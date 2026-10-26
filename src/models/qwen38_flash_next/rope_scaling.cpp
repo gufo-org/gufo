@@ -1,6 +1,8 @@
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <locale>
@@ -139,13 +141,27 @@ YarnRope MakeYarnRope(const RopeScaling& scaling, std::uint32_t rotary_dim,
 std::string RopePositionPolicy(const RopeScaling& scaling) {
   if (!scaling.Enabled())
     return "absolute-v1";
-  std::ostringstream out;
-  out.imbue(std::locale::classic());
-  out << std::hexfloat << "absolute-yarn-v1;factor=" << scaling.factor
-      << ";original=" << scaling.original_context
-      << ";beta_fast=" << scaling.beta_fast
-      << ";beta_slow=" << scaling.beta_slow;
-  return out.str();
+  // Hex floats go through to_chars: its shortest round-trip form is
+  // specified, while iostream hexfloat padding differs per standard library.
+  std::array<char, 64> digits{};
+  const auto emit = [&](float value) {
+    const auto result =
+        std::to_chars(digits.data() + 2, digits.data() + digits.size(), value,
+                      std::chars_format::hex);
+    const auto length = static_cast<std::size_t>(result.ptr - digits.data());
+    digits[0] = '0';
+    digits[1] = 'x';
+    return std::string_view(digits.data(), length);
+  };
+  std::string out = "absolute-yarn-v1;factor=";
+  out += emit(scaling.factor);
+  out += ";original=";
+  out += std::to_string(scaling.original_context);
+  out += ";beta_fast=";
+  out += emit(scaling.beta_fast);
+  out += ";beta_slow=";
+  out += emit(scaling.beta_slow);
+  return out;
 }
 
 }  // namespace gufo::models::qwen38_flash_next

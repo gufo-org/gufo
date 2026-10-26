@@ -28,6 +28,7 @@ namespace {
 using gufo::server::EmbeddingBatch;
 using gufo::server::EmbeddingInput;
 using gufo::server::EmbeddingPart;
+using gufo::server::EmbeddingRequestOptions;
 using gufo::server::EmbeddingService;
 using gufo::server::EmbeddingServiceOptions;
 using gufo::server::EmbeddingStatus;
@@ -35,6 +36,7 @@ using gufo::server::HandleEmbeddingsApiRequest;
 using gufo::server::HttpRequest;
 using gufo::server::HttpResponse;
 using gufo::server::IsEmbeddingsApiPath;
+using gufo::server::TruncateKeepingImages;
 
 constexpr std::size_t kWidth = 768;
 
@@ -75,11 +77,18 @@ std::size_t FakeTokens(const std::string& text) {
 
 struct FakeRunner {
   EmbeddingStatus Run(const std::vector<std::string>& texts,
+                      const EmbeddingRequestOptions& request,
                       EmbeddingBatch* batch, std::string* error) {
     ++calls;
     last_texts = texts;
+    last_truncate = request.truncate;
     for (std::size_t i = 0; i < texts.size(); ++i) {
       if (texts[i].starts_with("TOOLONG")) {
+        if (request.truncate) {
+          batch->embeddings.push_back(FakeEmbedding(texts[i]));
+          batch->token_counts.push_back(EmbeddingService::kMaxInputTokens);
+          continue;
+        }
         batch->failed_index = i;
         return EmbeddingStatus::kInputTooLong;
       }
@@ -99,6 +108,7 @@ struct FakeRunner {
 
   int calls{0};
   std::vector<std::string> last_texts;
+  bool last_truncate{false};
 };
 
 std::unique_ptr<EmbeddingService> MakeService(FakeRunner* runner) {
@@ -108,6 +118,7 @@ std::unique_ptr<EmbeddingService> MakeService(FakeRunner* runner) {
       .model_id = "embeddinggemma-2",
       .runner =
           [runner](const std::vector<EmbeddingInput>& inputs,
+                   const EmbeddingRequestOptions& request,
                    EmbeddingBatch* batch, std::string* error) {
             std::vector<std::string> texts;
             for (const auto& input : inputs) {
@@ -116,7 +127,7 @@ std::unique_ptr<EmbeddingService> MakeService(FakeRunner* runner) {
                 text += part.value;
               texts.push_back(std::move(text));
             }
-            return runner->Run(texts, batch, error);
+            return runner->Run(texts, request, batch, error);
           },
   });
 }
@@ -395,7 +406,7 @@ void TestInputValidation() {
               "invalid_parameter_type", "boolean item");
   ExpectError(Send(*service, R"({"input":"x","user":3})"), 400,
               "invalid_parameter_type", "non-string user");
-  ExpectError(Send(*service, R"({"input":"x","truncate":true})"), 400,
+  ExpectError(Send(*service, R"({"input":"x","normalize":true})"), 400,
               "unsupported_field", "unknown member");
 
   std::string many = R"({"input":[)";
@@ -472,8 +483,9 @@ void TestLimitsAndFailures() {
       .validate_model = false,
       .model_id = "embeddinggemma-2",
       .runner =
-          [](const std::vector<EmbeddingInput>&, EmbeddingBatch* batch,
-             std::string*) {
+          [](const std::vector<EmbeddingInput>&,
+             const gufo::server::EmbeddingRequestOptions&,
+             EmbeddingBatch* batch, std::string*) {
             batch->embeddings = {FakeEmbedding("only")};
             batch->token_counts = {3};
             return EmbeddingStatus::kOk;
@@ -490,6 +502,7 @@ void TestTypedInput() {
       .validate_model = false,
       .model_id = "embeddinggemma-2",
       .runner = [&](const std::vector<EmbeddingInput>& inputs,
+                    const gufo::server::EmbeddingRequestOptions&,
                     EmbeddingBatch* batch, std::string*) {
         captured = inputs;
         for (std::size_t i = 0; i < inputs.size(); ++i) {
@@ -541,6 +554,62 @@ void TestTypedInput() {
               "image count bounded before reading");
 }
 
+// #726: `truncate: true` asks the service to cut an over-length input
+// instead of refusing it. The default and `false` keep refusing.
+void TestTruncate() {
+  FakeRunner runner;
+  auto service = MakeService(&runner);
+  const HttpResponse refused =
+      Send(*service, R"({"input":["short","TOOLONG input"]})");
+  ExpectError(refused, 400, "context_length_exceeded", "default refuses");
+  Check(!runner.last_truncate, "truncation is off by default");
+
+  ExpectError(Send(*service, R"({"input":"TOOLONG input","truncate":false})"),
+              400, "context_length_exceeded", "truncate false refuses");
+  Check(!runner.last_truncate, "truncate false reaches the service");
+
+  const HttpResponse cut =
+      Send(*service, R"({"input":["short","TOOLONG input"],"truncate":true})");
+  Check(cut.status == 200, "truncate true embeds an over-length input");
+  Check(runner.last_truncate, "truncate true reaches the service");
+  const auto body = Parse(cut);
+  Check(body.find("data")->items().size() == 2, "both inputs are embedded");
+  Check(body.find("usage")->member_size("prompt_tokens") ==
+            FakeTokens("short") + EmbeddingService::kMaxInputTokens,
+        "usage counts the tokens embedded after truncation");
+
+  ExpectError(Send(*service, R"({"input":"a","truncate":"yes"})"), 400,
+              "invalid_parameter_type", "truncate must be a boolean");
+  const int calls = runner.calls;
+  ExpectError(Send(*service, R"({"input":"a","truncate":1})"), 400,
+              "invalid_parameter_type", "a numeric truncate is refused");
+  Check(runner.calls == calls, "an invalid truncate never reaches the service");
+  Check(Send(*service, R"({"input":"a","truncate":null})").status == 200,
+        "a null truncate is absent");
+}
+
+// The native path's cut for inputs with images: 2 = <bos>, 1 = <eos>,
+// 9 = image placeholder, 8 = end-of-image marker, 5 = text.
+void TestTruncateKeepingImages() {
+  using Tokens = std::vector<std::uint32_t>;
+  Tokens text{2, 5, 5, 5, 5, 5, 1};
+  Check(TruncateKeepingImages(&text, 4, 9) && text == Tokens{2, 5, 5, 1},
+        "a text-only encoding keeps its first tokens and <eos>");
+  Tokens image{2, 5, 9, 9, 8, 5, 5, 5, 1};
+  Check(
+      TruncateKeepingImages(&image, 6, 9) && image == Tokens{2, 5, 9, 9, 8, 1},
+      "a cut right after the end-of-image marker keeps the image");
+  Tokens marker{2, 5, 9, 9, 8, 5, 5, 5, 1};
+  Check(!TruncateKeepingImages(&marker, 5, 9) &&
+            marker == Tokens{2, 5, 9, 9, 8, 5, 5, 5, 1},
+        "a cut that would drop the end-of-image marker refuses unchanged");
+  Tokens inside{2, 9, 9, 9, 8, 5, 1};
+  Check(!TruncateKeepingImages(&inside, 3, 9), "a cut inside an image refuses");
+  Tokens fits{2, 9, 8, 1};
+  Check(TruncateKeepingImages(&fits, 4, 9) && fits == Tokens{2, 9, 8, 1},
+        "an encoding within the limit is unchanged");
+}
+
 void TestCancellation() {
   FakeRunner runner;
   auto service = MakeService(&runner);
@@ -556,6 +625,7 @@ void TestCancellation() {
       .model_id = "embeddinggemma-2",
       .runner =
           [&cancelled](const std::vector<EmbeddingInput>& texts,
+                       const gufo::server::EmbeddingRequestOptions&,
                        EmbeddingBatch* batch, std::string*) {
             cancelled = true;
             batch->embeddings = {FakeEmbedding(texts[0].content[0].value)};
@@ -579,7 +649,9 @@ void TestServiceLifecycle() {
       .model_root = {},
       .validate_model = false,
       .model_id = {},
-      .runner = [](const std::vector<EmbeddingInput>&, EmbeddingBatch*,
+      .runner = [](const std::vector<EmbeddingInput>&,
+                   const gufo::server::EmbeddingRequestOptions&,
+                   EmbeddingBatch*,
                    std::string*) { return EmbeddingStatus::kOk; },
   });
   Check(defaulted.model_id() == "embeddinggemma-2", "default model id");
@@ -589,7 +661,9 @@ void TestServiceLifecycle() {
       .model_root = "/nonexistent/embeddinggemma",
       .validate_model = true,
       .model_id = {},
-      .runner = [](const std::vector<EmbeddingInput>&, EmbeddingBatch*,
+      .runner = [](const std::vector<EmbeddingInput>&,
+                   const gufo::server::EmbeddingRequestOptions&,
+                   EmbeddingBatch*,
                    std::string*) { return EmbeddingStatus::kOk; },
   });
   Check(!invalid.ready() && !invalid.initialization_error().empty(),
@@ -619,7 +693,8 @@ void TestServiceLifecycle() {
       .validate_model = false,
       .model_id = {},
       .runner =
-          [&](const std::vector<EmbeddingInput>& texts, EmbeddingBatch* out,
+          [&](const std::vector<EmbeddingInput>& texts,
+              const gufo::server::EmbeddingRequestOptions&, EmbeddingBatch* out,
               std::string*) {
             if (active.fetch_add(1) != 0) {
               overlapped.fetch_add(1);
@@ -654,6 +729,8 @@ int main() {
   TestModelAndJson();
   TestLimitsAndFailures();
   TestTypedInput();
+  TestTruncate();
+  TestTruncateKeepingImages();
   TestCancellation();
   TestServiceLifecycle();
   std::cout << "PASS embedding_gemma2_embeddings_api_test\n";

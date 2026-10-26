@@ -34,6 +34,9 @@ struct CanonicalFingerprint {
 struct MachineFingerprint {
   std::string fingerprint_id;
   CanonicalFingerprint canonical;
+  // Display only: outside the canonical form, so the id is unchanged.
+  std::string os_name{"Linux"};
+  std::string target_platform{"x86_64-linux"};
 
   [[nodiscard]] std::string ToJson() const;
   [[nodiscard]] std::string ToHuman() const;

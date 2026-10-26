@@ -88,6 +88,103 @@ FileLock FileLock::Acquire(const std::string& path) {
 #endif
 }
 
+FileLock FileLock::TryAcquireProcessLock(const std::filesystem::path& path,
+                                         bool* contended,
+                                         std::string* holder_pid) noexcept {
+  if (contended != nullptr)
+    *contended = false;
+  if (holder_pid != nullptr)
+    *holder_pid = "?";
+#if defined(_WIN32)
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    return FileLock();
+  OVERLAPPED overlapped{};
+  overlapped.Offset = 0x7fffffffU;
+  if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                  1, 0, &overlapped)) {
+    if (contended != nullptr)
+      *contended = true;
+    if (holder_pid != nullptr) {
+      char pid_buf[32]{};
+      DWORD read_bytes = 0;
+      if (ReadFile(file, pid_buf, sizeof(pid_buf) - 1, &read_bytes, nullptr) &&
+          read_bytes > 0) {
+        pid_buf[read_bytes] = '\0';
+        for (DWORD i = 0; i < read_bytes; ++i) {
+          if (pid_buf[i] == '\n' || pid_buf[i] == '\r')
+            pid_buf[i] = '\0';
+        }
+        if (pid_buf[0] != '\0')
+          *holder_pid = pid_buf;
+      }
+    }
+    CloseHandle(file);
+    return FileLock();
+  }
+  char pid_buf[32]{};
+  const int len =
+      std::snprintf(pid_buf, sizeof(pid_buf), "%lu\n",
+                    static_cast<unsigned long>(GetCurrentProcessId()));
+  if (len > 0) {
+    LARGE_INTEGER zero{};
+    (void)SetFilePointerEx(file, zero, nullptr, FILE_BEGIN);
+    (void)SetEndOfFile(file);
+    DWORD written = 0;
+    (void)WriteFile(file, pid_buf, static_cast<DWORD>(len), &written, nullptr);
+  }
+  return FileLock(file);
+#else
+  const int fd = ::open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (fd < 0)
+    return FileLock();
+  if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    if (contended != nullptr)
+      *contended = true;
+    if (holder_pid != nullptr) {
+      char pid_buf[32]{};
+      const ssize_t n = ::read(fd, pid_buf, sizeof(pid_buf) - 1);
+      if (n > 0) {
+        pid_buf[n] = '\0';
+        for (ssize_t i = 0; i < n; ++i) {
+          if (pid_buf[i] == '\n' || pid_buf[i] == '\r')
+            pid_buf[i] = '\0';
+        }
+        if (pid_buf[0] != '\0')
+          *holder_pid = pid_buf;
+      }
+    }
+    ::close(fd);
+    return FileLock();
+  }
+  char pid_buf[32]{};
+  const int len = std::snprintf(pid_buf, sizeof(pid_buf), "%ld\n",
+                                static_cast<long>(::getpid()));
+  if (len > 0) {
+    const auto truncated = ::ftruncate(fd, 0);
+    (void)::lseek(fd, 0, SEEK_SET);
+    const auto wrote = ::write(fd, pid_buf, static_cast<std::size_t>(len));
+    (void)truncated;
+    (void)wrote;
+  }
+  return FileLock(fd);
+#endif
+}
+
+std::filesystem::path DefaultProcessLockPath(std::string_view filename) {
+#if defined(_WIN32)
+  std::error_code ec;
+  const auto temp = std::filesystem::temp_directory_path(ec);
+  if (!ec && !temp.empty())
+    return temp / filename;
+  return std::filesystem::path(filename);
+#else
+  return std::filesystem::path("/tmp") / filename;
+#endif
+}
+
 // --- AtomicPublishedFile ----------------------------------------------------
 
 AtomicPublishedFile::AtomicPublishedFile(AtomicPublishedFile&& other) noexcept

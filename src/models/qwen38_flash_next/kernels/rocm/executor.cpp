@@ -1,8 +1,5 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 
-#include <sys/mman.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -22,6 +19,7 @@
 #include "qfn_mmq.h"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
+#include "src/core/platform/pages.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
@@ -152,33 +150,8 @@ std::uint32_t IndexerCapacity(const Config& c, std::uint32_t batch,
 
 void PopulateSnapshotPrefix(std::uint8_t* data, std::uint64_t bytes,
                             std::uint64_t worker_limit = 4) {
-  const long page = sysconf(_SC_PAGESIZE);
-  if (page <= 0)
-    return;
-  const auto address = reinterpret_cast<std::uintptr_t>(data);
-  const auto skip = (page - address % page) % page;
-  if (bytes <= skip)
-    return;
-  const auto length = (bytes - skip) / page * page;
-  if (length == 0)
-    return;
-  // Populate before huge-page advice to avoid synchronous UMA compaction on
-  // first touch. Borrowed checkpoints prepare host pages only when exported.
-  const auto workers = std::max<std::uint64_t>(
-      1, std::min<std::uint64_t>(worker_limit, length / (32ULL << 20)));
-  const auto pages = length / page;
-  {
-    std::vector<std::jthread> faults;
-    for (std::uint64_t worker = 1; worker < workers; ++worker) {
-      const auto begin = pages * worker / workers * page;
-      const auto end = pages * (worker + 1) / workers * page;
-      faults.emplace_back([=] {
-        (void)madvise(data + skip + begin, end - begin, MADV_POPULATE_WRITE);
-      });
-    }
-    (void)madvise(data + skip, pages / workers * page, MADV_POPULATE_WRITE);
-  }
-  (void)madvise(data + skip, length, MADV_HUGEPAGE);
+  platform::PopulateWritablePages(data, static_cast<std::size_t>(bytes),
+                                  static_cast<std::size_t>(worker_limit));
 }
 
 }  // namespace

@@ -1,7 +1,5 @@
 #include "src/cli/eval/eval.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -21,6 +19,7 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/os_info.hpp"
 #include "src/eval/dataset.hpp"
 #include "src/eval/extract.hpp"
 #include "src/eval/http_client.hpp"
@@ -334,7 +333,8 @@ bool WriteReport(const std::filesystem::path& output, const Value& report,
     return false;
   }
   std::filesystem::path temporary = output;
-  temporary += ".tmp-" + std::to_string(static_cast<long long>(getpid()));
+  temporary +=
+      ".tmp-" + std::to_string(static_cast<long long>(platform::ProcessId()));
   {
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream) {

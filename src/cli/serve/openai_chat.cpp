@@ -297,9 +297,9 @@ bool ParseContent(const json::Value* content,
         *error = "image_url requires a user or tool message and a string URL";
         return false;
       }
-      // Resolution is model-owned. The standard detail values are accepted
-      // and all behave as 'auto', since clients such as Codex always send
-      // one; anything else is still a malformed request.
+      // Resolution is model-owned, except that 'low' bounds it. The other
+      // standard values behave as 'auto', since clients such as Codex always
+      // send one; anything else is still a malformed request.
       const auto* detail = image->find("detail");
       if (detail != nullptr &&
           (!detail->is_string() ||
@@ -308,10 +308,16 @@ bool ParseContent(const json::Value* content,
         *error = "image_url.detail must be 'auto', 'low', 'high' or 'original'";
         return false;
       }
+      const auto image_detail =
+          detail != nullptr && detail->get_str() == "low"
+              ? tokenization::ChatMessage::ImageDetail::kLow
+              : tokenization::ChatMessage::ImageDetail::kAuto;
       try {
         message->images.push_back(
-            {output->size(), std::make_shared<const std::vector<std::uint8_t>>(
-                                 core::ReadImageUrl(url->get_str(), budget))});
+            {output->size(),
+             std::make_shared<const std::vector<std::uint8_t>>(
+                 core::ReadImageUrl(url->get_str(), budget)),
+             image_detail});
       } catch (const std::exception& exception) {
         *error = exception.what();
         return false;

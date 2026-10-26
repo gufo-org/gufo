@@ -1,7 +1,10 @@
 #include "src/core/diagnostics/system_inventory.h"
 
+#include <cctype>
 #include <iomanip>
 #include <sstream>
+
+#include "src/core/platform/os_info.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -34,7 +37,14 @@ std::string EscapeJsonStr(std::string_view str) {
 SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
   SystemInventory inv;
 
-  // 1. CPU
+  inv.toolchain.os_name = platform::HostOsName();
+  std::string os_id = inv.toolchain.os_name;
+  for (char& ch : os_id) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  const bool linux_host = os_id == "linux";
+
+  // 1. CPU: /proc/cpuinfo on Linux, the OS processor query elsewhere.
   if (const auto cpu_opt = sysfs.QueryCpuInfo()) {
     inv.cpu.model_name = cpu_opt->model_name;
     inv.cpu.vendor = cpu_opt->vendor_id;
@@ -42,16 +52,32 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
     inv.cpu.logical_cores = cpu_opt->logical_cores;
     inv.cpu.physical_cores = cpu_opt->physical_cores;
     inv.cpu.numa_nodes = cpu_opt->numa_nodes;
+  } else if (const auto host_cpu = platform::QueryHostCpu();
+             host_cpu && !linux_host) {
+    inv.cpu.model_name = host_cpu->model_name.empty()
+                             ? "unavailable (processor name not reported)"
+                             : host_cpu->model_name;
+    inv.cpu.vendor = host_cpu->vendor;
+    inv.cpu.logical_cores = host_cpu->logical_cores;
+    inv.cpu.physical_cores = host_cpu->physical_cores;
+    inv.cpu.source = "OS processor query";
   } else {
     inv.cpu.model_name = "unavailable (could not read /proc/cpuinfo)";
   }
+  inv.toolchain.target_platform = inv.cpu.architecture + "-" + os_id;
 
-  // 2. Memory
+  // 2. Memory: /proc/meminfo on Linux, the OS memory status elsewhere.
   if (const auto mem_opt = sysfs.QueryMemInfo()) {
     inv.memory.total_bytes = mem_opt->total_bytes;
     inv.memory.available_bytes = mem_opt->available_bytes;
     inv.memory.free_bytes = mem_opt->free_bytes;
     inv.memory.is_unified = mem_opt->is_unified_memory;
+  } else if (const auto host_mem = platform::QueryHostMemory();
+             host_mem && !linux_host) {
+    inv.memory.total_bytes = host_mem->total_bytes;
+    inv.memory.available_bytes = host_mem->available_bytes;
+    inv.memory.free_bytes = host_mem->available_bytes;
+    inv.memory.source = "OS memory status";
   }
 
   // 3. Linux Kernel & Driver Inventory
@@ -66,8 +92,15 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
   inv.toolchain.rocm_version = GUFO_ROCM_VERSION;
 #endif
 
-  // 4. GPU (Sysfs + HIP query)
+  // 4. GPU (Sysfs + HIP query). Without DRM sysfs (Windows) only HIP
+  // describes the device.
   const auto gpus = sysfs.QueryDrmGpuDevices();
+  if (gpus.empty() && !linux_host) {
+    inv.gpu.driver_name = "AMD display driver";
+    inv.gpu.pci_id = "unavailable";
+    inv.gpu.power_mode = "unavailable";
+    inv.gpu.source = "HIP";
+  }
   if (!gpus.empty()) {
     const auto& primary_gpu = gpus[0];
     inv.gpu.driver_name =
@@ -118,6 +151,14 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
 #else
   inv.gpu.availability = "uncompiled (ENGINE_ENABLE_HIP=OFF)";
 #endif
+
+  if (!linux_host) {
+    // No amdgpu module to inspect: the display driver is loaded when HIP
+    // enumerates the device.
+    inv.toolchain.amdgpu_status =
+        inv.gpu.availability == "available" ? "loaded" : "unavailable";
+    inv.toolchain.source = "HIP runtime";
+  }
 
   return inv;
 }
@@ -215,7 +256,12 @@ std::string SystemInventory::ToHuman() const {
       << memory.memory_type << ")\n";
   oss << "GPU Model           : " << gpu.name << " [" << gpu.architecture
       << ", " << gpu.compute_units << " CUs] (" << gpu.availability << ")\n";
-  oss << "Linux Kernel        : " << toolchain.kernel_release << "\n";
+  if (toolchain.os_name == "Linux") {
+    oss << "Linux Kernel        : " << toolchain.kernel_release << "\n";
+  } else {
+    oss << "OS Release          : " << toolchain.os_name << " "
+        << toolchain.kernel_release << "\n";
+  }
   oss << "ROCm Version        : " << toolchain.rocm_version << "\n";
 
   return oss.str();

@@ -1,7 +1,5 @@
 #include "src/cli/serve/video_jobs.hpp"
 
-#include <unistd.h>
-
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -17,6 +15,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#include "src/core/platform/os_info.hpp"
 
 namespace {
 
@@ -593,7 +593,7 @@ void TestRunnerOutputBoundary(const std::filesystem::path& root) {
 int main() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() /
-      ("gufo-video-jobs-test-" + std::to_string(getpid()));
+      ("gufo-video-jobs-test-" + std::to_string(gufo::platform::ProcessId()));
   std::error_code ignored;
   std::filesystem::remove_all(base, ignored);
   std::filesystem::create_directories(base);

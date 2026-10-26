@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -93,6 +94,10 @@ private:
       const Directory&,
       const std::function<void(std::string_view, const FileInfo&)>&,
       std::error_code&);
+  friend bool TouchAt(const Directory&, std::string_view) noexcept;
+  friend bool LockDirectoryShared(const Directory&) noexcept;
+  friend bool TryLockDirectoryExclusive(const Directory&) noexcept;
+  friend void UnlockDirectory(const Directory&) noexcept;
 
   void Close() noexcept;
 
@@ -106,6 +111,14 @@ private:
 /// Opens `name` inside `dir` with `mode`. Returns kInvalidFile on failure.
 PlatformFile OpenAt(const Directory& dir, std::string_view name, FileMode mode,
                     std::error_code& ec) noexcept;
+
+/// Opens `path` for appending, creating it with owner-only permissions.
+/// Unlike OpenAt it follows symlinks and accepts devices and pipes, so
+/// user-chosen sinks such as /dev/stdout work. The handle may also be
+/// truncated (Truncate) to cut back a torn record. Returns kInvalidFile and
+/// sets `ec` on failure.
+PlatformFile OpenForAppend(const std::filesystem::path& path,
+                           std::error_code& ec) noexcept;
 
 /// Opens the subdirectory `name` of `dir`; `name` may be "." or "..".
 /// Returns an invalid Directory on failure.
@@ -205,11 +218,46 @@ std::size_t Read(PlatformFile file, void* output, std::size_t bytes,
 std::size_t ReadAt(PlatformFile file, std::uint64_t offset, void* output,
                    std::size_t bytes, std::error_code& ec) noexcept;
 
+/// Moves the read/write position to `offset` bytes from the beginning of the
+/// file. Returns false and sets `ec` on failure.
+bool SeekTo(PlatformFile file, std::uint64_t offset,
+            std::error_code& ec) noexcept;
+
+/// Moves the read/write position to the end of the file. Returns the file
+/// size in bytes, or 0 with `ec` set on failure.
+std::uint64_t SeekToEnd(PlatformFile file, std::error_code& ec) noexcept;
+
+/// Updates the access and modification times of `name` in `dir` to the current
+/// time without following symlinks.
+bool TouchAt(const Directory& dir, std::string_view name) noexcept;
+
+/// Advisory directory locks used to coordinate staging vs. orphan sweeps.
+bool LockDirectoryShared(const Directory& dir) noexcept;
+bool TryLockDirectoryExclusive(const Directory& dir) noexcept;
+void UnlockDirectory(const Directory& dir) noexcept;
+
+/// Opens a writable stdio stream backed by `[buffer, buffer + capacity)`
+/// (`fmemopen` on POSIX, temporary file on Windows). Finalize with
+/// FinishMemoryWriteStream().
+std::FILE* OpenMemoryWriteStream(void* buffer, std::size_t capacity) noexcept;
+bool FinishMemoryWriteStream(std::FILE* stream, void* buffer,
+                             std::size_t expected_bytes) noexcept;
+
+/// Opens a readable stdio stream over `[buffer, buffer + bytes)` (`fmemopen`
+/// on POSIX, temporary file on Windows). Close with `std::fclose`.
+std::FILE* OpenMemoryReadStream(const void* buffer, std::size_t bytes) noexcept;
+
+/// Sets the file size to `bytes`, shrinking or growing like ftruncate(2).
+/// Returns false and sets `ec` on failure.
+bool Truncate(PlatformFile file, std::uint64_t bytes,
+              std::error_code& ec) noexcept;
+
 /// Owner-consistency policy for files written by this user. POSIX requires
 /// the file to belong to the current user and to carry none of the
 /// `forbidden` permission bits (for example 0022 rejects group/other
 /// writes). Always true on Windows until ACL checks exist.
-bool OwnerOnly(const FileInfo& info, std::uint32_t forbidden) noexcept;
+bool OwnerOnly(const FileInfo& info, std::uint32_t forbidden,
+               std::uint32_t required = 0) noexcept;
 
 /// Makes an existing directory owner-only: chmod(path, 0700) on POSIX, so
 /// its entries in a shared temporary root cannot be listed or entered by

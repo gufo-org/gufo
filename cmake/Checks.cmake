@@ -33,6 +33,7 @@ set(gufo_pr_targets
   qwen3_asr_config_test qwen3_asr_audio_api_test
   embedding_gemma2_config_test embedding_gemma2_embeddings_api_test
   embedding_gemma2_image_processor_test
+  embedding_gemma2_batch_scheduler_test
   qwen3_tts_config_test qwen3_tts_audio_api_test
   qwen_image_21_test
   video_api_test minimax_h3_sampling_test minimax_h3_runtime_test)
@@ -50,9 +51,26 @@ list(APPEND gufo_pr_tests
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
   kernel_resources_parser_test check_docs_test check_pr_title_test)
+if (WIN32)
+  # Linux-only hosted suites: RLIMIT_FSIZE and fork()-based tests, the
+  # dup2/mmap/socket fixture tests, the permission-fault disk-store cases,
+  # the cache tests that fork or wrap libc symbols, and the 1,250-chunk
+  # per-file fsync stress in component_text_cache_test.
+  set(gufo_pr_linux_only
+    gguf_reader_test gguf_identity_test platform_publish_test
+    platform_prefault_test trace_test http_server_signals_test
+    http_server_test audio_websocket_test continuation_disk_store_test
+    component_text_cache_test eval_http_client_test cache_disk_faults_test
+    cache_boundary_test cache_adapter_test cache_slot_test cache_disk_test
+    cache_streaming_test cache_tiered_test cache_disk_publication_test)
+  list(REMOVE_ITEM gufo_pr_targets ${gufo_pr_linux_only})
+  list(REMOVE_ITEM gufo_pr_tests ${gufo_pr_linux_only})
+endif()
+
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
 add_custom_target(check-pr
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error
     --timeout 60 -R "^(${gufo_pr_pattern})$"
-  DEPENDS gufo ${gufo_pr_targets} cache_disk_faults
+  DEPENDS gufo ${gufo_pr_targets}
+    $<$<NOT:$<BOOL:${WIN32}>>:cache_disk_faults>
   USES_TERMINAL VERBATIM)

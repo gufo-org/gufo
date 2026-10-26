@@ -23,6 +23,7 @@
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -75,12 +76,49 @@ std::intptr_t SendNoSignal(Socket socket, const void* data, std::size_t bytes);
 std::intptr_t Receive(Socket socket, void* data, std::size_t bytes,
                       int flags = 0) noexcept;
 
-/// How ShutdownSocket half-closes a connected socket: stop sending, or stop
-/// both directions.
-enum class ShutdownHow { kWrite, kReadWrite };
+/// How ShutdownSocket half-closes a connected socket: stop receiving, stop
+/// sending, or stop both directions.
+enum class ShutdownHow { kRead, kWrite, kReadWrite };
 
 /// Half-close a connected socket; returns false on failure.
 bool ShutdownSocket(Socket socket, ShutdownHow how) noexcept;
+
+/// Accept a client socket from `listener`, ensuring the accepted socket is in
+/// blocking mode on platforms where non-blocking state is inherited.
+Socket AcceptClientSocket(Socket listener) noexcept;
+
+/// Poll a single socket for readability. Returns >0 if readable or
+/// closed/error, 0 on timeout, and <0 on poll error.
+int PollReadable(Socket socket, int timeout_ms) noexcept;
+
+/// Non-blocking check whether the remote peer has closed or reset the socket.
+bool IsPeerDisconnected(Socket socket) noexcept;
+
+/// Last socket error code on the calling thread (errno on POSIX,
+/// WSAGetLastError() on Windows).
+int LastSocketError() noexcept;
+
+/// Whether the last socket operation failed due to signal interruption.
+bool IsSocketInterrupted() noexcept;
+
+/// Whether the last socket operation timed out or would block.
+bool IsSocketWouldBlockOrTimeout() noexcept;
+
+/// Whether a failed accept() call is transient and the accept loop should
+/// retry.
+bool IsSocketAcceptRetryable() noexcept;
+
+/// Enable SO_REUSEADDR on `socket`.
+bool SetReuseAddr(Socket socket) noexcept;
+
+/// Configure address reuse for a temporary holding listener (`SO_REUSEADDR` on
+/// POSIX; `SO_EXCLUSIVEADDRUSE` on Windows so a second server cannot
+/// double-bind the held port before the holder closes it).
+bool SetExclusiveListenerReuse(Socket socket) noexcept;
+
+/// Disable IPV6_V6ONLY on an AF_INET6 socket so dual-stack binds work when
+/// supported by the OS.
+bool ClearIpv6Only(Socket socket) noexcept;
 
 /// Mark a socket non-blocking; returns false on failure.
 bool SetNonBlocking(Socket socket) noexcept;

@@ -60,9 +60,7 @@ int main() {
     CHECK(mapped.valid());
     CHECK(mapped.size() == bytes.size());
     CHECK(std::equal(bytes.begin(), bytes.end(), mapped.data()));
-#if !defined(_WIN32)
     CHECK(mapped.PlatformHandle() != platform::kInvalidFile);
-#endif
     auto moved = std::move(mapped);
     CHECK(!mapped.valid());
     CHECK(mapped.PlatformHandle() == platform::kInvalidFile);
@@ -120,12 +118,16 @@ int main() {
                                bytes.size() - 10) == 10);
     CHECK(platform::ReadFileAt(handle, out.data(), out.size(), bytes.size()) ==
           0);
+    const auto reopened = platform::ReopenUnbuffered(handle);
+    if (platform::FileValid(reopened)) {
+      fs::resize_file(file, bytes.size());
+      platform::CloseFile(reopened);
+    }
     platform::CloseFile(handle);
     CHECK(!platform::FileValid(platform::OpenReadFile(dir / "missing.bin")));
-#if !defined(_WIN32)
     // A failing read reports 0, never a wrapped negative count.
-    CHECK(platform::ReadFileAt(-1, out.data(), out.size(), 0) == 0);
-#endif
+    CHECK(platform::ReadFileAt(platform::kInvalidFile, out.data(), out.size(),
+                               0) == 0);
   }
 
   fs::remove_all(dir);

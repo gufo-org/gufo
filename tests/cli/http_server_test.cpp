@@ -992,6 +992,14 @@ void TestCompatibilityRequests() {
          request.messages.back().images.size() == 1 &&
          request.messages.back().images[0].offset == 8);
 
+  // Only detail "low" reaches the backend as a resolution bound.
+  response_body(server.Post("/v1/responses",
+                            R"({"input":[{"role":"user","content":[
+        {"type":"input_text","text":"describe"},
+        {"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"low"}]}]})"));
+  assert(server.backend->LastCall().chat.messages.back().images[0].detail ==
+         gufo::tokenization::ChatMessage::ImageDetail::kLow);
+
   const auto response = response_body(server.Post(
       "/v1/responses",
       R"({"instructions":"Be concise.","input":[{"role":"user","content":[
@@ -2865,6 +2873,7 @@ std::shared_ptr<gufo::server::EmbeddingService> MakeEmbeddingService(
           .model_id = "embedding-test",
           .runner =
               [](const std::vector<gufo::server::EmbeddingInput>& texts,
+                 const gufo::server::EmbeddingRequestOptions&,
                  EmbeddingBatch* batch, std::string*) {
                 for (const auto& text : texts) {
                   batch->embeddings.push_back({1.0F, 0.0F});
@@ -2987,6 +2996,7 @@ void TestEmbeddingService() {
             .model_id = "embedding-test",
             .runner =
                 [](const std::vector<gufo::server::EmbeddingInput>&,
+                   const gufo::server::EmbeddingRequestOptions&,
                    gufo::server::EmbeddingBatch*, std::string*) {
                   return gufo::server::EmbeddingStatus::kDeviceLost;
                 },

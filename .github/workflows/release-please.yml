@@ -51,7 +51,7 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - name: Request stable Toolboxes images for an existing merged release
+      - name: Request stable Toolboxes artifacts for an existing merged release
         if: ${{ steps.release-please.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -187,7 +187,7 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - name: Request stable Toolboxes images for the daily release
+      - name: Request stable Toolboxes artifacts for the daily release
         if: ${{ steps.publish-release.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}

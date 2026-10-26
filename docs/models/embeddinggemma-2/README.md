@@ -18,7 +18,7 @@ curl -sS http://127.0.0.1:8080/v1/embeddings \
   -d '{"model":"embeddinggemma-2","input":["task: search result | query: What causes the northern lights?"]}'
 ```
 
-The server returns L2-normalized mean-pooled vectors, so cosine similarity and dot product agree.  `input` is a string or an array of up to 2,048 strings or typed content objects, each at most 8,192 tokens including the `<bos>` and `<eos>` the tokenizer adds.  The server rejects token-array input because the vocabulary is the model's own.  `encoding_format` is `float` by default or `base64`.
+The server returns L2-normalized mean-pooled vectors, so cosine similarity and dot product agree.  `input` is a string or an array of up to 2,048 strings or typed content objects, each at most 8,192 tokens including the `<bos>` and `<eos>` the tokenizer adds.  Longer inputs return 400 `context_length_exceeded` unless the request sets `"truncate": true`, which keeps each input's first tokens.  The server rejects token-array input because the vocabulary is the model's own.  `encoding_format` is `float` by default or `base64`.
 
 ## Images
 
@@ -84,12 +84,39 @@ The model is trained with short prefixes, and Gufo does not add them.  Send the 
 
 Symmetric tasks use the same prefix on every input.  Omitting the prefixes still works but lowers retrieval quality.
 
+## Clients
+
+Clients that speak the OpenAI embeddings API work with two settings to check:
+
+- **Send strings.**  Gufo refuses token-array input (400 `unsupported_input`), because the token IDs come from another model's tokenizer.  LangChain's `OpenAIEmbeddings` tokenizes with tiktoken and sends token arrays by default.  Set `check_embedding_ctx_length=False`, as LangChain itself advises for OpenAI-compatible servers:
+
+  ```python
+  from langchain_openai import OpenAIEmbeddings
+
+  embeddings = OpenAIEmbeddings(
+      model="embeddinggemma-2",
+      base_url="http://127.0.0.1:8080/v1",
+      api_key="unused",
+      check_embedding_ctx_length=False,
+  )
+  ```
+
+- **Match the model ID.**  A request for any other model returns 404 `model_not_found`.  Configure the client with the served ID, or start Gufo with `--served-model-name` set to the name the client sends.  paperless-ngx's OpenAI-compatible backend sends `text-embedding-3-small` unless `PAPERLESS_AI_LLM_EMBEDDING_MODEL` is set:
+
+  ```sh
+  PAPERLESS_AI_LLM_EMBEDDING_BACKEND=openai-like
+  PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT=http://gufo-host:8080/v1
+  PAPERLESS_AI_LLM_EMBEDDING_MODEL=embeddinggemma-2
+  ```
+
+  By default paperless-ngx splits documents into chunks of 1,024 tokens as its own splitter counts them (`PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE`), far below the 8,192-token limit, and adds none of the task prefixes above.
+
 ## Requests
 
 Loading uploads the 540 MB text backbone, unmaps the checkpoint so the weights stay only in device memory, and then runs a short warm-up.  The warm-up times each hipBLASLt algorithm that needs no scratch space for each matrix shape and row bucket the encoder uses and keeps the fastest, so the first request pays no tuning cost.  The choice can differ between loads, which changes float32 accumulation order but not the result beyond rounding.
 
 The first image request uploads the vision tower and projector; subsequent requests reuse them. Audio weights are never uploaded.
 
-Sequences from one request or from concurrent requests run one device batch at a time.  A batch packs up to 8,192 tokens, and a single request may span more than one batch.  Concurrent requests take turns in arrival order, one batch per turn, so a short request waits for at most one batch of a long one.  A device failure that a probe confirms answers 503 `device_lost` and shuts the server down for its supervisor to restart, as the text server does.  Attention is bidirectional, so there is no cache to reuse between requests.  Gufo checks for cancellation once the request reaches the device and between its device batches.  `--served-model-name` sets the public model ID.  Gufo supports only BF16 safetensors, not GGUF or quantized variants.
+One device batch of up to 8,192 tokens runs at a time.  Text requests that wait for the device share a batch, oldest first, and a lone request runs at once.  A request with images runs in a batch of its own, in arrival order, and its soft tokens count toward the batch.  A request that fits in one batch never spans two.  A larger request is split, and after each of its batches the requests that arrived meanwhile go first, so a short request waits for at most one batch of a long one.  A device failure that a probe confirms answers 503 `device_lost` and shuts the server down for its supervisor to restart, as the text server does.  Attention is bidirectional, so there is no cache to reuse between requests.  Gufo checks for cancellation before each batch that would take a request's inputs, so a cancelled request does not use the device again.  `--served-model-name` sets the public model ID.  Gufo supports only BF16 safetensors, not GGUF or quantized variants.
 
 See [server limits](../../SERVER.md) and [quality gaps](QUALITY.md).

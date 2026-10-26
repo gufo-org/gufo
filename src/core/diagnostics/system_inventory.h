@@ -46,6 +46,9 @@ struct GpuInventory {
 };
 
 struct DriverToolchainInventory {
+  // The OS Gufo runs on ("Linux", "Windows") and the target it matches.
+  std::string os_name{"Linux"};
+  std::string target_platform{"x86_64-linux"};
   std::string kernel_release;
   std::string amdgpu_status{"loaded"};
   std::string rocm_version{"7.2.3"};

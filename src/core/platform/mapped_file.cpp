@@ -461,8 +461,10 @@ PlatformFile ReopenUnbuffered(PlatformFile file) noexcept {
 #if defined(_WIN32)
   // ReOpenFile fails when the desired share mode conflicts with the original
   // open; callers fall back to buffered I/O.
-  HANDLE reopened = ReOpenFile(static_cast<HANDLE>(file), GENERIC_READ,
-                               FILE_SHARE_READ, FILE_FLAG_NO_BUFFERING);
+  HANDLE reopened =
+      ReOpenFile(static_cast<HANDLE>(file), GENERIC_READ,
+                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                 FILE_FLAG_NO_BUFFERING);
   return reopened == INVALID_HANDLE_VALUE ? kInvalidFile : reopened;
 #else
   // Reopening the retained descriptor creates an independent O_DIRECT file

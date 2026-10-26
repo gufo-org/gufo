@@ -114,6 +114,9 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(phases.verdict([(100, 110), (100, 120)]), "slower")
         self.assertEqual(phases.verdict([(100, 110), (100, 101)]), "noisy")
         self.assertEqual(phases.verdict([(100, 90), (100, 80)]), "faster")
+        self.assertEqual(phases.verdict([(100, 110), (100, 90)]), "noisy")
+        # A slow base repeat alone is not a regression (#788 follow-up cache restore).
+        self.assertEqual(phases.verdict([(7.86, 2.63), (2.54, 2.60)]), "same")
         # Above 5% but within 3 ms is noise, not a regression.
         self.assertEqual(phases.verdict([(20, 22), (20, 22.5)]), "same")
         self.assertEqual(phases.verdict([]), "missing")

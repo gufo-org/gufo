@@ -193,7 +193,7 @@ the same source input when comparing revisions. These are public substitutes
 for PR #613's private cases; they do not reproduce the author's exact prompts.
 Run the existing Pi `edit` and `creation` cases for real tool execution, too.
 
-`embeddings.py` checks EmbeddingGemma 2 through the OpenAI SDK against a running `gufo serve embedding`.  It covers the fixture probes against sentence-transformers float32 vectors, input order, base64 and float encodings, Matryoshka `dimensions`, concurrent identical requests, and the error shapes.  It is standalone and outside `--suite all`:
+`embeddings.py` checks EmbeddingGemma 2 through the OpenAI SDK against a running `gufo serve embedding`.  It covers the fixture probes against sentence-transformers float32 vectors, input order, base64 and float encodings, Matryoshka `dimensions`, concurrent identical requests, the error shapes, and `"truncate": true`, whose vector must equal that of the longest prefix that fits the token limit.  It is standalone and outside `--suite all`:
 
 ```sh
 nix develop -c python3 tests/functional/embeddings.py \
@@ -233,15 +233,25 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`--tier pr` plans the per-PR set. Suites marked `"tier": "release"` (the deep
-cache histories, `cache-stalls`, `long-context` and `reasoning-budget`) then move
-to `release_only` unless a changed path matches their `escalate` patterns: cache
-code, the suite's own module, or Flash-Next model code for depth checks. `run.py
+`--tier pr` plans the per-PR set: one or two suites per behavior (`discovery`,
+`state-edges`, `messages-count-tokens`, `responses`, `stops`, `conversation`,
+`image-inputs`, `structured`, `tools`, `tool-streaming`, `sampling-defaults`,
+`batch` and `cache`). Every other suite is marked `"tier": "release"` and moves
+to `release_only`; the deep cache histories, `cache-stalls`, `long-context` and
+`reasoning-budget` still run on a PR when a changed path matches their
+`escalate` patterns: cache code, the suite's own module, or Flash-Next model
+code for depth checks. `run.py
 --tier pr` also trims transport matrices that a case does not depend on:
 `tool-reasoning` keeps the streamed mode, whose partial parses end in the same
 final parse a buffered reply uses, and `tool-native-schemas` rotates endpoint,
 stream and tool choice across cases. `--tier full` (the default for manual runs)
 keeps every suite and combination.
+
+The literal-closer cases from #786 (a lone `</invoke>` and a closer before or
+between calls) use the deterministic HTTP fixtures in
+`tests/cli/openai_chat_test.cpp`, with buffered/streamed and whole/bytewise output.
+Qwen27 Q4/Q8 can omit the requested line or call a tool instead, so these parser
+checks must not depend on a model following a request to copy tool markup.
 
 `Devlab functional checks` runs on every push to a non-draft PR, like `CI`
 (`pull_request`), with the repository's fork approval policy. A newer push cancels
@@ -261,11 +271,16 @@ Selections from separate paths are combined:
 | --- | --- |
 | Shared LLM behavior, cache, sampling or Qwen framing/vision | Flash-Next Q4/MTP |
 | Private Qwen27 implementation | Qwen27 Q4/DFlash2 |
-| Private DeepSeek implementation | DeepSeek V4/DSpark |
-| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek |
+| Private DeepSeek implementation | DeepSeek V4/DSpark (disabled, see below) |
+| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek (disabled, see below) |
 | Embedding, ASR or TTS code | That category's representative |
 | Shared infrastructure or unmapped paths | One representative per supported category |
 | Documentation, image generation or H3-only paths | No GPU job in this workflow |
+
+Models listed under `disabled` in `devlab.json`, with a reason, are left out of
+the plan and named in the report. DeepSeek V4 is disabled for now: its 81 GiB
+of weights and its suite set make the run too long to finish within a PR.
+Remove its entry to restore it.
 
 The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
 uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
@@ -292,7 +307,9 @@ models or their speed observations. Each LLM's `phases.py` arms exercise startup
 short, long and follow-up requests; `service_phases.py` measures bounded service
 histories. Both alternate main/candidate servers for two paired repeats,
 with GPU cool-down. Every request and phase retains all measurements; a slowdown
-requires both >5% and >3 ms in every repeat. Different output/work counters mark
+requires both >5% and >3 ms in every repeat. A phase that is slower in only
+some repeats is inconclusive; one that is faster in some repeats and never
+slower counts as unchanged. Different output/work counters mark
 relevant comparisons inconclusive. The plan selects timing gates from production
 changes; harness-only changes retain timing observations without gating unrelated
 noise. Startup phases gate only loader/configuration/build changes. Missing timing
@@ -428,6 +445,7 @@ RAM, disk and restart settings once their contracts pass.
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery; Messages image blocks in a user turn and a tool result |
 | `tool-images` | Chat/Responses function and custom-call image outputs; text/image order, image-only output, actual colors, streamed retries, changed pixels, continuation reuse, role/URL errors and unchanged text-only controls |
 | `image-count` | 17+ images in one message and across turns; Chat/Responses, sampled thinking/JSON, concurrent colors, limits, cancellation and RAM/disk replay |
+| `image-detail` | `detail` `auto` and `low` on a 1536 × 1024 image, where `low` resizes it to 512 × 320, uses fewer prompt tokens, and reuses no image tokens from `auto` |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata, foreign tool markers in prose and parallel calls (no DeepSeek text after the call block) |
@@ -486,6 +504,13 @@ controls on main, stop at
 `--through-case tool-images:tool_images_control_complete`; full candidate runs
 continue into the newly supported image-bearing tool outputs. A text-only
 model must not qualify the image suite by skipping its assertions.
+
+`image-detail` also requires `--mmproj`. Each of its two requests leaves a new
+stable boundary in the RAM cache. Retry copies cannot displace stable
+boundaries, as [KV-CACHE.md](../../docs/KV-CACHE.md) describes, so in a full
+cache these two boundaries can make a later unchanged retry prefill its
+assistant opening again. Select `image-detail` after `image-count`, whose
+unchanged retries expect full reuse.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`

@@ -57,9 +57,13 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
     if benchmark:
         selected.setdefault('flash-next-q4', []).append(
             {'path': None, 'rule': 'manual-ar-benchmark', 'representative': False})
+    # Models disabled in devlab.json stay out of the run; the plan names them
+    # with the reason so the report shows the gap.
+    disabled = [{'id': key, 'reason': data.get('disabled', {})[key], 'reasons': selected.pop(key)}
+                for key in sorted(selected) if key in data.get('disabled', {})]
     result = {'schema': 2, 'tier': tier, 'paths': resolutions, 'models': [], 'groups': [],
               'deferred': [], 'release_only': [], 'out_of_scope': [], 'obligations': [],
-              'scope': sorted(selected), 'benchmark': benchmark,
+              'disabled': disabled, 'scope': sorted(selected), 'benchmark': benchmark,
               'timing_qualification': 'paired main/candidate server phases; no averaging across requests'}
     for key, reasons in sorted(selected.items()):
         model = data['models'][key]

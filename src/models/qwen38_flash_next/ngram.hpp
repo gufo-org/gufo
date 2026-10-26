@@ -80,10 +80,12 @@ public:
   NgramTable(const NgramTable&) = delete;
   NgramTable& operator=(const NgramTable&) = delete;
 
-  /// Borrows the bound GGUF descriptor during Open; retains its own handle.
+  /// Borrows the bound GGUF descriptor during Open; retains its own handle,
+  /// unbuffered where the platform allows it and a buffered duplicate
+  /// otherwise.
   [[nodiscard]] static std::unique_ptr<NgramTable> Open(
-      int file_descriptor, std::uint64_t file_offset, std::uint64_t rows,
-      std::uint32_t row_dim, core::GgmlType type,
+      platform::PlatformFile file, std::uint64_t file_offset,
+      std::uint64_t rows, std::uint32_t row_dim, core::GgmlType type,
       std::string* error_msg = nullptr);
 
   /// Gathers `rows.size()` rows into `out` (rows.size() * row_dim floats).
@@ -137,7 +139,7 @@ private:
   std::vector<std::uint8_t> cache_rows_;
   std::size_t cache_count_{0};
 
-  int fd_{-1};
+  platform::PlatformFile file_{platform::kInvalidFile};
   bool direct_{false};
   std::uint64_t base_offset_{0};
   std::uint64_t rows_{0};

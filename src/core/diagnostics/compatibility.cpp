@@ -1,6 +1,7 @@
 #include "src/core/diagnostics/compatibility.h"
 
 #include <sstream>
+#include <string>
 
 namespace gufo::diagnostics {
 
@@ -45,15 +46,17 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
   if (section == "all" || section == "platform" || section == "inventory") {
     CompatibilityItem platform_item;
     platform_item.component = "platform";
-    platform_item.detected_value = inventory.cpu.architecture + "-linux";
-    platform_item.required_value = "x86_64-linux";
+    const std::string& target = inventory.toolchain.target_platform;
+    platform_item.detected_value = target;
+    platform_item.required_value = "x86_64-linux or x86_64-windows";
     platform_item.evidence = "CPU architecture / host OS";
-    if (inventory.cpu.architecture == "x86_64") {
+    if (target == "x86_64-linux" || target == "x86_64-windows") {
       platform_item.verdict = CompatibilityVerdict::kSupported;
       platform_item.remediation_hint = "None";
     } else {
       platform_item.verdict = CompatibilityVerdict::kUnsupported;
-      platform_item.remediation_hint = "gufo only supports Linux x86-64";
+      platform_item.remediation_hint =
+          "gufo supports Linux x86-64 and Windows x86-64";
       overall = CompatibilityVerdict::kUnsupported;
     }
     report.items.push_back(std::move(platform_item));
@@ -84,16 +87,23 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
   if (section == "all" || section == "inventory") {
     CompatibilityItem driver_item;
     driver_item.component = "kernel_driver";
-    driver_item.detected_value = "amdgpu: " + inventory.toolchain.amdgpu_status;
-    driver_item.required_value = "amdgpu: loaded";
-    driver_item.evidence = "/sys/class/drm";
+    const bool linux_host = inventory.toolchain.os_name == "Linux";
+    const std::string driver =
+        linux_host ? std::string("amdgpu") : inventory.gpu.driver_name;
+    driver_item.detected_value =
+        driver + ": " + inventory.toolchain.amdgpu_status;
+    driver_item.required_value = driver + ": loaded";
+    driver_item.evidence =
+        linux_host ? "/sys/class/drm" : "HIP device enumeration";
     if (inventory.toolchain.amdgpu_status == "loaded") {
       driver_item.verdict = CompatibilityVerdict::kSupported;
       driver_item.remediation_hint = "None";
     } else {
       driver_item.verdict = CompatibilityVerdict::kUnsupported;
       driver_item.remediation_hint =
-          "Ensure Linux kernel >= 6.10 with the amdgpu driver loaded";
+          linux_host
+              ? "Ensure Linux kernel >= 6.10 with the amdgpu driver loaded"
+              : "Install an AMD graphics driver with HIP support";
       overall = CompatibilityVerdict::kUnsupported;
     }
     report.items.push_back(std::move(driver_item));

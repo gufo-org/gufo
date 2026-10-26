@@ -1,0 +1,868 @@
+{
+ "date": "2026-10-24",
+ "hardware": {
+  "name": "AMD Radeon 8060S Graphics",
+  "gfx": "gfx1151",
+  "node": "gpuworker01 (Strix Halo)"
+ },
+ "model": "google/embeddinggemma-2 @ 914f7f89142e33e77833254d9c9b90c3cef7303b (BF16 safetensors)",
+ "build": "Production gufo builds from nix build of main 194db882, which has the hipBLASLt GEMMs from #751, image inputs from #759, and matrix-core attention from #770, and of this change 9a06aa43, in one Nix container image.",
+ "image": {
+  "embg2-ab11": "gufo-eg2@sha256:cfdcdfaa2baf529f5ff5e1b060acdede78b4ff32eb7143528cfd4ec94231b601",
+  "embg2-ab12": "gufo-eg2@sha256:a806221cea70580bdb4d75837ca976c22eb6436848a9bb60180adb18034f6512"
+ },
+ "commits": {
+  "base": "194db882 (main)",
+  "batch": "9a06aa43"
+ },
+ "log_sha256": {
+  "embg2-ab11": "8f41feb496c987e34eaf48d455d631ba1d93ffae1b70e7d07f11ed8a1c1c0e4c",
+  "embg2-ab12": "c5acfaf424256d7b6ad7be743c10f67b932ffd74ad64dd51b358b1ce8ef20969"
+ },
+ "pod": "embg2-ab11 on gpuworker01 for the tests and the HTTP rows, and embg2-ab12 on gpuworker01 for the separate-streams run.  Each was the only GPU pod on the node.",
+ "method": "Each build ran its nine EmbeddingGemma 2 GPU test binaries, then four HTTP passes in the order base, batch, batch, base, base, batch, batch, base, with a new server for each pass and 60 requests per row per pass.  Each value is the mean of the four passes' medians or p95s, and the speedup is the base median divided by the batch median.  The text rows come from tools/models/embedding_gemma2/http_bench.py, including the 16 x 1 x 16 row.  The image rows send one 320 x 180 PNG followed by a newline in the typed content format, 269 tokens, at 1, 4, and 16 clients.  The mixed row has 16 client threads that take 120 requests alternating an image request and a 16-word text request, so each kind has 60 requests per pass.  The first server of each build also ran tests/functional/embeddings.py and tests/functional/embedding_images.py, and all passed.  The separate_streams entries come from embg2-ab12, which ran the same builds in the same order for four passes each.  In each pass 8 threads sent 8 image requests each while 8 other threads sent 16-word text requests until the image threads finished, so the text request count differs between passes.  Each separate_streams value is the mean of the four passes' values.  The embg2-ab12 image holds the same two gufo store paths and differs only in its entry script.",
+ "load_ms": {
+  "base": [
+   1975,
+   1999,
+   1971,
+   1979
+  ],
+  "base_mean": 1981,
+  "batch": [
+   1983,
+   1994,
+   1993,
+   1986
+  ],
+  "batch_mean": 1989
+ },
+ "quality": {
+  "base": {
+   "golden_worst_cosine": 0.99998484,
+   "golden_worst_truncated_cosine": 0.99998681,
+   "long_document_cosine": 0.99998986,
+   "cpu_reference_worst_cosine": 0.99999234,
+   "batched_vs_alone_worst_cosine": 0.99999069,
+   "image_worst_cosine": 0.9999595187137211,
+   "image_best_cosine": 0.9999954575623583,
+   "attention_hip_test_worst_error": 0.0153937
+  },
+  "batch": {
+   "golden_worst_cosine": 0.99998484,
+   "golden_worst_truncated_cosine": 0.99998681,
+   "long_document_cosine": 0.99998986,
+   "cpu_reference_worst_cosine": 0.99999234,
+   "batched_vs_alone_worst_cosine": 0.99998959,
+   "shared_batch_vs_alone_worst_cosine": 0.99998831,
+   "concurrent_vs_lone_worst_cosine": 0.99997162,
+   "image_worst_cosine": 0.9999569516568002,
+   "image_best_cosine": 0.9999950984605085,
+   "attention_hip_test_worst_error": 0.0153937
+  }
+ },
+ "http": [
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 16,
+   "requests_per_run": 60,
+   "tokens_per_request": 40,
+   "base": {
+    "median_ms": 6.63,
+    "p95_ms": 7.25,
+    "tokens_per_s": 5891,
+    "runs_median_ms": [
+     6.57,
+     6.67,
+     6.71,
+     6.59
+    ],
+    "runs_p95_ms": [
+     7.37,
+     6.99,
+     7.51,
+     7.12
+    ]
+   },
+   "batch": {
+    "median_ms": 6.59,
+    "p95_ms": 7.36,
+    "tokens_per_s": 5900,
+    "runs_median_ms": [
+     6.54,
+     6.45,
+     6.76,
+     6.61
+    ],
+    "runs_p95_ms": [
+     6.94,
+     7.42,
+     7.64,
+     7.43
+    ]
+   },
+   "median_speedup": 1.01
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 12.88,
+    "p95_ms": 14.12,
+    "tokens_per_s": 30760,
+    "runs_median_ms": [
+     12.76,
+     13.01,
+     12.78,
+     12.96
+    ],
+    "runs_p95_ms": [
+     14.1,
+     14.89,
+     13.55,
+     13.96
+    ]
+   },
+   "batch": {
+    "median_ms": 13.04,
+    "p95_ms": 14.2,
+    "tokens_per_s": 30372,
+    "runs_median_ms": [
+     13.19,
+     13.21,
+     12.87,
+     12.87
+    ],
+    "runs_p95_ms": [
+     14.34,
+     14.55,
+     13.91,
+     13.98
+    ]
+   },
+   "median_speedup": 0.99
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 512,
+   "requests_per_run": 60,
+   "tokens_per_request": 1940,
+   "base": {
+    "median_ms": 61.08,
+    "p95_ms": 62.17,
+    "tokens_per_s": 31689,
+    "runs_median_ms": [
+     60.82,
+     61.65,
+     61.09,
+     60.76
+    ],
+    "runs_p95_ms": [
+     61.56,
+     63.05,
+     62.37,
+     61.69
+    ]
+   },
+   "batch": {
+    "median_ms": 61.23,
+    "p95_ms": 62.23,
+    "tokens_per_s": 31589,
+    "runs_median_ms": [
+     61.2,
+     61.25,
+     61.48,
+     61.0
+    ],
+    "runs_p95_ms": [
+     61.75,
+     62.36,
+     62.68,
+     62.15
+    ]
+   },
+   "median_speedup": 1.0
+  },
+  {
+   "concurrency": 1,
+   "inputs": 1,
+   "words": 2100,
+   "requests_per_run": 60,
+   "tokens_per_request": 8072,
+   "base": {
+    "median_ms": 339.43,
+    "p95_ms": 341.7,
+    "tokens_per_s": 23756,
+    "runs_median_ms": [
+     337.22,
+     343.81,
+     338.04,
+     338.65
+    ],
+    "runs_p95_ms": [
+     339.15,
+     347.29,
+     339.62,
+     340.74
+    ]
+   },
+   "batch": {
+    "median_ms": 337.65,
+    "p95_ms": 340.01,
+    "tokens_per_s": 23876,
+    "runs_median_ms": [
+     337.39,
+     335.84,
+     338.66,
+     338.73
+    ],
+    "runs_p95_ms": [
+     340.1,
+     338.18,
+     341.11,
+     340.65
+    ]
+   },
+   "median_speedup": 1.01
+  },
+  {
+   "concurrency": 1,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 93.51,
+    "p95_ms": 94.21,
+    "tokens_per_s": 37271,
+    "runs_median_ms": [
+     93.21,
+     93.71,
+     93.31,
+     93.82
+    ],
+    "runs_p95_ms": [
+     94.01,
+     94.41,
+     94.1,
+     94.32
+    ]
+   },
+   "batch": {
+    "median_ms": 94.1,
+    "p95_ms": 94.89,
+    "tokens_per_s": 37037,
+    "runs_median_ms": [
+     93.94,
+     94.63,
+     93.94,
+     93.91
+    ],
+    "runs_p95_ms": [
+     94.86,
+     95.28,
+     94.8,
+     94.64
+    ]
+   },
+   "median_speedup": 0.99
+  },
+  {
+   "concurrency": 1,
+   "inputs": 32,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 15670,
+   "base": {
+    "median_ms": 394.59,
+    "p95_ms": 397.83,
+    "tokens_per_s": 39602,
+    "runs_median_ms": [
+     391.56,
+     397.14,
+     394.33,
+     395.33
+    ],
+    "runs_p95_ms": [
+     393.87,
+     400.19,
+     397.28,
+     399.97
+    ]
+   },
+   "batch": {
+    "median_ms": 394.56,
+    "p95_ms": 397.5,
+    "tokens_per_s": 39608,
+    "runs_median_ms": [
+     393.73,
+     394.26,
+     394.71,
+     395.52
+    ],
+    "runs_p95_ms": [
+     396.84,
+     397.92,
+     397.45,
+     397.8
+    ]
+   },
+   "median_speedup": 1.0
+  },
+  {
+   "concurrency": 4,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 48.16,
+    "p95_ms": 49.22,
+    "tokens_per_s": 33262,
+    "runs_median_ms": [
+     48.12,
+     48.42,
+     47.78,
+     48.31
+    ],
+    "runs_p95_ms": [
+     49.47,
+     49.11,
+     48.97,
+     49.32
+    ]
+   },
+   "batch": {
+    "median_ms": 45.82,
+    "p95_ms": 47.16,
+    "tokens_per_s": 34991,
+    "runs_median_ms": [
+     45.81,
+     45.89,
+     45.93,
+     45.64
+    ],
+    "runs_p95_ms": [
+     47.09,
+     47.29,
+     47.07,
+     47.18
+    ]
+   },
+   "median_speedup": 1.05
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 404,
+   "base": {
+    "median_ms": 192.38,
+    "p95_ms": 193.73,
+    "tokens_per_s": 33339,
+    "runs_median_ms": [
+     192.4,
+     193.26,
+     190.24,
+     193.6
+    ],
+    "runs_p95_ms": [
+     195.07,
+     193.98,
+     191.24,
+     194.62
+    ]
+   },
+   "batch": {
+    "median_ms": 159.16,
+    "p95_ms": 166.26,
+    "tokens_per_s": 39755,
+    "runs_median_ms": [
+     160.05,
+     159.18,
+     159.34,
+     158.08
+    ],
+    "runs_p95_ms": [
+     165.5,
+     164.29,
+     168.77,
+     166.47
+    ]
+   },
+   "median_speedup": 1.21
+  },
+  {
+   "concurrency": 16,
+   "inputs": 1,
+   "words": 16,
+   "requests_per_run": 60,
+   "tokens_per_request": 40,
+   "base": {
+    "median_ms": 95.96,
+    "p95_ms": 96.77,
+    "tokens_per_s": 6594,
+    "runs_median_ms": [
+     95.53,
+     96.1,
+     95.96,
+     96.24
+    ],
+    "runs_p95_ms": [
+     95.82,
+     96.5,
+     97.31,
+     97.44
+    ]
+   },
+   "batch": {
+    "median_ms": 27.16,
+    "p95_ms": 34.23,
+    "tokens_per_s": 21368,
+    "runs_median_ms": [
+     26.87,
+     26.56,
+     28.68,
+     26.51
+    ],
+    "runs_p95_ms": [
+     35.05,
+     33.82,
+     34.57,
+     33.5
+    ]
+   },
+   "median_speedup": 3.53
+  },
+  {
+   "concurrency": 4,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 343.98,
+    "p95_ms": 345.82,
+    "tokens_per_s": 40616,
+    "runs_median_ms": [
+     342.41,
+     345.54,
+     343.78,
+     344.18
+    ],
+    "runs_p95_ms": [
+     344.93,
+     346.57,
+     345.63,
+     346.16
+    ]
+   },
+   "batch": {
+    "median_ms": 335.15,
+    "p95_ms": 343.44,
+    "tokens_per_s": 41479,
+    "runs_median_ms": [
+     334.49,
+     334.68,
+     335.7,
+     335.73
+    ],
+    "runs_p95_ms": [
+     341.72,
+     341.85,
+     345.41,
+     344.78
+    ]
+   },
+   "median_speedup": 1.03
+  },
+  {
+   "concurrency": 16,
+   "inputs": 8,
+   "words": 128,
+   "requests_per_run": 60,
+   "tokens_per_request": 3495,
+   "base": {
+    "median_ms": 1377.72,
+    "p95_ms": 1382.52,
+    "tokens_per_s": 40440,
+    "runs_median_ms": [
+     1370.75,
+     1380.74,
+     1376.04,
+     1383.37
+    ],
+    "runs_p95_ms": [
+     1376.8,
+     1386.66,
+     1381.14,
+     1385.46
+    ]
+   },
+   "batch": {
+    "median_ms": 1340.11,
+    "p95_ms": 1347.34,
+    "tokens_per_s": 41501,
+    "runs_median_ms": [
+     1337.28,
+     1341.2,
+     1342.75,
+     1339.22
+    ],
+    "runs_p95_ms": [
+     1345.96,
+     1345.43,
+     1348.21,
+     1349.77
+    ]
+   },
+   "median_speedup": 1.03
+  },
+  {
+   "concurrency": 1,
+   "inputs": "image",
+   "words": 0,
+   "requests_per_run": 60,
+   "tokens_per_request": 269,
+   "base": {
+    "median_ms": 584.58,
+    "p95_ms": 587.36,
+    "tokens_per_s": 460,
+    "runs_median_ms": [
+     580.68,
+     588.6,
+     586.26,
+     582.77
+    ],
+    "runs_p95_ms": [
+     583.45,
+     592.27,
+     588.77,
+     584.96
+    ]
+   },
+   "batch": {
+    "median_ms": 583.75,
+    "p95_ms": 586.02,
+    "tokens_per_s": 461,
+    "runs_median_ms": [
+     590.17,
+     581.27,
+     582.04,
+     581.51
+    ],
+    "runs_p95_ms": [
+     592.45,
+     583.29,
+     584.38,
+     583.95
+    ]
+   },
+   "median_speedup": 1.0
+  },
+  {
+   "concurrency": 4,
+   "inputs": "image",
+   "words": 0,
+   "requests_per_run": 60,
+   "tokens_per_request": 269,
+   "base": {
+    "median_ms": 2246.65,
+    "p95_ms": 2251.36,
+    "tokens_per_s": 479,
+    "runs_median_ms": [
+     2235.02,
+     2256.08,
+     2255.02,
+     2240.48
+    ],
+    "runs_p95_ms": [
+     2239.66,
+     2259.58,
+     2260.92,
+     2245.29
+    ]
+   },
+   "batch": {
+    "median_ms": 2246.21,
+    "p95_ms": 2251.97,
+    "tokens_per_s": 479,
+    "runs_median_ms": [
+     2272.12,
+     2235.8,
+     2240.77,
+     2236.14
+    ],
+    "runs_p95_ms": [
+     2276.88,
+     2242.41,
+     2248.27,
+     2240.3
+    ]
+   },
+   "median_speedup": 1.0
+  },
+  {
+   "concurrency": 16,
+   "inputs": "image",
+   "words": 0,
+   "requests_per_run": 60,
+   "tokens_per_request": 269,
+   "base": {
+    "median_ms": 8984.98,
+    "p95_ms": 8991.6,
+    "tokens_per_s": 479,
+    "runs_median_ms": [
+     8941.25,
+     9023.09,
+     9014.18,
+     8961.41
+    ],
+    "runs_p95_ms": [
+     8949.12,
+     9031.66,
+     9018.74,
+     8966.88
+    ]
+   },
+   "batch": {
+    "median_ms": 8979.05,
+    "p95_ms": 8988.95,
+    "tokens_per_s": 479,
+    "runs_median_ms": [
+     9086.98,
+     8937.28,
+     8952.08,
+     8939.87
+    ],
+    "runs_p95_ms": [
+     9096.06,
+     8944.84,
+     8965.33,
+     8949.59
+    ]
+   },
+   "median_speedup": 1.0
+  },
+  {
+   "concurrency": 16,
+   "inputs": "mixed-image",
+   "words": 0,
+   "requests_per_run": 60,
+   "tokens_per_request": 269,
+   "base": {
+    "median_ms": 5094.55,
+    "p95_ms": 6767.15,
+    "tokens_per_s": 474,
+    "runs_median_ms": [
+     5073.01,
+     5114.33,
+     5111.07,
+     5079.77
+    ],
+    "runs_p95_ms": [
+     6730.81,
+     6796.4,
+     6781.08,
+     6760.32
+    ]
+   },
+   "batch": {
+    "median_ms": 4952.76,
+    "p95_ms": 7315.21,
+    "tokens_per_s": 475,
+    "runs_median_ms": [
+     4875.19,
+     4798.99,
+     5073.65,
+     5063.23
+    ],
+    "runs_p95_ms": [
+     7406.28,
+     7278.18,
+     7294.35,
+     7282.04
+    ]
+   },
+   "median_speedup": 1.03
+  },
+  {
+   "concurrency": 16,
+   "inputs": "mixed-text",
+   "words": 0,
+   "requests_per_run": 60,
+   "tokens_per_request": 49,
+   "base": {
+    "median_ms": 4193.52,
+    "p95_ms": 5651.22,
+    "tokens_per_s": 86,
+    "runs_median_ms": [
+     3973.0,
+     4277.21,
+     4272.3,
+     4251.55
+    ],
+    "runs_p95_ms": [
+     5606.16,
+     5681.03,
+     5666.96,
+     5650.74
+    ]
+   },
+   "batch": {
+    "median_ms": 3974.5,
+    "p95_ms": 5929.67,
+    "tokens_per_s": 86,
+    "runs_median_ms": [
+     4023.04,
+     3959.18,
+     3961.03,
+     3954.76
+    ],
+    "runs_p95_ms": [
+     6281.18,
+     6178.4,
+     5635.66,
+     5623.43
+    ]
+   },
+   "median_speedup": 1.06
+  }
+ ],
+ "separate_streams": [
+  {
+   "inputs": "streams-image",
+   "concurrency": 8,
+   "base": {
+    "median_ms": 4513.24,
+    "p95_ms": 4533.84,
+    "mean_ms": 4272.37,
+    "requests_per_run": [
+     64,
+     64,
+     64,
+     64
+    ],
+    "runs_median_ms": [
+     4473.32,
+     4547.05,
+     4513.45,
+     4519.15
+    ],
+    "runs_p95_ms": [
+     4497.08,
+     4568.0,
+     4533.51,
+     4536.75
+    ],
+    "runs_mean_ms": [
+     4228.68,
+     4306.65,
+     4278.38,
+     4275.77
+    ]
+   },
+   "batch": {
+    "median_ms": 4488.04,
+    "p95_ms": 4499.03,
+    "mean_ms": 4242.39,
+    "requests_per_run": [
+     64,
+     64,
+     64,
+     64
+    ],
+    "runs_median_ms": [
+     4458.11,
+     4487.73,
+     4509.41,
+     4496.9
+    ],
+    "runs_p95_ms": [
+     4468.4,
+     4499.81,
+     4520.28,
+     4507.62
+    ],
+    "runs_mean_ms": [
+     4213.03,
+     4242.67,
+     4263.5,
+     4250.35
+    ]
+   },
+   "tokens_per_request": 269,
+   "median_speedup": 1.01
+  },
+  {
+   "inputs": "streams-text",
+   "concurrency": 8,
+   "base": {
+    "median_ms": 3953.9,
+    "p95_ms": 4511.7,
+    "mean_ms": 3529.07,
+    "requests_per_run": [
+     82,
+     82,
+     82,
+     82
+    ],
+    "runs_median_ms": [
+     3922.69,
+     3982.45,
+     3952.96,
+     3957.5
+    ],
+    "runs_p95_ms": [
+     4461.19,
+     4549.71,
+     4538.1,
+     4497.8
+    ],
+    "runs_mean_ms": [
+     3494.0,
+     3556.92,
+     3533.42,
+     3531.94
+    ]
+   },
+   "batch": {
+    "median_ms": 3928.41,
+    "p95_ms": 4460.02,
+    "mean_ms": 3546.61,
+    "requests_per_run": [
+     81,
+     81,
+     81,
+     81
+    ],
+    "runs_median_ms": [
+     3902.34,
+     3927.52,
+     3947.21,
+     3936.58
+    ],
+    "runs_p95_ms": [
+     4420.88,
+     4464.49,
+     4488.24,
+     4466.49
+    ],
+    "runs_mean_ms": [
+     3522.17,
+     3546.67,
+     3564.08,
+     3553.54
+    ]
+   },
+   "tokens_per_request": 49,
+   "median_speedup": 1.01
+  }
+ ]
+}

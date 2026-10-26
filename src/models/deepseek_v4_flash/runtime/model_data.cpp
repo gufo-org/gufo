@@ -2,7 +2,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
@@ -11,22 +10,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/file.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "src/cli/serve/logging.hpp"
 #include "src/core/mapped_prefetch.hpp"
+#include "src/core/platform/publish.hpp"
 #include "../kernels/rocm/resident_api.h"
 #include "dspark_internal.h"
 #include "model.h"
@@ -35,7 +33,7 @@
 
 static uint32_t g_ds4_compress_ratios[DS4_N_LAYER] = {0};
 
-static int g_ds4_lock_fd = -1;
+static gufo::platform::FileLock g_ds4_lock;
 
 /* =========================================================================
  * GGUF Quant Block Formats.
@@ -149,9 +147,8 @@ void *ds4_xrealloc(void *ptr, size_t size) {
 }
 
 double ds4_now_seconds(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration<double>(now).count();
 }
 
 static void cursor_error(ds4_cursor *c, const char *msg) {
@@ -478,10 +475,13 @@ static void model_close(ds4_model *m) {
     if (!m) return;
     free(m->kv);
     free(m->tensors);
-    if (m->map) munmap((void *)m->map, (size_t)m->size);
-    if (m->fd >= 0) close(m->fd);
+    m->mapping.Close();
+    if (gufo::platform::FileValid(m->fd)) {
+        gufo::platform::CloseFile(m->fd);
+    }
+    m->map = nullptr;
     memset(m, 0, sizeof(*m));
-    m->fd = -1;
+    m->fd = gufo::platform::kInvalidFile;
 }
 
 /* Read the GGUF metadata table.  Values stay in the mmap; we store offsets so
@@ -573,22 +573,18 @@ static void parse_tensors(ds4_model *m, ds4_cursor *c) {
 /* Open and map the GGUF once for resident ROCm tensor views. */
 static void model_open(ds4_model *m, const char *path) {
     memset(m, 0, sizeof(*m));
-    m->fd = -1;
+    m->fd = gufo::platform::OpenReadFile(path);
+    if (!gufo::platform::FileValid(m->fd) || !m->mapping.Open(path)) {
+        if (gufo::platform::FileValid(m->fd)) {
+            gufo::platform::CloseFile(m->fd);
+            m->fd = gufo::platform::kInvalidFile;
+        }
+        ds4_die("cannot open or map model");
+    }
 
-    int fd = open(path, O_RDONLY);
-    if (fd == -1) ds4_die_errno("cannot open model", path);
-    m->fd = fd;
-
-    struct stat st;
-    if (fstat(fd, &st) == -1) ds4_die_errno("cannot stat model", path);
-    if (st.st_size < 32) ds4_die("model file is too small to be GGUF");
-
-    void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) ds4_die_errno("cannot mmap model", path);
-
-    m->fd = fd;
-    m->map = static_cast<const uint8_t *>(map);
-    m->size = (uint64_t)st.st_size;
+    if (m->mapping.size < 32) ds4_die("model file is too small to be GGUF");
+    m->map = static_cast<const uint8_t *>(m->mapping.data);
+    m->size = (uint64_t)m->mapping.size;
 
     ds4_cursor c = cursor_at(m, 0);
     uint32_t magic;
@@ -1595,7 +1591,7 @@ int ds4_dspark_open(ds4_dspark_model **out, const char *path) {
           ds4_xcalloc(1, sizeof(ds4_dspark_model))));
       auto* d = owned.get();
       d->model = static_cast<ds4_model*>(ds4_xcalloc(1, sizeof(ds4_model)));
-      d->model->fd = -1;
+      d->model->fd = gufo::platform::kInvalidFile;
 
       model_open(d->model, path);
       dspark_validate_metadata(d);
@@ -1639,55 +1635,33 @@ void ds4_dspark_close(ds4_dspark_model *d) {
  */
 
 static void ds4_release_instance_lock(void) {
-    if (g_ds4_lock_fd >= 0) {
-        close(g_ds4_lock_fd);
-        g_ds4_lock_fd = -1;
-    }
+    g_ds4_lock.Release();
 }
 
 /* Refuse to start a second ds4 process.  The model can map tens of GiB, so a
  * stale accidental second run is more dangerous than a normal CLI error. */
 static void ds4_acquire_instance_lock(void) {
-    const char *path = getenv("DS4_LOCK_FILE");
-    if (!path || !path[0]) path = "/tmp/ds4.lock";
-
-    const int fd = open(path, O_RDWR | O_CREAT, 0600);
-    if (fd < 0) {
-        fprintf(stderr, "ds4: failed to open lock file %s: %s\n", path, strerror(errno));
-        throw std::runtime_error("DeepSeek instance lock unavailable");
-    }
-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        if (errno == EWOULDBLOCK) {
-            char buf[64];
-            const ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
-            long owner = -1;
-            if (n > 0) {
-                buf[n] = '\0';
-                char *end = NULL;
-                owner = strtol(buf, &end, 10);
-            }
-            if (owner > 0) {
-                fprintf(stderr, "ds4: another ds4 process is already running (pid %ld); refusing to start\n", owner);
+    const char *env_path = getenv("DS4_LOCK_FILE");
+    const std::filesystem::path lock_path =
+        (env_path && env_path[0])
+            ? std::filesystem::path(env_path)
+            : gufo::platform::DefaultProcessLockPath("ds4.lock");
+    bool contended = false;
+    std::string holder_pid;
+    g_ds4_lock = gufo::platform::FileLock::TryAcquireProcessLock(
+        lock_path, &contended, &holder_pid);
+    if (!g_ds4_lock.valid()) {
+        if (contended) {
+            if (!holder_pid.empty() && holder_pid != "?") {
+                fprintf(stderr, "ds4: another ds4 process is already running (pid %s); refusing to start\n", holder_pid.c_str());
             } else {
                 fprintf(stderr, "ds4: another ds4 process is already running; refusing to start\n");
             }
-            close(fd);
-            throw std::runtime_error("DeepSeek instance lock unavailable");
+        } else {
+            fprintf(stderr, "ds4: failed to open or lock %s\n", lock_path.string().c_str());
         }
-        fprintf(stderr, "ds4: failed to lock %s: %s\n", path, strerror(errno));
-        close(fd);
         throw std::runtime_error("DeepSeek instance lock unavailable");
     }
-
-    if (ftruncate(fd, 0) != 0) {
-        fprintf(stderr, "ds4: failed to truncate lock file %s: %s\n", path, strerror(errno));
-        close(fd);
-        throw std::runtime_error("DeepSeek instance lock unavailable");
-    }
-    dprintf(fd, "%ld\n", (long)getpid());
-    g_ds4_lock_fd = fd;
 }
 
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
@@ -1697,7 +1671,7 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     return 1;
   static std::mutex load_mutex;
   const std::lock_guard lock(load_mutex);
-  if (g_ds4_lock_fd >= 0) {
+  if (g_ds4_lock.valid()) {
     fprintf(stderr, "ds4: a DeepSeek engine is already open\n");
     return 1;
   }
@@ -1707,7 +1681,7 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
 
     e = static_cast<ds4_engine*>(ds4_xcalloc(1, sizeof(ds4_engine)));
     e->model = static_cast<ds4_model*>(ds4_xcalloc(1, sizeof(ds4_model)));
-    e->model->fd = -1;
+    e->model->fd = gufo::platform::kInvalidFile;
     e->weights = static_cast<ds4_weights*>(ds4_xcalloc(1, sizeof(ds4_weights)));
 
     model_open(e->model, opt->model_path);

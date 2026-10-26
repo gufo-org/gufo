@@ -62,10 +62,14 @@ print(urllib.request.urlopen(request).read().decode())
 
 Start that server with `--served-model-name vision-test`. Ordered text/image
 parts, multiple images and later turns work with AR/DFlash2 and caches.
-PNG/JPEG data URLs and public HTTPS are supported (`detail: auto`); requests
+PNG/JPEG data URLs and public HTTPS are supported; requests
 share a 20 MiB encoded-byte, 16-image and 15-second download budget. Each image
 is capped at 32 megapixels; private/loopback/link-local destinations are rejected.
-Official dynamic resizing allows 64–16384 merged image tokens.
+Official dynamic resizing allows 64–16384 merged image tokens. `detail: low`
+scales the image down to fit within 512 × 512 pixels and keeps its aspect ratio,
+so it uses at most 256 merged image tokens and never more than `auto`.
+`detail: high`, `original`, and `auto` use the full range, and `auto` is the
+default.
 
 Image numbering is off by default; `--add-vision-id` or
 `chat_template_kwargs: {"add_vision_id": true}` adds `Picture N:` prefixes.

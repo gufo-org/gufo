@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     for (const auto& probe : fixture.find("cases")->items()) {
       const auto name = probe.member_str("name");
 #if defined(GUFO_IMAGE_TEST_GPU)
-      model::hip::EncoderSequence sequence;
+      model::EncoderSequence sequence;
       for (const auto& id : probe.find("token_ids")->items())
         sequence.tokens.push_back(static_cast<std::uint32_t>(id.as_size()));
       std::size_t cursor = 0;

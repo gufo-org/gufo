@@ -159,7 +159,8 @@ def main():
         result = run(load + ["--trace", trace])
         assert result.returncode == 1, result.stderr
         assert "[WARN] [trace] event=trace_enabled" in result.stderr
-        assert stat.S_IMODE(os.stat(trace).st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(os.stat(trace).st_mode) == 0o600
     # Every help variant groups verbosity the same way: a "Logging:" section,
     # with no hand-written "Server Options:" list to drift from the parser.
     for args in (["serve", "--help"], ["serve", "llm", "--help"],

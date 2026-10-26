@@ -50,6 +50,10 @@ inline void IgnoreSocketPipeSignal() noexcept {
 #endif
 }
 
+/// Installs an async-signal-safe fatal signal reporter on POSIX (no-op on
+/// Windows).
+void InstallFatalSignalReporter() noexcept;
+
 }  // namespace gufo::platform
 
 #endif  // GUFO_CORE_PLATFORM_SHUTDOWN_SIGNAL_HPP_

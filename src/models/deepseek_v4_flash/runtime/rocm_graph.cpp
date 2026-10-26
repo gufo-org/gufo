@@ -14,6 +14,7 @@
 
 #include "../kernels/rocm/resident_api.h"
 #include "src/cli/serve/logging.hpp"
+#include "src/core/platform/fs.hpp"
 #include "dspark_internal.h"
 #include "dspark_policy.h"
 #include "model_data_internal.h"
@@ -7939,7 +7940,8 @@ int ds4_rocm_graph_save_snapshot(const ds4_rocm_graph* graph,
     snap->cap = bytes + 1u;
   }
 
-  FILE* fp = fmemopen(snap->ptr, static_cast<size_t>(bytes + 1u), "wb");
+  FILE* fp = gufo::platform::OpenMemoryWriteStream(
+      snap->ptr, static_cast<size_t>(bytes + 1u));
   if (!fp) {
     payload_set_err(err, errlen,
                     "failed to open memory stream for session snapshot");
@@ -7948,7 +7950,9 @@ int ds4_rocm_graph_save_snapshot(const ds4_rocm_graph* graph,
   const int rc =
       rocm_graph_save_payload(graph, checkpoint, logits, prefill_capacity,
                               context_size, state, fp, err, errlen);
-  if (fclose(fp) != 0 && rc == 0) {
+  if (!gufo::platform::FinishMemoryWriteStream(fp, snap->ptr,
+                                               static_cast<size_t>(bytes)) &&
+      rc == 0) {
     payload_set_err(err, errlen, "failed to finalize memory session snapshot");
     return 1;
   }
@@ -7974,7 +7978,7 @@ int ds4_rocm_graph_load_snapshot(ds4_rocm_graph* graph, ds4_tokens* checkpoint,
         return 1;
     }
 
-    FILE *fp = fmemopen((void *)snap->ptr, (size_t)snap->len, "rb");
+    FILE *fp = gufo::platform::OpenMemoryReadStream(snap->ptr, (size_t)snap->len);
     if (!fp) {
         payload_set_err(err, errlen, "failed to open memory stream for session snapshot restore");
         return 1;

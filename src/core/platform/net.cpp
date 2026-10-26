@@ -1,5 +1,6 @@
 #include "src/core/platform/net.hpp"
 
+#include <cerrno>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -90,12 +91,137 @@ std::intptr_t Receive(Socket socket, void* data, std::size_t bytes,
 
 bool ShutdownSocket(Socket socket, ShutdownHow how) noexcept {
 #if defined(_WIN32)
-  return ::shutdown(socket, how == ShutdownHow::kWrite ? SD_SEND : SD_BOTH) ==
-         0;
+  const int mode = how == ShutdownHow::kRead
+                       ? SD_RECEIVE
+                       : (how == ShutdownHow::kWrite ? SD_SEND : SD_BOTH);
+  return ::shutdown(socket, mode) == 0;
 #else
-  return ::shutdown(socket, how == ShutdownHow::kWrite ? SHUT_WR : SHUT_RDWR) ==
-         0;
+  const int mode = how == ShutdownHow::kRead
+                       ? SHUT_RD
+                       : (how == ShutdownHow::kWrite ? SHUT_WR : SHUT_RDWR);
+  return ::shutdown(socket, mode) == 0;
 #endif
+}
+
+Socket AcceptClientSocket(Socket listener) noexcept {
+  const Socket client = ::accept(listener, nullptr, nullptr);
+#if defined(_WIN32)
+  if (client != kInvalidSocket && !SetBlocking(client)) {
+    CloseSocket(client);
+    return kInvalidSocket;
+  }
+#endif
+  return client;
+}
+
+int PollReadable(Socket socket, int timeout_ms) noexcept {
+#if defined(_WIN32)
+  WSAPOLLFD pfd{.fd = socket, .events = POLLRDNORM, .revents = 0};
+  return WSAPoll(&pfd, 1, timeout_ms);
+#else
+  struct pollfd pfd{.fd = socket, .events = POLLIN, .revents = 0};
+  return ::poll(&pfd, 1, timeout_ms);
+#endif
+}
+
+bool IsPeerDisconnected(Socket socket) noexcept {
+  if (socket == kInvalidSocket)
+    return true;
+#if defined(_WIN32)
+  WSAPOLLFD pfd{.fd = socket, .events = POLLRDNORM, .revents = 0};
+  const int polled = WSAPoll(&pfd, 1, 0);
+  if (polled < 0)
+    return true;
+  if (polled == 0)
+    return false;
+  if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+    return true;
+  if ((pfd.revents & POLLIN) == 0)
+    return false;
+  u_long available = 0;
+  if (ioctlsocket(socket, FIONREAD, &available) == 0 && available > 0)
+    return false;
+  char byte = 0;
+  const int n = ::recv(socket, &byte, 1, MSG_PEEK);
+  if (n == 0)
+    return true;
+  if (n < 0) {
+    const int err = WSAGetLastError();
+    return err != WSAEWOULDBLOCK && err != WSAEINTR && err != WSAETIMEDOUT;
+  }
+  return false;
+#else
+  struct pollfd pfd{.fd = socket, .events = POLLIN, .revents = 0};
+  if (::poll(&pfd, 1, 0) <= 0)
+    return false;
+  if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+    return true;
+  if ((pfd.revents & POLLIN) == 0)
+    return false;
+  char byte = 0;
+  const ssize_t n = ::recv(socket, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+  return n == 0 ||
+         (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+#endif
+}
+
+int LastSocketError() noexcept {
+#if defined(_WIN32)
+  return WSAGetLastError();
+#else
+  return errno;
+#endif
+}
+
+bool IsSocketInterrupted() noexcept {
+#if defined(_WIN32)
+  return WSAGetLastError() == WSAEINTR;
+#else
+  return errno == EINTR;
+#endif
+}
+
+bool IsSocketWouldBlockOrTimeout() noexcept {
+#if defined(_WIN32)
+  const int err = WSAGetLastError();
+  return err == WSAEWOULDBLOCK || err == WSAETIMEDOUT;
+#else
+  return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+bool IsSocketAcceptRetryable() noexcept {
+#if defined(_WIN32)
+  const int err = WSAGetLastError();
+  return err == WSAEINTR || err == WSAEWOULDBLOCK || err == WSAECONNRESET;
+#else
+  return errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK ||
+         errno == ECONNABORTED;
+#endif
+}
+
+bool SetReuseAddr(Socket socket) noexcept {
+  int opt = 1;
+  return ::setsockopt(socket, SOL_SOCKET, SO_REUSEADDR,
+                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
+}
+
+bool SetExclusiveListenerReuse(Socket socket) noexcept {
+  int opt = 1;
+#if defined(_WIN32)
+  return ::setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
+#else
+  (void)::setsockopt(socket, SOL_SOCKET, SO_REUSEADDR,
+                     reinterpret_cast<const char*>(&opt), sizeof(opt));
+  return true;
+#endif
+}
+
+bool ClearIpv6Only(Socket socket) noexcept {
+  int opt = 0;
+  return ::setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
 }
 
 bool SetBlocking(Socket socket) noexcept {

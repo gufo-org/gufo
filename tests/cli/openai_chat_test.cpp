@@ -2429,16 +2429,20 @@ void TestImagePartsRetainOrderAndIdentity() {
     Expect(gufo::server::HandleOpenAiChat(Request(body), backend).status == 400,
            "unsupported image role, policy and URL are rejected");
   }
-  // Codex sends "high" from view_image; every standard value behaves as auto.
+  // Codex sends "high" from view_image. Only low changes the resolution.
+  using Detail = gufo::tokenization::ChatMessage::ImageDetail;
   for (const std::string detail : {"auto", "low", "high", "original"}) {
     const auto accepted = gufo::server::HandleOpenAiChat(
         Request(
             R"({"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":")" +
             detail + R"("}}]}]})"),
         backend);
-    Expect(accepted.status == 200 &&
-               backend.last_request.messages.front().images.size() == 1,
-           "standard image detail values are accepted as auto");
+    const auto& images = backend.last_request.messages.front().images;
+    Expect(accepted.status == 200 && images.size() == 1 &&
+               images[0].detail ==
+                   (detail == "low" ? Detail::kLow : Detail::kAuto),
+           "standard image detail values are accepted, and only low bounds "
+           "the resolution");
   }
 }
 
@@ -2530,6 +2534,33 @@ void TestToolImagesRetainOrderAndIdentity() {
              chat.content == "left  right" && chat.images.size() == 2 &&
              chat.images[0].offset == 5 && chat.images[1].offset == 11,
          "Chat images stay attached to the tool result at their text offsets");
+  {
+    using Detail = gufo::tokenization::ChatMessage::ImageDetail;
+    const auto detailed = gufo::server::HandleOpenAiChat(Request(R"({
+      "model":"test-model",
+      "messages":[{"role":"tool","tool_call_id":"call_picture","content":[
+        {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":"low"}}
+      ]}]
+    })"),
+                                                         backend);
+    Expect(detailed.status == 200 &&
+               backend.last_request.messages.front().images.size() == 1 &&
+               backend.last_request.messages.front().images[0].detail ==
+                   Detail::kLow,
+           "tool images carry their requested detail");
+    auto item =
+        parse(R"({"type":"function_call_output","call_id":"call_picture",
+      "output":[{"type":"input_image","detail":"low",
+                 "image_url":"data:image/png;base64,AQID"}]})");
+    gufo::core::ImageReadBudget budget;
+    gufo::tokenization::ChatMessage message;
+    std::string error;
+    Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                    &error) &&
+               message.images.size() == 1 &&
+               message.images[0].detail == Detail::kLow,
+           "Responses input_image.detail reaches the image part: " + error);
+  }
 
   for (const auto* kind : {"function_call_output", "custom_tool_call_output"}) {
     for (const bool text : {false, true}) {
@@ -5140,6 +5171,11 @@ void TestToolClosingFraming() {
       {call + "\n</invoke>\n<|im_end|>", 1, R"({"text":"42"})",
        std::string(kImEnd)},
       {"</invoke>\n" + call, 1, R"({"text":"42"})", "</invoke>\n"},
+      // #786: these are parser fixtures, independent of whether a model obeys
+      // a request to copy a literal closer. Qwen27 Q4 omits it before a call;
+      // Q8 can emit a call when asked for the closer alone.
+      {call, 1, R"({"text":"42"})", ""},
+      {"</invoke>\n\n" + call, 1, R"({"text":"42"})", "</invoke>\n\n"},
       {"</invoke>", 0, "", "</invoke>"},
       {"Text </parameter>", 0, "", "Text </parameter>"},
       {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},

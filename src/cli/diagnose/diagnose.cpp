@@ -107,14 +107,16 @@ diagnostics::DiagnosticReport CollectDiagnostics(
   if (section == "all" || section == "platform" || section == "inventory") {
     diagnostics::DiagnosticCheck check;
     check.name = "platform";
-    if (inventory.cpu.architecture == "x86_64") {
+    const std::string& target = inventory.toolchain.target_platform;
+    check.details["targetArchitecture"] = target;
+    if (target == "x86_64-linux" || target == "x86_64-windows") {
       check.status = diagnostics::DiagnosticStatus::kPass;
-      check.message = "Supported architecture: Linux x86-64";
-      check.details["targetArchitecture"] = "x86_64-linux";
+      check.message =
+          "Supported architecture: " + inventory.toolchain.os_name + " x86-64";
     } else {
       check.status = diagnostics::DiagnosticStatus::kFail;
-      check.message =
-          "Unsupported target platform: only Linux x86-64 is supported";
+      check.message = "Unsupported target platform " + target +
+                      ": only Linux and Windows x86-64 are supported";
       report.AddError("Unsupported platform architecture detected");
     }
     report.AddCheck(std::move(check));
@@ -126,6 +128,7 @@ diagnostics::DiagnosticReport CollectDiagnostics(
     sys_check.name = "system";
     sys_check.status = diagnostics::DiagnosticStatus::kPass;
     sys_check.message = "Host operating system and kernel identified";
+    sys_check.details["osName"] = inventory.toolchain.os_name;
     sys_check.details["kernelRelease"] = inventory.toolchain.kernel_release;
     report.AddCheck(std::move(sys_check));
 

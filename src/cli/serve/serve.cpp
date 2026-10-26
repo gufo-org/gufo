@@ -1,7 +1,5 @@
 #include "src/cli/serve/serve.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -36,6 +34,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
+#include "src/core/platform/shutdown_signal.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
@@ -93,50 +92,8 @@ private:
   bool completed_{false};
 };
 
-// Reports a fatal signal on the way out. A driver or runtime failure during a
-// load can abort the process outright, which runs no destructor and no
-// terminate handler, leaving a log that stops at event=load_started. Only
-// async-signal-safe calls are allowed here, so the line is assembled by hand
-// and written straight to the descriptor.
-extern "C" void ReportFatalSignal(int number) {
-  static constexpr char kPrefix[] =
-      "[ERROR] [server] event=fatal_signal signal=";
-  char digits[8];
-  std::size_t length = 0;
-  int value = number;
-  if (value <= 0) {
-    digits[length++] = '0';
-  } else {
-    char reversed[8];
-    std::size_t count = 0;
-    while (value > 0 && count < sizeof(reversed)) {
-      reversed[count++] = static_cast<char>('0' + (value % 10));
-      value /= 10;
-    }
-    while (count > 0) {
-      digits[length++] = reversed[--count];
-    }
-  }
-  (void)::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);
-  (void)::write(STDERR_FILENO, digits, length);
-  (void)::write(STDERR_FILENO, "\n", 1);
-  // Restore the default action and re-raise, so the exit status and any core
-  // dump still describe the original fault.
-  struct sigaction restore{};
-  restore.sa_handler = SIG_DFL;
-  (void)::sigemptyset(&restore.sa_mask);
-  (void)::sigaction(number, &restore, nullptr);
-  (void)::raise(number);
-}
-
 void InstallFatalSignalReporter() {
-  struct sigaction action{};
-  action.sa_handler = ReportFatalSignal;
-  (void)::sigemptyset(&action.sa_mask);
-  action.sa_flags = SA_RESETHAND;
-  for (const int number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
-    (void)::sigaction(number, &action, nullptr);
-  }
+  platform::InstallFatalSignalReporter();
 }
 
 // Installs a terminate handler that names the reason before the process dies.

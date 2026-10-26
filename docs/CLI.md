@@ -191,7 +191,7 @@ Use `gufo serve embedding --model DIR` to serve the EmbeddingGemma 2 text embedd
 - `model` (`-m`) is the EmbeddingGemma 2 model directory
 - `servedModelName` is the model ID that clients send and `/v1/models` reports, `embeddinggemma-2` by default
 
-The command takes the shared server options but not `--sessions` or `--context`, because requests run one at a time on the GPU and the model fixes the context window.  The [server guide](SERVER.md#embeddings) lists the request fields, the limits, and the task prefixes the model expects.
+The command takes the shared server options but not `--sessions` or `--context`, because concurrent text requests share device batches on one encoder and the model fixes the context window.  The [server guide](SERVER.md#embeddings) lists the request fields, the limits, and the task prefixes the model expects.
 
 ```sh
 gufo serve --port 8080 embedding --model ./models/embeddinggemma-2
@@ -207,8 +207,9 @@ These apply to every modality, before or after the subcommand:
 - `sessions` (`-j`) — preallocated GPU request sessions. In practice: more
   sessions means more requests can compute at once, at the cost of memory
   per session. This option applies to LLM serving; image and speech servers use
-  their own bounded queues. The embedding server serializes requests on a mutex
-  and is bounded by `--max-connections`.
+  their own bounded queues. The embedding server packs waiting text requests
+  into shared device batches and runs each request with images in its own
+  batch. `--max-connections` bounds the waiting requests.
 - `maxConnections` — maximum simultaneous HTTP connections. In practice:
   clients beyond the limit queue or are refused instead of piling up. A
   connection stops counting once its response is fully written, so a client

@@ -17,6 +17,46 @@
       }
     },
     {
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "base",
+      "description": "Windows MSVC host + TheRock HIP SDK device toolchain",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_MANIFEST_INSTALL": "ON",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-release",
+        "VCPKG_HOST_TRIPLET": "x64-windows-release",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/windows-therock.cmake"
+      }
+    },
+    {
+      "name": "windows-cpu-test",
+      "displayName": "Windows CPU Tests",
+      "description": "Host-contract suite on Windows without HIP",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BUILD_TESTING": "ON",
+        "ENGINE_ENABLE_HIP": "OFF"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release",
+      "description": "Windows gfx1151 build used by the Devlab Windows checks",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BUILD_TESTING": "OFF",
+        "ENGINE_ENABLE_HIP": "ON"
+      }
+    },
+    {
       "name": "release",
       "displayName": "Release",
       "description": "Production gfx1151 build; same optimization as the Nix package",
@@ -64,6 +104,16 @@
     }
   ],
   "buildPresets": [
+    {
+      "name": "windows-cpu-test",
+      "displayName": "Windows CPU Tests",
+      "configurePreset": "windows-cpu-test"
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release",
+      "configurePreset": "windows-release"
+    },
     {
       "name": "release",
       "displayName": "Release",

@@ -10,7 +10,8 @@ sentence-transformers float32 reference vectors:
 It checks cosine agreement with the reference, input order in a batched
 request, Matryoshka truncation, concurrent identical requests, and the error
 shapes. The SDK requests base64 by default, so the agreement check covers that
-encoding.
+encoding. With `"truncate": true` an over-length input must embed exactly like
+its longest prefix that fits the 8192-token limit unchanged.
 """
 
 import argparse
@@ -27,6 +28,9 @@ from pathlib import Path
 FIXTURE = (Path(__file__).resolve().parents[1] / "fixtures" /
            "embedding_gemma2" / "embedding_golden.json")
 MINIMUM_COSINE = 0.9999
+MAX_INPUT_TOKENS = 8192
+LONG_SENTENCE = ("The northern lights, or aurora borealis, are produced when "
+                 "charged particles collide with gases. ")
 
 
 def cosine(a, b):
@@ -42,6 +46,66 @@ def truncated(vector, size):
 
 def check(name):
     print(f"CHECK {name}", file=sys.stderr, flush=True)
+
+
+def expect_error(openai, call, status, code, name):
+    try:
+        call()
+    except openai.APIStatusError as error:
+        assert error.status_code == status, (name, error.status_code)
+        assert error.body["code"] == code, (name, error.body)
+    else:
+        raise AssertionError(f"{name} unexpectedly succeeded")
+
+
+def check_truncate(openai, client, model):
+    """#726: `truncate` cuts an over-length input to <bos>, its first tokens
+    and <eos>; the default and `false` keep refusing it."""
+    long_text = LONG_SENTENCE * 700
+
+    def embed(text, **body):
+        return client.embeddings.create(model=model, input=text,
+                                        encoding_format="float",
+                                        extra_body=body)
+
+    for name, body in (("by default", {}), ("with false", {"truncate": False})):
+        check(f"truncate: an over-length input is refused {name}")
+        expect_error(openai, lambda: embed(long_text, **body), 400,
+                     "context_length_exceeded", f"over-length {name}")
+
+    check("truncate: an over-length input embeds the limit's tokens")
+    cut = embed(long_text, truncate=True)
+    assert cut.usage.prompt_tokens == MAX_INPUT_TOKENS, cut.usage
+
+    # The longest character prefix that the server accepts without truncation
+    # holds the same tokens, so it must give the same vector. A refused prefix
+    # returns quickly, which keeps the search cheap.
+    check("truncate: the vector equals the longest prefix that fits")
+    low, high = 0, len(long_text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        try:
+            embed(long_text[:middle])
+            low = middle
+        except openai.BadRequestError:
+            high = middle - 1
+    prefix = embed(long_text[:low])
+    assert prefix.usage.prompt_tokens == MAX_INPUT_TOKENS, prefix.usage
+    assert cosine(cut.data[0].embedding,
+                  prefix.data[0].embedding) > 0.99999
+
+    check("truncate: a batch truncates only the over-length input")
+    short = embed("hello")
+    batch = embed(["hello", long_text], truncate=True)
+    assert [item.index for item in batch.data] == [0, 1]
+    assert batch.usage.prompt_tokens == (short.usage.prompt_tokens +
+                                         MAX_INPUT_TOKENS), batch.usage
+    assert cosine(batch.data[0].embedding, short.data[0].embedding) > 0.99999
+    assert cosine(batch.data[1].embedding, cut.data[0].embedding) > 0.99999
+
+    check("truncate: a non-boolean value is refused")
+    expect_error(openai, lambda: embed("hello", truncate="yes"), 400,
+                 "invalid_parameter_type", "string truncate")
 
 
 def main():
@@ -126,9 +190,13 @@ def main():
         results = list(pool.map(
             lambda _: client.embeddings.create(model=args.model, input=texts),
             range(8)))
-    for result in results:
-        for item, expected in zip(result.data, response.data):
-            assert cosine(item.embedding, expected.embedding) > 0.99999
+    # Concurrent requests share device batches, and a different batch shape
+    # can pick a different GEMM kernel, so the vectors match only to rounding.
+    worst = min(cosine(item.embedding, expected.embedding)
+                for result in results
+                for item, expected in zip(result.data, response.data))
+    assert worst > MINIMUM_COSINE, worst
+    check(f"concurrent requests match a lone request, worst cosine {worst:.8f}")
 
     check("model listing names only the embedding model")
     models = client.models.list()
@@ -144,13 +212,10 @@ def main():
     ):
         check(f"error: {name}")
         kwargs.setdefault("model", args.model)
-        try:
-            client.embeddings.create(**kwargs)
-        except openai.APIStatusError as error:
-            assert error.status_code == status, (name, error.status_code)
-            assert error.body["code"] == code, (name, error.body)
-        else:
-            raise AssertionError(f"{name} unexpectedly succeeded")
+        expect_error(openai, lambda: client.embeddings.create(**kwargs),
+                     status, code, name)
+
+    check_truncate(openai, client, args.model)
 
     print("PASS embeddings")
 

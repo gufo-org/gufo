@@ -1,6 +1,9 @@
 {
   "schema": 1,
-  "representatives": {
+  "disabled": {
+  "deepseek4": "Temporarily disabled: its 81 GiB weights and 36-suite PR set make the Devlab run too long to finish within a PR; re-enable by removing this entry"
+ },
+ "representatives": {
     "llm": "flash-next-q4",
     "embedding": "embedding-gemma2",
     "asr": "qwen3-asr",
@@ -412,6 +415,29 @@
       "owners": [
         "llm"
       ]
+    },
+    {
+      "id": "hosted-checks",
+      "priority": 20,
+      "paths": [
+        "cmake/Checks.cmake",
+        "tests/cli/arg_parser_test.cpp",
+        "tests/cli/bench_test.cpp",
+        "tests/cli/component_text_cache_test.cpp",
+        "tests/cli/continuation_disk_store_test.cpp",
+        "tests/cli/http_server_signals_test.cpp",
+        "tests/cli/http_server_test.cpp",
+        "tests/cli/http_server_test_support.hpp",
+        "tests/cli/logit_sampler_test.cpp",
+        "tests/cli/openai_chat_test.cpp",
+        "tests/cli/prompt_test.cpp",
+        "tests/cli/quote_tracker_test.cpp",
+        "tests/cli/serve_test.py",
+        "tests/cli/text_generation_scheduler_test.cpp",
+        "tests/cli/text_model_runner_test.cpp",
+        "tests/cli/trace_test.cpp"
+      ],
+      "owners": []
     },
     {
       "id": "shared-infrastructure",

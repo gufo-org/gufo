@@ -1,6 +1,7 @@
 # EmbeddingGemma 2 text and image embeddings: model-private BF16 safetensors runtime.
 
 add_library(gufo_embedding_gemma2 STATIC
+  batch_scheduler.cpp
   image_processor.cpp
   config.cpp
   loader.cpp
@@ -10,7 +11,8 @@ add_library(gufo_embedding_gemma2 STATIC
 )
 
 target_include_directories(gufo_embedding_gemma2 PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(gufo_embedding_gemma2 PUBLIC Threads::Threads)
+target_link_libraries(gufo_embedding_gemma2 PUBLIC Threads::Threads
+  gufo_platform)
 
 # Float32 CPU oracle for the HIP runtime; tests link it explicitly.
 add_library(gufo_embedding_gemma2_reference STATIC EXCLUDE_FROM_ALL

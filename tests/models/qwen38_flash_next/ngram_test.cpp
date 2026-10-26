@@ -1,9 +1,6 @@
 // PLE n-gram hashing and disk row reads, checked without the model.
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -12,7 +9,11 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <system_error>
 #include <vector>
+
+#include "src/core/platform/fs.hpp"
+#include "tests/support/temporary_directory.hpp"
 
 namespace q = gufo::models::qwen38_flash_next;
 
@@ -22,10 +23,9 @@ std::unique_ptr<q::NgramTable> OpenTable(const std::filesystem::path& path,
                                          std::uint64_t rows, std::uint32_t dim,
                                          gufo::core::GgmlType type,
                                          std::string* error) {
-  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  auto table = q::NgramTable::Open(fd, offset, rows, dim, type, error);
-  if (fd >= 0)
-    ::close(fd);
+  const auto file = gufo::platform::OpenReadFile(path);
+  auto table = q::NgramTable::Open(file, offset, rows, dim, type, error);
+  gufo::platform::CloseFile(file);
   return table;
 }
 
@@ -371,30 +371,40 @@ void TestDistantRows() {
 }
 
 void TestReplacedPath() {
-  char name[] = "/tmp/qwen-ngram-bound-XXXXXX";
-  const int fd = ::mkstemp(name);
-  Check(fd >= 0, "create bound table");
-  if (fd < 0)
-    return;
-  const std::uint16_t value = 0x3f80;  // BF16 1.0
-  Check(::write(fd, &value, sizeof(value)) == sizeof(value), "write bound row");
-  ::unlink(name);
+  TemporaryDirectory temp("qwen-ngram-bound");
+  const auto bound = temp.path() / "bound";
+  const auto next = temp.path() / "next";
   {
-    std::ofstream replacement(name, std::ios::binary);
+    std::ofstream initial(bound, std::ios::binary);
+    const std::uint16_t value = 0x3f80;  // BF16 1.0
+    initial.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    Check(initial.good(), "write bound row");
+  }
+  const auto file = gufo::platform::OpenReadFile(bound);
+  Check(gufo::platform::FileValid(file), "open bound table");
+  if (!gufo::platform::FileValid(file))
+    return;
+  {
+    std::ofstream replacement(next, std::ios::binary);
     const std::uint16_t other = 0x4000;
     replacement.write(reinterpret_cast<const char*>(&other), sizeof(other));
   }
+  std::error_code ec;
+  gufo::platform::Directory dir;
+  Check(dir.Open(temp.path(), ec) &&
+            gufo::platform::Rename(dir, "bound", dir, "retired", ec) &&
+            gufo::platform::Rename(dir, "next", dir, "bound", ec),
+        "replace bound path while descriptor stays open");
   std::string error;
   auto table =
-      q::NgramTable::Open(fd, 0, 1, 1, gufo::core::GgmlType::kBF16, &error);
-  ::close(fd);
+      q::NgramTable::Open(file, 0, 1, 1, gufo::core::GgmlType::kBF16, &error);
+  gufo::platform::CloseFile(file);
   Check(table != nullptr, "open original descriptor after path replacement");
   std::array<std::uint32_t, 1> ids{0};
   std::array<float, 1> output{};
   if (table)
     Check(table->Read(ids, output) && output[0] == 1.0F,
           "PLE reads original weights after replacement and descriptor close");
-  std::filesystem::remove(name);
 }
 
 // Gathers attribute every row to the sequence that requested it: copied from
@@ -463,6 +473,7 @@ void TestCounters() {
           "owners must cover the gather");
     Check(first.Load().rows == repeated.rows, "rejected gather is uncounted");
   }
+  table.reset();
   std::filesystem::remove(path);
 }
 }  // namespace

@@ -4,6 +4,8 @@
 #include <cstdint>
 
 #ifdef __cplusplus
+#include "src/core/platform/mapped_file.hpp"
+
 extern "C" {
 #endif
 
@@ -129,7 +131,7 @@ int ds4_gpu_routed_moe_one_tensor(
     float clamp, const ds4_gpu_tensor* x);
 int ds4_gpu_router_select_batch_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights, ds4_gpu_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_gpu_tensor *logits, const ds4_gpu_tensor *tokens, uint32_t n_expert, uint32_t n_expert_used, float expert_weight_scale, uint32_t n_tokens);
 int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights, ds4_gpu_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t token, uint32_t n_expert, uint32_t n_expert_used, float expert_weight_scale, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_gpu_tensor *logits);
-int ds4_gpu_set_model_fd(int fd);
+int ds4_gpu_set_model_fd(gufo::platform::PlatformFile fd);
 int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size, uint64_t max_tensor_bytes);
 int ds4_gpu_shared_down_hc_expand_q8_0_tensor(ds4_gpu_tensor *out_hc, ds4_gpu_tensor *shared_out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *shared_mid, const ds4_gpu_tensor *routed_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(

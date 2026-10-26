@@ -18,6 +18,9 @@ def registry():
     for rule in data['rules']:
         if not set(rule['owners']) <= owners:
             raise ValueError('Unknown owner in ' + rule['id'])
+    for key, reason in data.get('disabled', {}).items():
+        if key not in data['models'] or not reason:
+            raise ValueError('Disabled models need a known id and a reason: ' + key)
     for name, asset in data['assets'].items():
         if not re.fullmatch('[0-9a-f]{40}', asset['revision']):
             raise ValueError('Unpinned asset: ' + name)

@@ -1,7 +1,5 @@
 #include "src/cli/serve/inference_backend.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <chrono>

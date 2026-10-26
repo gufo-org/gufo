@@ -1,7 +1,5 @@
 #include "src/cli/serve/logging.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -16,6 +14,8 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::server {
 namespace {
@@ -54,7 +54,7 @@ std::string CurrentTimestamp() {
   const auto now = std::chrono::system_clock::now();
   const auto seconds = std::chrono::system_clock::to_time_t(now);
   std::tm calendar{};
-  ::localtime_r(&seconds, &calendar);
+  gufo::platform::LocalTime(seconds, &calendar);
   std::array<char, 32> buffer{};
   const auto written = std::strftime(buffer.data(), buffer.size(),
                                      "%Y-%m-%d %H:%M:%S", &calendar);
@@ -120,7 +120,7 @@ void Logger::Log(LogLevel level, std::string_view component,
     return;
   }
   static const bool color =
-      std::getenv("NO_COLOR") == nullptr && ::isatty(STDERR_FILENO) != 0;
+      std::getenv("NO_COLOR") == nullptr && gufo::platform::StderrIsTerminal();
   const char* tag = level == LogLevel::kError   ? "ERROR"
                     : level == LogLevel::kWarn  ? "WARN"
                     : level == LogLevel::kDebug ? "DEBUG"

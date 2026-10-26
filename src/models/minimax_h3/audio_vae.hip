@@ -1,6 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
 
-#include <fcntl.h>
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
 

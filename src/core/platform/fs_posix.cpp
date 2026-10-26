@@ -375,8 +375,90 @@ std::size_t ReadAt(PlatformFile file, std::uint64_t offset, void* output,
   return static_cast<std::size_t>(n);
 }
 
-bool OwnerOnly(const FileInfo& info, std::uint32_t forbidden) noexcept {
-  return info.user_id == ::geteuid() && (info.permissions & forbidden) == 0;
+bool OwnerOnly(const FileInfo& info, std::uint32_t forbidden,
+               std::uint32_t required) noexcept {
+  return info.user_id == ::geteuid() && (info.permissions & forbidden) == 0 &&
+         (info.permissions & required) == required;
+}
+
+PlatformFile OpenForAppend(const std::filesystem::path& path,
+                           std::error_code& ec) noexcept {
+  ec.clear();
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+                        S_IRUSR | S_IWUSR);
+  if (fd < 0)
+    ec = Errno();
+  return fd;
+}
+
+std::uint64_t SeekToEnd(PlatformFile file, std::error_code& ec) noexcept {
+  ec.clear();
+  const off_t end = ::lseek(file, 0, SEEK_END);
+  if (end < 0) {
+    ec = Errno();
+    return 0;
+  }
+  return static_cast<std::uint64_t>(end);
+}
+
+bool SeekTo(PlatformFile file, std::uint64_t offset,
+            std::error_code& ec) noexcept {
+  ec.clear();
+  if (::lseek(file, static_cast<off_t>(offset), SEEK_SET) !=
+      static_cast<off_t>(offset)) {
+    ec = Errno();
+    return false;
+  }
+  return true;
+}
+
+bool TouchAt(const Directory& dir, std::string_view name) noexcept {
+  return ::utimensat(dir.fd_, std::string(name).c_str(), nullptr,
+                     AT_SYMLINK_NOFOLLOW) == 0;
+}
+
+bool LockDirectoryShared(const Directory& dir) noexcept {
+  while (::flock(dir.fd_, LOCK_SH) != 0) {
+    if (errno != EINTR)
+      return false;
+  }
+  return true;
+}
+
+bool TryLockDirectoryExclusive(const Directory& dir) noexcept {
+  while (::flock(dir.fd_, LOCK_EX | LOCK_NB) != 0) {
+    if (errno != EINTR)
+      return false;
+  }
+  return true;
+}
+
+void UnlockDirectory(const Directory& dir) noexcept {
+  while (::flock(dir.fd_, LOCK_UN) != 0 && errno == EINTR) {
+  }
+}
+
+std::FILE* OpenMemoryWriteStream(void* buffer, std::size_t capacity) noexcept {
+  return ::fmemopen(buffer, capacity, "wb");
+}
+
+bool FinishMemoryWriteStream(std::FILE* stream, void*, std::size_t) noexcept {
+  return stream != nullptr && std::fclose(stream) == 0;
+}
+
+std::FILE* OpenMemoryReadStream(const void* buffer,
+                                std::size_t bytes) noexcept {
+  return ::fmemopen(const_cast<void*>(buffer), bytes, "rb");
+}
+
+bool Truncate(PlatformFile file, std::uint64_t bytes,
+              std::error_code& ec) noexcept {
+  ec.clear();
+  if (::ftruncate(file, static_cast<off_t>(bytes)) != 0) {
+    ec = Errno();
+    return false;
+  }
+  return true;
 }
 
 bool RestrictToOwner(const std::filesystem::path& path) noexcept {

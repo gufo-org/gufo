@@ -6,15 +6,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <condition_variable>
 #include <cstring>
 #include <exception>
 #include <map>
-#include <mutex>
 #include <string>
 #include <utility>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/embedding_gemma2/batch_scheduler.hpp"
 #include "src/models/embedding_gemma2/hip/blas.hpp"
 #include "src/models/embedding_gemma2/hip/ops.hpp"
 #include "src/models/embedding_gemma2/hip/vision_ops.hpp"
@@ -173,36 +172,14 @@ struct EncoderRuntime::Impl {
   DeviceBuffer probe;
   std::atomic<bool> lost{false};
 
-  // Device turns in arrival order, one batch each. A plain mutex lets the
-  // thread that just released it take it straight back, so a long request
-  // would still starve the requests queued behind it.
-  std::mutex turn_mutex;
-  std::condition_variable turn_changed;
-  std::uint64_t next_ticket{0};
-  std::uint64_t serving{0};
-
-  class Turn {
-  public:
-    explicit Turn(Impl& impl) : impl_(impl) {
-      std::unique_lock lock(impl_.turn_mutex);
-      const std::uint64_t ticket = impl_.next_ticket++;
-      impl_.turn_changed.wait(lock, [&] { return impl_.serving == ticket; });
-    }
-    ~Turn() {
-      {
-        const std::lock_guard lock(impl_.turn_mutex);
-        ++impl_.serving;
-      }
-      impl_.turn_changed.notify_all();
-    }
-    Turn(const Turn&) = delete;
-    Turn& operator=(const Turn&) = delete;
-    Turn(Turn&&) = delete;
-    Turn& operator=(Turn&&) = delete;
-
-  private:
-    Impl& impl_;
-  };
+  // Packs concurrent text calls into shared batches, gives each call with an
+  // image a batch of its own, and runs one batch at a time.
+  BatchScheduler scheduler{
+      kMaxSequenceTokens,
+      [this](const std::vector<const EncoderSequence*>& sequences,
+             std::vector<std::vector<float>>* embeddings, std::string* error) {
+        return OnDevice([&] { RunBatch(sequences, embeddings); }, error);
+      }};
 
   ~Impl() {
     if (blas != nullptr) {
@@ -235,9 +212,11 @@ struct EncoderRuntime::Impl {
     }
   }
 
-  void RunBatch(const std::vector<EncoderSequence>& sequences,
-                std::size_t first, std::size_t last, std::size_t tokens,
+  void RunBatch(const std::vector<const EncoderSequence*>& sequences,
                 std::vector<std::vector<float>>* embeddings);
+  // Runs scheduled device work and turns a failure into an error, confirming
+  // a lost device with the probe.
+  bool OnDevice(const std::function<void()>& work, std::string* error);
 };
 
 void EncoderRuntime::Impl::Upload() {
@@ -451,15 +430,14 @@ void EncoderRuntime::Impl::Warmup() {
   std::size_t rows = 0;
   do {
     rows = GemmLt::Bucket(rows + 1, kChunkTokens);
-    std::vector<std::uint32_t> filler(rows, 1000);
+    const EncoderSequence filler{std::vector<std::uint32_t>(rows, 1000), {}};
     unused.clear();
-    RunBatch({{std::move(filler), {}}}, 0, 1, rows, &unused);
+    RunBatch({&filler}, &unused);
   } while (rows < kChunkTokens);
 }
 
 void EncoderRuntime::Impl::RunBatch(
-    const std::vector<EncoderSequence>& sequences, std::size_t first,
-    std::size_t last, std::size_t tokens,
+    const std::vector<const EncoderSequence*>& sequences,
     std::vector<std::vector<float>>* embeddings) {
   const TextConfig& text = loaded.config.text;
   const std::size_t hidden = text.hidden_size;
@@ -472,19 +450,19 @@ void EncoderRuntime::Impl::RunBatch(
   host_begin.clear();
   host_end.clear();
   host_offsets.assign(1, 0);
-  host_ids.reserve(tokens);
-  for (std::size_t s = first; s < last; ++s) {
+  for (const EncoderSequence* sequence : sequences) {
     const auto begin = static_cast<std::uint32_t>(host_ids.size());
     const auto end =
-        begin + static_cast<std::uint32_t>(sequences[s].tokens.size());
-    for (std::size_t t = 0; t < sequences[s].tokens.size(); ++t) {
-      host_ids.push_back(sequences[s].tokens[t]);
+        begin + static_cast<std::uint32_t>(sequence->tokens.size());
+    for (std::size_t t = 0; t < sequence->tokens.size(); ++t) {
+      host_ids.push_back(sequence->tokens[t]);
       host_positions.push_back(static_cast<std::uint32_t>(t));
       host_begin.push_back(begin);
       host_end.push_back(end);
     }
     host_offsets.push_back(end);
   }
+  const std::size_t tokens = host_ids.size();
   token_ids.UploadAsync(0, host_ids.data(), tokens * sizeof(std::uint32_t),
                         stream);
   positions.UploadAsync(0, host_positions.data(),
@@ -500,9 +478,9 @@ void EncoderRuntime::Impl::RunBatch(
                         state.get<float>(), embeddings_bf16.get(), tokens,
                         hidden, kEmbedScale, stream);
 
-  for (std::size_t s = first; s < last; ++s) {
-    for (const auto& image : sequences[s].images) {
-      RunVision(image.patches, host_offsets[s - first] + image.offset);
+  for (std::size_t s = 0; s < sequences.size(); ++s) {
+    for (const auto& image : sequences[s]->images) {
+      RunVision(image.patches, host_offsets[s] + image.offset);
     }
   }
 
@@ -609,7 +587,7 @@ void EncoderRuntime::Impl::RunBatch(
          projected_f32.get<float>() + row * text.embedding_dim,
          std::min(kChunkTokens, tokens - row), text.embedding_dim, hidden);
   }
-  const std::size_t count = last - first;
+  const std::size_t count = sequences.size();
   if (!LaunchMeanPoolNormalize(
           projected_f32.get<float>(), offsets.get<std::uint32_t>(),
           pooled_f32.get<float>(), count, text.embedding_dim, stream)) {
@@ -627,6 +605,30 @@ void EncoderRuntime::Impl::RunBatch(
         host.begin() + static_cast<std::ptrdiff_t>(s * text.embedding_dim),
         host.begin() +
             static_cast<std::ptrdiff_t>((s + 1U) * text.embedding_dim));
+  }
+}
+
+bool EncoderRuntime::Impl::OnDevice(const std::function<void()>& work,
+                                    std::string* error) {
+  if (lost.load(std::memory_order_acquire)) {
+    *error = kDeviceLostMessage;
+    return false;
+  }
+  try {
+    work();
+    return true;
+  } catch (const std::exception& failure) {
+    // Kernels from the failed work may still be queued. They read the index
+    // buffers the next batch overwrites, so drain the stream before the next
+    // batch starts.
+    gufo::hip::LogCleanupError(hipStreamSynchronize(stream));
+    if (!DeviceUsable()) {
+      lost.store(true, std::memory_order_release);
+      *error = std::string(kDeviceLostMessage) + ": " + failure.what();
+      return false;
+    }
+    *error = std::string("embedding_gemma2: ") + failure.what();
+    return false;
   }
 }
 
@@ -740,45 +742,14 @@ bool EncoderRuntime::EmbedMultimodal(
       }
     }
   }
-  embeddings->clear();
-  embeddings->reserve(sequences.size());
-  std::size_t first = 0;
-  while (first < sequences.size()) {
-    std::size_t last = first;
-    std::size_t tokens = 0;
-    while (last < sequences.size() &&
-           tokens + sequences[last].tokens.size() <= kMaxSequenceTokens) {
-      tokens += sequences[last].tokens.size();
-      ++last;
-    }
-    // Each batch takes a new turn, so requests that arrived meanwhile run
-    // before the next batch of this one.
-    const Impl::Turn turn(*impl_);
-    if (device_lost()) {
-      embeddings->clear();
-      return fail(kDeviceLostMessage);
-    }
-    if (is_cancelled && is_cancelled()) {
-      embeddings->clear();
-      return fail(kCancelledMessage);
-    }
-    try {
-      impl_->RunBatch(sequences, first, last, tokens, embeddings);
-    } catch (const std::exception& failure) {
-      // Kernels from the failed batch may still be queued. They read the
-      // index buffers the next batch overwrites, so drain the stream before
-      // the turn passes on.
-      gufo::hip::LogCleanupError(hipStreamSynchronize(impl_->stream));
-      embeddings->clear();
-      if (!impl_->DeviceUsable()) {
-        impl_->lost.store(true, std::memory_order_release);
-        return fail(std::string(kDeviceLostMessage) + ": " + failure.what());
-      }
-      return fail(std::string("embedding_gemma2: ") + failure.what());
-    }
-    first = last;
+  std::string failure;
+  const auto outcome =
+      impl_->scheduler.Run(sequences, is_cancelled, embeddings, &failure);
+  if (outcome == BatchScheduler::Outcome::kOk) {
+    return true;
   }
-  return true;
+  return fail(outcome == BatchScheduler::Outcome::kCancelled ? kCancelledMessage
+                                                             : failure);
 }
 
 }  // namespace gufo::models::embedding_gemma2::hip
