@@ -111,3 +111,18 @@ warm each case once, then retain ten complete HTTP latencies and vectors.
 Repeat only flagged workloads, reversing toolchain order and retaining earlier
 results. Keep the checkpoint, power profile, tuning warmup and server options
 fixed.
+
+## Hosted HIP compiler cache
+
+The hosted build exposed a separate stale-object problem in ccache 4.13.6:
+Clang's bundled HIP preprocessor output produces a cache manifest with zero
+included headers. Adding a host function to an included HIP header still gives
+a direct cache hit; the reused object lacks the new symbol and fails to link.
+The [focused reproduction](artifacts/gfx1151-2026-10-26-hip-cache.json) records
+the source, flags and failing cached/successful uncached link controls.
+
+The Nix package now leaves HIP compilation uncached, matching the existing
+Linux CMake policy, while retaining C/C++ caching. This prevents reuse of stale
+HIP objects from the main timing baseline or an earlier CI cache. No model
+code, compiler flags or numerical bounds change; the migration measurements
+above already used uncached HIP compilation.

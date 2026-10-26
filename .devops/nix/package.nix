@@ -105,9 +105,10 @@ stdenv.mkDerivation {
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
   ];
 
-  # CI exposes a persistent /tmp/gufo-ccache through extra-sandbox-paths so a
-  # new revision recompiles only changed sources; without it the compiler runs
-  # directly. ccache builds differ from plain ones only in HIP __hip_cuid_* names.
+  # CI exposes a persistent /tmp/gufo-ccache through extra-sandbox-paths for
+  # C/C++ sources. Keep HIP uncached: Clang emits a bundled preprocessor output
+  # whose included headers ccache 4.13.6 does not record. A header-only change
+  # can then reuse a stale HIP object, including one from the timing baseline.
   preConfigure = ''
     ccache_dir=/tmp/gufo-ccache
     if [[ -d "$ccache_dir" && -w "$ccache_dir" ]]; then
@@ -118,7 +119,6 @@ stdenv.mkDerivation {
       export CCACHE_UMASK=000
       cmakeFlagsArray+=(
         "-DGUFO_CCACHE_PROGRAM=${ccache}/bin/ccache"
-        "-DCMAKE_HIP_COMPILER_LAUNCHER=${ccache}/bin/ccache"
       )
       ${ccache}/bin/ccache --zero-stats
     fi
