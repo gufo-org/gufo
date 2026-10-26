@@ -295,21 +295,19 @@ with Nix, signed public binary caches, Cachix and a shared C/C++/HIP compiler ca
 Both timing arms use the candidate's lock file. The binary artifact records the
 authorized revisions and executable checksums. A compressed portable bundle
 contains both executables, their pinned ELF loader, shared libraries and gfx1151
-BLAS kernel data. A trusted `devlab-cdn.yml` relay copies the opaque Actions artifact ZIP to a
-short-lived prerelease asset. Devlab downloads from GitHub's release CDN and
-checks the original Actions artifact SHA-256 before unpacking. It does not fetch
-the large bundle from Azure's Actions artifact store. A bounded range probe
-measures the CDN route. Below 5 MiB/s, the downloader also tests a rootless
-Cloudflare WARP MASQUE proxy (`usque` v4.2.1, checksum pinned) and uses it when
-it is faster. Only the bundle transfer uses the proxy; runner control and model
-mirror traffic keep their existing routes. Temporary WARP credentials and the
-loopback proxy are removed after the transfer. Transfer durations are logged
-separately from waiting for the relay. The relay uses only default
-branch code and never unpacks or executes the PR artifact. Daily cleanup deletes
-its `ci-devlab-<run>-<attempt>` releases and tags after three days. The relay
-workflow and `tools/ci/devlab_cdn.py` must be installed on the default branch
-before enabling the CDN consumer in PR workflows; `workflow_run` uses the default
-branch, so adding the relay only to a PR cannot activate it.
+BLAS kernel data. The GPU runner downloads directly from Actions artifacts.
+A bounded range probe
+measures the direct route; when slow, the downloader tests a rootless Cloudflare
+WARP MASQUE proxy (`usque` v4.2.1, checksum pinned) and uses it when faster.
+Only the binary transfer uses the proxy; runner control and model mirror traffic
+keep their existing routes. Temporary credentials and the loopback proxy are
+removed after transfer. The original Actions artifact SHA-256 is mandatory.
+No release relay or privileged publishing workflow is needed.
+The large Linux runtime is archived separately and cached under
+`$HF_HOME/gufo/runtimes` by SHA-256. Cache hits are hash-checked and unpacked
+locally; changed toolchains get a new content hash. Ordinary builds transfer
+only the two small executable packages. Windows PRs and manual dispatches use
+the same adaptive downloader and run device and per-family model smoke checks.
 The GPU runner unpacks and executes the verified bundle directly;
 it needs neither Nix nor administrator access and never compiles. Both binaries
 share one bundled runtime. Hosted jobs restore dependencies from signed binary

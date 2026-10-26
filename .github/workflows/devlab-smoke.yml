@@ -344,6 +344,7 @@ jobs:
           path: controller
           sparse-checkout: |
             tests/functional
+            tests/fixtures
             tools
 
       - name: Download authorized selection plan
@@ -375,24 +376,29 @@ jobs:
           ) > "$RUNNER_TEMP/gufo-weights.log" 2>&1 < /dev/null &
           echo $! > "$RUNNER_TEMP/gufo-weights.pid"
 
-      - name: Download hosted Linux binaries through release CDN
+      - name: Download hosted Linux binaries
         timeout-minutes: 135
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          python3 controller/tools/ci/devlab_cdn.py download \
-            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          python3 controller/tools/ci/devlab_artifact.py linux \
+            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output linux-artifacts.tar.gz
 
       - name: Unpack, verify and diagnose pinned production binaries
         id: binaries
         env:
+          GH_TOKEN: ${{ github.token }}
           APPROVED_MERGE: ${{ needs.authorize.outputs.merge }}
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
         shell: bash
         run: |
           set -euo pipefail
           tar -xzf linux-artifacts.tar.gz
+          python3 controller/tools/ci/devlab_artifact.py runtime \
+            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --manifest linux-artifacts/runtime.json --cache "$GUFO_CACHE_ROOT/runtimes" \
+            --output linux-artifacts
           python3 controller/tools/ci/linux_artifact.py verify \
             --source linux-artifacts/candidate --revision "$APPROVED_MERGE"
           python3 controller/tools/ci/linux_artifact.py verify \

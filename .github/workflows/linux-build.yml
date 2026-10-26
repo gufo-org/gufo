@@ -34,7 +34,7 @@ jobs:
       - name: Validate artifact import contracts
         run: |
           python3 -m unittest discover -s tests/tools -p linux_artifact_test.py
-          python3 -m unittest discover -s tests/tools -p devlab_cdn_test.py
+          python3 -m unittest discover -s tests/tools -p devlab_artifact_test.py
 
       - name: Checkout timing baseline
         if: inputs.baseline != ''
@@ -100,14 +100,34 @@ jobs:
         env:
           EXPECTED_REVISION: ${{ inputs.revision }}
           EXPECTED_BASELINE: ${{ inputs.baseline }}
+          RUNTIME_ARTIFACT: ${{ inputs.artifact-name }}-runtime
         run: |
           set -euo pipefail
           python3 tools/ci/linux_artifact.py verify --source linux-artifacts/candidate --revision "$EXPECTED_REVISION"
           if [[ -n "$EXPECTED_BASELINE" ]]; then
             python3 tools/ci/linux_artifact.py verify --source linux-artifacts/baseline --revision "$EXPECTED_BASELINE"
           fi
-          tar -I 'gzip -1' -cf linux-artifacts.tar.gz linux-artifacts
-          du -h linux-artifacts.tar.gz
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -I 'gzip -1 -n' -cf linux-runtime.tar.gz -C linux-artifacts runtime
+          python3 - <<'PYRUNTIME'
+          import hashlib, json, os
+          from pathlib import Path
+          archive = Path('linux-runtime.tar.gz')
+          with archive.open('rb') as source:
+              digest = hashlib.file_digest(source, 'sha256').hexdigest()
+          Path('linux-artifacts/runtime.json').write_text(json.dumps({
+              'artifact': os.environ['RUNTIME_ARTIFACT'], 'digest': 'sha256:' + digest}) + '\n')
+          PYRUNTIME
+          tar --exclude=linux-artifacts/runtime -I 'gzip -1' -cf linux-artifacts.tar.gz linux-artifacts
+          du -h linux-artifacts.tar.gz linux-runtime.tar.gz
+
+      - name: Upload shared Linux runtime
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact-name }}-runtime
+          path: linux-runtime.tar.gz
+          compression-level: 0
+          retention-days: 3
 
       - name: Upload production binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

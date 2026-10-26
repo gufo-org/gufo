@@ -2,8 +2,8 @@ name: Windows
 
 # Windows x86-64 is a development build target (AGENTS.md). A hosted runner
 # builds gufo.exe with its runtime and runs the host contract suite. On a
-# manual dispatch the Windows Strix Halo Devlab runner then checks the device
-# and one small model per family from that bundle (PR runs wait on #789).
+# Windows Strix Halo Devlab runner then checks the device and one small model
+# per family from that bundle on PRs and manual dispatches.
 # Toolboxes also calls this workflow to package an exact release tag.
 
 on:
@@ -265,7 +265,7 @@ jobs:
       # and nothing else: the staged HIP runtime with its rocBLAS/hipBLASLt
       # kernel directories, the vcpkg DLLs, the MSVC CRT and LLVM OpenMP, plus
       # the weight-free GPU tests and the model smoke checks with their
-      # references (the Devlab job has no checkout).
+      # references (Devlab checks out only the download tools).
       - name: Pack gufo for the Devlab runner
         run: |
           $dist = "$env:RUNNER_TEMP\windows-gufo"
@@ -430,10 +430,9 @@ jobs:
   devlab:
     name: Windows Devlab checks
     needs: build
-    # Manual dispatch only for now: the runners' route to the Actions
-    # artifact store often crawls at tens of KiB/s, so a PR run cannot
-    # finish (#789). Restore the PR trigger once the bundle comes from a CDN.
-    if: github.repository == 'gufo-org/gufo' && github.event_name == 'workflow_dispatch'
+    if: >-
+      github.repository == 'gufo-org/gufo' &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     runs-on: [ windows, strix-halo, devlab-dispatch ]
     timeout-minutes: 60
     permissions:
@@ -443,99 +442,28 @@ jobs:
       run:
         shell: powershell
     # Ephemeral runner with no SDK or package manager: it downloads the build
-    # job's bundle, no checkout, and the pinned model snapshots.
+    # job's bundle and the pinned model snapshots; checkout supplies only tools.
     steps:
-      # Single-stream throughput from this runner to each host it downloads
-      # from: the artifact store (Azure blob, no CDN), a GitHub release asset
-      # (GitHub's download CDN) and Hugging Face over plain HTTPS. Diagnostic
-      # only; it never fails the job.
-      - name: Probe download routes
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUNDLE_URL: ${{ github.api_url }}/repos/${{ github.repository }}/actions/artifacts/${{ needs.build.outputs.bundle-id }}/zip
-          RELEASE_URL: https://github.com/endyjasmi/gufo/releases/download/toolchain/therock-10.0.0/therock-dist-windows-gfx1151-10.0.0.tar.gz
-          HF_URL: https://huggingface.co/google/embeddinggemma-2/resolve/914f7f89142e33e77833254d9c9b90c3cef7303b/model.safetensors
-        run: |
-          "Runner: $env:RUNNER_NAME on $env:COMPUTERNAME"
-          "Proxy variables: " + ((Get-ChildItem env: | Where-Object Name -match 'proxy' | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' ')
-          netsh winhttp show proxy
-          $signed = curl.exe --fail --silent --output NUL --write-out '%{redirect_url}' `
-            --header "Authorization: Bearer $env:GH_TOKEN" $env:BUNDLE_URL
-          $format = '%{size_download} %{speed_download} %{remote_ip} %{time_connect} %{time_starttransfer} %{http_code} %{url_effective}'
-          foreach ($route in @(@('artifact (Azure blob)', $signed), @('release asset (CDN)', $env:RELEASE_URL), @('Hugging Face (HTTPS)', $env:HF_URL))) {
-            $fields = (curl.exe --silent --location --max-time 10 --output NUL --write-out $format $route[1]) -split ' '
-            "{0,-22} {1,8:N0} KiB/s  ip={2} connect={3}s first-byte={4}s http={5} host={6}" -f `
-              $route[0], ([double]$fields[1] / 1KB), $fields[2], $fields[3], $fields[4], $fields[5], ([uri]$fields[6]).Host
-          }
+      - name: Checkout download helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/ci
 
-      # The artifact action fetches the zip as one stream and, on this
-      # runner's link, can stop early while reporting success. A single
-      # stream to the artifact store can also crawl, so the zip is fetched as
-      # parallel byte ranges, each retried on its own with a fresh signed URL
-      # (they expire quickly), and checked against the upload's digest.
-      - name: Download gufo
+      - name: Download and verify gufo
         timeout-minutes: 20
         env:
           GH_TOKEN: ${{ github.token }}
-          BUNDLE_URL: ${{ github.api_url }}/repos/${{ github.repository }}/actions/artifacts/${{ needs.build.outputs.bundle-id }}/zip
-          BUNDLE_DIGEST: ${{ needs.build.outputs.bundle-digest }}
+          BUNDLE_ID: ${{ needs.build.outputs.bundle-id }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = "$env:RUNNER_TEMP\windows-gufo-parts"
-          Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          $signed = { curl.exe --fail --silent --show-error --output NUL --write-out '%{redirect_url}' `
-                        --header "Authorization: Bearer $env:GH_TOKEN" $env:BUNDLE_URL }
-          $headers = curl.exe --fail --silent --show-error --head (& $signed)
-          if ($LASTEXITCODE -ne 0) { throw 'cannot read the bundle size' }
-          $size = [int64](($headers | Select-String -Pattern '^Content-Length:\s*(\d+)').Matches[-1].Groups[1].Value)
-          $count = 32
-          $step = [math]::Ceiling($size / $count)
-          $watch = [Diagnostics.Stopwatch]::StartNew()
-          $jobs = foreach ($i in 0..($count - 1)) {
-            $first = $i * $step
-            $last = [math]::Min($size, $first + $step) - 1
-            Start-Job -ArgumentList $i, $first, $last, $dir, $env:BUNDLE_URL, $env:GH_TOKEN -ScriptBlock {
-              param($i, $first, $last, $dir, $api, $token)
-              $part = "$dir\part$i"
-              for ($attempt = 1; $attempt -le 6; $attempt++) {
-                $url = curl.exe --fail --silent --output NUL --write-out '%{redirect_url}' `
-                  --header "Authorization: Bearer $token" $api
-                # Only a stalled range (under 16 KiB/s for a minute) is retried.
-                $rate = curl.exe --fail --silent --show-error --connect-timeout 30 --speed-limit 16384 --speed-time 60 `
-                  --range "$first-$last" --output $part --write-out '%{speed_download}' $url
-                if ($LASTEXITCODE -eq 0 -and (Get-Item $part).Length -eq ($last - $first + 1)) {
-                  return "part {0}: attempt {1}, {2:N0} KiB/s" -f $i, $attempt, ([double]$rate / 1KB)
-                }
-                Start-Sleep -Seconds 5
-              }
-              throw "part $i failed after 6 attempts"
-            }
-          }
-          while (@($jobs | Where-Object State -eq 'Running').Count) {
-            Start-Sleep -Seconds 15
-            $have = (Get-ChildItem $dir -File | Measure-Object Length -Sum).Sum
-            "{0,5:N0} s: {1,6:N1} / {2:N1} MiB, {3,6:N0} KiB/s overall, {4}/{5} ranges done" -f `
-              $watch.Elapsed.TotalSeconds, ($have / 1MB), ($size / 1MB), ($have / 1KB / $watch.Elapsed.TotalSeconds), `
-              @($jobs | Where-Object State -eq 'Completed').Count, $count
-          }
-          $jobs | Receive-Job
           $zip = "$env:RUNNER_TEMP\windows-gufo.zip"
-          $out = [IO.File]::Create($zip)
-          foreach ($i in 0..($count - 1)) {
-            $in = [IO.File]::OpenRead("$dir\part$i"); $in.CopyTo($out); $in.Dispose()
-          }
-          $out.Dispose()
-          "Bundle: {0:N0} MiB in {1:N0} s over {2} ranges, {3:N0} KiB/s" -f ($size / 1MB), $watch.Elapsed.TotalSeconds, $count, ($size / 1KB / $watch.Elapsed.TotalSeconds)
-          $expected = $env:BUNDLE_DIGEST -replace '^sha256:', ''
-          $sha = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-          if ($expected -and $sha -ne $expected.ToLowerInvariant()) { throw "bundle sha256 $sha, expected $expected" }
-          if (-not $expected) { '::warning::the upload reported no digest; relying on the bundle manifest' }
+          python tools/ci/devlab_artifact.py fetch --artifact $env:BUNDLE_ID --output $zip
+          if ($LASTEXITCODE -ne 0) { throw 'verified artifact download failed' }
           New-Item -ItemType Directory -Force -Path windows-gufo | Out-Null
           tar -xf $zip -C windows-gufo
           if ($LASTEXITCODE -ne 0) { throw 'cannot unpack the gufo bundle' }
-          Remove-Item -Recurse -Force $zip, $dir
+          Remove-Item -Force $zip
 
       - name: Run hipInfo, gufo --version and gufo diagnose
         run: |
