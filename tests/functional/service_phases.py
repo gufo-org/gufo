@@ -124,6 +124,11 @@ def summarize(arms):
         startup.append({'group': 'startup', 'key': 'startup.' + metric, 'label': metric,
                          **values, 'verdict': verdict(pairs) if all(a is not None and b is not None
                                                                 for a, b in pairs) else 'missing'})
+    for phase in startup:
+        if phase['key'] == 'startup.listen':
+            phase['checked'] = all(arm['startup'].get('listen_source') == 'server' for arm in arms)
+            if not phase['checked']:
+                phase['advisory_reason'] = 'server readiness timestamps unavailable'
     return startup + phases, diverged
 
 

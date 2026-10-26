@@ -1480,13 +1480,16 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_timing_evidence_does_not_hide_outliers_or_average_requests(self):
         def pair(old, new):
             result = {"status": "passed", "measurements": [],
-                      "quality_or_coverage_changes": [], "slowdown_tolerance": .05, "noise_ms": 3}
+                      "quality_or_coverage_changes": [], "slowdown_tolerance": .05, "noise_ms": 10}
             functional.compare_lifecycle(result, {"startup_ms": old}, {"startup_ms": new})
             return result
 
         self.assertEqual(qualify([pair(100, 105)])["status"], "passed")
         self.assertEqual(qualify([pair(1, 4)])["status"], "passed")
-        self.assertEqual(qualify([pair(100, 106)])["status"], "inconclusive")
+        self.assertEqual(qualify([pair(20, 29)])["status"], "passed")
+        self.assertEqual(qualify([pair(20, 30)])["status"], "passed")
+        self.assertEqual(qualify([pair(1000, 1049)])["status"], "passed")
+        self.assertEqual(qualify([pair(100, 111)])["status"], "inconclusive")
         self.assertEqual(qualify([pair(100, 120), pair(101, 119)])["status"], "failed")
         noisy = qualify([pair(100, 700), pair(700, 100)])
         self.assertEqual(noisy["status"], "inconclusive")

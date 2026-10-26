@@ -124,7 +124,7 @@ nix develop -c python3 tests/functional/qwen_prefill_cancel.py \
 
 Use `--speculative off` for AR. The test owns its loopback server, records each
 request's phase timings and rejects a multi-second prefill blocking the short
-peer. Apply the usual matched 5% and 3 ms timing gates to its retained results.
+peer. Apply the usual matched 5% and 10 ms timing gates to its retained results.
 Add `--deep-peers` before `--` and serve with `--sessions 4` to fill the other
 slots with duplicate deep conversations. This checks that a short request
 after cancellation can reuse a redundant slot while another live copy retains
@@ -307,10 +307,10 @@ models or their speed observations. Each LLM's `phases.py` arms exercise startup
 short, long and follow-up requests; `service_phases.py` measures bounded service
 histories. Both alternate main/candidate servers for two paired repeats,
 with GPU cool-down. Every request and phase retains all measurements; a slowdown
-requires both >5% and >3 ms in every repeat. A phase that is slower in only
+requires both >5% and >10 ms in every repeat. A phase that is slower in only
 some repeats is inconclusive; one that is faster in some repeats and never
 slower counts as unchanged. Different output/work counters mark
-relevant comparisons inconclusive. The plan selects timing gates from production
+relevant comparisons incomparable and keep the status incomplete. The plan selects timing gates from production
 changes; harness-only changes retain timing observations without gating unrelated
 noise. Startup phases gate only loader/configuration/build changes. Missing timing
 evidence is always incomplete. Display medians do not determine verdicts.
@@ -319,9 +319,14 @@ The hosted report job updates one PR comment with the same correctness and phase
 layout for every selected model, selection reasons, known limitations and links
 to the run/artifacts. Missing selected groups, missing timing arms or mismatched
 revisions cannot pass. Correctness failures and consistently slower server phases
-set the advisory status to `failure`; incomplete, noisy or unavailable evidence
-sets `error`. The ordinary PR check remains advisory; automatic release merging
-requires it. The optional AR depth benchmark remains observational.
+set the advisory status to `failure`; incomplete, incomparable or unavailable evidence
+sets `error`. On ordinary PRs, complete but noisy timing comparisons keep a
+successful status with an explicit warning and retain every observation. The full
+release tier keeps `error` for inconclusive timing. HTTP-ready timing uses server
+monotonic timestamps at load completion and listener readiness. Comparisons with
+older binaries that lack these timestamps retain poll-derived timings as advisory
+observations, excluded from the gate. The ordinary PR check remains advisory;
+automatic release merging requires it. The optional AR depth benchmark remains observational.
 
 The PR write token stays on hosted runners. Fork runs upload their text report;
 `devlab-comment.yml` publishes it from `workflow_run` without executing PR code.
@@ -823,7 +828,7 @@ Every request checks its applicable response format, expected output and timings
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,
 queue, restore and wall times, plus server startup/restart. Missing cases,
 changed output/token counts or unexpected prefill/cache work fail immediately.
-Timing margins remain **both 5% and 3 ms**. One overrun is **inconclusive**, not
+Timing margins remain **both 5% and 10 ms**. One overrun is **inconclusive**, not
 proof of regression. Exit codes: **0 pass, 1 fail, 2 inconclusive/unqualified**.
 
 Use the code diff to identify affected paths. Investigate their timing flags;

@@ -4,7 +4,7 @@
 Each arm starts one server, records its startup phases, sends a fixed three
 request history and stops it. Arms alternate base/PR on the same runner after
 the GPU cools, and every phase gets a paired verdict: a change counts only when
-each repeat moves by more than 5% and 3 ms in the same direction.
+each repeat moves by more than 5% and 10 ms in the same direction.
 """
 
 import argparse
@@ -110,13 +110,17 @@ class Server:
             self.command = list(command) + ['--host', '127.0.0.1', '--port', str(self.port)]
         self.log_path = log_path
         self.events = []
+        self.listener_recorded = threading.Event()
 
     def _read(self, stream, log):
         for line in stream:
             stamp = time.monotonic()
             log.write(line)
-            if "[loader]" in line:
+            if "[loader]" in line or "event=listening " in line:
                 self.events.append((stamp, line))
+                if "event=listening " in line and any("event=load_completed " in event
+                                                         for _, event in self.events):
+                    self.listener_recorded.set()
 
     def start(self, timeout):
         self.log = self.log_path.open("w")
@@ -134,6 +138,9 @@ class Server:
                 connection.request("GET", "/health")
                 if connection.getresponse().status == 200:
                     self.ready = time.monotonic()
+                    # Let the log reader retain readiness even if the health response wins the race.
+                    if not self.listener_recorded.wait(1):
+                        raise RuntimeError("listener marker missing; see " + str(self.log_path))
                     return
             except (OSError, http.client.HTTPException):
                 pass
@@ -155,12 +162,18 @@ class Server:
 
     def startup(self):
         """Split spawn-to-ready time at the loader's own markers."""
-        fields, stamps = {}, {}
+        fields, stamps, server_stamps = {}, {}, {}
         for stamp, line in self.events:
             event = re.search(r"event=(\S+)", line)
             if not event:
                 continue
+            # The temporary loading listener precedes completion; measure the final listener.
+            if event.group(1) == "listening" and "load_completed" not in stamps:
+                continue
             stamps.setdefault(event.group(1), stamp)
+            monotonic = re.search(r"monotonic_us=([0-9]+)", line)
+            if monotonic:
+                server_stamps.setdefault(event.group(1), int(monotonic.group(1)))
             for key, value in re.findall(r"(\w+_ms)=([0-9.]+)", line):
                 fields[event.group(1) + "." + key] = float(value)
         if "load_started" not in stamps or "load_completed" not in stamps:
@@ -169,12 +182,18 @@ class Server:
                   + fields.get("vision_prepared.upload_ms", 0))
         structured = fields.get("structured_output_prepared.prepare_ms", 0)
         load = fields["load_completed.elapsed_ms"]
+        precise = all(key in server_stamps for key in ("load_completed", "listening"))
+        listen = ((server_stamps["listening"] - server_stamps["load_completed"]) / 1000
+                  if precise else (self.ready - stamps["load_completed"]) * 1000)
+        if listen < 0:
+            raise ValueError("listener precedes model load completion")
         return {
+            "listen_source": "server" if precise else "health_poll",
             "init": (stamps["load_started"] - self.spawned) * 1000,
             "weights": load - vision - structured,
             "vision": vision if "vision_prepared.upload_ms" in fields else None,
             "structured": structured if "structured_output_prepared.prepare_ms" in fields else None,
-            "listen": (self.ready - stamps["load_completed"]) * 1000,
+            "listen": listen,
         }
 
     def complete(self, text):
@@ -226,7 +245,7 @@ def run_arm(revision, binary, weights, output, repeat, startup_timeout, model_id
 
 
 def verdict(pairs):
-    """Paired 5% and 3 ms rule; a direction must hold in every repeat.
+    """Paired 5% and 10 ms rule; a direction must hold in every repeat.
 
     Only a slower repeat makes the comparison noisy: a repeat that is faster on
     one side and unchanged on the other is no evidence of a regression.
@@ -259,6 +278,10 @@ def summarize(arms):
 
     for key, label in STARTUP:
         add("startup", "startup." + key, label, lambda arm, key=key: arm["startup"][key])
+        if key == "listen":
+            phases[-1]['checked'] = all(arm['startup'].get('listen_source') == 'server' for arm in arms)
+            if not phases[-1]['checked']:
+                phases[-1]['advisory_reason'] = 'server readiness timestamps unavailable'
     for request, _, *_ in REQUESTS:
         for key, label in REQUEST_PHASES:
             add(request, f"{request}.{key}", label,

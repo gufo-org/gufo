@@ -73,6 +73,10 @@ public:
         << std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - start_)
                .count()
+        << " monotonic_us="
+        << std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+               .count()
         << ' ' << details << ' ' << server::Logger::MemoryStatus();
 #if defined(ENGINE_ENABLE_HIP)
     std::size_t free = 0, total = 0;

@@ -131,7 +131,7 @@ void TestRequestLogging() {
   assert(log.find("escaped\\x0a\\x1b[31m") != std::string::npos);
   // The startup confirmation is INFO-tier, so the default level reports it.
   // TestQuietTiersSuppressLifecycle covers the tiers that do not.
-  assert(log.find("event=listening") != std::string::npos);
+  assert(log.find("event=listening monotonic_us=") != std::string::npos);
 
   const CapturedLogs debug = CaptureTraffic(LogLevel::kDebug);
   assert(debug.text.find("[DEBUG]") != std::string::npos);

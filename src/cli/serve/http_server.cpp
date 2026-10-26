@@ -1953,7 +1953,12 @@ void HttpServer::run(bool handle_signals) {
                             "configure HTTP listener");
   Logger::Info(
       "server",
-      "event=listening address=http://" +
+      "event=listening monotonic_us=" +
+          std::to_string(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch())
+                  .count()) +
+          " address=http://" +
           (host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]") +
           ":" + std::to_string(port_) +
           " auth=" + (options_.api_key.empty() ? "off" : "bearer") +

@@ -137,7 +137,7 @@ def main():
                     peer = call(f"{case}_short_peer", short)
                     # Catch a multi-second pass blocking an unrelated cached
                     # request. Retain phase timings for the stricter matched
-                    # main/candidate 5% and 3 ms comparison.
+                    # main/candidate 5% and 10 ms comparison.
                     peer_ms = peer["usage"]["gufo"]["ttft_ms"]
                     control_ms = control["usage"]["gufo"]["ttft_ms"]
                     limit = 50 if args.deep_peers and mode == "off" else 1000
