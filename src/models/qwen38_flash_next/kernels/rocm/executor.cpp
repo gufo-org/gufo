@@ -1784,7 +1784,8 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   // Every column tile past an expert's bucket still costs a dispatch and a
   // full shared-memory reservation, so the grid is cut to the real largest
   // bucket. Counts are downloaded before the shared expert; wait only for
-  // that download while the shared expert continues on the same stream.
+  // that download while the shared expert continues (on the side stream in
+  // overlapped passes, joined by JoinSide).
   const Config& c = config();
   routed_max_rows_ = 0;
   routed_n_tiles_ = 0;

@@ -232,8 +232,9 @@ int main(int argc, char** argv) {
     return 2;
   }
   if ((every_pass_rows != 0 || !nll_path.empty()) &&
-      (reference || decode || cost_audit)) {
-    std::fprintf(stderr, "--logit-rows applies to plain prefill dumps only\n");
+      (reference || decode || cost_audit || mtp_audit)) {
+    std::fprintf(stderr,
+                 "--logit-rows and --nll apply to plain prefill runs only\n");
     return 2;
   }
   if (cost_audit && (mtp_audit || reference || !dump_path.empty())) {
