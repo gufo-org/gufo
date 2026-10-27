@@ -31,6 +31,10 @@ struct LoadResult {
   /// the original payload alignment for GPU upload.
   [[nodiscard]] std::vector<MappedRegion> RegionsFor(
       std::initializer_list<std::string_view> prefixes) const;
+
+  /// Drops the resident pages of every mapped shard once the caller's weights
+  /// live in device memory. Pointers in `store` stay valid (pages refault).
+  void ReleaseHostPages() const noexcept;
 };
 
 [[nodiscard]] LoadResult LoadModelDirectory(const std::string& model_dir);

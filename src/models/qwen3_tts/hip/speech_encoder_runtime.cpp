@@ -128,6 +128,8 @@ struct SpeechEncoderHipRuntime::Impl {
     RequireEncoderHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
                       "hipStreamCreate Qwen3-TTS speech encoder");
     LoadWeights();
+    // Weights were converted into owned device buffers by hipMemcpy.
+    model.ReleaseHostPages();
   }
 
   ~Impl() {

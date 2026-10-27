@@ -178,6 +178,11 @@ struct AudioEncoderHipRuntime::Impl {
     for (const auto& region : model.RegionsFor({"thinker.audio_tower."}))
       core::PrefaultMappedRange(region.data, region.size);
     LoadWeights();
+    // Uploads are hipMemcpyAsync reads of the mapping: wait before dropping
+    // its pages.
+    RequireHip(hipStreamSynchronize(stream),
+               "hipStreamSynchronize Qwen3-ASR audio weights");
+    model.ReleaseHostPages();
   }
 
   ~Impl() {

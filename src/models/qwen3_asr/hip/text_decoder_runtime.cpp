@@ -123,6 +123,10 @@ public:
   DeviceRegion(const DeviceRegion&) = delete;
   DeviceRegion& operator=(const DeviceRegion&) = delete;
 
+  /// True when the GPU reads the file mapping itself (hipHostRegister
+  /// fallback): its host pages must then stay resident.
+  [[nodiscard]] bool host_mapped() const noexcept { return registered_; }
+
   [[nodiscard]] bool Initialize(MappedRegion region, hipStream_t stream) {
     host_ = region.data;
     size_ = region.size;
@@ -309,6 +313,14 @@ struct TextDecoderHipRuntime::Impl {
       weight_regions.push_back(std::move(device_region));
     }
     LoadWeights();
+    // The region copies are hipMemcpyAsync reads of the mapping: wait for
+    // them before dropping its pages.
+    RequireHip(hipStreamSynchronize(stream),
+               "hipStreamSynchronize Qwen3-ASR text weights");
+    if (std::ranges::none_of(weight_regions, [](const auto& region) {
+          return region->host_mapped();
+        }))
+      model.ReleaseHostPages();
   }
 
   ~Impl() {

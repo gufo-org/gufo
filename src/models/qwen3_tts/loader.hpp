@@ -37,6 +37,10 @@ struct LoadResult {
   /// alignment is preserved when these ranges are copied to device memory.
   [[nodiscard]] std::vector<MappedRegion> RegionsFor(
       std::string_view prefix) const;
+
+  /// Drops the resident pages of every mapped file once the caller's weights
+  /// live in device memory. Pointers in `store` stay valid (pages refault).
+  void ReleaseHostPages() const noexcept;
 };
 
 /// Loads a quality-qualified Qwen3-TTS 12.5 Hz 1.7B model directory.

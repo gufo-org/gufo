@@ -142,6 +142,27 @@ inline void PrefaultMappedRange(const void* data, std::size_t bytes) {
 #endif  // !__HIP_DEVICE_COMPILE__
 }
 
+/// Drop this process's resident pages of a read-only file mapping once its
+/// contents have been copied elsewhere (device upload done and synchronized).
+/// The mapping stays valid: a later read refaults the page from the file, so
+/// this is safe even if a host read remains. Never call it on a range that is
+/// hipHostRegister'ed, where the mapping is the GPU-visible weight memory.
+/// Best effort: failures are ignored, and it is a no-op on Windows.
+inline void ReleaseMappedPages(const void* data, std::size_t bytes) noexcept {
+#if !defined(__HIP_DEVICE_COMPILE__) && !defined(_WIN32)
+  const long page_size = ::sysconf(_SC_PAGESIZE);
+  if (!data || bytes == 0 || page_size <= 0)
+    return;
+  const auto address = reinterpret_cast<std::uintptr_t>(data);
+  const auto skip = address % static_cast<std::size_t>(page_size);
+  (void)::madvise(reinterpret_cast<void*>(address - skip), bytes + skip,
+                  MADV_DONTNEED);
+#else
+  static_cast<void>(data);
+  static_cast<void>(bytes);
+#endif
+}
+
 }  // namespace gufo::platform
 
 #endif  // GUFO_CORE_PLATFORM_PREFETCH_HPP_

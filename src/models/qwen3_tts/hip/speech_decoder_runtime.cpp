@@ -124,6 +124,10 @@ public:
   DeviceRegion(const DeviceRegion&) = delete;
   DeviceRegion& operator=(const DeviceRegion&) = delete;
 
+  /// True when the GPU reads the file mapping itself (hipHostRegister
+  /// fallback): its host pages must then stay resident.
+  [[nodiscard]] bool host_mapped() const noexcept { return registered_; }
+
   bool Initialize(MappedRegion region, std::string* error) {
     host_ = region.data;
     size_ = region.size;
@@ -482,6 +486,8 @@ struct SpeechDecoderHipRuntime::Impl {
     LoadWeights();
     RequireHip(hipStreamSynchronize(stream),
                "synchronize Qwen3-TTS speech weights");
+    if (!speech_weights.host_mapped())
+      model.ReleaseHostPages();
   }
 
   ~Impl() {

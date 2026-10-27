@@ -13,6 +13,7 @@
 
 #include "src/core/json.hpp"
 #include "src/core/platform/mapped_file.hpp"
+#include "src/core/platform/prefault.hpp"
 
 namespace gufo::models::qwen3_asr {
 namespace {
@@ -162,6 +163,11 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
 }
 
 }  // namespace
+
+void LoadResult::ReleaseHostPages() const noexcept {
+  for (const auto& region : mapped_regions)
+    platform::ReleaseMappedPages(region.data, region.size);
+}
 
 std::vector<MappedRegion> LoadResult::RegionsFor(
     std::initializer_list<std::string_view> prefixes) const {

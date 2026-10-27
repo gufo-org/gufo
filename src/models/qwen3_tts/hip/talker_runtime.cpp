@@ -131,6 +131,10 @@ public:
   DeviceRegion(const DeviceRegion&) = delete;
   DeviceRegion& operator=(const DeviceRegion&) = delete;
 
+  /// True when the GPU reads the file mapping itself (hipHostRegister
+  /// fallback): its host pages must then stay resident.
+  [[nodiscard]] bool host_mapped() const noexcept { return registered_; }
+
   bool Initialize(MappedRegion region, std::string* error) {
     host_ = region.data;
     size_ = region.size;
@@ -410,6 +414,9 @@ struct TalkerHipRuntime::Impl {
     RequireHipblas(hipblasSetAtomicsMode(blas, HIPBLAS_ATOMICS_NOT_ALLOWED),
                    "hipblasSetAtomicsMode");
     LoadWeights();
+    // Uploads above are synchronous hipMemcpy calls.
+    if (!main_weights.host_mapped())
+      model.ReleaseHostPages();
   }
 
   ~Impl() {
