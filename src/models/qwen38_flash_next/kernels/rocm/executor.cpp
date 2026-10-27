@@ -2374,7 +2374,8 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
       // prep; the chunked scan waits for them before it reads z. On ROCm 10
       // passes shorter than the scan gain too (pp128 612 -> 644 tok/s with
       // both overlaps); on ROCm 7.2, beside the row split, the two streams
-      // only slow each other (pp2048 1,851 -> 1,829 tok/s), so builds
+      // only slow each other (Z alone: pp2048 1,852 -> 1,823 and 1,853 ->
+      // 1,794 tok/s in two rounds), so builds
       // without the scan keep Z on the main stream.
       const bool z_side = GdnChunkedScanAvailable();
       convolved = DenseF16SsmGemm(
@@ -2710,7 +2711,8 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // expert writes its own scratch and may quantize x into s_.x_q8t, so no
   // main-stream work may use s_.x_q8t before JoinSide.
   // Builds without the chunked recurrence (ROCm 7.2) run it in order: there
-  // it cost prefill 1 to 3 % (pp2048 1,852 -> 1,823 tok/s). Only the Q8_0
+  // it cost prefill 1 to 8 % (this overlap alone: pp2048 1,852 -> 1,829 and
+  // 1,853 -> 1,701 tok/s in two rounds). Only the Q8_0
   // shared expert overlaps: its kernels take stream_, while the BF16, F16
   // and F32 routes go through BLAS handles bound to the main stream.
   const bool overlap = GdnChunkedScanAvailable() &&
