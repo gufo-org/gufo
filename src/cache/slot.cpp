@@ -246,6 +246,14 @@ struct LeaseState final : MutationGuard {
           "slot lease cancelled while waiting for readers");
   }
   void RunIdle(std::stop_token cancelled) {
+    // Another slot's prefill keeps the device busy for seconds. Polling every
+    // millisecond wakes a core 1000 times a second: on Strix Halo, a core of
+    // an otherwise sleeping CCD costs ~4 W of the package limit the GPU
+    // shares, ~5% of a long prefill. Back off while deferred; the delay only
+    // postpones optional idle work.
+    constexpr auto kDeferMin = std::chrono::milliseconds(1);
+    constexpr auto kDeferMax = std::chrono::milliseconds(32);
+    auto defer = kDeferMin;
     std::unique_lock lock(mutex);
     while (!cancelled.stop_requested()) {
       // No polling once retained ranges are complete. Only a released lease
@@ -277,6 +285,7 @@ struct LeaseState final : MutationGuard {
       }
       if (!candidate) {
         idle_pending = false;
+        defer = kDeferMin;
         continue;
       }
       spilling = true;
@@ -302,9 +311,12 @@ struct LeaseState final : MutationGuard {
       spilling = false;
       idle_failed = failed;
       changed.notify_all();
-      if (!admitted)
-        changed.wait_for(lock, cancelled, std::chrono::milliseconds(1),
-                         [] { return false; });
+      if (admitted) {
+        defer = kDeferMin;
+      } else {
+        changed.wait_for(lock, cancelled, defer, [] { return false; });
+        defer = std::min(defer * 2, kDeferMax);
+      }
     }
   }
   void Guard(ComponentId component, Rows first, Rows end, bool release) {
