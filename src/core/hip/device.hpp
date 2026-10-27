@@ -39,8 +39,7 @@ private:
 /// `destination_device`. The source device is drained before reading so the
 /// copy observes settled work queued on any source stream.
 void CrossDeviceCopy(void* destination, int destination_device,
-                     const void* source, int source_device,
-                     std::size_t bytes);
+                     const void* source, int source_device, std::size_t bytes);
 
 /// Two-dimensional CrossDeviceCopy: `height` rows of `width_bytes` each,
 /// advancing by `source_pitch` / `destination_pitch` between rows.

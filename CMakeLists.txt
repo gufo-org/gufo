@@ -228,8 +228,7 @@ endif()
 add_subdirectory(src/cache)
 
 if (ENGINE_ENABLE_HIP)
-  add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp
-                                   src/core/hip/device.cpp)
+  add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
   target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform)
   # HIP loads ROCr through libamdhip64's own RUNPATH, so a build tree runs
   # the unpatched runtime unless LD_LIBRARY_PATH names the patched one (the
@@ -364,6 +363,7 @@ if (ENGINE_ENABLE_HIP)
     src/models/minimax_h3/video_vae.hip
     src/models/minimax_h3/attention.hip
     src/core/hip/snapshot_copy.hip
+    src/core/hip/device.cpp
     src/core/hip/weight_upload.cpp
     src/core/speculative/speculative_verifier.cpp
   )

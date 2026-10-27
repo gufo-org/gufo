@@ -115,8 +115,7 @@ DeviceGuard::~DeviceGuard() {
 }
 
 void CrossDeviceCopy(void* destination, int destination_device,
-                     const void* source, int source_device,
-                     std::size_t bytes) {
+                     const void* source, int source_device, std::size_t bytes) {
   if (bytes == 0)
     return;
   if (source_device == destination_device) {
@@ -136,8 +135,8 @@ void CrossDeviceCopy(void* destination, int destination_device,
     const auto chunk = std::min(kStagingChunkBytes, bytes - offset);
     StageChunk(static_cast<std::uint8_t*>(destination) + offset,
                destination_device,
-               static_cast<const std::uint8_t*>(source) + offset,
-               source_device, chunk, staging);
+               static_cast<const std::uint8_t*>(source) + offset, source_device,
+               chunk, staging);
     offset += chunk;
   }
 }
@@ -164,10 +163,10 @@ void CrossDeviceCopy2D(void* destination, int destination_device,
   }
   void* staging = StagingBuffer(std::min(width_bytes, kStagingChunkBytes));
   for (std::size_t row = 0; row < height; ++row) {
-    auto* row_destination = static_cast<std::uint8_t*>(destination) +
-                            row * destination_pitch;
-    const auto* row_source = static_cast<const std::uint8_t*>(source) +
-                             row * source_pitch;
+    auto* row_destination =
+        static_cast<std::uint8_t*>(destination) + row * destination_pitch;
+    const auto* row_source =
+        static_cast<const std::uint8_t*>(source) + row * source_pitch;
     for (std::size_t offset = 0; offset < width_bytes;) {
       const auto chunk = std::min(kStagingChunkBytes, width_bytes - offset);
       StageChunk(row_destination + offset, destination_device,

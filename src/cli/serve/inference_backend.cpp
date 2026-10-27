@@ -3110,8 +3110,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
 
   if (reader->GetMetadataString("general.architecture") == "deepseek4") {
     if (prefill_device != 0) {
-      SetError(error,
-               "--prefill-device applies to Qwen3.8-27B HTTP models");
+      SetError(error, "--prefill-device applies to Qwen3.8-27B HTTP models");
       return false;
     }
     if (!vision_model_path.empty()) {
@@ -3170,8 +3169,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (prefill_device != 0) {
-      SetError(error,
-               "--prefill-device applies to Qwen3.8-27B HTTP models");
+      SetError(error, "--prefill-device applies to Qwen3.8-27B HTTP models");
       return false;
     }
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
@@ -3279,9 +3277,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   if (prefill_device != 0) {
     const int device_count = hip::GetDeviceCount();
     if (prefill_device < 0 || prefill_device >= device_count) {
-      SetError(error,
-               "--prefill-device names a GPU that does not exist: " +
-                   std::to_string(device_count) + " device(s) visible");
+      SetError(error, "--prefill-device names a GPU that does not exist: " +
+                          std::to_string(device_count) + " device(s) visible");
       return false;
     }
     Logger::Info("loader", "event=load_phase phase=prefill_device_weights " +
@@ -3325,16 +3322,15 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
 }
 
 #if defined(ENGINE_ENABLE_HIP)
-bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
-                            std::string* error, std::uint32_t max_context,
-                            std::size_t session_count,
-                            TextPrefillPolicy prefill_policy,
-                            TextSchedulerPolicy scheduler_policy,
-                            TextSpeculativeConfig speculative_config,
-                            TextDiskCacheConfig disk_cache_config,
-                            TextRunnerRamCacheOptions ram_cache_config,
-                            std::shared_ptr<const hip::QwenGpuModel> prefill_model,
-                            int prefill_device) {
+bool InferenceBackend::load(
+    std::shared_ptr<const hip::QwenGpuModel> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config,
+    std::shared_ptr<const hip::QwenGpuModel> prefill_model,
+    int prefill_device) {
   if (model == nullptr) {
     SetError(error, "Qwen GPU model must not be null");
     return false;

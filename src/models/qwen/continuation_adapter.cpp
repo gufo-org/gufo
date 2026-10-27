@@ -262,8 +262,7 @@ ContinuationAdapter::ContinuationAdapter(
     cache::Identity identity, hip::QwenExecutionPolicy policy,
     std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
     hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger,
-    std::shared_ptr<const hip::QwenGpuModel> prefill_model,
-    int prefill_device)
+    std::shared_ptr<const hip::QwenGpuModel> prefill_model, int prefill_device)
     : model_(std::move(model)),
       prefill_model_(std::move(prefill_model)),
       prefill_device_(prefill_device),

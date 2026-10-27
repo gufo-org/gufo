@@ -243,15 +243,13 @@ void QwenGpuExecutor::ExportStateTo(QwenGpuExecutor& target,
 }
 
 void QwenGpuExecutor::ImportStateFrom(QwenGpuExecutor& source,
-                                      std::uint32_t first,
-                                      std::uint32_t end) {
+                                      std::uint32_t first, std::uint32_t end) {
   const auto& config = weights_.config;
   const std::uint32_t attention_layers = config.FullAttentionLayerCount();
   const std::uint32_t kv_width = config.num_key_value_heads * config.head_dim;
   const std::size_t recurrent_layers = config.num_layers - attention_layers;
-  const std::size_t conv_bytes =
-      recurrent_layers * config.SsmQkvSize() * config.ssm_conv_kernel *
-      sizeof(float);
+  const std::size_t conv_bytes = recurrent_layers * config.SsmQkvSize() *
+                                 config.ssm_conv_kernel * sizeof(float);
   const std::size_t deltanet_bytes =
       recurrent_layers * config.ssm_time_step_rank * config.ssm_state_size *
       config.SsmValueSize() *

@@ -649,9 +649,7 @@ private:
   /// arena into this arena, across devices, without disturbing anything else.
   void ImportStateFrom(QwenGpuExecutor& source, std::uint32_t first,
                        std::uint32_t end);
-  void InvalidatePrefillSync() noexcept {
-    prefill_synced_context_.reset();
-  }
+  void InvalidatePrefillSync() noexcept { prefill_synced_context_.reset(); }
   [[nodiscard]] std::vector<tokenization::TokenId>
   ForwardDecodeEquivalentVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,

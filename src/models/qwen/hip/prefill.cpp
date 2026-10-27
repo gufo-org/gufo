@@ -106,8 +106,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptBatchOffloaded(
   prefill_->SetCancellationCheck(cancellation_check_);
   prefill_->SetPromptHiddenCapture(capture_prompt_hidden_,
                                    arena_.GetTargetLayerCapture());
-  const tokenization::TokenId next_token = prefill_->ForwardPromptBatch(
-      prompt_tokens, start_pos, compute_logits);
+  const tokenization::TokenId next_token =
+      prefill_->ForwardPromptBatch(prompt_tokens, start_pos, compute_logits);
 
   // Pull the produced state back: recurrent state, the new KV rows and, when
   // logits were computed, the final logit row decode samples from.

@@ -171,25 +171,25 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
         if (map_error == hipSuccess)
           device_regions.push_back(i);
       } else {
-      bool source_was_read = false;
-      map_error = MapRegisteredRegion(source, destination, source_was_read);
-      if (map_error != hipSuccess) {
-        // Mapped registration is the Linux fast path; the device-resident
-        // upload preserves single-copy residency wherever it is refused.
-        destination = {};
-        map_error = AllocateDeviceRegion(source, destination);
-        if (map_error == hipSuccess) {
-          if (source_was_read) {
-            // A successful clone has already read the mapping. Reuse those
-            // cached bytes if registration fails instead of rereading the
-            // shard with direct I/O. When cloning is unavailable (Windows),
-            // keep the bounded file pipeline without touching the mapping.
-            map_error = CopyMappedRegion(source, destination.device_data);
-          } else {
-            device_regions.push_back(i);
+        bool source_was_read = false;
+        map_error = MapRegisteredRegion(source, destination, source_was_read);
+        if (map_error != hipSuccess) {
+          // Mapped registration is the Linux fast path; the device-resident
+          // upload preserves single-copy residency wherever it is refused.
+          destination = {};
+          map_error = AllocateDeviceRegion(source, destination);
+          if (map_error == hipSuccess) {
+            if (source_was_read) {
+              // A successful clone has already read the mapping. Reuse those
+              // cached bytes if registration fails instead of rereading the
+              // shard with direct I/O. When cloning is unavailable (Windows),
+              // keep the bounded file pipeline without touching the mapping.
+              map_error = CopyMappedRegion(source, destination.device_data);
+            } else {
+              device_regions.push_back(i);
+            }
           }
         }
-      }
       }
     } catch (const std::exception& e) {
       ReleaseWeightRegions(weight_regions);
