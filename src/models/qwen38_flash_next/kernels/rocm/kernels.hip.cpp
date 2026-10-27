@@ -8046,15 +8046,53 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
   const unsigned waves = kThreads / 32;
   // Long prefills take the chunked WMMA recurrence. Its scratch reuses the
   // row-split buffers: q/k rows in qn, T, P and the gates in kn.
-  const bool chunked =
-      kGdnChunkedScan && row_split && d == kGdnDim &&
-      state_snapshots.rows[0] == nullptr && n_tokens >= kGdnChunkMinTokens &&
-      v_heads % k_heads == 0 && v_heads / k_heads <= 4 &&
-      (checkpoint.state == nullptr || checkpoint.tokens % kGdnChunk == 0 ||
-       checkpoint.tokens == n_tokens);
+  const bool chunked = kGdnChunkedScan && row_split && d == kGdnDim &&
+                       state_snapshots.rows[0] == nullptr &&
+                       n_tokens >= kGdnChunkMinTokens &&
+                       v_heads % k_heads == 0 && v_heads / k_heads <= 4;
   if (chunked) {
     if constexpr (kGdnChunkedScan) {
       const std::uint32_t chunks = (n_tokens + kGdnChunk - 1) / kGdnChunk;
+      // A checkpoint inside a chunk does not change the pass: the scan saves
+      // the state at the chunk boundary before it, and the row split carries
+      // that copy over the remaining tokens (tail_checkpoint below).
+      GdnCheckpoint scan_checkpoint = checkpoint;
+      std::uint32_t boundary = checkpoint.tokens;
+      if (checkpoint.state != nullptr && checkpoint.tokens != n_tokens &&
+          checkpoint.tokens % kGdnChunk != 0) {
+        boundary = checkpoint.tokens / kGdnChunk * kGdnChunk;
+        scan_checkpoint.tokens = boundary;
+        if (boundary == 0 &&
+            hipMemcpyAsync(
+                checkpoint.state, state,
+                static_cast<std::size_t>(v_heads) * d * d * sizeof(float),
+                hipMemcpyDeviceToDevice, stream) != hipSuccess)
+          return false;
+      }
+      const auto tail_checkpoint = [&] {
+        const std::uint32_t tail = checkpoint.tokens - boundary;
+        if (checkpoint.state == nullptr || tail == 0)
+          return;
+        // The scan's q/k, T, P and gate scratch is free again; the outputs
+        // land in kn past the tail's gates, not in `raw`.
+        const float* rows =
+            conv_scratch + static_cast<std::size_t>(boundary) * channels;
+        float* tail_raw =
+            kn + static_cast<std::size_t>(kGdnChunk) * v_heads * 2;
+        hipLaunchKernelGGL(GdnPrepKqKernel, dim3(k_heads, tail), dim3(32), 0,
+                           stream, rows, qn, tail, k_heads, channels, eps);
+        hipLaunchKernelGGL(
+            GdnPrepAbKernel,
+            dim3(Blocks(static_cast<std::size_t>(tail) * v_heads)),
+            dim3(kThreads), 0, stream,
+            alpha_beta + static_cast<std::size_t>(boundary) * 2 * v_heads, a,
+            dt, kn, static_cast<std::size_t>(tail) * v_heads, v_heads);
+        hipLaunchKernelGGL(GdnRowSplitKernel,
+                           dim3(kGdnDim / kGdnRowSplitRowsPerBlock, v_heads),
+                           dim3(kGdnWaves * 32), 0, stream, rows, qn, kn,
+                           checkpoint.state, tail_raw, tail, k_heads, v_heads,
+                           GdnCheckpoint{});
+      };
       auto* qh = reinterpret_cast<_Float16*>(qn);
       _Float16* kh = qh + static_cast<std::size_t>(k_heads) * n_tokens * d;
       auto* t_tiles = reinterpret_cast<_Float16*>(kn);
@@ -8075,14 +8113,17 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
         hipLaunchKernelGGL(
             GdnChunkScanKernel<true>, dim3(v_heads), dim3(256), 0, stream, qh,
             kh, conv_scratch, state, raw, t_tiles, p_tiles, gates, n_tokens,
-            k_heads, v_heads, chunks, checkpoint, z, z_stride, norm_w, eps,
+            k_heads, v_heads, chunks, scan_checkpoint, z, z_stride, norm_w, eps,
             out_half, out_half_stride != 0 ? out_half_stride : v_heads * d);
+        tail_checkpoint();
         return true;
       }
       hipLaunchKernelGGL(GdnChunkScanKernel<false>, dim3(v_heads), dim3(256), 0,
                          stream, qh, kh, conv_scratch, state, raw, t_tiles,
                          p_tiles, gates, n_tokens, k_heads, v_heads, chunks,
-                         checkpoint, nullptr, 0U, nullptr, 0.0F, nullptr, 0U);
+                         scan_checkpoint, nullptr, 0U, nullptr, 0.0F, nullptr,
+                         0U);
+      tail_checkpoint();
     }
   } else if (row_split && d == kGdnDim && state_snapshots.rows[0] == nullptr) {
     hipLaunchKernelGGL(GdnPrepKqKernel, dim3(k_heads, n_tokens), dim3(32), 0,

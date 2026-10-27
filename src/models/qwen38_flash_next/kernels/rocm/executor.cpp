@@ -2352,6 +2352,16 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   std::uint32_t z_stride = c.SsmValueDim();
   bool convolved = false;
   hipEvent_t z_ready = nullptr;
+  // Until GatedDeltaNet queues its wait for the Z rows, every exit orders
+  // the main stream after them: the side stream still writes s_.qkvz.
+  struct ZJoin {
+    hipStream_t stream;
+    hipEvent_t event = nullptr;
+    ~ZJoin() {
+      if (event != nullptr)
+        (void)hipStreamWaitEvent(stream, event, 0);
+    }
+  } z_join{stream_};
   if (!l.ssm_in.empty()) {
     // Wide prefill convolves QKV in the projection's LDS tile. The raw
     // boundary rows remain available for the rolling history update.
@@ -2372,9 +2382,11 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
       if (convolved && z_side) {
         if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
                    error_msg)) {
+          (void)hipStreamSynchronize(side_stream_);
           return false;
         }
         z_ready = side_done_;
+        z_join.event = side_done_;
       }
     }
     if (!projections_ready && !convolved &&
@@ -2430,6 +2442,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
     AssignError(error_msg, "DeltaNet Z wait failed");
     return false;
   }
+  z_join.event = nullptr;  // GatedDeltaNet waited for the Z rows
   if (!project_output) {
     return true;
   }

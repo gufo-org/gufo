@@ -648,6 +648,167 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
   }
 }
 
+/// The chunked WMMA recurrence (row_split with n >= 256 on Clang 23+ builds)
+/// against the per-token F32 kernel, and its checkpoints: a checkpoint never
+/// changes the pass, and the captured state matches a prefix-only pass.
+int RunChunkedCase(std::uint32_t kTokens) {
+  const std::size_t kQkvCount = static_cast<std::size_t>(kTokens) * kChannels;
+  const std::size_t kStateCount =
+      static_cast<std::size_t>(kVHeads) * kDim * kDim;
+  const std::size_t kConvState =
+      static_cast<std::size_t>(kKernel - 1) * kChannels;
+  const std::size_t kQn = static_cast<std::size_t>(kTokens) * kKHeads * kDim;
+  const std::size_t kOut = static_cast<std::size_t>(kTokens) * kZ;
+  const auto qkv = MakeValues(kQkvCount, 0x1234ABCDU, 1.0F);
+  const auto z = MakeValues(kOut, 0x0BADF00DU, 2.0F);
+  const auto alpha_beta = MakeValues(
+      static_cast<std::size_t>(kTokens) * 2 * kVHeads, 0xBADC0FFEU, 2.0F);
+  const auto conv_w = MakeValues(static_cast<std::size_t>(kChannels) * kKernel,
+                                 0xDEADBEEFU, 0.5F);
+  const auto a = MakeValues(kVHeads, 0xC0FFEE11U, 1.0F, -1.5F);
+  const auto dt = MakeValues(kVHeads, 0xFEEDFACEU, 1.0F);
+  const auto norm_w = MakeValues(kDim, 0x600DCAFEU, 0.5F, 1.0F);
+  const auto conv_state = MakeValues(kConvState, 0x13579BDFU, 1.0F);
+  const auto state = MakeValues(kStateCount, 0x2468ACE0U, 0.1F);
+
+  HipBuffer<float> d_qkv(kQkvCount);
+  HipBuffer<float> d_z(kOut);
+  HipBuffer<float> d_alpha_beta(alpha_beta.size());
+  HipBuffer<float> d_conv_w(conv_w.size());
+  HipBuffer<float> d_a(kVHeads);
+  HipBuffer<float> d_dt(kVHeads);
+  HipBuffer<float> d_norm_w(kDim);
+  HipBuffer<float> d_scratch(static_cast<std::size_t>(kTokens + kKernel) *
+                             kChannels);
+  HipBuffer<float> d_qn(kQn);
+  HipBuffer<float> d_kn(kQn);
+  HipBuffer<float> d_raw(kOut);
+  HipBuffer<float> d_conv_state(kConvState);
+  HipBuffer<float> d_state(kStateCount);
+  HipBuffer<float> d_out(kOut);
+  Upload(&d_qkv, qkv);
+  Upload(&d_z, z);
+  Upload(&d_alpha_beta, alpha_beta);
+  Upload(&d_conv_w, conv_w);
+  Upload(&d_a, a);
+  Upload(&d_dt, dt);
+  Upload(&d_norm_w, norm_w);
+  const auto forward = [&](std::uint32_t count, bool chunked,
+                           q::GdnCheckpoint checkpoint, __half* out_half,
+                           std::uint32_t half_stride) {
+    Upload(&d_conv_state, conv_state);
+    Upload(&d_state, state);
+    if (!q::GatedDeltaNet(
+            d_qkv.get(), kChannels, d_z.get(), kZ, d_alpha_beta.get(),
+            d_conv_w.get(), d_a.get(), d_dt.get(), d_norm_w.get(),
+            d_conv_state.get(), d_scratch.get(), d_qn.get(), d_kn.get(),
+            d_raw.get(), d_state.get(), out_half ? nullptr : d_out.get(),
+            nullptr, {}, {}, count, kKHeads, kVHeads, kDim, kKernel, chunked,
+            false, kEps, nullptr, out_half, checkpoint, half_stride))
+      throw std::runtime_error("chunked GDN launch failed");
+    CheckHip(hipDeviceSynchronize(), "chunked GDN synchronization");
+  };
+  // F16 operands: the chunked route agrees with the F32 kernel to F16
+  // rounding of the inputs, relative to each tensor's RMS (measured 1.0e-2 to
+  // 1.7e-2 at n = 256, 300 and 1,030; indexing errors give O(1)).
+  constexpr double kTolerance = 5e-2;
+  forward(kTokens, false, {}, nullptr, 0);
+  const auto ref_out = Download(&d_out, kOut);
+  const auto ref_state = Download(&d_state, kStateCount);
+  forward(kTokens, true, {}, nullptr, 0);
+  const auto out = Download(&d_out, kOut);
+  const auto final_state = Download(&d_state, kStateCount);
+  const double out_error = WorstOverRms(ref_out, out);
+  const double state_error = WorstOverRms(ref_state, final_state);
+  std::cout << "chunked n=" << kTokens << ": output " << out_error << ", state "
+            << state_error << " over RMS";
+
+  // Checkpoints at a chunk boundary, inside a chunk and at the end.
+  constexpr std::size_t kGuard = 16;
+  constexpr float kSentinel = 12345.0F;
+  HipBuffer<float> captured_state(kStateCount + kGuard);
+  HipBuffer<float> captured_conv(kConvState + kGuard);
+  double checkpoint_error = 0.0;
+  std::vector<float> inside_chunk;  // the state captured at kTokens - 5
+  for (const std::uint32_t at : {288U, kTokens - 5, kTokens}) {
+    if (at > kTokens)
+      continue;
+    Upload(&captured_state,
+           std::vector<float>(kStateCount + kGuard, kSentinel));
+    Upload(&captured_conv, std::vector<float>(kConvState + kGuard, kSentinel));
+    forward(kTokens, true, {captured_state.get(), captured_conv.get(), at},
+            nullptr, 0);
+    if (std::memcmp(Download(&d_out, kOut).data(), out.data(),
+                    kOut * sizeof(float)) ||
+        std::memcmp(Download(&d_state, kStateCount).data(), final_state.data(),
+                    kStateCount * sizeof(float)))
+      throw std::runtime_error("chunked GDN checkpoint changed the pass");
+    const auto captured = Download(&captured_state, kStateCount + kGuard);
+    const auto history = Download(&captured_conv, kConvState + kGuard);
+    if (at == kTokens - 5)
+      inside_chunk.assign(
+          captured.begin(),
+          captured.begin() + static_cast<std::ptrdiff_t>(kStateCount));
+    forward(at, false, {}, nullptr, 0);
+    const auto prefix_state = Download(&d_state, kStateCount);
+    const auto prefix_conv = Download(&d_conv_state, kConvState);
+    checkpoint_error = std::max(
+        checkpoint_error,
+        WorstOverRms(
+            prefix_state,
+            std::vector<float>(
+                captured.begin(),
+                captured.begin() + static_cast<std::ptrdiff_t>(kStateCount))));
+    if (std::memcmp(history.data(), prefix_conv.data(),
+                    kConvState * sizeof(float)))
+      throw std::runtime_error("chunked GDN checkpoint changed the history");
+    for (std::size_t i = 0; i < kGuard; ++i)
+      if (captured[kStateCount + i] != kSentinel ||
+          history[kConvState + i] != kSentinel)
+        throw std::runtime_error("chunked GDN checkpoint wrote past its end");
+  }
+  std::cout << ", checkpoint state " << checkpoint_error;
+
+  // The gated norm fused into the scan: F16 rows (also at a padded stride
+  // and with a checkpoint inside a chunk) against the F32 epilogue's rows.
+  constexpr std::uint32_t kHalfStride = kZ + 32;
+  const std::size_t half_count =
+      static_cast<std::size_t>(kTokens - 1) * kHalfStride + kZ + kGuard;
+  HipBuffer<__half> d_half(half_count);
+  CheckHip(hipMemset(d_half.get(), 0x7F, d_half.bytes()), "half guard");
+  Upload(&captured_state, std::vector<float>(kStateCount + kGuard, kSentinel));
+  forward(kTokens, true, {captured_state.get(), nullptr, kTokens - 5},
+          d_half.get(), kHalfStride);
+  std::vector<__half> half(half_count);
+  CheckHip(hipMemcpy(half.data(), d_half.get(), d_half.bytes(),
+                     hipMemcpyDeviceToHost),
+           "fused half output");
+  std::vector<float> fused(kOut);
+  for (std::size_t i = 0; i < half_count; ++i) {
+    const std::size_t token = i / kHalfStride;
+    const std::size_t channel = i % kHalfStride;
+    if (token < kTokens && channel < kZ) {
+      fused[token * kZ + channel] = __half2float(half[i]);
+    } else {
+      std::uint16_t bits;
+      std::memcpy(&bits, &half[i], sizeof(bits));
+      if (bits != 0x7F7F)
+        throw std::runtime_error("fused GDN output overwrote padding");
+    }
+  }
+  if (std::memcmp(Download(&d_state, kStateCount).data(), final_state.data(),
+                  kStateCount * sizeof(float)))
+    throw std::runtime_error("fused GDN output changed the state");
+  if (std::memcmp(Download(&captured_state, kStateCount + kGuard).data(),
+                  inside_chunk.data(), kStateCount * sizeof(float)))
+    throw std::runtime_error("fused GDN output changed the checkpoint");
+  const double fused_error = WorstOverRms(ref_out, fused);
+  std::cout << ", fused output " << fused_error << '\n';
+  return std::max({out_error, state_error, checkpoint_error, fused_error}) >
+                 kTolerance
+             ? 1
+             : 0;
+}
 }  // namespace
 
 int main() {
@@ -662,6 +823,16 @@ int main() {
     }
     if (RunCase(1, true) != 0 || RunCase(8, true) != 0)
       return 1;
+    // Full, ragged and long chunked passes; Clang 22 builds keep the row
+    // split for every length.
+    if (q::GdnChunkedScanAvailable()) {
+      for (std::uint32_t n : {256u, 300u, 1030u}) {
+        if (RunChunkedCase(n) != 0)
+          return 1;
+      }
+    } else {
+      std::cout << "chunked GDN not built (Clang 22): skipped\n";
+    }
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

@@ -132,25 +132,32 @@ def load(manifest_path: Path, dumps: Path) -> dict:
 
 
 def summary(label: str, results: dict) -> None:
+    # NLL: the GPU's next-token NLL over every scored position. NLL@ref and
+    # ref NLL: GPU and reference over the positions whose next token is in
+    # the reference's stored top-k (the only ones the reference can score).
     print(f"\n{label}")
     print(f"{'prompt':<8} {'rows':>5} {'KL mean':>9} {'median':>9} {'p99':>8} "
-          f"{'max':>7} {'top-1':>7} {'NLL':>7} {'ref NLL':>8}")
-    every = {"kl": [], "top1": [], "nll": [], "ref": []}
+          f"{'max':>7} {'top-1':>7} {'NLL':>7} {'NLL@ref':>8} {'ref NLL':>8}")
+    every = {"kl": [], "top1": [], "nll": [], "nll_ref": [], "ref": []}
     for name, (m, ref_nll) in results.items():
-        both = ~np.isnan(m["nll"]) & ~np.isnan(ref_nll)
+        scored = ~np.isnan(m["nll"])
+        both = scored & ~np.isnan(ref_nll)
         print(f"{name:<8} {len(m['kl']):>5} {m['kl'].mean():>9.5f} "
               f"{np.median(m['kl']):>9.5f} {np.quantile(m['kl'], 0.99):>8.4f} "
               f"{m['kl'].max():>7.4f} {m['top1'].mean():>7.3f} "
-              f"{m['nll'][both].mean():>7.4f} {ref_nll[both].mean():>8.4f}")
+              f"{m['nll'][scored].mean():>7.4f} {m['nll'][both].mean():>8.4f} "
+              f"{ref_nll[both].mean():>8.4f}")
         every["kl"].append(m["kl"])
         every["top1"].append(m["top1"])
-        every["nll"].append(m["nll"][both])
+        every["nll"].append(m["nll"][scored])
+        every["nll_ref"].append(m["nll"][both])
         every["ref"].append(ref_nll[both])
     kl = np.concatenate(every["kl"])
     print(f"{'all':<8} {len(kl):>5} {kl.mean():>9.5f} {np.median(kl):>9.5f} "
           f"{np.quantile(kl, 0.99):>8.4f} {kl.max():>7.4f} "
           f"{np.concatenate(every['top1']).mean():>7.3f} "
           f"{np.concatenate(every['nll']).mean():>7.4f} "
+          f"{np.concatenate(every['nll_ref']).mean():>8.4f} "
           f"{np.concatenate(every['ref']).mean():>8.4f}")
 
 
