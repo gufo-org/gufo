@@ -495,14 +495,17 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
 /// output is bitwise identical to the mask walk. Null lists use the mask walk.
 /// Complete blocks past a row's `mask_words` * 32 bits are not selected,
 /// whatever the device position; keys up to the position must exist.
+/// Rows seeing at most `dense_extent` keys ignore the mask and sweep densely,
+/// as they do without one; pass the token budget so a row's arithmetic does
+/// not depend on whether its batch crosses the budget.
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* mask, std::uint32_t mask_words, float* out,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                hipStream_t stream, std::uint32_t* lists = nullptr,
-               std::uint32_t* counts = nullptr,
-               std::uint32_t list_capacity = 0);
+               std::uint32_t* counts = nullptr, std::uint32_t list_capacity = 0,
+               std::uint32_t dense_extent = 0);
 
 /// Maximum visible sparse context for this WMMA geometry, or zero when the
 /// geometry is unsupported. Checkpoint planning uses the same dispatch limit.
