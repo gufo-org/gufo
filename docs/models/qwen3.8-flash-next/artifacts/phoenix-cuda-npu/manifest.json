@@ -191,6 +191,12 @@
       "transformation": "Exact parsed synthetic request bodies and prompt token IDs from confirmation pair 0 CUDA",
       "bytes": 236386,
       "published_sha256": "9bbe100efda823c32766dfc8b39cfa6e9d05ab0f9313a97396bfb8bc3e6dfdc5"
+    },
+    {
+      "file": "09-followup-five-column-runlist-nvme.json",
+      "bytes": 4303,
+      "published_sha256": "45b1ac115f069638943abdddeca81028ebd23271c89766abba37058f2a10d82c",
+      "original_path": "docs\\models\\qwen3.8-flash-next\\artifacts\\phoenix-cuda-npu\\09-followup-five-column-runlist-nvme.json"
     }
   ]
 }

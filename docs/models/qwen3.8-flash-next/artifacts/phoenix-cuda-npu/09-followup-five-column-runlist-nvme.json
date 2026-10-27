@@ -1,0 +1,131 @@
+{
+  "version": "1.1.0",
+  "title": "Phoenix XDNA1 NPU 20-Core Silicon Execution, Batched xrt::runlist, Long-Context (16K-262K), and NVMe Direct I/O Co-Optimization",
+  "hardware": {
+    "npu": "AMD Phoenix XDNA1 (AIE2) 5 columns x 4 rows = 20 compute tiles + 5 MemTiles",
+    "gpu": "NVIDIA GeForce RTX Laptop GPU (8 GiB GDDR6, 128-bit bus)",
+    "cpu": "AMD Ryzen 9 (Zen 4 with AVX-512)",
+    "ram": "64 GiB dual-channel DDR5",
+    "ssd": "4 TB PCIe Gen4 NVMe SSD"
+  },
+  "phase2_five_column_silicon_execution": {
+    "probe": {
+      "all_20_cores_passed": true,
+      "passed_tiles": 20,
+      "total_tiles": 20,
+      "dispatch_ms": 2.14,
+      "physical_columns": 5,
+      "physical_rows": 4
+    },
+    "gemm_throughput_comparison": {
+      "shape": [
+        1024,
+        2560,
+        1280
+      ],
+      "cores_16_peak_tflops": 1.92,
+      "cores_20_peak_tflops": 1.04,
+      "cores_20_median_tflops": 0.81,
+      "architectural_finding": "Phoenix silicon contains 4 ShimNOCTile DMA interfaces across 5 compute columns. The 5th column shares NOC DMA routing with column 3, causing a 25% bus-routing stall when all 20 tiles transfer data concurrently. The 4-column compiler constraint aligns with the physical DMA topology."
+    }
+  },
+  "phase2_batched_runlist_and_tile_sentinel": {
+    "qualification": {
+      "passed": true,
+      "checked_values": 3056672768,
+      "max_abs_error": 0.120964,
+      "max_rel_rms": 0.001804,
+      "max_math_abs": 0.000103,
+      "negative_control_passed": true
+    },
+    "gufo_npu4_confirmation": {
+      "worker_ms_reduction_percent": 18.2,
+      "non_xrt_cpu_overhead_reduction_percent": 81.4,
+      "before_non_xrt_cpu_ms": 3185.1,
+      "after_non_xrt_cpu_ms": 598.5,
+      "host_wait_ms": 0.065
+    },
+    "gufo_npu8_screen": {
+      "total_worker_ms_before": 26450.0,
+      "total_worker_ms_after": 20327.1,
+      "worker_saved_ms": 6122.9,
+      "worker_reduction_percent": 23.1,
+      "host_wait_ms_before": 241.38,
+      "host_wait_ms_after": 0.067,
+      "fresh_360_prefill_improved_ms": 1508.5
+    }
+  },
+  "phase3_long_context_and_nvme_coopt": {
+    "kv_cache_scaling": {
+      "ctx_16384": {
+        "mode": "vram_resident",
+        "pinned_host_ram_gib": 0.0
+      },
+      "ctx_32768": {
+        "mode": "streaming",
+        "pinned_host_ram_int8_gib": 0.39,
+        "pinned_host_ram_k8v4_gib": 0.3
+      },
+      "ctx_65536": {
+        "mode": "streaming",
+        "pinned_host_ram_int8_gib": 0.77,
+        "pinned_host_ram_k8v4_gib": 0.6
+      },
+      "ctx_131072": {
+        "mode": "streaming",
+        "pinned_host_ram_int8_gib": 1.55,
+        "pinned_host_ram_k8v4_gib": 1.2
+      },
+      "ctx_262144": {
+        "mode": "streaming",
+        "pinned_host_ram_int8_gib": 3.09,
+        "pinned_host_ram_k8v4_gib": 2.39
+      }
+    },
+    "nvme_direct_io": {
+      "ple_table_rows": 320001536,
+      "ple_table_disk_gib": 9.1,
+      "measured_read_rows_per_s": 234892,
+      "host_page_cache_thrashing": "Eliminated via unbuffered async direct I/O (QD=512)"
+    },
+    "coopt_262k_benchmarks": {
+      "prefill_tok_per_s": {
+        "doc_2048": 411.7,
+        "doc_4096": 443.9,
+        "doc_8192": 440.9,
+        "doc_16384": 442.3
+      },
+      "decode_median_tok_per_s": 36.1,
+      "decode_peak_tok_per_s": 52.2
+    },
+    "nvme_tiered_experts_28gib_ram_cap": {
+      "prefill_8k_tok_per_s": 278.1,
+      "decode_8k_tok_per_s": 42.27,
+      "nvme_streamed_blobs_per_query": 3324,
+      "nvme_streamed_mib_per_query": 6780.3
+    },
+    "same_binary_npu_vs_cuda_comparison": {
+      "binary": "gufo-build/strata.exe (0.1.50 engine)",
+      "context": 16384,
+      "chunk_tokens": 1024,
+      "npu4_prefill_tok_per_s": {
+        "doc_2048": 332.4,
+        "doc_4096": 423.5,
+        "doc_8192": 424.2
+      },
+      "cuda_ctl_prefill_tok_per_s": {
+        "doc_2048": 355.6,
+        "doc_4096": 431.8,
+        "doc_8192": 440.2
+      },
+      "gap_percent_at_8k": 3.64,
+      "npu_jobs": 644,
+      "npu_dispatches": 2576,
+      "npu_valid_rows": 659456,
+      "npu_xrt_ms": 8783.1,
+      "npu_worker_ms": 9198.5,
+      "npu_host_wait_ms": 0.043,
+      "non_xrt_cpu_overhead_ms_per_job": 0.64
+    }
+  }
+}
