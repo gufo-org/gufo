@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <numeric>
@@ -447,6 +448,109 @@ void TestModelRows(const std::filesystem::path& model_path) {
                5120, kQ6Samples, 0.5780322588980198);
 }
 
+/// Deterministic pseudo-random blocks of every block format, with sane F16
+/// scales patched in; the expected FNV-1a hashes of the dequantized F32 bits
+/// come from gguf-py's independent NumPy dequantizers
+/// (gguf.quants.dequantize) over the same bytes, so this pins every format
+/// to ggml's reference values bit for bit.
+void TestDequantizeRowMatchesGgufPy() {
+  struct Expected {
+    gufo::core::GgmlType type;
+    std::uint64_t hash;
+  };
+  constexpr std::array<Expected, 18> kExpected = {{
+      {gufo::core::GgmlType::kQ4_0, 0xD281B0239A243459ULL},
+      {gufo::core::GgmlType::kQ4_1, 0x6D7BD9EB30002C9FULL},
+      {gufo::core::GgmlType::kQ5_0, 0x05A04BF224732323ULL},
+      {gufo::core::GgmlType::kQ5_1, 0x4CA02E1925FA5604ULL},
+      {gufo::core::GgmlType::kQ2_K, 0x4BA82C45B8873FA0ULL},
+      {gufo::core::GgmlType::kQ3_K, 0xA428B48204D3D498ULL},
+      {gufo::core::GgmlType::kQ4_K, 0xDF9F1270E319F0FDULL},
+      {gufo::core::GgmlType::kQ5_K, 0xB76045F1545ED5EFULL},
+      {gufo::core::GgmlType::kQ6_K, 0x182CD8E2D5F5C037ULL},
+      {gufo::core::GgmlType::kIQ2_XXS, 0x29D0E4333BCAA5A7ULL},
+      {gufo::core::GgmlType::kIQ2_XS, 0xF6326BD4300437A2ULL},
+      {gufo::core::GgmlType::kIQ2_S, 0xEF001A0F5E65084BULL},
+      {gufo::core::GgmlType::kIQ3_XXS, 0xDA348F74BC187DD8ULL},
+      {gufo::core::GgmlType::kIQ3_S, 0x72ECFE3E950A55D8ULL},
+      {gufo::core::GgmlType::kIQ1_S, 0x6249EDACD06371EDULL},
+      {gufo::core::GgmlType::kIQ1_M, 0xB17975BE5B3D4FD8ULL},
+      {gufo::core::GgmlType::kIQ4_NL, 0x5FB0BFED6A869927ULL},
+      {gufo::core::GgmlType::kIQ4_XS, 0x1AC72565AD1320A1ULL},
+  }};
+  constexpr std::size_t kBlocks = 64;
+  for (const auto& expected : kExpected) {
+    const auto type = expected.type;
+    const std::size_t elements = gufo::quant::QuantizedBlockElements(type);
+    const std::size_t bytes = gufo::quant::QuantizedRowBytes(type, elements);
+    if (elements == 0 || bytes == 0) {
+      std::cerr << "unsized format " << gufo::core::ToString(type) << '\n';
+      std::exit(1);
+    }
+    std::uint32_t state = 0x9E3779B9U ^ static_cast<std::uint32_t>(bytes);
+    std::vector<std::uint8_t> blocks(kBlocks * bytes);
+    for (auto& b : blocks) {
+      state ^= state << 13;
+      state ^= state >> 17;
+      state ^= state << 5;
+      b = static_cast<std::uint8_t>(state & 0xFFU);
+    }
+    const std::string_view name = gufo::core::ToString(type);
+    for (std::size_t k = 0; k < kBlocks; ++k) {
+      std::uint8_t* block = blocks.data() + k * bytes;
+      const auto put = [&](std::size_t offset) {
+        block[offset] = 0x66;  // F16 0x2E66, about 0.1
+        block[offset + 1] = 0x2E;
+      };
+      if (name == "Q2_K") {
+        put(80);
+        put(82);
+      } else if (name == "Q3_K") {
+        put(108);
+      } else if (name == "Q6_K") {
+        put(208);
+      } else if (name == "IQ1_M") {
+        // The F16 scale is the top nibbles of the four scale words.
+        constexpr std::uint8_t kNibbles[4] = {0x6, 0x6, 0xE, 0x2};
+        for (std::size_t i = 0; i < 4; ++i) {
+          std::uint8_t& high = block[48 + 2 * i + 1];
+          high = static_cast<std::uint8_t>((high & 0x0FU) | (kNibbles[i] << 4));
+        }
+      } else {
+        put(0);
+        if (name == "Q4_1" || name == "Q5_1" || name == "Q4_K" ||
+            name == "Q5_K") {
+          put(2);
+        }
+      }
+    }
+    std::vector<float> values(kBlocks * elements);
+    if (!gufo::quant::DequantizeRow(type, blocks.data(), values.data(),
+                                    values.size())) {
+      std::cerr << "DequantizeRow rejected " << name << '\n';
+      std::exit(1);
+    }
+    std::uint64_t hash = 0xCBF29CE484222325ULL;
+    for (const float v : values) {
+      std::uint32_t bits = 0;
+      std::memcpy(&bits, &v, sizeof(bits));
+      for (int i = 0; i < 4; ++i) {
+        hash ^= (bits >> (8 * i)) & 0xFFU;
+        hash *= 0x100000001B3ULL;
+      }
+    }
+    if (hash != expected.hash) {
+      std::cerr << "dequantized " << name << " differs from gguf-py\n";
+      std::exit(1);
+    }
+    if (gufo::quant::DequantizeRow(type, blocks.data(), values.data(),
+                                   elements + 1)) {
+      std::cerr << "DequantizeRow accepted a ragged " << name << " row\n";
+      std::exit(1);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -456,6 +560,7 @@ int main() {
   TestQ8();
   TestQ8_0();
   TestQ5_K();
+  TestDequantizeRowMatchesGgufPy();
   if (const char* model = std::getenv("GUFO_MTP_MODEL");
       model != nullptr && std::string_view(model).size() > 0) {
     TestModelRows(model);

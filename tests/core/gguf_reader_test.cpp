@@ -193,6 +193,35 @@ void TestQuantizationLabel() {
            "a shard with no dominant format is reported as mixed");
   }
   {
+    // Every GGML importance format opens with its block geometry, so a
+    // public mix fails at the model's binder (if at all), not at open.
+    struct Format {
+      gufo::core::GgmlType type;
+      std::uint64_t block_bytes;
+    };
+    for (const Format f : {Format{gufo::core::GgmlType::kIQ2_XXS, 66},
+                           Format{gufo::core::GgmlType::kIQ2_XS, 74},
+                           Format{gufo::core::GgmlType::kIQ2_S, 82},
+                           Format{gufo::core::GgmlType::kIQ3_XXS, 98},
+                           Format{gufo::core::GgmlType::kIQ3_S, 110},
+                           Format{gufo::core::GgmlType::kIQ1_S, 50},
+                           Format{gufo::core::GgmlType::kIQ1_M, 56}}) {
+      GgufBuilder builder;
+      builder.AddMetadataString("general.architecture", "qwen35");
+      builder.AddTensor("blk.0.ffn_up.weight", {512, 3}, f.type, 0);
+      auto binary = builder.Build(512);
+      std::string err;
+      auto reader = gufo::core::GgufReader::OpenMemory(binary.data(),
+                                                       binary.size(), &err);
+      const std::string name(gufo::core::ToString(f.type));
+      Expect(reader != nullptr, name + " tensor opens: " + err);
+      const auto* t = reader->FindTensor("blk.0.ffn_up.weight");
+      Expect(t != nullptr && t->type == f.type &&
+                 t->size_bytes == 2 * 3 * f.block_bytes,
+             name + " tensor keeps its type and block size");
+    }
+  }
+  {
     GgufBuilder builder;
     builder.AddMetadataString("general.architecture", "qwen35");
     builder.AddTensor("blk.0.ffn_up.weight", {256, 256},
