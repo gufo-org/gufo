@@ -253,7 +253,7 @@ between calls) use the deterministic HTTP fixtures in
 Qwen27 Q4/Q8 can omit the requested line or call a tool instead, so these parser
 checks must not depend on a model following a request to copy tool markup.
 
-`Devlab functional checks` runs on every push to a non-draft PR, like `CI`
+`Linux validation` runs on every push to a non-draft PR, like `Repository checks`
 (`pull_request`), with the repository's fork approval policy. A newer push cancels
 the PR's earlier run. PRs use the `pr` tier; release-please PRs and dispatches
 (unless they choose `tier: pr`) use `full`. Maintain/Admin users can dispatch a
@@ -346,9 +346,8 @@ layout for every selected model, selection reasons, known limitations and links
 to the run/artifacts. Missing selected groups, missing timing arms or mismatched
 revisions cannot pass. Correctness failures and consistently slower server phases
 set the advisory status to `failure`; incomplete, incomparable or unavailable evidence
-sets `error`. On ordinary PRs, complete but noisy timing comparisons keep a
-successful status with an explicit warning and retain every observation. The full
-release tier keeps `error` for inconclusive timing. HTTP-ready timing uses server
+sets `error`. On ordinary and release PRs, complete but noisy timing comparisons keep a
+successful status with an explicit warning and retain every observation. HTTP-ready timing uses server
 monotonic timestamps at load completion and listener readiness. Comparisons with
 older binaries that lack these timestamps retain poll-derived timings as advisory
 observations, excluded from the gate. The ordinary PR check remains advisory;

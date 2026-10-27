@@ -1,4 +1,4 @@
-name: Linux production build
+name: Linux build
 
 on:
   workflow_call:
@@ -21,22 +21,22 @@ permissions:
 
 jobs:
   build:
-    name: Linux build and package
+    name: Linux package
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout candidate
+      - name: Check out candidate source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.revision }}
           persist-credentials: false
 
-      - name: Validate artifact import contracts
+      - name: Run artifact contract tests
         run: |
           python3 -m unittest discover -s tests/tools -p linux_artifact_test.py
           python3 -m unittest discover -s tests/tools -p devlab_artifact_test.py
 
-      - name: Checkout timing baseline
+      - name: Check out baseline source
         if: inputs.baseline != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,7 +46,7 @@ jobs:
 
       # A unique save key retains each successful build; restore the newest
       # compiler cache for this pinned toolchain, including main's warm cache.
-      - name: Restore package compiler cache
+      - name: Restore compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-ccache
@@ -129,7 +129,7 @@ jobs:
           compression-level: 0
           retention-days: 3
 
-      - name: Upload production binaries
+      - name: Upload comparison packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ inputs.artifact-name }}

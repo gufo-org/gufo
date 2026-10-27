@@ -49,6 +49,30 @@ class ReportTest(unittest.TestCase):
         self.plan = {"base": "a" * 40, "head": "b" * 40, "deferred": [], "out_of_scope": [],
                      "groups": [{"profile": "flash-next-q4/off"}]}
 
+    def test_model_timing_policy_on_pr_and_release_tiers(self):
+        group = {"profile": "flash-next-q4/off", "configuration": "standard",
+                 "suites": ["stops"], "status": "passed"}
+        summary = {"groups": [group], "models": [{"id": "flash-next-q4",
+                   "correctness": "passed", "timing": "passed"}]}
+        for tier in ("pr", "full"):
+            plan = {**self.plan, "schema": 2, "tier": tier, "release_only": [],
+                    "models": [{"id": "flash-next-q4", "reasons": []}], "groups": [group]}
+            for timing, expected in (("inconclusive", "success"), ("slower", "failure"),
+                                     ("missing", "error"), ("incomparable", "error")):
+                with self.subTest(tier=tier, timing=timing), tempfile.TemporaryDirectory() as directory:
+                    with patch.object(report, "timing_state", return_value=timing):
+                        status, comment = self.run_report(directory, plan, summary, bench={
+                            "flash-next-q4.phases.json": json.dumps({
+                                "revisions": {"base": plan["base"], "head": plan["head"]}})})
+                    self.assertEqual(status["state"], expected)
+                    if timing == "inconclusive":
+                        self.assertIn("timing warning: inconclusive comparisons retained", comment)
+                        self.assertIn("| Flash-Next Q4 | passed | inconclusive |", comment)
+            failed = {**summary, "groups": [{**group, "status": "failed"}]}
+            with tempfile.TemporaryDirectory() as directory:
+                status, _ = self.run_report(directory, plan, failed)
+            self.assertEqual(status["state"], "failure")
+
     def test_failed_group_is_a_failure_with_detail(self):
         summary = {"groups": [
             {"profile": "flash-next-q4/off", "configuration": "standard",

@@ -1,4 +1,4 @@
-name: Devlab functional checks
+name: Linux validation
 
 on:
   # Same trigger and fork approval policy as CI. The check is advisory: it is
@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   authorize:
-    name: Authorize functional checks
+    name: Authorize and select checks
     if: >-
       github.repository == 'gufo-org/gufo' &&
       (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft)
@@ -53,7 +53,7 @@ jobs:
     steps:
       # Pull requests follow the repository's fork approval policy, like CI.
       # Dispatches require Maintain or Admin.
-      - name: Authorize dispatch
+      - name: Authorize manual run
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,7 +71,7 @@ jobs:
             esac
           done
 
-      - name: Pin PR head
+      - name: Pin PR revisions
         id: revision
         env:
           GH_TOKEN: ${{ github.token }}
@@ -96,7 +96,7 @@ jobs:
 
       # Advisory only: devlab/functional is not a required check, so cluster
       # problems never block merging.
-      - name: Mark advisory status pending
+      - name: Publish pending status
         if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
@@ -108,14 +108,14 @@ jobs:
             -f context=devlab/functional -f description="Planning functional checks" \
             -f target_url="$RUN_URL" --silent
 
-      - name: Checkout workflow and test harness
+      - name: Check out workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Validate functional impact rules and report rendering
+      - name: Run functional harness tests
         run: |
           python3 -m unittest discover -s tests/functional -p test_impact.py
           python3 -m unittest discover -s tests/functional -p test_report.py
@@ -175,14 +175,14 @@ jobs:
               summary.write('Selected candidate correctness and paired server-phase timings against main. Other-model and agent replay obligations remain separate.\n')
           PYPLAN
 
-      - name: Retain selection plan
+      - name: Upload selection plan
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: functional-plan-${{ github.run_attempt }}
           path: functional-plan.json
 
   build:
-    name: Hosted Linux binaries
+    name: Build
     needs: authorize
     if: needs.authorize.outputs.has_work == 'true'
     permissions:
@@ -196,7 +196,7 @@ jobs:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   smoke:
-    name: Selected model checks on Strix Halo
+    name: Run Linux model checks
     # Downloads overlap hosted compilation; consume the finalized artifact as
     # soon as it exists rather than waiting for hosted cache-save post steps.
     needs: authorize
@@ -341,7 +341,7 @@ jobs:
           printf '\nThis probe verifies runner placement and GPU device access. It does not execute a model or qualify performance.\n' >> "$GITHUB_STEP_SUMMARY"
 
       # Suites come from the same merge commit as the candidate binary.
-      - name: Checkout workflow and test harness
+      - name: Check out workflow and test harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.authorize.outputs.merge }}
@@ -352,14 +352,14 @@ jobs:
             tests/fixtures
             tools
 
-      - name: Download authorized selection plan
+      - name: Download selection plan
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: functional-plan-${{ github.run_attempt }}
 
       # Fetch assets while the hosted binary bundle builds and downloads. No mounted
       # weights or voice fixtures are required; the controller includes English audio.
-      - name: Start pinned selected-model downloads
+      - name: Start model weight downloads
         shell: bash
         run: |
           set -euo pipefail
@@ -381,7 +381,7 @@ jobs:
           ) > "$RUNNER_TEMP/gufo-weights.log" 2>&1 < /dev/null &
           echo $! > "$RUNNER_TEMP/gufo-weights.pid"
 
-      - name: Download hosted Linux binaries
+      - name: Download comparison packages
         timeout-minutes: 135
         env:
           GH_TOKEN: ${{ github.token }}
@@ -390,7 +390,7 @@ jobs:
           python3 controller/tools/ci/devlab_artifact.py linux \
             --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output linux-artifacts.tar.gz
 
-      - name: Unpack, verify and diagnose pinned production binaries
+      - name: Validate comparison packages
         id: binaries
         env:
           GH_TOKEN: ${{ github.token }}
@@ -411,7 +411,7 @@ jobs:
           linux-artifacts/candidate/gufo diagnose
           linux-artifacts/baseline/gufo diagnose
 
-      - name: Wait for pinned selected-model weights
+      - name: Wait for model weight downloads
         id: weights
         shell: bash
         run: |
@@ -439,7 +439,7 @@ jobs:
           "$RUNNER_TEMP/gufo-functional-client/bin/python" -c \
             'import jsonschema, PIL, numpy, httpx, run, openai_sdk, metrics, devlab_run, service_phases'
 
-      - name: Run selected model correctness and paired speed checks
+      - name: Run correctness and performance checks
         if: >-
           !cancelled() && steps.binaries.outcome == 'success' && steps.weights.outcome == 'success' &&
           steps.client.outcome == 'success'
@@ -484,7 +484,7 @@ jobs:
           [[ -f functional-results/summary.json ]] && cp functional-results/summary.json functional-report/
           true
 
-      - name: Retain report inputs for the PR comment
+      - name: Upload report inputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -493,7 +493,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Retain functional reports and logs
+      - name: Upload functional reports and logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -520,7 +520,7 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   report:
-    name: Publish functional report
+    name: Publish results
     needs: [ authorize, smoke ]
     # Hosted job: the PR write token never reaches the GPU host.
     if: always() && needs.authorize.outputs.head != ''
@@ -531,7 +531,7 @@ jobs:
       pull-requests: write
       statuses: write
     steps:
-      - name: Checkout report renderer
+      - name: Check out report renderer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -545,14 +545,14 @@ jobs:
           name: functional-plan-${{ github.run_attempt }}
           path: report-input
 
-      - name: Download cluster report inputs
+      - name: Download report inputs
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: functional-report-${{ github.run_attempt }}
           path: report-input/results
 
-      - name: Render comment and status
+      - name: Render PR comment and status
         env:
           AUTHORIZE_RESULT: ${{ needs.authorize.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
@@ -572,7 +572,7 @@ jobs:
 
       # A fork PR's token cannot comment or set statuses; devlab-comment.yml
       # publishes this report from the base repository instead.
-      - name: Retain report for fork publishing
+      - name: Upload fork report
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

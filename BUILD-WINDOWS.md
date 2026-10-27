@@ -125,7 +125,7 @@ Then `curl http://127.0.0.1:8080/ready` and POST to `/v1/chat/completions`.
 
 ## CI
 
-[`.github/workflows/windows.yml`](.github/workflows/windows.yml) builds this
+[`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml) builds this
 recipe on a hosted `windows-latest` runner, with the SDK archive, the vcpkg
 packages and the compiler cache restored from the Actions cache, and runs
 `check-pr`. It also builds the upstream OpenMP runtime, extracts the packaged
@@ -133,13 +133,12 @@ bundle, checks every EXE/DLL's normal and delay imports against the bundle and
 an explicit Windows system DLL list, and runs `--help`, `--version` and platform
 diagnosis with a restricted `PATH`. The import check does not use the builder's
 installed DLLs, so developer tools cannot conceal an omitted dependency.
-On a manual dispatch, the Windows Strix Halo Devlab runner then
-downloads the resulting bundle and runs `gufo diagnose`, the weight-free GPU
-tests, and one small model per family through
+On pull requests and manual dispatches, the
+[Windows validation workflow](.github/workflows/devlab-windows.yml) downloads
+the resulting bundle on Windows Strix Halo and runs `gufo diagnose`, weight-free
+GPU tests, and one small model per family through
 [`tests/functional/family_smoke.py`](tests/functional/family_smoke.py):
-EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B. Pull requests do not
-run that job yet: the runners' route to the Actions artifact store is too slow
-for the bundle ([#789](https://github.com/gufo-org/gufo/issues/789)).
+EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
 
 ## Gotchas
 

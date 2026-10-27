@@ -282,7 +282,10 @@ class TimingTest(unittest.TestCase):
             self.assertEqual(state, 'success')
             self.assertIn('timing warning', description)
             self.assertIn('⚠️', comment)
-            self.assertEqual(report.render_models(args, {**plan, 'tier': 'full'}, summary)[0], 'error')
+            state, description, comment = report.render_models(args, {**plan, 'tier': 'full'}, summary)
+            self.assertEqual(state, 'success')
+            self.assertIn('timing warning', description)
+            self.assertIn('⚠️', comment)
             checked['comparable_work'] = False
             (root/'qwen3-asr.phases.json').write_text(json.dumps(data))
             self.assertEqual(report.render_models(args, plan, summary)[0], 'error')

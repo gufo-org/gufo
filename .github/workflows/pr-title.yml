@@ -10,14 +10,14 @@ permissions:
 
 jobs:
   validate:
-    name: Conventional Commit title
+    name: Validate PR title
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Validate pull request title
+      - name: Validate PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: python3 tools/ci/check-pr-title.py "$PR_TITLE"

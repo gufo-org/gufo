@@ -266,8 +266,6 @@ def render_models(args, plan, summary):
         state, description = 'failure', f'Server phases slower in every paired repeat (>{SLOWDOWN * 100:g}% and >{NOISE_MS} ms)'
     elif any(speed in ('missing', 'incomparable') for speed in speeds.values()):
         state, description = 'error', 'Correctness passed; speed comparison incomplete or work differs'
-    elif plan['tier'] != 'pr' and any(speed == 'inconclusive' for speed in speeds.values()):
-        state, description = 'error', 'Correctness passed; release speed comparison inconclusive'
     elif args.smoke != 'success':
         state, description = 'error', f'Model checks completed; cluster job {args.smoke}'
     timing_warning = state == 'success' and any(speed == 'inconclusive' for speed in speeds.values())

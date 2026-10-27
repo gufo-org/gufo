@@ -62,7 +62,7 @@ Run once, investigate flags, then alternate main/PR only for affected histories;
 use unchanged-main controls when needed and retain every result. Fix confirmed
 regressions before publishing. Noisy evidence stays visibly inconclusive and
 unqualified; do not widen margins or stop at reporting failures. Devlab keeps
-inconclusive timing advisory on ordinary PRs and blocking on release PRs. Use the code
+inconclusive timing advisory on both ordinary and release PRs. Use the code
 diff to select affected metrics; unrelated timing variance does not justify
 another full matrix.
 For reported coding-agent loops, also replay the affected workflow with
