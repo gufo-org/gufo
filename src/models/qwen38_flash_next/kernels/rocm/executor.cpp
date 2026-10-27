@@ -2441,7 +2441,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                      c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
                      convolved, c.rms_eps, stream_, out_half, checkpoint,
                      half_stride, out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready)) {
-    AssignError(error_msg, "DeltaNet Z wait failed");
+    AssignError(error_msg, "DeltaNet launch failed");
     return false;
   }
   z_join.event = nullptr;  // GatedDeltaNet waited for the Z rows

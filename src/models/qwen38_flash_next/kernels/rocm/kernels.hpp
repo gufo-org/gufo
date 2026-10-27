@@ -361,7 +361,8 @@ struct GdnCheckpoint {
 /// `out_q8_1` also receives the rows' unpadded Q8_1 rows (as
 /// qfn_mmq_quantize_q8_1 writes them; d == 128). Its reader of `z` (the
 /// chunked scan with the fused norm, or the epilogue) waits for `z_ready`
-/// when it is set; returns false when that wait cannot be queued. `convolved`
+/// when it is set. Returns false when that wait, or the copy of the initial
+/// state for a checkpoint inside the first chunk, cannot be queued. `convolved`
 /// consumes convolution rows already in conv_scratch; it requires null
 /// speculative snapshots.
 bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,

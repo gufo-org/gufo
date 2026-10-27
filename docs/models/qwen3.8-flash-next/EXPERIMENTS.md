@@ -46,15 +46,18 @@ Builds on main `c0e0be58`, each with the fixture probe commit: lossless
 (G), + BF16 residual streams (B), and both (A, the head before the BF16
 residual streams were removed). G is now the branch head.
 `gufo bench -n 0 -r 3`, two round-robin rounds (pp512 from two dedicated
-rounds), tok/s as the mean of the rounds.
+rounds), tok/s as the mean of the rounds. NLL intervals are 95 % paired
+bootstraps from `f32_reference.py compare --against`; G's overall change is
+within noise, but its chat prompt rises by a significant +0.0145 (+0.0049
+to +0.0241).
 
 | Build | pp512 | pp2048 | pp4096 | pp2048 at d10K | Next-token NLL vs main (95 %) | Largest per-prompt NLL change |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
 | main | 1,286 | 1,854 | 1,909 | 1,732 | — | — |
 | L | 1,332 (+3.6 %) | 1,858 (+0.2 %) | 1,909 (0.0 %) | 1,740 (+0.5 %) | byte-identical | — |
-| G | 1,349 (+4.9 %) | 1,930 (+4.1 %) | 1,992 (+4.3 %) | 1,801 (+4.0 %) | +0.0021 (−0.0128 to +0.0164) | chat +0.0145 (+0.0050 to +0.0238) |
-| B | 1,349 (+4.9 %) | 1,879 (+1.4 %) | 1,948 (+2.0 %) | 1,764 (+1.8 %) | +0.0104 (−0.0047 to +0.0244) | tools +0.0192 (−0.0248 to +0.0653) |
-| A | 1,369 (+6.4 %) | 1,961 (+5.8 %) | 2,029 (+6.3 %) | 1,824 (+5.3 %) | +0.0175 (+0.0036 to +0.0321) | tools +0.0444 (+0.0004 to +0.0891) |
+| G | 1,349 (+4.9 %) | 1,930 (+4.1 %) | 1,992 (+4.3 %) | 1,801 (+4.0 %) | +0.0021 (−0.0128 to +0.0162) | chat +0.0145 (+0.0049 to +0.0241) |
+| B | 1,349 (+4.9 %) | 1,879 (+1.4 %) | 1,948 (+2.0 %) | 1,764 (+1.8 %) | +0.0104 (−0.0040 to +0.0245) | tools +0.0192 (−0.0259 to +0.0661) |
+| A | 1,369 (+6.4 %) | 1,961 (+5.8 %) | 2,029 (+6.3 %) | 1,824 (+5.3 %) | +0.0175 (+0.0030 to +0.0318) | tools +0.0444 (0.0000 to +0.0913) |
 
 ## Prefill overlap and chunked DeltaNet on ROCm 10.1 (October 24, 2026)
 
@@ -98,13 +101,14 @@ GPU model is resident starves the page cache and costs 46 s per token.
 F32 reference fixtures (`tests/fixtures/qwen38_flash_next/f32_reference`,
 2,479 positions: the last 256 rows of every prefill pass over documentation,
 C++ source, a four-turn chat and a tool-calling session). Paired
-differences against main, 95 % bootstrap intervals:
+differences against main, 95 % bootstrap intervals (`f32_reference.py
+compare --against`):
 
 | Build | KL to F32, all prompts | NLL of the next prompt token | Largest per-prompt NLL change |
 | --- | ---: | ---: | --- |
 | main | 0.0341 | 1.1112 | — |
-| without BF16 residual streams | 0.0301 (−0.0040, −0.0107 to +0.0029) | +0.0021 (−0.0132 to +0.0165) | chat +0.0145 (+0.0049 to +0.0241) |
-| with BF16 residual streams | 0.0358 (+0.0017, −0.0039 to +0.0071) | +0.0175 (+0.0030 to +0.0325) | tools +0.0444 (−0.0002 to +0.0894) |
+| without BF16 residual streams | 0.0301 (−0.0040, −0.0107 to +0.0029) | +0.0021 (−0.0128 to +0.0162) | chat +0.0145 (+0.0049 to +0.0241) |
+| with BF16 residual streams | 0.0358 (+0.0017, −0.0039 to +0.0071) | +0.0175 (+0.0030 to +0.0318) | tools +0.0444 (0.0000 to +0.0913) |
 
 The F32 reference's own NLL on these positions is 1.1079. Main is already far
 from it on the tool-calling prompt (KL 0.0997, p99 2.02); the other prompts

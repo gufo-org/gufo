@@ -1052,7 +1052,8 @@ nix develop -c python3 tests/models/qwen38_flash_next/f32_reference.py compare \
   --manifest "$F/manifest.json" --dumps dumps [--against main-dumps]
 ```
 
-`--against` adds paired KL intervals against a second build. Regenerate the
+`--against` adds paired KL and next-token NLL intervals (overall and per
+prompt) against a second build. Regenerate the
 fixtures when the shards or the reference change: run
 `qwen38_flash_next_reference_probe --tokens ... --dump` alone (no GPU model
 resident: 661 tokens took 858 s, against 46 s per token beside the GPU
