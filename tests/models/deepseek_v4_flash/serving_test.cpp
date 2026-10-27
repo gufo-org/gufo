@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "src/cli/serve/inference_backend.hpp"
+#include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/qwen/chat_template.hpp"
@@ -577,6 +578,15 @@ int main(int argc, char** argv) {
              "repeated DeepSeek chat differs from cold target execution");
       Expect(repeated_chat.cache_snapshot_bytes == 0,
              "exact DeepSeek reuse avoids another full snapshot copy");
+
+      // A raw prompt holding the chat render, as /apply-template returns it,
+      // parses the template's control tokens like the chat request does.
+      const auto rendered = gufo::models::deepseek_v4_flash::RenderChat(
+          direct_messages, ResolveDeepSeekChatOptions({}));
+      const auto http_rendered = backend.complete(rendered, 2, 0.0F);
+      Expect(http_rendered.prompt_tokens == http_chat.prompt_tokens &&
+                 http_rendered.tokens == direct_chat,
+             "raw rendered prompt tokenizes like the chat request");
 
       auto continued_messages = messages;
       continued_messages.emplace_back(gufo::tokenization::ChatRole::kAssistant,

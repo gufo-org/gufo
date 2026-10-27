@@ -1736,11 +1736,9 @@ public:
     return static_cast<std::uint32_t>(model_->VocabSize());
   }
 
+  // Raw prompts map control-token spellings to their special tokens, as the
+  // chat template's render does and as llama-server's /completion does.
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
-      std::string_view text) const override {
-    return DeepSeekRunnerTokens(model_->Tokenize(text));
-  }
-  [[nodiscard]] std::vector<TextRunnerToken> TokenizeControl(
       std::string_view text) const override {
     return DeepSeekRunnerTokens(model_->Tokenize(text, true));
   }
