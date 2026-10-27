@@ -516,8 +516,19 @@ int main(int argc, char** argv) {
     if (every_pass_rows != 0) {
       // Which rows the dump holds: f32_reference.py checks it against the
       // fixture, since another batch can give the same row count.
+      // FNV-1a over the token ids' little-endian bytes: the fixture's
+      // tokens.json must hold the same ids, not only the same count.
+      std::uint64_t ids_hash = 0xCBF29CE484222325ULL;
+      for (const std::int32_t id : tokens) {
+        const auto bits = static_cast<std::uint32_t>(id);
+        for (int byte = 0; byte < 4; ++byte) {
+          ids_hash ^= (bits >> (8 * byte)) & 0xFFU;
+          ids_hash *= 0x100000001B3ULL;
+        }
+      }
       std::ofstream meta(dump_path + ".json");
-      meta << "{\"tokens\": " << tokens.size() << ", \"batch\": " << batch
+      meta << "{\"tokens\": " << tokens.size() << ", \"ids_fnv1a\": \""
+           << std::hex << ids_hash << std::dec << "\", \"batch\": " << batch
            << ", \"rows_per_pass\": " << every_pass_rows
            << ", \"rows\": " << logit_rows << "}\n";
       if (!meta) {

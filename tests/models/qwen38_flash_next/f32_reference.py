@@ -110,6 +110,14 @@ def reference_nll(fixture: dict, next_tokens: np.ndarray) -> np.ndarray:
     return out
 
 
+def ids_fnv1a(tokens: np.ndarray) -> str:
+    """gpu_probe's FNV-1a over the token ids as little-endian int32 bytes."""
+    h = 0xCBF29CE484222325
+    for byte in tokens.astype("<i4").tobytes():
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:x}"
+
+
 def load(manifest_path: Path, dumps: Path) -> dict:
     manifest = json.loads(manifest_path.read_text())
     base = manifest_path.parent
@@ -131,7 +139,8 @@ def load(manifest_path: Path, dumps: Path) -> dict:
             raise SystemExit(f"{meta_path}: missing; dump with gpu_probe "
                              f"--logit-rows")
         meta = json.loads(meta_path.read_text())
-        expected = {"tokens": len(tokens), "batch": prompt["batch"],
+        expected = {"tokens": len(tokens), "ids_fnv1a": ids_fnv1a(tokens),
+                    "batch": prompt["batch"],
                     "rows_per_pass": manifest["rows_per_pass"]}
         for key, value in expected.items():
             if meta.get(key) != value:

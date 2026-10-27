@@ -1052,8 +1052,8 @@ nix develop -c python3 tests/models/qwen38_flash_next/f32_reference.py compare \
   --manifest "$F/manifest.json" --dumps dumps [--against main-dumps]
 ```
 
-Each `--logit-rows` dump has a `.json` sidecar with its batch, rows per pass
-and token count; `compare` rejects dumps whose sidecar does not match the
+Each `--logit-rows` dump has a `.json` sidecar with its batch, rows per pass,
+token count and a hash of the token ids; `compare` rejects dumps whose sidecar does not match the
 manifest. `--against` adds paired KL and next-token NLL intervals (overall
 and per prompt) against a second build. Regenerate the
 fixtures when the shards or the reference change: run
