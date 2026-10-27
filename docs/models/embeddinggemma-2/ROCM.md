@@ -86,7 +86,7 @@ Build sequentially before measuring on an idle GPU, retaining both packages:
 
 ```sh
 nix build --out-link result-rocm7
-nix build .#rocm10 --out-link result-rocm10
+nix build --out-link result-rocm10
 ./result-rocm10/bin/gufo serve embedding --model models/embeddinggemma-2 \
   --port 18768 --log-level debug > artifacts/embedding-server.log 2>&1
 ```

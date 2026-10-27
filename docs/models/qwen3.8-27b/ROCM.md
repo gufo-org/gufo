@@ -4,7 +4,7 @@ October 24, 2026, Strix Halo `gfx1151`. Q4_K_XL/Q8_K_XL targets and the Q4_K_M
 DFlash2 draft use the pinned [model identities](artifacts/model-identities.json).
 ROCm 7.2.3 uses Nix with Clang 22/GCC 15.3. ROCm 10.1.0 was first checked with
 Clang 24/GCC 15.2 in `rocm/dev-ubuntu-26.04:10.1.0-full`, then built through
-`nix build .#rocm10` with the cached Clang 24/GCC 16.2 toolchain and the matching
+`nix build` with the cached Clang 24/GCC 16.2 toolchain and the matching
 repository ROCr patch. Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
 from the independently checked `6d43e786`.
 Builds and inference run separately.

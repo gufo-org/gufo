@@ -3,10 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # ROCm 10.1.0 as rocmPackages_10, on nixos-unstable (gufo-org/nixpkgs
-    # rocm-10.1). Binaries for gfx1151 are on gufo.cachix.org.
-    # Only the rocm10 package and shell use it; the default stays on the
-    # nixpkgs ROCm release.
+    # ROCm 10.1.0 / HIP Clang 24, with gfx1151 binaries on gufo.cachix.org.
     nixpkgs-rocm10.url = "github:gufo-org/nixpkgs/1a6ba8bc6f744f7a843d025e46bc9911b4b6c37d";
     # Reference ASR/TTS runtime for benchmark comparisons; exposes a
     # ROCm gfx1151 package tuned for Strix Halo.
@@ -40,28 +37,28 @@
         value;
       revision = self.shortRev or self.dirtyShortRev or "dirty";
 
-      pkgs = forAllSystems (system: import nixpkgs { inherit system; });
+      # Reuse the cached ROCm closure, including its matching compiler/runtime.
+      # Python and general dependencies stay on the nixos-unstable input.
+      rocmPkgs = forAllSystems (system: import nixpkgs-rocm10 { inherit system; });
+      pkgs = forAllSystems (system: import nixpkgs {
+        inherit system;
+        overlays = [ (_final: _prev: {
+          rocmPackages = rocmPkgs.${system}.rocmPackages_10;
+        }) ];
+      });
 
       gufoPackages = forAllSystems (
         system:
-        pkgs.${system}.callPackage ./.devops/nix/scope.nix { inherit revision; }
-      );
-
-      # Evaluation build against ROCm 10.1.0. The whole package set comes from
-      # nixpkgs-rocm10 so glibc, stdenv and the ROCm compiler stay consistent.
-      gufoRocm10 = forAllSystems (
-        system:
-        let
-          pkgsRocm10 = import nixpkgs-rocm10 { inherit system; };
-        in
-        (pkgsRocm10.callPackage ./.devops/nix/scope.nix { inherit revision; }).gufo.override {
-          # Kernel libraries built for gfx1151 only, cached on gufo.cachix.org.
-          rocmPackages = pkgsRocm10.rocmPackages_10.gfx1151;
+        pkgs.${system}.callPackage ./.devops/nix/scope.nix {
+          inherit revision;
+          rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
         }
       );
 
       llamaReferences = forAllSystems (
-        system: pkgs.${system}.callPackage ./.devops/nix/llama-cpp-reference.nix { }
+        system: pkgs.${system}.callPackage ./.devops/nix/llama-cpp-reference.nix {
+          rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
+        }
       );
 
       alexnetWeights = system:
@@ -89,19 +86,23 @@
           let
             # Nixpkgs' default torchvision/lpips closures use CPU torch.
             # Override both edges so evaluation has one ROCm torch derivation.
+            # Torch's supported-target filter omits gfx1151; select it explicitly.
+            torchRocm = ps.torchWithRocm.override {
+              gpuTargets = [ "gfx1151" ];
+            };
             torchvisionRocm = ps.torchvision.override {
-              torch = ps.torchWithRocm;
+              torch = torchRocm;
             };
             lpipsRocm = ps.lpips.override {
-              torch = ps.torchWithRocm;
+              torch = torchRocm;
               torchvision = torchvisionRocm;
             };
             accelerateRocm = ps.accelerate.override {
-              torch = ps.torchWithRocm;
+              torch = torchRocm;
             };
           in
           [
-            ps.torchWithRocm
+            torchRocm
             torchvisionRocm
             ps.transformers
             accelerateRocm
@@ -156,8 +157,6 @@
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
           release = base.override { inherit releaseVersion; };
-          # ROCm 10.1.0 evaluation build; not a release or check input.
-          rocm10 = gufoRocm10.${system};
           # Windows test binaries of the platform leaves and the CPU cache,
           # cross-built here and run on a Windows CI host.
           windows-platform-tests =
@@ -169,7 +168,9 @@
               };
           # Optional benchmark packages: excluded from Gufo, the default
           # development shell and hosted checks.
-          ds4-reference = pkgs.${system}.callPackage ./.devops/nix/ds4-reference.nix { };
+          ds4-reference = pkgs.${system}.callPackage ./.devops/nix/ds4-reference.nix {
+            rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
+          };
           llama-cpp-reference = llamaReferences.${system}.release;
           llama-cpp-mtp-reference = llamaReferences.${system}.mtp;
         }
@@ -198,7 +199,9 @@
               # Compiler cache for the local loop; CMake attaches it as the C
               # and C++ launcher when it is on PATH, as the CPU checks do.
               pkgs.${system}.ccache
-              audio-cpp.packages.${system}.rocm-gfx1151
+              (audio-cpp.packages.${system}.rocm-gfx1151.override {
+                rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
+              })
             ];
             env = {
               TORCH_HOME = "${alexnetTorchHome system}";
@@ -219,32 +222,6 @@
               export CCACHE_NOHASHDIR=true
             '';
           };
-
-          # ROCm 10.1.0 evaluation shell: builds and profiles the rocm10
-          # package. It omits the ROCm torch tools, which would rebuild torch.
-          rocm10 =
-            let
-              pkgsRocm10 = import nixpkgs-rocm10 { inherit system; };
-              gufo = self.packages.${system}.rocm10;
-            in
-            pkgsRocm10.mkShell {
-              inputsFrom = [ gufo ];
-              packages = [
-                gufo.rocmPackages.rocprofiler-sdk
-                pkgsRocm10.python3
-                pkgsRocm10.gdb
-                pkgsRocm10.git
-                pkgsRocm10.ripgrep
-                pkgsRocm10.ccache
-              ];
-              env.LD_LIBRARY_PATH = pkgsRocm10.lib.makeLibraryPath [
-                gufo.rocmRuntime
-                pkgsRocm10.stdenv.cc.cc.lib
-                pkgsRocm10.zlib
-              ];
-              env.GUFO_ROCR_LIBRARY_DIR = "${gufo.rocmRuntime}/lib";
-              shellHook = self.devShells.${system}.default.shellHook;
-            };
         }
       );
 

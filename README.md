@@ -169,24 +169,22 @@ extra-substituters = https://gufo.cachix.org
 extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
 ```
 
-The Nix package and development shell include a ROCr 7.2.3
-[queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr.patch) for Strix Halo.
-It keeps queue save/restore buffers, launch/copy arenas and code-loading
-staging resident during host memory compaction, while retaining managed-memory
-support and the ordinary fine-grained host-allocation policy.
-
-`nix build .#rocm10` and `nix develop .#rocm10` build the same source against
-ROCm 10.1.0 (HIP Clang 24) from the open
-[nixpkgs ROCm 10.1 update](https://github.com/NixOS/nixpkgs/pull/573885), with
-the [rebased queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr-rocm10.patch).
-This build is under evaluation and is not qualified; it has no binary cache, so
-the first build compiles the ROCm toolchain and libraries for gfx1151.
+The Nix package and development shell use ROCm 10.1.0 (HIP Clang 24)
+from the pinned [nixpkgs ROCm 10.1 update](https://github.com/NixOS/nixpkgs/pull/573885).
+Python, Python packages and general build dependencies come from the pinned
+`nixos-unstable` input. The ROCm package set comes from the separate fork,
+retaining its compiler/runtime dependencies to reuse the gfx1151 binaries on
+`gufo.cachix.org`. All Nix workflows configure this cache explicitly.
+Both include a [queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr-rocm10.patch)
+for Strix Halo. It keeps queue save/restore buffers, launch/copy arenas and
+code-loading staging resident during host memory compaction, while retaining
+managed-memory support and the ordinary fine-grained host-allocation policy.
 
 ### Without Nix
 
 Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
-following development libraries. The currently qualified toolchain is GCC
-15.3 and ROCm 7.2.3. Attention and audio convolution kernels are compiled
+following development libraries. The pinned Nix toolchain uses GCC
+16.2 and ROCm 10.1.0 (HIP Clang 24). Attention and audio convolution kernels are compiled
 directly from HIP. Python, Triton/AOTriton, Composable Kernel and MIOpen are
 not production build or runtime requirements.
 For the same protection against queue evictions as the Nix build, apply the

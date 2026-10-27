@@ -4,7 +4,7 @@ October 24, 2026, Strix Halo `gfx1151`. CustomVoice, VoiceDesign and Base use
 the original BF16 checkpoints and F32 waveform decoder. ROCm 7.2.3 uses pinned
 Nix dependencies and Clang 22. ROCm 10.1.0 was first checked with Clang 24/GCC
 15.2 in `rocm/dev-ubuntu-26.04:10.1.0-full`, then built through
-`nix build .#rocm10` with cached Clang 24/GCC 16.2 and the repository's matching
+`nix build` with cached Clang 24/GCC 16.2 and the repository's matching
 ROCr patch. Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
 from the independently checked `6d43e786`.
 Builds and inference run separately.

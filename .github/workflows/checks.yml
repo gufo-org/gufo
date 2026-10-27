@@ -53,6 +53,8 @@ jobs:
         with:
           determinate: false
           extra-conf: |
+            extra-substituters = https://gufo.cachix.org
+            extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
             extra-sandbox-paths = /tmp/gufo-ccache
 
       # Pull on every run; push only from main so pull requests do not fill

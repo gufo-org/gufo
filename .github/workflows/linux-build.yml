@@ -65,6 +65,8 @@ jobs:
         with:
           determinate: false
           extra-conf: |
+            extra-substituters = https://gufo.cachix.org
+            extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
             extra-sandbox-paths = /tmp/gufo-ccache
 
       - name: Enable Cachix
@@ -82,8 +84,10 @@ jobs:
         run: |
           set -euo pipefail
           # Both arms use the candidate's pinned compiler and dependencies.
-          nix build ./baseline-source#default --reference-lock-file "$GITHUB_WORKSPACE/flake.lock" \
-            --no-write-lock-file --out-link result-baseline --print-build-logs --cores 4 --max-jobs 1
+          nix build --impure --file tools/ci/linux-baseline.nix \
+            --argstr source "$GITHUB_WORKSPACE/baseline-source" \
+            --argstr revision "$EXPECTED_REVISION" \
+            --out-link result-baseline --print-build-logs --cores 4 --max-jobs 1
           python3 tools/ci/linux_artifact.py pack --package result-baseline \
             --revision "$EXPECTED_REVISION" --output linux-artifacts/baseline
 

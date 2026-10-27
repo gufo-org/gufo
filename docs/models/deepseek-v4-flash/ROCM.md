@@ -10,7 +10,7 @@ valid, different summaries.
 
 The control uses pinned ROCm 7.2.3, HIP Clang 22 and GCC 15.3 through Nix.
 ROCm 10.1.0 was first checked with HIP Clang 24/GCC 15.2 inside
-`rocm/dev-ubuntu-26.04:10.1.0-full`, then built through `nix build .#rocm10`
+`rocm/dev-ubuntu-26.04:10.1.0-full`, then built through `nix build`
 with cached Clang 24/GCC 16.2 and the matching repository ROCr patch.
 Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
 from the independently checked `6d43e786`. Builds and inference run separately.

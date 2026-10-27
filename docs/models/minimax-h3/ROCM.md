@@ -8,12 +8,12 @@ unqualified.
 
 The control uses the pinned ROCm 7.2.3 Nix toolchain, HIP Clang 22 and GCC
 15.3. ROCm 10.1.0 was first checked with HIP Clang 24/GCC 15.2 inside
-`rocm/dev-ubuntu-26.04:10.1.0-full`, then built through `nix build .#rocm10`
+`rocm/dev-ubuntu-26.04:10.1.0-full`, then built through `nix build`
 with cached Clang 24/GCC 16.2 and the matching repository ROCr patch.
 Source `65bf6798` includes main `67d1f6ac`; this model's kernels are unchanged
 from the independently checked `6d43e786`. Builds and inference run separately
 on the same machine with the same BF16 checkpoint. Default Nix remains 7.2.3;
-`nix develop .#rocm10` supplies the optional development toolchain.
+`nix develop` supplies the development toolchain.
 
 ## Migration steps
 
