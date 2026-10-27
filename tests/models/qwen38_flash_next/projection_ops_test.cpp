@@ -166,7 +166,13 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
   const auto expected_history = download(conv_state, history.size());
   const auto expected_state = download(state, state_count);
   const auto expected_out = download(out, out_count);
-  for (int replay = 0; replay < 2; ++replay) {
+  // Replay 2 queues the Z row tiles on a second stream, as the overlapped
+  // prefill does: the same products, so every byte must match.
+  hipStream_t z_stream = nullptr;
+  hipEvent_t z_start = nullptr;
+  CheckHip(hipStreamCreate(&z_stream), "Z stream");
+  CheckHip(hipEventCreateWithFlags(&z_start, hipEventDisableTiming), "Z event");
+  for (int replay = 0; replay < 3; ++replay) {
     upload(conv_state, history);
     upload(state, initial_state);
     CheckHip(hipMemset(fused, 0xFF, (reference.size() + 8) * sizeof(float)),
@@ -174,9 +180,11 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
     CheckHip(hipMemset(scratch, 0xFF, conv_count * sizeof(float)),
              "poison fused convolution");
     if (!q::DenseF16SsmGemm(w, x, conv_w, conv_state, fused, scratch, batch, m,
-                            k, channels, 4, nullptr)) {
+                            k, channels, 4, nullptr, 0,
+                            replay == 2 ? z_stream : nullptr, z_start)) {
       throw std::runtime_error("SSM projection rejected the shape");
     }
+    CheckHip(hipDeviceSynchronize(), "SSM projection");
     exact(expected_conv, scratch, "convolution");
     const auto projected = download(fused, reference.size() + 8);
     for (std::size_t t = 0; t < batch; ++t) {
@@ -197,6 +205,8 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
     exact(expected_state, state, "recurrent state");
     exact(expected_out, out, "output");
   }
+  CheckHip(hipEventDestroy(z_start), "Z event");
+  CheckHip(hipStreamDestroy(z_stream), "Z stream");
   // A rejected geometry must not touch any pointer.
   if (q::DenseF16SsmGemm(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                          0, m, k, channels, 4, nullptr) ||
