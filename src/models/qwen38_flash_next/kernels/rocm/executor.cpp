@@ -2947,13 +2947,14 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
     MtpTopCandidates(s_.logits, s_.mtp_ids, s_.mtp_scratch_ids, s_.mtp_scores,
                      rows, stream_);
     if (draft != nullptr)
-      RemapDraftIds(s_.mtp_ids, count, prefix, draft->mtp_.draft_ids, stream_);
+      RemapDraftIds(s_.mtp_ids, count, prefix, draft->mtp_.draft_ids,
+                    kMtpDraftExtraRows, stream_);
   }
   if (token) {
     Argmax(s_.logits, s_.mtp_argmax, s_.mtp_token, 1, rows, stream_);
     if (draft != nullptr)
       RemapDraftIds(reinterpret_cast<std::uint32_t*>(s_.mtp_token), 1, prefix,
-                    draft->mtp_.draft_ids, stream_);
+                    draft->mtp_.draft_ids, kMtpDraftExtraRows, stream_);
     if (!Check(
             hipMemcpyAsync(mtp_token_host_, s_.mtp_token, sizeof(std::int32_t),
                            hipMemcpyDeviceToHost, stream_),

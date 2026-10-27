@@ -607,7 +607,8 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
         Argmax(logits_of(i), s_.mtp_argmax, s_.mtp_token, 1, rows, stream_);
         if (table != nullptr)
           RemapDraftIds(reinterpret_cast<std::uint32_t*>(s_.mtp_token), 1,
-                        static_cast<std::uint32_t>(prefix), table, stream_);
+                        static_cast<std::uint32_t>(prefix), table,
+                        kMtpDraftExtraRows, stream_);
         if (!Check(hipMemcpyAsync(batch_candidates_host_[i].ids.data(),
                                   s_.mtp_token, sizeof(std::int32_t),
                                   hipMemcpyDeviceToHost, stream_),
@@ -619,7 +620,8 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
                        s_.mtp_scores, rows, stream_);
       if (table != nullptr)
         RemapDraftIds(s_.mtp_ids, static_cast<std::uint32_t>(count),
-                      static_cast<std::uint32_t>(prefix), table, stream_);
+                      static_cast<std::uint32_t>(prefix), table,
+                      kMtpDraftExtraRows, stream_);
       if (!Check(hipMemcpyAsync(batch_candidates_host_ + i, s_.mtp_ids,
                                 offsetof(MtpCandidateLogits, logits) +
                                     count * sizeof(float),

@@ -373,10 +373,48 @@ void CheckCandidates(std::uint32_t vocab) {
             << ": exact ordering, ties, guards and graph replay passed\n";
 }
 
+void CheckRemapDraftIds() {
+  constexpr std::uint32_t prefix = 8, table_rows = 4;
+  constexpr std::int32_t beyond = 0x7EADBEEF;
+  // The table's rows (one empty slot), then memory the table does not own.
+  std::vector<std::int32_t> table{100, -1, 102, 103};
+  table.resize(table_rows + 60, beyond);
+  const std::vector<std::uint32_t> input{
+      UINT32_MAX - 1, 0,          prefix - 1,  prefix,    prefix + 1,
+      prefix + 3,     prefix + 4, prefix + 63, INT32_MAX, UINT32_MAX - 1};
+  const std::vector<std::uint32_t> expected{
+      UINT32_MAX - 1, 0,          prefix - 1, 100,           UINT32_MAX, 103,
+      UINT32_MAX,     UINT32_MAX, UINT32_MAX, UINT32_MAX - 1};
+  auto device_table = Allocate<std::int32_t>(table.size());
+  auto device_ids = Allocate<std::uint32_t>(input.size());
+  CheckHip(hipMemcpy(device_table.get(), table.data(), table.size() * 4,
+                     hipMemcpyHostToDevice),
+           "draft table upload");
+  CheckHip(hipMemcpy(device_ids.get(), input.data(), input.size() * 4,
+                     hipMemcpyHostToDevice),
+           "draft ID upload");
+  // The first and last IDs are guards outside n.
+  q::RemapDraftIds(device_ids.get() + 1,
+                   static_cast<std::uint32_t>(input.size() - 2), prefix,
+                   device_table.get(), table_rows, nullptr);
+  std::vector<std::uint32_t> actual(input.size());
+  CheckHip(hipMemcpy(actual.data(), device_ids.get(), actual.size() * 4,
+                     hipMemcpyDeviceToHost),
+           "draft ID download");
+  for (std::size_t i = 0; i < actual.size(); ++i)
+    if (actual[i] != expected[i])
+      throw std::runtime_error(
+          "draft ID remap: input=" + std::to_string(input[i]) + " expected=" +
+          std::to_string(expected[i]) + " actual=" + std::to_string(actual[i]));
+  std::cout << "Draft ID remap: table rows, empty slots and rows past the "
+               "table passed\n";
+}
+
 }  // namespace
 
 int main() {
   try {
+    CheckRemapDraftIds();
     CheckPenaltyArgmax(257);
     CheckPenaltyArgmax(248320);
     CheckArgmax(1);

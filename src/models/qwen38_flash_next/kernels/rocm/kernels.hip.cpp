@@ -2578,7 +2578,9 @@ __global__ void SelectScoreKernel(const float* q, const __half* blocks,
   const auto t0 = blockIdx.x;
   const auto complete = (*start_pos + first_token + t0 + 1) / ratio;
   const auto b = blockIdx.y * blockDim.x + threadIdx.x;
-  if (t0 >= n_tokens || complete <= budget || b >= complete)
+  // The position comes from the device, the row size from the host: a block
+  // past max_blocks has no score slot in this row.
+  if (t0 >= n_tokens || complete <= budget || b >= complete || b >= max_blocks)
     return;
   // Load both stored halves together. Unpacking preserves their exact F32
   // values while avoiding a separate narrow memory load for each component.
@@ -2697,7 +2699,8 @@ __launch_bounds__(kBlock) __global__
   __shared__ std::uint32_t state[3];  // threshold, remaining, bin count
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t pos = *start_pos + first_token + t;
-  const std::uint32_t complete = (pos + 1) / ratio;
+  // Only max_blocks scores exist per row (see SelectScoreKernel).
+  const std::uint32_t complete = min((pos + 1) / ratio, max_blocks);
   std::uint32_t* words = mask + static_cast<std::size_t>(t) * mask_words;
   for (std::uint32_t w = threadIdx.x; w < mask_words; w += blockDim.x) {
     words[w] = complete <= budget ? 0xFFFFFFFFu : 0u;
@@ -7972,16 +7975,22 @@ void GatherDraftLogits(float* logits, const std::int32_t* table,
 
 __global__ void RemapDraftIdsKernel(std::uint32_t* ids, std::uint32_t n,
                                     std::uint32_t prefix,
-                                    const std::int32_t* table) {
+                                    const std::int32_t* table,
+                                    std::uint32_t table_rows) {
   const std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n && ids[i] >= prefix)
-    ids[i] = static_cast<std::uint32_t>(table[ids[i] - prefix]);
+  if (i >= n || ids[i] < prefix)
+    return;
+  // A row past the table reads as an empty slot (-1), not past the table.
+  const std::uint32_t row = ids[i] - prefix;
+  ids[i] =
+      row < table_rows ? static_cast<std::uint32_t>(table[row]) : UINT32_MAX;
 }
 
 void RemapDraftIds(std::uint32_t* ids, std::uint32_t n, std::uint32_t prefix,
-                   const std::int32_t* table, hipStream_t stream) {
+                   const std::int32_t* table, std::uint32_t table_rows,
+                   hipStream_t stream) {
   hipLaunchKernelGGL(RemapDraftIdsKernel, dim3(Blocks(n)), dim3(kThreads), 0,
-                     stream, ids, n, prefix, table);
+                     stream, ids, n, prefix, table, table_rows);
 }
 
 void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,

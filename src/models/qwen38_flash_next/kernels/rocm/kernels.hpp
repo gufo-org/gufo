@@ -470,7 +470,9 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
 /// writes a visibility bitmap (`mask_words` uint32 per query, bit b = block
 /// b visible). Every block is visible when the count fits the budget.
 /// Queries retain F32 precision; pooled cache keys are F16. Scores
-/// still accumulate in FP32. `scores` holds n_tokens * max_blocks floats.
+/// still accumulate in FP32. `scores` holds n_tokens * max_blocks floats;
+/// blocks past max_blocks are neither scored nor selected, whatever the
+/// device position (`mask_words` * 32 must cover max_blocks).
 /// `live_blocks`, when nonzero, bounds the complete blocks of the last
 /// query (eager launches only: a captured graph must cover max_blocks).
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
@@ -617,10 +619,13 @@ void GatherDraftLogits(float* logits, const std::int32_t* table,
                        std::uint32_t prefix, std::uint32_t n,
                        hipStream_t stream);
 
-/// Draft head rows back to token IDs: ids[i] >= prefix (a table row) becomes
-/// table[ids[i] - prefix]; prefix rows are already token IDs.
+/// Draft head rows back to token IDs: ids[i] >= prefix (a row of the
+/// table_rows-row table) becomes table[ids[i] - prefix]; prefix rows are
+/// already token IDs. A row past the table becomes UINT32_MAX, as an empty
+/// slot (-1) does.
 void RemapDraftIds(std::uint32_t* ids, std::uint32_t n, std::uint32_t prefix,
-                   const std::int32_t* table, hipStream_t stream);
+                   const std::int32_t* table, std::uint32_t table_rows,
+                   hipStream_t stream);
 
 /// Number of IDs in each of the two selection buffers.
 std::uint32_t MtpCandidateWorkspaceSize(std::uint32_t vocab);

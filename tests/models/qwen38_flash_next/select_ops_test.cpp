@@ -256,6 +256,62 @@ void CheckQueryPrecisionBoundary() {
     CheckHip(hipFree(p), "free precision probe");
 }
 
+// The position is a device value while the host sizes the score and mask
+// rows. A position past those rows must select as if its row ended there,
+// without touching the memory that follows either row.
+void CheckPositionPastRows() {
+  constexpr unsigned max_blocks = kBudget + 32, words = max_blocks / 32;
+  constexpr unsigned past = max_blocks + 96, guard = 256;
+  // Negative floats rank above every score as the selector compares bits.
+  constexpr float score_guard = -2.0F;
+  constexpr std::uint32_t word_guard = 0x5A5A5A5AU;
+  const auto queries = MakeValues(kHeads * kDim, 0x51E5E1ECU, 1.0F);
+  const auto keys = MakeValues(std::size_t{past} * kDim, 0x0B10C5U, 1.0F);
+  std::vector<__half> keys_half(keys.size());
+  std::transform(keys.begin(), keys.end(), keys_half.begin(),
+                 [](float value) { return __float2half_rn(value); });
+  auto* dq = Upload(queries);
+  auto* dk = Upload(keys_half);
+  std::vector<float> reference_scores;
+  std::vector<std::uint32_t> reference_mask;
+  // The first launch fills its rows exactly and becomes the reference.
+  for (const unsigned complete : {max_blocks, past}) {
+    for (const unsigned live : {0U, complete}) {
+      auto* dp = Upload(std::vector<unsigned>{complete * kRatio - 1});
+      auto* ds = Upload(std::vector<float>(max_blocks + guard, score_guard));
+      auto* dm = Upload(std::vector<std::uint32_t>(words + guard, word_guard));
+      q::SelectBlocks(dq, dk, dm, ds, 1, dp, 0, kHeads, kDim, kRatio, kBudget,
+                      words, max_blocks, nullptr, live);
+      CheckHip(hipDeviceSynchronize(), "selection past the rows");
+      auto scores = Download(ds, max_blocks + guard);
+      auto mask = Download(dm, words + guard);
+      if (std::any_of(scores.begin() + max_blocks, scores.end(),
+                      [](float value) { return value != score_guard; }))
+        throw std::runtime_error("selection wrote past its score row");
+      if (std::any_of(mask.begin() + words, mask.end(),
+                      [](std::uint32_t word) { return word != word_guard; }))
+        throw std::runtime_error("selection wrote past its mask row");
+      scores.resize(max_blocks);
+      mask.resize(words);
+      if (reference_mask.empty()) {
+        reference_scores = scores;
+        reference_mask = mask;
+      } else if (scores != reference_scores || mask != reference_mask) {
+        throw std::runtime_error(
+            "a position past the rows changed the selection: complete=" +
+            std::to_string(complete) + " live=" + std::to_string(live));
+      }
+      for (void* p : {static_cast<void*>(dp), static_cast<void*>(ds),
+                      static_cast<void*>(dm)})
+        CheckHip(hipFree(p), "free position probe");
+    }
+  }
+  CheckHip(hipFree(dq), "free position queries");
+  CheckHip(hipFree(dk), "free position keys");
+  std::cout << "block selection past " << max_blocks
+            << " score slots: rows and guards kept\n";
+}
+
 void CheckPooling(unsigned start, unsigned capacity, float factor = 1.0F) {
   constexpr unsigned tokens = 7;
   const unsigned first = start / kRatio;
@@ -356,6 +412,7 @@ void CheckPooling(unsigned start, unsigned capacity, float factor = 1.0F) {
 int main() {
   try {
     CheckQueryPrecisionBoundary();
+    CheckPositionPastRows();
     CheckPooling(29, 64);
     CheckPooling(29, 16);     // batch wraps the raw-key ring
     CheckPooling(65533, 16);  // many wraps; absolute rotary position retained
