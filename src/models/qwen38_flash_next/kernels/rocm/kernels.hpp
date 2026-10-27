@@ -518,6 +518,10 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only = false);
 
+/// Whether wide prefills take the chunked DeltaNet recurrence: the scan
+/// needs Clang 23 or newer (ROCm 10); older compilers keep the row split.
+[[nodiscard]] bool GdnChunkedScanAvailable();
+
 /// counts[e] = number of (token, slot) pairs routed to expert e.
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
                   std::uint32_t n_tokens, std::uint32_t n_experts,

@@ -2359,12 +2359,15 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
         n_tokens <= options_.max_batch && DenseF16Route(l.ssm_in, n_tokens)) {
       PrepareHalfInput(x, n_tokens, l.ssm_in.cols);
       // The Z rows feed only the output norm: the side stream computes them
-      // while the main stream runs the latency-bound recurrence.
+      // while the main stream runs the chunked recurrence. Beside the row
+      // split the two streams only slow each other (ROCm 7.2 pp2048
+      // 1,851 -> 1,829 tok/s), so that build keeps Z on the main stream.
       convolved = DenseF16SsmGemm(
           l.ssm_in.data, static_cast<const __half*>(s_.x_half),
           l.ssm_conv1d.f32(), s.conv_state, s_.qkvz, s_.conv_scratch, n_tokens,
           l.ssm_in.rows, l.ssm_in.cols, channels, c.ssm_conv_kernel, stream_,
-          checkpoint.tokens, side_stream_, side_start_);
+          checkpoint.tokens, GdnChunkedScanAvailable() ? side_stream_ : nullptr,
+          side_start_);
       if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
                  error_msg)) {
         return false;
@@ -2682,7 +2685,10 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // A wide batch runs them on the side stream beside the routed experts,
   // which leave compute idle while they stream expert weights; the shared
   // expert writes only its own scratch, joined before the epilogue reads it.
-  const bool overlap = ExpertMatrixRows(n_tokens) && !last_only;
+  // Builds without the chunked recurrence run it in order: there it cost
+  // ROCm 7.2 prefill 1 to 3 % (pp2048 1,852 -> 1,823 tok/s).
+  const bool overlap =
+      GdnChunkedScanAvailable() && ExpertMatrixRows(n_tokens) && !last_only;
   const hipStream_t main = stream_;
   if (overlap) {
     if (!Check(hipEventRecord(side_start_, main), "side stream fork",

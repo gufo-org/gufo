@@ -2792,6 +2792,16 @@ __launch_bounds__(256) __global__ void GdnChunkPrepKernel(
   }
 }
 
+/// The chunked recurrence needs Clang 23 or newer (ROCm 10). Clang 22
+/// (ROCm 7.2) spills GdnChunkScanKernel to about 1 KB of scratch per lane,
+/// and prefill then runs 3-6 % slower than with the row split, so older
+/// compilers keep the row split and do not emit the scan.
+#if __clang_major__ >= 23
+constexpr bool kGdnChunkedScan = true;
+#else
+constexpr bool kGdnChunkedScan = false;
+#endif
+
 /// One block (8 waves) per value head; wave w owns state columns
 /// [16 w, 16 w + 16) (value rows of the [v][k] state) as eight F32 WMMA
 /// accumulators. Each chunk's q/k/T/P are staged once in LDS (K^T
@@ -6352,6 +6362,10 @@ __global__ void RoutedScatterKernel(const std::int32_t* __restrict__ ids,
 
 }  // namespace
 
+bool GdnChunkedScanAvailable() {
+  return kGdnChunkedScan;
+}
+
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream) {
@@ -8031,40 +8045,42 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
   // Long prefills take the chunked WMMA recurrence. Its scratch reuses the
   // row-split buffers: q/k rows in qn, T, P and the gates in kn.
   const bool chunked =
-      row_split && d == kGdnDim && state_snapshots.rows[0] == nullptr &&
-      n_tokens >= kGdnChunkMinTokens && v_heads % k_heads == 0 &&
-      v_heads / k_heads <= 4 &&
+      kGdnChunkedScan && row_split && d == kGdnDim &&
+      state_snapshots.rows[0] == nullptr && n_tokens >= kGdnChunkMinTokens &&
+      v_heads % k_heads == 0 && v_heads / k_heads <= 4 &&
       (checkpoint.state == nullptr || checkpoint.tokens % kGdnChunk == 0 ||
        checkpoint.tokens == n_tokens);
   if (chunked) {
-    const std::uint32_t chunks = (n_tokens + kGdnChunk - 1) / kGdnChunk;
-    auto* qh = reinterpret_cast<_Float16*>(qn);
-    _Float16* kh = qh + static_cast<std::size_t>(k_heads) * n_tokens * d;
-    auto* t_tiles = reinterpret_cast<_Float16*>(kn);
-    const std::size_t tile_halves =
-        static_cast<std::size_t>(v_heads) * chunks * kGdnChunk * kGdnChunk;
-    _Float16* p_tiles = t_tiles + tile_halves;
-    auto* gates = reinterpret_cast<float2*>(p_tiles + tile_halves);
-    hipLaunchKernelGGL(GdnChunkPrepKernel, dim3(k_heads, chunks), dim3(256), 0,
-                       stream, conv_scratch, alpha_beta, a, dt, t_tiles,
-                       p_tiles, gates, qh, kh, n_tokens, k_heads, v_heads,
-                       chunks, eps);
-    // The F16 output rows take the gated norm in the scan itself.
-    const bool fused_norm = out_q8 == nullptr && out_half != nullptr;
-    if (fused_norm) {
-      if (z_ready != nullptr)
-        (void)hipStreamWaitEvent(stream, z_ready, 0);
-      hipLaunchKernelGGL(GdnChunkScanKernel<true>, dim3(v_heads), dim3(256), 0,
+    if constexpr (kGdnChunkedScan) {
+      const std::uint32_t chunks = (n_tokens + kGdnChunk - 1) / kGdnChunk;
+      auto* qh = reinterpret_cast<_Float16*>(qn);
+      _Float16* kh = qh + static_cast<std::size_t>(k_heads) * n_tokens * d;
+      auto* t_tiles = reinterpret_cast<_Float16*>(kn);
+      const std::size_t tile_halves =
+          static_cast<std::size_t>(v_heads) * chunks * kGdnChunk * kGdnChunk;
+      _Float16* p_tiles = t_tiles + tile_halves;
+      auto* gates = reinterpret_cast<float2*>(p_tiles + tile_halves);
+      hipLaunchKernelGGL(GdnChunkPrepKernel, dim3(k_heads, chunks), dim3(256),
+                         0, stream, conv_scratch, alpha_beta, a, dt, t_tiles,
+                         p_tiles, gates, qh, kh, n_tokens, k_heads, v_heads,
+                         chunks, eps);
+      // The F16 output rows take the gated norm in the scan itself.
+      const bool fused_norm = out_q8 == nullptr && out_half != nullptr;
+      if (fused_norm) {
+        if (z_ready != nullptr)
+          (void)hipStreamWaitEvent(stream, z_ready, 0);
+        hipLaunchKernelGGL(
+            GdnChunkScanKernel<true>, dim3(v_heads), dim3(256), 0, stream, qh,
+            kh, conv_scratch, state, raw, t_tiles, p_tiles, gates, n_tokens,
+            k_heads, v_heads, chunks, checkpoint, z, z_stride, norm_w, eps,
+            out_half, out_half_stride != 0 ? out_half_stride : v_heads * d);
+        return;
+      }
+      hipLaunchKernelGGL(GdnChunkScanKernel<false>, dim3(v_heads), dim3(256), 0,
                          stream, qh, kh, conv_scratch, state, raw, t_tiles,
                          p_tiles, gates, n_tokens, k_heads, v_heads, chunks,
-                         checkpoint, z, z_stride, norm_w, eps, out_half,
-                         out_half_stride != 0 ? out_half_stride : v_heads * d);
-      return;
+                         checkpoint, nullptr, 0U, nullptr, 0.0F, nullptr, 0U);
     }
-    hipLaunchKernelGGL(GdnChunkScanKernel<false>, dim3(v_heads), dim3(256), 0,
-                       stream, qh, kh, conv_scratch, state, raw, t_tiles,
-                       p_tiles, gates, n_tokens, k_heads, v_heads, chunks,
-                       checkpoint, nullptr, 0U, nullptr, 0.0F, nullptr, 0U);
   } else if (row_split && d == kGdnDim && state_snapshots.rows[0] == nullptr) {
     hipLaunchKernelGGL(GdnPrepKqKernel, dim3(k_heads, n_tokens), dim3(32), 0,
                        stream, conv_scratch, qn, n_tokens, k_heads, channels,

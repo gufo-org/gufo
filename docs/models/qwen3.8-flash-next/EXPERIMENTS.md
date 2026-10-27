@@ -18,6 +18,27 @@ retained.
 | High-nibble Q4_K codes decoded as F16 subnormals (one `pk_fma` with the scale × 2^20) | Not retained: within noise, 0 to −2 %. Low nibbles cannot use the trick without a shift: at mantissa bits 8–11 they overlap the exponent. The scale must be widened in F32, because fast-math folds the two F16 doublings into one overflowing constant. The largest sampled F16(d × sc) is 0.054, under the 0.0625 limit. |
 | Q5_1 down experts read into registers from 16-row tiles, then re-encoded so a 5-bit code is an F16 subnormal (one `pk_fma` per two weights) | Not retained. Bit-identical in `routed_gemm_bench`: 3.08/3.89/5.47 → 2.87/3.66/5.06 ms at 512/2,048/4,096 tokens. Prefill-only end to end, with the layout applied at load: pp512 1,356/1,373 → 1,393/1,389, pp2048 1,983/1,976 → 1,988/1,995, pp4096 2,051/2,035 → 2,065/2,066 tok/s (+0.5 to +1.8 %). The repack would replace the only copy of the weights, so decode, MTP verification and the MMQ tier would each need a reader for it. Probes that run short passes fail until those readers exist. |
 
+### ROCm 7.2 (the default package)
+
+Clang 22 spills `GdnChunkScanKernel` to 1,172–1,400 bytes of scratch per
+lane (240 VGPRs, 307–383 spilled; ROCm 10's Clang 24 fits it in 237/185
+VGPRs). With the spill, the head was slower than main on ROCm 7.2:
+pp512/2048/4096 1,283/1,849/1,936 → 1,246/1,734/1,824 tok/s. Lifting the
+launch bound to 256 VGPRs, scheduling barriers per state tile and a later V
+prefetch did not remove it. Clang 22 builds therefore keep the row-split
+recurrence and do not emit the scan.
+
+Beside the row split, both side streams also cost ROCm 7.2 prefill: pp2048
+1,851/1,838 for main, 1,813/1,685 with both, 1,829/1,701 without the Z
+overlap, 1,823/1,794 without the shared-expert overlap and 1,852/1,853 with
+neither. The overlaps were tuned beside the chunked scan, so they now follow
+it. On ROCm 7.2 the branch then matches main: wide-prefill logits are
+byte-identical on the four fixture prompts. Speed is equal within noise:
+pp512 1,288/1,285 → 1,291/1,290, pp2048 1,853/1,853 → 1,851/1,852, pp4096
+1,924/1,919 → 1,925/1,920, d10K 1,747/1,747 → 1,746/1,746 tok/s. ROCm 10
+logits and speed are unchanged. All 20 Flash-Next CTest targets pass on
+ROCm 7.2.
+
 ### Lossy changes in combination
 
 Builds on main `c0e0be58`, each with the fixture probe commit: lossless
