@@ -708,6 +708,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
     std::span<const tokenization::TokenId> candidate_tokens,
     std::uint32_t start_pos, bool capture_logits) {
+  InvalidatePrefillSync();
   return ForwardDecodeEquivalentVerificationChunk(candidate_tokens, start_pos,
                                                   capture_logits);
 }
@@ -719,6 +720,7 @@ void QwenGpuExecutor::CommitVerificationChunk(
     return;
   }
   CheckReset();
+  InvalidatePrefillSync();
   if (start_pos > arena_.GetMaxContext() ||
       committed_tokens.size() > arena_.GetMaxContext() - start_pos)
     throw std::length_error("committed Qwen chunk exceeds context");

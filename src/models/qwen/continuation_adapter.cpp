@@ -261,8 +261,12 @@ ContinuationAdapter::ContinuationAdapter(
     std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t context,
     cache::Identity identity, hip::QwenExecutionPolicy policy,
     std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model,
-    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger)
+    hip::QwenDFlashGpuDraftConfig draft_config, cache::ResourceLedger* ledger,
+    std::shared_ptr<const hip::QwenGpuModel> prefill_model,
+    int prefill_device)
     : model_(std::move(model)),
+      prefill_model_(std::move(prefill_model)),
+      prefill_device_(prefill_device),
       draft_model_(std::move(draft_model)),
       draft_config_(draft_config),
       ledger_(ledger),
@@ -403,6 +407,20 @@ std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
   // Prepare the rollback pair before readiness. Pinning the current buffer
   // for a prefill pass then requires neither an allocation nor a state copy.
   executor->arena_.AllocateRecurrentSnapshot();
+  if (prefill_model_) {
+    // One second-GPU prefill executor per slot: the weights are shared, the
+    // KV/recurrent arenas are not.
+    std::string prefill_error;
+    auto prefill = std::shared_ptr<hip::QwenGpuExecutor>(
+        hip::QwenGpuExecutor::Create(prefill_model_, &prefill_error, context_,
+                                     policy_, prefill_device_)
+            .release());
+    if (!prefill)
+      throw std::runtime_error("cannot create prefill executor: " +
+                               prefill_error);
+    prefill->arena_.AllocateRecurrentSnapshot();
+    executor->AttachPrefillExecutor(std::move(prefill));
+  }
   std::unique_ptr<hip::QwenDFlashGpuDraftBackend> draft;
   if (draft_model_) {
     std::string error;

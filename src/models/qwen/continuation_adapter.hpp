@@ -29,7 +29,9 @@ public:
       hip::QwenExecutionPolicy = hip::QwenExecutionPolicy::Production(),
       std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model = nullptr,
       hip::QwenDFlashGpuDraftConfig draft_config = {},
-      cache::ResourceLedger* ledger = nullptr);
+      cache::ResourceLedger* ledger = nullptr,
+      std::shared_ptr<const hip::QwenGpuModel> prefill_model = nullptr,
+      int prefill_device = 0);
   ~ContinuationAdapter() override;
   [[nodiscard]] hip::QwenGpuExecutor& GetExecutor(cache::Slot&);
   [[nodiscard]] hip::QwenDFlashGpuDraftBackend* GetDraftBackend(cache::Slot&);
@@ -107,6 +109,10 @@ private:
                                                cache::Rows end, std::byte*,
                                                cache::Stream&);
   std::shared_ptr<const hip::QwenGpuModel> model_;
+  // Weights resident on the second GPU used for offloaded prompt prefill;
+  // null when prefill offload is disabled.
+  std::shared_ptr<const hip::QwenGpuModel> prefill_model_;
+  int prefill_device_{0};
   std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model_;
   hip::QwenDFlashGpuDraftConfig draft_config_;
   // Charged for each slot's pinned prompt capture; outlives the slots.

@@ -139,8 +139,12 @@ SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     std::span<const QwenGpuBatchItem> items) {
   for (const auto& item : items)
-    if (item.executor)
+    if (item.executor) {
       item.executor->CheckReset();
+      // Batched decode writes KV rows and recurrent state on every item's
+      // arena; a second-GPU prefill mirror is stale from here on.
+      item.executor->InvalidatePrefillSync();
+    }
   if (items.size() < 2 || items.size() > kMaxDecodeBatch) {
     throw std::invalid_argument(
         "Qwen GPU decode batch requires two to eight sessions");
@@ -440,8 +444,12 @@ std::vector<std::vector<tokenization::TokenId>>
 QwenGpuExecutor::ForwardVerificationBatch(
     std::span<const QwenGpuVerificationItem> items) {
   for (const auto& item : items)
-    if (item.executor)
+    if (item.executor) {
       item.executor->CheckReset();
+      // Verification writes KV rows and recurrent state on every item's
+      // arena; a second-GPU prefill mirror is stale from here on.
+      item.executor->InvalidatePrefillSync();
+    }
   if (items.empty() || items.size() > kMaxDecodeBatch ||
       items.front().executor == nullptr) {
     throw std::invalid_argument(

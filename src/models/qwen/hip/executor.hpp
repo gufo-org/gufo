@@ -99,10 +99,15 @@ public:
   QwenGpuModel(QwenGpuModel&&) = delete;
   QwenGpuModel& operator=(QwenGpuModel&&) = delete;
 
+  /// `device` selects the GPU that owns the weight placements. Device 0 keeps
+  /// the Linux mapped-registration fast path; any other device forces
+  /// device-resident copies uploaded from the mapping, because host-registered
+  /// unified-memory pages are not addressable by a second GPU.
   [[nodiscard]] static std::shared_ptr<const QwenGpuModel> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr,
-      std::shared_ptr<models::qwen::vision::Encoder> vision = {});
+      std::shared_ptr<models::qwen::vision::Encoder> vision = {},
+      int device = 0);
 
   [[nodiscard]] const std::shared_ptr<models::qwen::vision::Encoder>&
   VisionEncoder() const noexcept {
@@ -257,7 +262,8 @@ class QwenGpuArena {
 public:
   explicit QwenGpuArena(
       const core::ModelConfig& config, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production(),
+      int device = 0);
   ~QwenGpuArena();
 
   QwenGpuArena(const QwenGpuArena&) = delete;
@@ -385,6 +391,7 @@ private:
   std::uint32_t max_context_;
   std::uint32_t max_batch_;
   QwenExecutionPolicy policy_;
+  const int device_;
   std::vector<std::uint32_t> target_layer_ids_;
   // Buffer 0 comes from the constructor; buffer 1 is allocated by the first
   // SaveState. `live_recurrent_` holds the current state, `saved_recurrent_`
@@ -412,18 +419,35 @@ public:
   explicit QwenGpuExecutor(
       std::shared_ptr<const QwenGpuModel> model,
       std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production(),
+      int device = 0);
   ~QwenGpuExecutor();
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> Create(
       std::shared_ptr<const QwenGpuModel> model,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production(),
+      int device = 0);
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production(),
+      int device = 0);
+
+  /// Offloads prompt prefill to a second executor resident on another GPU.
+  /// The attached executor must share this executor's model weights (a second
+  /// QwenGpuModel built from the same GGUF on its device), policy and
+  /// context. ForwardPromptBatch then runs on the prefill device; the KV
+  /// cache, recurrent state and final logits are transferred back before it
+  /// returns, so decode continues here unchanged. Passing nullptr detaches.
+  void AttachPrefillExecutor(std::shared_ptr<QwenGpuExecutor> prefill);
+
+  [[nodiscard]] bool HasPrefillExecutor() const noexcept {
+    return prefill_ != nullptr && prefill_.get() != this;
+  }
+
+  [[nodiscard]] int GetDevice() const noexcept { return device_; }
 
   /// Generates tokens auto-regressively on GPU with streaming callback.
   std::vector<tokenization::TokenId> Generate(
@@ -613,6 +637,21 @@ private:
   [[nodiscard]] tokenization::TokenId ForwardPromptChunk(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos, bool compute_logits);
+  /// Runs the whole prompt batch on the attached prefill executor and pulls
+  /// the resulting state back. Used by ForwardPromptBatch when offloading.
+  [[nodiscard]] tokenization::TokenId ForwardPromptBatchOffloaded(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t start_pos, bool compute_logits);
+  /// Copies this arena's state at `valid_context` into `target`'s arena
+  /// (KV rows [0, valid_context) and the recurrent state), across devices.
+  void ExportStateTo(QwenGpuExecutor& target, std::uint32_t valid_context);
+  /// Copies KV rows [first, end) and the recurrent state from `source`'s
+  /// arena into this arena, across devices, without disturbing anything else.
+  void ImportStateFrom(QwenGpuExecutor& source, std::uint32_t first,
+                       std::uint32_t end);
+  void InvalidatePrefillSync() noexcept {
+    prefill_synced_context_.reset();
+  }
   [[nodiscard]] std::vector<tokenization::TokenId>
   ForwardDecodeEquivalentVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,
@@ -622,7 +661,13 @@ private:
   const models::QwenModelWeights& weights_;
   const tokenization::QwenTokenizer* tokenizer_;
   const QwenExecutionPolicy policy_;
+  const int device_;
   QwenGpuArena arena_;
+  /// Second-GPU prefill offload target and the context up to which its arena
+  /// is known to mirror this one. Any operation that mutates this arena's
+  /// state outside the offload path clears the sync marker.
+  std::shared_ptr<QwenGpuExecutor> prefill_;
+  std::optional<std::uint32_t> prefill_synced_context_;
   const detail::HipGraphCaptureKey graph_key_;
   detail::HipGraphDecodeExecutor graph_executor_;
   models::qwen::vision::DeviceInput vision_input_;

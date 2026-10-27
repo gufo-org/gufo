@@ -1,9 +1,11 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <stdexcept>
 #include <thread>
 
+#include "src/core/hip/device.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
@@ -45,6 +47,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptBatch(
   if (prompt_tokens.empty()) {
     return 0;
   }
+  // Second-GPU prefill offload: image prompts run locally because the vision
+  // encoder is resident on the primary device.
+  if (HasPrefillExecutor() && VisionLayout().images.empty()) {
+    return ForwardPromptBatchOffloaded(prompt_tokens, start_pos,
+                                       compute_logits);
+  }
   replaying_ssm_state_ = false;
   arena_.DisableSsmReplayCapture();
   if (capture_prompt_hidden_) {
@@ -76,6 +84,53 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptBatch(
                            start_pos + static_cast<std::uint32_t>(offset),
                            compute_logits && is_last);
   }
+  return next_token;
+}
+
+tokenization::TokenId QwenGpuExecutor::ForwardPromptBatchOffloaded(
+    std::span<const tokenization::TokenId> prompt_tokens,
+    std::uint32_t start_pos, bool compute_logits) {
+  const std::size_t end_pos =
+      static_cast<std::size_t>(start_pos) + prompt_tokens.size();
+  if (end_pos > arena_.GetMaxContext()) {
+    throw std::length_error("prompt exceeds the GPU context length");
+  }
+  replaying_ssm_state_ = false;
+  arena_.DisableSsmReplayCapture();
+
+  // The prefill arena mirrors this arena up to the sync marker; anything else
+  // (a cold start, a restored branch, a resumed chunked prefill after decode)
+  // re-exports the prefix state before the new tokens run on the second GPU.
+  if (!prefill_synced_context_ || *prefill_synced_context_ != start_pos)
+    ExportStateTo(*prefill_, start_pos);
+  prefill_->SetCancellationCheck(cancellation_check_);
+  prefill_->SetPromptHiddenCapture(capture_prompt_hidden_,
+                                   arena_.GetTargetLayerCapture());
+  const tokenization::TokenId next_token = prefill_->ForwardPromptBatch(
+      prompt_tokens, start_pos, compute_logits);
+
+  // Pull the produced state back: recurrent state, the new KV rows and, when
+  // logits were computed, the final logit row decode samples from.
+  ImportStateFrom(*prefill_, start_pos, static_cast<std::uint32_t>(end_pos));
+  if (compute_logits)
+    CrossDeviceCopy(arena_.d_logits, device_, prefill_->arena_.d_logits,
+                    prefill_->device_,
+                    weights_.config.vocab_size * sizeof(float));
+  if (capture_prompt_hidden_) {
+    const auto captured = prefill_->GetPromptHiddenStates();
+    h_prompt_hidden_.Clear();
+    if (!captured.empty()) {
+      const std::size_t captured_layers =
+          std::max<std::size_t>(arena_.GetTargetLayerCapture().size(), 1U);
+      const std::size_t row = captured_layers * weights_.config.hidden_size;
+      h_prompt_hidden_.Reserve(captured.size(),
+                               std::size_t{GetMaxPromptBatch()} * row);
+      h_prompt_hidden_.Resize(captured.size());
+      std::memcpy(h_prompt_hidden_.Data(), captured.data(),
+                  captured.size() * sizeof(float));
+    }
+  }
+  prefill_synced_context_ = static_cast<std::uint32_t>(end_pos);
   return next_token;
 }
 

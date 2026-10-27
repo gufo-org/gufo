@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
+#include "src/core/hip/device.hpp"
 #include "src/core/hip/hip_utils.hpp"
 
 namespace gufo::hip {
@@ -57,20 +58,23 @@ const QwenGpuModel& RequireModel(
 
 QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
                                  std::uint32_t max_context,
-                                 QwenExecutionPolicy policy)
+                                 QwenExecutionPolicy policy, int device)
     : model_(std::move(model)),
       weights_(RequireModel(model_).GetWeights()),
       tokenizer_(&model_->GetTokenizer()),
       policy_(policy),
-      arena_(weights_.config, max_context, policy_),
+      device_(device),
+      arena_(weights_.config, max_context, policy_, device),
       graph_key_(BuildGraphCaptureKey(weights_, policy_, max_context)),
       h_logits_(weights_.config.vocab_size, 0.0F) {
+  const DeviceGuard guard(device_);
   AllocateGpuSamplingWorkspace(&sampling_workspace_, weights_.config.vocab_size,
                                max_context);
   detail::EmitQwenExecutionPolicy(policy_.Fingerprint());
 }
 
 QwenGpuExecutor::~QwenGpuExecutor() {
+  const DeviceGuard guard(device_);
   if (continuation_hooks_)
     continuation_hooks_->BeforeRelease();
   (void)hipStreamSynchronize(arena_.stream);
@@ -130,6 +134,8 @@ QwenGpuMemoryUsage QwenGpuExecutor::GetMemoryUsage() const {
 }
 
 void QwenGpuExecutor::Reset() noexcept {
+  InvalidatePrefillSync();
+  const DeviceGuard guard(device_);
   try {
     if (continuation_hooks_)
       continuation_hooks_->BeforeReset();
@@ -159,9 +165,142 @@ void QwenGpuExecutor::Reset() noexcept {
 std::unique_ptr<QwenGpuSnapshot> QwenGpuExecutor::SaveSnapshot(
     std::uint32_t valid_context) {
   CheckReset();
+  const DeviceGuard guard(device_);
   auto snapshot = arena_.SaveSnapshot(valid_context);
   snapshot->vision_layout_ = vision_input_.layout().Prefix(valid_context);
   return snapshot;
+}
+
+void QwenGpuExecutor::AttachPrefillExecutor(
+    std::shared_ptr<QwenGpuExecutor> prefill) {
+  if (prefill != nullptr) {
+    if (prefill.get() == this)
+      throw std::invalid_argument(
+          "a Qwen executor cannot offload prefill to itself");
+    if (prefill->GetMaxContext() < arena_.GetMaxContext())
+      throw std::invalid_argument(
+          "the prefill executor context must cover the primary context");
+    if (prefill->GetExecutionPolicy().Fingerprint() != policy_.Fingerprint())
+      throw std::invalid_argument(
+          "the prefill executor must share the primary execution policy");
+  }
+  prefill_ = std::move(prefill);
+  InvalidatePrefillSync();
+}
+
+void QwenGpuExecutor::ExportStateTo(QwenGpuExecutor& target,
+                                    std::uint32_t valid_context) {
+  auto snapshot = SaveSnapshot(valid_context);
+  {
+    // The clone's planes live on the target device; allocate, transfer and
+    // restore with that device current so every HIP call binds correctly.
+    const DeviceGuard guard(target.device_);
+    QwenGpuSnapshot clone;
+    clone.num_layers_ = snapshot->num_layers_;
+    clone.attention_layers_ = snapshot->attention_layers_;
+    clone.full_attention_interval_ = snapshot->full_attention_interval_;
+    clone.kv_width_ = snapshot->kv_width_;
+    clone.max_context_ = snapshot->max_context_;
+    clone.valid_context_ = snapshot->valid_context_;
+    clone.kv_storage_ = snapshot->kv_storage_;
+    clone.recurrent_state_storage_ = snapshot->recurrent_state_storage_;
+    clone.kv_elements_per_plane_ = snapshot->kv_elements_per_plane_;
+    clone.conv_elements_per_layer_ = snapshot->conv_elements_per_layer_;
+    clone.deltanet_elements_per_layer_ = snapshot->deltanet_elements_per_layer_;
+    clone.conv_elements_ = snapshot->conv_elements_;
+    clone.deltanet_elements_ = snapshot->deltanet_elements_;
+    clone.payload_bytes_ = snapshot->payload_bytes_;
+    clone.vision_layout_ = snapshot->vision_layout_;
+
+    const std::size_t kv_f32_bytes =
+        clone.kv_elements_per_plane_ * 2 * sizeof(float);
+    const std::size_t kv_f16_bytes =
+        clone.kv_elements_per_plane_ * 2 * sizeof(std::uint16_t);
+    const std::size_t conv_bytes = clone.conv_elements_ * sizeof(float);
+    const std::size_t deltanet_bytes =
+        clone.deltanet_elements_ *
+        QwenRecurrentStateElementBytes(clone.recurrent_state_storage_);
+    if (snapshot->d_kv_f16_ != nullptr)
+      HIP_CHECK(hipMalloc(&clone.d_kv_f16_, kv_f16_bytes));
+    if (snapshot->d_kv_f32_ != nullptr)
+      HIP_CHECK(hipMalloc(&clone.d_kv_f32_, kv_f32_bytes));
+    HIP_CHECK(hipMalloc(&clone.d_ssm_conv_, conv_bytes));
+    HIP_CHECK(hipMalloc(&clone.d_ssm_deltanet_, deltanet_bytes));
+
+    if (clone.d_kv_f16_ != nullptr)
+      CrossDeviceCopy(clone.d_kv_f16_, target.device_, snapshot->d_kv_f16_,
+                      device_, kv_f16_bytes);
+    if (clone.d_kv_f32_ != nullptr)
+      CrossDeviceCopy(clone.d_kv_f32_, target.device_, snapshot->d_kv_f32_,
+                      device_, kv_f32_bytes);
+    CrossDeviceCopy(clone.d_ssm_conv_, target.device_, snapshot->d_ssm_conv_,
+                    device_, conv_bytes);
+    CrossDeviceCopy(clone.d_ssm_deltanet_, target.device_,
+                    snapshot->d_ssm_deltanet_, device_, deltanet_bytes);
+
+    target.arena_.RestoreSnapshot(clone);
+  }
+}
+
+void QwenGpuExecutor::ImportStateFrom(QwenGpuExecutor& source,
+                                      std::uint32_t first,
+                                      std::uint32_t end) {
+  const auto& config = weights_.config;
+  const std::uint32_t attention_layers = config.FullAttentionLayerCount();
+  const std::uint32_t kv_width = config.num_key_value_heads * config.head_dim;
+  const std::size_t recurrent_layers = config.num_layers - attention_layers;
+  const std::size_t conv_bytes =
+      recurrent_layers * config.SsmQkvSize() * config.ssm_conv_kernel *
+      sizeof(float);
+  const std::size_t deltanet_bytes =
+      recurrent_layers * config.ssm_time_step_rank * config.ssm_state_size *
+      config.SsmValueSize() *
+      QwenRecurrentStateElementBytes(policy_.recurrent_state_storage);
+  CrossDeviceCopy(arena_.d_ssm_conv_state, device_,
+                  source.arena_.d_ssm_conv_state, source.device_, conv_bytes);
+  CrossDeviceCopy(arena_.d_ssm_deltanet_state, device_,
+                  source.arena_.d_ssm_deltanet_state, source.device_,
+                  deltanet_bytes);
+  if (end <= first)
+    return;
+  const std::size_t span_rows = end - first;
+  if (policy_.UsesFp16AttentionKv()) {
+    // Token-major FP16 KV: one row per full-attention layer, positions
+    // contiguous inside the row, so the delta is a strided 2D copy.
+    const std::size_t pitch = static_cast<std::size_t>(arena_.GetMaxContext()) *
+                              kv_width * sizeof(std::uint16_t);
+    const std::size_t width_bytes =
+        span_rows * kv_width * sizeof(std::uint16_t);
+    const std::size_t offset =
+        static_cast<std::size_t>(first) * kv_width * sizeof(std::uint16_t);
+    const std::size_t plane_bytes = pitch * attention_layers;
+    for (std::size_t plane = 0; plane < 2; ++plane)
+      CrossDeviceCopy2D(
+          static_cast<std::uint8_t*>(arena_.d_attention_kv_f16) +
+              plane * plane_bytes + offset,
+          device_, pitch,
+          static_cast<const std::uint8_t*>(source.arena_.d_attention_kv_f16) +
+              plane * plane_bytes + offset,
+          source.device_, pitch, width_bytes, attention_layers);
+    return;
+  }
+  // Head-major FP32 KV: one row per (layer, key/value head) pair.
+  const std::size_t pitch = static_cast<std::size_t>(arena_.GetMaxContext()) *
+                            config.head_dim * sizeof(float);
+  const std::size_t rows =
+      static_cast<std::size_t>(attention_layers) * config.num_key_value_heads;
+  const std::size_t width_bytes = span_rows * config.head_dim * sizeof(float);
+  const std::size_t offset =
+      static_cast<std::size_t>(first) * config.head_dim * sizeof(float);
+  const std::size_t plane_bytes = pitch * rows;
+  for (std::size_t plane = 0; plane < 2; ++plane)
+    CrossDeviceCopy2D(
+        reinterpret_cast<std::uint8_t*>(arena_.d_kv_cache) +
+            plane * plane_bytes + offset,
+        device_, pitch,
+        reinterpret_cast<const std::uint8_t*>(source.arena_.d_kv_cache) +
+            plane * plane_bytes + offset,
+        source.device_, pitch, width_bytes, rows);
 }
 
 void QwenGpuExecutor::ConfigureVision(
@@ -178,6 +317,8 @@ void QwenGpuExecutor::ConfigureVision(
 
 void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
   CheckReset();
+  InvalidatePrefillSync();
+  const DeviceGuard guard(device_);
   models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
@@ -197,6 +338,8 @@ void QwenGpuExecutor::RestoreCompactSnapshot(
     std::span<const std::uint8_t> payload,
     std::uint32_t expected_valid_context) {
   CheckReset();
+  InvalidatePrefillSync();
+  const DeviceGuard guard(device_);
   models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
@@ -226,6 +369,7 @@ void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
 
 void QwenGpuExecutor::RestoreState() {
   CheckReset();
+  InvalidatePrefillSync();
   models::qwen::ContinuationRestore restore(continuation_hooks_, true);
   if (arena_.IsSsmReplayCaptureActive())
     arena_.DisableSsmReplayCapture();

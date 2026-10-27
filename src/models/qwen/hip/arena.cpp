@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "src/core/hip/device.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
@@ -701,12 +702,14 @@ void QwenGpuArena::RestoreCompactSnapshot(
 
 QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
                            std::uint32_t max_context,
-                           QwenExecutionPolicy policy)
+                           QwenExecutionPolicy policy, int device)
     : config_(config),
       max_context_(std::max(max_context, 1U)),
       max_batch_(std::min(max_context_, kMaxPromptBatch)),
-      policy_(policy) {
+      policy_(policy),
+      device_(device) {
   try {
+    DeviceGuard guard(device_);
     HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     HIPBLAS_CHECK(hipblasCreate(&hipblas_handle));
     HIPBLAS_CHECK(hipblasSetStream(hipblas_handle, stream));
@@ -915,6 +918,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
       max_context_(other.max_context_),
       max_batch_(other.max_batch_),
       policy_(other.policy_),
+      device_(other.device_),
       target_layer_ids_(std::move(other.target_layer_ids_)) {
   d_hidden = other.d_hidden;
   d_normed = other.d_normed;
@@ -1018,6 +1022,8 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     max_batch_ = other.max_batch_;
     policy_ = other.policy_;
     target_layer_ids_ = std::move(other.target_layer_ids_);
+    // device_ is const; move assignment only ever runs between arenas on the
+    // same device in this codebase, and FreeAll above already released ours.
     d_hidden = other.d_hidden;
     d_normed = other.d_normed;
     d_q = other.d_q;
@@ -1151,6 +1157,7 @@ void QwenGpuArena::Reset() {
 }
 
 void QwenGpuArena::FreeAll() noexcept {
+  const DeviceGuard guard(device_);
   if (d_hidden != nullptr)
     LogCleanupError(hipFree(d_hidden));
   if (d_normed != nullptr)

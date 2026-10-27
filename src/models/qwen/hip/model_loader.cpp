@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include "src/core/hip/device.hpp"
 #include "src/core/hip/weight_upload.hpp"
 #include "src/core/platform/pages.hpp"
 #include "src/core/platform/prefault.hpp"
@@ -146,7 +147,8 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
 
 [[nodiscard]] bool CreateWeightRegions(
     const core::GgufReader& reader,
-    std::vector<QwenGpuWeightRegion>& weight_regions, std::string* error_msg) {
+    std::vector<QwenGpuWeightRegion>& weight_regions, std::string* error_msg,
+    int device) {
   const auto source_regions = reader.GetMappedRegions();
   if (source_regions.empty()) {
     if (error_msg != nullptr) {
@@ -162,6 +164,13 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
     auto& destination = weight_regions[i];
     hipError_t map_error;
     try {
+      if (device != 0) {
+        // Host-registered unified-memory pages are not addressable by a
+        // second GPU; place the weights device-resident on `device`.
+        map_error = AllocateDeviceRegion(source, destination);
+        if (map_error == hipSuccess)
+          device_regions.push_back(i);
+      } else {
       bool source_was_read = false;
       map_error = MapRegisteredRegion(source, destination, source_was_read);
       if (map_error != hipSuccess) {
@@ -180,6 +189,7 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
             device_regions.push_back(i);
           }
         }
+      }
       }
     } catch (const std::exception& e) {
       ReleaseWeightRegions(weight_regions);
@@ -261,13 +271,15 @@ std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
 
 std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::shared_ptr<models::qwen::vision::Encoder> vision) {
+    std::shared_ptr<models::qwen::vision::Encoder> vision, int device) {
   if (reader == nullptr) {
     if (error_msg != nullptr) {
       *error_msg = "GGUF reader must not be null";
     }
     return nullptr;
   }
+
+  const DeviceGuard guard(device);
 
   if (!tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader,
                                                             error_msg)) {
@@ -285,7 +297,7 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     return nullptr;
 
   std::vector<QwenGpuWeightRegion> weight_regions;
-  if (!CreateWeightRegions(*reader, weight_regions, error_msg)) {
+  if (!CreateWeightRegions(*reader, weight_regions, error_msg, device)) {
     return nullptr;
   }
 
@@ -323,7 +335,7 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
     std::shared_ptr<const QwenGpuModel> model, std::string* error_msg,
-    std::uint32_t max_context, QwenExecutionPolicy policy) {
+    std::uint32_t max_context, QwenExecutionPolicy policy, int device) {
   if (model == nullptr) {
     if (error_msg != nullptr) {
       *error_msg = "Qwen GPU model must not be null";
@@ -342,17 +354,18 @@ std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
   }
 
   return std::make_unique<QwenGpuExecutor>(std::move(model), max_context,
-                                           policy);
+                                           policy, device);
 }
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::uint32_t max_context, QwenExecutionPolicy policy) {
-  auto model = QwenGpuModel::CreateFromGguf(std::move(reader), error_msg);
+    std::uint32_t max_context, QwenExecutionPolicy policy, int device) {
+  auto model =
+      QwenGpuModel::CreateFromGguf(std::move(reader), error_msg, {}, device);
   if (model == nullptr) {
     return nullptr;
   }
-  return Create(std::move(model), error_msg, max_context, policy);
+  return Create(std::move(model), error_msg, max_context, policy, device);
 }
 
 }  // namespace gufo::hip

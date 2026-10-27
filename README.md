@@ -123,6 +123,10 @@ EOS or the context is full. `--context N` sets context capacity per session;
 `--max-tokens N` sets a default response limit that clients can override.
 Reasoning tokens count toward that response limit.
 
+On a machine with a second GPU, `gufo serve llm --prefill-device N` runs Qwen
+prompt processing on that device and keeps decode on the Strix Halo APU; see
+[second-GPU prompt prefill](docs/MULTI-GPU.md).
+
 ## Harness notes
 
 - **Qwen with Codex:** Codex sends developer messages mid-conversation, after

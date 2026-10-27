@@ -36,6 +36,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
+#include "src/core/hip/device.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/host_allocations.hpp"
@@ -1046,8 +1047,12 @@ public:
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model = nullptr,
       speculative::SpeculativeOptions speculative_options = {},
       std::string artifact_fingerprint = {},
-      std::string draft_artifact_fingerprint = {})
+      std::string draft_artifact_fingerprint = {},
+      std::shared_ptr<const hip::QwenGpuModel> prefill_model = nullptr,
+      int prefill_device = 0)
       : model_(std::move(model)),
+        prefill_model_(std::move(prefill_model)),
+        prefill_device_(prefill_device),
         dflash_model_(std::move(dflash_model)),
         max_context_(max_context),
         speculative_options_(speculative_options),
@@ -1085,7 +1090,7 @@ public:
                 .max_context = max_context_,
                 .max_draft_tokens = speculative_options_.max_draft_tokens,
                 .policy = speculative_options_.dflash_policy},
-            &ledger),
+            &ledger, prefill_model_, prefill_device_),
         ledger);
     // Qwen's 256-row chunks are small. Preserve a bounded group before
     // waiting, instead of synchronizing every half-MiB range individually.
@@ -1500,6 +1505,8 @@ private:
 
   mutable models::qwen::vision::ImageCache image_cache_;
   std::shared_ptr<const hip::QwenGpuModel> model_;
+  std::shared_ptr<const hip::QwenGpuModel> prefill_model_;
+  int prefill_device_{0};
   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
   std::uint32_t max_context_;
   speculative::SpeculativeOptions speculative_options_;
@@ -3055,7 +3062,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+                            bool enable_yarn, int prefill_device) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3102,6 +3109,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
 
   if (reader->GetMetadataString("general.architecture") == "deepseek4") {
+    if (prefill_device != 0) {
+      SetError(error,
+               "--prefill-device applies to Qwen3.8-27B HTTP models");
+      return false;
+    }
     if (!vision_model_path.empty()) {
       SetError(error, "DeepSeek does not support --mmproj");
       return false;
@@ -3157,6 +3169,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
+    if (prefill_device != 0) {
+      SetError(error,
+               "--prefill-device applies to Qwen3.8-27B HTTP models");
+      return false;
+    }
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
         speculative_config.backend != TextSpeculativeBackend::kMtp) {
       SetError(error,
@@ -3258,6 +3275,27 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     SetError(error, "Failed to create GPU model: " + load_error);
     return false;
   }
+  std::shared_ptr<const hip::QwenGpuModel> prefill_model;
+  if (prefill_device != 0) {
+    const int device_count = hip::GetDeviceCount();
+    if (prefill_device < 0 || prefill_device >= device_count) {
+      SetError(error,
+               "--prefill-device names a GPU that does not exist: " +
+                   std::to_string(device_count) + " device(s) visible");
+      return false;
+    }
+    Logger::Info("loader", "event=load_phase phase=prefill_device_weights " +
+                               Logger::MemoryStatus());
+    std::string prefill_error;
+    prefill_model = hip::QwenGpuModel::CreateFromGguf(reader, &prefill_error,
+                                                      nullptr, prefill_device);
+    if (prefill_model == nullptr) {
+      SetError(error, "Failed to create prefill GPU model on device " +
+                          std::to_string(prefill_device) + ": " +
+                          prefill_error);
+      return false;
+    }
+  }
   if (DiskCacheEnabled(resolved_disk_cache_config) &&
       resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
       !FingerprintArtifact(
@@ -3267,7 +3305,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   return load(std::move(model), error, max_context, session_count,
               prefill_policy, scheduler_policy, speculative_config,
-              std::move(resolved_disk_cache_config), ram_cache_config);
+              std::move(resolved_disk_cache_config), ram_cache_config,
+              std::move(prefill_model), prefill_device);
 #else
   (void)model_path;
   (void)max_context;
@@ -3279,6 +3318,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)vision_model_path;
   (void)ram_cache_config;
   (void)enable_yarn;
+  (void)prefill_device;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif
@@ -3292,7 +3332,9 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
                             TextSchedulerPolicy scheduler_policy,
                             TextSpeculativeConfig speculative_config,
                             TextDiskCacheConfig disk_cache_config,
-                            TextRunnerRamCacheOptions ram_cache_config) {
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            std::shared_ptr<const hip::QwenGpuModel> prefill_model,
+                            int prefill_device) {
   if (model == nullptr) {
     SetError(error, "Qwen GPU model must not be null");
     return false;
@@ -3400,7 +3442,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
         speculative_options, disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint);
+        disk_cache_config.draft_model_artifact_fingerprint,
+        std::move(prefill_model), prefill_device);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

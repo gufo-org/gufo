@@ -603,6 +603,7 @@ void PrintServeHelp(std::string_view program_name,
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
     bool enable_yarn = false;
+    int prefill_device = 0;
     std::string trace_path;
 
     gufo::cli::ArgParser parser(
@@ -627,6 +628,12 @@ void PrintServeHelp(std::string_view program_name,
                    "Flash-Next: static YaRN, required for --context above the "
                    "native 262144; it applies to every request",
                    "Model", &enable_yarn);
+    parser.AddOption(
+        "", "--prefill-device", "N",
+        "Qwen3.8-27B: run prompt prefill on HIP device N (a second GPU) and "
+        "decode on device 0; KV and recurrent state transfer back after each "
+        "prefill (default: 0 = disabled)",
+        "Model", &prefill_device);
 
     // Sampling Defaults
     parser.AddOption(
@@ -1219,6 +1226,7 @@ int RunServe(std::span<const char* const> args) {
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
     bool enable_yarn = false;
+    int prefill_device = 0;
     std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
@@ -1254,6 +1262,12 @@ int RunServe(std::span<const char* const> args) {
                        "Flash-Next: static YaRN, required for --context above "
                        "the native 262144; it applies to every request",
                        "Model", &enable_yarn);
+    llm_parser.AddOption(
+        "", "--prefill-device", "N",
+        "Qwen3.8-27B: run prompt prefill on HIP device N (a second GPU) and "
+        "decode on device 0; KV and recurrent state transfer back after each "
+        "prefill (default: 0 = disabled)",
+        "Model", &prefill_device);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
@@ -1522,7 +1536,7 @@ int RunServe(std::span<const char* const> args) {
         },
         vision_model_path,
         server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes},
-        enable_yarn);
+        enable_yarn, prefill_device);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
