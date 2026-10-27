@@ -7,7 +7,6 @@
 #include <map>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "src/models/qwen3_tts/audio.hpp"
@@ -46,8 +45,8 @@ struct TtsServiceOptions {
   Runner runner;
 };
 
-/// Synchronous, bounded native HIP Qwen3-TTS service. The official Python
-/// implementation is used only by offline validation tools.
+/// Synchronous, bounded native HIP TTS service (supports Qwen3-TTS and Fish
+/// Drama-3).
 class TtsService {
 public:
   explicit TtsService(TtsServiceOptions options);
@@ -67,6 +66,7 @@ public:
   [[nodiscard]] const TtsVoicePreset* voice_preset(
       const std::string& name) const;
   [[nodiscard]] models::qwen3_tts::ModelVariant variant() const noexcept;
+  [[nodiscard]] bool is_fish_drama3() const noexcept;
 
   [[nodiscard]] bool Synthesize(
       const models::qwen3_tts::SynthesisRequest& request,

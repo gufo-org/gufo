@@ -52,7 +52,7 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
       start["sentence_index"] = static_cast<std::int64_t>(sentence);
       start["sentence_text"] = std::move(text);
       start["format"] = body.member_str("response_format");
-      start["sample_rate"] = 24000;
+      start["sample_rate"] = service.is_fish_drama3() ? 44100 : 24000;
       if (!socket.SendText(start.dump()))
         return false;
       auto response = HandleAudioTtsApiRequest(speech, service);
