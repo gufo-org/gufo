@@ -359,10 +359,9 @@ struct GdnCheckpoint {
 /// (K = v_heads * d) instead of `out`. With null `out_q8`, a non-null
 /// `out_half` receives F16 rows instead of `out`. With both null, a non-null
 /// `out_q8_1` also receives the rows' unpadded Q8_1 rows (as
-/// qfn_mmq_quantize_q8_1 writes them; d == 128). Its reader of `z` (the
-/// chunked scan with the fused norm, or the epilogue) waits for `z_ready`
-/// when it is set. Returns false when that wait, or the copy of the initial
-/// state for a checkpoint inside the first chunk, cannot be queued. `convolved`
+/// qfn_mmq_quantize_q8_1 writes them; d == 128). The epilogue, the reader
+/// of `z`, waits for `z_ready` when it is set. Returns false when that wait
+/// cannot be queued. `convolved`
 /// consumes convolution rows already in conv_scratch; it requires null
 /// speculative snapshots.
 bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
@@ -520,10 +519,6 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t kv_heads, std::uint32_t d,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only = false);
-
-/// Whether wide prefills take the chunked DeltaNet recurrence: the scan
-/// needs Clang 23 or newer (ROCm 10); older compilers keep the row split.
-[[nodiscard]] bool GdnChunkedScanAvailable();
 
 /// counts[e] = number of (token, slot) pairs routed to expert e.
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,

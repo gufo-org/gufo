@@ -1,5 +1,36 @@
 # Qwen3.8 Flash-Next experiments
 
+## Chunked DeltaNet removed (October 27, 2026)
+
+The release-tier functional `tool-reasoning` suite failed in both MTP and AR
+modes at `literal_protocol_raw_xml`: asked to echo a short XML literal with a
+tool declared (a 299-token prompt), Flash-Next answered "Hello! I'm here to
+help you with any questions or tasks you might have." at temperature 0 and
+presence penalty 0.
+
+- Bisect with the `rocm10` package of each commit (ROCm 10.1): `4a4a47c`
+  echoes the literal, `538e2fd` (#758) greets.
+- Main with the chunked scan compiled out echoes it, with and without MTP.
+- llama.cpp b11382 on Gufo's rendered prompt ranks `<` first (log
+  probability −0.715) and `Hello` third (−2.12): the scan flips a 1.4-nat
+  greedy decision. The same request without tools (48 tokens, below the
+  scan's 256-token threshold) echoes on every build.
+- The scan's F16 Q/K/T/P operands put its layer error 500 times above the
+  F32 recurrence (2.6e-4 against 5.1e-7 relative RMS), and its chat prompt
+  NLL rose by a significant 0.0145 nats (table below).
+
+The scan, its prep, the fused norm and their operator test are removed: about
+4 % of prefill does not justify flipping greedy decisions. Both side streams
+stay; they are lossless, and beside the row-split recurrence on ROCm 10.1
+they still shorten short passes. `gufo bench -n 0 -r 3`, two alternated
+rounds, 55 °C cooldown before each process:
+
+| Build | pp512 | pp2048 | pp4096 |
+| --- | ---: | ---: | ---: |
+| main (chunked scan, both side streams) | 1,348/1,346 | 1,936/1,932 | 2,010/1,993 |
+| row split, no side streams | 1,286/1,288 | 1,858/1,825 | 1,909/1,897 |
+| row split, both side streams (retained) | 1,331/1,329 | 1,855/1,853 | 1,916/1,908 |
+
 ## Sparse attention and routed repacks from the updated source branch (October 27, 2026)
 
 Ideas from the October 25–27 revision of halo-box/strix-llama.cpp's
@@ -44,7 +75,8 @@ ROCm 7.2.
 Builds on main `c0e0be58`, each with the fixture probe commit: lossless
 (L: side streams and mixer down tiles), + chunked DeltaNet and fused norm
 (G), + BF16 residual streams (B), and both (A, the head before the BF16
-residual streams were removed). G is now the branch head.
+residual streams were removed). G merged in #758; its chunked DeltaNet and
+fused norm were removed on October 27, which leaves L.
 `gufo bench -n 0 -r 3`, two round-robin rounds (pp512 from two dedicated
 rounds), tok/s as the mean of the rounds. NLL intervals are 95 % paired
 bootstraps from `f32_reference.py compare --against`; G's overall change is
@@ -72,10 +104,10 @@ experts 388 (DRAM floor about 305), dense F16 GEMMs about 350, HC combines
 
 | Experiment | Outcome |
 | --- | --- |
-| Shared expert on a side stream beside the routed experts | Retained: byte-identical logits. The two streams' kernels slow each other (routed gate/up 223 → 251 ms per pass), but the pass shortens: with chunked DeltaNet, disabling only this overlap gives 1,309/1,896/1,965 against 1,335/1,907/1,976 tok/s. |
-| GDN Z rows on a side stream after the QKV tiles | Retained: byte-identical. Beside the row-split recurrence (96 blocks) it was neutral at pp2048: the recurrence slowed 62 → 115 ms per pass. Starting Z together with QKV was also neutral. With chunked DeltaNet, disabling only this overlap gives 1,320/1,898/1,964 tok/s. |
-| Chunked WMMA DeltaNet for row-split prefills of 256+ tokens | Retained. 32-token chunks: parallel prep (L2 norms, log-decay prefix sums, `(I + A)^-1` by forward substitution, F16 Q/K/T/P), then one block per value head scanning the chunks with an F32 state in WMMA accumulators. V is read in F32 from the convolution output. The gates are computed in prep. A checkpoint inside a chunk does not change the pass: the scan saves the state at the chunk boundary before it, and the row split carries that copy over the remaining tokens (at most 31). With both overlaps, against main: 1,281/1,850/1,906 → 1,333/1,888/1,964 tok/s. `--validate-prefill 2048` against the sequential path: rmse 0.252 → 0.266, cosine 0.99694 → 0.99662. |
-| Gated norm inside the chunked scan | Retained: removes the epilogue pass and the raw F32 rows (22 ms per pp2048 pass). 1,335/1,907/1,976 → 1,344/1,928/1,993 tok/s. Last 64 rows of a 2,228-token prompt against main: KL 0.0098 → 0.0079 mean. |
+| Shared expert on a side stream beside the routed experts | Retained: byte-identical logits. The two streams' kernels slow each other (routed gate/up 223 → 251 ms per pass), but the pass shortens: with chunked DeltaNet, disabling only this overlap gives 1,309/1,896/1,965 against 1,335/1,907/1,976 tok/s. Kept after the chunked scan's [removal](#chunked-deltanet-removed-october-27-2026). |
+| GDN Z rows on a side stream after the QKV tiles | Retained: byte-identical. Beside the row-split recurrence (96 blocks) it was neutral at pp2048: the recurrence slowed 62 → 115 ms per pass. Starting Z together with QKV was also neutral. With chunked DeltaNet, disabling only this overlap gives 1,320/1,898/1,964 tok/s. Kept after the chunked scan's [removal](#chunked-deltanet-removed-october-27-2026). |
+| Chunked WMMA DeltaNet for row-split prefills of 256+ tokens | Rejected (lossy), removed on October 27 after merging in #758: on a 299-token tool prompt it turns a greedy literal echo into an unrelated greeting ([removal](#chunked-deltanet-removed-october-27-2026)). 32-token chunks: parallel prep (L2 norms, log-decay prefix sums, `(I + A)^-1` by forward substitution, F16 Q/K/T/P), then one block per value head scanning the chunks with an F32 state in WMMA accumulators. V is read in F32 from the convolution output. The gates are computed in prep. A checkpoint inside a chunk does not change the pass: the scan saves the state at the chunk boundary before it, and the row split carries that copy over the remaining tokens (at most 31). With both overlaps, against main: 1,281/1,850/1,906 → 1,333/1,888/1,964 tok/s. `--validate-prefill 2048` against the sequential path: rmse 0.252 → 0.266, cosine 0.99694 → 0.99662. |
+| Gated norm inside the chunked scan | Rejected: removed with the chunked scan on October 27. It removed the epilogue pass and the raw F32 rows (22 ms per pp2048 pass). 1,335/1,907/1,976 → 1,344/1,928/1,993 tok/s. Last 64 rows of a 2,228-token prompt against main: KL 0.0098 → 0.0079 mean. |
 | 32-row, rows-first W8A8 tiles for the mixer down up to 1,024 tokens | Retained: byte-identical. At pp512 the call falls from 187 to 165 µs (20 → 40 blocks); end to end it is within noise. At 2,048 tokens it is slower (649 vs 444 µs), so wider batches keep 64-row tiles. |
 | Residual streams kept as BF16 between two normed wide layers | Rejected (lossy), removed on October 27: on top of chunked DeltaNet it adds only 1.5–2 % (combination table above) for a measurable NLL cost, worst on tool text. On the F32 fixtures it raises the next-token NLL by 0.0175 nats (interval +0.003 to +0.033), mostly on chat and tool text. Only the two fused combines read the residual there. They hold BF16 (round to nearest even) at the front of each F32 row, convert at the PLE layer, the last layer and pass boundaries, and save 126 MB per layer at pp2048. Same-session A/B: 1,335/1,925/1,989 → 1,367/1,945/2,014 tok/s (repeat 1,286/1,933/1,983 → 1,367/1,954/2,026). F32 oracle in the table below. |
 | The same 32-row tiles for the shared expert | Rejected: the copies on the side stream only stretch beside the routed experts; the pass span is unchanged (393 → 394 ms at pp512). |
