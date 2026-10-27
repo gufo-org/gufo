@@ -2359,20 +2359,23 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
         n_tokens <= options_.max_batch && DenseF16Route(l.ssm_in, n_tokens)) {
       PrepareHalfInput(x, n_tokens, l.ssm_in.cols);
       // The Z rows feed only the output norm: the side stream computes them
-      // while the main stream runs the chunked recurrence. Beside the row
-      // split the two streams only slow each other (ROCm 7.2 pp2048
+      // beside the convolution boundary, the alpha/beta GEMM and the chunk
+      // prep; the chunked scan waits for them before it reads z. Beside the
+      // row split the two streams only slow each other (ROCm 7.2 pp2048
       // 1,851 -> 1,829 tok/s), so that build keeps Z on the main stream.
+      const bool z_side = GdnChunkedScanAvailable();
       convolved = DenseF16SsmGemm(
           l.ssm_in.data, static_cast<const __half*>(s_.x_half),
           l.ssm_conv1d.f32(), s.conv_state, s_.qkvz, s_.conv_scratch, n_tokens,
           l.ssm_in.rows, l.ssm_in.cols, channels, c.ssm_conv_kernel, stream_,
-          checkpoint.tokens, GdnChunkedScanAvailable() ? side_stream_ : nullptr,
-          side_start_);
-      if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
-                 error_msg)) {
-        return false;
+          checkpoint.tokens, z_side ? side_stream_ : nullptr, side_start_);
+      if (convolved && z_side) {
+        if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
+                   error_msg)) {
+          return false;
+        }
+        z_ready = side_done_;
       }
-      z_ready = convolved ? side_done_ : nullptr;
     }
     if (!projections_ready && !convolved &&
         !Dense(l.ssm_in, x, s_.qkvz, n_tokens, error_msg)) {
@@ -2413,16 +2416,20 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                         c.ssm_head_dim == 128 &&
                         l.ssm_out.type == GgmlType::kQ8_0 &&
                         l.ssm_out.cols == value_dim && UnpaddedQ8(value_dim);
-  GatedDeltaNet(qkv, qkv_stride, z, z_stride, s_.alpha_beta, l.ssm_conv1d.f32(),
-                l.ssm_a.f32(), l.ssm_dt.f32(), l.ssm_norm.f32(), s.conv_state,
-                s_.conv_scratch, s_.qn, s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
-                tiled && !half_output ? s_.x_q8t : nullptr,
-                speculative ? s.state_snapshots : RollbackRows{},
-                speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
-                c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
-                c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
-                convolved, c.rms_eps, stream_, out_half, checkpoint,
-                half_stride, out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready);
+  if (!GatedDeltaNet(qkv, qkv_stride, z, z_stride, s_.alpha_beta,
+                     l.ssm_conv1d.f32(), l.ssm_a.f32(), l.ssm_dt.f32(),
+                     l.ssm_norm.f32(), s.conv_state, s_.conv_scratch, s_.qn,
+                     s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
+                     tiled && !half_output ? s_.x_q8t : nullptr,
+                     speculative ? s.state_snapshots : RollbackRows{},
+                     speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
+                     c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
+                     c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
+                     convolved, c.rms_eps, stream_, out_half, checkpoint,
+                     half_stride, out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready)) {
+    AssignError(error_msg, "DeltaNet Z wait failed");
+    return false;
+  }
   if (!project_output) {
     return true;
   }
@@ -2686,9 +2693,14 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // which leave compute idle while they stream expert weights; the shared
   // expert writes only its own scratch, joined before the epilogue reads it.
   // Builds without the chunked recurrence run it in order: there it cost
-  // ROCm 7.2 prefill 1 to 3 % (pp2048 1,852 -> 1,823 tok/s).
-  const bool overlap =
-      GdnChunkedScanAvailable() && ExpertMatrixRows(n_tokens) && !last_only;
+  // ROCm 7.2 prefill 1 to 3 % (pp2048 1,852 -> 1,823 tok/s). Only the Q8_0
+  // shared expert overlaps: its kernels take stream_, while the BF16, F16
+  // and F32 routes go through BLAS handles bound to the main stream.
+  const bool overlap = GdnChunkedScanAvailable() &&
+                       ExpertMatrixRows(n_tokens) && !last_only &&
+                       l.shexp_gate.type == GgmlType::kQ8_0 &&
+                       l.shexp_up.type == GgmlType::kQ8_0 &&
+                       l.shexp_down.type == GgmlType::kQ8_0;
   const hipStream_t main = stream_;
   if (overlap) {
     if (!Check(hipEventRecord(side_start_, main), "side stream fork",
@@ -2719,11 +2731,24 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   };
   const bool shared_ok = shared_expert();
   stream_ = main;
-  if (!shared_ok || (overlap && !Check(hipEventRecord(side_done_, side_stream_),
-                                       "side stream join", error_msg))) {
+  if (overlap) {
+    if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
+               error_msg)) {
+      // Nothing to join: wait for the whole side stream instead.
+      (void)hipStreamSynchronize(side_stream_);
+      return false;
+    }
+    side_pending_ = true;
+  }
+  // Every exit, including errors, orders the main stream after the shared
+  // expert: its side-stream writes must not race the next pass.
+  struct JoinGuard {
+    const Executor* executor;
+    ~JoinGuard() { (void)executor->JoinSide(nullptr); }
+  } join_guard{this};
+  if (!shared_ok) {
     return false;
   }
-  side_pending_ = overlap;
   if (last_only && l.ffn_gate_exps.type == GgmlType::kQ8_0 &&
       l.ffn_up_exps.type == GgmlType::kQ8_0 &&
       l.ffn_down_exps.type == GgmlType::kQ8_0) {

@@ -7831,9 +7831,11 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      convolved, AttentionProjectionOutput{}, checkpoint_tokens);
   if (z_stream != nullptr) {
     // Start after the QKV tiles: both GEMMs are compute bound, the
-    // recurrence that follows them is not.
-    (void)hipEventRecord(z_start, stream);
-    (void)hipStreamWaitEvent(z_stream, z_start, 0);
+    // recurrence that follows them is not. If the fork cannot be ordered,
+    // the Z tiles stay on `stream`.
+    if (hipEventRecord(z_start, stream) != hipSuccess ||
+        hipStreamWaitEvent(z_stream, z_start, 0) != hipSuccess)
+      z_stream = stream;
     hipLaunchKernelGGL(
         (DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
         dim3(token_tiles, m / 256 - qkv_tiles), dim3(kThreads), 0, z_stream, w,
@@ -7984,7 +7986,7 @@ void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
                      destination, tokens, channels, history_rows);
 }
 
-void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
+bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t z_stride, const float* alpha_beta,
                    const float* conv_w, const float* a, const float* dt,
                    const float* norm_w, float* conv_state, float* conv_scratch,
@@ -8067,14 +8069,15 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
       // The F16 output rows take the gated norm in the scan itself.
       const bool fused_norm = out_q8 == nullptr && out_half != nullptr;
       if (fused_norm) {
-        if (z_ready != nullptr)
-          (void)hipStreamWaitEvent(stream, z_ready, 0);
+        if (z_ready != nullptr &&
+            hipStreamWaitEvent(stream, z_ready, 0) != hipSuccess)
+          return false;
         hipLaunchKernelGGL(
             GdnChunkScanKernel<true>, dim3(v_heads), dim3(256), 0, stream, qh,
             kh, conv_scratch, state, raw, t_tiles, p_tiles, gates, n_tokens,
             k_heads, v_heads, chunks, checkpoint, z, z_stride, norm_w, eps,
             out_half, out_half_stride != 0 ? out_half_stride : v_heads * d);
-        return;
+        return true;
       }
       hipLaunchKernelGGL(GdnChunkScanKernel<false>, dim3(v_heads), dim3(256), 0,
                          stream, qh, kh, conv_scratch, state, raw, t_tiles,
@@ -8105,8 +8108,9 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
         alpha_beta, a, dt, state, raw, state_snapshots, n_tokens, k_heads,
         v_heads, nullptr, 0, checkpoint);
   }
-  if (z_ready != nullptr)
-    (void)hipStreamWaitEvent(stream, z_ready, 0);
+  if (z_ready != nullptr &&
+      hipStreamWaitEvent(stream, z_ready, 0) != hipSuccess)
+    return false;
   hipLaunchKernelGGL(
       GdnEpilogueKernel<false>, dim3((n_tokens * v_heads + waves - 1) / waves),
       dim3(kThreads), 0, stream, raw, z, z_stride, norm_w, out, out_q8,
@@ -8114,6 +8118,7 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
       out_q8 == nullptr && out_half == nullptr && d == kGdnDim ? out_q8_1
                                                                : nullptr,
       out_half_stride);
+  return true;
 }
 
 bool GatedDeltaNetBatch(const GdnBatchItem* items, std::uint32_t count,

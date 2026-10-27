@@ -598,7 +598,7 @@ private:
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;
   mutable std::shared_ptr<void> checkpoint_storage_;
   /// The stream kernels are queued on. Overlapped work swaps in side_stream_
-  /// for its launches (SideStream) and joins back through side_done_.
+  /// for its launches and joins back through side_done_ (JoinSide).
   mutable hipStream_t stream_{nullptr};
   hipStream_t side_stream_{nullptr};
   hipEvent_t side_start_{nullptr};

@@ -21,8 +21,8 @@ running the reference again:
 
 `compare` expects DIR/NAME.bin for every prompt in the manifest, dumped with
 the manifest's batch and row count. With --against it also reports the paired
-per-position KL difference between the two builds with a bootstrap 95%
-interval.
+per-position KL and next-token NLL differences between the two builds with
+bootstrap 95% intervals (NLL also per prompt).
 """
 
 from __future__ import annotations
@@ -154,15 +154,34 @@ def summary(label: str, results: dict) -> None:
           f"{np.concatenate(every['ref']).mean():>8.4f}")
 
 
+def bootstrap(diff: np.ndarray, rng: np.random.Generator) -> tuple:
+    boot = [rng.choice(diff, size=len(diff)).mean() for _ in range(2000)]
+    lo, hi = np.quantile(boot, [0.025, 0.975])
+    return diff.mean(), lo, hi
+
+
 def paired(a: dict, b: dict, label_a: str, label_b: str) -> None:
     rng = np.random.default_rng(0)
     da = np.concatenate([a[n][0]["kl"] for n in a])
     db = np.concatenate([b[n][0]["kl"] for n in a])
-    diff = da - db
-    boot = [rng.choice(diff, size=len(diff)).mean() for _ in range(2000)]
-    lo, hi = np.quantile(boot, [0.025, 0.975])
-    print(f"\nKL({label_a}) - KL({label_b}): mean {diff.mean():+.5f}, "
-          f"95% interval [{lo:+.5f}, {hi:+.5f}] over {len(diff)} positions")
+    mean, lo, hi = bootstrap(da - db, rng)
+    print(f"\nKL({label_a}) - KL({label_b}): mean {mean:+.5f}, "
+          f"95% interval [{lo:+.5f}, {hi:+.5f}] over {len(da)} positions")
+    # Next-token NLL over the positions both builds score, overall and per
+    # prompt.
+    every = []
+    for name in a:
+        na, nb = a[name][0]["nll"], b[name][0]["nll"]
+        both = ~np.isnan(na) & ~np.isnan(nb)
+        diff = na[both] - nb[both]
+        every.append(diff)
+        mean, lo, hi = bootstrap(diff, rng)
+        print(f"NLL({label_a}) - NLL({label_b}) {name:<6}: mean {mean:+.4f}, "
+              f"95% interval [{lo:+.4f}, {hi:+.4f}] over {len(diff)} positions")
+    diff = np.concatenate(every)
+    mean, lo, hi = bootstrap(diff, rng)
+    print(f"NLL({label_a}) - NLL({label_b}) all   : mean {mean:+.4f}, "
+          f"95% interval [{lo:+.4f}, {hi:+.4f}] over {len(diff)} positions")
 
 
 def compare(args: argparse.Namespace) -> int:

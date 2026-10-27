@@ -250,7 +250,8 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 /// rows and must use DenseF16Gemm instead. Unsupported shapes launch nothing.
 /// A non-null `z_stream` receives the Z rows' tiles (the same products)
 /// after the QKV tiles (ordered through `z_start`), so they run beside the
-/// recurrence that does not read them.
+/// convolution boundary and the work that follows it until a reader of the
+/// Z rows waits for them.
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
@@ -358,11 +359,12 @@ struct GdnCheckpoint {
 /// (K = v_heads * d) instead of `out`. With null `out_q8`, a non-null
 /// `out_half` receives F16 rows instead of `out`. With both null, a non-null
 /// `out_q8_1` also receives the rows' unpadded Q8_1 rows (as
-/// qfn_mmq_quantize_q8_1 writes them; d == 128). The epilogue, the only
-/// reader of `z`, waits for `z_ready` when it is set. `convolved` consumes
-/// convolution rows already in conv_scratch; it requires null speculative
-/// snapshots.
-void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
+/// qfn_mmq_quantize_q8_1 writes them; d == 128). Its reader of `z` (the
+/// chunked scan with the fused norm, or the epilogue) waits for `z_ready`
+/// when it is set; returns false when that wait cannot be queued. `convolved`
+/// consumes convolution rows already in conv_scratch; it requires null
+/// speculative snapshots.
+bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t z_stride, const float* alpha_beta,
                    const float* conv_w, const float* a, const float* dt,
                    const float* norm_w, float* conv_state, float* conv_scratch,
