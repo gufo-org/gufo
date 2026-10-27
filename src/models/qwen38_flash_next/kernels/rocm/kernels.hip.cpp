@@ -8045,11 +8045,12 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
   }
   const unsigned waves = kThreads / 32;
   // Long prefills take the chunked WMMA recurrence. Its scratch reuses the
-  // row-split buffers: q/k rows in qn, T, P and the gates in kn.
+  // row-split buffers: q/k rows in qn, T, P and the gates in kn, which holds
+  // them for up to three value heads per key head.
   const bool chunked = kGdnChunkedScan && row_split && d == kGdnDim &&
                        state_snapshots.rows[0] == nullptr &&
                        n_tokens >= kGdnChunkMinTokens &&
-                       v_heads % k_heads == 0 && v_heads / k_heads <= 4;
+                       v_heads % k_heads == 0 && v_heads / k_heads <= 3;
   if (chunked) {
     if constexpr (kGdnChunkedScan) {
       const std::uint32_t chunks = (n_tokens + kGdnChunk - 1) / kGdnChunk;

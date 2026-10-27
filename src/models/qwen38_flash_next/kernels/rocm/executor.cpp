@@ -2703,8 +2703,9 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
   // A wide batch runs them on the side stream beside the routed experts,
-  // which leave compute idle while they stream expert weights; the shared
-  // expert writes only its own scratch, joined before the epilogue reads it.
+  // which leave compute idle while they stream expert weights. The shared
+  // expert writes its own scratch and may quantize x into s_.x_q8t, so no
+  // main-stream work may use s_.x_q8t before JoinSide.
   // Builds without the chunked recurrence run it in order: there it cost
   // ROCm 7.2 prefill 1 to 3 % (pp2048 1,852 -> 1,823 tok/s). Only the Q8_0
   // shared expert overlaps: its kernels take stream_, while the BF16, F16

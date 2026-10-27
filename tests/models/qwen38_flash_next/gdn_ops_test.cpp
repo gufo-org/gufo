@@ -730,7 +730,7 @@ int RunChunkedCase(std::uint32_t kTokens) {
   HipBuffer<float> captured_conv(kConvState + kGuard);
   double checkpoint_error = 0.0;
   std::vector<float> inside_chunk;  // the state captured at kTokens - 5
-  for (const std::uint32_t at : {288U, kTokens - 5, kTokens}) {
+  for (const std::uint32_t at : {7U, 288U, kTokens - 5, kTokens}) {
     if (at > kTokens)
       continue;
     Upload(&captured_state,
