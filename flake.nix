@@ -202,6 +202,8 @@
             ];
             env = {
               TORCH_HOME = "${alexnetTorchHome system}";
+              # CMake links HIP binaries against the patched ROCr.
+              GUFO_ROCR_LIBRARY_DIR = "${self.packages.${system}.default.rocmRuntime}/lib";
               LD_LIBRARY_PATH = pkgs.${system}.lib.makeLibraryPath [
                 self.packages.${system}.default.rocmRuntime
                 pkgs.${system}.stdenv.cc.cc.lib
@@ -240,6 +242,7 @@
                 pkgsRocm10.stdenv.cc.cc.lib
                 pkgsRocm10.zlib
               ];
+              env.GUFO_ROCR_LIBRARY_DIR = "${gufo.rocmRuntime}/lib";
               shellHook = self.devShells.${system}.default.shellHook;
             };
         }

@@ -230,6 +230,24 @@ add_subdirectory(src/cache)
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
   target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform)
+  # HIP loads ROCr through libamdhip64's own RUNPATH, so a build tree runs
+  # the unpatched runtime unless LD_LIBRARY_PATH names the patched one (the
+  # Nix package wraps `gufo` for this). With GUFO_ROCR_LIBRARY_DIR (the Nix
+  # shells export it) every HIP binary links that ROCr directly: the loader
+  # maps it first and HIP reuses it, one soname per process.
+  set(GUFO_ROCR_LIBRARY_DIR "" CACHE PATH
+      "ROCr runtime directory HIP binaries load (empty: HIP's own)")
+  set(gufo_rocr_dir "${GUFO_ROCR_LIBRARY_DIR}")
+  if (NOT gufo_rocr_dir AND DEFINED ENV{GUFO_ROCR_LIBRARY_DIR})
+    set(gufo_rocr_dir "$ENV{GUFO_ROCR_LIBRARY_DIR}")
+  endif()
+  if (gufo_rocr_dir AND NOT WIN32)
+    find_library(GUFO_ROCR_LIBRARY hsa-runtime64 PATHS "${gufo_rocr_dir}"
+                 NO_DEFAULT_PATH NO_CACHE REQUIRED)
+    target_link_libraries(gufo_hip_host PUBLIC
+                          "${GUFO_ROCR_LIBRARY}")
+    message(STATUS "gufo: ROCr runtime ${GUFO_ROCR_LIBRARY}")
+  endif()
   target_include_directories(gufo_hip_host PUBLIC ${PROJECT_SOURCE_DIR})
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
