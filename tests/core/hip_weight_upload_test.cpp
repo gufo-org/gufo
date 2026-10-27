@@ -1,13 +1,22 @@
 #include <hip/hip_runtime.h>
 
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#endif
+
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -34,7 +43,40 @@ struct Device {
   ~Device() { (void)hipFree(data); }
 };
 
+#if defined(__linux__)
+// While set, reads from O_DIRECT descriptors fail with ENOMEM, the way Windows
+// fails an unbuffered read it cannot lock in memory.
+std::atomic<bool> fail_direct_reads{false};
+std::atomic<int> failed_direct_reads{0};
+
+using Pread = ssize_t (*)(int, void*, size_t, off_t);
+
+ssize_t FaultingPread(Pread next, int fd, void* buffer, size_t size,
+                      off_t offset) {
+  if (fail_direct_reads && (::fcntl(fd, F_GETFL) & O_DIRECT) != 0) {
+    ++failed_direct_reads;
+    errno = ENOMEM;
+    return -1;
+  }
+  return next(fd, buffer, size, offset);
+}
+#endif
+
 }  // namespace
+
+#if defined(__linux__)
+// The test links gufo_core statically, so these replace libc's pread for the
+// uploader's reads.
+extern "C" ssize_t pread(int fd, void* buffer, size_t size, off_t offset) {
+  static const auto next = reinterpret_cast<Pread>(::dlsym(RTLD_NEXT, "pread"));
+  return FaultingPread(next, fd, buffer, size, offset);
+}
+extern "C" ssize_t pread64(int fd, void* buffer, size_t size, off_t offset) {
+  static const auto next =
+      reinterpret_cast<Pread>(::dlsym(RTLD_NEXT, "pread64"));
+  return FaultingPread(next, fd, buffer, size, offset);
+}
+#endif
 
 int main() {
   TemporaryDirectory files("gufo-weight-upload");
@@ -138,6 +180,39 @@ int main() {
   std::puts(
       "PASS: byte-exact upload, EOF, guards, bounds and failed-read drain");
   upload.reset();
+
+#if defined(__linux__)
+  // A failed unbuffered read retries through the buffered descriptor instead
+  // of failing the load. Shard 1 was truncated above, so reopen shard 0 only.
+  const auto& first = slices.front();
+  Require(first.shard == 0, "the first slice reads shard 0");
+  Require(hipMemset(device.data, 0, expected.size()) == hipSuccess &&
+              hipDeviceSynchronize() == hipSuccess,
+          "clear the destination");
+  fail_direct_reads = true;
+  upload = WeightUpload::Create(std::span(regions).first(1), &error);
+  Require(upload != nullptr, error);
+  Require(
+      upload->Copy(first.shard, first.offset, first.size,
+                   static_cast<char*>(device.data) + first.destination, &error),
+      error);
+  Require(upload->Finish(&error), error);
+  fail_direct_reads = false;
+  upload.reset();
+  std::vector<std::uint8_t> fallback(first.size);
+  Require(hipMemcpy(fallback.data(),
+                    static_cast<char*>(device.data) + first.destination,
+                    fallback.size(), hipMemcpyDeviceToHost) == hipSuccess,
+          "download fallback bytes");
+  Require(std::equal(fallback.begin(), fallback.end(),
+                     expected.begin() + first.destination),
+          "buffered fallback supplies the shard bytes");
+  if (failed_direct_reads == 0) {
+    std::puts("SKIP: this filesystem refused unbuffered opens");
+  } else {
+    std::puts("PASS: failed unbuffered reads fall back to buffered reads");
+  }
+#endif
   for (const auto& region : regions)
     gufo::platform::CloseFile(region.file_descriptor);
 }

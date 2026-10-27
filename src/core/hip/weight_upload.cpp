@@ -140,13 +140,12 @@ struct WeightUpload::State {
       read = ReadFully(slot.direct, slot.buffer, begin, length,
                        skip + task.size, ec);
       payload = static_cast<const char*>(slot.buffer) + skip;
-      if (!read && ec != std::errc::invalid_argument &&
-          ec != std::errc::operation_not_supported) {
-        return "shard read failed: " + ec.message();
-      }
     }
     if (!read) {
-      // Some filesystems accept unbuffered opens but reject aligned reads.
+      // A failed unbuffered read retries through the buffered descriptor,
+      // which reports its own error. Some filesystems accept unbuffered opens
+      // but reject aligned reads, and Windows refuses an unbuffered read with
+      // ERROR_NO_SYSTEM_RESOURCES when it cannot lock the pages in memory.
       ec = {};
       if (!ReadFully(shard.fd, slot.buffer, task.offset, task.size, task.size,
                      ec)) {
