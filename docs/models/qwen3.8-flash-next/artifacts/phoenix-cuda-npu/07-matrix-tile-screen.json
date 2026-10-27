@@ -1,0 +1,57 @@
+{
+  "shape_mkn": [
+    1024,
+    2560,
+    1024
+  ],
+  "results": [
+    {
+      "tile_mkn": [
+        64,
+        64,
+        32
+      ],
+      "measured_iterations": 3,
+      "warmups": 1,
+      "source_sha256": "048681f037a0447a505c0736203e4d93199a99a9262a768920c43e0170cb1997",
+      "stdout": "\nDispatch          (avg/min/max us): 5851.6 / 4938.5 / 7487.3   [median 5129.1, MAD 190.6, p95 7487.3]\nDispatch overhead (avg/min/max us): 160.1 / 147.3 / 173.9   [median 159.2, MAD 11.9, p95 173.9]\nNPU               (avg/min/max us): 5692.4 / 4779.3 / 7328.1   [median 4969.9, MAD 190.6, p95 7328.1]\nEnd-to-end        (avg/min/max us): 6484.7 / 5431.1 / 8179.8   [median 5843.2, MAD 412.1, p95 8179.8]\nNPU GFLOPS                    : 943.13\nPASS!\n",
+      "passed": true
+    },
+    {
+      "tile_mkn": [
+        64,
+        32,
+        64
+      ],
+      "measured_iterations": 3,
+      "warmups": 1,
+      "source_sha256": "c34fcd3d6130dba5140d1959b5a9059b104b312ed95c32875806e5d8810eec0f",
+      "stdout": "\nDispatch          (avg/min/max us): 4198.1 / 2869.9 / 6764.8   [median 2959.5, MAD 89.6, p95 6764.8]\nDispatch overhead (avg/min/max us): 168.2 / 154.4 / 180.2   [median 170.0, MAD 10.2, p95 180.2]\nNPU               (avg/min/max us): 4028.1 / 2699.9 / 6594.8   [median 2789.5, MAD 89.6, p95 6594.8]\nEnd-to-end        (avg/min/max us): 4795.5 / 3334.3 / 7689.4   [median 3362.9, MAD 28.6, p95 7689.4]\nNPU GFLOPS                    : 1332.83\nPASS!\n",
+      "passed": true
+    },
+    {
+      "tile_mkn": [
+        128,
+        32,
+        32
+      ],
+      "measured_iterations": 3,
+      "warmups": 1,
+      "source_sha256": "4253f2012a0fd0a734e8d57184c1c87e329fab20e91d3d5de2507d86a9f1b998",
+      "stdout": "\nDispatch          (avg/min/max us): 6387.9 / 4366.9 / 10284.0   [median 4512.8, MAD 145.9, p95 10284.0]\nDispatch overhead (avg/min/max us): 187.9 / 165.7 / 213.4   [median 184.6, MAD 18.9, p95 213.4]\nNPU               (avg/min/max us): 6203.3 / 4182.3 / 10099.4   [median 4328.2, MAD 145.9, p95 10099.4]\nEnd-to-end        (avg/min/max us): 6848.7 / 4933.5 / 10667.7   [median 4944.9, MAD 11.4, p95 10667.7]\nNPU GFLOPS                    : 865.46\nPASS!\n",
+      "passed": true
+    },
+    {
+      "tile_mkn": [
+        32,
+        64,
+        64
+      ],
+      "measured_iterations": 3,
+      "warmups": 1,
+      "source_sha256": "01e0bbb76301e561ea09ac2ff501677c6f209dde14ed20850a8d99b08f5e515a",
+      "stdout": "\nDispatch          (avg/min/max us): 5483.7 / 3401.5 / 6525.7   [median 6524.0, MAD 1.7, p95 6525.7]\nDispatch overhead (avg/min/max us): 211.1 / 191.9 / 245.0   [median 196.3, MAD 4.4, p95 245.0]\nNPU               (avg/min/max us): 5287.4 / 3205.2 / 6329.4   [median 6327.7, MAD 1.7, p95 6329.4]\nEnd-to-end        (avg/min/max us): 5904.9 / 3911.3 / 6950.2   [median 6853.3, MAD 96.9, p95 6950.2]\nNPU GFLOPS                    : 1015.37\nPASS!\n",
+      "passed": true
+    }
+  ]
+}

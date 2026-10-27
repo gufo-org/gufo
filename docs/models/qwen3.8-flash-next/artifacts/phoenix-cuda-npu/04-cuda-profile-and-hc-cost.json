@@ -1,0 +1,930 @@
+{
+  "status": "CUDA prefill improvement demonstrated for two tested fresh-prompt lengths; NPU router and batched same-projection split rejected for speed",
+  "user_priority": "GPU/NPU optimization first; retain only measured performance improvements",
+  "cuda_prefill": {
+    "completed": true,
+    "profile_only": false,
+    "comparisons": [
+      {
+        "workload": "fresh-120",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 2663,
+            "reused_tokens": 0,
+            "baseline_prompt_ms": 8987.0,
+            "candidate_prompt_ms": 6885.2,
+            "throughput_gain_percent": 30.526346366118638,
+            "latency_reduction_percent": 23.387114721264048,
+            "baseline_full_s": 12.330084600000191,
+            "candidate_full_s": 9.667880200000582,
+            "baseline_output_tokens": 83,
+            "candidate_output_tokens": 77,
+            "whole_request_length_confounded": true
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 2663,
+            "reused_tokens": 0,
+            "baseline_prompt_ms": 9120.6,
+            "candidate_prompt_ms": 6828.3,
+            "throughput_gain_percent": 33.57058125741399,
+            "latency_reduction_percent": 25.133214920071044,
+            "baseline_full_s": 11.810116599999674,
+            "candidate_full_s": 9.325021700000434,
+            "baseline_output_tokens": 71,
+            "candidate_output_tokens": 71,
+            "whole_request_length_confounded": false
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 2663,
+            "reused_tokens": 0,
+            "baseline_prompt_ms": 9452.0,
+            "candidate_prompt_ms": 6961.0,
+            "throughput_gain_percent": 35.78508834937508,
+            "latency_reduction_percent": 26.354210749047823,
+            "baseline_full_s": 11.984894200000781,
+            "candidate_full_s": 15.93360649999886,
+            "baseline_output_tokens": 68,
+            "candidate_output_tokens": 254,
+            "whole_request_length_confounded": true
+          }
+        ],
+        "median_throughput_gain_percent": 33.57058125741399,
+        "median_latency_reduction_percent": 25.133214920071044
+      },
+      {
+        "workload": "fresh-360",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 7801,
+            "reused_tokens": 0,
+            "baseline_prompt_ms": 24114.1,
+            "candidate_prompt_ms": 19072.3,
+            "throughput_gain_percent": 26.4351965940133,
+            "latency_reduction_percent": 20.908099410718208,
+            "baseline_full_s": 26.84810220000145,
+            "candidate_full_s": 21.235097200000382,
+            "baseline_output_tokens": 74,
+            "candidate_output_tokens": 62,
+            "whole_request_length_confounded": true
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 7801,
+            "reused_tokens": 0,
+            "baseline_prompt_ms": 24410.9,
+            "candidate_prompt_ms": 19205.0,
+            "throughput_gain_percent": 27.10700338453529,
+            "latency_reduction_percent": 21.326128901433382,
+            "baseline_full_s": 28.857635099999243,
+            "candidate_full_s": 23.383564300000216,
+            "baseline_output_tokens": 119,
+            "candidate_output_tokens": 119,
+            "whole_request_length_confounded": false
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 7801,
+            "reused_tokens": 0,
+            "baseline_prompt_ms": 24281.1,
+            "candidate_prompt_ms": 19549.3,
+            "throughput_gain_percent": 24.204447218058966,
+            "latency_reduction_percent": 19.487584994090057,
+            "baseline_full_s": 27.11073679999936,
+            "candidate_full_s": 21.995222000001377,
+            "baseline_output_tokens": 73,
+            "candidate_output_tokens": 63,
+            "whole_request_length_confounded": true
+          }
+        ],
+        "median_throughput_gain_percent": 26.4351965940133,
+        "median_latency_reduction_percent": 20.908099410718208
+      },
+      {
+        "workload": "repeated-360",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 7801,
+            "reused_tokens": 7796,
+            "baseline_prompt_ms": 255.4,
+            "candidate_prompt_ms": 275.7,
+            "throughput_gain_percent": -7.363075807036623,
+            "latency_reduction_percent": -7.948316366483943,
+            "baseline_full_s": 2.7337477000000945,
+            "candidate_full_s": 2.8588079000001017,
+            "baseline_output_tokens": 69,
+            "candidate_output_tokens": 75,
+            "whole_request_length_confounded": true
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 7801,
+            "reused_tokens": 7796,
+            "baseline_prompt_ms": 250.0,
+            "candidate_prompt_ms": 289.8,
+            "throughput_gain_percent": -13.733609385783307,
+            "latency_reduction_percent": -15.920000000000002,
+            "baseline_full_s": 2.571882000000187,
+            "candidate_full_s": 2.527078099999926,
+            "baseline_output_tokens": 62,
+            "candidate_output_tokens": 63,
+            "whole_request_length_confounded": true
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 7801,
+            "reused_tokens": 7796,
+            "baseline_prompt_ms": 230.0,
+            "candidate_prompt_ms": 228.4,
+            "throughput_gain_percent": 0.7005253940455258,
+            "latency_reduction_percent": 0.6956521739130417,
+            "baseline_full_s": 2.5111997999993037,
+            "candidate_full_s": 2.9633585999999923,
+            "baseline_output_tokens": 63,
+            "candidate_output_tokens": 75,
+            "whole_request_length_confounded": true
+          }
+        ],
+        "median_throughput_gain_percent": -7.363075807036623,
+        "median_latency_reduction_percent": -7.948316366483943
+      }
+    ],
+    "requests": 18
+  },
+  "resources": [
+    {
+      "sample_interval_s": 0.5,
+      "samples": 127,
+      "peak_dedicated_vram_bytes": 8209002496,
+      "minimum_available_ram_bytes": 12533760000,
+      "minimum_commit_headroom_bytes": 35436339200,
+      "max_gpu_temperature_c": 56,
+      "wddm_shared_memory": "See wddm-memory.csv per adapter; mapped pinned host memory alone is not proof of spill",
+      "pair": "pair-00",
+      "profile": "baseline",
+      "startup": {
+        "spawn_to_health_s": 19.085168700001304,
+        "health": {
+          "status": "ok",
+          "max_context": 65536,
+          "model": "qwen3.8-flash-next-iq3_s",
+          "images": true,
+          "api_key": false,
+          "image_generation": false,
+          "loaded": true,
+          "service": "strata"
+        },
+        "status": {
+          "service": "strata",
+          "model": "qwen3.8-flash-next-iq3_s",
+          "loaded": true,
+          "auto_load": true,
+          "structured_output": {
+            "formats": [
+              "json_object",
+              "json_schema"
+            ],
+            "method": "prompt_and_validate",
+            "constrained_decoding": false,
+            "stream_buffered": true
+          },
+          "engine": "0.1.48",
+          "started": 1793060291,
+          "uptime_s": 0,
+          "cache_max_tokens": 65536,
+          "context": {
+            "native": 65536,
+            "max_positions": 65536
+          },
+          "concurrency": {
+            "serving": 1,
+            "requested": 1
+          },
+          "dialects": [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/responses"
+          ],
+          "vision": {
+            "enabled": true,
+            "available": true,
+            "error": null
+          },
+          "image_generation": {
+            "enabled": false
+          },
+          "activity": {
+            "requests": 0,
+            "in_flight": 0,
+            "last_request_at": null
+          },
+          "last_timings": null,
+          "vram": {
+            "elastic": false
+          },
+          "machine": {
+            "at": 1793060291,
+            "gpu": {
+              "name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+              "used_mib": 7683.0,
+              "total_mib": 8188.0,
+              "util_pct": 71,
+              "temp_c": 40,
+              "power_w": 5.256
+            },
+            "ram": {
+              "used_gib": 50.1,
+              "total_gib": 63.2
+            }
+          }
+        },
+        "timing_boundary": "Popen immediately before spawn to first successful health response; warm OS cache not flushed"
+      }
+    },
+    {
+      "sample_interval_s": 0.5,
+      "samples": 111,
+      "peak_dedicated_vram_bytes": 8206905344,
+      "minimum_available_ram_bytes": 8220942336,
+      "minimum_commit_headroom_bytes": 31125626880,
+      "max_gpu_temperature_c": 59,
+      "wddm_shared_memory": "See wddm-memory.csv per adapter; mapped pinned host memory alone is not proof of spill",
+      "pair": "pair-00",
+      "profile": "cuda-resident40",
+      "startup": {
+        "spawn_to_health_s": 19.063806199999817,
+        "health": {
+          "status": "ok",
+          "max_context": 65536,
+          "model": "qwen3.8-flash-next-iq3_s",
+          "images": true,
+          "api_key": false,
+          "image_generation": false,
+          "loaded": true,
+          "service": "strata"
+        },
+        "status": {
+          "service": "strata",
+          "model": "qwen3.8-flash-next-iq3_s",
+          "loaded": true,
+          "auto_load": true,
+          "structured_output": {
+            "formats": [
+              "json_object",
+              "json_schema"
+            ],
+            "method": "prompt_and_validate",
+            "constrained_decoding": false,
+            "stream_buffered": true
+          },
+          "engine": "0.1.50",
+          "started": 1793060367,
+          "uptime_s": 0,
+          "cache_max_tokens": 65536,
+          "context": {
+            "native": 65536,
+            "max_positions": 65536
+          },
+          "concurrency": {
+            "serving": 1,
+            "requested": 1
+          },
+          "dialects": [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/responses"
+          ],
+          "vision": {
+            "enabled": true,
+            "available": true,
+            "error": null
+          },
+          "image_generation": {
+            "enabled": false
+          },
+          "activity": {
+            "requests": 0,
+            "in_flight": 0,
+            "last_request_at": null
+          },
+          "last_timings": null,
+          "vram": {
+            "elastic": false
+          },
+          "machine": {
+            "at": 1793060367,
+            "gpu": {
+              "name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+              "used_mib": null,
+              "total_mib": null,
+              "util_pct": null,
+              "temp_c": null,
+              "power_w": null
+            },
+            "ram": null
+          }
+        },
+        "timing_boundary": "Popen immediately before spawn to first successful health response; warm OS cache not flushed"
+      }
+    },
+    {
+      "sample_interval_s": 0.5,
+      "samples": 130,
+      "peak_dedicated_vram_bytes": 8209002496,
+      "minimum_available_ram_bytes": 12613005312,
+      "minimum_commit_headroom_bytes": 35500609536,
+      "max_gpu_temperature_c": 58,
+      "wddm_shared_memory": "See wddm-memory.csv per adapter; mapped pinned host memory alone is not proof of spill",
+      "pair": "pair-01",
+      "profile": "baseline",
+      "startup": {
+        "spawn_to_health_s": 18.57572860000073,
+        "health": {
+          "status": "ok",
+          "max_context": 65536,
+          "model": "qwen3.8-flash-next-iq3_s",
+          "images": true,
+          "api_key": false,
+          "image_generation": false,
+          "loaded": true,
+          "service": "strata"
+        },
+        "status": {
+          "service": "strata",
+          "model": "qwen3.8-flash-next-iq3_s",
+          "loaded": true,
+          "auto_load": true,
+          "structured_output": {
+            "formats": [
+              "json_object",
+              "json_schema"
+            ],
+            "method": "prompt_and_validate",
+            "constrained_decoding": false,
+            "stream_buffered": true
+          },
+          "engine": "0.1.48",
+          "started": 1793060504,
+          "uptime_s": 0,
+          "cache_max_tokens": 65536,
+          "context": {
+            "native": 65536,
+            "max_positions": 65536
+          },
+          "concurrency": {
+            "serving": 1,
+            "requested": 1
+          },
+          "dialects": [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/responses"
+          ],
+          "vision": {
+            "enabled": true,
+            "available": true,
+            "error": null
+          },
+          "image_generation": {
+            "enabled": false
+          },
+          "activity": {
+            "requests": 0,
+            "in_flight": 0,
+            "last_request_at": null
+          },
+          "last_timings": null,
+          "vram": {
+            "elastic": false
+          },
+          "machine": {
+            "at": 1793060504,
+            "gpu": {
+              "name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+              "used_mib": 7683.0,
+              "total_mib": 8188.0,
+              "util_pct": 58,
+              "temp_c": 45,
+              "power_w": 5.392
+            },
+            "ram": {
+              "used_gib": 50.1,
+              "total_gib": 63.2
+            }
+          }
+        },
+        "timing_boundary": "Popen immediately before spawn to first successful health response; warm OS cache not flushed"
+      }
+    },
+    {
+      "sample_interval_s": 0.5,
+      "samples": 116,
+      "peak_dedicated_vram_bytes": 8209002496,
+      "minimum_available_ram_bytes": 8237510656,
+      "minimum_commit_headroom_bytes": 31155499008,
+      "max_gpu_temperature_c": 60,
+      "wddm_shared_memory": "See wddm-memory.csv per adapter; mapped pinned host memory alone is not proof of spill",
+      "pair": "pair-01",
+      "profile": "cuda-resident40",
+      "startup": {
+        "spawn_to_health_s": 19.588099700000384,
+        "health": {
+          "status": "ok",
+          "max_context": 65536,
+          "model": "qwen3.8-flash-next-iq3_s",
+          "images": true,
+          "api_key": false,
+          "image_generation": false,
+          "loaded": true,
+          "service": "strata"
+        },
+        "status": {
+          "service": "strata",
+          "model": "qwen3.8-flash-next-iq3_s",
+          "loaded": true,
+          "auto_load": true,
+          "structured_output": {
+            "formats": [
+              "json_object",
+              "json_schema"
+            ],
+            "method": "prompt_and_validate",
+            "constrained_decoding": false,
+            "stream_buffered": true
+          },
+          "engine": "0.1.50",
+          "started": 1793060435,
+          "uptime_s": 0,
+          "cache_max_tokens": 65536,
+          "context": {
+            "native": 65536,
+            "max_positions": 65536
+          },
+          "concurrency": {
+            "serving": 1,
+            "requested": 1
+          },
+          "dialects": [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/responses"
+          ],
+          "vision": {
+            "enabled": true,
+            "available": true,
+            "error": null
+          },
+          "image_generation": {
+            "enabled": false
+          },
+          "activity": {
+            "requests": 0,
+            "in_flight": 0,
+            "last_request_at": null
+          },
+          "last_timings": null,
+          "vram": {
+            "elastic": false
+          },
+          "machine": {
+            "at": 1793060435,
+            "gpu": {
+              "name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+              "used_mib": 7683.0,
+              "total_mib": 8188.0,
+              "util_pct": 83,
+              "temp_c": 44,
+              "power_w": 5.397
+            },
+            "ram": {
+              "used_gib": 54.3,
+              "total_gib": 63.2
+            }
+          }
+        },
+        "timing_boundary": "Popen immediately before spawn to first successful health response; warm OS cache not flushed"
+      }
+    },
+    {
+      "sample_interval_s": 0.5,
+      "samples": 124,
+      "peak_dedicated_vram_bytes": 8194322432,
+      "minimum_available_ram_bytes": 12660723712,
+      "minimum_commit_headroom_bytes": 35602767872,
+      "max_gpu_temperature_c": 59,
+      "wddm_shared_memory": "See wddm-memory.csv per adapter; mapped pinned host memory alone is not proof of spill",
+      "pair": "pair-02",
+      "profile": "baseline",
+      "startup": {
+        "spawn_to_health_s": 19.0780021999999,
+        "health": {
+          "status": "ok",
+          "max_context": 65536,
+          "model": "qwen3.8-flash-next-iq3_s",
+          "images": true,
+          "api_key": false,
+          "image_generation": false,
+          "loaded": true,
+          "service": "strata"
+        },
+        "status": {
+          "service": "strata",
+          "model": "qwen3.8-flash-next-iq3_s",
+          "loaded": true,
+          "auto_load": true,
+          "structured_output": {
+            "formats": [
+              "json_object",
+              "json_schema"
+            ],
+            "method": "prompt_and_validate",
+            "constrained_decoding": false,
+            "stream_buffered": true
+          },
+          "engine": "0.1.48",
+          "started": 1793060582,
+          "uptime_s": 0,
+          "cache_max_tokens": 65536,
+          "context": {
+            "native": 65536,
+            "max_positions": 65536
+          },
+          "concurrency": {
+            "serving": 1,
+            "requested": 1
+          },
+          "dialects": [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/responses"
+          ],
+          "vision": {
+            "enabled": true,
+            "available": true,
+            "error": null
+          },
+          "image_generation": {
+            "enabled": false
+          },
+          "activity": {
+            "requests": 0,
+            "in_flight": 0,
+            "last_request_at": null
+          },
+          "last_timings": null,
+          "vram": {
+            "elastic": false
+          },
+          "machine": {
+            "at": 1793060582,
+            "gpu": {
+              "name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+              "used_mib": 7683.0,
+              "total_mib": 8188.0,
+              "util_pct": 82,
+              "temp_c": 45,
+              "power_w": 5.395
+            },
+            "ram": {
+              "used_gib": 50.1,
+              "total_gib": 63.2
+            }
+          }
+        },
+        "timing_boundary": "Popen immediately before spawn to first successful health response; warm OS cache not flushed"
+      }
+    },
+    {
+      "sample_interval_s": 0.5,
+      "samples": 122,
+      "peak_dedicated_vram_bytes": 8209002496,
+      "minimum_available_ram_bytes": 8276488192,
+      "minimum_commit_headroom_bytes": 31163727872,
+      "max_gpu_temperature_c": 61,
+      "wddm_shared_memory": "See wddm-memory.csv per adapter; mapped pinned host memory alone is not proof of spill",
+      "pair": "pair-02",
+      "profile": "cuda-resident40",
+      "startup": {
+        "spawn_to_health_s": 19.60661319999963,
+        "health": {
+          "status": "ok",
+          "max_context": 65536,
+          "model": "qwen3.8-flash-next-iq3_s",
+          "images": true,
+          "api_key": false,
+          "image_generation": false,
+          "loaded": true,
+          "service": "strata"
+        },
+        "status": {
+          "service": "strata",
+          "model": "qwen3.8-flash-next-iq3_s",
+          "loaded": true,
+          "auto_load": true,
+          "structured_output": {
+            "formats": [
+              "json_object",
+              "json_schema"
+            ],
+            "method": "prompt_and_validate",
+            "constrained_decoding": false,
+            "stream_buffered": true
+          },
+          "engine": "0.1.50",
+          "started": 1793060656,
+          "uptime_s": 0,
+          "cache_max_tokens": 65536,
+          "context": {
+            "native": 65536,
+            "max_positions": 65536
+          },
+          "concurrency": {
+            "serving": 1,
+            "requested": 1
+          },
+          "dialects": [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/responses"
+          ],
+          "vision": {
+            "enabled": true,
+            "available": true,
+            "error": null
+          },
+          "image_generation": {
+            "enabled": false
+          },
+          "activity": {
+            "requests": 0,
+            "in_flight": 0,
+            "last_request_at": null
+          },
+          "last_timings": null,
+          "vram": {
+            "elastic": false
+          },
+          "machine": {
+            "at": 1793060657,
+            "gpu": {
+              "name": "NVIDIA GeForce RTX 4070 Laptop GPU",
+              "used_mib": 7683.0,
+              "total_mib": 8188.0,
+              "util_pct": 66,
+              "temp_c": 45,
+              "power_w": 5.564
+            },
+            "ram": {
+              "used_gib": 54.1,
+              "total_gib": 63.2
+            }
+          }
+        },
+        "timing_boundary": "Popen immediately before spawn to first successful health response; warm OS cache not flushed"
+      }
+    }
+  ],
+  "raw_run": "<EXPERIMENT_ROOT>\\performance\\results\\20261027T001750Z-ba767f-cuda-prefill",
+  "gpu_npu_prefill_cost": {
+    "warm": [
+      {
+        "rows": 128,
+        "arms": {
+          "full_cuda_consumer": {
+            "median_us": 66.95,
+            "min_us": 61.3,
+            "max_us": 84.4
+          },
+          "cuda_remainder_only": {
+            "median_us": 57.5,
+            "min_us": 49.5,
+            "max_us": 100.2
+          },
+          "npu_slice_complete_transfer": {
+            "median_us": 612.0,
+            "min_us": 546.6,
+            "max_us": 815.8
+          },
+          "hybrid_consumer": {
+            "median_us": 687.15,
+            "min_us": 591.4,
+            "max_us": 811.7
+          }
+        },
+        "paired_throughput_gain_percent": {
+          "median": -90.07788494824015,
+          "min": -92.0167549587286,
+          "max": -86.82786608048698
+        },
+        "maximum_consumer_error": 4.29153442e-06
+      },
+      {
+        "rows": 256,
+        "arms": {
+          "full_cuda_consumer": {
+            "median_us": 108.9,
+            "min_us": 98.7,
+            "max_us": 161.2
+          },
+          "cuda_remainder_only": {
+            "median_us": 108.75,
+            "min_us": 83.3,
+            "max_us": 159.5
+          },
+          "npu_slice_complete_transfer": {
+            "median_us": 1120.75,
+            "min_us": 977.2,
+            "max_us": 1385.1
+          },
+          "hybrid_consumer": {
+            "median_us": 1108.0500000000002,
+            "min_us": 977.8,
+            "max_us": 1356.8
+          }
+        },
+        "paired_throughput_gain_percent": {
+          "median": -90.22339819392798,
+          "min": -92.41597877358491,
+          "max": -86.50255379720339
+        },
+        "maximum_consumer_error": 5.24520874e-06
+      },
+      {
+        "rows": 512,
+        "arms": {
+          "full_cuda_consumer": {
+            "median_us": 287.45000000000005,
+            "min_us": 266.4,
+            "max_us": 322.7
+          },
+          "cuda_remainder_only": {
+            "median_us": 203.6,
+            "min_us": 176.1,
+            "max_us": 304.7
+          },
+          "npu_slice_complete_transfer": {
+            "median_us": 1970.9499999999998,
+            "min_us": 1828.0,
+            "max_us": 2498.5
+          },
+          "hybrid_consumer": {
+            "median_us": 2033.8000000000002,
+            "min_us": 1906.0,
+            "max_us": 2446.4
+          }
+        },
+        "paired_throughput_gain_percent": {
+          "median": -85.95332681013703,
+          "min": -88.86527141922825,
+          "max": -83.54669464847848
+        },
+        "maximum_consumer_error": 5.24520874e-06
+      }
+    ],
+    "cold": [
+      {
+        "rows": 128,
+        "arms": {
+          "full_cuda_consumer": {
+            "median_us": 114.35,
+            "min_us": 104.8,
+            "max_us": 141.9
+          },
+          "cuda_remainder_only": {
+            "median_us": 77.55000000000001,
+            "min_us": 66.2,
+            "max_us": 112.7
+          },
+          "npu_slice_complete_transfer": {
+            "median_us": 697.35,
+            "min_us": 557.8,
+            "max_us": 816.2
+          },
+          "hybrid_consumer": {
+            "median_us": 692.3,
+            "min_us": 628.4,
+            "max_us": 801.7
+          }
+        },
+        "paired_throughput_gain_percent": {
+          "median": -83.36170303318542,
+          "min": -85.7857989724674,
+          "max": -77.44396757272294
+        },
+        "maximum_consumer_error": 4.29153442e-06
+      },
+      {
+        "rows": 256,
+        "arms": {
+          "full_cuda_consumer": {
+            "median_us": 175.05,
+            "min_us": 166.6,
+            "max_us": 218.3
+          },
+          "cuda_remainder_only": {
+            "median_us": 106.6,
+            "min_us": 91.1,
+            "max_us": 154.3
+          },
+          "npu_slice_complete_transfer": {
+            "median_us": 1124.2,
+            "min_us": 1023.3,
+            "max_us": 1351.6
+          },
+          "hybrid_consumer": {
+            "median_us": 1168.8000000000002,
+            "min_us": 1062.4,
+            "max_us": 1367.3
+          }
+        },
+        "paired_throughput_gain_percent": {
+          "median": -85.04872649065695,
+          "min": -87.72834413671184,
+          "max": -81.32151768046116
+        },
+        "maximum_consumer_error": 5.24520874e-06
+      },
+      {
+        "rows": 512,
+        "arms": {
+          "full_cuda_consumer": {
+            "median_us": 321.7,
+            "min_us": 312.7,
+            "max_us": 330.3
+          },
+          "cuda_remainder_only": {
+            "median_us": 161.0,
+            "min_us": 136.6,
+            "max_us": 212.8
+          },
+          "npu_slice_complete_transfer": {
+            "median_us": 2239.75,
+            "min_us": 1829.5,
+            "max_us": 2375.3
+          },
+          "hybrid_consumer": {
+            "median_us": 2094.25,
+            "min_us": 1974.0,
+            "max_us": 2377.5
+          }
+        },
+        "paired_throughput_gain_percent": {
+          "median": -84.6839351759902,
+          "min": -86.36803364879074,
+          "max": -83.53596757852077
+        },
+        "maximum_consumer_error": 5.24520874e-06
+      }
+    ]
+  },
+  "gpu_npu_scope": "Real BF16 weights, changing synthetic GPU-resident BF16 activations, identical complete-output CUDA consumer; not full-model inference",
+  "probe_correction": {
+    "status": "Corrected and passed both cache policies",
+    "cause": "Pageable default-stream H2D was not ordered before a nonblocking compute stream. Cold test exposed stale reference input in CUDA-only mode.",
+    "fix": "Copy input on the compute stream; explicitly complete initialization; check 15 CPU FP64 anchors from each current host input before the timed arms.",
+    "superseded": "cost-summary-unordered-input.json and all pre-ordered-input cost logs are excluded. Original failures retained.",
+    "accepted_logs": [
+      "npu_prefill/native-cost-ordered.log",
+      "npu_prefill/native-cost-cold-ordered.log"
+    ],
+    "qualification": "Three batch sizes, three warmups and 20 alternating rounds each per cache policy. Entire consumer output compared, not just NPU slice."
+  },
+  "npu_decision": "Do not integrate this batched slice into the full model: every measured completed-operation trial was slower. Cross-chunk two-bank scheduling remains unimplemented and unproven.",
+  "profile_log": "<EXPERIMENT_ROOT>\\performance\\results\\20261027T002528Z-d232f3-cuda-prefill\\pair-00\\cuda-resident40\\server\\engine.log",
+  "profile_lines": [
+    "strata prefill timing: 7796 tokens, GPU timeline 19303 ms, wall 19307 ms, host staging 6785 ms: embed+steps 33 (0.2%) hc read 697 (3.6%) gdn 1096 (5.7%) qsa proj 526 (2.7%) qsa indexer 1 (0.0%) qsa select 43 (0.2%) qsa attn 367 (1.9%) router+shared 285 (1.5%) host grouping 444 (2.3%) gather 393 (2.0%) wait copy 7225 (37.4%) dequant 4495 (23.3%) gemm gate/up 1347 (7.0%) gemm down 837 (4.3%) combine 363 (1.9%) ple 36 (0.2%) kv stage 32 (0.2%) gdn conv+gates 117 (0.6%) gdn recurrence 249 (1.3%) gdn out proj 403 (2.1%) hc write 316 (1.6%)"
+  ],
+  "quality_scope": "Unchanged model precision/budgets; exact ledger answers, previous JSON/tool/clamp checks for this retained CUDA binary. No new held-out perplexity result.",
+  "original_binary_sha256": "517ac61f284d55b99d1ac6d18dc40a92ae842dcf425acd74ed125cb848cc2d4c",
+  "files": {
+    "npu-control-engine\\strata.exe": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da",
+    "configs\\cuda-resident40.json": "9fa2c3f9c907849e41f88ffd95d8fbc23ac2c3459b9ca417ecac08757520b5fb",
+    "configs\\cuda-resident40.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+    "scripts\\performance_prefill.py": "1674d62d1153249a6d98ddea2e666c5436693e8775418ce372a625fdcac56ad1",
+    "scripts\\runtime.py": "c8b7225cce011ead2330ee76dddf67fbacd46fa3cffb693c1b0ad404e941e68b",
+    "launch-cuda-prefill.bat": "14ea589affd0b90089c59e87812466364cda13af802f3c39ea9762393d6440f4",
+    "performance\\npu_prefill\\cost_probe.cu": "6ddfb93392b49428035a337d9ed917d6cf5e2b6073b7c8c8d893783c1a1e3abf",
+    "performance\\npu_prefill\\kernel-initial.cc": "c8bc68b9add60b4718814f25c85c5d26cdfde41ca28dbd2098b32c2ca4d90647",
+    "performance\\npu_prefill\\kernel.cc": "85035846ba0dc7c1804d7b031939800199b6de46f757770d0ec14cc7186c9e0d",
+    "performance\\npu_prefill\\compile_probe.py": "4b85804e221e68d7325a071225f83896764eb85c501537ce8118ac7d20b9a64b",
+    "performance\\npu_prefill\\run_cost.py": "9a30823412fc6df0bdd538502ea0d40e1975142947729cc05263778e9b033f63",
+    "performance\\npu_prefill\\cost_probe.exe": "41ffb403c05ccd2e47e0f03f79e3f3090b479899a45388302e0dc4845be024e9",
+    "performance\\npu_prefill\\weights-full.bin": "6e87eb16e95e4e24cb83f3852d4200bdff7da87d8e8989022fe8012b88c2f978",
+    "performance\\npu_prefill\\artifacts-128\\final.xclbin": "ab3a4d4ffa0f7b821db1dacdcea6a849c618ae756eaf124b89911b11addd7d38",
+    "performance\\npu_prefill\\artifacts-256\\final.xclbin": "15866546278d9aac885c27d7865cad3d02cf84b8a876f78bb7186186f7fc4fa0",
+    "performance\\npu_prefill\\artifacts-512\\final.xclbin": "2c0213aa51dd60c44b315bfd4cd78177f99f9cabf0ab16f7e8248b0183cb5c8a",
+    "performance\\npu_prefill\\artifacts-128\\insts.bin": "12709f39848079caed0842bcdbde86c4d2bbbc4732d6ab8fe5dd692e4265193d",
+    "performance\\npu_prefill\\artifacts-256\\insts.bin": "81c2a6c77b62f45d22084799a5fc2c123183816fefa803a109db8556c39ce703",
+    "performance\\npu_prefill\\artifacts-512\\insts.bin": "53d4d04b7a2820c0b352dcfd759dfaa1b11bf328060ebd4a9c162ab1c0505b1c"
+  },
+  "limits": [
+    "Combined engine revision and 36->40 GiB residency change; no single-factor attribution.",
+    "Fresh prompts 2663 and 7801 tokens, cached prompt reused7796. No full65536-position or vision execution qualification.",
+    "Full response time and decode depend on sampled lengths and acceptance; accepted result is prefill only.",
+    "Slot APIs audited, not newly enabled or benchmarked. Gufo Strix Halo results are not local laptop evidence."
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "mlir_aie_commit": "6f73deca839e79a170e7c90b9285b3be949ca781",
+  "source": "programming_examples/basic/matrix_multiplication/whole_array/whole_array.py",
+  "shape": [
+    1024,
+    2560,
+    1024
+  ],
+  "tile": [
+    64,
+    32,
+    64
+  ],
+  "cache": "<EXPERIMENT_ROOT>\\npu\\cache\\1c31233d7976d106def72f08",
+  "native_sample_verification_passed": true
+}

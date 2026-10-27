@@ -1,0 +1,196 @@
+{
+  "scope": "Public review artifacts, not a complete runnable hardware installation.",
+  "local_path_placeholders": [
+    "<EXPERIMENT_ROOT>",
+    "<STRATA_ROOT>",
+    "<USER_HOME>"
+  ],
+  "files": [
+    {
+      "file": "01-native-functional.json",
+      "source": "npu/functional-summary.json",
+      "source_sha256": "6c12823d60b9b550e2f8b5b79a670398ca80597cc95ff14b18b16319d7259049",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 4463,
+      "published_sha256": "18279b179b942cf407026fe4e7578aa6226977df50d0d5ad61b4ada02603e317"
+    },
+    {
+      "file": "02-packed-cooptimization.json",
+      "source": "coopt/final-summary.json",
+      "source_sha256": "f10318d20720083cc3974b759332dec3f7d4eaf6061c55202f52de2898e9ffaa",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 8622,
+      "published_sha256": "558f882eb892316dde144a97dfeaa21b625eccfe1f8e11f9de2ed25d225431e9"
+    },
+    {
+      "file": "03-resident-router.json",
+      "source": "router/final-summary.json",
+      "source_sha256": "cd28aef5baa74413eaf40d5cbcccfd09f18623ffaa1da71d1c00372d1ed2a9e4",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 17025,
+      "published_sha256": "b709cfd73238252aefda49cbdfa5a6244705ed32f76f685fc2dee458e60ba2c4"
+    },
+    {
+      "file": "03-hardware-probes.json",
+      "source": "router/hardware-probes-02.json",
+      "source_sha256": "4448cf19c5656891ee6ba660d14c24db5144dafd5e59a69ebd03c87bb2aa9330",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 6099,
+      "published_sha256": "dcc631effb6e63e08e81b7585f6cd65f1b680f6490bec49e4990ecc93d81d032"
+    },
+    {
+      "file": "03-observed-vliw.json",
+      "source": "router/vliw-current-object.json",
+      "source_sha256": "ecd8be933a5e555af5df74299dd66a2622a8894eaab0362c9132b20d7c45e0f8",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 1227,
+      "published_sha256": "795e818fb0efb9ecebb1110a045fdb76c338ceecb064450baa1d9be1f9b225d9"
+    },
+    {
+      "file": "04-cuda-profile-and-hc-cost.json",
+      "source": "performance/final-summary.json",
+      "source_sha256": "913b5d488cdf390f7471f288d21669650f4c34468b372138bbd309e7e5a5c096",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 31816,
+      "published_sha256": "98b550c34c782611e9c5e85a53db9229bd66ee35b125dc75a799ca7dc0497dfe"
+    },
+    {
+      "file": "04-hc-cost-warm.json",
+      "source": "performance/npu_prefill/cost-summary.json",
+      "source_sha256": "ddd27753380287c42b4aea62221d5bbd7a177c74378c14877f71a91f2a51650c",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 67174,
+      "published_sha256": "068371f5551ec5ef9d0aa4b1eb18ab50931634eb7d1af329f9773728fa730efc"
+    },
+    {
+      "file": "04-hc-cost-cold.json",
+      "source": "performance/npu_prefill/cost-cold-summary.json",
+      "source_sha256": "6170d1ddfb451c6a522a14b4e3c1729bb4dbbfed27baef7d166af1a6e11e3dff",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 67183,
+      "published_sha256": "148b4e7bee3152f4d99bc6a095a26259d0f531b7def2e241d528c41871c732fb"
+    },
+    {
+      "file": "05-hc-two-bank.json",
+      "source": "two-bank/final-summary.json",
+      "source_sha256": "3fdc323fe80dfd12cd0de01d661d5384d286e6cc810ad0ea7f785d36f2861a4c",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 34752,
+      "published_sha256": "17a6949a8394ee2773207a2978353fde538ccfbf125ad6bfbd0fdd7ca3d5d580"
+    },
+    {
+      "file": "06-shared-memory.json",
+      "source": "gufo-projection/memory-results.json",
+      "source_sha256": "c039504ade5d174696d7be4b9e1622817872e5ded812dae9d29b7415ca251119",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 9020,
+      "published_sha256": "8c4cb02545c5a97372624ddcc4c0602e5ef97390bfbecc442264af4cc877b480"
+    },
+    {
+      "file": "07-projection-cost.json",
+      "source": "gufo-projection/projection-cost-results.json",
+      "source_sha256": "6a48e750a52a1cf3da4cf872b3918566768032b0027d5aee61d356afea80021c",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 35140,
+      "published_sha256": "2aa2f534f66bc4e6b16302e15727e4acc0322e0c1cfc85d8920c921410aef3bc"
+    },
+    {
+      "file": "08-full-model.json",
+      "source": "gufo-projection/final-summary.json",
+      "source_sha256": "d615dd53099364d169dadba1b6b22940592d19a5b1a2a6446ab57b02507e1738",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 97376,
+      "published_sha256": "fbd397c6f1b11da544f86e53fa9b33a029d9708596cd63bf58ffe9095ed5c551"
+    },
+    {
+      "file": "08-trace-and-logits.json",
+      "source": "gufo-projection/qualification-final.json",
+      "source_sha256": "2eff8e4ededf3e3ca337e1f8bbe5db9380ea347a9b37ab009324fedb4b02d133",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 2733,
+      "published_sha256": "233b20b86bc3540ed13458cd96a2497ba79524a514b7f88c92b037495d6f0d10"
+    },
+    {
+      "file": "08-original-identities.json",
+      "source": "gufo-projection/identity.json",
+      "source_sha256": "7c002f16d2cb16a39d14f9ecbf87782954abbf01299f6537a16cf2f3eb1104ee",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 3635,
+      "published_sha256": "3008e9c4c664847b3d106e4a9ff35680ff796079743fd018265fe5826c214be1"
+    },
+    {
+      "file": "08-kernel-source.json",
+      "source": "gufo-projection/artifacts-m64k32n64/source.json",
+      "source_sha256": "352be3469c826940fe73ae0ccb3474f4a1f9507582f3684b4ca5e81b96dde5a4",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 361,
+      "published_sha256": "326daf71b90c5429e7e37b3f84aae348bcea448f3899fed14531a12a1dde1ccc"
+    },
+    {
+      "file": "08-profile-cuda.json",
+      "source": "configs/cuda-resident40.json",
+      "source_sha256": "9fa2c3f9c907849e41f88ffd95d8fbc23ac2c3459b9ca417ecac08757520b5fb",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 2191,
+      "published_sha256": "709d8c6bdf7f12b53d7c00a098a10bf422275fed02cd0cd445dd757d353d70d0"
+    },
+    {
+      "file": "08-profile-npu4.json",
+      "source": "configs/gufo-npu4.json",
+      "source_sha256": "1ee8f2bd0e1cf6ab6ca6b2c02b64857e5ae40c669ecdef41c75911db1e4f948e",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 2420,
+      "published_sha256": "f612b1ed7bd32e0d8bddea7a62ffc2fd912687001c3c3d27df6adc85a030433a"
+    },
+    {
+      "file": "08-profile-npu4-settings.json",
+      "source": "configs/gufo-npu4.shared-settings.json",
+      "source_sha256": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "transformation": "JSON formatting, local path placeholders, and anonymous adapter labels; numeric values unchanged",
+      "bytes": 75,
+      "published_sha256": "3f180fe5972ec9de209883bdb2d8b180f12f3fd61a70fb44aec9651741149fbd"
+    },
+    {
+      "file": "07-matrix-tile-screen.json",
+      "transformation": "Exact standalone matrix timing stdout and source hashes; JSON wrapper added",
+      "bytes": 2936,
+      "published_sha256": "df336f63b15e7c8b9415fa1281e97d8dc2e44060814821f1427688476f1ab771"
+    },
+    {
+      "file": "strata-ssm-qkv-experiment.patch",
+      "source": "gufo-projection/source.patch",
+      "source_sha256": "fba83cc40c3d98696ead78b22224488a97d669f8db70af5c96fa12f04d3a197f",
+      "transformation": "byte-for-byte copy",
+      "bytes": 38874,
+      "published_sha256": "fba83cc40c3d98696ead78b22224488a97d669f8db70af5c96fa12f04d3a197f"
+    },
+    {
+      "file": "STRATA-LICENSE.txt",
+      "source": "gufo-engine/LICENSE",
+      "source_sha256": "949b9b0aada7476006469e58ee4ffb0e0f68c2d9137e90a356757b61a09d37f0",
+      "transformation": "byte-for-byte copy",
+      "bytes": 1093,
+      "published_sha256": "949b9b0aada7476006469e58ee4ffb0e0f68c2d9137e90a356757b61a09d37f0"
+    },
+    {
+      "file": "kernel-build.py.txt",
+      "source": "gufo-projection/compile_projection.py",
+      "source_sha256": "33e80ce528e8511b0e54cea6df104f9ef19342e27f2b7cfa28406d2452565d7d",
+      "transformation": "byte-for-byte copy",
+      "bytes": 1414,
+      "published_sha256": "33e80ce528e8511b0e54cea6df104f9ef19342e27f2b7cfa28406d2452565d7d"
+    },
+    {
+      "file": "08-requests.json",
+      "transformation": "Field selection; per-source hashes included in rows; numeric values unchanged",
+      "bytes": 138098,
+      "published_sha256": "a28c8d9befdcea79be4804586c750029ea15f2a43a70719103af2cf46f25b330"
+    },
+    {
+      "file": "08-workloads.json",
+      "transformation": "Exact parsed synthetic request bodies and prompt token IDs from confirmation pair 0 CUDA",
+      "bytes": 236386,
+      "published_sha256": "9bbe100efda823c32766dfc8b39cfa6e9d05ab0f9313a97396bfb8bc3e6dfdc5"
+    }
+  ]
+}

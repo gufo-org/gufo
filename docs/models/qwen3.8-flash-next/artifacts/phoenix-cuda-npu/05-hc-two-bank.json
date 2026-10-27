@@ -1,0 +1,1270 @@
+{
+  "status": "Rejected for performance; accepted cuda-resident40 remains selected",
+  "raw_run": "<EXPERIMENT_ROOT>\\two-bank\\results\\20261027T013440Z-1ce7fa-full-model-three-arm",
+  "comparison": {
+    "completed": true,
+    "measured_requests": 27,
+    "comparisons": [
+      {
+        "baseline": "cuda-resident40",
+        "candidate": "bank-cuda",
+        "workload": "fresh-120",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 2664,
+            "cache_n": 0,
+            "baseline_prompt_ms": 6766.4,
+            "candidate_prompt_ms": 10371.8,
+            "latency_reduction_percent": -53.283873256088896,
+            "throughput_gain_percent": -34.761565012823226,
+            "baseline_full_s": 9.67039079999995,
+            "candidate_full_s": 12.819302099998822,
+            "baseline_output_tokens": 83,
+            "candidate_output_tokens": 66
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 2664,
+            "cache_n": 0,
+            "baseline_prompt_ms": 6910.9,
+            "candidate_prompt_ms": 10493.9,
+            "latency_reduction_percent": -51.845635156057824,
+            "throughput_gain_percent": -34.14364535587341,
+            "baseline_full_s": 9.88563780000004,
+            "candidate_full_s": 17.486280900000565,
+            "baseline_output_tokens": 84,
+            "candidate_output_tokens": 191
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 2664,
+            "cache_n": 0,
+            "baseline_prompt_ms": 6914.7,
+            "candidate_prompt_ms": 10566.9,
+            "latency_reduction_percent": -52.817909670701546,
+            "throughput_gain_percent": -34.56264372711013,
+            "baseline_full_s": 9.306038199998511,
+            "candidate_full_s": 11.803544299998975,
+            "baseline_output_tokens": 74,
+            "candidate_output_tokens": 36
+          }
+        ],
+        "median_latency_reduction_percent": -52.817909670701546,
+        "median_throughput_gain_percent": -34.56264372711013
+      },
+      {
+        "baseline": "cuda-resident40",
+        "candidate": "bank-cuda",
+        "workload": "fresh-360",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 7802,
+            "cache_n": 0,
+            "baseline_prompt_ms": 18678.5,
+            "candidate_prompt_ms": 28941.2,
+            "latency_reduction_percent": -54.94391947961561,
+            "throughput_gain_percent": -35.46051995079679,
+            "baseline_full_s": 21.137925900000482,
+            "candidate_full_s": 31.275644200000897,
+            "baseline_output_tokens": 72,
+            "candidate_output_tokens": 75
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 7802,
+            "cache_n": 0,
+            "baseline_prompt_ms": 19487.1,
+            "candidate_prompt_ms": 30613.7,
+            "latency_reduction_percent": -57.0972592125047,
+            "throughput_gain_percent": -36.34516572645581,
+            "baseline_full_s": 22.761451799999122,
+            "candidate_full_s": 33.107090499999686,
+            "baseline_output_tokens": 86,
+            "candidate_output_tokens": 74
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 7802,
+            "cache_n": 0,
+            "baseline_prompt_ms": 19310.8,
+            "candidate_prompt_ms": 29474.6,
+            "latency_reduction_percent": -52.632723657228084,
+            "throughput_gain_percent": -34.48324998473261,
+            "baseline_full_s": 21.694287400001485,
+            "candidate_full_s": 42.953432299998894,
+            "baseline_output_tokens": 65,
+            "candidate_output_tokens": 343
+          }
+        ],
+        "median_latency_reduction_percent": -54.94391947961561,
+        "median_throughput_gain_percent": -35.46051995079679
+      },
+      {
+        "baseline": "cuda-resident40",
+        "candidate": "bank-cuda",
+        "workload": "repeated",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 7802,
+            "cache_n": 7797,
+            "baseline_prompt_ms": 260.0,
+            "candidate_prompt_ms": 218.5,
+            "latency_reduction_percent": 15.96153846153846,
+            "throughput_gain_percent": 18.99313501144164,
+            "baseline_full_s": 2.8366826999990735,
+            "candidate_full_s": 2.783211100000699,
+            "baseline_output_tokens": 73,
+            "candidate_output_tokens": 77
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 7802,
+            "cache_n": 7797,
+            "baseline_prompt_ms": 221.2,
+            "candidate_prompt_ms": 218.6,
+            "latency_reduction_percent": 1.1754068716093968,
+            "throughput_gain_percent": 1.1893870082342106,
+            "baseline_full_s": 2.629837000000407,
+            "candidate_full_s": 5.470100399999865,
+            "baseline_output_tokens": 77,
+            "candidate_output_tokens": 142
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 7802,
+            "cache_n": 7797,
+            "baseline_prompt_ms": 219.5,
+            "candidate_prompt_ms": 245.9,
+            "latency_reduction_percent": -12.02733485193621,
+            "throughput_gain_percent": -10.736071573810491,
+            "baseline_full_s": 2.0455075000008947,
+            "candidate_full_s": 6.421065700000327,
+            "baseline_output_tokens": 52,
+            "candidate_output_tokens": 159
+          }
+        ],
+        "median_latency_reduction_percent": 1.1754068716093968,
+        "median_throughput_gain_percent": 1.1893870082342106
+      },
+      {
+        "baseline": "cuda-resident40",
+        "candidate": "bank-npu",
+        "workload": "fresh-120",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 2664,
+            "cache_n": 0,
+            "baseline_prompt_ms": 6766.4,
+            "candidate_prompt_ms": 10822.7,
+            "latency_reduction_percent": -59.947682667297244,
+            "throughput_gain_percent": -37.47955685734614,
+            "baseline_full_s": 9.67039079999995,
+            "candidate_full_s": 14.298063500000353,
+            "baseline_output_tokens": 83,
+            "candidate_output_tokens": 100
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 2664,
+            "cache_n": 0,
+            "baseline_prompt_ms": 6910.9,
+            "candidate_prompt_ms": 10804.5,
+            "latency_reduction_percent": -56.339984661910904,
+            "throughput_gain_percent": -36.03683650330881,
+            "baseline_full_s": 9.88563780000004,
+            "candidate_full_s": 12.634887800000797,
+            "baseline_output_tokens": 84,
+            "candidate_output_tokens": 63
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 2664,
+            "cache_n": 0,
+            "baseline_prompt_ms": 6914.7,
+            "candidate_prompt_ms": 10761.1,
+            "latency_reduction_percent": -55.626419078195745,
+            "throughput_gain_percent": -35.74355781472155,
+            "baseline_full_s": 9.306038199998511,
+            "candidate_full_s": 13.050539800000479,
+            "baseline_output_tokens": 74,
+            "candidate_output_tokens": 61
+          }
+        ],
+        "median_latency_reduction_percent": -56.339984661910904,
+        "median_throughput_gain_percent": -36.03683650330881
+      },
+      {
+        "baseline": "cuda-resident40",
+        "candidate": "bank-npu",
+        "workload": "fresh-360",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 7802,
+            "cache_n": 0,
+            "baseline_prompt_ms": 18678.5,
+            "candidate_prompt_ms": 30338.3,
+            "latency_reduction_percent": -62.42364215541934,
+            "throughput_gain_percent": -38.43260828721451,
+            "baseline_full_s": 21.137925900000482,
+            "candidate_full_s": 36.82477689999905,
+            "baseline_output_tokens": 72,
+            "candidate_output_tokens": 177
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 7802,
+            "cache_n": 0,
+            "baseline_prompt_ms": 19487.1,
+            "candidate_prompt_ms": 30494.9,
+            "latency_reduction_percent": -56.48762514689207,
+            "throughput_gain_percent": -36.09718346346439,
+            "baseline_full_s": 22.761451799999122,
+            "candidate_full_s": 32.64059400000042,
+            "baseline_output_tokens": 86,
+            "candidate_output_tokens": 65
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 7802,
+            "cache_n": 0,
+            "baseline_prompt_ms": 19310.8,
+            "candidate_prompt_ms": 30374.1,
+            "latency_reduction_percent": -57.29073886115541,
+            "throughput_gain_percent": -36.42346604508446,
+            "baseline_full_s": 21.694287400001485,
+            "candidate_full_s": 33.0797018000012,
+            "baseline_output_tokens": 65,
+            "candidate_output_tokens": 72
+          }
+        ],
+        "median_latency_reduction_percent": -57.29073886115541,
+        "median_throughput_gain_percent": -36.42346604508446
+      },
+      {
+        "baseline": "cuda-resident40",
+        "candidate": "bank-npu",
+        "workload": "repeated",
+        "pairs": [
+          {
+            "pair": 0,
+            "prompt_tokens": 7802,
+            "cache_n": 7797,
+            "baseline_prompt_ms": 260.0,
+            "candidate_prompt_ms": 219.6,
+            "latency_reduction_percent": 15.538461538461545,
+            "throughput_gain_percent": 18.39708561020037,
+            "baseline_full_s": 2.8366826999990735,
+            "candidate_full_s": 2.9813727000000654,
+            "baseline_output_tokens": 73,
+            "candidate_output_tokens": 84
+          },
+          {
+            "pair": 1,
+            "prompt_tokens": 7802,
+            "cache_n": 7797,
+            "baseline_prompt_ms": 221.2,
+            "candidate_prompt_ms": 209.9,
+            "latency_reduction_percent": 5.108499095840857,
+            "throughput_gain_percent": 5.383515959980945,
+            "baseline_full_s": 2.629837000000407,
+            "candidate_full_s": 7.471586800000296,
+            "baseline_output_tokens": 77,
+            "candidate_output_tokens": 191
+          },
+          {
+            "pair": 2,
+            "prompt_tokens": 7802,
+            "cache_n": 7797,
+            "baseline_prompt_ms": 219.5,
+            "candidate_prompt_ms": 242.3,
+            "latency_reduction_percent": -10.387243735763096,
+            "throughput_gain_percent": -9.409822534048706,
+            "baseline_full_s": 2.0455075000008947,
+            "candidate_full_s": 2.37902910000048,
+            "baseline_output_tokens": 52,
+            "candidate_output_tokens": 61
+          }
+        ],
+        "median_latency_reduction_percent": 5.108499095840857,
+        "median_throughput_gain_percent": 5.383515959980945
+      }
+    ]
+  },
+  "groups": [
+    {
+      "profile": "cuda-resident40",
+      "workload": "fresh-120",
+      "prompt_tokens": [
+        2664,
+        2664,
+        2664
+      ],
+      "output_tokens": [
+        83,
+        84,
+        74
+      ],
+      "cache_n": [
+        0,
+        0,
+        0
+      ],
+      "prompt_ms": {
+        "values": [
+          6766.4,
+          6910.9,
+          6914.7
+        ],
+        "median": 6910.9,
+        "min": 6766.4,
+        "max": 6914.7
+      },
+      "prompt_per_second": {
+        "values": [
+          393.7,
+          385.5,
+          385.3
+        ],
+        "median": 385.5,
+        "min": 385.3,
+        "max": 393.7
+      },
+      "predicted_ms": {
+        "values": [
+          2898.3,
+          2967.8,
+          2372.6
+        ],
+        "median": 2898.3,
+        "min": 2372.6,
+        "max": 2967.8
+      },
+      "predicted_per_second": {
+        "values": [
+          28.6,
+          28.3,
+          31.2
+        ],
+        "median": 28.6,
+        "min": 28.3,
+        "max": 31.2
+      },
+      "full_request_s": {
+        "values": [
+          9.67039079999995,
+          9.88563780000004,
+          9.306038199998511
+        ],
+        "median": 9.67039079999995,
+        "min": 9.306038199998511,
+        "max": 9.88563780000004
+      },
+      "first_streamed_text_s": {
+        "values": [
+          6.811726699999781,
+          6.957519199999297,
+          6.976467599999523
+        ],
+        "median": 6.957519199999297,
+        "min": 6.811726699999781,
+        "max": 6.976467599999523
+      },
+      "first_visible_answer_s": {
+        "values": [
+          9.669299899998805,
+          9.713859699999375,
+          9.304959399998552
+        ],
+        "median": 9.669299899998805,
+        "min": 9.304959399998552,
+        "max": 9.713859699999375
+      }
+    },
+    {
+      "profile": "cuda-resident40",
+      "workload": "fresh-360",
+      "prompt_tokens": [
+        7802,
+        7802,
+        7802
+      ],
+      "output_tokens": [
+        72,
+        86,
+        65
+      ],
+      "cache_n": [
+        0,
+        0,
+        0
+      ],
+      "prompt_ms": {
+        "values": [
+          18678.5,
+          19487.1,
+          19310.8
+        ],
+        "median": 19310.8,
+        "min": 18678.5,
+        "max": 19487.1
+      },
+      "prompt_per_second": {
+        "values": [
+          417.7,
+          400.4,
+          404.0
+        ],
+        "median": 404.0,
+        "min": 400.4,
+        "max": 417.7
+      },
+      "predicted_ms": {
+        "values": [
+          2430.5,
+          3264.4,
+          2358.1
+        ],
+        "median": 2430.5,
+        "min": 2358.1,
+        "max": 3264.4
+      },
+      "predicted_per_second": {
+        "values": [
+          29.6,
+          26.3,
+          27.6
+        ],
+        "median": 27.6,
+        "min": 26.3,
+        "max": 29.6
+      },
+      "full_request_s": {
+        "values": [
+          21.137925900000482,
+          22.761451799999122,
+          21.694287400001485
+        ],
+        "median": 21.694287400001485,
+        "min": 21.137925900000482,
+        "max": 22.761451799999122
+      },
+      "first_streamed_text_s": {
+        "values": [
+          18.748348299999634,
+          19.54172760000074,
+          19.382361900001342
+        ],
+        "median": 19.382361900001342,
+        "min": 18.748348299999634,
+        "max": 19.54172760000074
+      },
+      "first_visible_answer_s": {
+        "values": [
+          21.119803300000058,
+          22.736548599999878,
+          21.5362223000011
+        ],
+        "median": 21.5362223000011,
+        "min": 21.119803300000058,
+        "max": 22.736548599999878
+      }
+    },
+    {
+      "profile": "cuda-resident40",
+      "workload": "repeated",
+      "prompt_tokens": [
+        7802,
+        7802,
+        7802
+      ],
+      "output_tokens": [
+        73,
+        77,
+        52
+      ],
+      "cache_n": [
+        7797,
+        7797,
+        7797
+      ],
+      "prompt_ms": {
+        "values": [
+          260.0,
+          221.2,
+          219.5
+        ],
+        "median": 221.2,
+        "min": 219.5,
+        "max": 260.0
+      },
+      "prompt_per_second": {
+        "values": [
+          19.2,
+          22.6,
+          22.8
+        ],
+        "median": 22.6,
+        "min": 19.2,
+        "max": 22.8
+      },
+      "predicted_ms": {
+        "values": [
+          2555.0,
+          2387.8,
+          1818.8
+        ],
+        "median": 2387.8,
+        "min": 1818.8,
+        "max": 2555.0
+      },
+      "predicted_per_second": {
+        "values": [
+          28.6,
+          32.2,
+          28.6
+        ],
+        "median": 28.6,
+        "min": 28.6,
+        "max": 32.2
+      },
+      "full_request_s": {
+        "values": [
+          2.8366826999990735,
+          2.629837000000407,
+          2.0455075000008947
+        ],
+        "median": 2.629837000000407,
+        "min": 2.0455075000008947,
+        "max": 2.8366826999990735
+      },
+      "first_streamed_text_s": {
+        "values": [
+          0.3205966999994416,
+          0.285355800000616,
+          0.2685832000006485
+        ],
+        "median": 0.285355800000616,
+        "min": 0.2685832000006485,
+        "max": 0.3205966999994416
+      },
+      "first_visible_answer_s": {
+        "values": [
+          2.8354957999999897,
+          2.6282071999994514,
+          2.0337177000001248
+        ],
+        "median": 2.6282071999994514,
+        "min": 2.0337177000001248,
+        "max": 2.8354957999999897
+      }
+    },
+    {
+      "profile": "bank-cuda",
+      "workload": "fresh-120",
+      "prompt_tokens": [
+        2664,
+        2664,
+        2664
+      ],
+      "output_tokens": [
+        66,
+        191,
+        36
+      ],
+      "cache_n": [
+        0,
+        0,
+        0
+      ],
+      "prompt_ms": {
+        "values": [
+          10371.8,
+          10493.9,
+          10566.9
+        ],
+        "median": 10493.9,
+        "min": 10371.8,
+        "max": 10566.9
+      },
+      "prompt_per_second": {
+        "values": [
+          256.9,
+          253.9,
+          252.1
+        ],
+        "median": 253.9,
+        "min": 252.1,
+        "max": 256.9
+      },
+      "predicted_ms": {
+        "values": [
+          2440.1,
+          6984.7,
+          1216.9
+        ],
+        "median": 2440.1,
+        "min": 1216.9,
+        "max": 6984.7
+      },
+      "predicted_per_second": {
+        "values": [
+          27.0,
+          27.3,
+          29.6
+        ],
+        "median": 27.3,
+        "min": 27.0,
+        "max": 29.6
+      },
+      "full_request_s": {
+        "values": [
+          12.819302099998822,
+          17.486280900000565,
+          11.803544299998975
+        ],
+        "median": 12.819302099998822,
+        "min": 11.803544299998975,
+        "max": 17.486280900000565
+      },
+      "first_streamed_text_s": {
+        "values": [
+          10.419600999999602,
+          10.546259300001111,
+          10.630967900000542
+        ],
+        "median": 10.546259300001111,
+        "min": 10.419600999999602,
+        "max": 10.630967900000542
+      },
+      "first_visible_answer_s": {
+        "values": [
+          12.818063400000028,
+          17.305680700001176,
+          11.802325599999676
+        ],
+        "median": 12.818063400000028,
+        "min": 11.802325599999676,
+        "max": 17.305680700001176
+      }
+    },
+    {
+      "profile": "bank-cuda",
+      "workload": "fresh-360",
+      "prompt_tokens": [
+        7802,
+        7802,
+        7802
+      ],
+      "output_tokens": [
+        75,
+        74,
+        343
+      ],
+      "cache_n": [
+        0,
+        0,
+        0
+      ],
+      "prompt_ms": {
+        "values": [
+          28941.2,
+          30613.7,
+          29474.6
+        ],
+        "median": 29474.6,
+        "min": 28941.2,
+        "max": 30613.7
+      },
+      "prompt_per_second": {
+        "values": [
+          269.6,
+          254.9,
+          264.7
+        ],
+        "median": 264.7,
+        "min": 254.9,
+        "max": 269.6
+      },
+      "predicted_ms": {
+        "values": [
+          2325.6,
+          2480.9,
+          13470.5
+        ],
+        "median": 2480.9,
+        "min": 2325.6,
+        "max": 13470.5
+      },
+      "predicted_per_second": {
+        "values": [
+          32.2,
+          29.8,
+          25.5
+        ],
+        "median": 29.8,
+        "min": 25.5,
+        "max": 32.2
+      },
+      "full_request_s": {
+        "values": [
+          31.275644200000897,
+          33.107090499999686,
+          42.953432299998894
+        ],
+        "median": 33.107090499999686,
+        "min": 31.275644200000897,
+        "max": 42.953432299998894
+      },
+      "first_streamed_text_s": {
+        "values": [
+          28.990864299999885,
+          30.66551040000013,
+          29.528425900000002
+        ],
+        "median": 29.528425900000002,
+        "min": 28.990864299999885,
+        "max": 30.66551040000013
+      },
+      "first_visible_answer_s": {
+        "values": [
+          31.27436579999994,
+          33.1068636,
+          42.95218019999993
+        ],
+        "median": 33.1068636,
+        "min": 31.27436579999994,
+        "max": 42.95218019999993
+      }
+    },
+    {
+      "profile": "bank-cuda",
+      "workload": "repeated",
+      "prompt_tokens": [
+        7802,
+        7802,
+        7802
+      ],
+      "output_tokens": [
+        77,
+        142,
+        159
+      ],
+      "cache_n": [
+        7797,
+        7797,
+        7797
+      ],
+      "prompt_ms": {
+        "values": [
+          218.5,
+          218.6,
+          245.9
+        ],
+        "median": 218.6,
+        "min": 218.5,
+        "max": 245.9
+      },
+      "prompt_per_second": {
+        "values": [
+          22.9,
+          22.9,
+          20.3
+        ],
+        "median": 22.9,
+        "min": 20.3,
+        "max": 22.9
+      },
+      "predicted_ms": {
+        "values": [
+          2546.3,
+          5243.9,
+          6158.3
+        ],
+        "median": 5243.9,
+        "min": 2546.3,
+        "max": 6158.3
+      },
+      "predicted_per_second": {
+        "values": [
+          30.2,
+          27.1,
+          25.8
+        ],
+        "median": 27.1,
+        "min": 25.8,
+        "max": 30.2
+      },
+      "full_request_s": {
+        "values": [
+          2.783211100000699,
+          5.470100399999865,
+          6.421065700000327
+        ],
+        "median": 5.470100399999865,
+        "min": 2.783211100000699,
+        "max": 6.421065700000327
+      },
+      "first_streamed_text_s": {
+        "values": [
+          0.2829440000004979,
+          0.27266810000037367,
+          0.31073319999995874
+        ],
+        "median": 0.2829440000004979,
+        "min": 0.27266810000037367,
+        "max": 0.31073319999995874
+      },
+      "first_visible_answer_s": {
+        "values": [
+          2.7820501000005606,
+          5.468812400000388,
+          6.419866899999761
+        ],
+        "median": 5.468812400000388,
+        "min": 2.7820501000005606,
+        "max": 6.419866899999761
+      }
+    },
+    {
+      "profile": "bank-npu",
+      "workload": "fresh-120",
+      "prompt_tokens": [
+        2664,
+        2664,
+        2664
+      ],
+      "output_tokens": [
+        100,
+        63,
+        61
+      ],
+      "cache_n": [
+        0,
+        0,
+        0
+      ],
+      "prompt_ms": {
+        "values": [
+          10822.7,
+          10804.5,
+          10761.1
+        ],
+        "median": 10804.5,
+        "min": 10761.1,
+        "max": 10822.7
+      },
+      "prompt_per_second": {
+        "values": [
+          246.1,
+          246.6,
+          247.6
+        ],
+        "median": 246.6,
+        "min": 246.1,
+        "max": 247.6
+      },
+      "predicted_ms": {
+        "values": [
+          3466.5,
+          1823.9,
+          2282.9
+        ],
+        "median": 2282.9,
+        "min": 1823.9,
+        "max": 3466.5
+      },
+      "predicted_per_second": {
+        "values": [
+          28.8,
+          34.5,
+          26.7
+        ],
+        "median": 28.8,
+        "min": 26.7,
+        "max": 34.5
+      },
+      "full_request_s": {
+        "values": [
+          14.298063500000353,
+          12.634887800000797,
+          13.050539800000479
+        ],
+        "median": 13.050539800000479,
+        "min": 12.634887800000797,
+        "max": 14.298063500000353
+      },
+      "first_streamed_text_s": {
+        "values": [
+          10.881809200000134,
+          10.857511800000793,
+          10.811865200001193
+        ],
+        "median": 10.857511800000793,
+        "min": 10.811865200001193,
+        "max": 10.881809200000134
+      },
+      "first_visible_answer_s": {
+        "values": [
+          14.296824999999444,
+          12.63375090000045,
+          12.877336400000786
+        ],
+        "median": 12.877336400000786,
+        "min": 12.63375090000045,
+        "max": 14.296824999999444
+      }
+    },
+    {
+      "profile": "bank-npu",
+      "workload": "fresh-360",
+      "prompt_tokens": [
+        7802,
+        7802,
+        7802
+      ],
+      "output_tokens": [
+        177,
+        65,
+        72
+      ],
+      "cache_n": [
+        0,
+        0,
+        0
+      ],
+      "prompt_ms": {
+        "values": [
+          30338.3,
+          30494.9,
+          30374.1
+        ],
+        "median": 30374.1,
+        "min": 30338.3,
+        "max": 30494.9
+      },
+      "prompt_per_second": {
+        "values": [
+          257.2,
+          255.8,
+          256.9
+        ],
+        "median": 256.9,
+        "min": 255.8,
+        "max": 257.2
+      },
+      "predicted_ms": {
+        "values": [
+          6455.1,
+          2135.8,
+          2694.7
+        ],
+        "median": 2694.7,
+        "min": 2135.8,
+        "max": 6455.1
+      },
+      "predicted_per_second": {
+        "values": [
+          27.4,
+          30.4,
+          26.7
+        ],
+        "median": 27.4,
+        "min": 26.7,
+        "max": 30.4
+      },
+      "full_request_s": {
+        "values": [
+          36.82477689999905,
+          32.64059400000042,
+          33.0797018000012
+        ],
+        "median": 33.0797018000012,
+        "min": 32.64059400000042,
+        "max": 36.82477689999905
+      },
+      "first_streamed_text_s": {
+        "values": [
+          30.424636300000202,
+          30.545121400000426,
+          30.426835199999914
+        ],
+        "median": 30.426835199999914,
+        "min": 30.424636300000202,
+        "max": 30.545121400000426
+      },
+      "first_visible_answer_s": {
+        "values": [
+          36.82365279999976,
+          32.62512549999883,
+          33.07866020000074
+        ],
+        "median": 33.07866020000074,
+        "min": 32.62512549999883,
+        "max": 36.82365279999976
+      }
+    },
+    {
+      "profile": "bank-npu",
+      "workload": "repeated",
+      "prompt_tokens": [
+        7802,
+        7802,
+        7802
+      ],
+      "output_tokens": [
+        84,
+        191,
+        61
+      ],
+      "cache_n": [
+        7797,
+        7797,
+        7797
+      ],
+      "prompt_ms": {
+        "values": [
+          219.6,
+          209.9,
+          242.3
+        ],
+        "median": 219.6,
+        "min": 209.9,
+        "max": 242.3
+      },
+      "prompt_per_second": {
+        "values": [
+          22.8,
+          23.8,
+          20.6
+        ],
+        "median": 22.8,
+        "min": 20.6,
+        "max": 23.8
+      },
+      "predicted_ms": {
+        "values": [
+          2753.7,
+          7256.5,
+          2129.7
+        ],
+        "median": 2753.7,
+        "min": 2129.7,
+        "max": 7256.5
+      },
+      "predicted_per_second": {
+        "values": [
+          30.5,
+          26.3,
+          28.6
+        ],
+        "median": 28.6,
+        "min": 26.3,
+        "max": 30.5
+      },
+      "full_request_s": {
+        "values": [
+          2.9813727000000654,
+          7.471586800000296,
+          2.37902910000048
+        ],
+        "median": 2.9813727000000654,
+        "min": 2.37902910000048,
+        "max": 7.471586800000296
+      },
+      "first_streamed_text_s": {
+        "values": [
+          0.2742292000002635,
+          0.2547685999998066,
+          0.2954544000003807
+        ],
+        "median": 0.2742292000002635,
+        "min": 0.2547685999998066,
+        "max": 0.2954544000003807
+      },
+      "first_visible_answer_s": {
+        "values": [
+          2.9800247000002855,
+          7.470491699999911,
+          2.3643513999995776
+        ],
+        "median": 2.9800247000002855,
+        "min": 2.3643513999995776,
+        "max": 7.470491699999911
+      }
+    }
+  ],
+  "resources": [
+    {
+      "profile": "cuda-resident40",
+      "minimum_available_ram_bytes": 7243128832,
+      "minimum_commit_headroom_bytes": 29858623488,
+      "peak_dedicated_vram_bytes": 8206905344,
+      "minimum_free_dedicated_vram_bytes": 378834944,
+      "max_gpu_temperature_c": 61,
+      "always_plugged_in": true,
+      "active_gpu_clock_mhz_range": [
+        270,
+        2640
+      ],
+      "observed_throttle_masks": [
+        1,
+        1024
+      ],
+      "spawn_to_health_s": [
+        20.37769440000011,
+        18.588094799999453,
+        19.093938799998796
+      ],
+      "resource_floors_passed": true,
+      "owned_memory_released": true,
+      "shared_memory": "Raw adapter-specific WDDM counters retained in each server/wddm-memory.csv; pinned host mappings are not proof of paging or spill."
+    },
+    {
+      "profile": "bank-cuda",
+      "minimum_available_ram_bytes": 7294148608,
+      "minimum_commit_headroom_bytes": 30326382592,
+      "peak_dedicated_vram_bytes": 8206905344,
+      "minimum_free_dedicated_vram_bytes": 378834944,
+      "max_gpu_temperature_c": 62,
+      "always_plugged_in": true,
+      "active_gpu_clock_mhz_range": [
+        210,
+        2640
+      ],
+      "observed_throttle_masks": [
+        1,
+        1024
+      ],
+      "spawn_to_health_s": [
+        20.83678559999862,
+        18.582988000000114,
+        19.584797499999695
+      ],
+      "resource_floors_passed": true,
+      "owned_memory_released": true,
+      "shared_memory": "Raw adapter-specific WDDM counters retained in each server/wddm-memory.csv; pinned host mappings are not proof of paging or spill."
+    },
+    {
+      "profile": "bank-npu",
+      "minimum_available_ram_bytes": 6862716928,
+      "minimum_commit_headroom_bytes": 29900718080,
+      "peak_dedicated_vram_bytes": 8206905344,
+      "minimum_free_dedicated_vram_bytes": 378834944,
+      "max_gpu_temperature_c": 62,
+      "always_plugged_in": true,
+      "active_gpu_clock_mhz_range": [
+        360,
+        2625
+      ],
+      "observed_throttle_masks": [
+        1,
+        1024
+      ],
+      "spawn_to_health_s": [
+        20.344853200000216,
+        19.570032999999967,
+        20.33900209999956
+      ],
+      "resource_floors_passed": true,
+      "owned_memory_released": true,
+      "shared_memory": "Raw adapter-specific WDDM counters retained in each server/wddm-memory.csv; pinned host mappings are not proof of paging or spill."
+    }
+  ],
+  "identities": {
+    "engine_base_commit": "1aff6d14117b88171fcfcec8f2b55fdc47f2b165",
+    "gufo_reference_commit": "2e499c39e4cd2d9250da2f44f529435f04995c84",
+    "files": {
+      "bank-engine\\CMakeLists.txt": "d23be6fc57fd8b26bb06e2c4af520c45a13602978ebe0e8cb41f2922d2193eb6",
+      "bank-engine\\src\\prefill\\prefill.cpp": "38c3012cded2c33e66e46b5a8a8965ad66e4672143321c9601c3781fd5194695",
+      "bank-engine\\src\\prefill\\two_bank_npu.cpp": "93eca0a4374782584ffb330652135db979fdf05f6b813f3c9d93668473b1ad8b",
+      "bank-engine\\include\\strata\\prefill\\two_bank_npu.hpp": "4aedc7f06cc30ccee31a04a63ccc618bfd5ce1f694075815c6886e9f4854dbad",
+      "bank-engine\\src\\prefill\\two_bank_identity.h": "362053a8734401177ef669163109d12b3df54776432489f9c6b757d4e70309f2",
+      "bank-build\\strata.exe": "63b9ca4e0bde5e09eb7d4e7bfc03195d9b7a984c3d13ab52fec3e249db09119c",
+      "npu-control-engine\\strata.exe": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da",
+      "two-bank\\artifacts\\final.xclbin": "87d80a92a5f12594ca1857ace9e1fd429fa7407bccf81df0fe78efe79dedc368",
+      "two-bank\\artifacts\\insts.bin": "e976dab7d0d6675f7371d5de98e4838156871e638ebb7eb6a2f313e4e7a6aab0",
+      "two-bank\\kernel.cc": "ad5904451e3351698bc05b9ef919c2778f31884a4aa6ff6be8706bd2f2f87cbb",
+      "two-bank\\compile_kernel.py": "d4d7a4fe500620b9261d8d80ea760c3fab00577c4850f3fbf2496eff71cac361",
+      "two-bank\\source.patch": "8f02ae02f5d646e886d217fdda39ee80f3fd05a630fbfb3db31449940fa407d6",
+      "configs\\cuda-resident40.json": "9fa2c3f9c907849e41f88ffd95d8fbc23ac2c3459b9ca417ecac08757520b5fb",
+      "configs\\bank-cuda.json": "0a0a877e3ddaca652e77723edc2bf5cf50f568f3ad72e3a76ef13538c1a5747c",
+      "configs\\bank-npu.json": "7e373e7d11d75930ab8a7c31fcc02657220e63ed394c2bbabf3da546ea2bbfbe"
+    },
+    "note": "source.patch includes the final drain/device-guard fixes and tracing. patch_engine.py is only the initial editing script, not a complete reproduction patch."
+  },
+  "npu_vs_cuda_bank_schedule": [
+    {
+      "workload": "fresh-120",
+      "npu_added_prompt_time_percent_by_pair": [
+        4.3473649704005135,
+        2.9598147495211613,
+        1.8378143069396113
+      ],
+      "median_percent": 2.9598147495211613
+    },
+    {
+      "workload": "fresh-360",
+      "npu_added_prompt_time_percent_by_pair": [
+        4.82737412408607,
+        -0.388061554140795,
+        3.05178017683021
+      ],
+      "median_percent": 3.05178017683021
+    },
+    {
+      "workload": "repeated",
+      "npu_added_prompt_time_percent_by_pair": [
+        0.5034324942791768,
+        -3.9798719121683424,
+        -1.464009760065066
+      ],
+      "median_percent": -1.464009760065066
+    }
+  ],
+  "negative_controls": [
+    {
+      "run": "20261027T013213Z-5afb15-bank-blocked-qualify",
+      "qualification": {
+        "passed": true,
+        "negative": true,
+        "completed_answer": false,
+        "failure": "RuntimeError(\"{'type': 'server_error', 'message': 'TASK_NEGATIVE_CONTROL_TWO_BANK_NPU_DISABLED'}\")"
+      },
+      "identity": {
+        "profile": "bank-blocked",
+        "exe": "<EXPERIMENT_ROOT>\\bank-build\\strata.exe",
+        "exe_sha256": "63b9ca4e0bde5e09eb7d4e7bfc03195d9b7a984c3d13ab52fec3e249db09119c",
+        "config_sha256": "2889155b38b20d3a1d0f7cc2d3b531ee35ade86ed30e732d83fcb91d732a32f0"
+      }
+    },
+    {
+      "run": "20261027T013241Z-2589ac-bank-bad-tag-qualify",
+      "qualification": {
+        "passed": true,
+        "negative": true,
+        "completed_answer": false,
+        "failure": "RuntimeError(\"{'type': 'server_error', 'message': 'Two-bank NPU job/row/tile/weight identity failed'}\")"
+      },
+      "identity": {
+        "profile": "bank-bad-tag",
+        "exe": "<EXPERIMENT_ROOT>\\bank-build\\strata.exe",
+        "exe_sha256": "63b9ca4e0bde5e09eb7d4e7bfc03195d9b7a984c3d13ab52fec3e249db09119c",
+        "config_sha256": "1f74b35fea76f834c6d1b38eb5a3fb241710198c1f64879bfd20e31a96286575"
+      }
+    }
+  ],
+  "qualification": "qualification-digest-v1.json, qualification-final.json, qualification-behavior.json; exact binary distinction in qualified-v1-identity.json",
+  "limits": [
+    "Full request times include varying generated output lengths; prefill comparisons use exact matched inputs and cache counts.",
+    "Bounded logits and task checks are not held-out perplexity or full quality equivalence.",
+    "Configured context remains 65536; actual measured prompt lengths are in groups. Full-64K and vision execution were not qualified.",
+    "Trace callbacks bound CUDA stream bank-body intervals including waits; overlap is not a measurement of simultaneous SM occupancy.",
+    "This implements the cross-bank schedule around HC attention-up on Phoenix/CUDA, not Gufo's exact SSM/QKV operation or mapped HIP transport.",
+    "Fault injection verifies explicit dispatch/identity failures. Exhaustive cancellation/timeout recovery and concurrent clients were not qualified."
+  ]
+}

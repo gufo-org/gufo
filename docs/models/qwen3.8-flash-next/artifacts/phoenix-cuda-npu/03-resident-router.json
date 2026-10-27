@@ -1,0 +1,493 @@
+{
+  "status": "Implemented and qualified within the documented scope; rejected as a performance default",
+  "scope": "Native Windows layer-0 decode, 128 of 512 router columns, 16 workers, 640 KiB immutable BF16 SRAM weights, 1-8 rows, CUDA remainder",
+  "evidence": {
+    "main_run": "<EXPERIMENT_ROOT>\\router\\results\\20261026T235021Z-eb0452-router-final",
+    "main_workloads": [
+      {
+        "case": "code",
+        "control_tps": {
+          "median": 21.81643925445787,
+          "min": 21.499621680476867,
+          "max": 23.34450923693236
+        },
+        "npu_tps": {
+          "median": 23.948037277605195,
+          "min": 20.684653799878035,
+          "max": 24.103497466673225
+        },
+        "paired_throughput_gain_percent": {
+          "median": 2.5853104665743754,
+          "min": -5.187764333946343,
+          "max": 12.111263281255113
+        },
+        "prompt_latency_reduction_percent": {
+          "median": -0.22435609799873468,
+          "min": -5.778344877870922,
+          "max": 4.737257654180194
+        },
+        "control_output_tokens": [
+          173,
+          233,
+          243
+        ],
+        "npu_output_tokens": [
+          251,
+          147,
+          212
+        ]
+      },
+      {
+        "case": "json",
+        "control_tps": {
+          "median": 23.35502755893252,
+          "min": 20.334490952293912,
+          "max": 25.631216526396326
+        },
+        "npu_tps": {
+          "median": 22.939102718887334,
+          "min": 22.142697383135765,
+          "max": 26.12758653571088
+        },
+        "paired_throughput_gain_percent": {
+          "median": -5.190874524714828,
+          "min": -10.503261929594787,
+          "max": 28.489012078089203
+        },
+        "prompt_latency_reduction_percent": {
+          "median": 4.633803857807983,
+          "min": -3.053493533328222,
+          "max": 4.80862856714851
+        },
+        "control_output_tokens": [
+          75,
+          134,
+          89
+        ],
+        "npu_output_tokens": [
+          99,
+          95,
+          137
+        ]
+      },
+      {
+        "case": "long_prefill",
+        "control_tps": {
+          "median": 28.238616307800918,
+          "min": 25.751418339838246,
+          "max": 30.73140749846343
+        },
+        "npu_tps": {
+          "median": 24.72378892065209,
+          "min": 22.975301550832857,
+          "max": 28.883972468043265
+        },
+        "paired_throughput_gain_percent": {
+          "median": -12.446882484740785,
+          "min": -25.238368753589878,
+          "max": 12.164588710668657
+        },
+        "prompt_latency_reduction_percent": {
+          "median": 0.9363836940533665,
+          "min": 0.31863353226163627,
+          "max": 3.103986157899552
+        },
+        "control_output_tokens": [
+          32,
+          64,
+          60
+        ],
+        "npu_output_tokens": [
+          32,
+          47,
+          32
+        ]
+      },
+      {
+        "case": "prefix_repeated",
+        "control_tps": {
+          "median": 25.10392044991442,
+          "min": 25.101976780671478,
+          "max": 27.25956214328307
+        },
+        "npu_tps": {
+          "median": 25.850988547578815,
+          "min": 22.970170681129368,
+          "max": 26.734086565214234
+        },
+        "paired_throughput_gain_percent": {
+          "median": 2.975902107222228,
+          "min": -15.73536449194447,
+          "max": 6.501917354172204
+        },
+        "prompt_latency_reduction_percent": {
+          "median": -8.512820512820518,
+          "min": -40.19384264538197,
+          "max": 4.834849210148395
+        },
+        "control_output_tokens": [
+          32,
+          154,
+          32
+        ],
+        "npu_output_tokens": [
+          221,
+          179,
+          72
+        ]
+      },
+      {
+        "case": "prose",
+        "control_tps": {
+          "median": 25.843188786684188,
+          "min": 25.40650406504065,
+          "max": 27.568692946532753
+        },
+        "npu_tps": {
+          "median": 24.731381993330864,
+          "min": 24.712149224770727,
+          "max": 26.828194755926305
+        },
+        "paired_throughput_gain_percent": {
+          "median": -2.732980651302419,
+          "min": -4.302126964789221,
+          "max": -2.6860112376113854
+        },
+        "prompt_latency_reduction_percent": {
+          "median": -0.30568575504381634,
+          "min": -3.052515312782411,
+          "max": -0.1295853269537517
+        },
+        "control_output_tokens": [
+          177,
+          175,
+          241
+        ],
+        "npu_output_tokens": [
+          267,
+          270,
+          128
+        ]
+      },
+      {
+        "case": "reasoning",
+        "control_tps": {
+          "median": 23.53597841760082,
+          "min": 23.09221849048407,
+          "max": 24.49230769230769
+        },
+        "npu_tps": {
+          "median": 23.446184941889843,
+          "min": 23.12986573395013,
+          "max": 24.109238318754
+        },
+        "paired_throughput_gain_percent": {
+          "median": -0.38151579729451823,
+          "min": -5.5627341264598895,
+          "max": 4.404166835200463
+        },
+        "prompt_latency_reduction_percent": {
+          "median": 0.0628704867972063,
+          "min": -5.217701006143716,
+          "max": 2.8926668358284724
+        },
+        "control_output_tokens": [
+          253,
+          199,
+          691
+        ],
+        "npu_output_tokens": [
+          232,
+          246,
+          113
+        ]
+      },
+      {
+        "case": "tool",
+        "control_tps": {
+          "median": 22.616247512212777,
+          "min": 20.46791937913978,
+          "max": 23.86552296624239
+        },
+        "npu_tps": {
+          "median": 22.667170381564038,
+          "min": 20.16485654650299,
+          "max": 24.085725521038142
+        },
+        "paired_throughput_gain_percent": {
+          "median": 6.497443963822236,
+          "min": -15.506328627174726,
+          "max": 10.744868404483077
+        },
+        "prompt_latency_reduction_percent": {
+          "median": 0.09936595060092701,
+          "min": -1.7028968272843947,
+          "max": 0.15251894571277624
+        },
+        "control_output_tokens": [
+          69,
+          72,
+          75
+        ],
+        "npu_output_tokens": [
+          114,
+          102,
+          98
+        ]
+      }
+    ],
+    "npu_execution": [
+      {
+        "groups": 634,
+        "rows": 1899,
+        "checked": 0,
+        "xrt_completed": 634,
+        "xrt_wait_ns": 223726500,
+        "callback_ns": 270096200,
+        "max_abs": 0,
+        "max_route_weight": 0,
+        "row_mask": 126,
+        "cuda_routes_checked": 0,
+        "max_cuda_route_error": 0,
+        "pair": "pair-00",
+        "profile": "router-perf",
+        "mode": "performance",
+        "consumed": "top10",
+        "failed": false,
+        "mean_callback_us": 426.0192429022082,
+        "mean_xrt_completed_wait_us": 352.88091482649844,
+        "timing_scope": "Callback excludes CUDA staging. Full request includes staging and heartbeat contention."
+      },
+      {
+        "groups": 552,
+        "rows": 1688,
+        "checked": 0,
+        "xrt_completed": 552,
+        "xrt_wait_ns": 193882000,
+        "callback_ns": 231545400,
+        "max_abs": 0,
+        "max_route_weight": 0,
+        "row_mask": 126,
+        "cuda_routes_checked": 0,
+        "max_cuda_route_error": 0,
+        "pair": "pair-01",
+        "profile": "router-perf",
+        "mode": "performance",
+        "consumed": "top10",
+        "failed": false,
+        "mean_callback_us": 419.4663043478261,
+        "mean_xrt_completed_wait_us": 351.2355072463768,
+        "timing_scope": "Callback excludes CUDA staging. Full request includes staging and heartbeat contention."
+      },
+      {
+        "groups": 455,
+        "rows": 1356,
+        "checked": 0,
+        "xrt_completed": 455,
+        "xrt_wait_ns": 159186900,
+        "callback_ns": 190536800,
+        "max_abs": 0,
+        "max_route_weight": 0,
+        "row_mask": 126,
+        "cuda_routes_checked": 0,
+        "max_cuda_route_error": 0,
+        "pair": "pair-02",
+        "profile": "router-perf",
+        "mode": "performance",
+        "consumed": "top10",
+        "failed": false,
+        "mean_callback_us": 418.7621978021978,
+        "mean_xrt_completed_wait_us": 349.86131868131866,
+        "timing_scope": "Callback excludes CUDA staging. Full request includes staging and heartbeat contention."
+      }
+    ],
+    "quality": {
+      "paired_kl": {
+        "median": 0.0015042277282174953,
+        "min": 0.000532969693790087,
+        "max": 0.004584620967832283
+      },
+      "paired_max_abs_logit_error": {
+        "median": 2.4643653482198715,
+        "min": 2.1399669647216797,
+        "max": 2.8895503282546997
+      },
+      "all_same_argmax": true,
+      "paired_samples": 6,
+      "control_repeat_kl": {
+        "median": 0.002612804735620403,
+        "min": 0.00032392170592142994,
+        "max": 0.004581530329460769
+      },
+      "scope": "Two warmup prompt positions, not held-out perplexity or full-distribution equivalence"
+    },
+    "resources": {
+      "peak_vram_mib": 7826.71484375,
+      "minimum_available_ram_gib": 7.532711029052734,
+      "minimum_commit_headroom_gib": 28.529579162597656,
+      "max_gpu_temperature_c": 63,
+      "clocks_mhz": [
+        2625.0
+      ],
+      "all_ac_connected": true
+    },
+    "gpu_raw": [
+      {
+        "shape": "PLE value",
+        "n": 6,
+        "speed_ratio": {
+          "median": 0.99935,
+          "min": 0.9965,
+          "max": 1.0069
+        },
+        "maximum_abs_error": 1.90734863e-06
+      },
+      {
+        "shape": "hc down (activations sliced)",
+        "n": 6,
+        "speed_ratio": {
+          "median": 1.0007000000000001,
+          "min": 0.999,
+          "max": 1.0017
+        },
+        "maximum_abs_error": 3.81469727e-06
+      },
+      {
+        "shape": "hc inject",
+        "n": 6,
+        "speed_ratio": {
+          "median": 1.1242999999999999,
+          "min": 0.972,
+          "max": 1.4802
+        },
+        "maximum_abs_error": 1.90734863e-06
+      },
+      {
+        "shape": "hc up",
+        "n": 6,
+        "speed_ratio": {
+          "median": 1.0029,
+          "min": 0.9744,
+          "max": 1.0051
+        },
+        "maximum_abs_error": 7.15255737e-07
+      },
+      {
+        "shape": "router / indexer q",
+        "n": 6,
+        "speed_ratio": {
+          "median": 0.9963,
+          "min": 0.9821,
+          "max": 1.0012
+        },
+        "maximum_abs_error": 1.43051147e-06
+      },
+      {
+        "shape": "row stride wider than N",
+        "n": 6,
+        "speed_ratio": {
+          "median": 0.9849,
+          "min": 0.8696,
+          "max": 1.0908
+        },
+        "maximum_abs_error": 9.53674316e-07
+      },
+      {
+        "shape": "single row",
+        "n": 6,
+        "speed_ratio": {
+          "median": 1.0018,
+          "min": 0.8691,
+          "max": 1.0234
+        },
+        "maximum_abs_error": 0.0
+      }
+    ],
+    "vliw_current_object": {
+      "object": "<EXPERIMENT_ROOT>\\npu\\cache\\615ab0c5fe34adb1c59b3f5c\\router_sram.o",
+      "object_sha256": "4b17efedcca61cadd1a6dcc36e82027c989c1eff274deb50daaadaead467b981",
+      "executed_xclbin_sha256": "dcfdea0abd8a186b8ff63120c7e484d5ea6317992e7650267615f62d0e56c6c2",
+      "scope": "Object used by the physically tested resident-router artifact. These observations do not establish maximum silicon issue width.",
+      "max_slots": 6,
+      "max_non_nop_operations": 4,
+      "examples": [
+        {
+          "line": "160: c0 03 00 a8 17 06 01 00 00 00 00 00 00 00 00 00      \tnopb\t;\t\tnopa\t;\t\tnops\t;\t\tnopx\t;\t\tvmov\twl1, wl10;\t\tnopv",
+          "slots": 6,
+          "active": 1
+        },
+        {
+          "line": "320: c0 03 00 68 c3 00 00 00 00 00 00 00 00 00 00 00      \tnopb\t;\t\tnopa\t;\t\tnops\t;\t\tnopx\t;\t\tvmov\tx0, bmh1;\t\tnopv",
+          "slots": 6,
+          "active": 1
+        },
+        {
+          "line": "144: b7 a8 07 06 ea a0 00 10 07 48 81 07  \tmova\tr5, #0x3c;\t\tpaddb\t[p0], #32;\t\tmovx\tr10, #0x7;\t\tvmov\twh0, wl2",
+          "slots": 4,
+          "active": 4
+        },
+        {
+          "line": "150: 67 86 e9 27 03 00 00 00 00 00 00 00  \tnopa\t;\t\tnopb\t;\t\tnopx\t;\t\tvmul.f\tbmh1, x10, x6, r4",
+          "slots": 4,
+          "active": 1
+        }
+      ]
+    },
+    "manual_behavior_review": {
+      "reasoning": "All six main responses give 6 items, maximum 8, no overflow.",
+      "prose": "All describe hit/miss behavior; pair-02 router-perf ends with an inaccurate or ambiguous only once phrase. Do not claim all prose is flawless.",
+      "code": "Six main code outputs each passed 8 bounded clamp checks.",
+      "other": "All main JSON/tool/ledger checks passed; all main requests stopped normally."
+    }
+  },
+  "identity": {
+    "upstream_engine_commit": "1aff6d14117b88171fcfcec8f2b55fdc47f2b165",
+    "files": {
+      "router-build\\strata.exe": "533e9fcb99ea5383e2be282847c4cd45a6b0f7bfcbf35df3cc383db98e1cd41a",
+      "router\\artifacts\\router_bridge.dll": "f0011f1f54241966b479d66bc0cb337fff8b9fbb3e78d151787c991d41be7d4e",
+      "router\\artifacts\\final.xclbin": "dcfdea0abd8a186b8ff63120c7e484d5ea6317992e7650267615f62d0e56c6c2",
+      "router\\artifacts\\insts.bin": "d2481e4b9bec47b8fb1993229fc273604df315bbcd0fe3487348e55d7303f659",
+      "router\\artifacts\\weights.bin": "eec2355a41333751d8fa08ca04791d79075044dc9b90181acd68c14f65aa2a75",
+      "router\\router_kernel.cc": "78ba357701218f0bb6a023dee31a153f31402b71513dafe7d97f902c160ded3e",
+      "router\\compile_test.py": "c255a614dfcf651fdccecd39e76553b790eed082b4e9f796997a66e6d21c96ff",
+      "router\\bridge.cpp": "e65ba4d69f85c9e8de7ddfa2148b8713b7005fb88a8ef7da1bf12b3f8ef64ca4",
+      "router\\artifact_hashes.h": "2ac7fbda10b9a7e3a6dbd14be2badfafd45dd16ecd2603cde35bc18600b51999",
+      "router\\router-engine.patch": "423717b3fb728ee27182edb73e28b81232045c2cf47f5dccf2ff3006db8f31ab",
+      "configs\\router-blocked.json": "8337e24be9866423a5536005e40b7e0a55644c2b042876477dbcef16c51c75b9",
+      "configs\\router-blocked.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\router-control.json": "cee5b5302d1d5029c7501484a26bb19ecaca31f3f290b16708c5cc97a7fd45cb",
+      "configs\\router-control.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\router-gpu-fp16.json": "764bbd3b8f6f45b69e778ece58caff6ec50070d6cf6fed0e90094e1aacb98025",
+      "configs\\router-gpu-fp16.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\router-perf.json": "1cd698a712be9ab0f19d32b0b1ed191ffbf35ac0f8d95c3a64d660555eb0479f",
+      "configs\\router-perf.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\router-qualify.json": "4195934fc457273df6fc3dce008616ec03eb411ec11e393ddb78287d430114b0",
+      "configs\\router-qualify.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "scripts\\runtime.py": "c8b7225cce011ead2330ee76dddf67fbacd46fa3cffb693c1b0ad404e941e68b",
+      "router\\benchmark.py": "4d326cad4960995769b86b1651bf9f44b2f7dff81f336d166868fa83dc2920a1",
+      "router\\controlled_length.py": "644bd2b9aabffb8b8eb2be8f340aa88c015db9816d4586974ce8b6bfa3c6a0d1",
+      "router\\deeper_context.py": "bfcad97b3703e4e2b3f3e161d44e7004c0cbe3e93009be5e63e8aa6feb7b17be"
+    },
+    "original_engine": "<STRATA_ROOT>\\engine\\strata.exe",
+    "original_sha256": "517ac61f284d55b99d1ac6d18dc40a92ae842dcf425acd74ed125cb848cc2d4c",
+    "original_git_status": " M strata_control/private_files.py\n?? local/\n?? research/\n",
+    "scope": "Source patch includes inherited final-add code, disabled in all router profiles. No commit or upload."
+  },
+  "main_run": "20261026T235021Z-eb0452-router-final",
+  "main_measured_requests": 42,
+  "correctness_run": "20261026T233139Z-d1f191-router-qualify",
+  "negative_run": "20261026T234954Z-42a25a-router-blocked",
+  "controlled_length_run": "20261027T000610Z-c6b2a4-controlled-length",
+  "deeper_context_run": "20261027T001035Z-8d23d6-deeper-context",
+  "excluded_run": "20261026T234403Z-38651d-router-main",
+  "quality_limits": [
+    "Bounded numerical and task checks, not perplexity or general distribution equivalence.",
+    "One manually reviewed NPU prose answer ended with an inaccurate or ambiguous only once sentence.",
+    "Configured 65536 context and vision are preserved but not fully exercised."
+  ],
+  "hardware_limits": [
+    "XRT reports five physical columns; 20-worker attempt rejected at compile time, not tested on silicon.",
+    "SRAM neighbor and memory-tile transfers passed; peak bandwidth and hardware maximum VLIW issue width not established."
+  ],
+  "decision": "Do not recommend NPU participation without a repeatable inference win. Use ../launch-cuda-prefill.bat for the separately qualified prefill profile; see ../performance/README.md."
+}

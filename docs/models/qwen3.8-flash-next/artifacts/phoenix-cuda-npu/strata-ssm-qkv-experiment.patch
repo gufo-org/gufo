@@ -1,0 +1,537 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 46ebf03..5da4177 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -708,6 +708,17 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+   # against llama.cpp on the SAME ids and a tokenizer on one side of that comparison is a second variable.
+   # plan v0.3 P5: batched prompt processing (tensor-core GEMMs through cuBLAS).
+   add_library(strata_prefill STATIC src/prefill/gemm.cu src/prefill/kernels.cu src/prefill/prefill.cpp)
++  option(STRATA_GUFO_PROJECTION "Experimental Windows CUDA/Phoenix shared-buffer SSM/QKV pipeline" OFF)
++  if(STRATA_GUFO_PROJECTION)
++    if(NOT WIN32 OR NOT STRATA_ENABLE_CUDA)
++      message(FATAL_ERROR "STRATA_GUFO_PROJECTION requires native Windows CUDA")
++    endif()
++    target_sources(strata_prefill PRIVATE src/prefill/gufo_projection.cpp src/prefill/gufo_projection.cu)
++    target_compile_definitions(strata_prefill PRIVATE STRATA_HAVE_GUFO=1)
++    target_compile_options(strata_prefill PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
++    target_include_directories(strata_prefill PRIVATE "C:/Xilinx/XRT/include")
++    target_link_libraries(strata_prefill PRIVATE "C:/Xilinx/XRT/lib/xrt_coreutil.lib" bcrypt)
++  endif()
+   if(STRATA_ENABLE_HIP)
+     # #313: the RDNA3 WMMA GEMMs include hip_runtime.h: AMD builds only (a CUDA build never sees this file)
+     target_sources(strata_prefill PRIVATE src/prefill/wmma_gemm.cu)
+diff --git a/include/strata/prefill/gufo_projection.hpp b/include/strata/prefill/gufo_projection.hpp
+new file mode 100644
+index 0000000..3696846
+--- /dev/null
++++ b/include/strata/prefill/gufo_projection.hpp
+@@ -0,0 +1,24 @@
++#pragma once
++#include <memory>
++#include <string>
++#include <cstdint>
++namespace strata::core { class WeightTable; }
++namespace strata::prefill {
++class Gemm;
++class GufoProjection {
++ struct Impl; std::unique_ptr<Impl> p_;
++public:
++ GufoProjection(); ~GufoProjection();
++ bool init(const core::WeightTable&,Gemm&,void*stream,std::string&error);
++ int columns(int layer) const;
++ bool submit(int bank,int layer,int rows,const uint16_t*fp16,void*stream,std::string&error);
++ bool wait(int bank,int layer,std::string&error);
++ bool scatter(int bank,int offset,float*dst,int stride,int columns,int rows,void*stream,std::string&error);
++ bool check(int bank,int offset,const float*reference,int stride,int columns,int rows,Gemm&,void*stream,std::string&error);
++ bool finish(std::string&error);
++};
++void gufo_pack_input(const uint16_t*,uint16_t*,int rows,void*);
++void gufo_pack_weight(const uint16_t*,uint16_t*,void*);
++void gufo_unpack_weight(const uint16_t*,uint16_t*,void*);
++void gufo_scatter_slice(const float*,float*,int,int,int,int,void*);
++}
+diff --git a/include/strata/prefill/prefill.hpp b/include/strata/prefill/prefill.hpp
+index f9bbca0..9b914ad 100644
+--- a/include/strata/prefill/prefill.hpp
++++ b/include/strata/prefill/prefill.hpp
+@@ -261,6 +261,9 @@ private:
+     // the direct successor. The public run() drains the chain once at prompt end.
+     bool run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err);
+     bool drain_pipeline(std::string& err);
++    bool run_gufo(const int64_t*,int64_t,int64_t,std::string&);
++    bool gufo_prepare(int,int,int64_t,std::string&);
++    bool gufo_project(int,int,const core::WeightRef*,float*,int64_t,std::string&);
+ 
+     int64_t stage_lb_ = 0, stage_le_ = -1;
+     std::vector<int> tap_layers_;
+diff --git a/src/prefill/gufo_projection.cpp b/src/prefill/gufo_projection.cpp
+new file mode 100644
+index 0000000..1a0e007
+--- /dev/null
++++ b/src/prefill/gufo_projection.cpp
+@@ -0,0 +1,138 @@
++#define NOMINMAX
++#include "strata/prefill/gufo_projection.hpp"
++#include "strata/prefill/gemm.hpp"
++#include "strata/core/weights.hpp"
++#include "strata/kernels/dequant_bf16.hpp"
++#include <cuda_runtime.h>
++#include <xrt/xrt_device.h>
++#include <xrt/xrt_bo.h>
++#include <xrt/xrt_kernel.h>
++#include <xrt/xrt_hw_context.h>
++#include <xrt/experimental/xrt_xclbin.h>
++#include <windows.h>
++#include <bcrypt.h>
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <fstream>
++#include <mutex>
++#include <stdexcept>
++#include <thread>
++#include <vector>
++namespace strata::prefill {
++namespace {
++constexpr int ROWS=1024,K=2560,SLICE=1024;
++void ck(cudaError_t s){if(s!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(s));}
++double now(){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();}
++std::vector<char>read(const std::string&p){std::ifstream f(p,std::ios::binary|std::ios::ate);if(!f)throw std::runtime_error("missing Gufo artifact");auto n=f.tellg();std::vector<char>b(size_t(n),0);f.seekg(0);f.read(b.data(),n);return b;}
++std::string sha(const void* data,size_t size){
++ BCRYPT_ALG_HANDLE a=nullptr;BCRYPT_HASH_HANDLE h=nullptr;DWORD n=0,got=0;unsigned char out[32];
++ if(BCryptOpenAlgorithmProvider(&a,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)throw std::runtime_error("SHA provider");
++ auto close=[&]{if(h)BCryptDestroyHash(h);BCryptCloseAlgorithmProvider(a,0);};
++ if(BCryptGetProperty(a,BCRYPT_OBJECT_LENGTH,(PUCHAR)&n,sizeof n,&got,0)<0){close();throw std::runtime_error("SHA size");}
++ std::vector<unsigned char>obj(n);
++ if(BCryptCreateHash(a,&h,obj.data(),n,nullptr,0,0)<0||BCryptHashData(h,(PUCHAR)data,ULONG(size),0)<0||BCryptFinishHash(h,out,32,0)<0){close();throw std::runtime_error("SHA failed");}
++ close();std::string s;const char*hex="0123456789abcdef";for(auto b:out){s+=hex[b>>4];s+=hex[b&15];}return s;
++}
++struct Shared {
++ void*host=nullptr;void*gpu=nullptr;bool registered=false;std::unique_ptr<xrt::bo>bo;
++ Shared(xrt::device&d,size_t bytes,int group){try{host=VirtualAlloc(nullptr,bytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);if(!host||uintptr_t(host)%4096)throw std::runtime_error("common buffer allocation failed");ck(cudaHostRegister(host,bytes,cudaHostRegisterMapped));registered=true;ck(cudaHostGetDevicePointer(&gpu,host,0));bo=std::make_unique<xrt::bo>(d,host,bytes,XRT_BO_FLAGS_HOST_ONLY,group);}catch(...){release();throw;}}
++ void unmap_cuda(){if(registered){ck(cudaHostUnregister(host));registered=false;gpu=nullptr;}}
++ void release(){if(registered)cudaHostUnregister(host);registered=false;bo.reset();if(host)VirtualFree(host,0,MEM_RELEASE);host=gpu=nullptr;}
++ ~Shared(){release();}
++};
++}
++struct GufoProjection::Impl {
++ struct Job{int bank,layer,rows;uint64_t id;bool done=false;std::string error;double start=0,end=0;};
++ struct Bank{std::unique_ptr<Shared>input;std::vector<std::unique_ptr<Shared>>outputs;cudaEvent_t ready=nullptr;std::shared_ptr<Job>job;};
++ std::unique_ptr<xrt::device>device;std::unique_ptr<xrt::xclbin>binary;std::unique_ptr<xrt::hw_context>context;std::unique_ptr<xrt::kernel>kernel;std::unique_ptr<xrt::bo>inst;
++ std::vector<std::vector<std::unique_ptr<Shared>>>weights;int count[48]={};Bank banks[2];std::unique_ptr<xrt::run>run;uint32_t inst_words=0;
++ std::mutex mutex;std::condition_variable cv;std::deque<std::shared_ptr<Job>>queue;std::thread worker;bool stopping=false,poisoned=false,blocked=false,trace=false;std::string failure;int cuda_device=0;
++ uint64_t seq=0,jobs=0,dispatches=0,valid_rows=0,checked_values=0;double xrt_ms=0,worker_ms=0,wait_ms=0,max_abs=0,max_math_abs=0,max_rel_rms=0;
++ ~Impl(){ {std::lock_guard<std::mutex>g(mutex);stopping=true;}cv.notify_all();if(worker.joinable())worker.join();for(auto&b:banks)if(b.ready)cudaEventDestroy(b.ready);}
++ void process(Job&j){
++  auto&b=banks[j.bank];ck(cudaEventSynchronize(b.ready));j.start=now();if(blocked)throw std::runtime_error("TASK_NEGATIVE_CONTROL_GUFO_NPU_DISABLED");
++  b.input->bo->sync(XCL_BO_SYNC_BO_TO_DEVICE);
++  for(int sl=0;sl<count[j.layer]/SLICE;sl++){
++   auto&out=*b.outputs[sl];std::fill_n((uint32_t*)out.host,ROWS*SLICE,0x7fc00000u);out.bo->sync(XCL_BO_SYNC_BO_TO_DEVICE);
++   run->set_arg(3,*b.input->bo);run->set_arg(4,*weights[j.layer][sl]->bo);run->set_arg(5,*out.bo);
++   double start=now();run->start();auto state=run->wait(std::chrono::milliseconds(3000));
++   if(state!=ERT_CMD_STATE_COMPLETED){run->abort();std::fprintf(stderr,"gufo FATAL: incomplete native command; terminating before buffer reuse\n");std::fflush(stderr);std::_Exit(87);}
++   double end=now();xrt_ms+=end-start;++dispatches;if(trace)std::fprintf(stderr,"GUFO_XRT_TRACE id=%llu bank=%d layer=%d slice=%d start=%.6f end=%.6f\n",j.id,j.bank,j.layer,sl,start,end);out.bo->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
++   const float*p=(const float*)out.host;for(int i=0;i<j.rows*SLICE;i++)if(!std::isfinite(p[i]))throw std::runtime_error("Gufo NPU missing/nonfinite output");
++  }
++  j.end=now();worker_ms+=j.end-j.start;++jobs;valid_rows+=j.rows;
++  if(trace)std::fprintf(stderr,"GUFO_NPU_TRACE id=%llu bank=%d layer=%d rows=%d start=%.6f end=%.6f\n",j.id,j.bank,j.layer,j.rows,j.start,j.end);
++ }
++ void work(){cudaSetDevice(cuda_device);while(true){std::shared_ptr<Job>j;{std::unique_lock<std::mutex>g(mutex);cv.wait(g,[&]{return stopping||!queue.empty();});if(stopping&&queue.empty())return;j=queue.front();queue.pop_front();}
++  try{if(poisoned)throw std::runtime_error(failure);process(*j);}catch(const std::exception&e){j->error=e.what();failure=j->error;poisoned=true;}
++  {std::lock_guard<std::mutex>g(mutex);j->done=true;}cv.notify_all();
++ }}
++};
++GufoProjection::GufoProjection():p_(new Impl){} GufoProjection::~GufoProjection()=default;
++bool GufoProjection::init(const core::WeightTable&wt,Gemm&gemm,void*stream,std::string&err){try{
++ auto&p=*p_;const char*dir=std::getenv("STRATA_GUFO_ARTIFACTS");if(!dir)throw std::runtime_error("STRATA_GUFO_ARTIFACTS required");
++ const char*ce=std::getenv("STRATA_GUFO_COLUMNS");int wanted=ce?std::atoi(ce):8192;if(wanted!=4096&&wanted!=8192&&wanted!=16384)throw std::runtime_error("Gufo columns must be4096/8192/16384");
++ p.blocked=std::getenv("STRATA_GUFO_BLOCK")!=nullptr;p.trace=std::getenv("STRATA_GUFO_TRACE")!=nullptr;ck(cudaGetDevice(&p.cuda_device));
++ auto xb=read(std::string(dir)+"/final.xclbin"),ib=read(std::string(dir)+"/insts.bin");
++ if(sha(xb.data(),xb.size())!="6e432ced70c305bf282d8bae0bd73e4c3d25261d1668afc433cf65e22d9ff143"||sha(ib.data(),ib.size())!="2e5674d6c5ea7a0a342b753791c6466a9d4ff90800de669fb716f46fccd8126b")throw std::runtime_error("Gufo artifact identity mismatch");
++ p.device=std::make_unique<xrt::device>(0);p.binary=std::make_unique<xrt::xclbin>(std::string(dir)+"/final.xclbin");p.device->register_xclbin(*p.binary);p.context=std::make_unique<xrt::hw_context>(*p.device,p.binary->get_uuid());p.kernel=std::make_unique<xrt::kernel>(*p.context,p.binary->get_kernels().at(0).get_name());
++ auto bytes=read(std::string(dir)+"/insts.bin");p.inst=std::make_unique<xrt::bo>(*p.device,bytes.size(),XCL_BO_FLAGS_CACHEABLE,p.kernel->group_id(1));std::memcpy(p.inst->map<void*>(),bytes.data(),bytes.size());p.inst->sync(XCL_BO_SYNC_BO_TO_DEVICE);p.inst_words=bytes.size()/4;
++ p.weights.resize(48);size_t total=0;
++ for(int l=2;l<48;l++){
++  const std::string pre="blk."+std::to_string(l)+".";const bool linear=wt.find(pre+"attn_qkv.weight")!=nullptr;
++  std::vector<const core::WeightRef*>srcs;for(const auto&name:linear?std::vector<std::string>{"attn_qkv.weight","attn_gate.weight"}:std::vector<std::string>{"attn_q.weight","attn_k.weight","attn_v.weight"}){
++   auto w=wt.find(pre+name);if(!w||!w->native_data||w->ne0!=K||!kernels::dequant_bf16_supported(w->native_type))throw std::runtime_error("unsupported native Gufo projection weight");srcs.push_back(w);
++  }
++  int full=0;for(auto w:srcs)full+=int(w->ne1);if(full!=(linear?16384:13312))throw std::runtime_error("Gufo projection geometry mismatch");p.count[l]=std::min(wanted,full);
++  for(int sl=0;sl<p.count[l]/SLICE;sl++){
++   auto b=std::make_unique<Shared>(*p.device,K*SLICE*2,p.kernel->group_id(4));int off=0;
++   for(auto w:srcs){int begin=std::max(sl*SLICE,off),end=std::min((sl+1)*SLICE,off+int(w->ne1));if(end>begin)kernels::dequant_f16(w->native_type,w->native_data,begin-off,end-begin,K,gemm.scratch()+size_t(begin-sl*SLICE)*K,stream);off+=int(w->ne1);}
++   gufo_pack_weight(gemm.scratch(),(uint16_t*)b->gpu,stream);ck(cudaStreamSynchronize((cudaStream_t)stream));b->bo->sync(XCL_BO_SYNC_BO_TO_DEVICE);b->unmap_cuda();p.weights[l].push_back(std::move(b));total+=K*SLICE*2;
++  }
++ }
++ for(auto&b:p.banks){b.input=std::make_unique<Shared>(*p.device,ROWS*K*2,p.kernel->group_id(3));ck(cudaEventCreateWithFlags(&b.ready,cudaEventDisableTiming));for(int s=0;s<wanted/SLICE;s++)b.outputs.push_back(std::make_unique<Shared>(*p.device,ROWS*SLICE*4,p.kernel->group_id(5)));}
++ p.run=std::make_unique<xrt::run>(*p.kernel);p.run->set_arg(0,uint64_t(3));p.run->set_arg(1,*p.inst);p.run->set_arg(2,p.inst_words);p.worker=std::thread([&p]{p.work();});
++ std::fprintf(stderr,"strata gufo: native mapped SSM/QKV ready, %d columns,1024 CUDA rows per bank,%.1fMiB BF16 host weights, explicit FP16-to-BF16 rounding\n",wanted,double(total)/(1<<20));return true;
++}catch(const std::exception&e){err=e.what();return false;}}
++int GufoProjection::columns(int l)const{return p_->count[l];}
++bool GufoProjection::submit(int bank,int layer,int rows,const uint16_t*x,void*stream,std::string&err){try{
++ auto&p=*p_;auto&b=p.banks[bank];if(rows<1||rows>ROWS||layer<2||layer>=48)throw std::runtime_error("Gufo submission shape mismatch");
++ {std::lock_guard<std::mutex>g(p.mutex);if(b.job&&!b.job->done)throw std::runtime_error("Gufo bank reused while active");}
++ gufo_pack_input(x,(uint16_t*)b.input->gpu,rows,stream);ck(cudaGetLastError());ck(cudaEventRecord(b.ready,(cudaStream_t)stream));auto j=std::make_shared<Impl::Job>();j->bank=bank;j->layer=layer;j->rows=rows;j->id=++p.seq;
++ {std::lock_guard<std::mutex>g(p.mutex);b.job=j;p.queue.push_back(j);}p.cv.notify_all();return true;
++}catch(const std::exception&e){err=e.what();return false;}}
++bool GufoProjection::wait(int bank,int layer,std::string&err){auto&p=*p_;auto j=p.banks[bank].job;if(!j||j->layer!=layer){err="Gufo ticket identity mismatch";return false;}double t=now();std::unique_lock<std::mutex>g(p.mutex);if(!p.cv.wait_for(g,std::chrono::seconds(30),[&]{return j->done;})){err="Gufo worker deadline";return false;}p.wait_ms+=now()-t;if(!j->error.empty()){err=j->error;return false;}return true;}
++bool GufoProjection::scatter(int b,int off,float*dst,int stride,int cols,int rows,void*stream,std::string&err){try{int at=0;while(at<cols){int col=off+at,n=std::min(cols-at,SLICE-col%SLICE);gufo_scatter_slice((const float*)p_->banks[b].outputs[col/SLICE]->gpu,dst+at,stride,col%SLICE,n,rows,stream);at+=n;}ck(cudaGetLastError());return true;}catch(const std::exception&e){err=e.what();return false;}}
++bool GufoProjection::check(int b,int off,const float*ref,int stride,int cols,int rows,Gemm&gm,void*stream,std::string&err){try{
++ std::vector<float>r(size_t(rows)*cols);ck(cudaMemcpy2DAsync(r.data(),cols*4,ref,stride*4,cols*4,rows,cudaMemcpyDeviceToHost,(cudaStream_t)stream));ck(cudaStreamSynchronize((cudaStream_t)stream));double e2=0,r2=0;auto&p=*p_;
++ for(int row=0;row<rows;row++)for(int c=0;c<cols;c++){float a=((const float*)p.banks[b].outputs[(off+c)/SLICE]->host)[row*SLICE+(off+c)%SLICE],v=r[size_t(row)*cols+c];double e=std::abs(double(a)-v);p.max_abs=std::max(p.max_abs,e);e2+=e*e;r2+=double(v)*v;if(!std::isfinite(v)||!std::isfinite(a))throw std::runtime_error("Gufo projection nonfinite reference/output");}
++ double rel=std::sqrt(e2/std::max(r2,1e-30));p.max_rel_rms=std::max(p.max_rel_rms,rel);if(rel>0.01)throw std::runtime_error("Gufo BF16 projection relative RMS exceeded1percent");
++ // Separate BF16 arithmetic correctness from the explicit FP16-to-BF16 quality tradeoff.
++ // Reuse existing GEMM scratch; this duplicate reference is absent from timed runs.
++ uint16_t*x=gm.scratch(),*packed=x+ROWS*K,*w=packed+K*SLICE;
++ float*y=(float*)(w+K*SLICE);
++ if(gm.scratch_elems()<3*ROWS*K+2*ROWS*SLICE)throw std::runtime_error("Gufo numerical scratch insufficient");
++ ck(cudaMemcpyAsync(x,p.banks[b].input->host,ROWS*K*2,cudaMemcpyHostToDevice,(cudaStream_t)stream));
++ std::vector<float>math(size_t(rows)*SLICE);
++ for(int sl=off/SLICE;sl<(off+cols+SLICE-1)/SLICE;++sl) {
++  ck(cudaMemcpyAsync(packed,p.weights[p.banks[b].job->layer][sl]->host,K*SLICE*2,cudaMemcpyHostToDevice,(cudaStream_t)stream));
++  gufo_unpack_weight(packed,w,stream);gm.bf16(x,w,y,rows,SLICE,K);
++  ck(cudaMemcpyAsync(math.data(),y,size_t(rows)*SLICE*4,cudaMemcpyDeviceToHost,(cudaStream_t)stream));ck(cudaStreamSynchronize((cudaStream_t)stream));
++  auto*actual=(const float*)p.banks[b].outputs[sl]->host;
++  for(int row=0;row<rows;++row)for(int col=std::max(off,sl*SLICE);col<std::min(off+cols,(sl+1)*SLICE);++col){
++   const int i=row*SLICE+col%SLICE;const double e=std::abs(double(actual[i])-math[i]);p.max_math_abs=std::max(p.max_math_abs,e);
++   if(!std::isfinite(math[i])||e>0.002+0.0002*std::abs(math[i]))throw std::runtime_error("Gufo BF16 arithmetic mismatch");
++  }
++ }
++ p.checked_values+=size_t(rows)*cols;return true;
++}catch(const std::exception&e){err=e.what();return false;}}
++bool GufoProjection::finish(std::string&err){auto&p=*p_;bool ok=true;for(auto&b:p.banks){auto j=b.job;if(!j)continue;std::unique_lock<std::mutex>g(p.mutex);if(!p.cv.wait_for(g,std::chrono::seconds(30),[&]{return j->done;})){std::fprintf(stderr,"gufo FATAL: drain deadline\n");std::fflush(stderr);std::_Exit(86);}if(!j->error.empty()){ok=false;if(err.empty())err=j->error;}}
++ std::fprintf(stderr,"strata gufo NPU: jobs=%llu dispatches=%llu valid_rows=%llu checked_values=%llu max_abs=%.8g max_rel_rms=%.8g max_math_abs=%.8g xrt_ms=%.3f worker_ms=%.3f host_wait_ms=%.3f\n",p.jobs,p.dispatches,p.valid_rows,p.checked_values,p.max_abs,p.max_rel_rms,p.max_math_abs,p.xrt_ms,p.worker_ms,p.wait_ms);return ok;
++}
++}
+diff --git a/src/prefill/gufo_projection.cu b/src/prefill/gufo_projection.cu
+new file mode 100644
+index 0000000..aebe82b
+--- /dev/null
++++ b/src/prefill/gufo_projection.cu
+@@ -0,0 +1,14 @@
++#include "strata/prefill/gufo_projection.hpp"
++#include <cuda_runtime.h>
++#include <cuda_fp16.h>
++#include <cuda_bf16.h>
++namespace strata::prefill {
++__global__ void pack_input(const uint16_t*x,uint16_t*y,int rows){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<1024*2560)y[i]=i<rows*2560?__bfloat16_as_ushort(__float2bfloat16_rn(__half2float(__ushort_as_half(x[i])))):0;}
++__global__ void pack_weight(const uint16_t*w,uint16_t*b){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<2560*1024)b[i]=__bfloat16_as_ushort(__float2bfloat16_rn(__half2float(__ushort_as_half(w[(i%1024)*2560+i/1024]))));}
++__global__ void unpack_weight(const uint16_t*b,uint16_t*w){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<2560*1024)w[i]=b[(i%2560)*1024+i/2560];}
++__global__ void scatter(const float*s,float*d,int stride,int src_col,int cols,int rows){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<cols*rows)d[(i/cols)*stride+i%cols]=s[(i/cols)*1024+src_col+i%cols];}
++void gufo_pack_input(const uint16_t*x,uint16_t*y,int rows,void*st){pack_input<<<(1024*2560+255)/256,256,0,(cudaStream_t)st>>>(x,y,rows);}
++void gufo_pack_weight(const uint16_t*w,uint16_t*b,void*st){pack_weight<<<(1024*2560+255)/256,256,0,(cudaStream_t)st>>>(w,b);}
++void gufo_unpack_weight(const uint16_t*b,uint16_t*w,void*st){unpack_weight<<<(1024*2560+255)/256,256,0,(cudaStream_t)st>>>(b,w);}
++void gufo_scatter_slice(const float*s,float*d,int stride,int src_col,int cols,int rows,void*st){scatter<<<(rows*cols+255)/256,256,0,(cudaStream_t)st>>>(s,d,stride,src_col,cols,rows);}
++}
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 6cb888e..db8f72a 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -1,6 +1,10 @@
+ // src/prefill/prefill.cpp - see include/strata/prefill/prefill.hpp.
+ #include "strata/kernels/fused_gr.hpp"
+ #include "strata/prefill/prefill.hpp"
++#ifdef STRATA_HAVE_GUFO
++#include "strata/prefill/gufo_projection.hpp"
++#include "strata/kernels/dequant_bf16.hpp"
++#endif
+ #if defined(STRATA_HAVE_DFLASH2)
+ #include "strata/kernels/dflash2.hpp"
+ #endif
+@@ -130,6 +134,14 @@ namespace strata::prefill {
+ namespace {
+ 
+ using Clock = std::chrono::steady_clock;
++int gufo_mode() {
++#ifdef STRATA_HAVE_GUFO
++    static const int mode = [] { const char* p = std::getenv("STRATA_GUFO_PIPE"); return p ? std::atoi(p) : 0; }();
++    return mode;
++#else
++    return 0;
++#endif
++}
+ constexpr float EPS = 1e-6f;
+ constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
+ constexpr int64_t C = 10240, ZV = 6144, HV = 48;
+@@ -881,6 +893,13 @@ struct Prefill::Impl {
+     bool borrowed = false, borrow_spill = false;
+     cudaStream_t cs = nullptr, copy = nullptr;
+     Gemm gemm;
++    bool gufo_input_ready = false, gufo_prepared = false;
++    int gufo_bank = 0;
++    uint16_t* gufo_input[2] = {};
++    float *gufo_side[2] = {}, *gufo_inj[2] = {};
++#ifdef STRATA_HAVE_GUFO
++    std::unique_ptr<GufoProjection> gufo;
++#endif
+     std::vector<void*> owned;
+     // chunk buffers
+     float *emb = nullptr, *R = nullptr, *xn = nullptr, *lo = nullptr, *gated = nullptr, *inj = nullptr;
+@@ -1078,6 +1097,9 @@ void Prefill::release() {
+     if (!impl_) return;
+     impl_->hand_worker.reset();   // idle here (run drains the chain before it returns); joins its thread
+     if (impl_->cs) cudaStreamSynchronize(impl_->cs);
++#ifdef STRATA_HAVE_GUFO
++    if (impl_->gufo) { std::string e; impl_->gufo->finish(e); impl_->gufo.reset(); }
++#endif
+     if (impl_->copy) cudaStreamSynchronize(impl_->copy);
+     if (impl_->kv_copy) cudaStreamSynchronize(impl_->kv_copy);
+     for (int i = 0; i < RING_MAX; ++i) {
+@@ -1564,6 +1586,22 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
+               std::to_string(o.failed_bytes >> 20) + " MiB)";
+         return false;
+     }
++#ifdef STRATA_HAVE_GUFO
++    if (gufo_mode()) {
++        if (gufo_mode() < 1 || gufo_mode() > 2 || g.n_layers != 48 || g.n_embd != N || T != 1024 ||
++            stage_lb_ != 0 || stage_le_ != 48 || next_ || helper_ || m.pp || m.f16_io || m.xn_f16 ||
++            gr_unfused() || hc_pad() || hc_upmix() || m.xn16_lo || m.mixed_bf_lo ||
++            std::getenv("STRATA_KV_PREFETCH") || std::getenv("STRATA_HC_Q8") || std::getenv("STRATA_DENSE_MMQ")) {
++            err = "Gufo experimental path requires the qualified 48-layer,1024-row CUDA geometry and standard HC";
++            return false;
++        }
++        if (gufo_mode() == 2 && !m.gufo) {
++            m.gufo = std::make_unique<GufoProjection>();
++            if (!m.gufo->init(wt, m.gemm, stream, err)) return false;
++        }
++        std::fprintf(stderr,"strata gufo: schedule mode=%d,1024 rows per bank,paired residuals,shared body scratch\n",gufo_mode());
++    }
++#endif
+     { int wd = 0; if (cudaGetDevice(&wd) == cudaSuccess) warm_gemm_libraries(wd); else (void) cudaGetLastError(); }
+     return true;
+ }
+@@ -1576,13 +1614,18 @@ bool Prefill::carve(size_t T, void* alloc) {
+     const core::ModelGeometry& g = *m.g;
+     core::SessionState& ss = *m.ss;
+     bool ok = true;
+-    m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D, ok);
++    m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D * (gufo_mode() ? 2 : 1), ok);
+     m.xn = gr_unfused() ? o.take<float>(T * D, ok) : nullptr;   // F-1: not needed (gr_mix_r reads R)
+     m.grs = o.take<float>(T * HC, ok);
+     m.xn16 = o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok); m.lo = o.take<float>(T * LR, ok); m.lo16 = o.take<uint16_t>(T * LR, ok);
+     m.gated = o.take<float>(T * D, ok); m.inj = o.take<float>(T * HC, ok);
+     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
+     m.mixed_h = o.take<uint16_t>(T * N, ok);
++    if (gufo_mode()) for (int b=0;b<2;++b) {
++        m.gufo_input[b]=o.take<uint16_t>(T*N,ok);
++        m.gufo_side[b]=o.take<float>(T*640,ok);
++        m.gufo_inj[b]=o.take<float>(T*HC,ok);
++    }
+     // Embedding rows are dead after gr_broadcast on m.cs; subsequent half outputs use the same stream.
+     m.bo = m.emb;
+     if (bf16x2_hc(m.f16_io)) { m.xn16_lo = o.take<uint16_t>(T * D, ok); m.lo16_lo = o.take<uint16_t>(T * LR, ok); }
+@@ -2352,14 +2395,15 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
+     // prompt path was told it had less room than it did.  Safe - the direction is over-estimating, and `take`
+     // still bounds-checks - but it under-sizes every loan, so every chunk the scan picks is one step smaller.
+     if (ring_bytes_on()) {
+-        f(T * N); f(T * D);
++        f(T * N); f(T * D * (gufo_mode() ? 2 : 1));
+         if (gr_unfused()) f(T * D);
+         f(T * HC);
+     } else {   // STRATA_RING_BYTES=0: 0.1.39's count
+-        f(T * N); f(T * D); f(T * D);
++        f(T * N); f(T * D * (gufo_mode() ? 2 : 1)); f(T * D);
+     }
+     o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok); f(T * LR); o.take<uint16_t>(T * LR, ok);
+     f(T * D); f(T * HC); f(T * N); o.take<uint16_t>(T * N, ok); o.take<uint16_t>(T * N, ok);
++    if (gufo_mode()) for (int b=0;b<2;++b) { o.take<uint16_t>(T*N,ok); f(T*640); f(T*HC); }
+     if (!emb_reuse_account()) f(T * N);   // bo: aliases emb in carve; still counted unless STRATA_EMB_REUSE_ACCOUNT=1
+     const bool f16_io = prompt_f16();   // the current device's mode (the stage's), as Prefill::init will decide it
+     if (bf16x2_hc(f16_io)) { o.take<uint16_t>(T * D, ok); o.take<uint16_t>(T * LR, ok); }
+@@ -2584,6 +2628,101 @@ struct PeTimer {
+ };
+ }  // namespace
+ 
++
++#ifdef STRATA_HAVE_GUFO
++bool Prefill::gufo_prepare(int bank,int layer,int64_t T,std::string&err) {
++    Impl&m=*impl_; const core::LayerView v(*m.wt,layer);
++    const auto*wn=need(v,"hc_attn_norm.weight",err); const auto*wd=need(v,"hc_attn_down.weight",err);
++    const auto*wu=need(v,"hc_attn_up.weight",err); const auto*wi=need(v,"hc_attn_inject.weight",err);
++    if(!wn||!wd||!wu||!wi)return false;
++    gr_norm_rs(m.R,(const float*)wn->data,EPS,m.grs,m.xn16,T,m.cs);
++    if(!bf16_proj(m.gemm,wd,m.xn16,m.lo,T,"gufo HC down",err))return false;
++    gr_silu(m.lo,m.lo16,T,m.cs);
++    if(!bf16_proj(m.gemm,wu,m.lo16,m.gated,T,"gufo HC up",err) ||
++       !bf16_proj(m.gemm,wi,m.xn16,m.gufo_inj[bank],T,"gufo HC inject",err))return false;
++    gr_mix_r(m.R,m.grs,(const float*)wn->data,m.gated,m.mixed,m.mixed_bf,T,m.cs,m.mixed_h);
++    if(cudaMemcpyAsync(m.gufo_input[bank],m.mixed_h,T*N*2,cudaMemcpyDeviceToDevice,m.cs)!=cudaSuccess){err="Gufo input retain failed";return false;}
++    if(core::is_qsa_layer(*m.g,layer)) {
++        auto*k=need(v,"indexer.k_proj.weight",err); auto*q=need(v,"indexer.q_proj.weight",err);
++        if(!k||!q||!bf16_proj(m.gemm,k,m.mixed_bf,m.gufo_side[bank],T,"gufo indexer k",err)||
++           !bf16_proj(m.gemm,q,m.mixed_bf,m.gufo_side[bank]+T*128,T,"gufo indexer q",err))return false;
++    } else {
++        auto*a=need(v,"ssm_alpha.weight",err);auto*b=need(v,"ssm_beta.weight",err);
++        if(!a||!b||!bf16_proj(m.gemm,a,m.mixed_bf,m.gufo_side[bank],T,"gufo alpha",err,2*HV)||
++           !bf16_proj(m.gemm,b,m.mixed_bf,m.gufo_side[bank]+HV,T,"gufo beta",err,2*HV))return false;
++    }
++    if(m.gufo&&!m.gufo->submit(bank,layer,(int)T,m.gufo_input[bank],m.cs,err))return false;
++    return true;
++}
++bool Prefill::gufo_project(int layer,int off,const core::WeightRef*w,float*out,int64_t T,std::string&err) {
++    Impl&m=*impl_;const uint16_t*x=m.gufo_input[m.gufo_bank];
++    if(!m.gufo)return native_proj(m.gemm,w,x,out,T,"Gufo CUDA control",err);
++    const int cols=std::min<int>(int(w->ne1),std::max(0,m.gufo->columns(layer)-off));
++    if(cols==0)return native_proj(m.gemm,w,x,out,T,"Gufo GPU remainder",err);
++    if(!m.gufo->wait(m.gufo_bank,layer,err))return false;
++    if(std::getenv("STRATA_GUFO_CHECK")) {
++        if(!native_proj(m.gemm,w,x,out,T,"Gufo FP16 numerical reference",err)||
++           !m.gufo->check(m.gufo_bank,off,out,(int)w->ne1,cols,(int)T,m.gemm,m.cs,err))return false;
++    }
++    if(cols<w->ne1) {
++        strata::kernels::dequant_f16(w->native_type,w->native_data,cols,w->ne1-cols,w->ne0,m.gemm.scratch(),m.cs);
++        m.gemm.f16(x,m.gemm.scratch(),out+cols,T,w->ne1-cols,w->ne0,w->ne1);
++    }
++    return m.gufo->scatter(m.gufo_bank,off,out,(int)w->ne1,cols,(int)T,m.cs,err);
++}
++bool Prefill::run_gufo(const int64_t*tokens,int64_t n,int64_t pos0,std::string&err) {
++    Impl&m=*impl_;const core::OnDevice on_device(m.device);
++    if(next_||helper_||hand_in_||m.pp||!tap_layers_.empty()||stage_lb_!=0||stage_le_!=48||m.T!=1024) {
++        err="Gufo unsupported pipeline/tap geometry";return false;
++    }
++    auto chunk=std::move(on_chunk); auto stage=std::move(on_stage_chunk);auto stop=std::move(stop_at_chunk);
++    float*base=m.R;const auto oldtokens=stats_.tokens,oldchunks=stats_.chunks;const double oldms=stats_.ms_total;
++    const int64_t oldforce=force_chunk_;const bool oldsingle=force_single_,oldplanned=force_planned_;
++    const auto started=Clock::now();int64_t done=0,nchunks=0;stopped_at_=-1;
++    // Every exit settles bank jobs and the CUDA readers before restoring reusable storage.
++    auto restore=[&]{
++        cudaStreamSynchronize(m.cs);if(m.gufo){std::string drain;if(!m.gufo->finish(drain)&&err.empty())err=drain;}
++        m.R=base;m.gufo_prepared=false;m.gufo_input_ready=false;stage_lb_=0;stage_le_=48;
++        on_chunk=std::move(chunk);on_stage_chunk=std::move(stage);stop_at_chunk=std::move(stop);
++        force_chunk_=0;force_single_=oldsingle;force_planned_=oldplanned;
++        stats_.tokens=oldtokens+done;stats_.chunks=oldchunks+nchunks;stats_.ms_total=oldms+ms_since(started);
++    };
++    struct Scope{decltype(restore)&f;~Scope(){f();}}scope{restore};
++    auto body=[&](int bank,int64_t offset,int64_t T,int lb,int le,bool prepared)->bool{
++        m.R=base+(bank?1024*D:0);m.gufo_bank=bank;m.gufo_prepared=prepared;m.gufo_input_ready=prepared;
++        stage_lb_=lb;stage_le_=le;force_chunk_=1024;force_single_=false;force_planned_=false;
++        const bool trace=std::getenv("STRATA_GUFO_TRACE")!=nullptr;
++        struct Marker{int bank,layer;const char*edge;};
++        auto mark=[](void*ptr){std::unique_ptr<Marker>p((Marker*)ptr);const double t=std::chrono::duration<double,std::milli>(Clock::now().time_since_epoch()).count();std::fprintf(stderr,"GUFO_CUDA_TRACE bank=%d layer=%d edge=%s time=%.6f\n",p->bank,p->layer,p->edge,t);};
++        if(trace) {auto*p=new Marker{bank,lb,"start"};if(cudaLaunchHostFunc(m.cs,mark,p)!=cudaSuccess){delete p;err="Gufo trace start failed";return false;}}
++        const bool ok=run_impl(tokens+offset,T,pos0+offset,err);
++        if(trace) {auto*p=new Marker{bank,lb,"end"};if(cudaLaunchHostFunc(m.cs,mark,p)!=cudaSuccess){delete p;err="Gufo trace end failed";return false;}cudaStreamSynchronize(m.cs);}
++        return ok;
++    };
++    while(done<n) {
++        if(should_stop&&should_stop()){err="cancelled";return false;}
++        if(done>0&&stop&&stop()){stopped_at_=done;break;}
++        const int64_t a=std::min<int64_t>(1024,n-done),b=std::min<int64_t>(1024,n-done-a);
++        if(!b) {if(!body(0,done,a,0,48,false))return false;}
++        else {
++            if(!body(0,done,a,0,2,false)||!gufo_prepare(0,2,a,err)||
++               !body(1,done+a,b,0,2,false)||!gufo_prepare(1,2,b,err))return false;
++            for(int layer=2;layer<48;++layer) {
++                if(!body(0,done,a,layer,layer+1,true))return false;
++                if(layer<47&&!gufo_prepare(0,layer+1,a,err))return false;
++                if(!body(1,done+a,b,layer,layer+1,true))return false;
++                if(layer<47&&!gufo_prepare(1,layer+1,b,err))return false;
++            }
++        }
++        m.R=base;
++        if(stage&&!stage(pos0+done+a+b,err))return false;
++        if(chunk&&!chunk(base,a+b,pos0+done,err))return false;
++        done+=a+b;++nchunks;
++    }
++    return true;
++}
++#endif
++
+ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
+     err.clear();
+     // force_chunk is for this run only: taken before any early return can leave it to the next one
+@@ -2733,6 +2872,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+         const auto tsetup = Clock::now();
+         // ---- embeddings, broadcast to the four streams - or, in a later stage of a layer split, the rows the
+         // previous stage handed on
++        if (!m.gufo_input_ready) {
+         if (hand_in_ != nullptr && hand_ev_ != nullptr) {
+             // STRATA_HANDOFF_PIPE: each piece's upload waits on the GPU for its download on the stage before.  The
+             // stage before split the chunk it handed on (n rows); one chunk here is all of it, otherwise (a smaller
+@@ -2824,6 +2964,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+             }
+         }
+         if (hand_in_ == nullptr) gr_broadcast(m.emb, m.R, T, m.cs);
++        }
+         // ---- the PLE rows of the whole chunk, one batched SSD request on a thread (see ple_gather).  A later chunk's
+         // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
+         // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
+@@ -3193,6 +3334,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                 const int64_t ldx = hc_pad() && T >= std::max<int64_t>(pf_switch_min_t(), 64) && !gr_unfused() &&
+                                             !m.xn16_lo ? D + XN_PAD : D;
+                 const bool xf16 = m.xn_f16 && !m.xn16_lo && ldx == D;   // xn16 holds FP16 (its writers and readers below)
++                if (!(half == 0 && m.gufo_prepared)) {
+                 if (gr_unfused()) gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs, m.xn16_lo, xf16);
+                 else if (!normed) gr_norm_rs(m.R, (const float*) wn->data, EPS, m.grs, m.xn16, T, m.cs, m.xn16_lo, ldx, xf16);
+                 normed = false;
+@@ -3254,6 +3396,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                     core::NativeDense::hc_bf16_release(m.cs, 0, 0);
+                     core::NativeDense::hc_bf16_release(m.cs, 1, 0);
+                 }
++                } else {
++                    normed = false;
++                    if (cudaMemcpyAsync(m.inj,m.gufo_inj[m.gufo_bank],T*HC*4,cudaMemcpyDeviceToDevice,m.cs)!=cudaSuccess) {
++                        err="Gufo injection restore failed"; return false;
++                    }
++                }
+                 if (half == 0 && !core::is_qsa_layer(g, l)) {
+                     // ======================= GDN =======================
+                     const core::WeightRef *wqkv = need(v, "attn_qkv.weight", err), *wg = need(v, "attn_gate.weight", err),
+@@ -3265,10 +3413,18 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                     pt.mark(kPfGdn, cs);
+                     float* state = ss.gdn_state + (size_t) (gdn_index - ss.gdn_ord0) * gdn_floats;
+                     float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
++#ifdef STRATA_HAVE_GUFO
++                    if (m.gufo_prepared) {
++                        if (!gufo_project(l,0,wqkv,m.qkv,T,err) || !gufo_project(l,10240,wg,m.z,T,err)) return false;
++                        if(cudaMemcpyAsync(m.ab,m.gufo_side[m.gufo_bank],T*2*HV*4,cudaMemcpyDeviceToDevice,m.cs)!=cudaSuccess) {err="Gufo side restore failed";return false;}
++                    } else
++#endif
++                    {
+                     if (!native_proj(m.gemm, wqkv, m.mixed_h, m.qkv, T, v.name("attn_qkv.weight"), err)) return false;
+                     if (!native_proj(m.gemm, wg, m.mixed_h, m.z, T, v.name("attn_gate.weight"), err)) return false;
+                     if (!bf16_proj(m.gemm, wa, m.mixed_bf, m.ab, T, v.name("ssm_alpha.weight"), err, 2 * HV, m.mixed_bf_lo)) return false;
+                     if (!bf16_proj(m.gemm, wb, m.mixed_bf, m.ab + HV, T, v.name("ssm_beta.weight"), err, 2 * HV, m.mixed_bf_lo)) return false;
++                    }
+                     pt.mark(kPfGdnConv, cs);   // "gdn" is the projections in; the rest on their own lines
+                     gdn_gates(m.ab, (const float*) wdt->data, (const float*) wsa->data, m.gate, m.beta, T, m.cs);
+                     gdn_conv(conv, m.qkv, (const float*) wc->data, m.hbuf, T, EPS, m.cs);
+@@ -3291,11 +3447,20 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                                           *wikn = need(v, "indexer.k_norm.weight", err);
+                     if (!wq || !wk || !wv || !wo || !wik || !wiq || !wqn || !wkn || !wiqn || !wikn) return false;
+                     pt.mark(kPfQsa, cs);
++#ifdef STRATA_HAVE_GUFO
++                    if (m.gufo_prepared) {
++                        if (!gufo_project(l,0,wq,m.Qf,T,err) || !gufo_project(l,12288,wk,m.Kc,T,err) || !gufo_project(l,12800,wv,m.Vc,T,err)) return false;
++                        if(cudaMemcpyAsync(m.idx_raw,m.gufo_side[m.gufo_bank],T*128*4,cudaMemcpyDeviceToDevice,m.cs)!=cudaSuccess ||
++                           cudaMemcpyAsync(m.q_idx,m.gufo_side[m.gufo_bank]+T*128,T*512*4,cudaMemcpyDeviceToDevice,m.cs)!=cudaSuccess) {err="Gufo indexer restore failed";return false;}
++                    } else
++#endif
++                    {
+                     if (!native_proj(m.gemm, wk, m.mixed_h, m.Kc, T, v.name("attn_k.weight"), err)) return false;
+                     if (!native_proj(m.gemm, wv, m.mixed_h, m.Vc, T, v.name("attn_v.weight"), err)) return false;
+                     if (!native_proj(m.gemm, wq, m.mixed_h, m.Qf, T, v.name("attn_q.weight"), err)) return false;
+                     if (!bf16_proj(m.gemm, wik, m.mixed_bf, m.idx_raw, T, v.name("indexer.k_proj.weight"), err, 0, m.mixed_bf_lo)) return false;
+                     if (!bf16_proj(m.gemm, wiq, m.mixed_bf, m.q_idx, T, v.name("indexer.q_proj.weight"), err, 0, m.mixed_bf_lo)) return false;
++                    }
+                     rms_rows(m.Kc, (const float*) wkn->data, T * 2, 256, 256, EPS, m.cs);
+                     rope(m.Kc, T, 2, 256, 512, p0, strata::kernels::rope_scaling(), m.cs);
+                     // KV streaming: this layer's cells [0, p0) come in from the host copy to the staging pool, and the
+@@ -5139,7 +5304,12 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
+         return ok;
+     }
+ #endif
++#ifdef STRATA_HAVE_GUFO
++    const bool body_ok = gufo_mode() && n > 1024 && (force_chunk_ == 0 || force_chunk_ == 1024) ?
++        run_gufo(tokens,n,pos0,err) : run_impl(tokens,n,pos0,err);
++#else
+     const bool body_ok = run_impl(tokens, n, pos0, err);
++#endif
+ 
+     std::string drain_err;
+     const bool drain_ok = drain_pipeline(drain_err);

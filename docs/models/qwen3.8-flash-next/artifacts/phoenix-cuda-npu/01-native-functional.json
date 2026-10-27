@@ -1,0 +1,111 @@
+{
+  "status": "Native NPU execution and one-layer model integration verified; optimization deferred",
+  "positive_run": "<EXPERIMENT_ROOT>\\results\\20261026T221458Z-5770e2-npu-functional-functional",
+  "negative_run": "<EXPERIMENT_ROOT>\\results\\20261026T221622Z-3ce0ea-npu-functional-blocked-functional",
+  "control_run": "<EXPERIMENT_ROOT>\\results\\20261026T221257Z-cf9d1b-npu-control-functional",
+  "npu_counts": {
+    "groups": 308,
+    "rows": 816,
+    "xrt_completed": 816,
+    "xrt_wait_ns": 522431700,
+    "callback_ns": 536832200
+  },
+  "resources": {
+    "sample_interval_s": 0.5,
+    "samples": 95,
+    "peak_dedicated_vram_bytes": 8211099648,
+    "minimum_available_ram_bytes": 6146572288,
+    "minimum_commit_headroom_bytes": 31262261248,
+    "max_gpu_temperature_c": 52,
+    "wddm_shared_memory": "See wddm-memory.csv per adapter; mapped pinned host memory alone is not proof of spill"
+  },
+  "answers": {
+    "smoke": {
+      "npu_content": "{\"answer\":42}",
+      "control_content": "{\"answer\":42}",
+      "same_visible_content": true,
+      "npu_output_tokens": 76,
+      "control_output_tokens": 111,
+      "npu_finish": "stop",
+      "control_finish": "stop"
+    },
+    "code": {
+      "npu_content": "def clamp(value, lower, upper):\n    if lower > upper:\n        raise ValueError(\"lower cannot be greater than upper\")\n\n    if value < lower:\n        return lower\n    if value > upper:\n        return upper\n    return value",
+      "control_content": "def clamp(value, lower, upper):\n    if lower > upper:\n        raise ValueError(\"lower must not be greater than upper\")\n    if value < lower:\n        return lower\n    if value > upper:\n        return upper\n    return value",
+      "same_visible_content": false,
+      "npu_output_tokens": 302,
+      "control_output_tokens": 145,
+      "npu_finish": "stop",
+      "control_finish": "stop",
+      "behavior_checks": "7 boundary/interior/equal/fractional checks and reversed-bounds exception passed for both arms"
+    },
+    "json": {
+      "npu_content": "{\"sum\":42,\"even\":true,\"label\":\"checked\"}",
+      "control_content": "{\"sum\":42,\"even\":true,\"label\":\"checked\"}",
+      "same_visible_content": true,
+      "npu_output_tokens": 101,
+      "control_output_tokens": 97,
+      "npu_finish": "stop",
+      "control_finish": "stop"
+    },
+    "tool": {
+      "npu_content": "",
+      "control_content": "",
+      "same_visible_content": true,
+      "npu_output_tokens": 141,
+      "control_output_tokens": 70,
+      "npu_finish": "tool_calls",
+      "control_finish": "tool_calls"
+    }
+  },
+  "native_model": "Qwen3.8-Flash-Next GSQ-RCO IQ3_S, unchanged files",
+  "context_configured": 65536,
+  "resident_experts_gib": 40,
+  "cpu_workers": 7,
+  "scope": "layer 0 decode final shared-vector addition; prefill and other layers retain CPU/CUDA",
+  "npu_dtype": "FP32; compiler-rt software addition on NPU tile; RN-even plus signedFTZ",
+  "artifacts": [
+    {
+      "path": "<EXPERIMENT_ROOT>\\strata-npu-build\\strata.exe",
+      "bytes": 70580224,
+      "sha256": "f3efe34c8410c7881da968dea0e0c9b502a65297a5fb1d7a7c8625adb5da8e29"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\npu-control-engine\\strata.exe",
+      "bytes": 70567936,
+      "sha256": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\npu\\artifacts\\strata_npu_bridge.dll",
+      "bytes": 35328,
+      "sha256": "032f50b4ae22a77e0c653209a26a5002682342c8c5c245e38a604815199863c7"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\npu\\artifacts\\final.xclbin",
+      "bytes": 9975,
+      "sha256": "e44307f78d4932c4f1b32d3bdd50e69bc0cba76228789c883d5b2e890ef362be"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\npu\\artifacts\\insts.bin",
+      "bytes": 420,
+      "sha256": "49bef06b65ce0d68826eb7bc7d573bad4303098bdd9515e4b1f6267d56bee359"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\npu\\add_fp32_softfloat.cc",
+      "bytes": 667,
+      "sha256": "c34da7fe297e09bb2e7368a6d586b2cf4e55043e69bb181a5ee105cb326ae047"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\strata-npu\\src\\core\\npu_final_add.cpp",
+      "bytes": 8284,
+      "sha256": "5266f2c5ba994b09661d19701892fdf29e65898ab714e1f13cb9280d99433865"
+    }
+  ],
+  "not_claimed": [
+    "speedup",
+    "whole-model NPU execution",
+    "full 65,536-position stress qualification",
+    "vision inference qualification",
+    "newGPU FP16 performance measurement"
+  ]
+}

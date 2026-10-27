@@ -1,0 +1,19 @@
+"""Run the pinned upstream tiled NPU1 matrix design and retain native artifacts."""
+from pathlib import Path
+import argparse,json,shutil,sys
+H=Path(__file__).resolve().parent;R=H.parent
+ap=argparse.ArgumentParser();ap.add_argument('--tile',nargs=3,type=int,default=[64,64,32]);opts=ap.parse_args()
+sys.path.insert(0,str(R/'npu/mlir-aie/programming_examples/basic/matrix_multiplication/whole_array'))
+from aie.utils.hostruntime.xrtruntime.hostruntime import CachedXRTRuntime
+loaded=[];original=CachedXRTRuntime.load
+def load(self,kernel,**kw):
+ loaded.append(Path(kernel.xclbin_path).parent)
+ return original(self,kernel,**kw)
+CachedXRTRuntime.load=load
+import whole_array
+sys.argv=[sys.argv[0],'-M','1024','-K','2560','-N','1024','-m',str(opts.tile[0]),'-k',str(opts.tile[1]),'-n',str(opts.tile[2]),'--dtype_in','bf16','--dtype_out','f32','--dev','npu','--iters','3','--warmup','1']
+whole_array.main()
+dest=H/('artifacts-m%dk%dn%d'%tuple(opts.tile));dest.mkdir(exist_ok=True)
+for name in ('final.xclbin','insts.bin','input_with_addresses.mlir','aie.mlir'):
+ shutil.copy2(loaded[-1]/name,dest/name)
+(dest/'source.json').write_text(json.dumps({'mlir_aie_commit':'6f73deca839e79a170e7c90b9285b3be949ca781','source':'programming_examples/basic/matrix_multiplication/whole_array/whole_array.py','shape':[1024,2560,1024],'tile':opts.tile,'cache':str(loaded[-1]),'native_sample_verification_passed':True},indent=2)+'\n')

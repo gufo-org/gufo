@@ -1,0 +1,87 @@
+{
+  "runs": [
+    {
+      "run": "gufo-projection\\results\\20261027T030833Z-ca5201-cuda-resident40-qualify",
+      "requests": [
+        {
+          "name": "smoke",
+          "finish_reason": "stop",
+          "actual_output_tokens": 69,
+          "offline_prompt_tokens": 2022,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 2022,
+            "prompt_ms": 5462.9,
+            "prompt_per_token_ms": 2.702,
+            "prompt_per_second": 370.1,
+            "predicted_n": 69,
+            "predicted_ms": 2876.4,
+            "predicted_per_token_ms": 41.687,
+            "predicted_per_second": 24.0,
+            "draft_n": 65,
+            "draft_n_accepted": 40
+          },
+          "correctness": {
+            "status": "exact JSON semantics",
+            "passed": true
+          }
+        }
+      ],
+      "last_npu_totals": null
+    },
+    {
+      "run": "gufo-projection\\results\\20261027T030758Z-4db39d-gufo-trace4-qualify",
+      "requests": [
+        {
+          "name": "smoke",
+          "finish_reason": "stop",
+          "actual_output_tokens": 110,
+          "offline_prompt_tokens": 2022,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 2022,
+            "prompt_ms": 5100.8,
+            "prompt_per_token_ms": 2.523,
+            "prompt_per_second": 396.4,
+            "predicted_n": 110,
+            "predicted_ms": 4211.0,
+            "predicted_per_token_ms": 38.282,
+            "predicted_per_second": 26.1,
+            "draft_n": 94,
+            "draft_n_accepted": 70
+          },
+          "correctness": {
+            "status": "exact JSON semantics",
+            "passed": true
+          }
+        }
+      ],
+      "last_npu_totals": "strata gufo NPU: jobs=92 dispatches=368 valid_rows=92782 checked_values=0 max_abs=0 max_rel_rms=0 max_math_abs=0 xrt_ms=1585.704 worker_ms=2143.815 host_wait_ms=0.006",
+      "overlap": {
+        "completed_xrt_intervals": 368,
+        "sum_xrt_ms": 1585.70360000059,
+        "other_bank_body_overlap_ms": 1585.70360000059,
+        "fraction": 1.0
+      }
+    }
+  ],
+  "logit_comparisons": [
+    {
+      "left": "gufo-projection\\results\\20261027T030833Z-ca5201-cuda-resident40-qualify",
+      "right": "gufo-projection\\results\\20261027T030758Z-4db39d-gufo-trace4-qualify",
+      "values": [
+        {
+          "index": 0,
+          "vocab": 248320,
+          "kl_left_to_right": 0.000366818049313011,
+          "argmax_equal": true,
+          "max_abs_logit_difference": 1.6809188723564148
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "First-window logits are bounded diagnostics, not held-out perplexity.",
+    "GPU-stream body markers include waits and callbacks; they do not measure SM-busy time."
+  ]
+}

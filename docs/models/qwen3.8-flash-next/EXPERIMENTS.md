@@ -1,5 +1,15 @@
 # Qwen3.8 Flash-Next experiments
 
+## Phoenix NPU with a discrete CUDA GPU (October 27, 2026)
+
+An external native Windows Strata adaptation tested Gufo-inspired projection,
+two-bank prefill and common-buffer mechanisms on Ryzen 9 7940HS/Phoenix plus
+an RTX 4070 Laptop. The strongest NPU candidate increased fresh-prefill
+latency by 2.35% / 3.61% in three matched pairs and remains disabled.
+See the [complete experiment report and review questions](PHOENIX_CUDA_NPU_REPORT.md)
+for all stages, failed controls, per-request evidence and the experimental
+Strata patch. These are not Gufo runtime benchmarks or a new supported backend.
+
 ## Selector scheduling on newer LLVM (October 23, 2026)
 
 | Experiment | Outcome |

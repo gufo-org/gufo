@@ -1,0 +1,3204 @@
+{
+  "status": "Bounded correctness checks passed; no demonstrated gain; NPU experiment rejected and disabled",
+  "runs": [
+    {
+      "run": "gufo-projection\\results\\20261027T024517Z-23a172-all-widths-screen",
+      "plan": {
+        "profiles": [
+          "cuda-resident40",
+          "gufo-cuda",
+          "gufo-npu4",
+          "gufo-npu8",
+          "gufo-npu16"
+        ],
+        "pairs": 1,
+        "identities": {
+          "cuda-resident40": {
+            "config_sha256": "9fa2c3f9c907849e41f88ffd95d8fbc23ac2c3459b9ca417ecac08757520b5fb",
+            "exe_sha256": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da"
+          },
+          "gufo-cuda": {
+            "config_sha256": "34817ac9645fc04d497060c6f55918ced87c6a09a57b2fc343c0a9897b1710d8",
+            "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5"
+          },
+          "gufo-npu4": {
+            "config_sha256": "1ee8f2bd0e1cf6ab6ca6b2c02b64857e5ae40c669ecdef41c75911db1e4f948e",
+            "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5"
+          },
+          "gufo-npu8": {
+            "config_sha256": "d1ed67cf05f01c6e4e5eedb72d86bac07524c9dd7ba32932fc8b95b47144a936",
+            "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5"
+          },
+          "gufo-npu16": {
+            "config_sha256": "617bc072266b201ddce4d28d484a81fb06ea463560576fd0be2f92bd82664015",
+            "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5"
+          }
+        },
+        "context": 65536,
+        "reasoning_budget": 8192,
+        "output_budget": 16384,
+        "model": "Unchanged IQ3_S/INT8 KV",
+        "warmups": 2,
+        "order": "Alternating profile order each pair",
+        "acceptance": "Complete answers and cache checks must pass. Repeatable positive paired fresh-prefill gain required; no promotion for NPU participation alone.",
+        "baseline": "cuda-resident40 is the previously accepted engine0.1.50 /40GiB profile. bank-cuda is an optional attribution control."
+      },
+      "comparison": {
+        "completed": true,
+        "measured_requests": 15,
+        "comparisons": [
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-cuda",
+            "workload": "fresh-120",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 2667,
+                "cache_n": 0,
+                "baseline_prompt_ms": 6931.5,
+                "candidate_prompt_ms": 6852.0,
+                "latency_reduction_percent": 1.1469378922311146,
+                "throughput_gain_percent": 1.160245183887909,
+                "baseline_full_s": 8.925273100001505,
+                "candidate_full_s": 8.7341740999982,
+                "baseline_output_tokens": 62,
+                "candidate_output_tokens": 48
+              }
+            ],
+            "median_latency_reduction_percent": 1.1469378922311146,
+            "median_throughput_gain_percent": 1.160245183887909
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-cuda",
+            "workload": "fresh-360",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 0,
+                "baseline_prompt_ms": 19093.8,
+                "candidate_prompt_ms": 19151.1,
+                "latency_reduction_percent": -0.3000974138201995,
+                "throughput_gain_percent": -0.29919952378714143,
+                "baseline_full_s": 21.2278581999999,
+                "candidate_full_s": 21.749699700001656,
+                "baseline_output_tokens": 57,
+                "candidate_output_tokens": 71
+              }
+            ],
+            "median_latency_reduction_percent": -0.3000974138201995,
+            "median_throughput_gain_percent": -0.29919952378714143
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-cuda",
+            "workload": "repeated",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 7800,
+                "baseline_prompt_ms": 230.7,
+                "candidate_prompt_ms": 231.4,
+                "latency_reduction_percent": -0.30342436064152434,
+                "throughput_gain_percent": -0.30250648228177246,
+                "baseline_full_s": 2.996381199998723,
+                "candidate_full_s": 2.618505800001003,
+                "baseline_output_tokens": 72,
+                "candidate_output_tokens": 64
+              }
+            ],
+            "median_latency_reduction_percent": -0.30342436064152434,
+            "median_throughput_gain_percent": -0.30250648228177246
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "fresh-120",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 2667,
+                "cache_n": 0,
+                "baseline_prompt_ms": 6931.5,
+                "candidate_prompt_ms": 7078.7,
+                "latency_reduction_percent": -2.1236384620933357,
+                "throughput_gain_percent": -2.079477870230406,
+                "baseline_full_s": 8.925273100001505,
+                "candidate_full_s": 9.382487799997762,
+                "baseline_output_tokens": 62,
+                "candidate_output_tokens": 64
+              }
+            ],
+            "median_latency_reduction_percent": -2.1236384620933357,
+            "median_throughput_gain_percent": -2.079477870230406
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "fresh-360",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 0,
+                "baseline_prompt_ms": 19093.8,
+                "candidate_prompt_ms": 19990.1,
+                "latency_reduction_percent": -4.694193926824419,
+                "throughput_gain_percent": -4.483719441123357,
+                "baseline_full_s": 21.2278581999999,
+                "candidate_full_s": 21.909958300002472,
+                "baseline_output_tokens": 57,
+                "candidate_output_tokens": 55
+              }
+            ],
+            "median_latency_reduction_percent": -4.694193926824419,
+            "median_throughput_gain_percent": -4.483719441123357
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "repeated",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 7800,
+                "baseline_prompt_ms": 230.7,
+                "candidate_prompt_ms": 235.8,
+                "latency_reduction_percent": -2.210663198959706,
+                "throughput_gain_percent": -2.1628498727735423,
+                "baseline_full_s": 2.996381199998723,
+                "candidate_full_s": 4.082845700002508,
+                "baseline_output_tokens": 72,
+                "candidate_output_tokens": 99
+              }
+            ],
+            "median_latency_reduction_percent": -2.210663198959706,
+            "median_throughput_gain_percent": -2.1628498727735423
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu8",
+            "workload": "fresh-120",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 2667,
+                "cache_n": 0,
+                "baseline_prompt_ms": 6931.5,
+                "candidate_prompt_ms": 7296.7,
+                "latency_reduction_percent": -5.268700858400055,
+                "throughput_gain_percent": -5.005002261296198,
+                "baseline_full_s": 8.925273100001505,
+                "candidate_full_s": 9.427377899999556,
+                "baseline_output_tokens": 62,
+                "candidate_output_tokens": 60
+              }
+            ],
+            "median_latency_reduction_percent": -5.268700858400055,
+            "median_throughput_gain_percent": -5.005002261296198
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu8",
+            "workload": "fresh-360",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 0,
+                "baseline_prompt_ms": 19093.8,
+                "candidate_prompt_ms": 20734.2,
+                "latency_reduction_percent": -8.591270464758205,
+                "throughput_gain_percent": -7.911566397546088,
+                "baseline_full_s": 21.2278581999999,
+                "candidate_full_s": 22.859968699998717,
+                "baseline_output_tokens": 57,
+                "candidate_output_tokens": 57
+              }
+            ],
+            "median_latency_reduction_percent": -8.591270464758205,
+            "median_throughput_gain_percent": -7.911566397546088
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu8",
+            "workload": "repeated",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 7800,
+                "baseline_prompt_ms": 230.7,
+                "candidate_prompt_ms": 264.5,
+                "latency_reduction_percent": -14.651061985262249,
+                "throughput_gain_percent": -12.778827977315698,
+                "baseline_full_s": 2.996381199998723,
+                "candidate_full_s": 1.9700917000009213,
+                "baseline_output_tokens": 72,
+                "candidate_output_tokens": 49
+              }
+            ],
+            "median_latency_reduction_percent": -14.651061985262249,
+            "median_throughput_gain_percent": -12.778827977315698
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu16",
+            "workload": "fresh-120",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 2667,
+                "cache_n": 0,
+                "baseline_prompt_ms": 6931.5,
+                "candidate_prompt_ms": 9511.0,
+                "latency_reduction_percent": -37.2141672076751,
+                "throughput_gain_percent": -27.121228051729574,
+                "baseline_full_s": 8.925273100001505,
+                "candidate_full_s": 11.912537500000326,
+                "baseline_output_tokens": 62,
+                "candidate_output_tokens": 63
+              }
+            ],
+            "median_latency_reduction_percent": -37.2141672076751,
+            "median_throughput_gain_percent": -27.121228051729574
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu16",
+            "workload": "fresh-360",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 0,
+                "baseline_prompt_ms": 19093.8,
+                "candidate_prompt_ms": 28166.6,
+                "latency_reduction_percent": -47.51699504551215,
+                "throughput_gain_percent": -32.21120049988284,
+                "baseline_full_s": 21.2278581999999,
+                "candidate_full_s": 30.144895299999916,
+                "baseline_output_tokens": 57,
+                "candidate_output_tokens": 54
+              }
+            ],
+            "median_latency_reduction_percent": -47.51699504551215,
+            "median_throughput_gain_percent": -32.21120049988284
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu16",
+            "workload": "repeated",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 7800,
+                "baseline_prompt_ms": 230.7,
+                "candidate_prompt_ms": 267.8,
+                "latency_reduction_percent": -16.08149111400088,
+                "throughput_gain_percent": -13.8536221060493,
+                "baseline_full_s": 2.996381199998723,
+                "candidate_full_s": 2.4973020999968867,
+                "baseline_output_tokens": 72,
+                "candidate_output_tokens": 68
+              }
+            ],
+            "median_latency_reduction_percent": -16.08149111400088,
+            "median_throughput_gain_percent": -13.8536221060493
+          }
+        ]
+      },
+      "groups": [
+        {
+          "profile": "cuda-resident40",
+          "workload": "fresh-120",
+          "prompt_tokens": [
+            2667
+          ],
+          "output_tokens": [
+            62
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              6931.5
+            ],
+            "median": 6931.5,
+            "min": 6931.5,
+            "max": 6931.5
+          },
+          "prompt_per_second": {
+            "values": [
+              384.8
+            ],
+            "median": 384.8,
+            "min": 384.8,
+            "max": 384.8
+          },
+          "predicted_ms": {
+            "values": [
+              1981.5
+            ],
+            "median": 1981.5,
+            "min": 1981.5,
+            "max": 1981.5
+          },
+          "predicted_per_second": {
+            "values": [
+              31.3
+            ],
+            "median": 31.3,
+            "min": 31.3,
+            "max": 31.3
+          },
+          "full_request_s": {
+            "values": [
+              8.925273100001505
+            ],
+            "median": 8.925273100001505,
+            "min": 8.925273100001505,
+            "max": 8.925273100001505
+          },
+          "first_streamed_text_s": {
+            "values": [
+              6.985330300001806
+            ],
+            "median": 6.985330300001806,
+            "min": 6.985330300001806,
+            "max": 6.985330300001806
+          },
+          "first_visible_answer_s": {
+            "values": [
+              8.924142399999255
+            ],
+            "median": 8.924142399999255,
+            "min": 8.924142399999255,
+            "max": 8.924142399999255
+          }
+        },
+        {
+          "profile": "cuda-resident40",
+          "workload": "fresh-360",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            57
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              19093.8
+            ],
+            "median": 19093.8,
+            "min": 19093.8,
+            "max": 19093.8
+          },
+          "prompt_per_second": {
+            "values": [
+              408.8
+            ],
+            "median": 408.8,
+            "min": 408.8,
+            "max": 408.8
+          },
+          "predicted_ms": {
+            "values": [
+              2104.7
+            ],
+            "median": 2104.7,
+            "min": 2104.7,
+            "max": 2104.7
+          },
+          "predicted_per_second": {
+            "values": [
+              27.1
+            ],
+            "median": 27.1,
+            "min": 27.1,
+            "max": 27.1
+          },
+          "full_request_s": {
+            "values": [
+              21.2278581999999
+            ],
+            "median": 21.2278581999999,
+            "min": 21.2278581999999,
+            "max": 21.2278581999999
+          },
+          "first_streamed_text_s": {
+            "values": [
+              19.16697700000077
+            ],
+            "median": 19.16697700000077,
+            "min": 19.16697700000077,
+            "max": 19.16697700000077
+          },
+          "first_visible_answer_s": {
+            "values": [
+              21.226696699999593
+            ],
+            "median": 21.226696699999593,
+            "min": 21.226696699999593,
+            "max": 21.226696699999593
+          }
+        },
+        {
+          "profile": "cuda-resident40",
+          "workload": "repeated",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            72
+          ],
+          "cache_n": [
+            7800
+          ],
+          "prompt_ms": {
+            "values": [
+              230.7
+            ],
+            "median": 230.7,
+            "min": 230.7,
+            "max": 230.7
+          },
+          "prompt_per_second": {
+            "values": [
+              21.7
+            ],
+            "median": 21.7,
+            "min": 21.7,
+            "max": 21.7
+          },
+          "predicted_ms": {
+            "values": [
+              2759.2
+            ],
+            "median": 2759.2,
+            "min": 2759.2,
+            "max": 2759.2
+          },
+          "predicted_per_second": {
+            "values": [
+              26.1
+            ],
+            "median": 26.1,
+            "min": 26.1,
+            "max": 26.1
+          },
+          "full_request_s": {
+            "values": [
+              2.996381199998723
+            ],
+            "median": 2.996381199998723,
+            "min": 2.996381199998723,
+            "max": 2.996381199998723
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.27837720000025
+            ],
+            "median": 0.27837720000025,
+            "min": 0.27837720000025,
+            "max": 0.27837720000025
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.978788100001111
+            ],
+            "median": 2.978788100001111,
+            "min": 2.978788100001111,
+            "max": 2.978788100001111
+          }
+        },
+        {
+          "profile": "gufo-cuda",
+          "workload": "fresh-120",
+          "prompt_tokens": [
+            2667
+          ],
+          "output_tokens": [
+            48
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              6852.0
+            ],
+            "median": 6852.0,
+            "min": 6852.0,
+            "max": 6852.0
+          },
+          "prompt_per_second": {
+            "values": [
+              389.2
+            ],
+            "median": 389.2,
+            "min": 389.2,
+            "max": 389.2
+          },
+          "predicted_ms": {
+            "values": [
+              1855.3
+            ],
+            "median": 1855.3,
+            "min": 1855.3,
+            "max": 1855.3
+          },
+          "predicted_per_second": {
+            "values": [
+              25.9
+            ],
+            "median": 25.9,
+            "min": 25.9,
+            "max": 25.9
+          },
+          "full_request_s": {
+            "values": [
+              8.7341740999982
+            ],
+            "median": 8.7341740999982,
+            "min": 8.7341740999982,
+            "max": 8.7341740999982
+          },
+          "first_streamed_text_s": {
+            "values": [
+              6.922437299999729
+            ],
+            "median": 6.922437299999729,
+            "min": 6.922437299999729,
+            "max": 6.922437299999729
+          },
+          "first_visible_answer_s": {
+            "values": [
+              8.732894199998555
+            ],
+            "median": 8.732894199998555,
+            "min": 8.732894199998555,
+            "max": 8.732894199998555
+          }
+        },
+        {
+          "profile": "gufo-cuda",
+          "workload": "fresh-360",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            71
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              19151.1
+            ],
+            "median": 19151.1,
+            "min": 19151.1,
+            "max": 19151.1
+          },
+          "prompt_per_second": {
+            "values": [
+              407.5
+            ],
+            "median": 407.5,
+            "min": 407.5,
+            "max": 407.5
+          },
+          "predicted_ms": {
+            "values": [
+              2575.7
+            ],
+            "median": 2575.7,
+            "min": 2575.7,
+            "max": 2575.7
+          },
+          "predicted_per_second": {
+            "values": [
+              27.6
+            ],
+            "median": 27.6,
+            "min": 27.6,
+            "max": 27.6
+          },
+          "full_request_s": {
+            "values": [
+              21.749699700001656
+            ],
+            "median": 21.749699700001656,
+            "min": 21.749699700001656,
+            "max": 21.749699700001656
+          },
+          "first_streamed_text_s": {
+            "values": [
+              19.215409300002648
+            ],
+            "median": 19.215409300002648,
+            "min": 19.215409300002648,
+            "max": 19.215409300002648
+          },
+          "first_visible_answer_s": {
+            "values": [
+              21.748490700003458
+            ],
+            "median": 21.748490700003458,
+            "min": 21.748490700003458,
+            "max": 21.748490700003458
+          }
+        },
+        {
+          "profile": "gufo-cuda",
+          "workload": "repeated",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            64
+          ],
+          "cache_n": [
+            7800
+          ],
+          "prompt_ms": {
+            "values": [
+              231.4
+            ],
+            "median": 231.4,
+            "min": 231.4,
+            "max": 231.4
+          },
+          "prompt_per_second": {
+            "values": [
+              21.6
+            ],
+            "median": 21.6,
+            "min": 21.6,
+            "max": 21.6
+          },
+          "predicted_ms": {
+            "values": [
+              2380.8
+            ],
+            "median": 2380.8,
+            "min": 2380.8,
+            "max": 2380.8
+          },
+          "predicted_per_second": {
+            "values": [
+              26.9
+            ],
+            "median": 26.9,
+            "min": 26.9,
+            "max": 26.9
+          },
+          "full_request_s": {
+            "values": [
+              2.618505800001003
+            ],
+            "median": 2.618505800001003,
+            "min": 2.618505800001003,
+            "max": 2.618505800001003
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.2774074000008113
+            ],
+            "median": 0.2774074000008113,
+            "min": 0.2774074000008113,
+            "max": 0.2774074000008113
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.617410300001211
+            ],
+            "median": 2.617410300001211,
+            "min": 2.617410300001211,
+            "max": 2.617410300001211
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "fresh-120",
+          "prompt_tokens": [
+            2667
+          ],
+          "output_tokens": [
+            64
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              7078.7
+            ],
+            "median": 7078.7,
+            "min": 7078.7,
+            "max": 7078.7
+          },
+          "prompt_per_second": {
+            "values": [
+              376.8
+            ],
+            "median": 376.8,
+            "min": 376.8,
+            "max": 376.8
+          },
+          "predicted_ms": {
+            "values": [
+              2279.7
+            ],
+            "median": 2279.7,
+            "min": 2279.7,
+            "max": 2279.7
+          },
+          "predicted_per_second": {
+            "values": [
+              28.1
+            ],
+            "median": 28.1,
+            "min": 28.1,
+            "max": 28.1
+          },
+          "full_request_s": {
+            "values": [
+              9.382487799997762
+            ],
+            "median": 9.382487799997762,
+            "min": 9.382487799997762,
+            "max": 9.382487799997762
+          },
+          "first_streamed_text_s": {
+            "values": [
+              7.1425784999992175
+            ],
+            "median": 7.1425784999992175,
+            "min": 7.1425784999992175,
+            "max": 7.1425784999992175
+          },
+          "first_visible_answer_s": {
+            "values": [
+              9.381229700000404
+            ],
+            "median": 9.381229700000404,
+            "min": 9.381229700000404,
+            "max": 9.381229700000404
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "fresh-360",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            55
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              19990.1
+            ],
+            "median": 19990.1,
+            "min": 19990.1,
+            "max": 19990.1
+          },
+          "prompt_per_second": {
+            "values": [
+              390.4
+            ],
+            "median": 390.4,
+            "min": 390.4,
+            "max": 390.4
+          },
+          "predicted_ms": {
+            "values": [
+              1898.5
+            ],
+            "median": 1898.5,
+            "min": 1898.5,
+            "max": 1898.5
+          },
+          "predicted_per_second": {
+            "values": [
+              29.0
+            ],
+            "median": 29.0,
+            "min": 29.0,
+            "max": 29.0
+          },
+          "full_request_s": {
+            "values": [
+              21.909958300002472
+            ],
+            "median": 21.909958300002472,
+            "min": 21.909958300002472,
+            "max": 21.909958300002472
+          },
+          "first_streamed_text_s": {
+            "values": [
+              20.054946800002654
+            ],
+            "median": 20.054946800002654,
+            "min": 20.054946800002654,
+            "max": 20.054946800002654
+          },
+          "first_visible_answer_s": {
+            "values": [
+              21.908751900002244
+            ],
+            "median": 21.908751900002244,
+            "min": 21.908751900002244,
+            "max": 21.908751900002244
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "repeated",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            99
+          ],
+          "cache_n": [
+            7800
+          ],
+          "prompt_ms": {
+            "values": [
+              235.8
+            ],
+            "median": 235.8,
+            "min": 235.8,
+            "max": 235.8
+          },
+          "prompt_per_second": {
+            "values": [
+              21.2
+            ],
+            "median": 21.2,
+            "min": 21.2,
+            "max": 21.2
+          },
+          "predicted_ms": {
+            "values": [
+              3828.1
+            ],
+            "median": 3828.1,
+            "min": 3828.1,
+            "max": 3828.1
+          },
+          "predicted_per_second": {
+            "values": [
+              25.9
+            ],
+            "median": 25.9,
+            "min": 25.9,
+            "max": 25.9
+          },
+          "full_request_s": {
+            "values": [
+              4.082845700002508
+            ],
+            "median": 4.082845700002508,
+            "min": 4.082845700002508,
+            "max": 4.082845700002508
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.29571620000206167
+            ],
+            "median": 0.29571620000206167,
+            "min": 0.29571620000206167,
+            "max": 0.29571620000206167
+          },
+          "first_visible_answer_s": {
+            "values": [
+              4.063926900002116
+            ],
+            "median": 4.063926900002116,
+            "min": 4.063926900002116,
+            "max": 4.063926900002116
+          }
+        },
+        {
+          "profile": "gufo-npu8",
+          "workload": "fresh-120",
+          "prompt_tokens": [
+            2667
+          ],
+          "output_tokens": [
+            60
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              7296.7
+            ],
+            "median": 7296.7,
+            "min": 7296.7,
+            "max": 7296.7
+          },
+          "prompt_per_second": {
+            "values": [
+              365.5
+            ],
+            "median": 365.5,
+            "min": 365.5,
+            "max": 365.5
+          },
+          "predicted_ms": {
+            "values": [
+              2108.7
+            ],
+            "median": 2108.7,
+            "min": 2108.7,
+            "max": 2108.7
+          },
+          "predicted_per_second": {
+            "values": [
+              28.5
+            ],
+            "median": 28.5,
+            "min": 28.5,
+            "max": 28.5
+          },
+          "full_request_s": {
+            "values": [
+              9.427377899999556
+            ],
+            "median": 9.427377899999556,
+            "min": 9.427377899999556,
+            "max": 9.427377899999556
+          },
+          "first_streamed_text_s": {
+            "values": [
+              7.362491399999271
+            ],
+            "median": 7.362491399999271,
+            "min": 7.362491399999271,
+            "max": 7.362491399999271
+          },
+          "first_visible_answer_s": {
+            "values": [
+              9.42602110000007
+            ],
+            "median": 9.42602110000007,
+            "min": 9.42602110000007,
+            "max": 9.42602110000007
+          }
+        },
+        {
+          "profile": "gufo-npu8",
+          "workload": "fresh-360",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            57
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              20734.2
+            ],
+            "median": 20734.2,
+            "min": 20734.2,
+            "max": 20734.2
+          },
+          "prompt_per_second": {
+            "values": [
+              376.4
+            ],
+            "median": 376.4,
+            "min": 376.4,
+            "max": 376.4
+          },
+          "predicted_ms": {
+            "values": [
+              2105.1
+            ],
+            "median": 2105.1,
+            "min": 2105.1,
+            "max": 2105.1
+          },
+          "predicted_per_second": {
+            "values": [
+              27.1
+            ],
+            "median": 27.1,
+            "min": 27.1,
+            "max": 27.1
+          },
+          "full_request_s": {
+            "values": [
+              22.859968699998717
+            ],
+            "median": 22.859968699998717,
+            "min": 22.859968699998717,
+            "max": 22.859968699998717
+          },
+          "first_streamed_text_s": {
+            "values": [
+              20.795026700001472
+            ],
+            "median": 20.795026700001472,
+            "min": 20.795026700001472,
+            "max": 20.795026700001472
+          },
+          "first_visible_answer_s": {
+            "values": [
+              22.85883069999909
+            ],
+            "median": 22.85883069999909,
+            "min": 22.85883069999909,
+            "max": 22.85883069999909
+          }
+        },
+        {
+          "profile": "gufo-npu8",
+          "workload": "repeated",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            49
+          ],
+          "cache_n": [
+            7800
+          ],
+          "prompt_ms": {
+            "values": [
+              264.5
+            ],
+            "median": 264.5,
+            "min": 264.5,
+            "max": 264.5
+          },
+          "prompt_per_second": {
+            "values": [
+              18.9
+            ],
+            "median": 18.9,
+            "min": 18.9,
+            "max": 18.9
+          },
+          "predicted_ms": {
+            "values": [
+              1698.0
+            ],
+            "median": 1698.0,
+            "min": 1698.0,
+            "max": 1698.0
+          },
+          "predicted_per_second": {
+            "values": [
+              28.9
+            ],
+            "median": 28.9,
+            "min": 28.9,
+            "max": 28.9
+          },
+          "full_request_s": {
+            "values": [
+              1.9700917000009213
+            ],
+            "median": 1.9700917000009213,
+            "min": 1.9700917000009213,
+            "max": 1.9700917000009213
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.3242943000004743
+            ],
+            "median": 0.3242943000004743,
+            "min": 0.3242943000004743,
+            "max": 0.3242943000004743
+          },
+          "first_visible_answer_s": {
+            "values": [
+              1.9689312999980757
+            ],
+            "median": 1.9689312999980757,
+            "min": 1.9689312999980757,
+            "max": 1.9689312999980757
+          }
+        },
+        {
+          "profile": "gufo-npu16",
+          "workload": "fresh-120",
+          "prompt_tokens": [
+            2667
+          ],
+          "output_tokens": [
+            63
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              9511.0
+            ],
+            "median": 9511.0,
+            "min": 9511.0,
+            "max": 9511.0
+          },
+          "prompt_per_second": {
+            "values": [
+              280.4
+            ],
+            "median": 280.4,
+            "min": 280.4,
+            "max": 280.4
+          },
+          "predicted_ms": {
+            "values": [
+              2395.4
+            ],
+            "median": 2395.4,
+            "min": 2395.4,
+            "max": 2395.4
+          },
+          "predicted_per_second": {
+            "values": [
+              26.3
+            ],
+            "median": 26.3,
+            "min": 26.3,
+            "max": 26.3
+          },
+          "full_request_s": {
+            "values": [
+              11.912537500000326
+            ],
+            "median": 11.912537500000326,
+            "min": 11.912537500000326,
+            "max": 11.912537500000326
+          },
+          "first_streamed_text_s": {
+            "values": [
+              9.566356899998937
+            ],
+            "median": 9.566356899998937,
+            "min": 9.566356899998937,
+            "max": 9.566356899998937
+          },
+          "first_visible_answer_s": {
+            "values": [
+              11.911165899997286
+            ],
+            "median": 11.911165899997286,
+            "min": 11.911165899997286,
+            "max": 11.911165899997286
+          }
+        },
+        {
+          "profile": "gufo-npu16",
+          "workload": "fresh-360",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            54
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              28166.6
+            ],
+            "median": 28166.6,
+            "min": 28166.6,
+            "max": 28166.6
+          },
+          "prompt_per_second": {
+            "values": [
+              277.1
+            ],
+            "median": 277.1,
+            "min": 277.1,
+            "max": 277.1
+          },
+          "predicted_ms": {
+            "values": [
+              1946.8
+            ],
+            "median": 1946.8,
+            "min": 1946.8,
+            "max": 1946.8
+          },
+          "predicted_per_second": {
+            "values": [
+              27.7
+            ],
+            "median": 27.7,
+            "min": 27.7,
+            "max": 27.7
+          },
+          "full_request_s": {
+            "values": [
+              30.144895299999916
+            ],
+            "median": 30.144895299999916,
+            "min": 30.144895299999916,
+            "max": 30.144895299999916
+          },
+          "first_streamed_text_s": {
+            "values": [
+              28.241950600000564
+            ],
+            "median": 28.241950600000564,
+            "min": 28.241950600000564,
+            "max": 28.241950600000564
+          },
+          "first_visible_answer_s": {
+            "values": [
+              30.143784800002322
+            ],
+            "median": 30.143784800002322,
+            "min": 30.143784800002322,
+            "max": 30.143784800002322
+          }
+        },
+        {
+          "profile": "gufo-npu16",
+          "workload": "repeated",
+          "prompt_tokens": [
+            7805
+          ],
+          "output_tokens": [
+            68
+          ],
+          "cache_n": [
+            7800
+          ],
+          "prompt_ms": {
+            "values": [
+              267.8
+            ],
+            "median": 267.8,
+            "min": 267.8,
+            "max": 267.8
+          },
+          "prompt_per_second": {
+            "values": [
+              18.7
+            ],
+            "median": 18.7,
+            "min": 18.7,
+            "max": 18.7
+          },
+          "predicted_ms": {
+            "values": [
+              2210.2
+            ],
+            "median": 2210.2,
+            "min": 2210.2,
+            "max": 2210.2
+          },
+          "predicted_per_second": {
+            "values": [
+              30.8
+            ],
+            "median": 30.8,
+            "min": 30.8,
+            "max": 30.8
+          },
+          "full_request_s": {
+            "values": [
+              2.4973020999968867
+            ],
+            "median": 2.4973020999968867,
+            "min": 2.4973020999968867,
+            "max": 2.4973020999968867
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.32802329999685753
+            ],
+            "median": 0.32802329999685753,
+            "min": 0.32802329999685753,
+            "max": 0.32802329999685753
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.496181599999545
+            ],
+            "median": 2.496181599999545,
+            "min": 2.496181599999545,
+            "max": 2.496181599999545
+          }
+        }
+      ],
+      "resources": [
+        {
+          "profile": "cuda-resident40",
+          "minimum_available_ram_bytes": 8190488576,
+          "minimum_commit_headroom_bytes": 30614020096,
+          "peak_dedicated_vram_bytes": 8188030976,
+          "minimum_free_dedicated_vram_bytes": 397709312,
+          "max_gpu_temperature_c": 57,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236142592.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45166624768.0,
+            "adapter-4": 0
+          },
+          "startup_s": [
+            19.59565769999972
+          ],
+          "native_totals": [],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        },
+        {
+          "profile": "gufo-cuda",
+          "minimum_available_ram_bytes": 8204722176,
+          "minimum_commit_headroom_bytes": 30524227584,
+          "peak_dedicated_vram_bytes": 8265625600,
+          "minimum_free_dedicated_vram_bytes": 320114688,
+          "max_gpu_temperature_c": 60,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236142592.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45166624768.0,
+            "adapter-4": 0
+          },
+          "startup_s": [
+            19.57287870000073
+          ],
+          "native_totals": [],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        },
+        {
+          "profile": "gufo-npu4",
+          "minimum_available_ram_bytes": 7066329088,
+          "minimum_commit_headroom_bytes": 29444341760,
+          "peak_dedicated_vram_bytes": 8250945536,
+          "minimum_free_dedicated_vram_bytes": 334794752,
+          "max_gpu_temperature_c": 62,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236142592.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45210664960.0,
+            "adapter-4": 1075855360.0
+          },
+          "startup_s": [
+            20.342012799999793
+          ],
+          "native_totals": [
+            {
+              "jobs": "644",
+              "dispatches": "2576",
+              "valid_rows": "641424",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "10987.187",
+              "worker_ms": "14335.841",
+              "host_wait_ms": "323.694"
+            }
+          ],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        },
+        {
+          "profile": "gufo-npu8",
+          "minimum_available_ram_bytes": 6219509760,
+          "minimum_commit_headroom_bytes": 28543971328,
+          "peak_dedicated_vram_bytes": 8250945536,
+          "minimum_free_dedicated_vram_bytes": 334794752,
+          "max_gpu_temperature_c": 62,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236142592.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45244219392.0,
+            "adapter-4": 2074099712.0
+          },
+          "startup_s": [
+            20.82161179999821
+          ],
+          "native_totals": [
+            {
+              "jobs": "644",
+              "dispatches": "5152",
+              "valid_rows": "641424",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "20039.208",
+              "worker_ms": "26449.982",
+              "host_wait_ms": "241.384"
+            }
+          ],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        },
+        {
+          "profile": "gufo-npu16",
+          "minimum_available_ram_bytes": 4384518144,
+          "minimum_commit_headroom_bytes": 26730156032,
+          "peak_dedicated_vram_bytes": 8265625600,
+          "minimum_free_dedicated_vram_bytes": 320114688,
+          "max_gpu_temperature_c": 60,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236208128.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45311328256.0,
+            "adapter-4": 3881844736.0
+          },
+          "startup_s": [
+            21.817977700000483
+          ],
+          "native_totals": [
+            {
+              "jobs": "644",
+              "dispatches": "9800",
+              "valid_rows": "641424",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "37970.495",
+              "worker_ms": "48081.474",
+              "host_wait_ms": "14236.075"
+            }
+          ],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        }
+      ]
+    },
+    {
+      "run": "gufo-projection\\results\\20261027T025322Z-cd42f8-long-prefill-screen",
+      "plan": {
+        "profiles": [
+          "cuda-resident40",
+          "gufo-npu4",
+          "gufo-npu16"
+        ],
+        "pairs": 1,
+        "records": [
+          720
+        ],
+        "identities": {
+          "cuda-resident40": {
+            "config_sha256": "9fa2c3f9c907849e41f88ffd95d8fbc23ac2c3459b9ca417ecac08757520b5fb",
+            "exe_sha256": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da"
+          },
+          "gufo-npu4": {
+            "config_sha256": "1ee8f2bd0e1cf6ab6ca6b2c02b64857e5ae40c669ecdef41c75911db1e4f948e",
+            "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5"
+          },
+          "gufo-npu16": {
+            "config_sha256": "617bc072266b201ddce4d28d484a81fb06ea463560576fd0be2f92bd82664015",
+            "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5"
+          }
+        },
+        "context": 65536,
+        "reasoning_budget": 8192,
+        "output_budget": 16384,
+        "model": "Unchanged IQ3_S/INT8 KV",
+        "warmups": 2,
+        "order": "Alternating profile order each pair",
+        "acceptance": "Complete answers and cache checks must pass. Repeatable positive paired fresh-prefill gain required; no promotion for NPU participation alone.",
+        "baseline": "cuda-resident40 is the previously accepted engine0.1.50 /40GiB profile. bank-cuda is an optional attribution control."
+      },
+      "comparison": {
+        "completed": true,
+        "measured_requests": 6,
+        "comparisons": [
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "fresh-720",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 15512,
+                "cache_n": 0,
+                "baseline_prompt_ms": 37722.5,
+                "candidate_prompt_ms": 39353.0,
+                "latency_reduction_percent": -4.322354032739084,
+                "throughput_gain_percent": -4.143267349376156,
+                "baseline_full_s": 40.31006950000301,
+                "candidate_full_s": 41.667850899997575,
+                "baseline_output_tokens": 76,
+                "candidate_output_tokens": 72
+              }
+            ],
+            "median_latency_reduction_percent": -4.322354032739084,
+            "median_throughput_gain_percent": -4.143267349376156
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "repeated",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 15512,
+                "cache_n": 15507,
+                "baseline_prompt_ms": 287.7,
+                "candidate_prompt_ms": 297.0,
+                "latency_reduction_percent": -3.232533889468203,
+                "throughput_gain_percent": -3.1313131313131404,
+                "baseline_full_s": 2.4761388000006264,
+                "candidate_full_s": 2.828587100000732,
+                "baseline_output_tokens": 67,
+                "candidate_output_tokens": 72
+              }
+            ],
+            "median_latency_reduction_percent": -3.232533889468203,
+            "median_throughput_gain_percent": -3.1313131313131404
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu16",
+            "workload": "fresh-720",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 15512,
+                "cache_n": 0,
+                "baseline_prompt_ms": 37722.5,
+                "candidate_prompt_ms": 53159.4,
+                "latency_reduction_percent": -40.922261249917156,
+                "throughput_gain_percent": -29.03889058191026,
+                "baseline_full_s": 40.31006950000301,
+                "candidate_full_s": 55.75790899999993,
+                "baseline_output_tokens": 76,
+                "candidate_output_tokens": 71
+              }
+            ],
+            "median_latency_reduction_percent": -40.922261249917156,
+            "median_throughput_gain_percent": -29.03889058191026
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu16",
+            "workload": "repeated",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 15512,
+                "cache_n": 15507,
+                "baseline_prompt_ms": 287.7,
+                "candidate_prompt_ms": 311.7,
+                "latency_reduction_percent": -8.342022940563076,
+                "throughput_gain_percent": -7.6997112608277245,
+                "baseline_full_s": 2.4761388000006264,
+                "candidate_full_s": 2.486702399997739,
+                "baseline_output_tokens": 67,
+                "candidate_output_tokens": 68
+              }
+            ],
+            "median_latency_reduction_percent": -8.342022940563076,
+            "median_throughput_gain_percent": -7.6997112608277245
+          }
+        ]
+      },
+      "groups": [
+        {
+          "profile": "cuda-resident40",
+          "workload": "fresh-720",
+          "prompt_tokens": [
+            15512
+          ],
+          "output_tokens": [
+            76
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              37722.5
+            ],
+            "median": 37722.5,
+            "min": 37722.5,
+            "max": 37722.5
+          },
+          "prompt_per_second": {
+            "values": [
+              411.2
+            ],
+            "median": 411.2,
+            "min": 411.2,
+            "max": 411.2
+          },
+          "predicted_ms": {
+            "values": [
+              2554.2
+            ],
+            "median": 2554.2,
+            "min": 2554.2,
+            "max": 2554.2
+          },
+          "predicted_per_second": {
+            "values": [
+              29.8
+            ],
+            "median": 29.8,
+            "min": 29.8,
+            "max": 29.8
+          },
+          "full_request_s": {
+            "values": [
+              40.31006950000301
+            ],
+            "median": 40.31006950000301,
+            "min": 40.31006950000301,
+            "max": 40.31006950000301
+          },
+          "first_streamed_text_s": {
+            "values": [
+              37.79493570000341
+            ],
+            "median": 37.79493570000341,
+            "min": 37.79493570000341,
+            "max": 37.79493570000341
+          },
+          "first_visible_answer_s": {
+            "values": [
+              40.30894910000279
+            ],
+            "median": 40.30894910000279,
+            "min": 40.30894910000279,
+            "max": 40.30894910000279
+          }
+        },
+        {
+          "profile": "cuda-resident40",
+          "workload": "repeated",
+          "prompt_tokens": [
+            15512
+          ],
+          "output_tokens": [
+            67
+          ],
+          "cache_n": [
+            15507
+          ],
+          "prompt_ms": {
+            "values": [
+              287.7
+            ],
+            "median": 287.7,
+            "min": 287.7,
+            "max": 287.7
+          },
+          "prompt_per_second": {
+            "values": [
+              17.4
+            ],
+            "median": 17.4,
+            "min": 17.4,
+            "max": 17.4
+          },
+          "predicted_ms": {
+            "values": [
+              2161.2
+            ],
+            "median": 2161.2,
+            "min": 2161.2,
+            "max": 2161.2
+          },
+          "predicted_per_second": {
+            "values": [
+              31.0
+            ],
+            "median": 31.0,
+            "min": 31.0,
+            "max": 31.0
+          },
+          "full_request_s": {
+            "values": [
+              2.4761388000006264
+            ],
+            "median": 2.4761388000006264,
+            "min": 2.4761388000006264,
+            "max": 2.4761388000006264
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.35509040000033565
+            ],
+            "median": 0.35509040000033565,
+            "min": 0.35509040000033565,
+            "max": 0.35509040000033565
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.4749153000011574
+            ],
+            "median": 2.4749153000011574,
+            "min": 2.4749153000011574,
+            "max": 2.4749153000011574
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "fresh-720",
+          "prompt_tokens": [
+            15512
+          ],
+          "output_tokens": [
+            72
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              39353.0
+            ],
+            "median": 39353.0,
+            "min": 39353.0,
+            "max": 39353.0
+          },
+          "prompt_per_second": {
+            "values": [
+              394.2
+            ],
+            "median": 394.2,
+            "min": 394.2,
+            "max": 394.2
+          },
+          "predicted_ms": {
+            "values": [
+              2290.2
+            ],
+            "median": 2290.2,
+            "min": 2290.2,
+            "max": 2290.2
+          },
+          "predicted_per_second": {
+            "values": [
+              31.4
+            ],
+            "median": 31.4,
+            "min": 31.4,
+            "max": 31.4
+          },
+          "full_request_s": {
+            "values": [
+              41.667850899997575
+            ],
+            "median": 41.667850899997575,
+            "min": 41.667850899997575,
+            "max": 41.667850899997575
+          },
+          "first_streamed_text_s": {
+            "values": [
+              39.416885299997375
+            ],
+            "median": 39.416885299997375,
+            "min": 39.416885299997375,
+            "max": 39.416885299997375
+          },
+          "first_visible_answer_s": {
+            "values": [
+              41.66669489999913
+            ],
+            "median": 41.66669489999913,
+            "min": 41.66669489999913,
+            "max": 41.66669489999913
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "repeated",
+          "prompt_tokens": [
+            15512
+          ],
+          "output_tokens": [
+            72
+          ],
+          "cache_n": [
+            15507
+          ],
+          "prompt_ms": {
+            "values": [
+              297.0
+            ],
+            "median": 297.0,
+            "min": 297.0,
+            "max": 297.0
+          },
+          "prompt_per_second": {
+            "values": [
+              16.8
+            ],
+            "median": 16.8,
+            "min": 16.8,
+            "max": 16.8
+          },
+          "predicted_ms": {
+            "values": [
+              2524.2
+            ],
+            "median": 2524.2,
+            "min": 2524.2,
+            "max": 2524.2
+          },
+          "predicted_per_second": {
+            "values": [
+              28.5
+            ],
+            "median": 28.5,
+            "min": 28.5,
+            "max": 28.5
+          },
+          "full_request_s": {
+            "values": [
+              2.828587100000732
+            ],
+            "median": 2.828587100000732,
+            "min": 2.828587100000732,
+            "max": 2.828587100000732
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.3454061999982514
+            ],
+            "median": 0.3454061999982514,
+            "min": 0.3454061999982514,
+            "max": 0.3454061999982514
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.641692299999704
+            ],
+            "median": 2.641692299999704,
+            "min": 2.641692299999704,
+            "max": 2.641692299999704
+          }
+        },
+        {
+          "profile": "gufo-npu16",
+          "workload": "fresh-720",
+          "prompt_tokens": [
+            15512
+          ],
+          "output_tokens": [
+            71
+          ],
+          "cache_n": [
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              53159.4
+            ],
+            "median": 53159.4,
+            "min": 53159.4,
+            "max": 53159.4
+          },
+          "prompt_per_second": {
+            "values": [
+              291.8
+            ],
+            "median": 291.8,
+            "min": 291.8,
+            "max": 291.8
+          },
+          "predicted_ms": {
+            "values": [
+              2570.8
+            ],
+            "median": 2570.8,
+            "min": 2570.8,
+            "max": 2570.8
+          },
+          "predicted_per_second": {
+            "values": [
+              27.6
+            ],
+            "median": 27.6,
+            "min": 27.6,
+            "max": 27.6
+          },
+          "full_request_s": {
+            "values": [
+              55.75790899999993
+            ],
+            "median": 55.75790899999993,
+            "min": 55.75790899999993,
+            "max": 55.75790899999993
+          },
+          "first_streamed_text_s": {
+            "values": [
+              53.2267197000001
+            ],
+            "median": 53.2267197000001,
+            "min": 53.2267197000001,
+            "max": 53.2267197000001
+          },
+          "first_visible_answer_s": {
+            "values": [
+              55.73967179999818
+            ],
+            "median": 55.73967179999818,
+            "min": 55.73967179999818,
+            "max": 55.73967179999818
+          }
+        },
+        {
+          "profile": "gufo-npu16",
+          "workload": "repeated",
+          "prompt_tokens": [
+            15512
+          ],
+          "output_tokens": [
+            68
+          ],
+          "cache_n": [
+            15507
+          ],
+          "prompt_ms": {
+            "values": [
+              311.7
+            ],
+            "median": 311.7,
+            "min": 311.7,
+            "max": 311.7
+          },
+          "prompt_per_second": {
+            "values": [
+              16.0
+            ],
+            "median": 16.0,
+            "min": 16.0,
+            "max": 16.0
+          },
+          "predicted_ms": {
+            "values": [
+              2156.5
+            ],
+            "median": 2156.5,
+            "min": 2156.5,
+            "max": 2156.5
+          },
+          "predicted_per_second": {
+            "values": [
+              31.5
+            ],
+            "median": 31.5,
+            "min": 31.5,
+            "max": 31.5
+          },
+          "full_request_s": {
+            "values": [
+              2.486702399997739
+            ],
+            "median": 2.486702399997739,
+            "min": 2.486702399997739,
+            "max": 2.486702399997739
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.36903659999734373
+            ],
+            "median": 0.36903659999734373,
+            "min": 0.36903659999734373,
+            "max": 0.36903659999734373
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.4856015000004845
+            ],
+            "median": 2.4856015000004845,
+            "min": 2.4856015000004845,
+            "max": 2.4856015000004845
+          }
+        }
+      ],
+      "resources": [
+        {
+          "profile": "cuda-resident40",
+          "minimum_available_ram_bytes": 8245026816,
+          "minimum_commit_headroom_bytes": 30524297216,
+          "peak_dedicated_vram_bytes": 8188030976,
+          "minimum_free_dedicated_vram_bytes": 397709312,
+          "max_gpu_temperature_c": 62,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236208128.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45166624768.0,
+            "adapter-4": 0
+          },
+          "startup_s": [
+            20.37003460000051
+          ],
+          "native_totals": [],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        },
+        {
+          "profile": "gufo-npu4",
+          "minimum_available_ram_bytes": 7084892160,
+          "minimum_commit_headroom_bytes": 29441441792,
+          "peak_dedicated_vram_bytes": 8265625600,
+          "minimum_free_dedicated_vram_bytes": 320114688,
+          "max_gpu_temperature_c": 62,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236208128.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45210664960.0,
+            "adapter-4": 1075855360.0
+          },
+          "startup_s": [
+            19.6272484000001
+          ],
+          "native_totals": [
+            {
+              "jobs": "920",
+              "dispatches": "3680",
+              "valid_rows": "901738",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "14559.674",
+              "worker_ms": "18996.225",
+              "host_wait_ms": "0.786"
+            }
+          ],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        },
+        {
+          "profile": "gufo-npu16",
+          "minimum_available_ram_bytes": 4568600576,
+          "minimum_commit_headroom_bytes": 26651480064,
+          "peak_dedicated_vram_bytes": 8250945536,
+          "minimum_free_dedicated_vram_bytes": 334794752,
+          "max_gpu_temperature_c": 61,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236142592.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45311328256.0,
+            "adapter-4": 3881844736.0
+          },
+          "startup_s": [
+            20.822367500000837
+          ],
+          "native_totals": [
+            {
+              "jobs": "920",
+              "dispatches": "14000",
+              "valid_rows": "901738",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "51001.775",
+              "worker_ms": "64516.755",
+              "host_wait_ms": "16862.595"
+            }
+          ],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        }
+      ]
+    },
+    {
+      "run": "gufo-projection\\results\\20261027T025859Z-5604e2-confirmed-best-npu",
+      "plan": {
+        "profiles": [
+          "cuda-resident40",
+          "gufo-npu4"
+        ],
+        "pairs": 3,
+        "identities": {
+          "cuda-resident40": {
+            "config_sha256": "9fa2c3f9c907849e41f88ffd95d8fbc23ac2c3459b9ca417ecac08757520b5fb",
+            "exe_sha256": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da"
+          },
+          "gufo-npu4": {
+            "config_sha256": "1ee8f2bd0e1cf6ab6ca6b2c02b64857e5ae40c669ecdef41c75911db1e4f948e",
+            "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5"
+          }
+        },
+        "context": 65536,
+        "reasoning_budget": 8192,
+        "output_budget": 16384,
+        "model": "Unchanged IQ3_S/INT8 KV",
+        "warmups": 2,
+        "order": "Alternating profile order each pair",
+        "acceptance": "Complete answers and cache checks must pass. Repeatable positive paired fresh-prefill gain required; no promotion for NPU participation alone.",
+        "baseline": "cuda-resident40 is the previously accepted engine0.1.50 /40GiB profile. bank-cuda is an optional attribution control."
+      },
+      "comparison": {
+        "completed": true,
+        "measured_requests": 18,
+        "comparisons": [
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "fresh-120",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 2667,
+                "cache_n": 0,
+                "baseline_prompt_ms": 6809.4,
+                "candidate_prompt_ms": 7031.0,
+                "latency_reduction_percent": -3.2543249038094357,
+                "throughput_gain_percent": -3.151756506898029,
+                "baseline_full_s": 8.786971000001358,
+                "candidate_full_s": 8.791408500001126,
+                "baseline_output_tokens": 56,
+                "candidate_output_tokens": 48
+              },
+              {
+                "pair": 1,
+                "prompt_tokens": 2667,
+                "cache_n": 0,
+                "baseline_prompt_ms": 6868.7,
+                "candidate_prompt_ms": 6928.5,
+                "latency_reduction_percent": -0.8706159826459281,
+                "throughput_gain_percent": -0.8631016814606318,
+                "baseline_full_s": 8.879318299997976,
+                "candidate_full_s": 8.680439699997805,
+                "baseline_output_tokens": 58,
+                "candidate_output_tokens": 48
+              },
+              {
+                "pair": 2,
+                "prompt_tokens": 2667,
+                "cache_n": 0,
+                "baseline_prompt_ms": 6792.1,
+                "candidate_prompt_ms": 6952.0,
+                "latency_reduction_percent": -2.354205621236427,
+                "throughput_gain_percent": -2.3000575373993026,
+                "baseline_full_s": 9.208895899999334,
+                "candidate_full_s": 9.2838989999982,
+                "baseline_output_tokens": 67,
+                "candidate_output_tokens": 69
+              }
+            ],
+            "median_latency_reduction_percent": -2.354205621236427,
+            "median_throughput_gain_percent": -2.3000575373993026
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "fresh-360",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 0,
+                "baseline_prompt_ms": 18799.3,
+                "candidate_prompt_ms": 19624.5,
+                "latency_reduction_percent": -4.389525141893591,
+                "throughput_gain_percent": -4.204947896761702,
+                "baseline_full_s": 20.750250099998084,
+                "candidate_full_s": 21.794041900000593,
+                "baseline_output_tokens": 57,
+                "candidate_output_tokens": 68
+              },
+              {
+                "pair": 1,
+                "prompt_tokens": 7805,
+                "cache_n": 0,
+                "baseline_prompt_ms": 18905.5,
+                "candidate_prompt_ms": 19430.7,
+                "latency_reduction_percent": -2.7780275581180014,
+                "throughput_gain_percent": -2.702939163282847,
+                "baseline_full_s": 20.99756019999768,
+                "candidate_full_s": 21.633053999998083,
+                "baseline_output_tokens": 63,
+                "candidate_output_tokens": 64
+              },
+              {
+                "pair": 2,
+                "prompt_tokens": 7805,
+                "cache_n": 0,
+                "baseline_prompt_ms": 18927.9,
+                "candidate_prompt_ms": 19610.6,
+                "latency_reduction_percent": -3.6068449220462817,
+                "throughput_gain_percent": -3.481280531957187,
+                "baseline_full_s": 21.25124810000125,
+                "candidate_full_s": 21.8839822000009,
+                "baseline_output_tokens": 65,
+                "candidate_output_tokens": 68
+              }
+            ],
+            "median_latency_reduction_percent": -3.6068449220462817,
+            "median_throughput_gain_percent": -3.481280531957187
+          },
+          {
+            "baseline": "cuda-resident40",
+            "candidate": "gufo-npu4",
+            "workload": "repeated",
+            "pairs": [
+              {
+                "pair": 0,
+                "prompt_tokens": 7805,
+                "cache_n": 7800,
+                "baseline_prompt_ms": 190.3,
+                "candidate_prompt_ms": 270.0,
+                "latency_reduction_percent": -41.8812401471361,
+                "throughput_gain_percent": -29.518518518518512,
+                "baseline_full_s": 2.687090499999613,
+                "candidate_full_s": 2.2886405999997805,
+                "baseline_output_tokens": 71,
+                "candidate_output_tokens": 57
+              },
+              {
+                "pair": 1,
+                "prompt_tokens": 7805,
+                "cache_n": 7800,
+                "baseline_prompt_ms": 208.2,
+                "candidate_prompt_ms": 229.8,
+                "latency_reduction_percent": -10.374639769452454,
+                "throughput_gain_percent": -9.399477806788525,
+                "baseline_full_s": 5.138618100001622,
+                "candidate_full_s": 2.507093399999576,
+                "baseline_output_tokens": 132,
+                "candidate_output_tokens": 68
+              },
+              {
+                "pair": 2,
+                "prompt_tokens": 7805,
+                "cache_n": 7800,
+                "baseline_prompt_ms": 192.5,
+                "candidate_prompt_ms": 220.3,
+                "latency_reduction_percent": -14.441558441558456,
+                "throughput_gain_percent": -12.61915569677713,
+                "baseline_full_s": 2.3058503000029305,
+                "candidate_full_s": 2.628799299996899,
+                "baseline_output_tokens": 58,
+                "candidate_output_tokens": 71
+              }
+            ],
+            "median_latency_reduction_percent": -14.441558441558456,
+            "median_throughput_gain_percent": -12.61915569677713
+          }
+        ]
+      },
+      "groups": [
+        {
+          "profile": "cuda-resident40",
+          "workload": "fresh-120",
+          "prompt_tokens": [
+            2667,
+            2667,
+            2667
+          ],
+          "output_tokens": [
+            56,
+            58,
+            67
+          ],
+          "cache_n": [
+            0,
+            0,
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              6809.4,
+              6868.7,
+              6792.1
+            ],
+            "median": 6809.4,
+            "min": 6792.1,
+            "max": 6868.7
+          },
+          "prompt_per_second": {
+            "values": [
+              391.7,
+              388.3,
+              392.7
+            ],
+            "median": 391.7,
+            "min": 388.3,
+            "max": 392.7
+          },
+          "predicted_ms": {
+            "values": [
+              1956.3,
+              1992.3,
+              2397.8
+            ],
+            "median": 1992.3,
+            "min": 1956.3,
+            "max": 2397.8
+          },
+          "predicted_per_second": {
+            "values": [
+              28.6,
+              29.1,
+              27.9
+            ],
+            "median": 28.6,
+            "min": 27.9,
+            "max": 29.1
+          },
+          "full_request_s": {
+            "values": [
+              8.786971000001358,
+              8.879318299997976,
+              9.208895899999334
+            ],
+            "median": 8.879318299997976,
+            "min": 8.786971000001358,
+            "max": 9.208895899999334
+          },
+          "first_streamed_text_s": {
+            "values": [
+              6.8687893000023905,
+              6.925507299998571,
+              6.856694499998412
+            ],
+            "median": 6.8687893000023905,
+            "min": 6.856694499998412,
+            "max": 6.925507299998571
+          },
+          "first_visible_answer_s": {
+            "values": [
+              8.785775899999862,
+              8.878112999998848,
+              9.207652099998086
+            ],
+            "median": 8.878112999998848,
+            "min": 8.785775899999862,
+            "max": 9.207652099998086
+          }
+        },
+        {
+          "profile": "cuda-resident40",
+          "workload": "fresh-360",
+          "prompt_tokens": [
+            7805,
+            7805,
+            7805
+          ],
+          "output_tokens": [
+            57,
+            63,
+            65
+          ],
+          "cache_n": [
+            0,
+            0,
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              18799.3,
+              18905.5,
+              18927.9
+            ],
+            "median": 18905.5,
+            "min": 18799.3,
+            "max": 18927.9
+          },
+          "prompt_per_second": {
+            "values": [
+              415.2,
+              412.8,
+              412.4
+            ],
+            "median": 412.8,
+            "min": 412.4,
+            "max": 415.2
+          },
+          "predicted_ms": {
+            "values": [
+              1929.7,
+              2082.8,
+              2313.4
+            ],
+            "median": 2082.8,
+            "min": 1929.7,
+            "max": 2313.4
+          },
+          "predicted_per_second": {
+            "values": [
+              29.5,
+              30.2,
+              28.1
+            ],
+            "median": 29.5,
+            "min": 28.1,
+            "max": 30.2
+          },
+          "full_request_s": {
+            "values": [
+              20.750250099998084,
+              20.99756019999768,
+              21.25124810000125
+            ],
+            "median": 20.99756019999768,
+            "min": 20.750250099998084,
+            "max": 21.25124810000125
+          },
+          "first_streamed_text_s": {
+            "values": [
+              18.873459499998717,
+              18.95307739999771,
+              18.979030300000886
+            ],
+            "median": 18.95307739999771,
+            "min": 18.873459499998717,
+            "max": 18.979030300000886
+          },
+          "first_visible_answer_s": {
+            "values": [
+              20.749172100000578,
+              20.996221499997773,
+              21.07324210000297
+            ],
+            "median": 20.996221499997773,
+            "min": 20.749172100000578,
+            "max": 21.07324210000297
+          }
+        },
+        {
+          "profile": "cuda-resident40",
+          "workload": "repeated",
+          "prompt_tokens": [
+            7805,
+            7805,
+            7805
+          ],
+          "output_tokens": [
+            71,
+            132,
+            58
+          ],
+          "cache_n": [
+            7800,
+            7800,
+            7800
+          ],
+          "prompt_ms": {
+            "values": [
+              190.3,
+              208.2,
+              192.5
+            ],
+            "median": 192.5,
+            "min": 190.3,
+            "max": 208.2
+          },
+          "prompt_per_second": {
+            "values": [
+              26.3,
+              24.0,
+              26.0
+            ],
+            "median": 26.0,
+            "min": 24.0,
+            "max": 26.3
+          },
+          "predicted_ms": {
+            "values": [
+              2474.5,
+              4925.1,
+              2083.5
+            ],
+            "median": 2474.5,
+            "min": 2083.5,
+            "max": 4925.1
+          },
+          "predicted_per_second": {
+            "values": [
+              28.7,
+              26.8,
+              27.8
+            ],
+            "median": 27.8,
+            "min": 26.8,
+            "max": 28.7
+          },
+          "full_request_s": {
+            "values": [
+              2.687090499999613,
+              5.138618100001622,
+              2.3058503000029305
+            ],
+            "median": 2.687090499999613,
+            "min": 2.3058503000029305,
+            "max": 5.138618100001622
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.2529248999999254,
+              0.2528529000010167,
+              0.2596752999997989
+            ],
+            "median": 0.2529248999999254,
+            "min": 0.2528529000010167,
+            "max": 0.2596752999997989
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.664416199997504,
+              5.137485300001572,
+              2.2885220000025583
+            ],
+            "median": 2.664416199997504,
+            "min": 2.2885220000025583,
+            "max": 5.137485300001572
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "fresh-120",
+          "prompt_tokens": [
+            2667,
+            2667,
+            2667
+          ],
+          "output_tokens": [
+            48,
+            48,
+            69
+          ],
+          "cache_n": [
+            0,
+            0,
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              7031.0,
+              6928.5,
+              6952.0
+            ],
+            "median": 6952.0,
+            "min": 6928.5,
+            "max": 7031.0
+          },
+          "prompt_per_second": {
+            "values": [
+              379.3,
+              384.9,
+              383.6
+            ],
+            "median": 383.6,
+            "min": 379.3,
+            "max": 384.9
+          },
+          "predicted_ms": {
+            "values": [
+              1725.5,
+              1746.3,
+              2310.6
+            ],
+            "median": 1746.3,
+            "min": 1725.5,
+            "max": 2310.6
+          },
+          "predicted_per_second": {
+            "values": [
+              27.8,
+              27.5,
+              29.9
+            ],
+            "median": 27.8,
+            "min": 27.5,
+            "max": 29.9
+          },
+          "full_request_s": {
+            "values": [
+              8.791408500001126,
+              8.680439699997805,
+              9.2838989999982
+            ],
+            "median": 8.791408500001126,
+            "min": 8.680439699997805,
+            "max": 9.2838989999982
+          },
+          "first_streamed_text_s": {
+            "values": [
+              7.108291799999279,
+              6.9801793999977235,
+              7.014935899998818
+            ],
+            "median": 7.014935899998818,
+            "min": 6.9801793999977235,
+            "max": 7.108291799999279
+          },
+          "first_visible_answer_s": {
+            "values": [
+              8.790259999997943,
+              8.673882699997193,
+              9.282523099998798
+            ],
+            "median": 8.790259999997943,
+            "min": 8.673882699997193,
+            "max": 9.282523099998798
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "fresh-360",
+          "prompt_tokens": [
+            7805,
+            7805,
+            7805
+          ],
+          "output_tokens": [
+            68,
+            64,
+            68
+          ],
+          "cache_n": [
+            0,
+            0,
+            0
+          ],
+          "prompt_ms": {
+            "values": [
+              19624.5,
+              19430.7,
+              19610.6
+            ],
+            "median": 19610.6,
+            "min": 19430.7,
+            "max": 19624.5
+          },
+          "prompt_per_second": {
+            "values": [
+              397.7,
+              401.7,
+              398.0
+            ],
+            "median": 398.0,
+            "min": 397.7,
+            "max": 401.7
+          },
+          "predicted_ms": {
+            "values": [
+              2161.6,
+              2184.1,
+              2265.4
+            ],
+            "median": 2184.1,
+            "min": 2161.6,
+            "max": 2265.4
+          },
+          "predicted_per_second": {
+            "values": [
+              31.5,
+              29.3,
+              30.0
+            ],
+            "median": 30.0,
+            "min": 29.3,
+            "max": 31.5
+          },
+          "full_request_s": {
+            "values": [
+              21.794041900000593,
+              21.633053999998083,
+              21.8839822000009
+            ],
+            "median": 21.794041900000593,
+            "min": 21.633053999998083,
+            "max": 21.8839822000009
+          },
+          "first_streamed_text_s": {
+            "values": [
+              19.669599600001675,
+              19.488992799997504,
+              19.66169699999955
+            ],
+            "median": 19.66169699999955,
+            "min": 19.488992799997504,
+            "max": 19.669599600001675
+          },
+          "first_visible_answer_s": {
+            "values": [
+              21.79306070000166,
+              21.622512999998435,
+              21.882827099998394
+            ],
+            "median": 21.79306070000166,
+            "min": 21.622512999998435,
+            "max": 21.882827099998394
+          }
+        },
+        {
+          "profile": "gufo-npu4",
+          "workload": "repeated",
+          "prompt_tokens": [
+            7805,
+            7805,
+            7805
+          ],
+          "output_tokens": [
+            57,
+            68,
+            71
+          ],
+          "cache_n": [
+            7800,
+            7800,
+            7800
+          ],
+          "prompt_ms": {
+            "values": [
+              270.0,
+              229.8,
+              220.3
+            ],
+            "median": 229.8,
+            "min": 220.3,
+            "max": 270.0
+          },
+          "prompt_per_second": {
+            "values": [
+              18.5,
+              21.8,
+              22.7
+            ],
+            "median": 21.8,
+            "min": 18.5,
+            "max": 22.7
+          },
+          "predicted_ms": {
+            "values": [
+              2011.0,
+              2260.6,
+              2401.6
+            ],
+            "median": 2260.6,
+            "min": 2011.0,
+            "max": 2401.6
+          },
+          "predicted_per_second": {
+            "values": [
+              28.3,
+              30.1,
+              29.6
+            ],
+            "median": 29.6,
+            "min": 28.3,
+            "max": 30.1
+          },
+          "full_request_s": {
+            "values": [
+              2.2886405999997805,
+              2.507093399999576,
+              2.628799299996899
+            ],
+            "median": 2.507093399999576,
+            "min": 2.2886405999997805,
+            "max": 2.628799299996899
+          },
+          "first_streamed_text_s": {
+            "values": [
+              0.32135919999927864,
+              0.2853508000007423,
+              0.2688116999997874
+            ],
+            "median": 0.2853508000007423,
+            "min": 0.2688116999997874,
+            "max": 0.32135919999927864
+          },
+          "first_visible_answer_s": {
+            "values": [
+              2.2874898000009125,
+              2.50599819999843,
+              2.6274757999999565
+            ],
+            "median": 2.50599819999843,
+            "min": 2.2874898000009125,
+            "max": 2.6274757999999565
+          }
+        }
+      ],
+      "resources": [
+        {
+          "profile": "cuda-resident40",
+          "minimum_available_ram_bytes": 8546816000,
+          "minimum_commit_headroom_bytes": 30714482688,
+          "peak_dedicated_vram_bytes": 8188030976,
+          "minimum_free_dedicated_vram_bytes": 397709312,
+          "max_gpu_temperature_c": 63,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236142592.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45166624768.0,
+            "adapter-4": 0
+          },
+          "startup_s": [
+            20.345203599998058,
+            18.600564399999712,
+            19.056905699999334
+          ],
+          "native_totals": [],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        },
+        {
+          "profile": "gufo-npu4",
+          "minimum_available_ram_bytes": 7480823808,
+          "minimum_commit_headroom_bytes": 29553717248,
+          "peak_dedicated_vram_bytes": 8250945536,
+          "minimum_free_dedicated_vram_bytes": 334794752,
+          "max_gpu_temperature_c": 63,
+          "always_plugged_in": true,
+          "observed_throttle_masks": [
+            1,
+            1024
+          ],
+          "peak_wddm_shared_bytes_by_adapter": {
+            "adapter-1": 236142592.0,
+            "adapter-2": 8192.0,
+            "adapter-3": 45210664960.0,
+            "adapter-4": 1075855360.0
+          },
+          "startup_s": [
+            19.606762600000366,
+            19.564971799998602,
+            20.33687959999952
+          ],
+          "native_totals": [
+            {
+              "jobs": "644",
+              "dispatches": "2576",
+              "valid_rows": "641424",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "10256.236",
+              "worker_ms": "13517.300",
+              "host_wait_ms": "0.043"
+            },
+            {
+              "jobs": "644",
+              "dispatches": "2576",
+              "valid_rows": "641424",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "10166.144",
+              "worker_ms": "13351.252",
+              "host_wait_ms": "0.044"
+            },
+            {
+              "jobs": "644",
+              "dispatches": "2576",
+              "valid_rows": "641424",
+              "checked_values": "0",
+              "max_abs": "0",
+              "max_rel_rms": "0",
+              "max_math_abs": "0",
+              "xrt_ms": "9974.615",
+              "worker_ms": "13033.798",
+              "host_wait_ms": "0.041"
+            }
+          ],
+          "monitored_resource_floors_passed": true,
+          "owned_memory_released": true
+        }
+      ]
+    }
+  ],
+  "qualification": [
+    {
+      "run": "<EXPERIMENT_ROOT>\\gufo-projection\\results\\20261027T024117Z-a87e94-gufo-qualify4-qualify",
+      "result": {
+        "passed": true,
+        "requests": 1,
+        "npu_stats": "strata gufo NPU: jobs=92 dispatches=368 valid_rows=92782 checked_values=380035072 max_abs=0.10109138 max_rel_rms=0.0017437605 max_math_abs=0.00010681152 xrt_ms=1607.029 worker_ms=2024.813 host_wait_ms=0.009"
+      },
+      "identity": {
+        "profile": "gufo-qualify4",
+        "exe": "<EXPERIMENT_ROOT>\\gufo-build\\strata.exe",
+        "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5",
+        "config_sha256": "0265311f5dfcd687ab1d04892b0cc3628fc8ba092212a643ce35c70d1493085e"
+      }
+    },
+    {
+      "run": "<EXPERIMENT_ROOT>\\gufo-projection\\results\\20261027T024214Z-dfce06-gufo-qualify8-qualify",
+      "result": {
+        "passed": true,
+        "requests": 1,
+        "npu_stats": "strata gufo NPU: jobs=92 dispatches=736 valid_rows=92782 checked_values=760070144 max_abs=0.11219025 max_rel_rms=0.001653626 max_math_abs=9.9182129e-05 xrt_ms=3129.567 worker_ms=3894.075 host_wait_ms=0.006"
+      },
+      "identity": {
+        "profile": "gufo-qualify8",
+        "exe": "<EXPERIMENT_ROOT>\\gufo-build\\strata.exe",
+        "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5",
+        "config_sha256": "550ac9d81b50d201e4aa8aa87906d58051462e092f034d9e89669704b6244a84"
+      }
+    },
+    {
+      "run": "<EXPERIMENT_ROOT>\\gufo-projection\\results\\20261027T024256Z-3e208d-gufo-qualify16-qualify",
+      "result": {
+        "passed": true,
+        "requests": 1,
+        "npu_stats": "strata gufo NPU: jobs=92 dispatches=1400 valid_rows=92782 checked_values=1445785600 max_abs=0.11024666 max_rel_rms=0.0021154435 max_math_abs=0.00010299683 xrt_ms=6199.359 worker_ms=7672.104 host_wait_ms=0.064"
+      },
+      "identity": {
+        "profile": "gufo-qualify16",
+        "exe": "<EXPERIMENT_ROOT>\\gufo-build\\strata.exe",
+        "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5",
+        "config_sha256": "6512e8c8b4283908e8e7ac152dd5d93101ebc5f2bfdfc313ae64fa2edb1130ea"
+      }
+    },
+    {
+      "run": "<EXPERIMENT_ROOT>\\gufo-projection\\results\\20261027T024348Z-2fa8e4-gufo-blocked-qualify",
+      "result": {
+        "passed": true,
+        "negative": true,
+        "completed_answer": false,
+        "failure": "RuntimeError(\"{'type': 'server_error', 'message': 'TASK_NEGATIVE_CONTROL_GUFO_NPU_DISABLED'}\")"
+      },
+      "identity": {
+        "profile": "gufo-blocked",
+        "exe": "<EXPERIMENT_ROOT>\\gufo-build\\strata.exe",
+        "exe_sha256": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5",
+        "config_sha256": "dfd0414c3b715a4af5507be7981ff2d30fecc500b4cab1943adfd1fa153167f3"
+      }
+    }
+  ],
+  "limits": [
+    "Timings include real model execution, transfers, synchronization and NPU packing/scatter; validation and tracing are absent from timed profiles.",
+    "Generated output counts vary. Full-answer/decode times are observations, not controlled equal-output speed comparisons.",
+    "The 15,512-token and all-widths screens have one observation per arm; only the separately identified confirmation has three alternating pairs.",
+    "Bounded arithmetic, first-window logits, JSON and ledger/cache checks are not held-out perplexity, general quality equivalence, full64K, vision or concurrent-client qualification.",
+    "Mapped CUDA/XRT host buffers still require discrete-GPU PCIe traffic. Whole projection weights reside in host RAM; the kernel reuses tiles in SRAM.",
+    "CUDA reports a low WDDM allocation budget on both control and candidate. Dedicated-VRAM floors were monitored separately; host mappings/shared-memory counters are not proof of VRAM paging or its absence.",
+    "The tested kernel uses16compute workers. These measurements do not establish maximum physical tile count, issue width, SRAM bandwidth or the best possible NPU implementation."
+  ],
+  "identity": {
+    "engine_base": "1aff6d14117b88171fcfcec8f2b55fdc47f2b165",
+    "files": {
+      "gufo-engine\\include\\strata\\prefill\\gufo_projection.hpp": "3151898612708e7b9c9938e27cc7313f35d5cd9f3240cf1e5a9b4b6c6543ac96",
+      "gufo-engine\\src\\prefill\\gufo_projection.cpp": "68d5a5861e5e5233dddafcb7aa7ef79eaccb0bab8543f1b6c528a3aa6fc3aef9",
+      "gufo-engine\\src\\prefill\\gufo_projection.cu": "19f46a60f1ccb0609691b93f5a948cf434d598a8bb800f74bfa656822c4dc3c9",
+      "gufo-engine\\CMakeLists.txt": "53b2d072e1038b48bbeb95f808d3b5dd45817514ab3751b95b7f1534f01eedb9",
+      "gufo-engine\\src\\prefill\\prefill.cpp": "6cdca6c904bb2393aeb79ca25d52c60b8107f7a8958c7f5042803f24c5d5cd28",
+      "gufo-engine\\include\\strata\\prefill\\prefill.hpp": "58ec6f13744fa8df0daa14989671ef80ce7189b5bdbe3046dce49a7e4f4f9076",
+      "gufo-build\\strata.exe": "02163319d3ffdebd1580e04f66ff041a1a205e98766bb114d6a70779a5df4dc5",
+      "npu-control-engine\\strata.exe": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da",
+      "gufo-projection\\source.patch": "fba83cc40c3d98696ead78b22224488a97d669f8db70af5c96fa12f04d3a197f",
+      "gufo-projection\\artifacts-m64k32n64\\final.xclbin": "6e432ced70c305bf282d8bae0bd73e4c3d25261d1668afc433cf65e22d9ff143",
+      "gufo-projection\\artifacts-m64k32n64\\insts.bin": "2e5674d6c5ea7a0a342b753791c6466a9d4ff90800de669fb716f46fccd8126b",
+      "configs\\gufo-blocked.json": "dfd0414c3b715a4af5507be7981ff2d30fecc500b4cab1943adfd1fa153167f3",
+      "configs\\gufo-blocked.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-cuda.json": "34817ac9645fc04d497060c6f55918ced87c6a09a57b2fc343c0a9897b1710d8",
+      "configs\\gufo-cuda.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-disabled.json": "fa052fcb9d9f36ceaafc5ebab467db669d7c8679ed6ae5d4fdf16c6d8c2c395b",
+      "configs\\gufo-disabled.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-npu16.json": "617bc072266b201ddce4d28d484a81fb06ea463560576fd0be2f92bd82664015",
+      "configs\\gufo-npu16.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-npu4.json": "1ee8f2bd0e1cf6ab6ca6b2c02b64857e5ae40c669ecdef41c75911db1e4f948e",
+      "configs\\gufo-npu4.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-npu8.json": "d1ed67cf05f01c6e4e5eedb72d86bac07524c9dd7ba32932fc8b95b47144a936",
+      "configs\\gufo-npu8.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-qualify16.json": "6512e8c8b4283908e8e7ac152dd5d93101ebc5f2bfdfc313ae64fa2edb1130ea",
+      "configs\\gufo-qualify16.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-qualify4.json": "0265311f5dfcd687ab1d04892b0cc3628fc8ba092212a643ce35c70d1493085e",
+      "configs\\gufo-qualify4.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-qualify8.json": "550ac9d81b50d201e4aa8aa87906d58051462e092f034d9e89669704b6244a84",
+      "configs\\gufo-qualify8.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36",
+      "configs\\gufo-trace4.json": "8a774f20e31df0a1fdde8345ea6252246cec2a73b1c9207f057ecc0d14226170",
+      "configs\\gufo-trace4.shared-settings.json": "13b44a4bb627acce8b57f71f6763a7a1f08467b1a6480ca593d0cc1c77dc7d36"
+    },
+    "note": "source.patch is complete; integrate.py/seal.py record initial assembly only."
+  },
+  "selected_profile": "cuda-resident40",
+  "trace_and_logit_diagnostic": {
+    "runs": [
+      {
+        "run": "gufo-projection\\results\\20261027T030833Z-ca5201-cuda-resident40-qualify",
+        "requests": [
+          {
+            "name": "smoke",
+            "finish_reason": "stop",
+            "actual_output_tokens": 69,
+            "offline_prompt_tokens": 2022,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 2022,
+              "prompt_ms": 5462.9,
+              "prompt_per_token_ms": 2.702,
+              "prompt_per_second": 370.1,
+              "predicted_n": 69,
+              "predicted_ms": 2876.4,
+              "predicted_per_token_ms": 41.687,
+              "predicted_per_second": 24.0,
+              "draft_n": 65,
+              "draft_n_accepted": 40
+            },
+            "correctness": {
+              "status": "exact JSON semantics",
+              "passed": true
+            }
+          }
+        ],
+        "last_npu_totals": null
+      },
+      {
+        "run": "gufo-projection\\results\\20261027T030758Z-4db39d-gufo-trace4-qualify",
+        "requests": [
+          {
+            "name": "smoke",
+            "finish_reason": "stop",
+            "actual_output_tokens": 110,
+            "offline_prompt_tokens": 2022,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 2022,
+              "prompt_ms": 5100.8,
+              "prompt_per_token_ms": 2.523,
+              "prompt_per_second": 396.4,
+              "predicted_n": 110,
+              "predicted_ms": 4211.0,
+              "predicted_per_token_ms": 38.282,
+              "predicted_per_second": 26.1,
+              "draft_n": 94,
+              "draft_n_accepted": 70
+            },
+            "correctness": {
+              "status": "exact JSON semantics",
+              "passed": true
+            }
+          }
+        ],
+        "last_npu_totals": "strata gufo NPU: jobs=92 dispatches=368 valid_rows=92782 checked_values=0 max_abs=0 max_rel_rms=0 max_math_abs=0 xrt_ms=1585.704 worker_ms=2143.815 host_wait_ms=0.006",
+        "overlap": {
+          "completed_xrt_intervals": 368,
+          "sum_xrt_ms": 1585.70360000059,
+          "other_bank_body_overlap_ms": 1585.70360000059,
+          "fraction": 1.0
+        }
+      }
+    ],
+    "logit_comparisons": [
+      {
+        "left": "gufo-projection\\results\\20261027T030833Z-ca5201-cuda-resident40-qualify",
+        "right": "gufo-projection\\results\\20261027T030758Z-4db39d-gufo-trace4-qualify",
+        "values": [
+          {
+            "index": 0,
+            "vocab": 248320,
+            "kl_left_to_right": 0.000366818049313011,
+            "argmax_equal": true,
+            "max_abs_logit_difference": 1.6809188723564148
+          }
+        ]
+      }
+    ],
+    "limits": [
+      "First-window logits are bounded diagnostics, not held-out perplexity.",
+      "GPU-stream body markers include waits and callbacks; they do not measure SM-busy time."
+    ]
+  },
+  "cleanup": {
+    "sample": {
+      "utc": "2026-10-27T03:21:16.899187+00:00",
+      "monotonic_s": 21068.6995527,
+      "available_ram_bytes": 55045181440,
+      "total_ram_bytes": 67881381888,
+      "commit_headroom_bytes": 86539624448,
+      "commit_limit_bytes": 104388603904,
+      "gpu": {
+        "util": 0,
+        "mem_used": 251658240,
+        "mem_total": 8585740288,
+        "temp": 33,
+        "power": 2.805,
+        "power_limit": 120.0,
+        "pcie_gen": 1,
+        "pcie_gen_max": 4,
+        "pcie_width": 8,
+        "pcie_rx_mb": 0.0,
+        "pcie_tx_mb": 0.0,
+        "sm_clock_mhz": 210,
+        "throttle_reasons_bitmask": 1
+      },
+      "power_plugged": true
+    },
+    "inference_or_experiment_processes": [],
+    "experiment_listeners": [],
+    "original_binary_sha256": "517ac61f284d55b99d1ac6d18dc40a92ae842dcf425acd74ed125cb848cc2d4c",
+    "preflight": {
+      "baseline": true,
+      "cuda-resident40": true
+    },
+    "live_git_status": " M strata_control/private_files.py\n?? local/\n?? research/\n"
+  }
+}

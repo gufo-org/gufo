@@ -1,0 +1,30 @@
+{
+  "object": "<EXPERIMENT_ROOT>\\npu\\cache\\615ab0c5fe34adb1c59b3f5c\\router_sram.o",
+  "object_sha256": "4b17efedcca61cadd1a6dcc36e82027c989c1eff274deb50daaadaead467b981",
+  "executed_xclbin_sha256": "dcfdea0abd8a186b8ff63120c7e484d5ea6317992e7650267615f62d0e56c6c2",
+  "scope": "Object used by the physically tested resident-router artifact. These observations do not establish maximum silicon issue width.",
+  "max_slots": 6,
+  "max_non_nop_operations": 4,
+  "examples": [
+    {
+      "line": "160: c0 03 00 a8 17 06 01 00 00 00 00 00 00 00 00 00      \tnopb\t;\t\tnopa\t;\t\tnops\t;\t\tnopx\t;\t\tvmov\twl1, wl10;\t\tnopv",
+      "slots": 6,
+      "active": 1
+    },
+    {
+      "line": "320: c0 03 00 68 c3 00 00 00 00 00 00 00 00 00 00 00      \tnopb\t;\t\tnopa\t;\t\tnops\t;\t\tnopx\t;\t\tvmov\tx0, bmh1;\t\tnopv",
+      "slots": 6,
+      "active": 1
+    },
+    {
+      "line": "144: b7 a8 07 06 ea a0 00 10 07 48 81 07  \tmova\tr5, #0x3c;\t\tpaddb\t[p0], #32;\t\tmovx\tr10, #0x7;\t\tvmov\twh0, wl2",
+      "slots": 4,
+      "active": 4
+    },
+    {
+      "line": "150: 67 86 e9 27 03 00 00 00 00 00 00 00  \tnopa\t;\t\tnopb\t;\t\tnopx\t;\t\tvmul.f\tbmh1, x10, x6, r4",
+      "slots": 4,
+      "active": 1
+    }
+  ]
+}

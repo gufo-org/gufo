@@ -1,0 +1,105 @@
+[
+  {
+    "probe": "columns",
+    "columns": 4,
+    "workers": 16,
+    "physical_output_pass": true
+  },
+  {
+    "probe": "columns",
+    "columns": 5,
+    "physical_output_pass": false,
+    "exception": "MLIRError('Verification failed:\\nerror: \"<EXPERIMENT_ROOT>\\\\\\\\router\\\\\\\\hardware_probes.py\":34:80: \\'aie.logical_tile\\' op column index (4) must be less than the number of columns in the device (4)\\n note: \"<EXPERIMENT_ROOT>\\\\\\\\router\\\\\\\\hardware_probes.py\":34:80: see current operation: %16 = \"aie.logical_tile\"() <{col = 4 : i32, row = 2 : i32, tile_type = 0 : i32}> : () -> index')",
+    "traceback": "Traceback (most recent call last):\n  File \"<EXPERIMENT_ROOT>\\router\\hardware_probes.py\", line 64, in main\n    tx=iron.tensor(x,device='npu');ty=iron.zeros(n*128,dtype=np.uint32,device='npu');columns(tx,ty,cols=n)\n                                                                                     ~~~~~~~^^^^^^^^^^^^^^\n  File \"<EXPERIMENT_ROOT>\\npu\\mlir-aie\\ironenv\\Lib\\site-packages\\mlir_aie\\python\\aie\\utils\\callabledesign.py\", line 444, in __call__\n    kernel = self._compile_and_build_kernel(compilable, cache_key, trace_config)\n  File \"<EXPERIMENT_ROOT>\\npu\\mlir-aie\\ironenv\\Lib\\site-packages\\mlir_aie\\python\\aie\\utils\\callabledesign.py\", line 247, in _compile_and_build_kernel\n    xclbin_path, inst_path = compilable.compile()\n                             ~~~~~~~~~~~~~~~~~~^^\n  File \"<EXPERIMENT_ROOT>\\npu\\mlir-aie\\ironenv\\Lib\\site-packages\\mlir_aie\\python\\aie\\utils\\compile\\jit\\compilabledesign.py\", line 930, in compile\n    if self._infer_full_elf():\n       ~~~~~~~~~~~~~~~~~~~~^^\n  File \"<EXPERIMENT_ROOT>\\npu\\mlir-aie\\ironenv\\Lib\\site-packages\\mlir_aie\\python\\aie\\utils\\compile\\jit\\compilabledesign.py\", line 1042, in _infer_full_elf\n    if not self._generated_for(full_elf=False).requires_full_elf:\n           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^\n  File \"<EXPERIMENT_ROOT>\\npu\\mlir-aie\\ironenv\\Lib\\site-packages\\mlir_aie\\python\\aie\\utils\\compile\\jit\\compilabledesign.py\", line 2022, in _generated_for\n    generated = self._generate_uncached(full_elf=full_elf)\n  File \"<EXPERIMENT_ROOT>\\npu\\mlir-aie\\ironenv\\Lib\\site-packages\\mlir_aie\\python\\aie\\utils\\compile\\jit\\compilabledesign.py\", line 2133, in _generate_uncached\n    result = self.mlir_generator(*bound.args, **bound.kwargs)\n  File \"<EXPERIMENT_ROOT>\\router\\hardware_probes.py\", line 39, in columns\n    return Program(iron.get_current_device(),Runtime(sequence,[ty,host,fi.prod(),*[f.cons() for f in fo]]),workers=workers).resolve_program()\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"<EXPERIMENT_ROOT>\\npu\\mlir-aie\\ironenv\\Lib\\site-packages\\mlir_aie\\python\\aie\\iron\\program.py\", line 248, in resolve_program\n    raise design_error(exc)\n  File \"<EXPERIMENT_ROOT>\\\\router\\\\hardware_probes.py\", line 34, in <design>\n    workers.append(Worker(body,fn_args=[fi.cons(),state,parts[r].prod(),fn],tile=Tile(c,r+2)))\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\naie._mlir_libs._mlir.ir.MLIRError: Verification failed:\nerror: \"<EXPERIMENT_ROOT>\\\\router\\\\hardware_probes.py\":34:80: 'aie.logical_tile' op column index (4) must be less than the number of columns in the device (4)\n note: \"<EXPERIMENT_ROOT>\\\\router\\\\hardware_probes.py\":34:80: see current operation: %16 = \"aie.logical_tile\"() <{col = 4 : i32, row = 2 : i32, tile_type = 0 : i32}> : () -> index\n"
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": true,
+    "memtile_stage": false,
+    "trial": 0,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 3.3740606999999727,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": true,
+    "memtile_stage": false,
+    "trial": 1,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.0021679999999832944,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": true,
+    "memtile_stage": false,
+    "trial": 2,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.001974000000700471,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": false,
+    "memtile_stage": false,
+    "trial": 0,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.9210520000006,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": false,
+    "memtile_stage": false,
+    "trial": 1,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.0019180999997843173,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": false,
+    "memtile_stage": false,
+    "trial": 2,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.0017268999999942025,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": false,
+    "memtile_stage": true,
+    "trial": 0,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.9074205000006259,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": false,
+    "memtile_stage": true,
+    "trial": 1,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.0021055000006526825,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  },
+  {
+    "probe": "shared_sram",
+    "reader_local": false,
+    "memtile_stage": true,
+    "trial": 2,
+    "physical_output_pass": true,
+    "host_wall_s_including_jit_if_first": 0.0019352999997863662,
+    "cycles_unavailable": true,
+    "bytes_shared_reads": 4194304
+  }
+]

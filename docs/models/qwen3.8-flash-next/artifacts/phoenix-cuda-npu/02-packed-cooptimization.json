@@ -1,0 +1,331 @@
+{
+  "status": "NPU component latency improvement demonstrated; whole-model acceleration not accepted",
+  "main_comparison": "<EXPERIMENT_ROOT>\\coopt\\results\\20261026T223422Z-95e045-four-arm",
+  "share_screen": "<EXPERIMENT_ROOT>\\coopt\\results\\20261026T225426Z-22cdf7-pcie-screen",
+  "deeper_context": "<EXPERIMENT_ROOT>\\coopt\\results\\20261026T225918Z-93211e-deeper-context",
+  "negative_control": "<EXPERIMENT_ROOT>\\results\\20261026T230007Z-776b4a-coopt-npu16-blocked-functional",
+  "bridge": [
+    {
+      "rows": 1,
+      "median_ms": {
+        "serial": 0.64745,
+        "batch4": 0.7196,
+        "packed16": 0.33015
+      },
+      "latency_reduction_percent": {
+        "batch4": -11.143717661595499,
+        "packed16": 49.00764537802147
+      },
+      "block_medians_ms": {
+        "serial": [
+          0.64745,
+          0.65605,
+          0.6339
+        ],
+        "batch4": [
+          0.70665,
+          0.7196,
+          0.722
+        ],
+        "packed16": [
+          0.3131,
+          0.34125,
+          0.33015
+        ]
+      }
+    },
+    {
+      "rows": 2,
+      "median_ms": {
+        "serial": 1.26795,
+        "batch4": 0.78045,
+        "packed16": 0.34015
+      },
+      "latency_reduction_percent": {
+        "batch4": 38.44788832367206,
+        "packed16": 73.17323238298039
+      },
+      "block_medians_ms": {
+        "serial": [
+          1.2699,
+          1.24045,
+          1.26795
+        ],
+        "batch4": [
+          0.78045,
+          0.766,
+          0.79225
+        ],
+        "packed16": [
+          0.3232,
+          0.3658,
+          0.34015
+        ]
+      }
+    },
+    {
+      "rows": 3,
+      "median_ms": {
+        "serial": 1.9072,
+        "batch4": 0.8294,
+        "packed16": 0.34485
+      },
+      "latency_reduction_percent": {
+        "batch4": 56.5121644295302,
+        "packed16": 81.91851929530202
+      },
+      "block_medians_ms": {
+        "serial": [
+          1.9325,
+          1.9072,
+          1.8555
+        ],
+        "batch4": [
+          0.8294,
+          0.80855,
+          0.8392
+        ],
+        "packed16": [
+          0.3537,
+          0.3381,
+          0.34485
+        ]
+      }
+    },
+    {
+      "rows": 4,
+      "median_ms": {
+        "serial": 2.4883,
+        "batch4": 0.89365,
+        "packed16": 0.37705
+      },
+      "latency_reduction_percent": {
+        "batch4": 64.08592211550055,
+        "packed16": 84.84708435478036
+      },
+      "block_medians_ms": {
+        "serial": [
+          2.4883,
+          2.47535,
+          2.5245
+        ],
+        "batch4": [
+          0.88385,
+          0.89365,
+          0.9138
+        ],
+        "packed16": [
+          0.3797,
+          0.37705,
+          0.35835
+        ]
+      }
+    },
+    {
+      "rows": 5,
+      "median_ms": {
+        "serial": 3.0573,
+        "batch4": 0.96735,
+        "packed16": 0.39945
+      },
+      "latency_reduction_percent": {
+        "batch4": 68.35933666961044,
+        "packed16": 86.93455009321951
+      },
+      "block_medians_ms": {
+        "serial": [
+          3.0556,
+          3.0573,
+          3.1438
+        ],
+        "batch4": [
+          0.9414,
+          0.96975,
+          0.96735
+        ],
+        "packed16": [
+          0.3943,
+          0.4016,
+          0.39945
+        ]
+      }
+    },
+    {
+      "rows": 6,
+      "median_ms": {
+        "serial": 3.71915,
+        "batch4": 1.00655,
+        "packed16": 0.4036
+      },
+      "latency_reduction_percent": {
+        "batch4": 72.93602032722531,
+        "packed16": 89.14805802401087
+      },
+      "block_medians_ms": {
+        "serial": [
+          3.7727,
+          3.71915,
+          3.6287
+        ],
+        "batch4": [
+          1.00015,
+          1.00655,
+          1.0104
+        ],
+        "packed16": [
+          0.4036,
+          0.40935,
+          0.384
+        ]
+      }
+    },
+    {
+      "rows": 7,
+      "median_ms": {
+        "serial": 4.2779,
+        "batch4": 1.05965,
+        "packed16": 0.43115
+      },
+      "latency_reduction_percent": {
+        "batch4": 75.22966876271067,
+        "packed16": 89.92145678954627
+      },
+      "block_medians_ms": {
+        "serial": [
+          4.3036,
+          4.2779,
+          4.22065
+        ],
+        "batch4": [
+          1.05305,
+          1.05965,
+          1.07195
+        ],
+        "packed16": [
+          0.4409,
+          0.43115,
+          0.4241
+        ]
+      }
+    },
+    {
+      "rows": 8,
+      "median_ms": {
+        "serial": 4.92885,
+        "batch4": 1.12875,
+        "packed16": 0.4353
+      },
+      "latency_reduction_percent": {
+        "batch4": 77.09912048449435,
+        "packed16": 91.16832526857178
+      },
+      "block_medians_ms": {
+        "serial": [
+          4.8457,
+          4.9645,
+          4.92885
+        ],
+        "batch4": [
+          1.1118,
+          1.12875,
+          1.1494
+        ],
+        "packed16": [
+          0.4459,
+          0.4353,
+          0.4349
+        ]
+      }
+    }
+  ],
+  "main_npu_totals": {
+    "groups": 1607,
+    "rows": 4710,
+    "dispatches": 1607,
+    "checked_values": 12057600,
+    "xrt_wait_ns": 742014400,
+    "callback_ns": 859053800
+  },
+  "functional_acceptance": {
+    "requests": 21,
+    "code_behavior": "Eight checks per generated clamp function, all three rounds passed.",
+    "prose_reasoning": "All six finalist prose/reasoning answers manually read: three-sentence cache explanation and correct 6→8→3→6 ring-buffer result.",
+    "json_tool_ledger": "Exact JSON semantics, tool name/arguments and ledger answers checked.",
+    "limits": "This is bounded functionality, not comprehensive model quality, 64K context or vision qualification."
+  },
+  "deeper_context_qualification": {
+    "passed": true,
+    "fresh_prompt_tokens": 7796,
+    "continuation_prompt_tokens": 7888,
+    "reused_tokens": 7865,
+    "output_tokens": [
+      68,
+      58
+    ]
+  },
+  "minimum_ram_gib_main": 7.093456268310547,
+  "peak_vram_mib_main": 7828.71484375,
+  "artifacts": [
+    {
+      "path": "<EXPERIMENT_ROOT>\\strata-npu-build\\strata.exe",
+      "bytes": 70580224,
+      "sha256": "f3efe34c8410c7881da968dea0e0c9b502a65297a5fb1d7a7c8625adb5da8e29"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\npu-control-engine\\strata.exe",
+      "bytes": 70567936,
+      "sha256": "b22c9546670754408e9ed7b91bd221e0a64051ea3bb2657a8e86ec4cd0a677da"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\coopt\\npu\\artifacts-packed16\\strata_npu_bridge.dll",
+      "bytes": 35328,
+      "sha256": "3e908d0b142458e4c667dd020e32b60bb875ee408f0da908994c76774c3a660b"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\coopt\\npu\\artifacts-packed16\\final.xclbin",
+      "bytes": 60728,
+      "sha256": "3690fc1c416ad0374b590a8f0bff37b7ad2bce153f57438ec1bc14bb4e5c916d"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\coopt\\npu\\artifacts-packed16\\insts.bin",
+      "bytes": 1152,
+      "sha256": "b9580dde1b6ccaeeafe4f464d4a446ca4e264a0de511ab507a471d5a7e9d85c8"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\coopt\\npu\\strata_npu_bridge_packed16.cpp",
+      "bytes": 5204,
+      "sha256": "ce0fbd401529be64d2fac373eb64897da36b3a41a94fd2b64d880fa7c03def8f"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\coopt\\npu\\add_fp32_packed16.py",
+      "bytes": 6328,
+      "sha256": "96398ceabd5f6f871df8ccd71a1f70744b212240671187bb9d23b5fa8465b6ce"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\coopt\\npu\\add_fp32_packed16.cc",
+      "bytes": 715,
+      "sha256": "8e769ee8908479435f4a2806a698d180c03bcb4540ed55d6d2d63835c8eee988"
+    },
+    {
+      "path": "<EXPERIMENT_ROOT>\\configs\\coopt-npu16.json",
+      "bytes": 2593,
+      "sha256": "a4128102d90143a99f1246a7704ce89128a224258e095b22c5ac51d3103ed8b2"
+    }
+  ],
+  "profile": "coopt-npu16",
+  "default_promoted": false,
+  "arithmetic": "Unchanged compiler-rt FP32 RN-even with signed FTZ; finite model outputs checked bitwise against CUDA.",
+  "placement": "All 16 compiler-exposed cores: four columns × four compute rows. Physical Phoenix has 20 compute tiles.",
+  "npu_transfer_per_callback_bytes": {
+    "input": 163840,
+    "output": 81920,
+    "padded_rows": 8
+  },
+  "retained_failures": [
+    "First bridge comparison failed before execution due to a Python import path; corrected.",
+    "Separate-input 16-tile graph failed DMA placement; packed-input graph passed.",
+    "512-token buffer profile failed a tool-call request in round two; original NPU profile also failed that request. No causal attribution to buffer change.",
+    "512-token long-prefill run was slower; no promotion.",
+    "GPU share 0.55 regressed; 0.25 remains unqualified due mixed results and variable outputs."
+  ]
+}

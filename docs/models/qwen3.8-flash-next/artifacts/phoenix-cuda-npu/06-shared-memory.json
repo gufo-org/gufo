@@ -1,0 +1,383 @@
+{
+  "scope": "Native CUDA producer, fixed512-row HC NPU test artifact, CUDA full-output consumer. Synthetic arithmetic transport/coherency test, not model projection performance.",
+  "results": [
+    {
+      "mode": "copy",
+      "exit_code": 0,
+      "passed": true,
+      "rows": [
+        {
+          "mode": "copy",
+          "round": 0,
+          "warmup": true,
+          "full_ms": 4.1156,
+          "xrt_ms": 3.1379,
+          "checked_values": 524288,
+          "job": 100
+        },
+        {
+          "mode": "copy",
+          "round": 1,
+          "warmup": true,
+          "full_ms": 1.8422,
+          "xrt_ms": 1.3688,
+          "checked_values": 524288,
+          "job": 101
+        },
+        {
+          "mode": "copy",
+          "round": 2,
+          "warmup": true,
+          "full_ms": 1.7181,
+          "xrt_ms": 1.3494,
+          "checked_values": 524288,
+          "job": 102
+        },
+        {
+          "mode": "copy",
+          "round": 3,
+          "warmup": false,
+          "full_ms": 1.7435,
+          "xrt_ms": 1.3801,
+          "checked_values": 524288,
+          "job": 103
+        },
+        {
+          "mode": "copy",
+          "round": 4,
+          "warmup": false,
+          "full_ms": 1.7749,
+          "xrt_ms": 1.4058,
+          "checked_values": 524288,
+          "job": 104
+        },
+        {
+          "mode": "copy",
+          "round": 5,
+          "warmup": false,
+          "full_ms": 1.724,
+          "xrt_ms": 1.365,
+          "checked_values": 524288,
+          "job": 105
+        },
+        {
+          "mode": "copy",
+          "round": 6,
+          "warmup": false,
+          "full_ms": 1.7539,
+          "xrt_ms": 1.3678,
+          "checked_values": 524288,
+          "job": 106
+        },
+        {
+          "mode": "copy",
+          "round": 7,
+          "warmup": false,
+          "full_ms": 1.7301,
+          "xrt_ms": 1.3586,
+          "checked_values": 524288,
+          "job": 107
+        },
+        {
+          "mode": "copy",
+          "round": 8,
+          "warmup": false,
+          "full_ms": 1.6946,
+          "xrt_ms": 1.3533,
+          "checked_values": 524288,
+          "job": 108
+        },
+        {
+          "mode": "copy",
+          "round": 9,
+          "warmup": false,
+          "full_ms": 1.6912,
+          "xrt_ms": 1.3444,
+          "checked_values": 524288,
+          "job": 109
+        },
+        {
+          "mode": "copy",
+          "round": 10,
+          "warmup": false,
+          "full_ms": 1.6852,
+          "xrt_ms": 1.3419,
+          "checked_values": 524288,
+          "job": 110
+        },
+        {
+          "mode": "copy",
+          "round": 11,
+          "warmup": false,
+          "full_ms": 1.7106,
+          "xrt_ms": 1.3397,
+          "checked_values": 524288,
+          "job": 111
+        },
+        {
+          "mode": "copy",
+          "round": 12,
+          "warmup": false,
+          "full_ms": 1.8879,
+          "xrt_ms": 1.3739,
+          "checked_values": 524288,
+          "job": 112
+        }
+      ],
+      "median_full_ms": 1.72705,
+      "blocked_dispatch_detected": true
+    },
+    {
+      "mode": "xrt-map",
+      "exit_code": 0,
+      "passed": true,
+      "rows": [
+        {
+          "mode": "xrt-map",
+          "round": 0,
+          "warmup": true,
+          "full_ms": 3.6342,
+          "xrt_ms": 3.0205,
+          "checked_values": 524288,
+          "job": 100
+        },
+        {
+          "mode": "xrt-map",
+          "round": 1,
+          "warmup": true,
+          "full_ms": 1.6304,
+          "xrt_ms": 1.3669,
+          "checked_values": 524288,
+          "job": 101
+        },
+        {
+          "mode": "xrt-map",
+          "round": 2,
+          "warmup": true,
+          "full_ms": 1.6318,
+          "xrt_ms": 1.3603,
+          "checked_values": 524288,
+          "job": 102
+        },
+        {
+          "mode": "xrt-map",
+          "round": 3,
+          "warmup": false,
+          "full_ms": 1.6024,
+          "xrt_ms": 1.3465,
+          "checked_values": 524288,
+          "job": 103
+        },
+        {
+          "mode": "xrt-map",
+          "round": 4,
+          "warmup": false,
+          "full_ms": 1.7156,
+          "xrt_ms": 1.3841,
+          "checked_values": 524288,
+          "job": 104
+        },
+        {
+          "mode": "xrt-map",
+          "round": 5,
+          "warmup": false,
+          "full_ms": 1.7084,
+          "xrt_ms": 1.3587,
+          "checked_values": 524288,
+          "job": 105
+        },
+        {
+          "mode": "xrt-map",
+          "round": 6,
+          "warmup": false,
+          "full_ms": 1.7114,
+          "xrt_ms": 1.4085,
+          "checked_values": 524288,
+          "job": 106
+        },
+        {
+          "mode": "xrt-map",
+          "round": 7,
+          "warmup": false,
+          "full_ms": 1.6027,
+          "xrt_ms": 1.344,
+          "checked_values": 524288,
+          "job": 107
+        },
+        {
+          "mode": "xrt-map",
+          "round": 8,
+          "warmup": false,
+          "full_ms": 1.6799,
+          "xrt_ms": 1.3452,
+          "checked_values": 524288,
+          "job": 108
+        },
+        {
+          "mode": "xrt-map",
+          "round": 9,
+          "warmup": false,
+          "full_ms": 1.6847,
+          "xrt_ms": 1.3656,
+          "checked_values": 524288,
+          "job": 109
+        },
+        {
+          "mode": "xrt-map",
+          "round": 10,
+          "warmup": false,
+          "full_ms": 1.7125,
+          "xrt_ms": 1.3689,
+          "checked_values": 524288,
+          "job": 110
+        },
+        {
+          "mode": "xrt-map",
+          "round": 11,
+          "warmup": false,
+          "full_ms": 1.7146,
+          "xrt_ms": 1.3823,
+          "checked_values": 524288,
+          "job": 111
+        },
+        {
+          "mode": "xrt-map",
+          "round": 12,
+          "warmup": false,
+          "full_ms": 1.7803,
+          "xrt_ms": 1.3754,
+          "checked_values": 524288,
+          "job": 112
+        }
+      ],
+      "median_full_ms": 1.7099,
+      "blocked_dispatch_detected": true
+    },
+    {
+      "mode": "user-map",
+      "exit_code": 0,
+      "passed": true,
+      "rows": [
+        {
+          "mode": "user-map",
+          "round": 0,
+          "warmup": true,
+          "full_ms": 3.5999,
+          "xrt_ms": 3.0169,
+          "checked_values": 524288,
+          "job": 100
+        },
+        {
+          "mode": "user-map",
+          "round": 1,
+          "warmup": true,
+          "full_ms": 1.6269,
+          "xrt_ms": 1.367,
+          "checked_values": 524288,
+          "job": 101
+        },
+        {
+          "mode": "user-map",
+          "round": 2,
+          "warmup": true,
+          "full_ms": 1.6237,
+          "xrt_ms": 1.3628,
+          "checked_values": 524288,
+          "job": 102
+        },
+        {
+          "mode": "user-map",
+          "round": 3,
+          "warmup": false,
+          "full_ms": 1.602,
+          "xrt_ms": 1.3406,
+          "checked_values": 524288,
+          "job": 103
+        },
+        {
+          "mode": "user-map",
+          "round": 4,
+          "warmup": false,
+          "full_ms": 1.6664,
+          "xrt_ms": 1.4102,
+          "checked_values": 524288,
+          "job": 104
+        },
+        {
+          "mode": "user-map",
+          "round": 5,
+          "warmup": false,
+          "full_ms": 1.641,
+          "xrt_ms": 1.3653,
+          "checked_values": 524288,
+          "job": 105
+        },
+        {
+          "mode": "user-map",
+          "round": 6,
+          "warmup": false,
+          "full_ms": 1.6139,
+          "xrt_ms": 1.3497,
+          "checked_values": 524288,
+          "job": 106
+        },
+        {
+          "mode": "user-map",
+          "round": 7,
+          "warmup": false,
+          "full_ms": 1.6037,
+          "xrt_ms": 1.3486,
+          "checked_values": 524288,
+          "job": 107
+        },
+        {
+          "mode": "user-map",
+          "round": 8,
+          "warmup": false,
+          "full_ms": 1.6187,
+          "xrt_ms": 1.3435,
+          "checked_values": 524288,
+          "job": 108
+        },
+        {
+          "mode": "user-map",
+          "round": 9,
+          "warmup": false,
+          "full_ms": 1.7192,
+          "xrt_ms": 1.386,
+          "checked_values": 524288,
+          "job": 109
+        },
+        {
+          "mode": "user-map",
+          "round": 10,
+          "warmup": false,
+          "full_ms": 1.6866,
+          "xrt_ms": 1.3622,
+          "checked_values": 524288,
+          "job": 110
+        },
+        {
+          "mode": "user-map",
+          "round": 11,
+          "warmup": false,
+          "full_ms": 1.6879,
+          "xrt_ms": 1.3639,
+          "checked_values": 524288,
+          "job": 111
+        },
+        {
+          "mode": "user-map",
+          "round": 12,
+          "warmup": false,
+          "full_ms": 1.7179,
+          "xrt_ms": 1.3768,
+          "checked_values": 524288,
+          "job": 112
+        }
+      ],
+      "median_full_ms": 1.6537000000000002,
+      "blocked_dispatch_detected": true
+    }
+  ]
+}

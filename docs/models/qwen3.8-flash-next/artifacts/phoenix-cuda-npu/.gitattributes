@@ -1,0 +1,3 @@
+* -text whitespace=cr-at-eol
+*.json linguist-generated=true
+*.patch -whitespace
