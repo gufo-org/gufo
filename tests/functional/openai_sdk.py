@@ -2092,18 +2092,19 @@ def check_auto_tools(client, model, checks, vision=False):
     assert json.loads(calls[0].arguments) == {"value": 7}, result
     record("auto_many_declared_tools", result.to_dict())
     if vision:
+        # The argument stop below requires a color name, not an RGB/hex code.
+        image_prompt = ("Call record with value equal to the image color as a lowercase "
+                        "English color name, not a hex or RGB code. Omit optional.")
         result = client.responses.create(**{
             **response_request, "temperature": 0,
             "input": [{"role": "user", "content": [
-                {"type": "input_text", "text":
-                 "Call record with value equal to the image color. Omit optional."},
+                {"type": "input_text", "text": image_prompt},
                 {"type": "input_image", "image_url":
                  image_content("blue")["image_url"]["url"]}]}]})
         response_signature(result, value="blue")
         record("auto_image_tool", result.to_dict())
         image_request = {**common, "messages": [{"role": "user", "content": [
-            image_content("blue"), {"type": "text", "text":
-            "Call record with value equal to the image color. Omit optional."}]}]}
+            image_content("blue"), {"type": "text", "text": image_prompt}]}]}
         stopped = chat_result(client, {**image_request, "stop": "blue"}, True)
         assert stopped["finish"] == "stop" and not stopped["tools"], stopped
         retry = chat_result(client, image_request, True)
