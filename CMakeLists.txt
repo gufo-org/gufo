@@ -349,6 +349,7 @@ target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
 
 add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
+add_subdirectory(src/models/fish_drama3)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -423,7 +424,7 @@ add_library(gufo_http STATIC
   # the engine library, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_fish_drama3 gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -453,7 +454,7 @@ target_compile_definitions(gufo PRIVATE
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
 endif()
-target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2)
+target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_fish_drama3 gufo_qwen3_asr gufo_embedding_gemma2)
 
 if (NOT WIN32)
   add_custom_target(gufo-server ALL
@@ -973,7 +974,7 @@ if (BUILD_TESTING)
     tests/models/qwen3_tts/audio_api_test.cpp
     src/cli/serve/audio_tts_api.cpp
     src/cli/serve/tts_service.cpp)
-  target_link_libraries(qwen3_tts_audio_api_test PRIVATE gufo_qwen3_tts)
+  target_link_libraries(qwen3_tts_audio_api_test PRIVATE gufo_qwen3_tts gufo_fish_drama3)
   add_test(NAME qwen3_tts_audio_api_test COMMAND qwen3_tts_audio_api_test)
   set_tests_properties(qwen3_tts_audio_api_test PROPERTIES
     LABELS "cpu;models;qwen3-tts;server;api;audio;quality")
@@ -984,6 +985,22 @@ if (BUILD_TESTING)
   add_test(NAME qwen3_tts_audio_test COMMAND qwen3_tts_audio_test)
   set_tests_properties(qwen3_tts_audio_test PROPERTIES
     LABELS "cpu;models;qwen3-tts;audio;quality;resampling")
+
+  add_executable(fish_drama3_config_test
+    tests/models/fish_drama3/config_test.cpp)
+  target_link_libraries(fish_drama3_config_test PRIVATE gufo_fish_drama3)
+  add_test(NAME fish_drama3_config_test COMMAND fish_drama3_config_test)
+  set_tests_properties(fish_drama3_config_test PROPERTIES
+    LABELS "cpu;models;fish-drama3;config;quality")
+
+  add_executable(fish_drama3_test
+    tests/models/fish_drama3/fish_drama3_test.cpp)
+  target_link_libraries(fish_drama3_test PRIVATE gufo_fish_drama3 gufo_qwen3_tts)
+  add_test(NAME fish_drama3_test COMMAND fish_drama3_test)
+  set_tests_properties(fish_drama3_test PROPERTIES
+    LABELS "gpu;models;fish-drama3;quality;external-model"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE)
 
   add_executable(qwen3_tts_config_test
     tests/models/qwen3_tts/config_test.cpp)

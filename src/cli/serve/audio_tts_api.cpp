@@ -204,7 +204,8 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
                  "string when supplied",
                  "invalid_parameter_type");
   }
-  if (model->str() != service.model_id() && model->str() != "qwen3-tts") {
+  if (model->str() != service.model_id() && model->str() != "qwen3-tts" &&
+      !(service.is_fish_drama3() && model->str() == "fish-drama-3")) {
     return Error(400, "Bad Request", "unsupported audio speech model",
                  "invalid_model");
   }
@@ -256,7 +257,10 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
     reference_audio = preset->reference_audio;
     reference_text = preset->reference_text;
     speaker_embedding_only = preset->speaker_embedding_only;
-  } else if (service.variant() == models::qwen3_tts::ModelVariant::kBase) {
+  } else if (service.variant() == models::qwen3_tts::ModelVariant::kBase &&
+             (!service.is_fish_drama3() ||
+              body.find("reference_audio") != nullptr ||
+              body.find("reference_text") != nullptr)) {
     const json::Value* encoded_audio = body.find("reference_audio");
     const json::Value* clone_text = body.find("reference_text");
     const json::Value* clone_mode = body.find("voice_clone_mode");
@@ -416,64 +420,69 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
         {"Cache-Control", "no-cache"},
         {"X-Gufo-TTS-Backend", service.backend_name()}};
     response.stream_log = log;
-    response
-        .streaming_body = [&service, synthesis = std::move(synthesis),
-                           cancelled = request.is_cancelled, log,
-                           sse](const HttpResponse::BodyWriter& write) mutable {
-      const auto started = std::chrono::steady_clock::now();
-      std::size_t samples = 0;
-      bool disconnected = false;
-      bool invalid_audio = false;
-      synthesis.on_audio = [&](std::span<const float> chunk) {
-        if (cancelled && cancelled())
-          return false;
-        std::string bytes = EncodePcm16(chunk);
-        if (!chunk.empty() && bytes.empty()) {
-          invalid_audio = true;
-          return false;
-        }
-        if (sse) {
-          auto event = json::Value::object();
-          event["type"] = "speech.audio.delta";
-          event["audio"] = EncodeAudioBase64(bytes);
-          event["response_format"] = "pcm";
-          bytes = "event: speech.audio.delta\ndata: " + event.dump() + "\n\n";
-        }
-        disconnected = !write(bytes);
-        samples += chunk.size();
-        return !disconnected;
-      };
-      models::qwen3_tts::SynthesisResult result;
-      std::string error;
-      const auto check = [&] {
-        return disconnected || (cancelled && cancelled());
-      };
-      if (!service.Synthesize(synthesis, check, &result, &error)) {
-        log->error_code = invalid_audio ? "invalid_audio"
-                          : check()     ? "cancelled"
-                                        : "generation_failed";
-        if (invalid_audio)
-          error = "Qwen3-TTS produced invalid audio";
-        if (sse && !check()) {
-          auto event = json::Value::object();
-          event["type"] = "error";
-          event["message"] = error;
-          log->error_event_sent =
-              write("event: error\ndata: " + event.dump() + "\n\n");
-        }
-      } else if (sse) {
-        (void)write(
-            "event: speech.audio.done\ndata: "
-            "{\"type\":\"speech.audio.done\"}\n\n");
-      }
-      synthesis.on_audio = {};
-      log->details =
-          "model=" + service.model_id() + " stream=" + (sse ? "sse" : "pcm") +
-          " audio_ms=" + std::to_string(samples / 24) + " synthesis_ms=" +
-          std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - started)
-                             .count());
-    };
+    response.streaming_body =
+        [&service, synthesis = std::move(synthesis),
+         cancelled = request.is_cancelled, log,
+         sse](const HttpResponse::BodyWriter& write) mutable {
+          const auto started = std::chrono::steady_clock::now();
+          std::size_t samples = 0;
+          bool disconnected = false;
+          bool invalid_audio = false;
+          synthesis.on_audio = [&](std::span<const float> chunk) {
+            if (cancelled && cancelled())
+              return false;
+            std::string bytes = EncodePcm16(chunk);
+            if (!chunk.empty() && bytes.empty()) {
+              invalid_audio = true;
+              return false;
+            }
+            if (sse) {
+              auto event = json::Value::object();
+              event["type"] = "speech.audio.delta";
+              event["audio"] = EncodeAudioBase64(bytes);
+              event["response_format"] = "pcm";
+              bytes =
+                  "event: speech.audio.delta\ndata: " + event.dump() + "\n\n";
+            }
+            disconnected = !write(bytes);
+            samples += chunk.size();
+            return !disconnected;
+          };
+          models::qwen3_tts::SynthesisResult result;
+          std::string error;
+          const auto check = [&] {
+            return disconnected || (cancelled && cancelled());
+          };
+          if (!service.Synthesize(synthesis, check, &result, &error)) {
+            log->error_code = invalid_audio ? "invalid_audio"
+                              : check()     ? "cancelled"
+                                            : "generation_failed";
+            if (invalid_audio)
+              error = "Qwen3-TTS produced invalid audio";
+            if (sse && !check()) {
+              auto event = json::Value::object();
+              event["type"] = "error";
+              event["message"] = error;
+              log->error_event_sent =
+                  write("event: error\ndata: " + event.dump() + "\n\n");
+            }
+          } else if (sse) {
+            (void)write(
+                "event: speech.audio.done\ndata: "
+                "{\"type\":\"speech.audio.done\"}\n\n");
+          }
+          synthesis.on_audio = {};
+          log->details =
+              "model=" + service.model_id() +
+              " stream=" + (sse ? "sse" : "pcm") + " audio_ms=" +
+              std::to_string(1000ULL * samples /
+                             (service.is_fish_drama3() ? 44100ULL : 24000ULL)) +
+              " synthesis_ms=" +
+              std::to_string(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - started)
+                      .count());
+        };
     return response;
   }
   models::qwen3_tts::SynthesisResult result;
