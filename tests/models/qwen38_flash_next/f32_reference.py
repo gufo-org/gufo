@@ -121,6 +121,22 @@ def load(manifest_path: Path, dumps: Path) -> dict:
         positions = fixture["positions"].astype(np.int64)
         nxt = np.where(positions + 1 < len(tokens),
                        tokens[np.minimum(positions + 1, len(tokens) - 1)], -1)
+        if len(tokens) != prompt["token_count"]:
+            raise SystemExit(f"{prompt['name']}: {len(tokens)} token ids, "
+                             f"manifest {prompt['token_count']}")
+        # gpu_probe --logit-rows records the batch and row count beside the
+        # dump: another batch can give the same row count at other positions.
+        meta_path = dumps / f"{prompt['name']}.bin.json"
+        if not meta_path.exists():
+            raise SystemExit(f"{meta_path}: missing; dump with gpu_probe "
+                             f"--logit-rows")
+        meta = json.loads(meta_path.read_text())
+        expected = {"tokens": len(tokens), "batch": prompt["batch"],
+                    "rows_per_pass": manifest["rows_per_pass"]}
+        for key, value in expected.items():
+            if meta.get(key) != value:
+                raise SystemExit(f"{meta_path}: {key} {meta.get(key)}, "
+                                 f"fixture {value}")
         gpu = np.fromfile(dumps / f"{prompt['name']}.bin", dtype=np.float32)
         gpu = gpu.reshape(-1, VOCAB)
         if len(gpu) != len(positions):

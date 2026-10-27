@@ -513,6 +513,18 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "cannot write logit dump %s\n", dump_path.c_str());
       return 1;
     }
+    if (every_pass_rows != 0) {
+      // Which rows the dump holds: f32_reference.py checks it against the
+      // fixture, since another batch can give the same row count.
+      std::ofstream meta(dump_path + ".json");
+      meta << "{\"tokens\": " << tokens.size() << ", \"batch\": " << batch
+           << ", \"rows_per_pass\": " << every_pass_rows
+           << ", \"rows\": " << logit_rows << "}\n";
+      if (!meta) {
+        std::fprintf(stderr, "cannot write %s.json\n", dump_path.c_str());
+        return 1;
+      }
+    }
   }
 
   if (reference) {
