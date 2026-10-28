@@ -4,6 +4,33 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.26.0](https://github.com/gufo-org/gufo/compare/v0.25.0...v0.26.0) (2026-10-28)
+
+
+### Features
+
+* **embedding:** support native audio embeddings ([#819](https://github.com/gufo-org/gufo/issues/819)) ([1c62f0a](https://github.com/gufo-org/gufo/commit/1c62f0a9f96aec33c8128bf652eff312bdf56f90))
+* **serve:** add llama-server's /apply-template ([#821](https://github.com/gufo-org/gufo/issues/821)) ([5efd8b7](https://github.com/gufo-org/gufo/commit/5efd8b772fc22a96adc9748db0c404434039fb00))
+* **serve:** let --cache-ram-bytes turn the RAM cache off ([#783](https://github.com/gufo-org/gufo/issues/783)) ([62f0b96](https://github.com/gufo-org/gufo/commit/62f0b96a7b8ae37c8bfa08fcdca5c15989bf35dd))
+* **serve:** select EmbeddingGemma 2 checkpoint prompts by name ([#823](https://github.com/gufo-org/gufo/issues/823)) ([ec4aacb](https://github.com/gufo-org/gufo/commit/ec4aacba29a497f72fb48d4fe246138f593911f5))
+
+
+### Bug Fixes
+
+* **audio:** drop resident safetensors pages after the TTS and ASR uploads ([#845](https://github.com/gufo-org/gufo/issues/845)) ([f1b6c54](https://github.com/gufo-org/gufo/commit/f1b6c54f1fe6145d40d93b820196974e6110840f))
+* **build:** load the patched ROCr from build-tree HIP binaries ([#841](https://github.com/gufo-org/gufo/issues/841)) ([4a4a47c](https://github.com/gufo-org/gufo/commit/4a4a47c131890f417256c13e43e6adc925895ee7))
+* **embedding:** accept MP3s without a Xing header and audio in llama.cpp multimodal_data ([#828](https://github.com/gufo-org/gufo/issues/828)) ([e472f83](https://github.com/gufo-org/gufo/commit/e472f8337161f2ca49b36a14c809777b645c0202))
+* **qwen-flash:** remove lossy chunked DeltaNet prefill ([#850](https://github.com/gufo-org/gufo/issues/850)) ([c92b19c](https://github.com/gufo-org/gufo/commit/c92b19c5dc7ec12f83d0c2a5603cda78cc200b3e))
+* **qwen:** keep model weights in device memory when the heap has room ([#708](https://github.com/gufo-org/gufo/issues/708)) ([5131f34](https://github.com/gufo-org/gufo/commit/5131f348c7372a4588f356ebb421b9be62ba2d7b))
+* **rocm:** qualify image, H3, DeepSeek and Qwen models on 10.1 ([#768](https://github.com/gufo-org/gufo/issues/768)) ([c0e0be5](https://github.com/gufo-org/gufo/commit/c0e0be589d287b6935c3f8304e0bc3e63a9f05d5))
+* **serve:** accept more than 128 function tools ([#827](https://github.com/gufo-org/gufo/issues/827)) ([b2fdc6a](https://github.com/gufo-org/gufo/commit/b2fdc6ac8ae2b2bca2810b362d1292179207d87f))
+* **server:** drain the request before the loading responder closes ([#795](https://github.com/gufo-org/gufo/issues/795)) ([c811b45](https://github.com/gufo-org/gufo/commit/c811b4512a91279d9c62c370850541198d8c357e))
+
+
+### Performance
+
+* **qwen-flash:** faster Flash-Next prefill with chunked DeltaNet and stream overlap ([#758](https://github.com/gufo-org/gufo/issues/758)) ([538e2fd](https://github.com/gufo-org/gufo/commit/538e2fd7801901da712908ef69fdad510416dd7a))
+
 ## [0.25.0](https://github.com/gufo-org/gufo/compare/v0.24.0...v0.25.0) (2026-10-26)
 
 
