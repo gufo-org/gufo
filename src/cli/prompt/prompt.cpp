@@ -451,7 +451,7 @@ int GenerateDeepSeekResponse(
     }
   } else {
     for (; generated < opt.max_tokens; ++generated) {
-      const auto logits = session.CopyLogits(&error);
+      const auto logits = session.Logits(&error);
       if (logits.empty()) {
         std::cerr << "\nDeepSeek V4 Flash token selection failed: " << error
                   << '\n';

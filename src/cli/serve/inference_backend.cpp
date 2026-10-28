@@ -1492,10 +1492,10 @@ public:
       return {.stop = true, .piece = {}};
     // A sampled DSpark cycle may have drawn the next token already.
     int token = deepseek.session().TakePendingDsparkToken();
-    std::vector<float> logits;
+    std::span<const float> logits;
     if (token < 0 || sampler.config().logprobs) {
       std::string error;
-      logits = deepseek.session().CopyLogits(&error);
+      logits = deepseek.session().Logits(&error);
       if (logits.empty()) {
         throw std::runtime_error("DeepSeek token selection failed: " + error);
       }
@@ -1528,7 +1528,7 @@ public:
     if (deepseek.position() >= max_context_)
       return TextDecodeSelection{.stop = true, .piece = {}};
     std::string error;
-    const auto logits = deepseek.session().CopyLogits(&error);
+    const auto logits = deepseek.session().Logits(&error);
     if (logits.empty())
       throw std::runtime_error("DeepSeek token preview failed: " + error);
     const auto token = sampler.Sample(logits);

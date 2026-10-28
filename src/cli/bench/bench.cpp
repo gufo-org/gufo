@@ -415,7 +415,7 @@ int RunDeepSeekBenchmark(
                                std::string* error_msg) -> int {
     int token = session.TakePendingDsparkToken();
     if (token < 0) {
-      const auto logits = session.CopyLogits(error_msg);
+      const auto logits = session.Logits(error_msg);
       if (logits.empty())
         return -1;
       token = static_cast<int>(sampler.Sample(logits));
