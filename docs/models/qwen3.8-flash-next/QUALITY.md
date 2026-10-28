@@ -1,5 +1,44 @@
 # Qwen3.8 Flash-Next quality
 
+## Four-token prefill alignment, October 28, 2026
+
+Sparse prefill (`WmmaCausalAttention` with a mask) packs four consecutive
+queries from each pass start into a tile and gathers the union of their
+selections, so a prompt split past the 2,048-token budget matches one pass
+only when every later pass starts on a multiple of four (noted in #714). The
+server could split there: a turn's stable boundary, shared and in-pass
+checkpoints and budget-limited passes beside decoders can end anywhere. The
+model now reports `TextRunnerCapabilities::prefill_alignment` (the compress
+ratio, 4): budget-limited passes end on a multiple of four (a budget below
+four runs to the next one), and the stable final-user-turn boundary, grid,
+shared and complete-prompt checkpoints are rounded down to it, so a restore
+re-prefills at most three tokens. `Session::Feed` aligns its own passes the
+same way. An unaligned prefill frontier is not kept as a live continuation;
+decoded frontiers are. `TextRunnerPool::Request::Prefill` asserts that every
+step after a request's first starts aligned. The snapshot payload version
+is 19.
+
+- `component_text_cache_test` checks the planning with a fake runner of
+  alignment 4: pass ends 8/16/24/32/41 for a 41-token prompt at budget 10,
+  an in-pass capture at 40, restores at 32 and 40, and a budget of 3 running
+  to the next multiple of four.
+- `tests/functional/cache_alignment_qwen38.py` (`--sessions 2 --context
+  40960`, 4 GiB RAM cache): four conversations whose final user turn ends at
+  2,944–2,947 tokens (all four residues). A seeds the cache, B continues it;
+  B restored from RAM and from `--cache-disk` after a restart must equal B
+  on a fresh server byte for byte, and every restore must start on a
+  multiple of four. On a downstream branch (v0.23 base, 8-bit K/V) it passes
+  in AR and MTP, every restore at 2,944; without the change the restores
+  start at 2,944/2,945/2,946/2,947 and the 2,946 case changes its output from
+  RAM and from disk.
+- End to end on the same branch, two long prompts prefilled as one pass
+  against two passes ending 3, 4, 5 and 6 tokens before the prompt end: the
+  aligned split is identical, the others change the prompt logits (one
+  changes its 40th generated token). Four long 28-question-slice answers
+  (5,754–22,368-token prompts) that the server had split off the alignment
+  now equal a single-pass prefill through the engine API over their whole
+  reasoning, where they had diverged after 173–647 characters.
+
 ## Sampled draft-head costs, October 23, 2026
 
 Based on main `41d93463`, including the expanded greedy-head eligibility.
