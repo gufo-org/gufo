@@ -104,9 +104,9 @@ void ValidateDrama3Codes(const FishDacCodes& codes,
   }
 }
 
-std::vector<Drama3Frame> BuildDrama3Prompt(
+std::vector<Drama3Frame> BuildDrama3PromptPrefix(
     const ModelConfig& config, const Drama3Tokenizer& tokenizer,
-    const std::string& text, const std::vector<Drama3Take>& references,
+    const std::vector<Drama3Take>& references,
     const std::vector<Drama3Take>& history) {
   std::vector<Drama3Frame> frames;
   const auto append_text = [&](const std::string& segment) {
@@ -154,7 +154,34 @@ std::vector<Drama3Frame> BuildDrama3Prompt(
     append_codes(take.codes);
     append_text("<|im_end|>\n");
   }
-  user_turn(text);
+  return frames;
+}
+
+std::vector<Drama3Frame> BuildDrama3PromptSuffix(
+    const Drama3Tokenizer& tokenizer, const std::string& text) {
+  ValidateDrama3Text(text, "input");
+  std::vector<Drama3Frame> frames;
+  const auto append_text = [&](const std::string& segment) {
+    for (const auto token : tokenizer.Encode(segment)) {
+      Drama3Frame row{};
+      row[0] = token;
+      frames.push_back(row);
+    }
+  };
+  append_text("<|im_start|>user\n");
+  append_text(TaggedText(text, false));
+  append_text("<|im_end|>\n");
+  append_text("<|im_start|>assistant\n<|voice|>");
+  return frames;
+}
+
+std::vector<Drama3Frame> BuildDrama3Prompt(
+    const ModelConfig& config, const Drama3Tokenizer& tokenizer,
+    const std::string& text, const std::vector<Drama3Take>& references,
+    const std::vector<Drama3Take>& history) {
+  auto frames = BuildDrama3PromptPrefix(config, tokenizer, references, history);
+  const auto suffix = BuildDrama3PromptSuffix(tokenizer, text);
+  frames.insert(frames.end(), suffix.begin(), suffix.end());
   return frames;
 }
 

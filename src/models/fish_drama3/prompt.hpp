@@ -29,6 +29,12 @@ struct Drama3Take {
 
 void ValidateDrama3Text(const std::string& text, const char* location);
 void ValidateDrama3Codes(const FishDacCodes& codes, std::int64_t codebook_size);
+[[nodiscard]] std::vector<Drama3Frame> BuildDrama3PromptPrefix(
+    const ModelConfig& config, const Drama3Tokenizer& tokenizer,
+    const std::vector<Drama3Take>& references = {},
+    const std::vector<Drama3Take>& history = {});
+[[nodiscard]] std::vector<Drama3Frame> BuildDrama3PromptSuffix(
+    const Drama3Tokenizer& tokenizer, const std::string& text);
 [[nodiscard]] std::vector<Drama3Frame> BuildDrama3Prompt(
     const ModelConfig& config, const Drama3Tokenizer& tokenizer,
     const std::string& text, const std::vector<Drama3Take>& references = {},

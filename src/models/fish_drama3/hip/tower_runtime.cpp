@@ -156,6 +156,8 @@ struct LayerWeights {
 
   DeviceBuffer<float> key_cache;    // [capacity, kv_heads * head_dim]
   DeviceBuffer<float> value_cache;  // [capacity, kv_heads * head_dim]
+  DeviceBuffer<float> prefix_key_cache;
+  DeviceBuffer<float> prefix_value_cache;
 };
 
 struct Workspace {
@@ -214,6 +216,7 @@ struct Workspace {
 struct TowerHipRuntime::Impl {
   TowerConfig cfg;
   std::size_t capacity{4096};
+  std::size_t prefix_steps{0};
   hipStream_t stream{nullptr};
   rocblas_handle blas{nullptr};
   std::vector<float>
@@ -509,6 +512,69 @@ void TowerHipRuntime::Reset() {
   }
 }
 
+bool TowerHipRuntime::SavePrefixState(std::size_t prefix_steps,
+                                      std::string* error) {
+  if (prefix_steps > impl_->capacity) {
+    SetError(error, "Invalid Drama 3 tower prefix steps to save");
+    return false;
+  }
+  try {
+    impl_->prefix_steps = prefix_steps;
+    if (prefix_steps == 0) {
+      return true;
+    }
+    const std::size_t kv_elems =
+        prefix_steps * impl_->cfg.kv_heads * impl_->cfg.head_dim;
+    for (auto& layer : impl_->layers) {
+      if (layer.prefix_key_cache.size() < kv_elems) {
+        layer.prefix_key_cache.Reset(kv_elems);
+        layer.prefix_value_cache.Reset(kv_elems);
+      }
+      RequireHip(hipMemcpyAsync(layer.prefix_key_cache.get(),
+                                layer.key_cache.get(), kv_elems * sizeof(float),
+                                hipMemcpyDeviceToDevice, impl_->stream),
+                 "save tower prefix key_cache");
+      RequireHip(
+          hipMemcpyAsync(layer.prefix_value_cache.get(),
+                         layer.value_cache.get(), kv_elems * sizeof(float),
+                         hipMemcpyDeviceToDevice, impl_->stream),
+          "save tower prefix value_cache");
+    }
+    RequireHip(hipStreamSynchronize(impl_->stream),
+               "synchronize save tower prefix state");
+    return true;
+  } catch (const std::exception& ex) {
+    SetError(error, ex.what());
+    return false;
+  }
+}
+
+bool TowerHipRuntime::RestorePrefixState(std::string* error) {
+  if (impl_->prefix_steps == 0) {
+    return true;
+  }
+  try {
+    const std::size_t kv_elems =
+        impl_->prefix_steps * impl_->cfg.kv_heads * impl_->cfg.head_dim;
+    for (auto& layer : impl_->layers) {
+      RequireHip(
+          hipMemcpyAsync(layer.key_cache.get(), layer.prefix_key_cache.get(),
+                         kv_elems * sizeof(float), hipMemcpyDeviceToDevice,
+                         impl_->stream),
+          "restore tower prefix key_cache");
+      RequireHip(hipMemcpyAsync(layer.value_cache.get(),
+                                layer.prefix_value_cache.get(),
+                                kv_elems * sizeof(float),
+                                hipMemcpyDeviceToDevice, impl_->stream),
+                 "restore tower prefix value_cache");
+    }
+    return true;
+  } catch (const std::exception& ex) {
+    SetError(error, ex.what());
+    return false;
+  }
+}
+
 void TowerHipRuntime::MixBackboneEmbeddings(
     std::vector<float>* embeddings, std::span<const Drama3Frame> frames) const {
   const auto& cfg = impl_->cfg;
@@ -545,7 +611,7 @@ std::vector<float> TowerHipRuntime::SharedInput(
 
 bool TowerHipRuntime::Prefill(std::span<const float> backbone_hidden,
                               std::span<const Drama3Frame> frames,
-                              std::string* error) {
+                              std::string* error, std::size_t start_pos) {
   const auto& cfg = impl_->cfg;
   if (frames.empty() ||
       backbone_hidden.size() != frames.size() * cfg.hidden_size) {
@@ -556,7 +622,7 @@ bool TowerHipRuntime::Prefill(std::span<const float> backbone_hidden,
   if (steps == 0) {
     return true;
   }
-  if (steps > impl_->capacity) {
+  if (start_pos + steps > impl_->capacity) {
     SetError(error, "Drama 3 tower prefill exceeds cache capacity");
     return false;
   }
@@ -596,8 +662,8 @@ bool TowerHipRuntime::Prefill(std::span<const float> backbone_hidden,
                                 steps * sizeof(std::int32_t),
                                 hipMemcpyHostToDevice, impl_->stream),
                  "upload tower prefill book codes");
-      impl_->RunLayerDevice(layer, steps, 0, cur_h, impl_->ws.codes.get(),
-                            impl_->ws.label_mask.get(),
+      impl_->RunLayerDevice(layer, steps, start_pos, cur_h,
+                            impl_->ws.codes.get(), impl_->ws.label_mask.get(),
                             layer == 0 ? impl_->ws.extra.get() : nullptr,
                             next_h);
       std::swap(cur_h, next_h);
@@ -719,6 +785,18 @@ std::unique_ptr<TowerHipRuntime> TowerHipRuntime::Create(
 }
 
 void TowerHipRuntime::Reset() {}
+bool TowerHipRuntime::SavePrefixState(std::size_t, std::string* error) {
+  if (error != nullptr) {
+    *error = "Drama 3 tower runtime requires a HIP-enabled build";
+  }
+  return false;
+}
+bool TowerHipRuntime::RestorePrefixState(std::string* error) {
+  if (error != nullptr) {
+    *error = "Drama 3 tower runtime requires a HIP-enabled build";
+  }
+  return false;
+}
 void TowerHipRuntime::MixBackboneEmbeddings(
     std::vector<float>*, std::span<const Drama3Frame>) const {}
 std::vector<float> TowerHipRuntime::SharedInput(
@@ -726,8 +804,8 @@ std::vector<float> TowerHipRuntime::SharedInput(
   return {};
 }
 bool TowerHipRuntime::Prefill(std::span<const float>,
-                              std::span<const Drama3Frame>,
-                              std::string* error) {
+                              std::span<const Drama3Frame>, std::string* error,
+                              std::size_t) {
   if (error != nullptr) {
     *error = "Drama 3 tower runtime requires a HIP-enabled build";
   }

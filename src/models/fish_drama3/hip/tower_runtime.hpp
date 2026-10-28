@@ -27,6 +27,9 @@ public:
       std::size_t max_cache_steps = 4096, std::string* error = nullptr);
 
   void Reset();
+  [[nodiscard]] bool SavePrefixState(std::size_t prefix_steps,
+                                     std::string* error = nullptr);
+  [[nodiscard]] bool RestorePrefixState(std::string* error = nullptr);
 
   void MixBackboneEmbeddings(std::vector<float>* embeddings,
                              std::span<const Drama3Frame> frames) const;
@@ -36,7 +39,8 @@ public:
 
   [[nodiscard]] bool Prefill(std::span<const float> backbone_hidden,
                              std::span<const Drama3Frame> frames,
-                             std::string* error = nullptr);
+                             std::string* error = nullptr,
+                             std::size_t start_pos = 0);
 
   [[nodiscard]] bool RunFrame(std::span<const float> backbone_hidden,
                               const Drama3Frame& current_frame,

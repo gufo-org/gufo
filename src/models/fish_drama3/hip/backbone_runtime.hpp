@@ -25,6 +25,9 @@ public:
       std::size_t max_cache_steps = 4096, std::string* error = nullptr);
 
   void Reset();
+  [[nodiscard]] bool SavePrefixState(std::string* error = nullptr);
+  [[nodiscard]] bool RestorePrefixState(std::string* error = nullptr);
+  [[nodiscard]] std::size_t saved_prefix_steps() const noexcept;
 
   [[nodiscard]] std::vector<float> TokenEmbedding(
       std::span<const std::int32_t> token_ids) const;

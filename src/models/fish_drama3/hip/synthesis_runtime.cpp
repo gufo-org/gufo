@@ -128,6 +128,22 @@ std::int32_t SampleHostTopKTopP(const std::vector<float>& logits,
   return order[choice(rng)];
 }
 
+bool SameTakes(const std::vector<Drama3Take>& left,
+               const std::vector<Drama3Take>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < left.size(); ++i) {
+    if (left[i].text != right[i].text ||
+        left[i].codes.codebooks != right[i].codes.codebooks ||
+        left[i].codes.frames != right[i].codes.frames ||
+        left[i].codes.codes != right[i].codes.codes) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 struct SynthesisHipRuntime::Impl {
@@ -142,6 +158,14 @@ struct SynthesisHipRuntime::Impl {
   std::vector<float> cached_ref_samples;
   std::uint32_t cached_ref_rate{0};
   FishDacCodes cached_ref_codes;
+
+  // Cached prompt prefix state (system + references + history) across requests
+  bool has_cached_prefix{false};
+  std::vector<Drama3Take> cached_prefix_refs;
+  std::vector<Drama3Take> cached_prefix_history;
+  std::size_t cached_prefix_len{0};
+  Drama3Frame cached_prefix_last_frame{};
+  std::vector<float> cached_prefix_last_hidden;
 
   Impl(const std::string& model_dir, std::size_t max_ctx)
       : max_context_frames(max_ctx) {
@@ -259,54 +283,126 @@ bool SynthesisHipRuntime::Generate(const SynthesisRequest& request,
       refs.push_back(Drama3Take{request.reference_text, std::move(ref_codes)});
     }
 
-    const auto prompt = BuildDrama3Prompt(impl_->config, *impl_->tokenizer,
-                                          request.text, refs, request.history);
+    const auto prefix_frames = BuildDrama3PromptPrefix(
+        impl_->config, *impl_->tokenizer, refs, request.history);
+    const auto suffix_frames =
+        BuildDrama3PromptSuffix(*impl_->tokenizer, request.text);
     const std::size_t max_new = request.sampling.max_new_frames;
-    if (prompt.size() + max_new > impl_->max_context_frames) {
+    if (prefix_frames.size() + suffix_frames.size() + max_new >
+        impl_->max_context_frames) {
       SetError(error, "Drama 3 prompt + max_new_frames exceeds context limit");
       return false;
     }
 
-    impl_->backbone->Reset();
-    impl_->tower->Reset();
     impl_->codec->ResetStream();
+    const std::size_t dim = impl_->config.backbone.hidden_size;
 
-    // 1. Build input embeddings for prompt
-    std::vector<std::int32_t> prompt_ids(prompt.size());
-    for (std::size_t i = 0; i < prompt.size(); ++i) {
-      prompt_ids[i] = prompt[i][0];
+    const bool prefix_hit =
+        !prefix_frames.empty() && impl_->has_cached_prefix &&
+        impl_->cached_prefix_len == prefix_frames.size() &&
+        SameTakes(impl_->cached_prefix_refs, refs) &&
+        SameTakes(impl_->cached_prefix_history, request.history);
+
+    if (prefix_hit) {
+      const auto restore_start = Clock::now();
+      if (!impl_->backbone->RestorePrefixState(error) ||
+          !impl_->tower->RestorePrefixState(error)) {
+        impl_->has_cached_prefix = false;
+        return false;
+      }
+      result->backbone_prefill_ms += ElapsedMs(restore_start);
+    } else {
+      impl_->has_cached_prefix = false;
+      impl_->backbone->Reset();
+      impl_->tower->Reset();
+
+      std::vector<std::int32_t> prefix_ids(prefix_frames.size());
+      for (std::size_t i = 0; i < prefix_frames.size(); ++i) {
+        prefix_ids[i] = prefix_frames[i][0];
+      }
+      auto prefix_emb = impl_->backbone->TokenEmbedding(prefix_ids);
+      impl_->tower->MixBackboneEmbeddings(&prefix_emb, prefix_frames);
+
+      const auto bb_prefix_start = Clock::now();
+      std::vector<float> prefix_hidden;
+      if (!impl_->backbone->ForwardEmbeddings(prefix_emb, prefix_frames.size(),
+                                              &prefix_hidden, error, nullptr)) {
+        return false;
+      }
+      result->backbone_prefill_ms += ElapsedMs(bb_prefix_start);
+
+      if (is_cancelled && is_cancelled()) {
+        SetError(error, "Cancelled");
+        return false;
+      }
+
+      const auto tw_prefix_start = Clock::now();
+      if (!impl_->tower->Prefill(prefix_hidden, prefix_frames, error, 0U)) {
+        return false;
+      }
+      result->tower_prefill_ms += ElapsedMs(tw_prefix_start);
+
+      if (!impl_->backbone->SavePrefixState(error) ||
+          !impl_->tower->SavePrefixState(prefix_frames.size() - 1U, error)) {
+        return false;
+      }
+      impl_->cached_prefix_refs = refs;
+      impl_->cached_prefix_history = request.history;
+      impl_->cached_prefix_len = prefix_frames.size();
+      impl_->cached_prefix_last_frame = prefix_frames.back();
+      impl_->cached_prefix_last_hidden.assign(
+          prefix_hidden.end() - static_cast<std::ptrdiff_t>(dim),
+          prefix_hidden.end());
+      impl_->has_cached_prefix = true;
     }
-    auto embeddings = impl_->backbone->TokenEmbedding(prompt_ids);
-    impl_->tower->MixBackboneEmbeddings(&embeddings, prompt);
 
-    // 2. Backbone Prefill (with fused LM Head logits for the last prompt
-    // token!)
-    const auto bb_prefill_start = Clock::now();
-    std::vector<float> prefill_hidden;
+    // Incremental Suffix Prefill (only user turn + assistant header tokens)
+    std::vector<std::int32_t> suffix_ids(suffix_frames.size());
+    for (std::size_t i = 0; i < suffix_frames.size(); ++i) {
+      suffix_ids[i] = suffix_frames[i][0];
+    }
+    auto suffix_emb = impl_->backbone->TokenEmbedding(suffix_ids);
+    impl_->tower->MixBackboneEmbeddings(&suffix_emb, suffix_frames);
+
+    const auto bb_suffix_start = Clock::now();
+    std::vector<float> suffix_hidden;
     std::vector<float> logits;
-    if (!impl_->backbone->ForwardEmbeddings(embeddings, prompt.size(),
-                                            &prefill_hidden, error, &logits)) {
+    if (!impl_->backbone->ForwardEmbeddings(suffix_emb, suffix_frames.size(),
+                                            &suffix_hidden, error, &logits)) {
       return false;
     }
-    result->backbone_prefill_ms = ElapsedMs(bb_prefill_start);
+    result->backbone_prefill_ms += ElapsedMs(bb_suffix_start);
 
     if (is_cancelled && is_cancelled()) {
       SetError(error, "Cancelled");
       return false;
     }
 
-    // 3. Tower Prefill
-    const auto tw_prefill_start = Clock::now();
-    if (!impl_->tower->Prefill(prefill_hidden, prompt, error)) {
+    const auto tw_suffix_start = Clock::now();
+    std::vector<Drama3Frame> tower_suffix_frames;
+    tower_suffix_frames.reserve(1U + suffix_frames.size());
+    tower_suffix_frames.push_back(impl_->cached_prefix_last_frame);
+    tower_suffix_frames.insert(tower_suffix_frames.end(), suffix_frames.begin(),
+                               suffix_frames.end());
+
+    std::vector<float> tower_suffix_hidden;
+    tower_suffix_hidden.reserve(tower_suffix_frames.size() * dim);
+    tower_suffix_hidden.insert(tower_suffix_hidden.end(),
+                               impl_->cached_prefix_last_hidden.begin(),
+                               impl_->cached_prefix_last_hidden.end());
+    tower_suffix_hidden.insert(tower_suffix_hidden.end(), suffix_hidden.begin(),
+                               suffix_hidden.end());
+
+    if (!impl_->tower->Prefill(tower_suffix_hidden, tower_suffix_frames, error,
+                               impl_->cached_prefix_len - 1U)) {
       return false;
     }
-    result->tower_prefill_ms = ElapsedMs(tw_prefill_start);
+    result->tower_prefill_ms += ElapsedMs(tw_suffix_start);
 
-    const std::size_t dim = impl_->config.backbone.hidden_size;
     std::vector<float> cur_hidden(
-        prefill_hidden.end() - static_cast<std::ptrdiff_t>(dim),
-        prefill_hidden.end());
-    Drama3Frame cur_frame = prompt.back();
+        suffix_hidden.end() - static_cast<std::ptrdiff_t>(dim),
+        suffix_hidden.end());
+    Drama3Frame cur_frame = suffix_frames.back();
 
     std::mt19937 rng(request.sampling.seed);
     SamplerScratch sampler_scratch;

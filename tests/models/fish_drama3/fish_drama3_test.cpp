@@ -105,7 +105,12 @@ int main(int argc, char** argv) {
   const auto prompt_frames = BuildDrama3Prompt(
       cfg, tok, "<|speaker:0|>Hello from Fish Drama 3 on AMD gfx1151!",
       {ref_take});
+  const auto prefix_frames = BuildDrama3PromptPrefix(cfg, tok, {ref_take});
+  const auto suffix_frames = BuildDrama3PromptSuffix(
+      tok, "<|speaker:0|>Hello from Fish Drama 3 on AMD gfx1151!");
   Require(!prompt_frames.empty(), "Prompt frames should not be empty");
+  Require(prefix_frames.size() + suffix_frames.size() == prompt_frames.size(),
+          "Prefix + suffix frame count must match full prompt");
   std::cout << "[PASS] Built prompt with " << prompt_frames.size()
             << " frames\n";
 

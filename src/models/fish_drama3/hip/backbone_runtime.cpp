@@ -139,6 +139,8 @@ struct FullAttentionWeights {
 
   DeviceBuffer<float> key_cache;    // [capacity, 512]
   DeviceBuffer<float> value_cache;  // [capacity, 512]
+  DeviceBuffer<float> prefix_key_cache;
+  DeviceBuffer<float> prefix_value_cache;
 };
 
 struct LinearAttentionWeights {
@@ -154,6 +156,8 @@ struct LinearAttentionWeights {
 
   DeviceBuffer<float> conv_state;  // [3, 8192]
   DeviceBuffer<float> ssm_state;   // [32, 128, 128]
+  DeviceBuffer<float> prefix_conv_state;
+  DeviceBuffer<float> prefix_ssm_state;
 };
 
 struct LayerWeights {
@@ -245,6 +249,7 @@ struct BackboneHipRuntime::Impl {
   BackboneConfig cfg;
   std::size_t capacity{4096};
   std::size_t cur_steps{0};
+  std::size_t prefix_steps{0};
   std::size_t compact_lm_head_rows{0};
 
   hipStream_t stream{nullptr};
@@ -622,6 +627,110 @@ void BackboneHipRuntime::Reset() {
   }
 }
 
+bool BackboneHipRuntime::SavePrefixState(std::string* error) {
+  if (impl_->cur_steps == 0 || impl_->cur_steps > impl_->capacity) {
+    SetError(error, "Invalid Drama 3 backbone prefix steps to save");
+    return false;
+  }
+  try {
+    impl_->prefix_steps = impl_->cur_steps;
+    const std::size_t kv_width =
+        impl_->cfg.num_key_value_heads * impl_->cfg.head_dim;
+    const std::size_t kv_elems = impl_->prefix_steps * kv_width;
+    for (auto& lw : impl_->layers) {
+      if (lw.is_full_attention) {
+        if (lw.full_attn.prefix_key_cache.size() < kv_elems) {
+          lw.full_attn.prefix_key_cache.Reset(kv_elems);
+          lw.full_attn.prefix_value_cache.Reset(kv_elems);
+        }
+        RequireHip(hipMemcpyAsync(lw.full_attn.prefix_key_cache.get(),
+                                  lw.full_attn.key_cache.get(),
+                                  kv_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "save backbone prefix key_cache");
+        RequireHip(hipMemcpyAsync(lw.full_attn.prefix_value_cache.get(),
+                                  lw.full_attn.value_cache.get(),
+                                  kv_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "save backbone prefix value_cache");
+      } else {
+        const std::size_t conv_elems = lw.linear_attn.conv_state.size();
+        const std::size_t ssm_elems = lw.linear_attn.ssm_state.size();
+        if (lw.linear_attn.prefix_conv_state.size() != conv_elems) {
+          lw.linear_attn.prefix_conv_state.Reset(conv_elems);
+        }
+        if (lw.linear_attn.prefix_ssm_state.size() != ssm_elems) {
+          lw.linear_attn.prefix_ssm_state.Reset(ssm_elems);
+        }
+        RequireHip(hipMemcpyAsync(lw.linear_attn.prefix_conv_state.get(),
+                                  lw.linear_attn.conv_state.get(),
+                                  conv_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "save backbone prefix conv_state");
+        RequireHip(hipMemcpyAsync(lw.linear_attn.prefix_ssm_state.get(),
+                                  lw.linear_attn.ssm_state.get(),
+                                  ssm_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "save backbone prefix ssm_state");
+      }
+    }
+    RequireHip(hipStreamSynchronize(impl_->stream),
+               "synchronize save backbone prefix state");
+    return true;
+  } catch (const std::exception& ex) {
+    SetError(error, ex.what());
+    return false;
+  }
+}
+
+bool BackboneHipRuntime::RestorePrefixState(std::string* error) {
+  if (impl_->prefix_steps == 0 || impl_->prefix_steps > impl_->capacity) {
+    SetError(error, "No saved Drama 3 backbone prefix state to restore");
+    return false;
+  }
+  try {
+    impl_->cur_steps = impl_->prefix_steps;
+    const std::size_t kv_width =
+        impl_->cfg.num_key_value_heads * impl_->cfg.head_dim;
+    const std::size_t kv_elems = impl_->prefix_steps * kv_width;
+    for (auto& lw : impl_->layers) {
+      if (lw.is_full_attention) {
+        RequireHip(hipMemcpyAsync(lw.full_attn.key_cache.get(),
+                                  lw.full_attn.prefix_key_cache.get(),
+                                  kv_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "restore backbone prefix key_cache");
+        RequireHip(hipMemcpyAsync(lw.full_attn.value_cache.get(),
+                                  lw.full_attn.prefix_value_cache.get(),
+                                  kv_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "restore backbone prefix value_cache");
+      } else {
+        const std::size_t conv_elems = lw.linear_attn.conv_state.size();
+        const std::size_t ssm_elems = lw.linear_attn.ssm_state.size();
+        RequireHip(hipMemcpyAsync(lw.linear_attn.conv_state.get(),
+                                  lw.linear_attn.prefix_conv_state.get(),
+                                  conv_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "restore backbone prefix conv_state");
+        RequireHip(hipMemcpyAsync(lw.linear_attn.ssm_state.get(),
+                                  lw.linear_attn.prefix_ssm_state.get(),
+                                  ssm_elems * sizeof(float),
+                                  hipMemcpyDeviceToDevice, impl_->stream),
+                   "restore backbone prefix ssm_state");
+      }
+    }
+    return true;
+  } catch (const std::exception& ex) {
+    SetError(error, ex.what());
+    return false;
+  }
+}
+
+std::size_t BackboneHipRuntime::saved_prefix_steps() const noexcept {
+  return impl_->prefix_steps;
+}
+
 std::vector<float> BackboneHipRuntime::TokenEmbedding(
     std::span<const std::int32_t> token_ids) const {
   const std::size_t dim = impl_->cfg.hidden_size;
@@ -869,6 +978,21 @@ std::unique_ptr<BackboneHipRuntime> BackboneHipRuntime::Create(
 }
 
 void BackboneHipRuntime::Reset() {}
+bool BackboneHipRuntime::SavePrefixState(std::string* error) {
+  if (error != nullptr) {
+    *error = "Drama 3 backbone runtime requires a HIP-enabled build";
+  }
+  return false;
+}
+bool BackboneHipRuntime::RestorePrefixState(std::string* error) {
+  if (error != nullptr) {
+    *error = "Drama 3 backbone runtime requires a HIP-enabled build";
+  }
+  return false;
+}
+std::size_t BackboneHipRuntime::saved_prefix_steps() const noexcept {
+  return 0;
+}
 std::vector<float> BackboneHipRuntime::TokenEmbedding(
     std::span<const std::int32_t>) const {
   return {};
