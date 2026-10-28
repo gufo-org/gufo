@@ -58,6 +58,9 @@ int ds4_gpu_compressor_update_tensor(const ds4_gpu_tensor *kv_cur, const ds4_gpu
 int ds4_gpu_dsv4_fp8_kv_quantize_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);
 int ds4_gpu_dsv4_fp8_kv_quantize_mirror_f16_tensor(ds4_gpu_tensor *x, ds4_gpu_tensor *mirror_f16, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);
 int ds4_gpu_dsv4_indexer_qat_tensor(ds4_gpu_tensor *x, uint32_t n_rows, uint32_t head_dim);
+/* RoPE tail of every row at one position, then the indexer QAT; bit-identical
+ * to ds4_gpu_rope_tail_tensor followed by ds4_gpu_dsv4_indexer_qat_tensor. */
+int ds4_gpu_dsv4_indexer_rope_qat_tensor(ds4_gpu_tensor *x, uint32_t n_rows, uint32_t head_dim, uint32_t n_rot, uint32_t pos, uint32_t n_ctx_orig, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow);
 /* Single-token form of ds4_gpu_dsv4_qkv_rms_norm_rows_tensor that also writes
  * q's Q8_0 row and finishes the KV row in place (RoPE tail, FP8 rounding) and
  * stores its F16-rounded copy at raw_row of raw_cache. */
