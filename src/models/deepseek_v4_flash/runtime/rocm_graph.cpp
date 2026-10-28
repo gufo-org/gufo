@@ -1304,13 +1304,11 @@ static bool rocm_graph_encode_decode_layer(
                                            layer->attn_q_b->abs_offset, q_rank,
                                            q_dim, g->qr_norm_q8) != 0;
     if (ok)
-      ok = ds4_gpu_head_rms_norm_tensor(g->q, 1, DS4_N_HEAD, DS4_N_HEAD_DIM,
-                                        DS4_RMS_EPS) != 0;
-    if (ok) ok = ds4_gpu_rope_tail_tensor(g->q, 1, DS4_N_HEAD, DS4_N_HEAD_DIM,
-                                            DS4_N_ROT, pos,
-                                            compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0,
-                                            false, freq_base, freq_scale, ext_factor, attn_factor,
-                                            DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
+      ok = ds4_gpu_head_rms_norm_rope_tensor(
+               g->q, 1, DS4_N_HEAD, DS4_N_HEAD_DIM, DS4_N_ROT, pos,
+               compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, false, freq_base,
+               freq_scale, ext_factor, attn_factor, DS4_ROPE_YARN_BETA_FAST,
+               DS4_ROPE_YARN_BETA_SLOW, DS4_RMS_EPS) != 0;
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("q_path");
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("kv_path");
 
