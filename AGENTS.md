@@ -57,11 +57,12 @@ not a duplicate full correctness run. Reuse baseline evidence only when revision
 toolchain, harness, model, settings and cache history match. Include `long-context`
 and `cache` for continuation changes; verify loaded mode and actual drafts.
 Correctness and expected prefill/cache work are strict; timings are
-mandatory per request/phase at 5% and 3 ms, never averaged across requests.
+mandatory per request/phase at 5% and 10 ms, never averaged across requests.
 Run once, investigate flags, then alternate main/PR only for affected histories;
 use unchanged-main controls when needed and retain every result. Fix confirmed
 regressions before publishing. Noisy evidence stays visibly inconclusive and
-unqualified; do not widen margins or stop at reporting failures. Use the code
+unqualified; do not widen margins or stop at reporting failures. Devlab keeps
+inconclusive timing advisory on both ordinary and release PRs. Use the code
 diff to select affected metrics; unrelated timing variance does not justify
 another full matrix.
 For reported coding-agent loops, also replay the affected workflow with

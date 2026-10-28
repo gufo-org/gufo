@@ -193,7 +193,7 @@ __launch_bounds__(WM * WN * 32) __global__
 
 bool DenseShape(int channels, int inner) {
   return (channels == 4096 && (inner == 4096 || inner == 12288)) ||
-         (channels == 12288 && inner == 4096);
+         ((channels == 64 || channels == 12288) && inner == 4096);
 }
 
 void PackDense16(const std::uint16_t* input, std::uint16_t* output, int rows,
@@ -207,7 +207,20 @@ bool DenseBf16(const std::uint16_t* weights, const std::uint16_t* input,
                hipStream_t stream) {
   if (rows < 1 || !DenseShape(channels, inner))
     return false;
-  if (rows <= 64 || (rows <= 256 && channels == 4096)) {
+  if (channels == 64) {
+    // The final image projection needs the same accumulation order across
+    // BLAS database updates. Small channel tiles also expose enough parallel
+    // work at low image resolutions.
+    const dim3 grid((rows + 31) / 32, channels / 16);
+    if (rows % 32)
+      DenseProjection<16, 32, 1, 2, true><<<grid, 64, 0, stream>>>(
+          weights, input, reinterpret_cast<hip_bfloat16*>(output), rows,
+          channels, inner);
+    else
+      DenseProjection<16, 32, 1, 2, false><<<grid, 64, 0, stream>>>(
+          weights, input, reinterpret_cast<hip_bfloat16*>(output), rows,
+          channels, inner);
+  } else if (rows <= 64 || (rows <= 256 && channels == 4096)) {
     const dim3 grid((rows + 31) / 32, channels / 128);
     if (rows % 32)
       DenseProjection<128, 32, 2, 2, true><<<grid, 128, 0, stream>>>(

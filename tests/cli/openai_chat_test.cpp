@@ -843,8 +843,8 @@ void TestResponsesClientCompatTolerances() {
            "A namespace without a tools array is rejected");
   }
   {
-    // The shared 128-function cap counts flattened functions at append time,
-    // so both orderings around a full namespace reject the 129th function.
+    // #820: no fixed function count. Claude Code with MCP servers sends
+    // more than 128 tools; the request body size bounds the count.
     std::string nested = R"({"type":"namespace","name":"crm","tools":[)";
     for (int i = 0; i < 128; ++i) {
       if (i != 0)
@@ -853,21 +853,44 @@ void TestResponsesClientCompatTolerances() {
     }
     nested += "]}";
     const std::string outside = R"({"type":"function","name":"outside"})";
-    gufo::server::ChatRequest accepted;
-    Expect(!gufo::server::ParseOpenAiResponseControls(
-               gufo::json::parse(R"({"tools":[)" + nested + "]}"), &accepted) &&
-               accepted.tools.size() == 128,
-           "Exactly 128 functions flattened from a namespace are accepted");
     for (const bool outside_first : {false, true}) {
       const auto body = outside_first
                             ? R"({"tools":[)" + outside + "," + nested + "]}"
                             : R"({"tools":[)" + nested + "," + outside + "]}";
-      gufo::server::ChatRequest overflow;
-      Expect(gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
-                                                       &overflow)
-                 .has_value(),
-             "Both boundary orderings reject the 129th flattened function");
+      gufo::server::ChatRequest accepted;
+      Expect(!gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
+                                                        &accepted)
+                     .has_value() &&
+                 accepted.tools.size() == 129,
+             "Both orderings accept a 129th flattened function");
     }
+    const std::string duplicate = R"({"type":"function","name":"f127"})";
+    gufo::server::ChatRequest repeated;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[)" + nested + "," + duplicate +
+                                 "]}"),
+               &repeated)
+               .has_value(),
+           "A name repeated after a namespace is still rejected");
+  }
+  {
+    // The Messages tools of Claude Code with MCP servers (#820).
+    std::string tools = "[";
+    for (int i = 0; i < 200; ++i) {
+      if (i != 0)
+        tools += ",";
+      tools +=
+          R"({"name":"mcp__srv__t)" + std::to_string(i) +
+          R"(","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}})";
+    }
+    tools += "]";
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseAnthropicToolControls(
+                gufo::json::parse(R"({"tools":)" + tools + "}"), &chat)
+                   .has_value() &&
+               chat.tools.size() == 200 &&
+               chat.tools.back().name == "mcp__srv__t199",
+           "Messages accepts 200 custom tools");
   }
   {
     gufo::server::ChatRequest chat;
@@ -2429,16 +2452,20 @@ void TestImagePartsRetainOrderAndIdentity() {
     Expect(gufo::server::HandleOpenAiChat(Request(body), backend).status == 400,
            "unsupported image role, policy and URL are rejected");
   }
-  // Codex sends "high" from view_image; every standard value behaves as auto.
+  // Codex sends "high" from view_image. Only low changes the resolution.
+  using Detail = gufo::tokenization::ChatMessage::ImageDetail;
   for (const std::string detail : {"auto", "low", "high", "original"}) {
     const auto accepted = gufo::server::HandleOpenAiChat(
         Request(
             R"({"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":")" +
             detail + R"("}}]}]})"),
         backend);
-    Expect(accepted.status == 200 &&
-               backend.last_request.messages.front().images.size() == 1,
-           "standard image detail values are accepted as auto");
+    const auto& images = backend.last_request.messages.front().images;
+    Expect(accepted.status == 200 && images.size() == 1 &&
+               images[0].detail ==
+                   (detail == "low" ? Detail::kLow : Detail::kAuto),
+           "standard image detail values are accepted, and only low bounds "
+           "the resolution");
   }
 }
 
@@ -2530,6 +2557,33 @@ void TestToolImagesRetainOrderAndIdentity() {
              chat.content == "left  right" && chat.images.size() == 2 &&
              chat.images[0].offset == 5 && chat.images[1].offset == 11,
          "Chat images stay attached to the tool result at their text offsets");
+  {
+    using Detail = gufo::tokenization::ChatMessage::ImageDetail;
+    const auto detailed = gufo::server::HandleOpenAiChat(Request(R"({
+      "model":"test-model",
+      "messages":[{"role":"tool","tool_call_id":"call_picture","content":[
+        {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":"low"}}
+      ]}]
+    })"),
+                                                         backend);
+    Expect(detailed.status == 200 &&
+               backend.last_request.messages.front().images.size() == 1 &&
+               backend.last_request.messages.front().images[0].detail ==
+                   Detail::kLow,
+           "tool images carry their requested detail");
+    auto item =
+        parse(R"({"type":"function_call_output","call_id":"call_picture",
+      "output":[{"type":"input_image","detail":"low",
+                 "image_url":"data:image/png;base64,AQID"}]})");
+    gufo::core::ImageReadBudget budget;
+    gufo::tokenization::ChatMessage message;
+    std::string error;
+    Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                    &error) &&
+               message.images.size() == 1 &&
+               message.images[0].detail == Detail::kLow,
+           "Responses input_image.detail reaches the image part: " + error);
+  }
 
   for (const auto* kind : {"function_call_output", "custom_tool_call_output"}) {
     for (const bool text : {false, true}) {

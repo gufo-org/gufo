@@ -1172,12 +1172,14 @@ static __global__ void GroupedQkvNormRopeWaveKernel(
           static_cast<std::size_t>(row) * kRopeHalf + dimension;
       const float cosine = Bf16ToFloat(rope_cos[rope]);
       const float sine = Bf16ToFloat(rope_sin[rope]);
-      query[output] = FloatToBf16(query_value * cosine - paired_query * sine);
+      query[output] = FloatToBf16(
+          fmaf(query_value, cosine, -__fmul_rn(paired_query, sine)));
       query[output + kRopeHalf] =
-          FloatToBf16(paired_query * cosine + query_value * sine);
-      key[output] = FloatToBf16(key_value * cosine - paired_key * sine);
+          FloatToBf16(fmaf(paired_query, cosine, __fmul_rn(query_value, sine)));
+      key[output] =
+          FloatToBf16(fmaf(key_value, cosine, -__fmul_rn(paired_key, sine)));
       key[output + kRopeHalf] =
-          FloatToBf16(paired_key * cosine + key_value * sine);
+          FloatToBf16(fmaf(paired_key, cosine, __fmul_rn(key_value, sine)));
     } else if (dimension >= kRopeHalf * 2U) {
       query[output] =
           FloatToBf16(Bf16ToFloat(qkv[query_base + dimension]) * query_inverse *

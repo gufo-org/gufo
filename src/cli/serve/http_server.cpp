@@ -1722,8 +1722,10 @@ void LoadingResponder::serve() {
   loading.headers.emplace_back("Retry-After", "1");
   const std::string reply = BuildResponse(loading);
   // One connection at a time is enough for probes. Read the request head
-  // before replying so closing does not reset an unread request, but bound
-  // the wait: a client that connects and sends nothing must not delay stop().
+  // before replying, and after replying read what the client still sends (a
+  // request body) until it closes: closing with unread data resets the
+  // connection, and the client can lose the reply. Bound both waits: a client
+  // that connects and sends nothing must not delay stop().
   constexpr auto kRequestWait = std::chrono::milliseconds(500);
   while (!stopped_.load(std::memory_order_acquire)) {
     if (net::PollReadable(listen_fd_, 100) <= 0)
@@ -1731,26 +1733,36 @@ void LoadingResponder::serve() {
     const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
     if (client_fd < 0)
       continue;
-    std::string head;
-    const auto deadline = std::chrono::steady_clock::now() + kRequestWait;
-    while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
-           !stopped_.load(std::memory_order_acquire)) {
+    // Appends one read to `into` (when set); false once the deadline passes,
+    // the client closes or stop() runs.
+    const auto receive = [&](std::chrono::steady_clock::time_point deadline,
+                             std::string* into) {
       const auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(
               deadline - std::chrono::steady_clock::now())
               .count();
-      if (remaining <= 0 ||
+      if (stopped_.load(std::memory_order_acquire) || remaining <= 0 ||
           net::PollReadable(client_fd, static_cast<int>(remaining)) <= 0)
-        break;
-      char buffer[2048];
+        return false;
+      char buffer[4096];
       const std::intptr_t received =
           net::Receive(client_fd, buffer, sizeof(buffer), 0);
       if (received <= 0)
-        break;
-      head.append(buffer, static_cast<std::size_t>(received));
+        return false;
+      if (into != nullptr)
+        into->append(buffer, static_cast<std::size_t>(received));
+      return true;
+    };
+    std::string head;
+    const auto head_deadline = std::chrono::steady_clock::now() + kRequestWait;
+    while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
+           receive(head_deadline, &head)) {
     }
     (void)SendAll(client_fd, reply);
     (void)net::ShutdownSocket(client_fd, net::ShutdownHow::kWrite);
+    const auto drain_deadline = std::chrono::steady_clock::now() + kRequestWait;
+    while (receive(drain_deadline, nullptr)) {
+    }
     net::CloseSocket(client_fd);
   }
 }
@@ -1857,6 +1869,7 @@ void HttpServer::register_routes() {
   add("POST", "/rerank", NotImplemented);
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);
+  add("POST", "/apply-template", HandleApplyTemplate);
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);
@@ -1953,7 +1966,12 @@ void HttpServer::run(bool handle_signals) {
                             "configure HTTP listener");
   Logger::Info(
       "server",
-      "event=listening address=http://" +
+      "event=listening monotonic_us=" +
+          std::to_string(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch())
+                  .count()) +
+          " address=http://" +
           (host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]") +
           ":" + std::to_string(port_) +
           " auth=" + (options_.api_key.empty() ? "off" : "bearer") +

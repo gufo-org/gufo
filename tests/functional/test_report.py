@@ -49,6 +49,30 @@ class ReportTest(unittest.TestCase):
         self.plan = {"base": "a" * 40, "head": "b" * 40, "deferred": [], "out_of_scope": [],
                      "groups": [{"profile": "flash-next-q4/off"}]}
 
+    def test_model_timing_policy_on_pr_and_release_tiers(self):
+        group = {"profile": "flash-next-q4/off", "configuration": "standard",
+                 "suites": ["stops"], "status": "passed"}
+        summary = {"groups": [group], "models": [{"id": "flash-next-q4",
+                   "correctness": "passed", "timing": "passed"}]}
+        for tier in ("pr", "full"):
+            plan = {**self.plan, "schema": 2, "tier": tier, "release_only": [],
+                    "models": [{"id": "flash-next-q4", "reasons": []}], "groups": [group]}
+            for timing, expected in (("inconclusive", "success"), ("slower", "failure"),
+                                     ("missing", "error"), ("incomparable", "error")):
+                with self.subTest(tier=tier, timing=timing), tempfile.TemporaryDirectory() as directory:
+                    with patch.object(report, "timing_state", return_value=timing):
+                        status, comment = self.run_report(directory, plan, summary, bench={
+                            "flash-next-q4.phases.json": json.dumps({
+                                "revisions": {"base": plan["base"], "head": plan["head"]}})})
+                    self.assertEqual(status["state"], expected)
+                    if timing == "inconclusive":
+                        self.assertIn("timing warning: inconclusive comparisons retained", comment)
+                        self.assertIn("| Flash-Next Q4 | passed | inconclusive |", comment)
+            failed = {**summary, "groups": [{**group, "status": "failed"}]}
+            with tempfile.TemporaryDirectory() as directory:
+                status, _ = self.run_report(directory, plan, failed)
+            self.assertEqual(status["state"], "failure")
+
     def test_failed_group_is_a_failure_with_detail(self):
         summary = {"groups": [
             {"profile": "flash-next-q4/off", "configuration": "standard",
@@ -111,14 +135,15 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| `tg128 @ d0` | 20.00 | 20.00 | +0.0% |", comment)
 
     def test_phase_verdicts_need_every_repeat(self):
-        self.assertEqual(phases.verdict([(100, 110), (100, 120)]), "slower")
-        self.assertEqual(phases.verdict([(100, 110), (100, 101)]), "noisy")
-        self.assertEqual(phases.verdict([(100, 90), (100, 80)]), "faster")
-        self.assertEqual(phases.verdict([(100, 110), (100, 90)]), "noisy")
+        self.assertEqual(phases.verdict([(100, 111), (100, 120)]), "slower")
+        self.assertEqual(phases.verdict([(100, 111), (100, 101)]), "noisy")
+        self.assertEqual(phases.verdict([(100, 89), (100, 80)]), "faster")
+        self.assertEqual(phases.verdict([(100, 111), (100, 89)]), "noisy")
         # A slow base repeat alone is not a regression (#788 follow-up cache restore).
         self.assertEqual(phases.verdict([(7.86, 2.63), (2.54, 2.60)]), "same")
-        # Above 5% but within 3 ms is noise, not a regression.
-        self.assertEqual(phases.verdict([(20, 22), (20, 22.5)]), "same")
+        # Above 5% but within 10 ms is noise, not a regression.
+        self.assertEqual(phases.verdict([(20, 29), (20, 30)]), "same")
+        self.assertEqual(phases.verdict([(1000, 1049), (1000, 1050)]), "same")
         self.assertEqual(phases.verdict([]), "missing")
 
     def test_phase_pipeline_is_drawn_with_verdict_colors(self):
@@ -139,7 +164,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(verdicts["startup.weights"], "same")
         self.assertEqual(verdicts["startup.structured"], "missing")
         self.assertEqual(diverged, ["long", "resume", "short"])
-        data = {"settings": {"repeats": 2, "slowdown": .05, "noise_ms": 3,
+        data = {"settings": {"repeats": 2, "slowdown": .05, "noise_ms": 10,
                              "requests": {"short": "Short prompt", "long": "Long prompt",
                                           "resume": "Follow-up"}},
                 "wall_s": 600, "arms": arms, "phases": found, "diverged": diverged}

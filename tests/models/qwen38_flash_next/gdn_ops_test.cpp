@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -113,13 +114,15 @@ double WorstRelative(const std::vector<float>& reference,
 
 /// Worst absolute difference over the reference's RMS: the chunked route
 /// rounds its operands to F16, so near-zero elements carry the row's
-/// rounding noise.
+/// rounding noise. A non-finite candidate element is an infinite error.
 double WorstOverRms(const std::vector<float>& reference,
                     const std::vector<float>& candidate) {
   double ss = 0.0;
   double worst = 0.0;
   for (std::size_t i = 0; i < reference.size(); ++i) {
     ss += static_cast<double>(reference[i]) * reference[i];
+    if (!std::isfinite(candidate[i]))
+      return std::numeric_limits<double>::infinity();
     worst = std::max(
         worst, std::abs(static_cast<double>(reference[i]) - candidate[i]));
   }

@@ -49,10 +49,16 @@ __global__ static void indexer_score_one_direct_kernel(
   }
   __syncthreads();
   if (tid == 0) {
+#pragma clang fp reassociate(off)
     float total = 0.0f;
-    // Keep the previous groups of four and their accumulation order.
-    for (uint32_t h = 0; h < 64u; h += 4u)
-      total += partial[h] + partial[h + 1] + partial[h + 2] + partial[h + 3];
+    // Preserve the qualified compiler's sequential head accumulation.
+    // Fast-math must not regroup four heads before adding the running sum.
+    for (uint32_t h = 0; h < 64u; h += 4u) {
+      total += partial[h];
+      total += partial[h + 1];
+      total += partial[h + 2];
+      total += partial[h + 3];
+    }
     scores[c] = total;
   }
 }

@@ -1,4 +1,4 @@
-name: Devlab functional comment
+name: Functional reporting
 
 # Keeps the single Devlab functional PR comment in step with its run: a
 # placeholder with a cancel link while the run is in progress, and the
@@ -10,7 +10,7 @@ name: Devlab functional comment
 # PR is resolved from the triggering run, not from the artifact.
 on:
   workflow_run:
-    workflows: [ Devlab functional checks ]
+    workflows: [ Linux validation ]
     types: [ in_progress, completed ]
 
 permissions: {}
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Update functional PR comment
+    name: Update PR comment
     if: >-
       github.repository == 'gufo-org/gufo' &&
       github.event.workflow_run.event == 'pull_request'

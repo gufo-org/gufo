@@ -420,6 +420,11 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
         if name == "pattern_root" and sampling_preset != "deepseek4":
             # Only DeepSeek's string flag can carry an undeclared typed key.
             arguments = {"value": "alpha"}
+        if name == "nullable_null":
+            # A union admitting strings keeps a bare word as text, as in
+            # llama.cpp, so Python's None is the string "None". Ask for the
+            # JSON spelling the expected null needs.
+            prompt += " Write the value as the JSON literal null."
         if name == "nullable_string":
             # Both alternatives are valid schema values; explicitly select
             # the string. Qwen's native syntax, like its chat template and

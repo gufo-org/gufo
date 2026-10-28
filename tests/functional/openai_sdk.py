@@ -28,7 +28,7 @@ from metrics import CaseComplete, Recorder
 from tool_reasoning import check_reasoning_separator, check_tool_reasoning, response_result
 from tool_streaming import check_tool_streaming
 from discovery import check_discovery
-from image_inputs import check_image_count, check_image_inputs
+from image_inputs import check_image_count, check_image_detail, check_image_inputs
 from tool_images import check_tool_images
 from tool_choice import check_tool_choice_cache
 from tool_parameter_order import check_tool_parameter_order
@@ -2092,18 +2092,19 @@ def check_auto_tools(client, model, checks, vision=False):
     assert json.loads(calls[0].arguments) == {"value": 7}, result
     record("auto_many_declared_tools", result.to_dict())
     if vision:
+        # The argument stop below requires a color name, not an RGB/hex code.
+        image_prompt = ("Call record with value equal to the image color as a lowercase "
+                        "English color name, not a hex or RGB code. Omit optional.")
         result = client.responses.create(**{
             **response_request, "temperature": 0,
             "input": [{"role": "user", "content": [
-                {"type": "input_text", "text":
-                 "Call record with value equal to the image color. Omit optional."},
+                {"type": "input_text", "text": image_prompt},
                 {"type": "input_image", "image_url":
                  image_content("blue")["image_url"]["url"]}]}]})
         response_signature(result, value="blue")
         record("auto_image_tool", result.to_dict())
         image_request = {**common, "messages": [{"role": "user", "content": [
-            image_content("blue"), {"type": "text", "text":
-            "Call record with value equal to the image color. Omit optional."}]}]}
+            image_content("blue"), {"type": "text", "text": image_prompt}]}]}
         stopped = chat_result(client, {**image_request, "stop": "blue"}, True)
         assert stopped["finish"] == "stop" and not stopped["tools"], stopped
         retry = chat_result(client, image_request, True)
@@ -2754,7 +2755,7 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 
-SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
+SDK_SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
               "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
@@ -2797,8 +2798,8 @@ def main():
     args = parser.parse_args()
     if args.suite in ("discovery", "messages-image-counts", "all") and args.expected_input_modalities is None:
         parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
-    if args.suite in ("image-inputs", "image-count", "tool-images") and not args.vision:
-        parser.error("image-inputs, image-count and tool-images require --vision and a loaded projector")
+    if args.suite in ("image-inputs", "image-count", "tool-images", "image-detail") and not args.vision:
+        parser.error("image-inputs, image-count, tool-images, and image-detail require --vision and a loaded projector")
     if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
         parser.error("--sampling-preset is required for all/sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
@@ -2860,6 +2861,7 @@ def main():
             "tool-images": lambda: check_tool_images(
                 client, args.model, checks, image_content, chat_result, response_result,
                 args.server_log),
+            "image-detail": lambda: check_image_detail(client, args.model, checks, chat_result),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
@@ -2945,7 +2947,7 @@ def main():
                 client, args.model, checks, chat_result),
         }
         selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
-                     and (name not in ("image-inputs", "image-count", "tool-images") or args.vision)]
+                     and (name not in ("image-inputs", "image-count", "tool-images", "image-detail") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:

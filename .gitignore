@@ -82,7 +82,7 @@ test-results/
 # source control. Keep the root anchored so similarly named fixture paths are
 # unaffected.
 /artifacts/
-/models/
+/models
 *.safetensors
 *.gguf
 *.ckpt

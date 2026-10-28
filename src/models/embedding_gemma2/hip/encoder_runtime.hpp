@@ -16,9 +16,9 @@ namespace gufo::models::embedding_gemma2::hip {
 /// The model's context window. Longer sequences are refused, not truncated.
 inline constexpr std::size_t kMaxSequenceTokens = 8192;
 
-/// GPU text and image encoder. One instance owns the weights and the scratch
-/// buffers and runs one device batch at a time. `Embed` is thread-safe: text
-/// calls that wait for the device share batches in arrival order, as
+/// GPU text, image and audio encoder. One instance owns the weights and the
+/// scratch buffers and runs one device batch at a time. `Embed` is thread-safe:
+/// text calls that wait for the device share batches in arrival order, as
 /// `BatchScheduler` describes, so a long call does not hold the device until
 /// it finishes.
 class EncoderRuntime {
@@ -30,7 +30,8 @@ public:
   EncoderRuntime(EncoderRuntime&&) = delete;
   EncoderRuntime& operator=(EncoderRuntime&&) = delete;
 
-  /// Uploads the text backbone. Vision weights load on the first image.
+  /// Uploads the text backbone. Vision and audio weights load on the first
+  /// request for each.
   [[nodiscard]] static std::unique_ptr<EncoderRuntime> Create(
       const std::string& model_dir, std::string* error = nullptr);
 
@@ -49,9 +50,10 @@ public:
       std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,
       const std::function<bool()>& is_cancelled = {});
 
-  /// Like `Embed`, for sequences that may hold images. A call with an image
-  /// runs in a batch of its own, in arrival order. The first such call loads
-  /// the vision tower in that batch, so a failed load fails only that call.
+  /// Like `Embed`, for sequences that may hold images or audio. A call with an
+  /// image or audio runs in a batch of its own, in arrival order. The first
+  /// such call loads the vision tower in that batch, so a failed load fails
+  /// only that call.
   [[nodiscard]] bool EmbedMultimodal(
       const std::vector<EncoderSequence>& sequences,
       std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,

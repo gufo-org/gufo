@@ -420,7 +420,22 @@
       "id": "hosted-checks",
       "priority": 20,
       "paths": [
-        "cmake/Checks.cmake"
+        "cmake/Checks.cmake",
+        "tests/cli/arg_parser_test.cpp",
+        "tests/cli/bench_test.cpp",
+        "tests/cli/component_text_cache_test.cpp",
+        "tests/cli/continuation_disk_store_test.cpp",
+        "tests/cli/http_server_signals_test.cpp",
+        "tests/cli/http_server_test.cpp",
+        "tests/cli/http_server_test_support.hpp",
+        "tests/cli/logit_sampler_test.cpp",
+        "tests/cli/openai_chat_test.cpp",
+        "tests/cli/prompt_test.cpp",
+        "tests/cli/quote_tracker_test.cpp",
+        "tests/cli/serve_test.py",
+        "tests/cli/text_generation_scheduler_test.cpp",
+        "tests/cli/text_model_runner_test.cpp",
+        "tests/cli/trace_test.cpp"
       ],
       "owners": []
     },
@@ -456,7 +471,9 @@
       "paths": [
         "tests/functional/devlab*",
         "tests/functional/service_phases.py",
-        "tests/functional/requirements.txt"
+        "tests/functional/requirements.txt",
+        "tools/ci/linux_artifact.py",
+        "tools/ci/devlab_artifact.py"
       ],
       "owners": [
         "llm",

@@ -250,6 +250,35 @@ int main(int argc, char** argv) {
         "invalid UTF-8 must still be wrapped by bos and eos");
   Check(tokenizer.Encode("", false).empty(), "empty text without specials");
 
+  // #726: truncation keeps <bos>, the first content tokens and <eos>.
+  std::string over_limit;
+  while (over_limit.size() < 64 * 1024) {
+    over_limit += "The quick brown fox jumps over the lazy dog. ";
+  }
+  const std::vector<std::uint32_t> full_ids = tokenizer.Encode(over_limit);
+  Check(full_ids.size() > 8192, "the over-limit text exceeds 8192 tokens");
+  const std::vector<std::uint32_t> cut_ids =
+      tokenizer.EncodeTruncated(over_limit, 8192);
+  Check(cut_ids.size() == 8192 && cut_ids.front() == 2u && cut_ids.back() == 1u,
+        "a truncated encoding fills the limit between bos and eos");
+  Check(std::equal(cut_ids.begin(), cut_ids.end() - 1, full_ids.begin()),
+        "a truncated encoding keeps the first tokens of the full encoding");
+  Check(tokenizer.EncodeTruncated("short text", 8192) ==
+            tokenizer.Encode("short text"),
+        "a text within the limit is not changed");
+  Check(tokenizer.EncodeTruncated(over_limit, 1) == full_ids,
+        "a limit below the two markers leaves the encoding whole");
+  // A small limit encodes only a short leading slice of the text; the kept
+  // tokens must still match the full encoding.
+  for (const std::size_t limit : {3, 16, 64, 257}) {
+    const std::vector<std::uint32_t> small =
+        tokenizer.EncodeTruncated(over_limit, limit);
+    Check(small.size() == limit && small.front() == 2u && small.back() == 1u &&
+              std::equal(small.begin(), small.end() - 1, full_ids.begin()),
+          "a short truncation keeps the full encoding's first tokens (limit " +
+              std::to_string(limit) + ")");
+  }
+
   std::cout << "PASS embedding_gemma2_tokenizer_test: " << passed
             << " golden cases, load " << load_ms << " ms, " << long_text.size()
             << " byte encode " << long_ms << " ms\n";

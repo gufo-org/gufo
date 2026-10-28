@@ -9,6 +9,8 @@ import re
 import statistics
 import sys
 
+from metrics import NOISE_MS, SLOWDOWN
+
 
 MARKER = "<!-- devlab-functional -->"
 STATUS_CONTEXT = "devlab/functional"
@@ -143,6 +145,8 @@ def phases_section(data):
                  f"{settings['slowdown'] * 100:.0f}% and >{settings['noise_ms']} ms); 🟨 slower in "
                  "some repeats, inconclusive; ⬜ never slower. Observations, not qualified timing "
                  f"regressions. Measured in {data['wall_s'] / 60:.1f} min.</sub>")
+    if any(phase.get('advisory_reason') for phase in phases):
+        lines += ["", "⚠️ HTTP ready timing is advisory: server-side timestamps are unavailable in one or more arms."]
     if data.get("diverged"):
         lines += ["", "⚠️ Generated text differs or server work differs between arms for "
                   + ", ".join(f"`{key}`" for key in data["diverged"])
@@ -220,9 +224,14 @@ def timing_state(data):
     applicable = [phase for phase in applicable if phase.get('checked', True)]
     if not applicable:
         return 'observations'
+    if any(phase.get('comparable_work') is False or phase['group'] in data.get('diverged', [])
+           for phase in applicable):
+        return 'incomparable'
+    if any(phase['verdict'] == 'missing' for phase in applicable):
+        return 'missing'
     if any(phase['verdict'] == 'slower' for phase in applicable):
         return 'slower'
-    if any(phase['verdict'] in ('noisy', 'missing') for phase in applicable):
+    if any(phase['verdict'] == 'noisy' for phase in applicable):
         return 'inconclusive'
     return 'measured'
 
@@ -254,13 +263,17 @@ def render_models(args, plan, summary):
     elif any(item['correctness'] != 'passed' or item['timing'] != 'passed' for item in items.values()):
         state, description = 'error', 'Selected model correctness or timing evidence is incomplete'
     elif any(speed == 'slower' for speed in speeds.values()):
-        state, description = 'failure', 'Server phases slower in every paired repeat (>5% and >3 ms)'
-    elif any(speed in ('missing', 'inconclusive') for speed in speeds.values()):
-        state, description = 'error', 'Correctness passed; speed comparison incomplete or inconclusive'
+        state, description = 'failure', f'Server phases slower in every paired repeat (>{SLOWDOWN * 100:g}% and >{NOISE_MS} ms)'
+    elif any(speed in ('missing', 'incomparable') for speed in speeds.values()):
+        state, description = 'error', 'Correctness passed; speed comparison incomplete or work differs'
     elif args.smoke != 'success':
         state, description = 'error', f'Model checks completed; cluster job {args.smoke}'
+    timing_warning = state == 'success' and any(speed == 'inconclusive' for speed in speeds.values())
+    if timing_warning:
+        description = 'Correctness passed; timing warning: inconclusive comparisons retained'
     tier = ' · PR tier' if plan['tier'] == 'pr' else ''
-    lines = [MARKER, f'### {ICONS[state]} Devlab functional checks{tier}: {description}', '',
+    icon = "⚠️" if timing_warning else ICONS[state]
+    lines = [MARKER, f'### {icon} Devlab functional checks{tier}: {description}', '',
              '| Model | Correctness | Speed · main → PR |', '| --- | --- | --- |']
     for selection in plan['models']:
         key = selection['id']

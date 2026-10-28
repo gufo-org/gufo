@@ -33,6 +33,25 @@ class WindowsBundleTest(unittest.TestCase):
                 (root / "LIBOMP140.x86_64.DLL").touch()
                 self.assertEqual(bundle.check_bundle(root), [])
 
+    def test_audio_imports_allow_winmm_but_require_bundled_codecs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("gufo.exe", "sndfile.dll", "out123.dll"):
+                (root / name).touch()
+            imports = {
+                "gufo.exe": {"sndfile.dll"},
+                "sndfile.dll": {"libmpg123.dll"},
+                "out123.dll": {"WINMM.DLL"},
+                "libmpg123.dll": {"kernel32.dll"},
+            }
+            with patch.object(bundle, "imported_dlls", side_effect=lambda p: imports[p.name]):
+                self.assertEqual(
+                    bundle.check_bundle(root),
+                    ["sndfile.dll requires unbundled libmpg123.dll"],
+                )
+                (root / "libmpg123.dll").touch()
+                self.assertEqual(bundle.check_bundle(root), [])
+
     def test_developer_and_crt_libraries_are_not_system_dependencies(self):
         for name in ("libomp140.x86_64.dll", "libomp.dll", "msvcp140.dll", "vcruntime140.dll"):
             with self.subTest(name=name):

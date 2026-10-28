@@ -70,6 +70,8 @@ __global__ static void attention_noncausal_raw_batch_heads_kernel(
 
   float* oh = heads + ((uint64_t)tok * n_head + h) * head_dim;
   for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
+    // Preserve the qualified row-by-row FMA order under newer LLVM.
     float acc = 0.0f;
     for (uint32_t r = 0; r < n_raw; r++) {
       const uint32_t row =
@@ -220,14 +222,48 @@ __global__ static void attention_decode_mixed_one_fast_oldhip_kernel(
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
+    // Preserve the qualified row-by-row FMA order under newer LLVM.
+    // Issue a bounded group of value loads before consuming them in the
+    // original row order. The serial FP32 FMA chain is unchanged.
+    constexpr unsigned P = 16;
     float acc = 0.0f;
-    for (uint32_t r = 0; r < n_raw; r++) {
+    uint32_t r = 0;
+    for (; r + P <= n_raw; r += P) {
+      float v[P], w[P];
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j) {
+        const uint32_t row = raw_start + r + j < raw_cap
+                                 ? raw_start + r + j
+                                 : raw_start + r + j - raw_cap;
+        v[j] = raw_kv[(uint64_t)row * head_dim + d];
+        w[j] = scores[r + j];
+      }
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j)
+        acc += w[j] * v[j];
+    }
+    for (; r < n_raw; ++r) {
       const uint32_t row =
-          (raw_start + r < raw_cap ? raw_start + r : raw_start + r - raw_cap);
+          raw_start + r < raw_cap ? raw_start + r : raw_start + r - raw_cap;
       acc += scores[r] * raw_kv[(uint64_t)row * head_dim + d];
     }
-    for (uint32_t c = 0; c < n_comp; c++) {
-      acc += scores[n_raw + c] * comp_kv[(uint64_t)c * head_dim + d];
+    uint32_t c = 0;
+    for (; c + P <= n_comp; c += P) {
+      float v[P], w[P];
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j) {
+        const uint32_t row = c + j;
+        v[j] = comp_kv[(uint64_t)row * head_dim + d];
+        w[j] = scores[n_raw + c + j];
+      }
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j)
+        acc += w[j] * v[j];
+    }
+    for (; c < n_comp; ++c) {
+      const uint32_t row = c;
+      acc += scores[n_raw + c] * comp_kv[(uint64_t)row * head_dim + d];
     }
     heads[(uint64_t)h * head_dim + d] = acc * inv_denom;
   }
@@ -311,13 +347,46 @@ __global__ static void attention_decode_indexed_mixed_one_fast_oldhip_kernel(
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
+#pragma clang fp reassociate(off)
+    // Preserve the qualified row-by-row FMA order under newer LLVM.
+    // Issue a bounded group of value loads before consuming them in the
+    // original row order. The serial FP32 FMA chain is unchanged.
+    constexpr unsigned P = 16;
     float acc = 0.0f;
-    for (uint32_t r = 0; r < n_raw; r++) {
+    uint32_t r = 0;
+    for (; r + P <= n_raw; r += P) {
+      float v[P], w[P];
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j) {
+        const uint32_t row = raw_start + r + j < raw_cap
+                                 ? raw_start + r + j
+                                 : raw_start + r + j - raw_cap;
+        v[j] = raw_kv[(uint64_t)row * head_dim + d];
+        w[j] = scores[r + j];
+      }
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j)
+        acc += w[j] * v[j];
+    }
+    for (; r < n_raw; ++r) {
       const uint32_t row =
-          (raw_start + r < raw_cap ? raw_start + r : raw_start + r - raw_cap);
+          raw_start + r < raw_cap ? raw_start + r : raw_start + r - raw_cap;
       acc += scores[r] * raw_kv[(uint64_t)row * head_dim + d];
     }
-    for (uint32_t c = 0; c < comp_count; c++) {
+    uint32_t c = 0;
+    for (; c + P <= comp_count; c += P) {
+      float v[P], w[P];
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j) {
+        const uint32_t row = comp_rows[c + j];
+        v[j] = comp_kv[(uint64_t)row * head_dim + d];
+        w[j] = scores[n_raw + c + j];
+      }
+#pragma unroll
+      for (unsigned j = 0; j < P; ++j)
+        acc += w[j] * v[j];
+    }
+    for (; c < comp_count; ++c) {
       const uint32_t row = comp_rows[c];
       acc += scores[n_raw + c] * comp_kv[(uint64_t)row * head_dim + d];
     }

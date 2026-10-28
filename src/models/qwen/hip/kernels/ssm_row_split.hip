@@ -334,6 +334,7 @@ __global__ void BatchedSSMPostNormGateFp16Kernel(const float* raw,
                                                  const float* weight,
                                                  const float* gate, __half* out,
                                                  std::size_t head_count) {
+#pragma clang fp reassociate(off) contract(off)
   const unsigned lane = threadIdx.x & 31U;
   const std::size_t head = std::size_t(blockIdx.x) * 8 + threadIdx.x / 32;
   if (head >= head_count) {
@@ -346,7 +347,14 @@ __global__ void BatchedSSMPostNormGateFp16Kernel(const float* raw,
     values[j] = raw[base + lane + j * 32];
     squares[j] = __fmul_rn(values[j], values[j]);
   }
-  for (int shift = 16; shift > 0; shift >>= 1) {
+  // The separate FP32 epilogue fuses the first local square with its neighbor.
+  // Make that rounding explicit: LLVM 24 otherwise contracts only some of
+  // these four chains and can move an FP16 result across a rounding boundary.
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    squares[j] = __fmaf_rn(values[j], values[j], __shfl_xor(squares[j], 16));
+  }
+  for (int shift = 8; shift > 0; shift >>= 1) {
 #pragma unroll
     for (unsigned j = 0; j < 4; ++j) {
       squares[j] += __shfl_xor(squares[j], shift);

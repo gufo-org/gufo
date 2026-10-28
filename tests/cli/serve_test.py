@@ -44,6 +44,7 @@ def main():
     check(["serve", "embedding"], 2, "--model <DIR> is required")
     text = check(["serve", "embedding", "--help"], 0, "--served-model-name")
     assert "--context" not in text and "--sessions" not in text
+    assert "--default-prompt-name" in text
     check(["serve", "embedding", "--context", "8"], 2, "Unknown option")
     check(["serve", "help", "embedding"], 0, "EmbeddingGemma 2")
     check(["serve", "embedding", "--model", "/missing"], 1,

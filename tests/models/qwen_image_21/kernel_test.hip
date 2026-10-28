@@ -388,7 +388,13 @@ void Dense() {
                                        {256, 4096, 12288},
                                        {4096, 4096, 4096},
                                        {4097, 12288, 4096},
-                                       {4372, 4096, 12288}}) {
+                                       {4372, 4096, 12288},
+                                       {1, 64, 4096},
+                                       {31, 64, 4096},
+                                       {32, 64, 4096},
+                                       {33, 64, 4096},
+                                       {256, 64, 4096},
+                                       {4096, 64, 4096}}) {
     std::vector<std::uint16_t> weights(std::size_t(channels) * inner),
         input(std::size_t(rows) * inner), output(std::size_t(rows) * channels),
         replay(output.size());

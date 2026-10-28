@@ -29,8 +29,9 @@ struct BatchScheduler::Caller {
   const std::vector<EncoderSequence>& sequences;
   const std::function<bool()>& is_cancelled;
   std::vector<std::vector<float>>& embeddings;
-  /// Some sequence holds an image, so the caller gets a batch of its own.
-  bool has_images{false};
+  /// Some sequence holds an image or audio, so the caller gets a batch of its
+  /// own.
+  bool has_media{false};
   /// First sequence not yet taken into a batch.
   std::size_t next{0};
   std::size_t remaining_tokens{0};
@@ -97,9 +98,10 @@ BatchScheduler::Outcome BatchScheduler::Run(
     return Outcome::kOk;
   }
   std::size_t tokens = 0;
-  bool has_images = false;
+  bool has_media = false;
   for (const EncoderSequence& sequence : sequences) {
-    has_images = has_images || !sequence.images.empty();
+    has_media =
+        has_media || !sequence.images.empty() || !sequence.audio.empty();
     if (sequence.tokens.size() > max_batch_tokens_) {
       *error = "a sequence is longer than the batch token limit";
       return Outcome::kFailed;
@@ -110,7 +112,7 @@ BatchScheduler::Outcome BatchScheduler::Run(
   Caller caller{.sequences = sequences,
                 .is_cancelled = is_cancelled,
                 .embeddings = *embeddings,
-                .has_images = has_images,
+                .has_media = has_media,
                 .remaining_tokens = tokens};
   const Outcome outcome = Wait(caller, error);
   if (outcome != Outcome::kOk) {
@@ -154,7 +156,7 @@ void BatchScheduler::RunNextBatch(std::unique_lock<std::mutex>& lock) {
   std::size_t tokens = 0;
   while (!queue_.empty()) {
     Caller& caller = *queue_.front();
-    if (caller.has_images && !sequences.empty()) {
+    if (caller.has_media && !sequences.empty()) {
       break;
     }
     std::size_t last = caller.next;
@@ -188,7 +190,7 @@ void BatchScheduler::RunNextBatch(std::unique_lock<std::mutex>& lock) {
       caller.remaining_tokens -= caller.sequences[index].tokens.size();
     }
     caller.next = last;
-    if (last < caller.sequences.size() || caller.has_images) {
+    if (last < caller.sequences.size() || caller.has_media) {
       break;
     }
   }

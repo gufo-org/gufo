@@ -190,6 +190,7 @@ Use `gufo serve embedding --model DIR` to serve the EmbeddingGemma 2 text embedd
 
 - `model` (`-m`) is the EmbeddingGemma 2 model directory
 - `servedModelName` is the model ID that clients send and `/v1/models` reports, `embeddinggemma-2` by default
+- `defaultPromptName` names a prompt from the checkpoint's `config_sentence_transformers.json` that prefixes text inputs of requests without `prompt_name`; image-only and audio-only inputs stay unprefixed; none by default
 
 The command takes the shared server options but not `--sessions` or `--context`, because concurrent text requests share device batches on one encoder and the model fixes the context window.  The [server guide](SERVER.md#embeddings) lists the request fields, the limits, and the task prefixes the model expects.
 

@@ -70,7 +70,7 @@ def main():
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
                   ('model_services.py', 'service_http.py', 'asr_service.py', 'tts_service.py',
-                   'embeddings.py', 'embedding_images.py')}}
+                   'embeddings.py', 'embedding_images.py', 'embedding_audio.py')}}
     evidence = Evidence(output, report)
     evidence.save()
     url = f'http://127.0.0.1:{port}'
@@ -83,10 +83,12 @@ def main():
                 models = evidence.json(url + '/v1/models', label='models', method='GET')
                 assert public_model in [item['id'] for item in models['data']], models
             if args.service == 'embedding':
-                for script in ('embeddings.py', 'embedding_images.py'):
+                for script in ('embeddings.py', 'embedding_images.py', 'embedding_audio.py'):
                     with evidence.case(script):
                         launch = [sys.executable, str(HERE / script), '--base-url', url + '/v1',
                                   '--model', public_model, '--output', str(output / (script + '.json'))]
+                        if script == 'embedding_audio.py':
+                            launch += ['--server-log', str(output / 'server.log')]
                         with (output / (script + '.log')).open('w') as log:
                             result = subprocess.run(launch, stdout=log, stderr=subprocess.STDOUT, timeout=600)
                         assert result.returncode == 0, f'see {script}.log'

@@ -61,7 +61,11 @@ struct Prompt {
       std::size_t token_count) const;
 };
 
-[[nodiscard]] core::Image ResizeImage(const core::Image& image);
+/// `kLow` limits both sides of the resized image to 512 pixels, which is at
+/// most 16 x 16 merged tokens, unless the model's minimum size is larger. It
+/// never exceeds the `kAuto` size. `kAuto` uses the model's full range.
+[[nodiscard]] core::Image ResizeImage(
+    const core::Image& image, tokenization::ChatMessage::ImageDetail detail);
 [[nodiscard]] Prompt Prepare(
     const tokenization::QwenTokenizer& tokenizer,
     std::span<const tokenization::ChatMessage> messages,

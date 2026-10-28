@@ -541,36 +541,25 @@ void ds4_session_snapshot_free(ds4_session_snapshot *snapshot) {
     memset(snapshot, 0, sizeof(*snapshot));
 }
 
-/* C1 retains the established four-probe/64-token acceptance policy. Concurrent
- * requests use a separate recent-cost window after their batched cycle. */
+// Judge recent completed-token cost, including the guaranteed target anchor.
+// Accepted/drafted alone over-penalizes short blocks and retains a poor start
+// across every retry. Concurrent cohorts keep their separate calibration.
 static void session_dspark_note_cycle(ds4_session* session,
                                       bool concurrent_batch) {
-  if (concurrent_batch) {
+  if (concurrent_batch)
     return;
-  }
-  constexpr uint64_t kEarlyCycles = 4u;
-  constexpr double kEarlyRejectRate = 0.25;
-  constexpr uint64_t kWarmupCycles = 8u;
-  constexpr double kBreakEvenAcceptance = 0.48;
-  constexpr uint32_t kSerialLowAcceptanceBackoff = DS4_DSPARK_RETRY_TOKENS;
-
-  const auto& state = session->dspark_state;
-  const uint64_t drafted = state.support_drafted - state.policy_start_drafted;
-  const uint64_t accepted =
-      state.support_accepted - state.policy_start_accepted;
+  auto& state = session->dspark_state;
   const uint64_t steps = state.steps - state.policy_start_steps;
-  if (drafted == 0u || steps < kEarlyCycles)
-    return;
-  const double acceptance =
-      static_cast<double>(accepted) / static_cast<double>(drafted);
-  if (steps < kWarmupCycles && acceptance >= kEarlyRejectRate) {
-    return;
+  const uint64_t drafted = state.support_drafted - state.policy_start_drafted;
+  const uint64_t accepted = state.support_accepted - state.policy_start_accepted;
+  const bool backoff = ds4_dspark_serial_backoff(steps, drafted, accepted);
+  if (backoff)
+    state.skip_remaining = DS4_DSPARK_RETRY_TOKENS;
+  if (backoff || steps >= 8u) {
+    state.policy_start_steps = state.steps;
+    state.policy_start_drafted = state.support_drafted;
+    state.policy_start_accepted = state.support_accepted;
   }
-  if (acceptance >= kBreakEvenAcceptance) {
-    session->dspark_state.skip_remaining = 0u;
-    return;
-  }
-  session->dspark_state.skip_remaining = kSerialLowAcceptanceBackoff;
 }
 
 // Cost units are hundredths of one ordinary batch decode step, calibrated

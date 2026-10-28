@@ -1,0 +1,143 @@
+name: Linux build
+
+on:
+  workflow_call:
+    inputs:
+      revision:
+        required: true
+        type: string
+      baseline:
+        default: ''
+        type: string
+      artifact-name:
+        required: true
+        type: string
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Linux package
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      - name: Run artifact contract tests
+        run: |
+          python3 -m unittest discover -s tests/tools -p linux_artifact_test.py
+          python3 -m unittest discover -s tests/tools -p devlab_artifact_test.py
+
+      - name: Check out baseline source
+        if: inputs.baseline != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.baseline }}
+          path: baseline-source
+          persist-credentials: false
+
+      # A unique save key retains each successful build; restore the newest
+      # compiler cache for this pinned toolchain, including main's warm cache.
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-ccache
+          key: gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
+
+      - name: Prepare compiler cache
+        run: |
+          mkdir -p /tmp/gufo-ccache
+          chmod -R a+rwX /tmp/gufo-ccache
+          chmod 1777 /tmp/gufo-ccache
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://gufo.cachix.org
+            extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
+            extra-sandbox-paths = /tmp/gufo-ccache
+
+      - name: Enable Cachix
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: gufo
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: ${{ github.event_name == 'pull_request' }}
+          pushFilter: '(-source$|\.tar\.gz$)'
+
+      - name: Build and package baseline
+        if: inputs.baseline != ''
+        env:
+          EXPECTED_REVISION: ${{ inputs.baseline }}
+        run: |
+          set -euo pipefail
+          # Both arms use the candidate's pinned compiler and dependencies.
+          nix build --impure --file tools/ci/linux-baseline.nix \
+            --argstr source "$GITHUB_WORKSPACE/baseline-source" \
+            --argstr revision "$EXPECTED_REVISION" \
+            --out-link result-baseline --print-build-logs --cores 4 --max-jobs 1
+          python3 tools/ci/linux_artifact.py pack --package result-baseline \
+            --revision "$EXPECTED_REVISION" --output linux-artifacts/baseline
+
+      - name: Build and package candidate
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          nix build .#default --print-build-logs --cores 4 --max-jobs 1
+          python3 tools/ci/linux_artifact.py pack --package result \
+            --revision "$EXPECTED_REVISION" --output linux-artifacts/candidate
+
+      - name: Verify and archive the portable bundle
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision }}
+          EXPECTED_BASELINE: ${{ inputs.baseline }}
+          RUNTIME_ARTIFACT: ${{ inputs.artifact-name }}-runtime
+        run: |
+          set -euo pipefail
+          python3 tools/ci/linux_artifact.py verify --source linux-artifacts/candidate --revision "$EXPECTED_REVISION"
+          if [[ -n "$EXPECTED_BASELINE" ]]; then
+            python3 tools/ci/linux_artifact.py verify --source linux-artifacts/baseline --revision "$EXPECTED_BASELINE"
+          fi
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -I 'gzip -1 -n' -cf linux-runtime.tar.gz -C linux-artifacts runtime
+          python3 - <<'PYRUNTIME'
+          import hashlib, json, os
+          from pathlib import Path
+          archive = Path('linux-runtime.tar.gz')
+          with archive.open('rb') as source:
+              digest = hashlib.file_digest(source, 'sha256').hexdigest()
+          Path('linux-artifacts/runtime.json').write_text(json.dumps({
+              'artifact': os.environ['RUNTIME_ARTIFACT'], 'digest': 'sha256:' + digest}) + '\n')
+          PYRUNTIME
+          tar --exclude=linux-artifacts/runtime -I 'gzip -1' -cf linux-artifacts.tar.gz linux-artifacts
+          du -h linux-artifacts.tar.gz linux-runtime.tar.gz
+
+      - name: Upload shared Linux runtime
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact-name }}-runtime
+          path: linux-runtime.tar.gz
+          compression-level: 0
+          retention-days: 3
+
+      - name: Upload comparison packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: linux-artifacts.tar.gz
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error

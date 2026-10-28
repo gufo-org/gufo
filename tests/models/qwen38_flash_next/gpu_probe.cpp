@@ -3,6 +3,11 @@
 //
 // gpu_probe --model FIRST_SHARD.gguf --prompt TEXT [--reference]
 //           [--batch T] [--context N] [--yarn-factor F] [--dump logits.bin]
+//           [--logit-rows N] [--nll nll.bin]
+// The dump holds the last 64 rows of the final prefill pass, or with
+// --logit-rows the last N rows of every pass in position order. --nll
+// writes each position's negative log likelihood of the next prompt token
+// (float32, tokens - 1 values) and prints the mean.
 // Independent predictor oracle: --mtp-model MTP.gguf --mtp-audit
 // MTP cost calibration: --mtp-model MTP.gguf --cost-audit C (0 = all)
 //                      [--depth N] (default: 0, 4096, 32768)
@@ -18,8 +23,10 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
@@ -84,6 +91,8 @@ int main(int argc, char** argv) {
   std::string model_path;
   std::string prompt = "The capital of France is";
   std::string dump_path;
+  std::uint32_t every_pass_rows = 0;  ///< --logit-rows: rows kept per pass
+  std::string nll_path;
   std::string mtp_path;
   std::string decode_text;
   std::string decode_ids_path;
@@ -184,6 +193,19 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "--dump") {
       dump_path = next();
+    } else if (arg == "--logit-rows") {
+      const auto value = next();
+      std::uint32_t rows = 0;
+      const auto [end, ec] =
+          std::from_chars(value.data(), value.data() + value.size(), rows);
+      if (ec != std::errc{} || end != value.data() + value.size() ||
+          rows == 0) {
+        std::fprintf(stderr, "--logit-rows requires a positive integer\n");
+        return 2;
+      }
+      every_pass_rows = rows;
+    } else if (arg == "--nll") {
+      nll_path = next();
     } else {
       std::fprintf(stderr, "unknown argument %s\n", arg.c_str());
       return 2;
@@ -203,6 +225,16 @@ int main(int argc, char** argv) {
   }
   if ((mtp_audit || cost_audit) && mtp_path.empty()) {
     std::fprintf(stderr, "MTP audits require --mtp-model\n");
+    return 2;
+  }
+  if (!nll_path.empty() && (every_pass_rows != 0 || !dump_path.empty())) {
+    std::fprintf(stderr, "--nll cannot be combined with logit dumps\n");
+    return 2;
+  }
+  if ((every_pass_rows != 0 || !nll_path.empty()) &&
+      (reference || decode || cost_audit || mtp_audit)) {
+    std::fprintf(stderr,
+                 "--logit-rows and --nll apply to plain prefill runs only\n");
     return 2;
   }
   if (cost_audit && (mtp_audit || reference || !dump_path.empty())) {
@@ -291,7 +323,11 @@ int main(int argc, char** argv) {
   q::rocm::Executor::Options options;
   options.max_batch = batch;
   options.max_context = context;
-  options.max_logit_rows = std::min<std::uint32_t>(batch, 64);
+  options.max_logit_rows =
+      !nll_path.empty()
+          ? batch
+          : std::min<std::uint32_t>(
+                batch, every_pass_rows != 0 ? every_pass_rows : 64);
   if (mtp_audit || cost_audit)
     options.max_speculative = 8;
 
@@ -364,6 +400,7 @@ int main(int argc, char** argv) {
   }
 
   std::vector<float> gpu_logits;
+  std::vector<float> nll;  ///< --nll: per-position next-token NLL
   std::size_t logit_rows = 0;
   for (std::size_t off = 0; off < tokens.size(); off += batch) {
     const std::size_t n = std::min<std::size_t>(batch, tokens.size() - off);
@@ -383,10 +420,50 @@ int main(int argc, char** argv) {
       return 1;
     }
     const bool last = off + n == tokens.size();
-    if (last) {
+    if (!nll_path.empty()) {
+      // Row i predicts token off + i + 1; rows split across threads.
+      const std::size_t scored = last ? n - 1 : n;
+      nll.resize(off + scored);
+      const unsigned workers =
+          std::max(1U, std::min(16U, std::thread::hardware_concurrency()));
+      std::vector<std::thread> pool;
+      for (unsigned w = 0; w < workers; ++w) {
+        pool.emplace_back([&, w] {
+          for (std::size_t i = w; i < scored; i += workers) {
+            const float* row = out.data() + i * c.vocab_size;
+            const float peak = *std::max_element(row, row + c.vocab_size);
+            double sum = 0.0;
+            for (std::size_t v = 0; v < c.vocab_size; ++v)
+              sum += std::exp(static_cast<double>(row[v]) - peak);
+            const auto target = static_cast<std::size_t>(tokens[off + i + 1]);
+            nll[off + i] = static_cast<float>(
+                std::log(sum) - (static_cast<double>(row[target]) - peak));
+          }
+        });
+      }
+      for (auto& t : pool)
+        t.join();
+    } else if (every_pass_rows != 0) {
+      gpu_logits.insert(gpu_logits.end(), out.begin(), out.end());
+      logit_rows += rows;
+    } else if (last) {
       gpu_logits = std::move(out);
       logit_rows = rows;
     }
+  }
+  if (!nll_path.empty()) {
+    std::ofstream file(nll_path, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(nll.data()),
+               static_cast<std::streamsize>(nll.size() * sizeof(float)));
+    if (!file) {
+      std::fprintf(stderr, "cannot write %s\n", nll_path.c_str());
+      return 1;
+    }
+    const double total = std::accumulate(nll.begin(), nll.end(), 0.0);
+    std::printf("nll %zu positions mean %.6f ppl %.4f\n", nll.size(),
+                total / static_cast<double>(nll.size()),
+                std::exp(total / static_cast<double>(nll.size())));
+    return 0;
   }
   if (decode) {
     // Matched-token decode: feed a fixed continuation one token at a time
@@ -435,6 +512,29 @@ int main(int argc, char** argv) {
     if (!dump) {
       std::fprintf(stderr, "cannot write logit dump %s\n", dump_path.c_str());
       return 1;
+    }
+    if (every_pass_rows != 0) {
+      // Which rows the dump holds: f32_reference.py checks it against the
+      // fixture, since another batch can give the same row count.
+      // FNV-1a over the token ids' little-endian bytes: the fixture's
+      // tokens.json must hold the same ids, not only the same count.
+      std::uint64_t ids_hash = 0xCBF29CE484222325ULL;
+      for (const std::int32_t id : tokens) {
+        const auto bits = static_cast<std::uint32_t>(id);
+        for (int byte = 0; byte < 4; ++byte) {
+          ids_hash ^= (bits >> (8 * byte)) & 0xFFU;
+          ids_hash *= 0x100000001B3ULL;
+        }
+      }
+      std::ofstream meta(dump_path + ".json");
+      meta << "{\"tokens\": " << tokens.size() << ", \"ids_fnv1a\": \""
+           << std::hex << ids_hash << std::dec << "\", \"batch\": " << batch
+           << ", \"rows_per_pass\": " << every_pass_rows
+           << ", \"rows\": " << logit_rows << "}\n";
+      if (!meta) {
+        std::fprintf(stderr, "cannot write %s.json\n", dump_path.c_str());
+        return 1;
+      }
     }
   }
 

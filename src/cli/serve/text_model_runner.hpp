@@ -375,6 +375,12 @@ public:
       return std::nullopt;
     return prompt->tokens.size();
   }
+  /// The text RenderAndTokenize tokenizes, or empty when the runner cannot
+  /// render its template as text.
+  [[nodiscard]] virtual std::optional<std::string> RenderPrompt(
+      const ChatRequest&) const {
+    return std::nullopt;
+  }
   /// Called before cache restoration, prefill or selection, including
   /// a complete prefix hit. Must replace, never inherit, the previous request.
   virtual void SetPromptContext(

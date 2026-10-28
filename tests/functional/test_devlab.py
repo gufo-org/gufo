@@ -70,6 +70,12 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(self.models('cmake/Checks.cmake', 'src/models/embedding_gemma2/hip/ops.hip'),
                          {'embedding-gemma2'})
         self.assertEqual(self.models('cmake/toolchains/windows-therock.cmake'), self.models('CMakeLists.txt'))
+        # Its CPU test sources need no model either; the code they test still selects.
+        self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'tests/cli/http_server_test.cpp'), set())
+        self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'src/cli/serve/openai_chat.cpp'),
+                         {'flash-next-q4'})
+        self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'), {'qwen3-asr', 'qwen3-tts-base'})
+        self.assertEqual(self.models('tests/cli/continuation_cache_test.cpp'), self.models('CMakeLists.txt'))
 
     def test_category_and_fixture_ownership(self):
         for path, expected in [
@@ -165,7 +171,7 @@ class ExecutionTest(unittest.TestCase):
                 return subprocess.CompletedProcess(args, int(failed))
             output.write_text(json.dumps({'arms': [{'revision': side} for side in ('base','head','base','head')],
                 'settings': {'repeats': 2}, 'revisions': {'base': plan['base'], 'head': plan['head']},
-                'phases': [{'key': 'short.server_ms'}]}))
+                'phases': [{'key': 'short.server_ms'}, {'key': 'startup.listen', 'checked': False}]}))
             return subprocess.CompletedProcess(args, 0)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -175,6 +181,9 @@ class ExecutionTest(unittest.TestCase):
                 code = devlab_run.execute(plan, Path('/head'), Path('/base'), assets,
                                           root/'results', root/'report', root/'logs')
             observed = json.loads((root/'report/summary.json').read_text())
+            timing = json.loads((root/'report/qwen3-asr.phases.json').read_text())
+            self.assertTrue(timing['phases'][0]['checked'])
+            self.assertFalse(timing['phases'][1]['checked'])
         self.assertEqual(code, 1)
         self.assertEqual(len(calls), 4)
         self.assertEqual([item['correctness'] for item in observed['models']], ['failed', 'passed'])
@@ -197,6 +206,31 @@ class TimingTest(unittest.TestCase):
         self.assertEqual(server.command[:5], ['/gufo', 'serve', 'asr', '--model', '/asr'])
         self.assertIn('--port', server.command)
         self.assertNotIn('--mtp-model', server.command)
+
+    def test_startup_uses_server_timestamps_and_ignores_loading_listener(self):
+        server = phases.Server(Path('/gufo'), None, Path('/log'), ['/gufo'])
+        server.spawned, server.ready = 10, 12
+        server.events = [
+            (10.1, '[server] event=listening monotonic_us=1000000'),
+            (10.2, '[loader] event=load_started'),
+            (11.1, '[loader] event=load_completed elapsed_ms=900 monotonic_us=2000000'),
+            # Reader delivery and the health probe are deliberately much later.
+            (11.5, '[server] event=listening monotonic_us=2001250'),
+        ]
+        measured = server.startup()
+        self.assertEqual(measured['listen'], 1.25)
+        self.assertEqual(measured['listen_source'], 'server')
+        server.events = [(stamp, line.split(' monotonic_us=')[0]) for stamp, line in server.events]
+        self.assertAlmostEqual(server.startup()['listen'], 900)
+        self.assertEqual(server.startup()['listen_source'], 'health_poll')
+        found, _ = service_phases.summarize(self.arms())
+        listen = next(phase for phase in found if phase['key'] == 'startup.listen')
+        self.assertFalse(listen['checked'])
+        arms = self.arms()
+        for arm in arms:
+            arm['startup']['listen_source'] = 'server'
+        found, _ = service_phases.summarize(arms)
+        self.assertTrue(next(phase for phase in found if phase['key'] == 'startup.listen')['checked'])
 
     def test_server_work_must_match_and_repeats_must_be_complete(self):
         arms = self.arms()
@@ -230,7 +264,7 @@ class TimingTest(unittest.TestCase):
             self.assertIn('Qwen3-ASR', comment)
             phases, diverged = service_phases.summarize(self.arms())
             data = {'revisions': {'base': plan['base'], 'head': plan['head']}, 'arms': self.arms(), 'phases': phases, 'diverged': diverged,
-                    'settings': {'repeats': 2, 'slowdown': .05, 'noise_ms': 3, 'requests': service_phases.REQUESTS},
+                    'settings': {'repeats': 2, 'slowdown': .05, 'noise_ms': 10, 'requests': service_phases.REQUESTS},
                     'wall_s': 1}
             (root/'qwen3-asr.phases.json').write_text(json.dumps(data))
             state, _, comment = report.render_models(args, plan, summary)
@@ -241,6 +275,24 @@ class TimingTest(unittest.TestCase):
                     phase['verdict'] = 'same'
             (root/'qwen3-asr.phases.json').write_text(json.dumps(data))
             self.assertEqual(report.render_models(args, plan, summary)[0], 'success')
+            checked = next(phase for phase in data['phases'] if phase['key'] == 'short.server_ms')
+            checked['verdict'] = 'noisy'
+            (root/'qwen3-asr.phases.json').write_text(json.dumps(data))
+            state, description, comment = report.render_models(args, plan, summary)
+            self.assertEqual(state, 'success')
+            self.assertIn('timing warning', description)
+            self.assertIn('⚠️', comment)
+            state, description, comment = report.render_models(args, {**plan, 'tier': 'full'}, summary)
+            self.assertEqual(state, 'success')
+            self.assertIn('timing warning', description)
+            self.assertIn('⚠️', comment)
+            checked['comparable_work'] = False
+            (root/'qwen3-asr.phases.json').write_text(json.dumps(data))
+            self.assertEqual(report.render_models(args, plan, summary)[0], 'error')
+            checked['comparable_work'] = True
+            checked['verdict'] = 'missing'
+            (root/'qwen3-asr.phases.json').write_text(json.dumps(data))
+            self.assertEqual(report.render_models(args, plan, summary)[0], 'error')
             self.assertEqual(report.render_models(args, plan, {'groups': [], 'models': []})[0], 'error')
 
 

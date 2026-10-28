@@ -43,7 +43,8 @@ std::uint64_t ReadLittleEndian64(const std::byte* bytes) noexcept {
 /// Indexes the requested backbones. Unused towers are skipped.
 bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
                      std::vector<std::shared_ptr<void>>* mappings,
-                     std::string* error, bool include_vision) {
+                     std::string* error, bool include_vision,
+                     bool include_audio) {
   // RawMappedFile has no destructor; the owner closes the mapping.
   std::shared_ptr<MappedFile> mapping(new MappedFile(), [](MappedFile* m) {
     m->Close();
@@ -79,7 +80,9 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
     if (name == "__metadata__" ||
         !(name.starts_with(kTextTensorPrefix) ||
           (include_vision && (name.starts_with("vision_tower.") ||
-                              name.starts_with("embed_vision."))))) {
+                              name.starts_with("embed_vision."))) ||
+          (include_audio && (name.starts_with("audio_tower.") ||
+                             name.starts_with("embed_audio."))))) {
       continue;
     }
     if (!specification.is_object()) {
@@ -210,8 +213,53 @@ std::vector<ExpectedTensor> ExpectedVisionTensors() {
   return tensors;
 }
 
-LoadResult LoadModelDirectory(const std::string& model_dir,
-                              bool include_vision) {
+std::vector<ExpectedTensor> ExpectedAudioTensors() {
+  std::vector<ExpectedTensor> tensors = {
+      {"audio_tower.subsample_conv_projection.layer0.conv.weight",
+       {128, 1, 3, 3}},
+      {"audio_tower.subsample_conv_projection.layer0.norm.weight", {128}},
+      {"audio_tower.subsample_conv_projection.layer1.conv.weight",
+       {32, 128, 3, 3}},
+      {"audio_tower.subsample_conv_projection.layer1.norm.weight", {32}},
+      {"audio_tower.subsample_conv_projection.input_proj_linear.weight",
+       {1024, 1024}},
+      {"audio_tower.output_proj.weight", {1536, 1024}},
+      {"audio_tower.output_proj.bias", {1536}},
+      {"embed_audio.embedding_projection.weight", {512, 1536}},
+  };
+  for (unsigned i = 0; i < 12; ++i) {
+    const std::string p = "audio_tower.layers." + std::to_string(i) + ".";
+    const auto linear = [&](const std::string& name, std::uint64_t out,
+                            std::uint64_t in) {
+      tensors.push_back({p + name + ".linear.weight", {out, in}});
+      for (const auto* bound :
+           {"input_min", "input_max", "output_min", "output_max"})
+        tensors.push_back({p + name + "." + bound, {}});
+    };
+    for (const auto* ff : {"feed_forward1.", "feed_forward2."}) {
+      linear(std::string(ff) + "ffw_layer_1", 4096, 1024);
+      linear(std::string(ff) + "ffw_layer_2", 1024, 4096);
+      for (const auto* norm :
+           {"pre_layer_norm.weight", "post_layer_norm.weight"})
+        tensors.push_back({p + ff + norm, {1024}});
+    }
+    for (const auto* proj : {"q_proj", "k_proj", "v_proj", "post"})
+      linear(std::string("self_attn.") + proj, 1024, 1024);
+    tensors.push_back({p + "self_attn.relative_k_proj.weight", {1024, 1024}});
+    tensors.push_back({p + "self_attn.per_dim_scale", {128}});
+    linear("lconv1d.linear_start", 2048, 1024);
+    linear("lconv1d.linear_end", 1024, 1024);
+    tensors.push_back({p + "lconv1d.depthwise_conv1d.weight", {1024, 1, 5}});
+    for (const auto* norm :
+         {"lconv1d.pre_layer_norm.weight", "lconv1d.conv_norm.weight",
+          "norm_pre_attn.weight", "norm_post_attn.weight", "norm_out.weight"})
+      tensors.push_back({p + norm, {1024}});
+  }
+  return tensors;
+}
+
+LoadResult LoadModelDirectory(const std::string& model_dir, bool include_vision,
+                              bool include_audio) {
   LoadResult result;
   result.store = std::make_unique<TensorStore>();
   const auto config = LoadModelConfigFromPath(model_dir);
@@ -232,7 +280,7 @@ LoadResult LoadModelDirectory(const std::string& model_dir,
       std::filesystem::path(model_dir) / "model.safetensors";
   std::string error;
   if (!LoadSafetensors(path, result.store.get(), &result.mappings, &error,
-                       include_vision)) {
+                       include_vision, include_audio)) {
     result.error = "embedding_gemma2: " + error;
     return result;
   }
@@ -245,6 +293,14 @@ LoadResult LoadModelDirectory(const std::string& model_dir,
     auto vision = ExpectedVisionTensors();
     expected_tensors.insert(expected_tensors.end(), vision.begin(),
                             vision.end());
+  }
+  if (include_audio) {
+    if (!result.config.supported_audio) {
+      result.error = "embedding_gemma2: unsupported audio configuration";
+      return result;
+    }
+    auto audio = ExpectedAudioTensors();
+    expected_tensors.insert(expected_tensors.end(), audio.begin(), audio.end());
   }
   for (const ExpectedTensor& expected : expected_tensors) {
     const Tensor* tensor = result.store->Find(expected.name);

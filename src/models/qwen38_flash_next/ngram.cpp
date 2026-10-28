@@ -97,13 +97,12 @@ std::unique_ptr<NgramTable> NgramTable::Open(
   t->cache_rows_.resize(t->cache_count_ * t->row_bytes_);
   t->rows_ = rows;
   t->base_offset_ = file_offset;
-  // Direct I/O bypasses the page cache; the mapping used for the rest of the
-  // model must not be used here or every touched row would stay resident.
+  // Linux direct I/O avoids retaining every touched row in the page cache;
+  // Windows uses cached concurrent reads of the otherwise mapped model.
   // When the platform cannot provide it, rows read buffered through a
   // duplicate: the table always owns the handle it closes.
-  t->file_ = platform::ReopenUnbuffered(file);
-  t->direct_ = t->file_ != platform::kInvalidFile;
-  if (!t->direct_) {
+  t->file_ = platform::ReopenRandomReadFile(file, t->direct_);
+  if (!platform::FileValid(t->file_)) {
     t->file_ = platform::DuplicateFile(file);
   }
   if (t->file_ == platform::kInvalidFile) {

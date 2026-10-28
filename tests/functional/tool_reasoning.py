@@ -291,7 +291,14 @@ QWEN_ENVELOPE_SYSTEM = (
     "<tool_call>terminal<arg_key>command</arg_key><arg_value>SHELL</arg_value>"
     "</tool_call>"
 )
-SHAPE_SYSTEM = {"qwen_envelope_documented_then_prose": QWEN_ENVELOPE_SYSTEM}
+# A call carrying envelope or vocabulary spellings must be the model's native
+# call. Documenting the client envelope offers a second call syntax, and
+# Flash-Next can answer with that envelope, which names a declared tool and is
+# removed as framing rather than executed. Those cases get no system prompt.
+SHAPE_SYSTEM = {"qwen_envelope_documented_then_prose": QWEN_ENVELOPE_SYSTEM,
+                "closer_in_arguments": None,
+                "vocab_token_in_arguments": None,
+                "lookalike_in_arguments": None}
 
 
 TAIL_LOOKALIKE_SYSTEM = (
@@ -446,9 +453,10 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
         for streaming in streaming_modes():
             mode = "stream" if streaming else "buffered"
             label = f"envelope_closer_{name}_{mode}"
-            request = dict(model=model,
-                           messages=[{"role": "system", "content": system},
-                                     {"role": "user", "content": prompt}],
+            messages = [{"role": "user", "content": prompt}]
+            if system is not None:
+                messages.insert(0, {"role": "system", "content": system})
+            request = dict(model=model, messages=messages,
                            tools=[terminal_tool(commands.get(name))],
                            tool_choice="auto", reasoning_effort="none",
                            temperature=0, max_completion_tokens=256,
@@ -602,11 +610,14 @@ def check_literal_protocol_data(client, model, checks, chat_result):
     for name, literal in literals.items():
         for streaming in streaming_modes():
             label = f"literal_protocol_{name}_{'stream' if streaming else 'buffered'}"
+            # The Qwen preset's presence penalty covers the prompt window, so
+            # an exact echo is penalized; llama.cpp declines this one too.
             request = dict(model=model, messages=[{"role": "user", "content":
                 "Reply with exactly the following literal text, without any code fence, "
                 "explanation or tool call:\n" + literal}], tools=[terminal_tool()],
                 tool_choice="auto", reasoning_effort="none", temperature=0,
-                max_completion_tokens=128, extra_body={"cache_prompt": False})
+                max_completion_tokens=128, presence_penalty=0,
+                extra_body={"cache_prompt": False})
             result = chat_result(client, request, streaming)
             checks[label] = result
             print(f"CHECK {label}", file=sys.stderr, flush=True)

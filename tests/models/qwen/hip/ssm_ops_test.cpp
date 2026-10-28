@@ -1158,7 +1158,66 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
         conv_output, d_alpha, d_beta, d_ssm_a, d_ssm_dt, d_ssm_norm, d_gate,
         output, nullptr, d_kq, d_ab, 0, batch, qkv_dim, num_key_heads,
         num_heads, key_dim, val_dim, nullptr, storage, actual.data());
-    if (actual.CopyToHost() != expected.CopyToHost()) {
+    const auto actual_bits = actual.CopyToHost();
+    const auto expected_bits = expected.CopyToHost();
+    {
+      // This route leaves the pre-normalization recurrence output in scratch.
+      // Evaluate the formula independently to distinguish an inaccurate
+      // fusion from harmless differences in the separate FP32 calculation.
+      std::vector<float> raw(batch * inner_size);
+      download(raw, output);
+      double fused_squared_error = 0, separate_squared_error = 0;
+      double fused_max_error = 0, separate_max_error = 0;
+      std::size_t mismatches = 0, fused_closer = 0, separate_closer = 0;
+      for (std::size_t head = 0; head < batch * num_heads; ++head) {
+        double sum = 0;
+        for (std::size_t column = 0; column < val_dim; ++column) {
+          const double value = raw[head * val_dim + column];
+          sum += value * value;
+        }
+        const double inv = 1 / std::sqrt(sum / val_dim + double(1e-6F));
+        for (std::size_t column = 0; column < val_dim; ++column) {
+          const auto i = head * val_dim + column;
+          const double g = h_gate[i];
+          const double reference = double(raw[i]) * inv *
+                                   double(h_ssm_norm[column]) * g /
+                                   (1 + std::exp(-g));
+          const double fused = gufo::quant::Fp16ToFloat(actual_bits[i]);
+          const double separate = gufo::quant::Fp16ToFloat(expected_bits[i]);
+          const double fused_error = std::abs(fused - reference);
+          const double separate_error = std::abs(separate - reference);
+          // FP16 half-ULP rounding plus the existing 1e-5 FP32 envelope.
+          // Include half a subnormal step for outputs close to zero.
+          const double bound =
+              std::abs(reference) * (1.0 / 2048 + 1e-5) + std::ldexp(1.0, -25);
+          if (!std::isfinite(fused) || !std::isfinite(separate) ||
+              fused_error > bound || separate_error > bound) {
+            throw std::runtime_error("SSM FP16 epilogue exceeded FP64 bound");
+          }
+          fused_squared_error += fused_error * fused_error;
+          separate_squared_error += separate_error * separate_error;
+          fused_max_error = std::max(fused_max_error, fused_error);
+          separate_max_error = std::max(separate_max_error, separate_error);
+          if (actual_bits[i] != expected_bits[i]) {
+            if (mismatches++ < 4)
+              std::cout << "  FP16 difference " << i << ": fused=" << fused
+                        << " separate=" << separate << " FP64=" << reference
+                        << "\n";
+            fused_closer += fused_error < separate_error;
+            separate_closer += separate_error < fused_error;
+          }
+        }
+      }
+      std::cout << "  FP16 oracle: mismatches=" << mismatches
+                << " fused_closer=" << fused_closer
+                << " separate_closer=" << separate_closer
+                << " fused_rmse=" << std::sqrt(fused_squared_error / raw.size())
+                << " separate_rmse="
+                << std::sqrt(separate_squared_error / raw.size())
+                << " fused_max=" << fused_max_error
+                << " separate_max=" << separate_max_error << "\n";
+    }
+    if (actual_bits != expected_bits) {
       throw std::runtime_error("fused SSM FP16 epilogue changed output bits");
     }
     std::vector<std::uint8_t> state_bits(
@@ -1382,6 +1441,7 @@ void TestBatchedRecurrenceDivergingState(std::size_t batch) {
 #endif  // defined(ENGINE_ENABLE_HIP)
 
 int main() {
+  std::cout << std::unitbuf;
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status = gufo::test::GateHipDevice(
       gufo::test::HipDeviceRequirement::kOptional, "Qwen SSM ops test");

@@ -335,6 +335,8 @@ int main(int argc, char** argv) {
           "restore reference state: " + error);
     Check(cold.samples == cached.samples && cold.code_frames == 320 - reference,
           "cached reference emits exact suffix audio");
+    (void)Report("reference_" + std::to_string(reference), cold.samples,
+                 std::span<const float>(incremental).subspan(reference * 1920));
     Check(std::equal(cold.samples.begin(), cold.samples.end(),
                      incremental.begin() + reference * 1920),
           "reference reuse matches independently decoded full history");

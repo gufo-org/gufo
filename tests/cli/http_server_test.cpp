@@ -131,7 +131,7 @@ void TestRequestLogging() {
   assert(log.find("escaped\\x0a\\x1b[31m") != std::string::npos);
   // The startup confirmation is INFO-tier, so the default level reports it.
   // TestQuietTiersSuppressLifecycle covers the tiers that do not.
-  assert(log.find("event=listening") != std::string::npos);
+  assert(log.find("event=listening monotonic_us=") != std::string::npos);
 
   const CapturedLogs debug = CaptureTraffic(LogLevel::kDebug);
   assert(debug.text.find("[DEBUG]") != std::string::npos);
@@ -572,6 +572,64 @@ void TestLlamaProps() {
   assert(named.member_str("build_info") == "0.2.0 (abc1234)");
 }
 
+void TestApplyTemplate() {
+  RunningServer server;
+  const std::string chat = R"({"messages":[{"role":"system","content":"sys"},
+      {"role":"user","content":"ping"}],
+      "tools":[{"type":"function","function":{"name":"t","parameters":
+        {"type":"object","properties":{"a":{"type":"string"}}}}}]})";
+  const int calls = server.backend->calls;
+
+  // A backend that cannot render its template as text says so.
+  ExpectStatus(server.Post("/apply-template", chat), 501);
+
+  // The prompt is the backend's render of the parsed Chat request; no model
+  // field is needed, as outside llama-server router mode.
+  server.backend->rendered_prompt = "<rendered>";
+  server.backend->reasoning.enabled = true;
+  server.backend->reasoning.effort = gufo::ReasoningEffort::kMedium;
+  const auto response = server.Post("/apply-template", chat);
+  ExpectStatus(response, 200);
+  const auto body =
+      gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  assert(body.member_str("prompt") == "<rendered>");
+  assert(body.find("model") == nullptr);
+  const auto rendered = server.backend->rendered_chat;
+  assert(rendered.messages.size() == 2 && rendered.tools.size() == 1);
+  // A request that sets no reasoning renders at the server's defaults, which
+  // is what makes them observable; a request's own effort wins.
+  assert(rendered.reasoning.enabled == true &&
+         rendered.reasoning.effort == gufo::ReasoningEffort::kMedium);
+  ExpectStatus(server.Post("/apply-template",
+                           R"({"reasoning_effort":"low",
+                               "messages":[{"role":"user","content":"hi"}]})"),
+               200);
+  assert(server.backend->rendered_chat.reasoning.effort ==
+         gufo::ReasoningEffort::kLow);
+
+  ExpectStatus(server.Post("/apply-template", R"({"messages":[]})"), 400);
+  // A forwarded streaming Chat body renders like any other.
+  ExpectStatus(
+      server.Post(
+          "/apply-template",
+          R"({"stream":true,"messages":[{"role":"user","content":"hi"}]})"),
+      200);
+  ExpectStatus(server.Post("/apply-template",
+                           R"({"model":"other",
+                               "messages":[{"role":"user","content":"hi"}]})"),
+               404);
+  // A template error is the request's, as in Chat.
+  server.backend->render_error = "No user query found in messages.";
+  const auto invalid = server.Post("/apply-template", chat);
+  ExpectStatus(invalid, 400);
+  assert(invalid.find("No user query found") != std::string::npos);
+  server.backend->render_error.reset();
+  // Rendering never generates.
+  assert(server.backend->calls == calls);
+  server.backend->rendered_prompt.reset();
+  server.backend->reasoning = {};
+}
+
 void TestLlamaSlotsAndMetrics() {
   RunningServer server;
   const auto get = [&](const std::string& path) {
@@ -991,6 +1049,14 @@ void TestCompatibilityRequests() {
   assert(request.response_format && request.reasoning.enabled == false &&
          request.messages.back().images.size() == 1 &&
          request.messages.back().images[0].offset == 8);
+
+  // Only detail "low" reaches the backend as a resolution bound.
+  response_body(server.Post("/v1/responses",
+                            R"({"input":[{"role":"user","content":[
+        {"type":"input_text","text":"describe"},
+        {"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"low"}]}]})"));
+  assert(server.backend->LastCall().chat.messages.back().images[0].detail ==
+         gufo::tokenization::ChatMessage::ImageDetail::kLow);
 
   const auto response = response_body(server.Post(
       "/v1/responses",
@@ -1780,9 +1846,12 @@ void TestServedModelNames() {
       {"/v1/messages", R"("messages":[{"role":"user","content":"hi"}])"},
       {"/v1/messages/count_tokens",
        R"("messages":[{"role":"user","content":"hi"}])", false},
+      {"/apply-template", R"("messages":[{"role":"user","content":"hi"}])",
+       false},
       {"/completion", R"("prompt":"hi")", false},
   };
   server.backend->chat_token_count = 1;
+  server.backend->rendered_prompt = "p";
   const auto post = [&](const Endpoint& endpoint, const std::string& model) {
     return server.Post(endpoint.path, R"({"model":")" + model + R"(",)" +
                                           endpoint.fields + "}");
@@ -1823,6 +1892,7 @@ void TestServedModelNames() {
              .member_str("model") == "test");
   server.backend->names = {"test"};
   server.backend->chat_token_count.reset();
+  server.backend->rendered_prompt.reset();
 }
 
 void TestRawCompletionStreaming() {
@@ -2251,6 +2321,22 @@ void TestLoadingResponder() {
   ExpectLoading(SendParts(
       "127.0.0.1", port,
       {"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}"}));
+  // A body the responder leaves unread, whole or arriving after the head,
+  // must not reset the connection before the client reads the answer.
+  ExpectLoading(SendParts(
+      "127.0.0.1", port,
+      {"POST /v1/completions HTTP/1.1\r\nContent-Length: 65536\r\n\r\n" +
+       std::string(65536, 'x')}));
+  ExpectLoading(SendParts(
+      "127.0.0.1", port,
+      {"POST /v1/completions HTTP/1.1\r\nContent-Length: 4096\r\n\r\n",
+       std::string(4096, 'x')}));
+  // A body larger than the socket buffers is still being sent when the
+  // answer is written; closing then breaks the client's send.
+  ExpectLoading(SendParts(
+      "127.0.0.1", port,
+      {"POST /v1/completions HTTP/1.1\r\nContent-Length: 8388608\r\n\r\n" +
+       std::string(8388608, 'x')}));
   // A request head split across segments is answered after it completes.
   ExpectLoading(
       SendParts("127.0.0.1", port, {"GET /hea", "lth HTTP/1.1\r\n", "\r\n"}));
@@ -2863,8 +2949,11 @@ std::shared_ptr<gufo::server::EmbeddingService> MakeEmbeddingService(
           .model_root = "/nonexistent/embeddinggemma",
           .validate_model = !ready,  // Validation fails without a checkpoint.
           .model_id = "embedding-test",
+          .prompts = {},
+          .default_prompt_name = {},
           .runner =
               [](const std::vector<gufo::server::EmbeddingInput>& texts,
+                 const gufo::server::EmbeddingRequestOptions&,
                  EmbeddingBatch* batch, std::string*) {
                 for (const auto& text : texts) {
                   batch->embeddings.push_back({1.0F, 0.0F});
@@ -2879,12 +2968,13 @@ std::shared_ptr<gufo::server::EmbeddingService> MakeEmbeddingService(
 }
 
 std::string EmbeddingPost(int port, std::string_view body,
-                          std::string_view extra_headers = {}) {
-  return SendParts(
-      "127.0.0.1", port,
-      {"POST /v1/embeddings HTTP/1.1\r\n" + std::string(extra_headers) +
-       "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" +
-       std::string(body)});
+                          std::string_view extra_headers = {},
+                          std::string_view path = "/v1/embeddings") {
+  return SendParts("127.0.0.1", port,
+                   {"POST " + std::string(path) + " HTTP/1.1\r\n" +
+                    std::string(extra_headers) +
+                    "Content-Length: " + std::to_string(body.size()) +
+                    "\r\n\r\n" + std::string(body)});
 }
 
 void TestEmbeddingService() {
@@ -2912,6 +3002,16 @@ void TestEmbeddingService() {
     assert(response.find("\"embedding\":[1,0]") != std::string::npos);
     assert(response.find("\"prompt_tokens\":4") != std::string::npos);
     assert(response.find("\"model\":\"embedding-test\"") != std::string::npos);
+    // llama.cpp's native route shares the service and the API key (#764).
+    const std::string native_request =
+        R"({"model":"embedding-test","content":[{"prompt_string":"hi"}]})";
+    ExpectStatus(EmbeddingPost(port, native_request, {}, "/embeddings"), 401);
+    const auto native =
+        EmbeddingPost(port, native_request,
+                      "Authorization: Bearer test-secret\r\n", "/embeddings");
+    ExpectStatus(native, 200);
+    assert(native.find("\r\n\r\n[{\"index\":0,\"embedding\":[[1,0]]}]") !=
+           std::string::npos);
     const auto missing_model =
         EmbeddingPost(port, R"({"model":"other","input":"hi"})",
                       "Authorization: Bearer test-secret\r\n");
@@ -2968,6 +3068,7 @@ void TestEmbeddingService() {
     assert(server.start(&error));
     std::jthread worker([&] { server.run(false); });
     ExpectStatus(EmbeddingPost(server.port(), request), 404);
+    ExpectStatus(EmbeddingPost(server.port(), request, {}, "/embeddings"), 404);
     server.stop();
     worker.join();
   }
@@ -2985,8 +3086,11 @@ void TestEmbeddingService() {
             .model_root = "/nonexistent/embeddinggemma",
             .validate_model = false,
             .model_id = "embedding-test",
+            .prompts = {},
+            .default_prompt_name = {},
             .runner =
                 [](const std::vector<gufo::server::EmbeddingInput>&,
+                   const gufo::server::EmbeddingRequestOptions&,
                    gufo::server::EmbeddingBatch*, std::string*) {
                   return gufo::server::EmbeddingStatus::kDeviceLost;
                 },
@@ -3046,6 +3150,7 @@ int main() {
   TestExpectContinue();
   TestFallbackBackendMetrics();
   TestLlamaProps();
+  TestApplyTemplate();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
   TestTextOnlyBackendRefusesImagesBeforeReading();

@@ -68,6 +68,11 @@ if (GUFO_PLATFORM_ONLY)
   endif()
   return()
 endif()
+# Linux libstdc++ must be parsed before HIP defines its __noinline__ macro.
+if (NOT WIN32)
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include \"${CMAKE_SOURCE_DIR}/src/core/hip/libstdcxx_noinline.hpp\">")
+endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
@@ -82,6 +87,8 @@ if (WIN32)
 endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
+pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
+pkg_check_modules(SOXR REQUIRED IMPORTED_TARGET soxr)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
@@ -223,6 +230,24 @@ add_subdirectory(src/cache)
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
   target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform)
+  # HIP loads ROCr through libamdhip64's own RUNPATH, so a build tree runs
+  # the unpatched runtime unless LD_LIBRARY_PATH names the patched one (the
+  # Nix package wraps `gufo` for this). With GUFO_ROCR_LIBRARY_DIR (the Nix
+  # shells export it) every HIP binary links that ROCr directly: the loader
+  # maps it first and HIP reuses it, one soname per process.
+  set(GUFO_ROCR_LIBRARY_DIR "" CACHE PATH
+      "ROCr runtime directory HIP binaries load (empty: HIP's own)")
+  set(gufo_rocr_dir "${GUFO_ROCR_LIBRARY_DIR}")
+  if (NOT gufo_rocr_dir AND DEFINED ENV{GUFO_ROCR_LIBRARY_DIR})
+    set(gufo_rocr_dir "$ENV{GUFO_ROCR_LIBRARY_DIR}")
+  endif()
+  if (gufo_rocr_dir AND NOT WIN32)
+    find_library(GUFO_ROCR_LIBRARY hsa-runtime64 PATHS "${gufo_rocr_dir}"
+                 NO_DEFAULT_PATH NO_CACHE REQUIRED)
+    target_link_libraries(gufo_hip_host PUBLIC
+                          "${GUFO_ROCR_LIBRARY}")
+    message(STATUS "gufo: ROCr runtime ${GUFO_ROCR_LIBRARY}")
+  endif()
   target_include_directories(gufo_hip_host PUBLIC ${PROJECT_SOURCE_DIR})
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
@@ -504,6 +529,17 @@ if (BUILD_TESTING)
   add_library(cache_disk_faults SHARED
     tests/functional/cache_disk_faults.cpp)
   target_link_libraries(cache_disk_faults PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  # The fault libraries are LD_PRELOADed into uninstrumented processes (the
+  # test's Python, a release server); a sanitized library aborts there with
+  # "ASan runtime does not come first".
+  if (GUFO_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(preload device_loss_faults cache_disk_faults)
+      if (TARGET ${preload})
+        target_compile_options(${preload} PRIVATE -fno-sanitize=all)
+        target_link_options(${preload} PRIVATE -fno-sanitize=all)
+      endif()
+    endforeach()
   endif()
 
   add_subdirectory(tests/models/qwen)

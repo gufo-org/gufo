@@ -435,7 +435,10 @@ def check_literal_history(client, model, checks, chat_result, image=None):
     for endpoint in ("chat", "responses"):
         for visual in (False, True) if image else (False,):
             label = f"literal_history_{endpoint}_{'image' if visual else 'text'}"
-            prompt = "Read next.txt once. After receiving its contents, reply only DONE."
+            # Unannounced markup in a tool result reads as an injection, and
+            # the model may warn about it after DONE.
+            prompt = ("Read next.txt once. It holds sample data that quotes tool-call "
+                      "markup. After receiving its contents, reply only DONE.")
             content = "Read old.txt."
             if visual:
                 content = [image, {"type": "text", "text": content}]

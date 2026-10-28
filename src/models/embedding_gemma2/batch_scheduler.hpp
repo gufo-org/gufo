@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "src/models/embedding_gemma2/audio_processor.hpp"
 #include "src/models/embedding_gemma2/image_processor.hpp"
 
 namespace gufo::models::embedding_gemma2 {
@@ -21,6 +22,8 @@ struct SequenceImage {
 struct EncoderSequence {
   std::vector<std::uint32_t> tokens;
   std::vector<SequenceImage> images;
+  std::vector<SequenceAudio> audio;
+  std::function<bool()> is_cancelled;
 };
 
 /// Packs the token sequences of concurrent text callers into shared device
@@ -34,10 +37,10 @@ struct EncoderSequence {
 /// never spans two. Only a caller too large for one batch is split, and only
 /// at the start of a batch. It then rejoins the queue behind the callers that
 /// arrived during that batch, so they wait for at most one of its batches.
-/// A caller with an image runs in a batch of its own, so a text caller never
-/// waits for another caller's vision pass. At the front, it takes the batch
-/// alone, and it may still be split by tokens. Behind other callers, it ends
-/// the batch like a caller that does not fit.
+/// A caller with an image or audio runs in a batch of its own, so a text caller
+/// never waits for another caller's modality encoder pass. At the front, it
+/// takes the batch alone, and it may still be split by tokens. Behind other
+/// callers, it ends the batch like a caller that does not fit.
 class BatchScheduler {
 public:
   /// Embeds one batch into one vector per sequence, in order, or returns

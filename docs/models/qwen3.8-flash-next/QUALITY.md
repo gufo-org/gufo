@@ -1033,6 +1033,35 @@ and [SGLang](https://github.com/sgl-project/sglang/blob/993d1fccbaafe3e79d91567d
 formulas supply independent predictor checks; pinned Transformers ignores MTP
 weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
+### F32 reference fixtures
+
+[`tests/fixtures/qwen38_flash_next/f32_reference`](../../../tests/fixtures/qwen38_flash_next/f32_reference)
+holds the CPU F32 reference's log-sum-exp and top-256 logits for 2,479 prefill
+positions over four prompts (documentation, C++ source, chat, tool calls),
+for the model shards and reference revision in its `manifest.json`. Score
+a build in about a minute, without the CPU reference:
+
+```sh
+F=tests/fixtures/qwen38_flash_next/f32_reference
+PROBE=build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_gpu_probe
+for p in docs:2048 code:512 chat:512 tools:512; do
+  "$PROBE" --model "$MODEL" --prompt-file "$F/prompts/${p%%:*}.txt" \
+    --batch "${p##*:}" --context 4096 --logit-rows 256 --dump "dumps/${p%%:*}.bin"
+done
+nix develop -c python3 tests/models/qwen38_flash_next/f32_reference.py compare \
+  --manifest "$F/manifest.json" --dumps dumps [--against main-dumps]
+```
+
+Each `--logit-rows` dump has a `.json` sidecar with its batch, rows per pass,
+token count and a hash of the token ids; `compare` rejects dumps whose sidecar does not match the
+manifest. `--against` adds paired KL and next-token NLL intervals (overall
+and per prompt) against a second build. Regenerate the
+fixtures when the shards or the reference change: run
+`qwen38_flash_next_reference_probe --tokens ... --dump` alone (no GPU model
+resident: 661 tokens took 858 s, against 46 s per token beside the GPU
+model), then `f32_reference.py write`. `gpu_probe --nll` measures the
+next-token NLL over a long prompt file in 2,048-token passes.
+
 ## Benchmark method
 
 All Gufo tables were refreshed on October 18, 2026, with the clean production

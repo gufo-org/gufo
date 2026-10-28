@@ -408,7 +408,19 @@ void CloseFile(PlatformFile file) noexcept {
 std::size_t ReadFileAt(PlatformFile file, void* output, std::size_t bytes,
                        std::uint64_t offset) noexcept {
 #if defined(_WIN32)
+  struct ThreadEvent {
+    HANDLE handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ~ThreadEvent() {
+      if (handle != nullptr)
+        CloseHandle(handle);
+    }
+  };
+  thread_local ThreadEvent event;
+  if (event.handle == nullptr)
+    return 0;
   OVERLAPPED overlapped{};
+  overlapped.hEvent = event.handle;
+  ResetEvent(overlapped.hEvent);
   overlapped.Offset = static_cast<DWORD>(offset);
   overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
   // ReadFile takes a DWORD count; larger requests return a short read.
@@ -416,7 +428,10 @@ std::size_t ReadFileAt(PlatformFile file, void* output, std::size_t bytes,
   DWORD read_bytes = 0;
   if (!ReadFile(static_cast<HANDLE>(file), output, request, &read_bytes,
                 &overlapped)) {
-    return 0;
+    if (GetLastError() != ERROR_IO_PENDING ||
+        !GetOverlappedResult(static_cast<HANDLE>(file), &overlapped,
+                             &read_bytes, TRUE))
+      return 0;
   }
   return read_bytes;
 #else
@@ -471,6 +486,26 @@ PlatformFile ReopenUnbuffered(PlatformFile file) noexcept {
   // description without resolving the original, replaceable pathname.
   const auto path = "/proc/self/fd/" + std::to_string(file);
   return ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+#endif
+}
+
+PlatformFile ReopenRandomReadFile(PlatformFile file, bool& direct) noexcept {
+  direct = false;
+#if defined(_WIN32)
+  if (!FileValid(file))
+    return kInvalidFile;
+  // NTFS serializes non-cached reads while another range of the file is
+  // mapped. Cached overlapped reads preserve concurrency; their cached pages
+  // remain reclaimable rather than part of the model's resident weights.
+  HANDLE reopened =
+      ReOpenFile(static_cast<HANDLE>(file), GENERIC_READ,
+                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                 FILE_FLAG_RANDOM_ACCESS | FILE_FLAG_OVERLAPPED);
+  return reopened == INVALID_HANDLE_VALUE ? kInvalidFile : reopened;
+#else
+  const auto reopened = ReopenUnbuffered(file);
+  direct = FileValid(reopened);
+  return reopened;
 #endif
 }
 

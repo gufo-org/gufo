@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -297,9 +298,9 @@ bool ParseContent(const json::Value* content,
         *error = "image_url requires a user or tool message and a string URL";
         return false;
       }
-      // Resolution is model-owned. The standard detail values are accepted
-      // and all behave as 'auto', since clients such as Codex always send
-      // one; anything else is still a malformed request.
+      // Resolution is model-owned, except that 'low' bounds it. The other
+      // standard values behave as 'auto', since clients such as Codex always
+      // send one; anything else is still a malformed request.
       const auto* detail = image->find("detail");
       if (detail != nullptr &&
           (!detail->is_string() ||
@@ -308,10 +309,16 @@ bool ParseContent(const json::Value* content,
         *error = "image_url.detail must be 'auto', 'low', 'high' or 'original'";
         return false;
       }
+      const auto image_detail =
+          detail != nullptr && detail->get_str() == "low"
+              ? tokenization::ChatMessage::ImageDetail::kLow
+              : tokenization::ChatMessage::ImageDetail::kAuto;
       try {
         message->images.push_back(
-            {output->size(), std::make_shared<const std::vector<std::uint8_t>>(
-                                 core::ReadImageUrl(url->get_str(), budget))});
+            {output->size(),
+             std::make_shared<const std::vector<std::uint8_t>>(
+                 core::ReadImageUrl(url->get_str(), budget)),
+             image_detail});
       } catch (const std::exception& exception) {
         *error = exception.what();
         return false;
@@ -462,9 +469,10 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
   return true;
 }
 
-bool ParseTools(const json::Value* tools,
-                std::vector<tokenization::ChatTool>* output, std::string* error,
-                bool allow_non_function = false) {
+bool ParseToolList(const json::Value* tools,
+                   std::vector<tokenization::ChatTool>* output,
+                   std::unordered_set<std::string>* names, std::string* error,
+                   bool allow_non_function) {
   if (tools == nullptr || tools->is_null()) {
     return true;
   }
@@ -487,7 +495,7 @@ bool ParseTools(const json::Value* tools,
         *error = "namespace tools require a tools array";
         return false;
       }
-      if (!ParseTools(nested, output, error, allow_non_function))
+      if (!ParseToolList(nested, output, names, error, allow_non_function))
         return false;
       continue;
     }
@@ -526,9 +534,9 @@ bool ParseTools(const json::Value* tools,
       *error = std::string(kToolNameRule);
       return false;
     }
-    if (std::ranges::any_of(*output, [&](const auto& previous) {
-          return previous.name == tool.name;
-        })) {
+    // A set keeps the check linear: only the request body size bounds the
+    // number of functions.
+    if (!names->insert(tool.name).second) {
       *error = "function names must be unique";
       return false;
     }
@@ -570,15 +578,18 @@ bool ParseTools(const json::Value* tools,
     definition["type"] = "function";
     definition["function"] = std::move(function_obj);
     tool.definition_json = definition.dump();
-    // Counted per flattened function, so namespace recursion cannot exceed
-    // the cap by ordering hosted-adjacent entries around a full namespace.
-    if (output->size() >= 128) {
-      *error = "'tools' supports at most 128 functions";
-      return false;
-    }
     output->push_back(std::move(tool));
   }
   return true;
+}
+
+bool ParseTools(const json::Value* tools,
+                std::vector<tokenization::ChatTool>* output, std::string* error,
+                bool allow_non_function = false) {
+  std::unordered_set<std::string> names;
+  for (const auto& tool : *output)
+    names.insert(tool.name);
+  return ParseToolList(tools, output, &names, error, allow_non_function);
 }
 
 bool ParseToolChoice(const json::Value* value, ParsedChatRequest* request,
@@ -803,7 +814,8 @@ std::optional<HttpResponse> ParseToolControls(const json::Value& body,
 
 std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                                          TextGenerationBackend& backend,
-                                         ParsedChatRequest* output) {
+                                         ParsedChatRequest* output,
+                                         bool require_model = true) {
   json::Value body;
   try {
     body = json::parse(request.body);
@@ -821,6 +833,9 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                  "invalid_model");
   }
   output->model = body.member_str("model");
+  if (output->model.empty() && !require_model) {
+    output->model = backend.model_id();
+  }
   if (output->model.empty()) {
     return Error(400, "Bad Request", "'model' is required", "missing_model");
   }
@@ -3918,6 +3933,43 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
                                 initial_output_state);
   } catch (const TextGenerationError& exception) {
     return GenerationError(exception);
+  } catch (const std::invalid_argument& exception) {
+    return Error(400, "Bad Request", exception.what(), "invalid_prompt");
+  } catch (const std::length_error& exception) {
+    return Error(400, "Bad Request", exception.what(),
+                 "context_length_exceeded");
+  }
+}
+
+HttpResponse HandleApplyTemplate(const HttpRequest& request,
+                                 TextGenerationBackend& backend) {
+  ParsedChatRequest parsed;
+  if (auto error = ParseRequest(request, backend, &parsed,
+                                /*require_model=*/false);
+      error.has_value()) {
+    return std::move(*error);
+  }
+  // As in llama-server, `stream` is ignored: the prompt is one JSON response.
+  try {
+    auto prompt = backend.render_chat_prompt(parsed.chat);
+    if (!prompt) {
+      json::Value response = json::Value::object();
+      json::Value error = json::Value::object();
+      error["message"] = "endpoint not implemented on this text model";
+      error["type"] = "server_error";
+      error["code"] = "not_implemented";
+      response["error"] = std::move(error);
+      HttpResponse unavailable;
+      unavailable.status = 501;
+      unavailable.reason = "Not Implemented";
+      unavailable.body = response.dump();
+      return unavailable;
+    }
+    json::Value response = json::Value::object();
+    response["prompt"] = std::move(*prompt);
+    HttpResponse rendered;
+    rendered.body = response.dump();
+    return rendered;
   } catch (const std::invalid_argument& exception) {
     return Error(400, "Bad Request", exception.what(), "invalid_prompt");
   } catch (const std::length_error& exception) {

@@ -73,6 +73,10 @@ public:
         << std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - start_)
                .count()
+        << " monotonic_us="
+        << std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+               .count()
         << ' ' << details << ' ' << server::Logger::MemoryStatus();
 #if defined(ENGINE_ENABLE_HIP)
     std::size_t free = 0, total = 0;
@@ -497,12 +501,17 @@ void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
 }
 
 void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
-                         std::string* served_model_name) {
+                         std::string* served_model_name,
+                         std::string* default_prompt_name) {
   parser.AddOption("-m", "--model", "DIR", "EmbeddingGemma 2 model directory",
                    "Model", model);
   parser.AddOption("", "--served-model-name", "NAME",
                    "Public API model ID (default: embeddinggemma-2)", "Model",
                    served_model_name);
+  parser.AddOption("", "--default-prompt-name", "NAME",
+                   "Checkpoint prompt for text inputs without prompt_name "
+                   "(default: none)",
+                   "Model", default_prompt_name);
 }
 
 }  // namespace
@@ -526,9 +535,11 @@ void PrintServeHelp(std::string_view program_name,
   if (subcommand == "embedding") {
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
-    ArgParser parser(std::string(program_name) + " serve embedding",
-                     "Serve EmbeddingGemma 2 text and image embeddings.");
-    AddEmbeddingOptions(parser, &model, &name);
+    std::string default_prompt_name;
+    ArgParser parser(
+        std::string(program_name) + " serve embedding",
+        "Serve EmbeddingGemma 2 text, image and audio embeddings.");
+    AddEmbeddingOptions(parser, &model, &name, &default_prompt_name);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
     parser.PrintHelp();
@@ -760,7 +771,7 @@ void PrintServeHelp(std::string_view program_name,
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
          "(/v1/audio/transcriptions)\n"
-      << "  embedding Serve EmbeddingGemma 2 text and image embeddings "
+      << "  embedding Serve EmbeddingGemma 2 text, image and audio embeddings "
          "(/v1/embeddings)\n\n"
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
@@ -952,9 +963,11 @@ int RunServe(std::span<const char* const> args) {
   if (subcommand == "embedding") {
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
-    ArgParser parser("gufo serve embedding",
-                     "Serve EmbeddingGemma 2 text and image embeddings.");
-    AddEmbeddingOptions(parser, &model, &name);
+    std::string default_prompt_name;
+    ArgParser parser(
+        "gufo serve embedding",
+        "Serve EmbeddingGemma 2 text, image and audio embeddings.");
+    AddEmbeddingOptions(parser, &model, &name, &default_prompt_name);
     add_server_options(parser, false);
     if (!parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << '\n';
@@ -971,12 +984,21 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     ModelLoadLog load_log("embedding_gemma2", model);
+    std::map<std::string, std::string> prompts;
+    std::string prompts_error;
+    if (!server::LoadSentenceTransformerPrompts(model, &prompts,
+                                                &prompts_error)) {
+      std::cerr << "Error: " << prompts_error << '\n';
+      return 1;
+    }
     try {
       embeddings = std::make_shared<server::EmbeddingService>(
           server::EmbeddingServiceOptions{
               .model_root = model,
               .validate_model = true,
               .model_id = name,
+              .prompts = std::move(prompts),
+              .default_prompt_name = default_prompt_name,
               .runner = {},
           });
     } catch (const std::exception& error) {

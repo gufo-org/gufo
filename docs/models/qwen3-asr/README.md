@@ -5,6 +5,7 @@ supported; 0.6B, forced alignment and audio GGUFs are unsupported. Python runs
 only offline reference checks. Generation is deterministic greedy decoding.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
+· [ROCm migration](ROCM.md)
 
 ```sh
 nix develop -c hf download Qwen/Qwen3-ASR-1.7B \

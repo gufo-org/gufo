@@ -14,6 +14,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/embedding_gemma2/batch_scheduler.hpp"
+#include "src/models/embedding_gemma2/hip/audio_runtime.hpp"
 #include "src/models/embedding_gemma2/hip/blas.hpp"
 #include "src/models/embedding_gemma2/hip/ops.hpp"
 #include "src/models/embedding_gemma2/hip/vision_ops.hpp"
@@ -149,6 +150,7 @@ struct EncoderRuntime::Impl {
         context, temp, gate_up, act, pooled, features;
   };
   std::unique_ptr<Vision> vision;
+  std::unique_ptr<AudioRuntime> audio;
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
   GemmLt gemm_lt;
@@ -182,6 +184,7 @@ struct EncoderRuntime::Impl {
       }};
 
   ~Impl() {
+    audio.reset();
     if (blas != nullptr) {
       gufo::hip::LogCleanupError(hipblasDestroy(blas));
     }
@@ -479,6 +482,16 @@ void EncoderRuntime::Impl::RunBatch(
                         hidden, kEmbedScale, stream);
 
   for (std::size_t s = 0; s < sequences.size(); ++s) {
+    for (const auto& clip : sequences[s]->audio) {
+      if (!audio)
+        audio = std::make_unique<AudioRuntime>(model_dir, stream);
+      const auto* features =
+          audio->Run(clip.features, sequences[s]->is_cancelled);
+      const std::size_t offset = host_offsets[s] + clip.offset;
+      LaunchVisionInsert(features, state.get<float>() + offset * 512,
+                         embeddings_bf16.get<std::uint16_t>() + offset * 512,
+                         clip.features.soft_tokens(), stream);
+    }
     for (const auto& image : sequences[s]->images) {
       RunVision(image.patches, host_offsets[s] + image.offset);
     }
@@ -735,6 +748,28 @@ bool EncoderRuntime::EmbedMultimodal(
         }
       }
       previous_end = image.offset + n;
+    }
+    previous_end = 0;
+    for (const auto& clip : sequence.audio) {
+      const auto& features = clip.features;
+      const std::size_t n = features.soft_tokens();
+      bool padding = false;
+      for (const auto valid : features.mask) {
+        if (valid > 1 || (padding && valid))
+          return fail("embedding_gemma2: invalid audio feature mask");
+        padding = padding || !valid;
+      }
+      if (features.mask.empty() || features.mask.size() > 2999 || n == 0 ||
+          features.values.size() != features.mask.size() * 128 ||
+          !std::ranges::all_of(features.values,
+                               [](float x) { return std::isfinite(x); }) ||
+          clip.offset < previous_end || clip.offset > sequence.tokens.size() ||
+          n > sequence.tokens.size() - clip.offset)
+        return fail("embedding_gemma2: invalid audio features or token offset");
+      for (std::size_t j = 0; j < n; ++j)
+        if (sequence.tokens[clip.offset + j] != kAudioTokenId)
+          return fail("embedding_gemma2: audio placeholder mismatch");
+      previous_end = clip.offset + n;
     }
     for (const std::uint32_t id : sequence.tokens) {
       if (id >= text.vocab_size) {

@@ -118,7 +118,7 @@ PNG reading, preprocessing, vision/text inference and response transport.
 
 This is a new workload with no supported main image path to compare. The first
 image request additionally loads **335.5 MB** of vision/projector weights; text
-startup still loads only the text backbone. Audio weights are never uploaded.
+startup still loads only the text backbone. Audio weights load lazily on the first audio request; see the audio measurements below.
 
 The affected text controls retain every request. Main and candidate alternate
 per workload, with 60 requests each and no per-request failures at the 5% and
@@ -138,3 +138,34 @@ evidence against worktree revision `8e7979cc`, which was not origin/main. Its
 initial isolated 152.8 ms outlier remains marked inconclusive and is not used
 to qualify the rebased PR. Earlier published text benchmark rows above remain
 their original measurements.
+
+## Audio, October 26, 2026
+
+Production release binary `cb49012f75b4`, checkpoint and official reference pins
+as recorded in [quality](QUALITY.md#audio-and-interleaved-input-parity).
+Loopback HTTP C1 server durations below keep each request separately. The first
+audio request includes lazy tower/projector loading; subsequent requests reuse
+weights and bounded scratch. Text and vision were already resident.
+
+| Input | First request (ms) | Second (ms) | Third (ms) |
+| --- | ---: | ---: | ---: |
+| Generated one-second tone, 29 expanded tokens | 146.9 | 28.3 | 27.8 |
+| Ten-second English speech, 254 tokens | 99.8 | 99.7 | 100.4 |
+| Two clips with text, 35 tokens | 46.8 | 47.2 | 47.1 |
+| Audio/image/text, 288 tokens | 511.4 | 498.6 | 498.1 |
+
+An isolated native test measured **1,410,707,456 bytes (1.31 GiB)** less free
+device memory after constructing the audio runtime, including widened float32
+weights, fixed scratch and BLAS reservations. This is a `hipMemGetInfo` allocation
+delta, not process RSS. Audio is float32 to retain the independent stage contract;
+text and vision keep their existing numerical paths.
+
+[Raw measurements](artifacts/gfx1151-2026-10-26-audio.json) retain all runs and
+all standard HTTP benchmark requests (60 per workload). The first candidate pass
+overlapped the CPU contract workload, so that standard comparison is
+**inconclusive**, without a speed claim. After it finished, matched main
+`9dd2d24d` and candidate controls repeated only the affected C1 histories:
+40/404/1,940-token text inputs and a 256-token image. Every individual request's
+server and client time passes the unchanged 5% and 10 ms margins. All vectors
+are byte-identical and work counts match. The two unchanged-main runs are
+retained as controls; the first inconclusive observations are not discarded.

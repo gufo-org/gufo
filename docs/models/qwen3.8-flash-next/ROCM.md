@@ -5,7 +5,8 @@ MTP sidecar on Strix Halo `gfx1151`.
 
 **Focused compatibility and numerical checks pass on both runtimes.**
 Sampled generation improves; some cold-start and disk timing observations
-remain inconclusive. The default Nix toolchain remains ROCm 7.2.3. Main
+remain inconclusive. At the time of these measurements, the default Nix
+toolchain was ROCm 7.2.3. Main
 `ab122e44` adds the optional ROCm 10.1 build and its ROCr queue-memory patch.
 The working branch is rebased onto main `ade4f4d7`, including the expanded
 greedy draft-head eligibility from #739 and the Cachix configuration from
@@ -28,8 +29,8 @@ Inference and builds run separately.
 Controller comparisons use frozen controls based on main `41d93463` plus
 the selector change; the candidate adds the scoped sampled-head cost curve.
 
-The repository's optional Nix entry points are `nix build .#rocm10` and
-`nix develop .#rocm10`. The measurements here use the container configuration
+The repository now uses ROCm 10.1 through `nix build` and `nix develop`;
+the former optional `.#rocm10` outputs have been removed. The measurements here use the container configuration
 above; they do not qualify every possible ROCm installation.
 
 ## Validation

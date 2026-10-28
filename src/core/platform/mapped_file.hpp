@@ -124,6 +124,11 @@ PlatformFile DuplicateFile(PlatformFile file) noexcept;
 /// callers then fall back to buffered reads.
 PlatformFile ReopenUnbuffered(PlatformFile file) noexcept;
 
+/// Reopens a retained file for concurrent random reads. Windows uses cached
+/// overlapped I/O; Linux attempts direct I/O. Sets `direct` when the returned
+/// handle requires aligned reads. Returns kInvalidFile on failure.
+PlatformFile ReopenRandomReadFile(PlatformFile file, bool& direct) noexcept;
+
 }  // namespace gufo::platform
 
 #endif  // GUFO_CORE_PLATFORM_MAPPED_FILE_HPP_

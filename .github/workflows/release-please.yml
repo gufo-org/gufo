@@ -1,4 +1,4 @@
-name: Release Please
+name: Release automation
 
 on:
   schedule:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   release:
-    name: Create daily release
+    name: Prepare, merge and publish release
     runs-on: ubuntu-latest
     # The release PR waits for the full Devlab functional run (about an hour).
     timeout-minutes: 180
@@ -28,7 +28,7 @@ jobs:
       pull-requests: read
       issues: write
     steps:
-      - name: Create release app token
+      - name: Create release token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -43,7 +43,7 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
 
-      - name: Maintain release pull request or publish merged release
+      - name: Update release PR or publish merged release
         id: release-please
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
@@ -51,7 +51,7 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - name: Request stable Toolboxes artifacts for an existing merged release
+      - name: Request Toolboxes artifacts for existing release
         if: ${{ steps.release-please.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -63,7 +63,7 @@ jobs:
             '{event_type: "gufo-release", client_payload: {tag: $tag}}' \
             | gh api --method POST repos/gufo-org/toolboxes/dispatches --input -
 
-      - name: Wait for release pull request checks
+      - name: Wait for release PR checks
         if: >-
           ${{ steps.release-please.outputs.prs_created == 'true' &&
               steps.release-please.outputs.release_created != 'true' }}
@@ -80,8 +80,8 @@ jobs:
           fi
 
           required_checks=(
-            "Conventional Commit title"
-            "CPU contracts & repository checks"
+            "Validate PR title"
+            "Run CPU and repository checks"
             # The full functional suite on Strix Halo; only releases require it.
             "devlab/functional"
           )
@@ -135,7 +135,7 @@ jobs:
             done
           done
 
-      - name: Create fresh release app token after the wait
+      - name: Refresh release token
         if: >-
           ${{ steps.release-please.outputs.prs_created == 'true' &&
               steps.release-please.outputs.release_created != 'true' }}
@@ -153,7 +153,7 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
 
-      - name: Merge release pull request
+      - name: Merge release PR
         if: >-
           ${{ steps.release-please.outputs.prs_created == 'true' &&
               steps.release-please.outputs.release_created != 'true' }}
@@ -187,7 +187,7 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - name: Request stable Toolboxes artifacts for the daily release
+      - name: Request Toolboxes artifacts for new release
         if: ${{ steps.publish-release.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}

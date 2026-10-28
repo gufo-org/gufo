@@ -1,0 +1,178 @@
+name: Windows validation
+
+on:
+  push:
+    # Main refreshes caches restored by pull requests.
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/windows-build.yml
+
+  devlab:
+    name: Run Windows model checks
+    needs: build
+    if: >-
+      github.repository == 'gufo-org/gufo' &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: [ windows, strix-halo, devlab-dispatch ]
+    timeout-minutes: 60
+    permissions:
+      actions: read # the bundle artifact
+      contents: read
+    defaults:
+      run:
+        shell: powershell
+    # Ephemeral runner with no SDK or package manager: it downloads the build
+    # job's bundle and the pinned model snapshots; checkout supplies only tools.
+    steps:
+      - name: Check out download helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/ci
+
+      - name: Download and verify application bundle
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_ID: ${{ needs.build.outputs.bundle-id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "$env:RUNNER_TEMP\windows-gufo.zip"
+          python tools/ci/devlab_artifact.py fetch --artifact $env:BUNDLE_ID --output $zip
+          if ($LASTEXITCODE -ne 0) { throw 'verified artifact download failed' }
+          New-Item -ItemType Directory -Force -Path windows-gufo | Out-Null
+          tar -xf $zip -C windows-gufo
+          if ($LASTEXITCODE -ne 0) { throw 'cannot unpack the gufo bundle' }
+          Remove-Item -Force $zip
+
+      - name: Run GPU and application diagnostics
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in Get-Content windows-gufo\bundle-manifest.txt) {
+            $size, $path = $line -split "`t", 2
+            $file = Get-Item -LiteralPath "windows-gufo\$path" -ErrorAction SilentlyContinue
+            if (-not $file -or $file.Length -ne [int64]$size) { throw "the gufo bundle is incomplete: $path" }
+          }
+          (Get-CimInstance Win32_VideoController).Name
+          .\windows-gufo\hipInfo.exe
+          if ($LASTEXITCODE -ne 0) { throw 'hipInfo failed' }
+          .\windows-gufo\gufo.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'gufo --version failed' }
+          .\windows-gufo\gufo.exe diagnose
+          if ($LASTEXITCODE -ne 0) { throw 'gufo diagnose failed' }
+
+      # Real HIP kernels and allocations without weights, so a stalled SDK or
+      # a missing runtime piece shows before any model download.
+      - name: Run GPU checks without weights
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gufo = '.\windows-gufo\gufo.exe'
+          foreach ($benchmark in 'bandwidth', 'allocation') {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            & $gufo diagnose --benchmark $benchmark
+            if ($LASTEXITCODE -ne 0) { throw "gufo diagnose --benchmark $benchmark failed" }
+            "{0}: {1:N1} s" -f $benchmark, $watch.Elapsed.TotalSeconds
+          }
+          Push-Location windows-gufo
+          foreach ($test in 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test') {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            & ".\$test.exe"
+            if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
+            "{0}: {1:N1} s" -f $test, $watch.Elapsed.TotalSeconds
+          }
+          Pop-Location
+
+      # The pinned snapshots of tests/functional/devlab.json, as the Linux
+      # Devlab job downloads them.
+      - name: Download model weights
+        env:
+          # One small model per family. Flash-Next (107 GiB) and DeepSeek V4
+          # (81 GiB) are deferred.
+          GUFO_ASSETS: embedding,asr,tts-base,qwen27
+          HF_HUB_DOWNLOAD_TIMEOUT: '120'
+          HF_HUB_ETAG_TIMEOUT: '60'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Inherit the runner's Hugging Face mirror, transfer settings and persistent cache.
+          $hfHome = if ($env:HF_HOME) { $env:HF_HOME } else { "$env:USERPROFILE\.cache\huggingface" }
+          $env:GUFO_MODEL_CACHE = Join-Path $hfHome 'gufo\models'
+          python -m venv "$env:RUNNER_TEMP\hf-cli"
+          if ($LASTEXITCODE -ne 0) { throw 'cannot create the Hugging Face venv' }
+          & "$env:RUNNER_TEMP\hf-cli\Scripts\python.exe" -m pip install --quiet 'huggingface_hub[hf_xet]==1.26.0'
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install huggingface_hub' }
+          $script = @'
+          import json, os, sys, time
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          registry = json.loads(Path("windows-gufo/tests/functional/devlab.json").read_text())
+          paths = {}
+          for key in os.environ["GUFO_ASSETS"].split(","):
+              asset = registry["assets"][key]
+              destination = Path(os.environ["GUFO_MODEL_CACHE"]) / key / asset["revision"]
+              existing = sum((destination / name).is_file() for name in asset["required"])
+              print(f"{key}: {existing}/{len(asset['required'])} required files already present in {destination}", flush=True)
+              started = time.monotonic()
+              # Retried like devlab_models.py: the xet transfer can drop mid-file
+              # and snapshot_download resumes what is already on disk.
+              for attempt in range(1, 4):
+                  try:
+                      snapshot_download(repo_id=asset["repo"], revision=asset["revision"],
+                                        allow_patterns=asset["patterns"], local_dir=destination)
+                      break
+                  except Exception as error:
+                      print(f"{key}: attempt {attempt} failed after {time.monotonic() - started:.0f} s: {error}", flush=True)
+                      if attempt == 3:
+                          raise
+                      time.sleep(10)
+              seconds = time.monotonic() - started
+              for name in asset["required"]:
+                  if not (destination / name).is_file():
+                      sys.exit(f"{key}: missing {name}")
+              size = sum(p.stat().st_size for p in destination.rglob("*") if p.is_file())
+              # A cached snapshot can finish within one Windows clock tick.
+              rate = f"{size / 2**20 / seconds:.1f} MiB/s" if seconds > 0 else "already cached"
+              print(f"{key}: {size / 2**30:.2f} GiB in {seconds:.0f} s, {rate}", flush=True)
+              paths[key] = str(destination)
+          (Path(os.environ["RUNNER_TEMP"]) / "functional-assets.json").write_text(json.dumps(paths))
+          '@
+          $script | & "$env:RUNNER_TEMP\hf-cli\Scripts\python.exe" -
+          if ($LASTEXITCODE -ne 0) { throw 'model download failed' }
+
+      - name: Run model smoke checks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = Get-Content "$env:RUNNER_TEMP\functional-assets.json" -Raw | ConvertFrom-Json
+          $smoke = 'windows-gufo\tests\functional\family_smoke.py'
+          $common = @('--binary', 'windows-gufo\gufo.exe', '--log-dir', "$env:RUNNER_TEMP\smoke-logs")
+          $checks = [ordered]@{
+            embedding = @('embedding', '--model', $assets.embedding)
+            asr       = @('asr', '--model', $assets.asr)
+            tts       = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr)
+            qwen27    = @('llm', '--model', (Join-Path $assets.qwen27 'Qwen3.8-27B-UD-Q4_K_XL.gguf'))
+          }
+          $failed = @()
+          foreach ($name in $checks.Keys) {
+            "=== $name"
+            python $smoke @($checks[$name]) @common
+            if ($LASTEXITCODE -ne 0) { $failed += $name }
+          }
+          if ($failed) { throw "smoke checks failed: $($failed -join ', ')" }
+
+      - name: Remove temporary bundle and environments
+        if: always()
+        run: |
+          Remove-Item -Recurse -Force windows-gufo, "$env:RUNNER_TEMP\functional-assets.json", "$env:RUNNER_TEMP\hf-cli", "$env:RUNNER_TEMP\smoke-logs" -ErrorAction SilentlyContinue

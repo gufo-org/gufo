@@ -541,6 +541,8 @@ private:
                  bool last_only = false, bool projections_ready = false,
                  bool project_output = true,
                  std::uint32_t checkpoint_tokens = 0) const;
+  /// Orders the main stream after the work queued on side_stream_.
+  bool JoinSide(std::string* error_msg) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
@@ -595,7 +597,13 @@ private:
   mutable std::once_flag snapshot_allocator_once_;
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;
   mutable std::shared_ptr<void> checkpoint_storage_;
-  hipStream_t stream_{nullptr};
+  /// The stream kernels are queued on. Overlapped work swaps in side_stream_
+  /// for its launches and joins back through side_done_ (JoinSide).
+  mutable hipStream_t stream_{nullptr};
+  hipStream_t side_stream_{nullptr};
+  hipEvent_t side_start_{nullptr};
+  hipEvent_t side_done_{nullptr};
+  mutable bool side_pending_{false};  ///< side_done_ not yet waited on
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;

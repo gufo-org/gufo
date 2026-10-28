@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "src/core/json.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace {
 
@@ -525,7 +526,7 @@ void TestQueueSaturation(const std::filesystem::path& root) {
 int main() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() /
-      ("gufo-video-api-test-" + std::to_string(getpid()));
+      ("gufo-video-api-test-" + std::to_string(gufo::platform::ProcessId()));
   std::error_code ignored;
   std::filesystem::remove_all(base, ignored);
   std::filesystem::create_directories(base);

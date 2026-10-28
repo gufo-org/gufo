@@ -15,7 +15,7 @@ import pefile
 SYSTEM_DLLS = frozenset(
     """advapi32.dll bcrypt.dll cfgmgr32.dll crypt32.dll gdi32.dll iphlpapi.dll
     kernel32.dll ntdll.dll ole32.dll oleaut32.dll psapi.dll secur32.dll setupapi.dll
-    shell32.dll shlwapi.dll user32.dll version.dll ws2_32.dll""".split()
+    shell32.dll shlwapi.dll user32.dll version.dll winmm.dll ws2_32.dll""".split()
 )
 
 

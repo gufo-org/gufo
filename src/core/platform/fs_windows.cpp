@@ -444,7 +444,21 @@ std::size_t ReadAt(PlatformFile file, std::uint64_t offset, void* output,
     ec = std::make_error_code(std::errc::bad_file_descriptor);
     return 0;
   }
+  struct ThreadEvent {
+    HANDLE handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ~ThreadEvent() {
+      if (handle != nullptr)
+        CloseHandle(handle);
+    }
+  };
+  thread_local ThreadEvent event;
+  if (event.handle == nullptr) {
+    ec = std::make_error_code(std::errc::not_enough_memory);
+    return 0;
+  }
   OVERLAPPED overlapped{};
+  overlapped.hEvent = event.handle;
+  ResetEvent(overlapped.hEvent);
   overlapped.Offset = static_cast<DWORD>(offset);
   overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
   DWORD read_bytes = 0;
@@ -452,7 +466,13 @@ std::size_t ReadAt(PlatformFile file, std::uint64_t offset, void* output,
                                              : static_cast<DWORD>(bytes);
   if (!ReadFile(static_cast<HANDLE>(file), output, request, &read_bytes,
                 &overlapped)) {
-    const DWORD code = GetLastError();
+    DWORD code = GetLastError();
+    if (code == ERROR_IO_PENDING) {
+      if (GetOverlappedResult(static_cast<HANDLE>(file), &overlapped,
+                              &read_bytes, TRUE))
+        return read_bytes;
+      code = GetLastError();
+    }
     if (code == ERROR_HANDLE_EOF)
       return 0;  // Clean end of file.
     ec = Win32Error(code);

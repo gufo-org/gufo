@@ -180,6 +180,35 @@ std::optional<ModelConfig> ParseModelConfig(const std::string& json_contents) {
         root.member_size("image_token_id") == 258880 &&
         root.member_size("eoi_token_id") == 258882;
   }
+  if (const auto* audio = root.find("audio_config");
+      audio && audio->is_object()) {
+    const auto* channels = audio->find("subsampling_conv_channels");
+    const auto* clipped = audio->find("use_clipped_linears");
+    config.supported_audio =
+        audio->member_str("model_type") == "gemma4_audio" &&
+        audio->member_str("dtype") == "bfloat16" &&
+        audio->member_str("hidden_act") == "silu" &&
+        audio->member_size("hidden_size") == 1024 &&
+        audio->member_size("num_hidden_layers") == 12 &&
+        audio->member_size("num_attention_heads") == 8 &&
+        audio->member_size("output_proj_dims") == 1536 &&
+        audio->member_size("conv_kernel_size") == 5 &&
+        audio->member_size("attention_chunk_size") == 12 &&
+        audio->member_size("attention_context_left") == 13 &&
+        audio->member_double("attention_context_right", -1) == 0 &&
+        audio->member_double("attention_invalid_logits_value") == -1e9 &&
+        audio->member_double("attention_logit_cap") == 50 &&
+        audio->member_double("gradient_clipping") == 1e10 &&
+        audio->member_double("residual_weight") == 0.5 &&
+        audio->member_double("rms_norm_eps") == 1e-6 && clipped &&
+        clipped->is_bool() && clipped->as_bool() && channels &&
+        channels->is_array() && channels->size() == 2 &&
+        channels->items()[0].as_size() == 128 &&
+        channels->items()[1].as_size() == 32 &&
+        root.member_size("audio_token_id") == 258881 &&
+        root.member_size("boa_token_id") == 256000 &&
+        root.member_size("eoa_token_index") == 258883;
+  }
   return config;
 }
 

@@ -89,7 +89,7 @@ def execute(plan, binary, baseline, assets_path, output, report, logs):
                               for side in ('base', 'head')))
             if passed:
                 for phase in observed['phases']:
-                    phase['checked'] = any(fnmatch.fnmatchcase(phase['key'], pattern)
+                    phase['checked'] = phase.get('checked', True) and any(fnmatch.fnmatchcase(phase['key'], pattern)
                                            for pattern in selection['timing_checks'])
                 observed['timing_checks'] = selection['timing_checks']
                 write(destination, observed)
