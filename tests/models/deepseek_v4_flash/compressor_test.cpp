@@ -58,7 +58,10 @@ void Run(const std::vector<float>& model, unsigned dim, unsigned ratio,
   Write(input, kv);
   Write(sc, scores);
   std::vector<float> sequential;
-  for (bool grouped : {false, true}) {
+  // Mode 0 stores one row at a time, mode 1 stores spans up to each boundary,
+  // and mode 2 replays whole windows.
+  for (int mode = 0; mode < 3; ++mode) {
+    const bool grouped = mode != 0;
     std::vector<float> expected_kv(state_size, 0),
         expected_score(state_size, -100);
     Tensor state(state_size * sizeof(float)), ss(state_size * sizeof(float)),
@@ -72,24 +75,41 @@ void Run(const std::vector<float>& model, unsigned dim, unsigned ratio,
           "a store spanning a pool boundary is rejected");
     unsigned produced = 0;
     for (unsigned t = 0; t < rows;) {
+      const unsigned whole = mode == 2 && (start + t) % ratio == 0
+                                 ? (rows - t) / ratio * ratio
+                                 : 0;
       const unsigned count =
-          grouped ? std::min(rows - t, ratio - (start + t) % ratio) : 1;
+          whole     ? whole
+          : grouped ? std::min(rows - t, ratio - (start + t) % ratio)
+                    : 1;
       const size_t offset = size_t(t) * width * sizeof(float);
       const size_t bytes = size_t(count) * width * sizeof(float);
       Tensor k(input.data, offset, bytes), s(sc.data, offset, bytes);
       const unsigned position = start + t + count - 1;
-      if (grouped)
-        Check(ds4_gpu_compressor_store_batch_tensor(
-                  k.data, s.data, state.data, ss.data, model.data(),
-                  model.size() * sizeof(float), 0, 0, dim, ratio, start + t,
-                  count),
-              "store a disjoint span");
-      Check(ds4_gpu_compressor_update_tensor(
+      if (whole) {
+        Tensor out(output.data, size_t(produced) * dim * sizeof(float),
+                   size_t(whole / ratio) * dim * sizeof(float));
+        Check(ds4_gpu_compressor_prefill_replay_tensor(
+                  out.data, state.data, ss.data, k.data, s.data, model.data(),
+                  model.size() * sizeof(float), 0, 0,
+                  norm_offset * sizeof(float), 0, dim, ratio, start + t, whole,
+                  16, 0, false, 10000, 1, 0, 1, 32, 1, 1e-6F, nullptr),
+              "replay whole windows");
+      } else {
+        if (grouped)
+          Check(ds4_gpu_compressor_store_batch_tensor(
+                    k.data, s.data, state.data, ss.data, model.data(),
+                    model.size() * sizeof(float), 0, 0, dim, ratio, start + t,
+                    count),
+                "store a disjoint span");
+        Check(
+            ds4_gpu_compressor_update_tensor(
                 k.data, s.data, state.data, ss.data, output.data, model.data(),
                 model.size() * sizeof(float), 0, 0, norm_offset * sizeof(float),
                 0, dim, ratio, position, produced, 16, 0, 10000, 1, 0, 1, 32, 1,
                 1e-6F, grouped, false, false),
             "pool and update compressor state");
+      }
       for (unsigned row = t; row < t + count; ++row) {
         const unsigned slot = (start + row) % ratio;
         const unsigned dst = ratio == 4 ? ratio + slot : slot;
@@ -98,14 +118,14 @@ void Run(const std::vector<float>& model, unsigned dim, unsigned ratio,
           expected_score[dst * width + d] =
               scores[row * width + d] + model[slot * width + d];
         }
-      }
-      if ((position + 1) % ratio == 0) {
-        ++produced;
-        if (ratio == 4) {
-          std::copy_n(expected_kv.begin() + ratio * width, ratio * width,
-                      expected_kv.begin());
-          std::copy_n(expected_score.begin() + ratio * width, ratio * width,
-                      expected_score.begin());
+        if (slot + 1 == ratio) {
+          ++produced;
+          if (ratio == 4) {
+            std::copy_n(expected_kv.begin() + ratio * width, ratio * width,
+                        expected_kv.begin());
+            std::copy_n(expected_score.begin() + ratio * width, ratio * width,
+                        expected_score.begin());
+          }
         }
       }
       Check(Read(state, state_size) == expected_kv,
@@ -119,7 +139,8 @@ void Run(const std::vector<float>& model, unsigned dim, unsigned ratio,
     if (grouped)
       Check(std::memcmp(result.data(), sequential.data(),
                         result.size() * sizeof(float)) == 0,
-            "grouped and sequential compressed rows are bit-identical");
+            "grouped and replayed compressed rows match the sequential rows "
+            "bit for bit");
     else
       sequential = result;
   }
