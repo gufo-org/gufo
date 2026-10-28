@@ -1360,6 +1360,7 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
         uint64_t                in_dim,
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
+        const ds4_gpu_tensor *x_q8,
         const ds4_gpu_tensor *block_add,
         const ds4_gpu_tensor *residual_hc,
         const ds4_gpu_tensor *split,
@@ -1388,17 +1389,12 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
     if (!wptr)
       return 0;
 
-    const uint64_t xq_bytes = blocks * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes = scale_offset + blocks * sizeof(float);
-    void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 hc expand prequant");
-    if (!tmp) return 0;
-    int8_t *xq = (int8_t *)tmp;
-    float* xscale = (float*)((char*)tmp + scale_offset);
+    int8_t *xq = NULL;
+    float *xscale = NULL;
     const int use_dp4a = 1;
-    quantize_q8_0_f32_kernel<<<(unsigned)blocks, 32>>>(
-            xq, xscale, (const float *)x->ptr, in_dim, blocks);
-    if (!hip_ok(hipGetLastError(), "matmul_q8_0_hc_expand quantize launch")) {
+    if (x_q8) {
+        if (!hip_q8_0_act(x_q8, 1u, blocks, &xq, &xscale)) return 0;
+    } else if (!hip_quantize_q8_0_prequant(x, in_dim, blocks, 1u, &xq, &xscale)) {
         return 0;
     }
     const uint32_t rows_per_block = 16u;

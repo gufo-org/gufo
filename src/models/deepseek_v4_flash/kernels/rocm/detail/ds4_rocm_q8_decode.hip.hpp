@@ -534,10 +534,13 @@ __global__ static void matmul_q8_0_preq_batch_warp8_kernel(
     out[tok * out_dim + row] = acc;
 }
 
+/* kQ8Out also writes low's Q8_0 form: launched with 32 rows per block over a
+ * multiple of 32 rows, each block holds exactly one Q8_0 block of outputs. */
+template <bool kQ8Out>
 __global__ static void grouped_q8_0_a_preq_warp8_kernel(
     float* low, const unsigned char* w, const int8_t* xq, const float* xscale,
     uint64_t group_dim, uint64_t rank, uint32_t n_groups, uint32_t n_tokens,
-    uint64_t blocks, int use_dp4a) {
+    uint64_t blocks, int use_dp4a, int8_t* low_q8, float* low_q8_scale) {
   const uint32_t rows_per_block = blockDim.x >> 5u;
   const uint64_t row =
       (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
@@ -567,6 +570,17 @@ __global__ static void grouped_q8_0_a_preq_warp8_kernel(
   acc = warp_sum_f32(acc);
   if (lane == 0)
     low[tok * low_dim + row] = acc;
+  if (!kQ8Out)
+    return;
+  __shared__ float block_out[32];
+  if (lane == 0)
+    block_out[threadIdx.x >> 5u] = acc;
+  __syncthreads();
+  if (threadIdx.x < 32u) {
+    const uint64_t i0 = tok * low_dim + (uint64_t)blockIdx.x * 32u;
+    quantize_q8_0_block32(block_out[threadIdx.x], threadIdx.x, 32u, low_q8 + i0,
+                          low_q8_scale + i0 / 32u);
+  }
 }
 
 /*

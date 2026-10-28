@@ -1356,16 +1356,18 @@ static int attention_output_q8_batch_launch(
                                                 blocks_a);
         if (!hip_ok(hipGetLastError(), "attention_output_q8_a prequant launch")) return 0;
         dim3 grid_a(((unsigned)low_dim + 7u) / 8u, (unsigned)n_tokens, 1);
-        grouped_q8_0_a_preq_warp8_kernel<<<grid_a, 256>>>((float *)low->ptr,
-                                                          out_a,
-                                                          xq,
-                                                          xscale,
-                                                          group_dim,
-                                                          rank,
-                                                          n_groups,
-                                                          n_tokens,
-                                                          blocks_a,
-                                                          use_dp4a);
+        grouped_q8_0_a_preq_warp8_kernel<false><<<grid_a, 256>>>((float *)low->ptr,
+                                                                 out_a,
+                                                                 xq,
+                                                                 xscale,
+                                                                 group_dim,
+                                                                 rank,
+                                                                 n_groups,
+                                                                 n_tokens,
+                                                                 blocks_a,
+                                                                 use_dp4a,
+                                                                 nullptr,
+                                                                 nullptr);
         if (!hip_ok(hipGetLastError(), "attention_output_q8_a preq launch")) return 0;
     }
 
@@ -1611,7 +1613,8 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
         uint64_t                rank,
         uint32_t                n_groups,
         const ds4_gpu_tensor *heads,
-        const ds4_gpu_tensor *heads_q8) {
+        const ds4_gpu_tensor *heads_q8,
+        ds4_gpu_tensor       *low_q8) {
     if (!low || !heads || !model_map || group_dim == 0 || rank == 0 || n_groups == 0) {
         return 0;
     }
@@ -1646,8 +1649,17 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
             ((unsigned)low_dim + rows_per_block - 1u) / rows_per_block,
             1,
             1);
-    grouped_q8_0_a_preq_warp8_kernel<<<grid_a,
-                                       rows_per_block * 32u>>>(
+    if (low_q8) {
+        int8_t *lq = NULL;
+        float *ls = NULL;
+        if (low_dim % rows_per_block != 0u || !hip_q8_0_act(low_q8, 1u, low_dim / 32u, &lq, &ls)) return 0;
+        grouped_q8_0_a_preq_warp8_kernel<true><<<grid_a, rows_per_block * 32u>>>(
+                (float *)low->ptr, out_a, xq, xscale, group_dim, rank, n_groups, 1,
+                blocks_a, use_dp4a, lq, ls);
+        return hip_ok(hipGetLastError(), "attention_output_low_q8 launch");
+    }
+    grouped_q8_0_a_preq_warp8_kernel<false><<<grid_a,
+                                              rows_per_block * 32u>>>(
             (float *)low->ptr,
             out_a,
             xq,
@@ -1657,7 +1669,9 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
             n_groups,
             1,
             blocks_a,
-            use_dp4a);
+            use_dp4a,
+            nullptr,
+            nullptr);
     return hip_ok(hipGetLastError(),
                    "attention_output_low_q8 launch");
 }
