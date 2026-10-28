@@ -98,6 +98,25 @@ int main(int argc, char** argv) {
     }
     assert(rejected);
   }
+  ValidateRequest(Request{.prompt = "a red cube",
+                          .images = {},
+                          .loras = {{"style", 0.8F}, {"ink", -10}}});
+  for (auto loras : {std::vector<Lora>(17), std::vector<Lora>{{"", 1}},
+                     std::vector<Lora>{{"style", 1}, {"style", 0.5F}},
+                     std::vector<Lora>{{"style", NAN}},
+                     std::vector<Lora>{{"style", INFINITY}},
+                     std::vector<Lora>{{"style", 10.5F}}}) {
+    for (std::size_t i = 0; loras.size() == 17 && i < loras.size(); ++i)
+      loras[i].name = "a" + std::to_string(i);
+    bool rejected = false;
+    try {
+      ValidateRequest(
+          Request{.prompt = "a red cube", .images = {}, .loras = loras});
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
   int calls = 0;
   gufo::server::ImageService service(
       {}, "image-test", [&](const Request& request, const CancellationCheck&) {
@@ -150,5 +169,117 @@ int main(int argc, char** argv) {
          calls == 3);
   http.body.resize(http.body.size() - 8);
   assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
+  // Adapters: registered by name only (an injected runner opens no files).
+  std::vector<Lora> seen;
+  gufo::server::ImageService adapters(
+      {}, "image-test",
+      [&](const Request& request, const CancellationCheck&) {
+        seen = request.loras;
+        return Result{.image = image, .metrics = {}};
+      },
+      {.files = {{"style", "/nonexistent/style.safetensors"},
+                 {"ink", "/x/ink.safetensors"}},
+       .defaults = {{"style", 0.8F}}});
+  http.path = "/v1/images/generations";
+  http.headers = {{"Content-Type", "application/json"}};
+  const auto generate = [&](const std::string& loras) {
+    http.body = R"({"prompt":"a red cube","size":"256x256")" +
+                (loras.empty() ? "" : ",\"loras\":" + loras) + "}";
+    return gufo::server::HandleImageApiRequest(http, adapters).status;
+  };
+  const std::vector<Lora> defaults{{"style", 0.8F}};
+  const std::vector<Lora> both{{"ink", 0.8F}, {"style", 1}};
+  const std::vector<Lora> negative{{"ink", -0.25F}};
+  assert(generate("") == 200 && seen == defaults);
+  assert(generate("[]") == 200 && seen.empty());
+  assert(generate(R"([{"name":"ink","scale":0.8},{"name":"style"}])") == 200 &&
+         seen == both);
+  seen = {};
+  for (const auto& bad : std::vector<std::string>{
+           R"([{"name":"unknown"}])", R"([{"name":"ink"},{"name":"ink"}])",
+           R"([{"name":"ink","scale":"x"}])", R"([{"name":"ink","path":"/x"}])",
+           R"({"name":"ink"})", R"("ink")", R"([{"scale":1}])", R"(["ink"])",
+           R"([{"name":"ink","scale":11}])", R"([{"name":"ink","scale":1e40}])",
+           R"([{"name":"ink","scale":1e300}])"})
+    assert(generate(bad) == 400 && seen.empty());
+  // More than 16 distinct registered adapters.
+  gufo::server::ImageLoraOptions seventeen;
+  std::string many = "[";
+  for (int i = 0; i < 17; ++i) {
+    const auto name = "a" + std::to_string(i);
+    seventeen.files.emplace_back(name, "/x/" + name + ".safetensors");
+    many += std::string(i ? "," : "") + R"({"name":")" + name + R"("})";
+  }
+  gufo::server::ImageService capped(
+      {}, "image-test",
+      [&](const Request&, const CancellationCheck&) {
+        return Result{.image = image, .metrics = {}};
+      },
+      std::move(seventeen));
+  http.body = R"({"prompt":"a red cube","loras":)" + many + "]}";
+  const auto over = gufo::server::HandleImageApiRequest(http, capped);
+  assert(over.status == 400 &&
+         over.body.find("at most 16") != std::string::npos);
+  http.body = R"({"prompt":"a red cube","loras":[{"name":"unknown"}]})";
+  assert(gufo::server::HandleImageApiRequest(http, adapters)
+             .body.find("unknown LoRA adapter: unknown") != std::string::npos);
+  // Multipart edits carry `loras` as a JSON field.
+  http.path = "/v1/images/edits";
+  http.headers = {
+      {"Content-Type", "multipart/form-data; boundary=\"boundary\""}};
+  http.body =
+      "--boundary\r\nContent-Disposition: form-data; name=\"image\"\r\n\r\n";
+  http.body.append(reinterpret_cast<const char*>(png.data()), png.size());
+  for (const auto& [name, value] :
+       {std::pair{"prompt", "a red cube"},
+        {"size", "256x256"},
+        {"loras", R"([{"name":"ink","scale":-0.25}])"}})
+    http.body += "\r\n--boundary\r\nContent-Disposition: form-data; name=\"" +
+                 std::string(name) + "\"\r\n\r\n" + value;
+  http.body += "\r\n--boundary--\r\n";
+  assert(gufo::server::HandleImageApiRequest(http, adapters).status == 200 &&
+         seen == negative);
+  http.method = "GET";
+  http.path = "/sdapi/v1/loras";
+  http.headers = {};
+  http.body.clear();
+  const auto listed = gufo::server::HandleImageLorasRequest(http, adapters);
+  assert(listed.status == 200);
+  const auto list = gufo::json::parse(listed.body);
+  assert(list.is_array() && list.size() == 2);
+  const auto& style = list.items()[0];
+  const auto& ink = list.items()[1];
+  assert(style.member_str("name") == "style" &&
+         style.member_str("alias") == "style" &&
+         style.member_str("path") == "style.safetensors");
+  assert(ink.member_str("path") == "ink.safetensors");
+  assert(style.find("metadata")->is_object());
+  // Listed as the shortest float text; `active_scale` uses the same formatting.
+  assert(style.find("default_scale")->as_double() == 0.8);
+  assert(ink.find("default_scale")->is_null());
+  // Only a loaded model merges adapters; an injected runner lists none.
+  assert(style.find("active_scale")->is_null() &&
+         ink.find("active_scale")->is_null());
+  http.method = "POST";
+  assert(gufo::server::HandleImageLorasRequest(http, adapters).status == 400);
+  for (const auto& options : std::vector<gufo::server::ImageLoraOptions>{
+           {.files = {{"a b", "/x"}}, .defaults = {}},
+           {.files = {{"", "/x"}}, .defaults = {}},
+           {.files = {{std::string(65, 'a'), "/x"}}, .defaults = {}},
+           {.files = {{"a", "/x"}, {"a", "/y"}}, .defaults = {}},
+           {.files = {{"a", "/x"}}, .defaults = {{"b", 1}}},
+           {.files = {{"a", "/x"}}, .defaults = {{"a", 1}, {"a", 2}}},
+           {.files = {{"a", "/x"}}, .defaults = {{"a", 12}}}}) {
+    bool rejected = false;
+    try {
+      gufo::server::ImageService invalid(
+          {}, "image-test",
+          [&](const Request&, const CancellationCheck&) { return Result{}; },
+          options);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
   std::cout << "Qwen-Image image and schedule contracts passed\n";
 }
