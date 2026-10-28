@@ -145,7 +145,7 @@ bool ValidateImageProcessor(const std::string& model_dir, std::string* error) {
         enabled("do_rescale", true) && enabled("do_normalize", false) &&
         config->member_size("patch_size") == 16 &&
         config->member_size("pooling_kernel_size") == 3 &&
-        config->member_size("max_soft_tokens") == 280 &&
+        config->member_size("max_soft_tokens") == kDefaultImageSoftTokens &&
         config->member_size("resample") == 3 &&
         std::abs(config->member_double("rescale_factor") - 1.0 / 255.0) <
             1e-15) {
@@ -160,10 +160,17 @@ bool ValidateImageProcessor(const std::string& model_dir, std::string* error) {
   return false;
 }
 
+bool SupportedImageSoftTokens(std::uint32_t max_soft_tokens) {
+  return std::ranges::find(kImageSoftTokenBudgets, max_soft_tokens) !=
+         kImageSoftTokenBudgets.end();
+}
+
 ImagePatches ProcessImage(const core::Image& image,
-                          std::size_t soft_token_budget) {
-  if (soft_token_budget != 140 && soft_token_budget != 280)
-    throw std::invalid_argument("unsupported embedding vision budget");
+                          std::uint32_t max_soft_tokens) {
+  if (!SupportedImageSoftTokens(max_soft_tokens)) {
+    throw std::invalid_argument(
+        "image max_soft_tokens must be one of 70, 140, 280, 560, or 1120");
+  }
   if (image.width == 0 || image.height == 0 || image.width > kMaxImageSide ||
       image.height > kMaxImageSide ||
       std::size_t{image.width} * image.height > core::kMaxImagePixels ||
@@ -171,24 +178,23 @@ ImagePatches ProcessImage(const core::Image& image,
     throw std::invalid_argument(
         "invalid embedding image dimensions or RGB data");
   }
-  const int kBudget = static_cast<int>(soft_token_budget);
+  const int budget = static_cast<int>(max_soft_tokens);
   constexpr int kStride = 48;
-  const double factor =
-      std::sqrt((kBudget * 9.0 * 256) /
-                (static_cast<double>(image.width) * image.height));
+  const double factor = std::sqrt(
+      (budget * 9.0 * 256) / (static_cast<double>(image.width) * image.height));
   int height =
       static_cast<int>(std::floor(factor * image.height / kStride)) * kStride;
   int width =
       static_cast<int>(std::floor(factor * image.width / kStride)) * kStride;
   if (height == 0) {
     height = kStride;
-    width = static_cast<int>(
-                std::min<std::uint32_t>(image.width / image.height, kBudget)) *
+    width = static_cast<int>(std::min<std::uint32_t>(image.width / image.height,
+                                                     max_soft_tokens)) *
             kStride;
   } else if (width == 0) {
     width = kStride;
-    height = static_cast<int>(
-                 std::min<std::uint32_t>(image.height / image.width, kBudget)) *
+    height = static_cast<int>(std::min<std::uint32_t>(
+                 image.height / image.width, max_soft_tokens)) *
              kStride;
   }
   const auto resized = Resize(image, width, height);

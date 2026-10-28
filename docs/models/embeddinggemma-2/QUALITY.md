@@ -50,7 +50,11 @@ same preprocessing; see [Embeddings](../../SERVER.md#embeddings).
 
 The oracle is [`reference_images.py`](../../../tools/models/embedding_gemma2/reference_images.py),
 using official transformers commit `50e35cc0ca18ec19b80653690de553e6decf74f5`
-(`5.21.0.dev0`), Torch 2.12.0, and the checkpoint's processor configuration.
+(`5.21.0.dev0`), Torch 2.14.1, and the checkpoint's processor configuration.
+It covers the default 280-token budget and, for three shapes each, the
+processor's other `max_soft_tokens` budgets (70, 140, 560 and 1120). The
+280-token cases kept their patch hashes and token IDs from the earlier Torch
+2.12.0 run, and their reference values moved by at most 3.4e-7.
 It loads the multimodal model in float32 with unused audio disabled and
 mean-pools/L2-normalizes its outputs independently of Gufo. The script records
 processor patch hashes, token IDs, full reference vectors and library versions

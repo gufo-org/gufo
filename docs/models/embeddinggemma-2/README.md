@@ -54,7 +54,11 @@ applies to base64. Private destinations and local files are refused.
 Preprocessing follows the pinned checkpoint's `Gemma4ImageProcessor`: RGB,
 antialiased uint8 bicubic resize preserving aspect ratio, no crop, rescale by
 1/255, and 16×16 patches. The 3×3 spatial pool yields at most 280 soft tokens
-per image; the actual count depends on aspect ratio. These tokens and their
+per image by default; the actual count depends on aspect ratio. A request can
+pick the processor's other budgets with
+`"mm_processor_kwargs": {"max_soft_tokens": N}`, where N is 70, 140, 280, 560
+or 1120, as in vLLM; one budget applies to every image of the request. At 1120
+the 8,192-token limit fits at most seven images that use the whole budget. These tokens and their
 boundary markers count toward the 8,192-token input limit and reported usage.
 Text parts containing literal `<|image|>` placeholders are refused when images
 are present. Unsupported processor or vision configurations are refused.

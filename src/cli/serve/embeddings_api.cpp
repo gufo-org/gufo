@@ -168,6 +168,7 @@ bool IsKnownField(std::string_view name, bool native) {
   return name == "input" || name == "model" || name == "encoding_format" ||
          name == "dimensions" || name == "user" || name == "truncate" ||
          name == "prompt_name" || name == "video_options" ||
+         name == "mm_processor_kwargs" ||
          (native && (name == "content" || name == "embd_normalize"));
 }
 
@@ -523,6 +524,32 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
     }
     options.truncate = truncate->as_bool();
   }
+
+  // vLLM's per-request processor options. Only the image budget is supported.
+  if (const json::Value* kwargs = Optional(root, "mm_processor_kwargs");
+      kwargs != nullptr) {
+    if (!kwargs->is_object()) {
+      return BadRequest("'mm_processor_kwargs' must be an object",
+                        "invalid_parameter_type");
+    }
+    for (const auto& [key, value] : kwargs->members()) {
+      if (key != "max_soft_tokens") {
+        return BadRequest("unsupported mm_processor_kwargs key '" + key +
+                              "'; only 'max_soft_tokens' is supported",
+                          "invalid_mm_processor_kwargs");
+      }
+      const auto budget = value.as_size(0);
+      if (budget > models::embedding_gemma2::kMaxImageSoftTokens ||
+          !models::embedding_gemma2::SupportedImageSoftTokens(
+              static_cast<std::uint32_t>(budget))) {
+        return BadRequest(
+            "'max_soft_tokens' must be one of 70, 140, 280, 560, or 1120",
+            "invalid_mm_processor_kwargs");
+      }
+      options.image_soft_tokens = static_cast<std::uint32_t>(budget);
+    }
+  }
+
 
   EmbeddingBatch batch;
   std::string error;

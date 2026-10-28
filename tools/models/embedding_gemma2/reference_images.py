@@ -20,6 +20,10 @@ REVISION = "914f7f89142e33e77833254d9c9b90c3cef7303b"
 # Covers upsampling, downsampling, unchanged dimensions, ragged patch grids,
 # portrait/landscape, and extreme aspect ratios.
 SHAPES = [(37, 29), (1231, 947), (768, 768), (511, 263), (41, 997), (2048, 1), (320, 180)]
+# The other max_soft_tokens budgets: a ragged landscape grid and both
+# extreme-aspect clamps, whose longest side depends on the budget.
+BUDGETS = [70, 140, 560, 1120]
+BUDGET_SHAPES = [(1231, 947), (41, 997), (2048, 1)]
 
 
 def image(width, height, seed):
@@ -41,7 +45,10 @@ def main():
     model = AutoModel.from_pretrained(args.model, config=config, dtype=torch.float32,
                                       attn_implementation="sdpa").eval()
     cases = []
-    for seed, (width, height) in enumerate(SHAPES):
+    runs = [(seed, shape, None) for seed, shape in enumerate(SHAPES)]
+    runs += [(len(SHAPES) + i, shape, budget) for budget in BUDGETS
+             for i, shape in enumerate(BUDGET_SHAPES)]
+    for seed, (width, height), budget in runs:
         picture = image(width, height, seed)
         # Also exercise text before/after an image and two images in one input.
         text = "<|image|>" if seed != 3 else "title: camera | text: <|image|> a colorful pattern"
@@ -51,7 +58,8 @@ def main():
         if seed == 4:
             text = "<|image|> and <|image|>"
             pictures.append(image(29, 37, 11))
-        inputs = processor(text=[text], images=[pictures], return_tensors="pt")
+        options = {} if budget is None else {"max_soft_tokens": budget}
+        inputs = processor(text=[text], images=[pictures], return_tensors="pt", **options)
         pixels = inputs["pixel_values"]
         positions = inputs["image_position_ids"]
         image_records = []
@@ -68,11 +76,12 @@ def main():
             mask = inputs["attention_mask"].unsqueeze(-1)
             pooled = (output * mask).sum(1) / mask.sum(1)
             vector = torch.nn.functional.normalize(pooled, dim=-1)[0].tolist()
-        cases.append({"name": f"image_{seed}", "text": text,
+        name = f"image_{seed}" if budget is None else f"image_{budget}_{seed}"
+        cases.append({"name": name, "text": text, **options,
                       "images": image_records,
                       "token_ids": inputs["input_ids"][0].tolist(),
                       "embedding": [float(f"{v:.7g}") for v in vector]})
-        print(f"image_{seed}: {image_records}, {len(cases[-1]['token_ids'])} tokens", flush=True)
+        print(f"{name}: {image_records}, {len(cases[-1]['token_ids'])} tokens", flush=True)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump({"model": "google/embeddinggemma-2", "revision": REVISION,
                    "transformers": transformers.__version__,

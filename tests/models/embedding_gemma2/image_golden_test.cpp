@@ -72,8 +72,11 @@ int main(int argc, char** argv) {
         sequence.tokens.push_back(static_cast<std::uint32_t>(id.as_size()));
       std::size_t cursor = 0;
 #endif
+      const auto budget = static_cast<std::uint32_t>(
+          probe.member_size("max_soft_tokens", model::kDefaultImageSoftTokens));
       for (const auto& specification : probe.find("images")->items()) {
-        auto patches = model::ProcessImage(MakeImage(specification));
+        auto patches = model::ProcessImage(MakeImage(specification), budget);
+        Check(patches.soft_tokens() <= budget, name + " soft-token budget");
         Check(patches.rows == specification.member_size("rows") &&
                   patches.columns == specification.member_size("columns"),
               name + " patch grid");

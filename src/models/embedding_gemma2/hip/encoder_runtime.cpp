@@ -18,6 +18,7 @@
 #include "src/models/embedding_gemma2/hip/blas.hpp"
 #include "src/models/embedding_gemma2/hip/ops.hpp"
 #include "src/models/embedding_gemma2/hip/vision_ops.hpp"
+#include "src/models/embedding_gemma2/image_processor.hpp"
 #include "src/models/embedding_gemma2/loader.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
@@ -313,7 +314,7 @@ void EncoderRuntime::Impl::LoadVision() {
         {p + "mlp.gate_proj.linear.weight", p + "mlp.up_proj.linear.weight"});
     layer.down = upload(p + "mlp.down_proj.linear.weight");
   }
-  constexpr std::size_t n = 2520, h = 768;
+  constexpr std::size_t n = std::size_t{kMaxImageSoftTokens} * 9, h = 768;
   candidate->pixels = DeviceBuffer(n * h * sizeof(float));
   candidate->pixels_bf16 = DeviceBuffer(n * h * 2);
   candidate->state = DeviceBuffer(n * h * sizeof(float));
@@ -327,8 +328,8 @@ void EncoderRuntime::Impl::LoadVision() {
   candidate->gate_up =
       DeviceBuffer(std::min(n, kChunkTokens) * 6144 * sizeof(float));
   candidate->act = DeviceBuffer(n * 3072 * 2);
-  candidate->pooled = DeviceBuffer(280 * h * 2);
-  candidate->features = DeviceBuffer(280 * 512 * sizeof(float));
+  candidate->pooled = DeviceBuffer(kMaxImageSoftTokens * h * 2);
+  candidate->features = DeviceBuffer(kMaxImageSoftTokens * 512 * sizeof(float));
   vision = std::move(candidate);
 }
 
@@ -742,7 +743,7 @@ bool EncoderRuntime::EmbedMultimodal(
       const auto& patches = image.patches;
       const std::size_t n = patches.soft_tokens();
       if (patches.rows == 0 || patches.columns == 0 || patches.rows % 3 ||
-          patches.columns % 3 || n > 280 ||
+          patches.columns % 3 || n > kMaxImageSoftTokens ||
           patches.pixels.size() != n * 9 * 768 || image.offset < previous_end ||
           image.offset > sequence.tokens.size() ||
           n > sequence.tokens.size() - image.offset) {

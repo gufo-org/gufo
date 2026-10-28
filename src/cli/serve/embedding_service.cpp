@@ -195,7 +195,8 @@ struct EmbeddingService::Impl {
           }
           try {
             const auto bytes = core::ReadImageUrl(part.value, budget);
-            auto patches = ProcessImage(core::DecodeImage(bytes));
+            auto patches = ProcessImage(core::DecodeImage(bytes),
+                                        request.image_soft_tokens);
             text += kBeginImageToken;
             for (std::size_t j = 0; j < patches.soft_tokens(); ++j)
               text += kImageToken;

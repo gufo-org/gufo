@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_EMBEDDING_GEMMA2_IMAGE_PROCESSOR_HPP_
 #define GUFO_MODELS_EMBEDDING_GEMMA2_IMAGE_PROCESSOR_HPP_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -11,9 +12,16 @@
 namespace gufo::models::embedding_gemma2 {
 
 inline constexpr std::uint32_t kMaxImageSide = 32768;
+/// Gemma4ImageProcessor's supported `max_soft_tokens` values; the checkpoint
+/// defaults to 280.
+inline constexpr std::array<std::uint32_t, 5> kImageSoftTokenBudgets{
+    70, 140, 280, 560, 1120};
+inline constexpr std::uint32_t kDefaultImageSoftTokens = 280;
+inline constexpr std::uint32_t kMaxImageSoftTokens = 1120;
 
-/// Unpadded, row-major 16x16 RGB patches. The reference pads to 2,520
-/// patches and masks the padding; omitting those keys gives the same result.
+/// Unpadded, row-major 16x16 RGB patches. The reference pads to nine patches
+/// per soft token of the budget and masks the padding; omitting those keys
+/// gives the same result.
 struct ImagePatches {
   std::uint32_t rows{0};
   std::uint32_t columns{0};
@@ -28,10 +36,15 @@ struct ImagePatches {
 [[nodiscard]] bool ValidateImageProcessor(const std::string& model_dir,
                                           std::string* error = nullptr);
 
-/// Gemma4ImageProcessor: aspect-preserving 280-soft-token budget, uint8
+/// True for a `max_soft_tokens` value in `kImageSoftTokenBudgets`.
+[[nodiscard]] bool SupportedImageSoftTokens(std::uint32_t max_soft_tokens);
+
+/// Gemma4ImageProcessor: aspect-preserving resize to at most
+/// `max_soft_tokens` soft tokens (a value of `kImageSoftTokenBudgets`), uint8
 /// antialiased bicubic resize, rescale, then patchify. Does not crop.
-[[nodiscard]] ImagePatches ProcessImage(const core::Image& image,
-                                        std::size_t soft_token_budget = 280);
+[[nodiscard]] ImagePatches ProcessImage(
+    const core::Image& image,
+    std::uint32_t max_soft_tokens = kDefaultImageSoftTokens);
 
 }  // namespace gufo::models::embedding_gemma2
 #endif
