@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -55,7 +56,7 @@ int main() {
 
   std::array<gufo::core::GgufMappedRegion, 2> regions;
   for (std::size_t i = 0; i < paths.size(); ++i) {
-    regions[i] = {nullptr, source[i].size(),
+    regions[i] = {source[i].data(), source[i].size(),
                   gufo::platform::OpenReadFile(paths[i])};
     Require(gufo::platform::FileValid(regions[i].file_descriptor),
             "open original shard");
@@ -95,12 +96,18 @@ int main() {
   std::string error;
   auto upload = WeightUpload::Create(regions, &error);
   Require(upload != nullptr, error);
+  // These addresses identify file offsets; their contents must never supply
+  // upload bytes or enter HIP's pageable host-registration cache.
+  for (auto& buffer : source)
+    std::fill(buffer.begin(), buffer.end(), 0);
   for (const auto& s : slices) {
-    Require(
-        upload->Copy(s.shard, s.offset, s.size,
-                     static_cast<char*>(device.data) + s.destination, &error),
-        error);
+    Require(upload->CopyMapped(source[s.shard].data() + s.offset, s.size,
+                               static_cast<char*>(device.data) + s.destination,
+                               &error),
+            error);
   }
+  Require(!upload->CopyMapped(&error, 1, device.data, &error),
+          "reject a pointer outside the source mappings");
   Require(upload->Copy(1, source[1].size(), 0, nullptr, &error),
           "empty range at EOF");
   Require(upload->Finish(&error), error);

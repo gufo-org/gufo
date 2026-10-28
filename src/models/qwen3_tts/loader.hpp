@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/gguf_reader.hpp"
 #include "src/models/qwen3_tts/config.hpp"
 #include "src/models/qwen3_tts/tensor.hpp"
 
@@ -19,6 +20,7 @@ struct MappedRegion {
   // Byte offset of the safetensors payload. Tensor offsets are relative to it,
   // so a device copy can restore vectorized-load alignment by shifting here.
   std::size_t payload_offset = 0;
+  platform::PlatformFile file_descriptor = platform::kInvalidFile;
 };
 
 /// Result of loading the model directory. `tensors` payload pointers stay
@@ -41,6 +43,7 @@ struct LoadResult {
   /// Drops the resident pages of every mapped file once the caller's weights
   /// live in device memory. Pointers in `store` stay valid (pages refault).
   void ReleaseHostPages() const noexcept;
+  [[nodiscard]] std::vector<core::GgufMappedRegion> WeightUploadRegions() const;
 };
 
 /// Loads a quality-qualified Qwen3-TTS 12.5 Hz 1.7B model directory.

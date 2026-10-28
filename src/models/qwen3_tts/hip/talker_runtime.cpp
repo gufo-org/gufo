@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/weight_upload.hpp"
 #include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen3_tts/hip/talker_ops.hpp"
@@ -135,16 +136,16 @@ public:
   /// fallback): its host pages must then stay resident.
   [[nodiscard]] bool host_mapped() const noexcept { return registered_; }
 
-  bool Initialize(MappedRegion region, std::string* error) {
+  bool Initialize(MappedRegion region, const LoadResult& model,
+                  std::string* error) {
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
-    core::PrefaultMappedRange(host_, size_);
     // gfx1151 shares one physical memory pool with the host, but
     // device-resident weights still use coarse-grained pages the GPU caches and
     // streams far faster than host-registered pages, so decode prefers the
     // copy.
-    if (TryCopy() || TryMap())
+    if (TryCopy(model) || TryMap())
       return true;
     SetError(error, "cannot make Qwen3-TTS safetensors GPU-visible");
     return false;
@@ -161,6 +162,7 @@ public:
 
 private:
   bool TryMap() {
+    core::PrefaultMappedRange(host_, size_);
     const hipError_t registered =
         hipHostRegister(const_cast<std::byte*>(host_), size_,
                         hipHostRegisterMapped | hipHostRegisterReadOnly);
@@ -178,7 +180,7 @@ private:
     return false;
   }
 
-  bool TryCopy() {
+  bool TryCopy(const LoadResult& model) {
     // Safetensors headers are an arbitrary length, so the payload rarely starts
     // on a 16-byte boundary. Padding the copy by that much lets every tensor
     // land where the widest packed loads are legal.
@@ -192,7 +194,16 @@ private:
     allocation_ = allocation;
     owns_device_ = true;
     device_ = static_cast<std::byte*>(allocation) + shift;
-    if (hipMemcpy(device_, host_, size_, hipMemcpyHostToDevice) == hipSuccess) {
+    // Never expose the file mapping to HIP's pageable-copy registration cache:
+    // its HMM restore work can repopulate pages after MADV_DONTNEED.
+    const bool copied = [&] {
+      std::string error;
+      auto upload =
+          gufo::hip::WeightUpload::Create(model.WeightUploadRegions(), &error);
+      return upload && upload->CopyMapped(host_, size_, device_, &error) &&
+             upload->Finish(&error);
+    }();
+    if (copied) {
       return true;
     }
     (void)hipFree(allocation_);
@@ -399,7 +410,7 @@ struct TalkerHipRuntime::Impl {
         predictor_token(1) {
     const auto talker_regions = model.RegionsFor("talker.");
     if (talker_regions.size() != 1 ||
-        !main_weights.Initialize(talker_regions.front(), nullptr)) {
+        !main_weights.Initialize(talker_regions.front(), model, nullptr)) {
       throw std::runtime_error(
           "cannot initialize Qwen3-TTS GPU weight mapping");
     }
@@ -414,7 +425,7 @@ struct TalkerHipRuntime::Impl {
     RequireHipblas(hipblasSetAtomicsMode(blas, HIPBLAS_ATOMICS_NOT_ALLOWED),
                    "hipblasSetAtomicsMode");
     LoadWeights();
-    // Uploads above are synchronous hipMemcpy calls.
+    // The bounded uploads above have finished.
     if (!main_weights.host_mapped())
       model.ReleaseHostPages();
   }

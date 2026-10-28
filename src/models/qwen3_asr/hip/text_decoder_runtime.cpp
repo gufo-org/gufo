@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/weight_upload.hpp"
 #include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen3_asr/hip/blas.hpp"
 #include "src/models/qwen3_asr/hip/text_ops.hpp"
@@ -127,12 +128,11 @@ public:
   /// fallback): its host pages must then stay resident.
   [[nodiscard]] bool host_mapped() const noexcept { return registered_; }
 
-  [[nodiscard]] bool Initialize(MappedRegion region, hipStream_t stream) {
+  [[nodiscard]] bool Initialize(MappedRegion region, const LoadResult& model) {
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
-    core::PrefaultMappedRange(host_, size_);
-    return TryCopy(stream) || TryMap();
+    return TryCopy(model) || TryMap();
   }
 
   [[nodiscard]] const void* Resolve(const std::byte* pointer) const noexcept {
@@ -146,6 +146,7 @@ public:
 
 private:
   [[nodiscard]] bool TryMap() {
+    core::PrefaultMappedRange(host_, size_);
     if (hipHostRegister(const_cast<std::byte*>(host_), size_,
                         hipHostRegisterMapped | hipHostRegisterReadOnly) !=
         hipSuccess) {
@@ -162,7 +163,7 @@ private:
     return false;
   }
 
-  [[nodiscard]] bool TryCopy(hipStream_t stream) {
+  [[nodiscard]] bool TryCopy(const LoadResult& model) {
     constexpr std::size_t kLoadAlignment = 16U;
     const std::size_t shift =
         (kLoadAlignment - (payload_offset_ % kLoadAlignment)) % kLoadAlignment;
@@ -172,8 +173,16 @@ private:
     }
     owns_device_ = true;
     device_ = static_cast<std::byte*>(allocation_) + shift;
-    if (hipMemcpyAsync(device_, host_, size_, hipMemcpyHostToDevice, stream) ==
-        hipSuccess) {
+    // Never expose the file mapping to HIP's pageable-copy registration cache:
+    // its HMM restore work can repopulate pages after MADV_DONTNEED.
+    const bool copied = [&] {
+      std::string error;
+      auto upload =
+          gufo::hip::WeightUpload::Create(model.WeightUploadRegions(), &error);
+      return upload && upload->CopyMapped(host_, size_, device_, &error) &&
+             upload->Finish(&error);
+    }();
+    if (copied) {
       return true;
     }
     (void)hipFree(allocation_);
@@ -306,15 +315,14 @@ struct TextDecoderHipRuntime::Impl {
     for (const MappedRegion region :
          model.RegionsFor({"thinker.model.", "thinker.lm_head."})) {
       auto device_region = std::make_unique<DeviceRegion>();
-      if (!device_region->Initialize(region, stream)) {
+      if (!device_region->Initialize(region, model)) {
         throw std::runtime_error(
             "cannot make Qwen3-ASR safetensors GPU-visible");
       }
       weight_regions.push_back(std::move(device_region));
     }
     LoadWeights();
-    // The region copies are hipMemcpyAsync reads of the mapping: wait for
-    // them before dropping its pages.
+    // Complete any derived weight work before dropping the host pages.
     RequireHip(hipStreamSynchronize(stream),
                "hipStreamSynchronize Qwen3-ASR text weights");
     if (std::ranges::none_of(weight_regions, [](const auto& region) {

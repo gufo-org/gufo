@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/weight_upload.hpp"
 #include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen3_tts/hip/speech_decoder_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
@@ -128,15 +129,15 @@ public:
   /// fallback): its host pages must then stay resident.
   [[nodiscard]] bool host_mapped() const noexcept { return registered_; }
 
-  bool Initialize(MappedRegion region, std::string* error) {
+  bool Initialize(MappedRegion region, const LoadResult& model,
+                  std::string* error) {
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
-    core::PrefaultMappedRange(host_, size_);
     // The supported gfx1151 APU shares physical memory with the CPU, but
     // hipMalloc uses coarse-grained pages that the GPU caches and streams
     // faster than host-registered safetensors pages.
-    if (TryCopy() || TryMap())
+    if (TryCopy(model) || TryMap())
       return true;
     SetError(error,
              "cannot make Qwen3-TTS speech-tokenizer weights GPU-visible");
@@ -154,6 +155,7 @@ public:
 
 private:
   bool TryMap() {
+    core::PrefaultMappedRange(host_, size_);
     if (hipHostRegister(const_cast<std::byte*>(host_), size_,
                         hipHostRegisterMapped | hipHostRegisterReadOnly) !=
         hipSuccess) {
@@ -170,7 +172,7 @@ private:
     return false;
   }
 
-  bool TryCopy() {
+  bool TryCopy(const LoadResult& model) {
     constexpr std::size_t kLoadAlignment = 16;
     const std::size_t shift =
         (kLoadAlignment - (payload_offset_ % kLoadAlignment)) % kLoadAlignment;
@@ -181,7 +183,16 @@ private:
     allocation_ = allocation;
     owns_device_ = true;
     device_ = static_cast<std::byte*>(allocation) + shift;
-    if (hipMemcpy(device_, host_, size_, hipMemcpyHostToDevice) == hipSuccess) {
+    // Never expose the file mapping to HIP's pageable-copy registration cache:
+    // its HMM restore work can repopulate pages after MADV_DONTNEED.
+    const bool copied = [&] {
+      std::string error;
+      auto upload =
+          gufo::hip::WeightUpload::Create(model.WeightUploadRegions(), &error);
+      return upload && upload->CopyMapped(host_, size_, device_, &error) &&
+             upload->Finish(&error);
+    }();
+    if (copied) {
       return true;
     }
     (void)hipFree(allocation_);
@@ -479,7 +490,7 @@ struct SpeechDecoderHipRuntime::Impl {
     }
     RequireHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
                "hipStreamCreateWithFlags");
-    if (!speech_weights.Initialize(decoder_regions.front(), nullptr)) {
+    if (!speech_weights.Initialize(decoder_regions.front(), model, nullptr)) {
       throw std::runtime_error(
           "cannot initialize Qwen3-TTS speech weight mapping");
     }

@@ -24,6 +24,9 @@ public:
 
   bool Copy(std::uint32_t shard, std::uint64_t offset, std::size_t size,
             void* device, std::string* error);
+  /// Resolve a pointer within the supplied mappings without reading its pages.
+  bool CopyMapped(const void* source, std::size_t size, void* device,
+                  std::string* error);
   /// Waits for every queued copy, including on failure.
   bool Finish(std::string* error);
 

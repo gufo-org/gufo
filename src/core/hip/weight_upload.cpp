@@ -50,6 +50,7 @@ struct WeightUpload::State {
   struct Shard {
     platform::PlatformFile fd{platform::kInvalidFile};
     std::uint64_t size{0};
+    const void* mapping{nullptr};
   };
   struct Slot {
     void* buffer{nullptr};
@@ -212,6 +213,7 @@ std::unique_ptr<WeightUpload> WeightUpload::Create(
       return nullptr;
     }
     shard.size = info.size;
+    shard.mapping = region.data;
   }
   for (auto& slot : s.slots) {
     if (s.host_allocations.Allocate(&slot.buffer, kChunkBytes + kAlignment) !=
@@ -260,6 +262,23 @@ bool WeightUpload::Copy(std::uint32_t shard, std::uint64_t offset,
     s.changed.notify_all();
   }
   return s.Status(error);
+}
+
+bool WeightUpload::CopyMapped(const void* source, std::size_t size,
+                              void* device, std::string* error) {
+  const auto address = reinterpret_cast<std::uintptr_t>(source);
+  for (std::size_t i = 0; i < state_->shards.size(); ++i) {
+    const auto& shard = state_->shards[i];
+    const auto base = reinterpret_cast<std::uintptr_t>(shard.mapping);
+    if (shard.mapping != nullptr && address >= base &&
+        address - base < shard.size) {
+      return Copy(static_cast<std::uint32_t>(i), address - base, size, device,
+                  error);
+    }
+  }
+  if (error)
+    *error = "weight upload source is outside its mappings";
+  return false;
 }
 
 bool WeightUpload::Finish(std::string* error) {

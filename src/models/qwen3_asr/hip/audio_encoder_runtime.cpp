@@ -12,6 +12,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <ranges>
@@ -22,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/mapped_prefetch.hpp"
+#include "src/core/hip/weight_upload.hpp"
 #include "src/models/qwen3_asr/hip/audio_ops.hpp"
 #include "src/models/qwen3_asr/hip/blas.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
@@ -123,9 +124,9 @@ const Tensor& RequireTensor(const TensorStore& store, std::string_view name,
   return *tensor;
 }
 
-DeviceBuffer<hip_bfloat16> UploadBfloat16Async(
+DeviceBuffer<hip_bfloat16> UploadBfloat16FromFile(
     const TensorStore& store, std::string_view name,
-    std::span<const std::uint64_t> shape, hipStream_t stream) {
+    std::span<const std::uint64_t> shape, gufo::hip::WeightUpload& upload) {
   const Tensor& tensor = RequireTensor(store, name, shape);
   const auto elements = tensor.NumElements();
   if (!elements.has_value()) {
@@ -133,11 +134,25 @@ DeviceBuffer<hip_bfloat16> UploadBfloat16Async(
                              std::string(name));
   }
   DeviceBuffer<hip_bfloat16> result(*elements);
-  RequireHip(hipMemcpyAsync(result.get(), tensor.data, tensor.byte_count,
-                            hipMemcpyHostToDevice, stream),
-             "hipMemcpyAsync Qwen3-ASR weight");
+  std::string error;
+  const bool copied =
+      upload.CopyMapped(tensor.data, tensor.byte_count, result.get(), &error);
+  if (!copied) {
+    // Drain earlier copies before this local destination can be destroyed.
+    (void)upload.Finish(&error);
+    throw std::runtime_error(error);
+  }
   return result;
 }
+
+struct UploadFailureGuard {
+  std::unique_ptr<gufo::hip::WeightUpload>& upload;
+  int exceptions{std::uncaught_exceptions()};
+  ~UploadFailureGuard() {
+    if (std::uncaught_exceptions() > exceptions)
+      upload.reset();
+  }
+};
 
 std::string LayerName(std::size_t layer, std::string_view suffix) {
   return "thinker.audio_tower.layers." + std::to_string(layer) + "." +
@@ -175,11 +190,11 @@ struct AudioEncoderHipRuntime::Impl {
                    "hipblasSetStream Qwen3-ASR");
     RequireHipblas(hipblasSetAtomicsMode(blas, HIPBLAS_ATOMICS_NOT_ALLOWED),
                    "hipblasSetAtomicsMode Qwen3-ASR");
-    for (const auto& region : model.RegionsFor({"thinker.audio_tower."}))
-      core::PrefaultMappedRange(region.data, region.size);
+    BeginWeightUpload();
     LoadWeights();
-    // Uploads are hipMemcpyAsync reads of the mapping: wait before dropping
-    // its pages.
+    LoadEncoderWeights();
+    FinishWeightUpload();
+    weight_upload.reset();
     RequireHip(hipStreamSynchronize(stream),
                "hipStreamSynchronize Qwen3-ASR audio weights");
     model.ReleaseHostPages();
@@ -197,13 +212,28 @@ struct AudioEncoderHipRuntime::Impl {
   DeviceBuffer<hip_bfloat16> UploadBfloat16(
       const TensorStore& store, std::string_view name,
       std::span<const std::uint64_t> shape) {
-    return UploadBfloat16Async(store, name, shape, stream);
+    return UploadBfloat16FromFile(store, name, shape, *weight_upload);
+  }
+
+  void BeginWeightUpload() {
+    std::string error;
+    weight_upload =
+        gufo::hip::WeightUpload::Create(model.WeightUploadRegions(), &error);
+    if (!weight_upload)
+      throw std::runtime_error(error);
+  }
+
+  void FinishWeightUpload() {
+    std::string error;
+    if (!weight_upload->Finish(&error))
+      throw std::runtime_error(error);
   }
 
   DeviceBuffer<hip_bfloat16> UploadConvolution(const TensorStore& store,
                                                std::string_view name) {
     auto original = UploadBfloat16(
         store, name, std::array<std::uint64_t, 4>{480, 480, 3, 3});
+    FinishWeightUpload();
     DeviceBuffer<hip_bfloat16> packed(original.size());
     LaunchPackConvolutionWeights(original.get(), packed.get(), stream);
     RequireHip(hipGetLastError(), "pack Qwen3-ASR convolution weights");
@@ -243,14 +273,12 @@ struct AudioEncoderHipRuntime::Impl {
     compact.Reset(chunks * kConvTime * kHidden);
   }
 
-  void EnsureEncoderWeights() {
-    if (!layers.empty()) {
-      return;
-    }
+  void LoadEncoderWeights() {
     const TensorStore& store = *model.store;
     layers.reserve(24);
     for (std::size_t layer = 0; layer < 24; ++layer) {
       EncoderLayerWeights weights;
+      UploadFailureGuard drain_before_local_weights{weight_upload};
       weights.q_weight =
           UploadBfloat16(store, LayerName(layer, "self_attn.q_proj.weight"),
                          std::array<std::uint64_t, 2>{kHidden, kHidden});
@@ -419,7 +447,6 @@ struct AudioEncoderHipRuntime::Impl {
                                 hipMemcpyDeviceToHost, stream),
                  "hipMemcpyAsync Qwen3-ASR audio frontend");
     }
-    EnsureEncoderWeights();
     EnsureTransformerCapacity(tokens);
     const std::size_t hidden_elements = tokens * kHidden;
     RequireHip(hipMemcpyAsync(hidden.get(), compact.get(),
@@ -561,6 +588,7 @@ struct AudioEncoderHipRuntime::Impl {
   DeviceBuffer<float> ffn;
   DeviceBuffer<hip_bfloat16> ffn_bfloat16;
   DeviceBuffer<std::uint32_t> finite_flag{1U};
+  std::unique_ptr<gufo::hip::WeightUpload> weight_upload;
 };
 
 AudioEncoderHipRuntime::AudioEncoderHipRuntime(std::unique_ptr<Impl> impl)
