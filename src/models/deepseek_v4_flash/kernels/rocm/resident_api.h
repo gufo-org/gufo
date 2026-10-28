@@ -76,7 +76,10 @@ int ds4_gpu_hc_expand_split_tensor(ds4_gpu_tensor* out_hc,
                                    const ds4_gpu_tensor* residual_hc,
                                    const ds4_gpu_tensor* split, uint32_t n_embd,
                                    uint32_t n_hc);
-int ds4_gpu_hc_split_weighted_sum_norm_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *norm_out, ds4_gpu_tensor *split, const ds4_gpu_tensor *mix, const ds4_gpu_tensor *residual_hc, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint64_t norm_weight_offset, uint32_t n_embd, uint32_t n_hc, uint32_t sinkhorn_iters, float eps, float norm_eps);
+/* norm_q8 may be NULL; when set it also receives norm_out's Q8_0 form
+ * (ds4_gpu_q8_0_act_bytes per row), and norm_q8k, if also set, its Q8_K form
+ * (ds4_gpu_q8_K_act_bytes per row). Quantized outputs need n_embd == 4096. */
+int ds4_gpu_hc_split_weighted_sum_norm_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *norm_out, ds4_gpu_tensor *norm_q8, ds4_gpu_tensor *norm_q8k, ds4_gpu_tensor *split, const ds4_gpu_tensor *mix, const ds4_gpu_tensor *residual_hc, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint64_t norm_weight_offset, uint32_t n_embd, uint32_t n_hc, uint32_t sinkhorn_iters, float eps, float norm_eps);
 int ds4_gpu_hc_split_weighted_sum_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *split, const ds4_gpu_tensor *mix, const ds4_gpu_tensor *residual_hc, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_embd, uint32_t n_hc, uint32_t sinkhorn_iters, float eps);
 /* The whole pre-block chain -- norm, mix projection, split, weighted sum -- in
  * one pass over the hyper-connection row. Returns 0 when the shape does not fit
@@ -106,9 +109,13 @@ int ds4_gpu_matmul_f32_tensor(ds4_gpu_tensor *out, const void *model_map, uint64
 int ds4_gpu_matmul_q8_0_hc_expand_tensor(ds4_gpu_tensor *out_hc, ds4_gpu_tensor *block_out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_matmul_q8_0_group_pairs_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok, const uint32_t *group_offsets, uint32_t group_count);
 int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok);
-/* Two single-token projections of one input; quantizes it once and otherwise
- * launches exactly what two ds4_gpu_matmul_q8_0_tensor calls would. */
-int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uint64_t weight0_offset, uint64_t out0_dim, ds4_gpu_tensor *out1, uint64_t weight1_offset, uint64_t out1_dim, const void *model_map, uint64_t model_size, uint64_t in_dim, const ds4_gpu_tensor *x);
+/* Bytes of one Q8_0 / Q8_K activation row of in_dim values, the form a
+ * producer writes for the narrow projections that consume it. */
+uint64_t ds4_gpu_q8_0_act_bytes(uint64_t in_dim);
+uint64_t ds4_gpu_q8_K_act_bytes(uint64_t in_dim);
+/* Two single-token projections of one Q8_0 activation row; launches exactly
+ * what two ds4_gpu_matmul_q8_0_tensor calls would after their quantize pass. */
+int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uint64_t weight0_offset, uint64_t out0_dim, ds4_gpu_tensor *out1, uint64_t weight1_offset, uint64_t out1_dim, const void *model_map, uint64_t model_size, uint64_t in_dim, const ds4_gpu_tensor *xq8);
 int ds4_gpu_output_hc_weights_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *pre, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, float eps);
 int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps);
 /* F16-result form of the hyper-connection row norm, paired with
@@ -138,7 +145,7 @@ int ds4_gpu_routed_moe_one_tensor(
     uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim,
     uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor* selected,
     const ds4_gpu_tensor* weights, uint32_t n_total_expert, uint32_t n_expert,
-    float clamp, const ds4_gpu_tensor* x);
+    float clamp, const ds4_gpu_tensor* x, const ds4_gpu_tensor* xq8k);
 int ds4_gpu_router_select_batch_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights, ds4_gpu_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_gpu_tensor *logits, const ds4_gpu_tensor *tokens, uint32_t n_expert, uint32_t n_expert_used, float expert_weight_scale, uint32_t n_tokens);
 int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights, ds4_gpu_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t token, uint32_t n_expert, uint32_t n_expert_used, float expert_weight_scale, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_gpu_tensor *logits);
 int ds4_gpu_set_model_fd(gufo::platform::PlatformFile fd);
@@ -148,7 +155,8 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
     ds4_gpu_tensor* gate, ds4_gpu_tensor* up, ds4_gpu_tensor* mid,
     const void* model_map, uint64_t model_size, uint64_t gate_offset,
     uint64_t up_offset, uint64_t in_dim, uint64_t out_dim,
-    const ds4_gpu_tensor* x, float clamp, uint32_t n_tok);
+    const ds4_gpu_tensor* x, const ds4_gpu_tensor* xq8, float clamp,
+    uint32_t n_tok);
 int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t context_bytes);
 int ds4_gpu_spec_row_argmax_tensor(ds4_gpu_tensor *out_index, const ds4_gpu_tensor *logits, uint32_t vocab, uint32_t n_rows);
 int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(

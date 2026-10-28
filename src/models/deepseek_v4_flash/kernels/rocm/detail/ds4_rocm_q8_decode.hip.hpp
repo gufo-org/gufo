@@ -62,27 +62,9 @@ __global__ static void quantize_q8_0_f32_kernel(int8_t* xq, float* xscale,
   uint64_t i0 = b * 32;
   uint64_t bn = in_dim - i0 < 32 ? in_dim - i0 : 32;
   const float* xr = x + tok * in_dim + i0;
-
-  float a = 0.0f;
-  if (threadIdx.x < bn)
-    a = fabsf(xr[threadIdx.x]);
-  a = warp_max_f32(a);
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-  const float d = __shfl(a, 0, 32) / 127.0f;
-#else
-  const float d = __shfl_sync(FULL_WARP_MASK, a, 0, 32) / 127.0f;
-#endif
-  const float id = d != 0.0f ? 1.0f / d : 0.0f;
-  if (threadIdx.x == 0)
-    xscale[tok * blocks + b] = d;
-  int8_t* dst = xq + (tok * blocks + b) * 32;
-  if (threadIdx.x < bn) {
-    int v = (int)lrintf(xr[threadIdx.x] * id);
-    v = v > 127 ? 127 : (v < -128 ? -128 : v);
-    dst[threadIdx.x] = (int8_t)v;
-  } else {
-    dst[threadIdx.x] = 0;
-  }
+  const float v = threadIdx.x < bn ? xr[threadIdx.x] : 0.0f;
+  quantize_q8_0_block32(v, threadIdx.x, (uint32_t)bn,
+                        xq + (tok * blocks + b) * 32, xscale + tok * blocks + b);
 }
 
 __global__ static void matmul_q8_0_preq_kernel(
