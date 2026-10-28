@@ -41,6 +41,16 @@ enum class GgmlType : std::uint16_t {
   kIQ4_XS = 23,
   kI32 = 26,
   kBF16 = 30,
+  // Agention Gyro trellis types (https://gitlab.com/agentionai-group/agention-gyro).
+  // Only dequantization on CPU is implemented so far; HIP compute kernels are TODO.
+  kTQ2_T = 144,
+  kTQK6 = 145,
+  kTQK7 = 146,
+  kTQP5 = 147,
+  kTQP6 = 148,
+  kTQP7 = 149,
+  kTQK5 = 150,
+  kTQK4 = 151,
 };
 
 [[nodiscard]] constexpr std::string_view ToString(GgmlType type) noexcept {
@@ -85,6 +95,22 @@ enum class GgmlType : std::uint16_t {
       return "I32";
     case GgmlType::kBF16:
       return "BF16";
+    case GgmlType::kTQ2_T:
+      return "TQ2_T";
+    case GgmlType::kTQK4:
+      return "TQK4";
+    case GgmlType::kTQK5:
+      return "TQK5";
+    case GgmlType::kTQK6:
+      return "TQK6";
+    case GgmlType::kTQK7:
+      return "TQK7";
+    case GgmlType::kTQP5:
+      return "TQP5";
+    case GgmlType::kTQP6:
+      return "TQP6";
+    case GgmlType::kTQP7:
+      return "TQP7";
   }
   return "UNKNOWN";
 }

@@ -1,4 +1,5 @@
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/core/quant/gyro/tq_ref.h"
 
 #include <array>
 #include <cmath>
@@ -215,6 +216,30 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       break;
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
+      break;
+    case core::GgmlType::kTQ2_T:
+      block_bytes = 34;
+      break;
+    case core::GgmlType::kTQK4:
+      block_bytes = 18;
+      break;
+    case core::GgmlType::kTQK5:
+      block_bytes = 22;
+      break;
+    case core::GgmlType::kTQK6:
+      block_bytes = 26;
+      break;
+    case core::GgmlType::kTQK7:
+      block_bytes = 30;
+      break;
+    case core::GgmlType::kTQP5:
+      block_bytes = 42;
+      break;
+    case core::GgmlType::kTQP6:
+      block_bytes = 50;
+      break;
+    case core::GgmlType::kTQP7:
+      block_bytes = 58;
       break;
     default:
       return 0;
@@ -671,6 +696,10 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
     }
   }
   return sum;
+}
+
+void DequantizeTQ2_T(const void* src, float* dst, std::size_t k) {
+  tq_dequantize_row(TQ_TYPE_TQ2_T, src, dst, static_cast<int64_t>(k));
 }
 
 }  // namespace gufo::quant

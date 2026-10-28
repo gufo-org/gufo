@@ -127,6 +127,15 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ6_K:
     case core::GgmlType::kQ8_K:
       return 256;
+    case core::GgmlType::kTQ2_T:
+    case core::GgmlType::kTQK4:
+    case core::GgmlType::kTQK5:
+    case core::GgmlType::kTQK6:
+    case core::GgmlType::kTQK7:
+    case core::GgmlType::kTQP5:
+    case core::GgmlType::kTQP6:
+    case core::GgmlType::kTQP7:
+      return 128;
     default:
       return 0;
   }
@@ -184,6 +193,10 @@ void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);
 
 // Dequantize row of IQ3_S to float
 void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of Gyro TQ2_T (trellis, 128 elements per 34-byte block) to float.
+// Reference implementation (AgentionAI, Apache 2.0). CPU only.
+void DequantizeTQ2_T(const void* src, float* dst, std::size_t k);
 
 // Compute dot product of IQ4_NL quantized row with FP32 vector
 float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,
