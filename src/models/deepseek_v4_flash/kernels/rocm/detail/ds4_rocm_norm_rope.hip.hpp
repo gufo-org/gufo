@@ -1,16 +1,14 @@
 #include "ds4_rocm_norm.hip.hpp"
 
-__global__ static void rms_norm_weight_kernel(float *out, const float *x, const float *w, uint32_t n, uint32_t rows, float eps) {
-    uint32_t row = blockIdx.x;
-    if (row >= rows) return;
-    const float *xr = x + (uint64_t)row * n;
-    float *orow = out + (uint64_t)row * n;
+/* One row of rms_norm_weight_kernel; `partial` is blockDim.x shared floats.
+ * orow may alias xr. */
+__device__ static void rms_norm_weight_row(float *orow, const float *xr, const float *w, uint32_t n,
+                                           float eps, float *partial) {
     float sum = 0.0f;
     for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
         float v = xr[i];
         sum += v * v;
     }
-    __shared__ float partial[256];
     partial[threadIdx.x] = sum;
     __syncthreads();
     for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
@@ -21,6 +19,13 @@ __global__ static void rms_norm_weight_kernel(float *out, const float *x, const 
     for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
         orow[i] = xr[i] * scale * w[i];
     }
+}
+
+__global__ static void rms_norm_weight_kernel(float *out, const float *x, const float *w, uint32_t n, uint32_t rows, float eps) {
+    uint32_t row = blockIdx.x;
+    if (row >= rows) return;
+    __shared__ float partial[256];
+    rms_norm_weight_row(out + (uint64_t)row * n, x + (uint64_t)row * n, w, n, eps, partial);
 }
 
 __device__ static float rope_yarn_ramp_dev(float low, float high, int i0);

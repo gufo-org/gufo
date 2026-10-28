@@ -54,6 +54,26 @@ int ds4_gpu_compressor_store_batch_tensor(
 int ds4_gpu_compressor_prefill_ratio4_replay_tensor(ds4_gpu_tensor *comp_cache, ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv, const ds4_gpu_tensor *sc, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t pos0, uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps, ds4_gpu_tensor *comp_mirror_f16);
 int ds4_gpu_compressor_prefill_state_ratio4_tensor(ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv_tail, const ds4_gpu_tensor *sc_tail, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint32_t head_dim, uint32_t pos0);
 int ds4_gpu_compressor_prefill_tensor(ds4_gpu_tensor *comp_cache, ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv, const ds4_gpu_tensor *sc, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t ratio, uint32_t pos0, uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps, ds4_gpu_tensor *comp_mirror_f16);
+/* One compressor of a single-token decode step. */
+struct ds4_gpu_compressor_step {
+    const ds4_gpu_tensor *kv;      /* this token's coff * head_dim values */
+    const ds4_gpu_tensor *sc;
+    ds4_gpu_tensor *state_kv;
+    ds4_gpu_tensor *state_score;
+    ds4_gpu_tensor *comp_cache;    /* rows of head_dim floats */
+    ds4_gpu_tensor *comp_mirror;   /* optional F16 copy of the rounded rows */
+    uint32_t comp_row;
+    uint64_t ape_offset;
+    uint32_t ape_type;
+    uint64_t norm_offset;          /* F32 norm weights */
+    uint32_t head_dim;
+    bool qat;                      /* indexer rows: Hadamard FP4, not FP8 */
+};
+/* One launch for up to two compressors of a layer: the state store, and on the
+ * window's last token the pooled, normalized, rotated and rounded row plus the
+ * ratio-4 state shift. Bit-identical to ds4_gpu_compressor_update_tensor
+ * followed by the row's FP8 (with mirror) or indexer QAT pass. */
+int ds4_gpu_compressor_decode_tensor(const ds4_gpu_compressor_step *steps, uint32_t n_steps, const void *model_map, uint64_t model_size, uint32_t ratio, uint32_t pos, uint32_t n_rot, uint32_t n_ctx_orig, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps);
 int ds4_gpu_compressor_update_tensor(const ds4_gpu_tensor *kv_cur, const ds4_gpu_tensor *sc_cur, ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, ds4_gpu_tensor *comp_cache, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t ratio, uint32_t pos, uint32_t comp_row, uint32_t n_rot, uint32_t n_ctx_orig, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps, bool state_already_stored, bool decode_one_token, bool defer_finalize);
 int ds4_gpu_dsv4_fp8_kv_quantize_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);
 int ds4_gpu_dsv4_fp8_kv_quantize_mirror_f16_tensor(ds4_gpu_tensor *x, ds4_gpu_tensor *mirror_f16, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);

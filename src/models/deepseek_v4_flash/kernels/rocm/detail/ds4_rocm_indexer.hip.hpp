@@ -10,6 +10,46 @@ static hipError_t ds4_hip_set_dynamic_shared_memory(Kernel kernel,
                                bytes);
 }
 
+/* Hadamard transform and FP4 (E2M1) round trip of one 128-value indexer row.
+ * Every thread of the block calls it (barriers); threads 0..127 own a value.
+ * `vals` and `absbuf` are 128 shared floats each. */
+__device__ static void indexer_hadamard_fp4_row(float *xr, uint32_t tid, float *vals, float *absbuf) {
+    const bool own = tid < 128u;
+    if (own) vals[tid] = xr[tid];
+    __syncthreads();
+
+    for (uint32_t stride = 1u; stride < 128u; stride <<= 1u) {
+        if (own && (tid & stride) == 0u) {
+            uint32_t base = (tid & ~(2u * stride - 1u)) + (tid & (stride - 1u));
+            float a = vals[base];
+            float b = vals[base + stride];
+            vals[base] = a + b;
+            vals[base + stride] = a - b;
+        }
+        __syncthreads();
+    }
+
+    float v = own ? vals[tid] * 0.08838834764831845f : 0.0f;
+    uint32_t fp4_block = tid >> 5u;
+    uint32_t lane = tid & 31u;
+    uint32_t block_base = fp4_block * 32u;
+    if (own) absbuf[tid] = fabsf(v);
+    __syncthreads();
+
+    for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
+        if (own && lane < stride) {
+            absbuf[block_base + lane] = fmaxf(absbuf[block_base + lane],
+                                              absbuf[block_base + lane + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (!own) return;
+    float amax = fmaxf(absbuf[block_base], 7.052966104933725e-38f);
+    float scale = exp2f(ceilf(log2f(amax / 6.0f)));
+    xr[tid] = dsv4_e2m1fn_dequant_dev(fminf(6.0f, fmaxf(-6.0f, v / scale))) * scale;
+}
+
 /* kRope first rotates each row's RoPE tail at `pos`, one pair per thread as
  * rope_tail_kernel does, then reads the rotated row back. */
 template <bool kRope>
@@ -27,39 +67,7 @@ __global__ static void indexer_hadamard_fp4_kernel(float *x, uint32_t n_rows, ui
     }
     __shared__ float vals[128];
     __shared__ float absbuf[128];
-    float *xr = x + (uint64_t)row * head_dim;
-    vals[tid] = xr[tid];
-    __syncthreads();
-
-    for (uint32_t stride = 1u; stride < 128u; stride <<= 1u) {
-        if ((tid & stride) == 0u) {
-            uint32_t base = (tid & ~(2u * stride - 1u)) + (tid & (stride - 1u));
-            float a = vals[base];
-            float b = vals[base + stride];
-            vals[base] = a + b;
-            vals[base + stride] = a - b;
-        }
-        __syncthreads();
-    }
-
-    float v = vals[tid] * 0.08838834764831845f;
-    uint32_t fp4_block = tid >> 5u;
-    uint32_t lane = tid & 31u;
-    uint32_t block_base = fp4_block * 32u;
-    absbuf[tid] = fabsf(v);
-    __syncthreads();
-
-    for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
-        if (lane < stride) {
-            absbuf[block_base + lane] = fmaxf(absbuf[block_base + lane],
-                                              absbuf[block_base + lane + stride]);
-        }
-        __syncthreads();
-    }
-
-    float amax = fmaxf(absbuf[block_base], 7.052966104933725e-38f);
-    float scale = exp2f(ceilf(log2f(amax / 6.0f)));
-    xr[tid] = dsv4_e2m1fn_dequant_dev(fminf(6.0f, fmaxf(-6.0f, v / scale))) * scale;
+    indexer_hadamard_fp4_row(x + (uint64_t)row * head_dim, tid, vals, absbuf);
 }
 
 __global__ static void indexer_scores_kernel(
