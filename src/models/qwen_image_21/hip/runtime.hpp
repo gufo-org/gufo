@@ -8,9 +8,11 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "src/models/qwen_image_21/hip/blas.hpp"
+#include "src/models/qwen_image_21/lora.hpp"
 #include "src/models/qwen_image_21/model.hpp"
 #include "src/models/qwen_image_21/weights.hpp"
 
@@ -48,6 +50,13 @@ void FusedAttention128(const std::uint16_t* queries, const std::uint16_t* keys,
                        int heads, int rows, int count, int query_start,
                        hipStream_t stream, int query_count = 128,
                        const int* limits = nullptr);
+// weight[rows x cols] += scale * up[rows x rank] * down[rank x cols]; FP32,
+// row-major.
+void LoraLowRank(hipblasHandle_t blas, float* weight, const float* up,
+                 const float* down, int rows, int cols, int rank, float scale);
+// ComfyUI DoRA on the output axis; norms are of `weight` before this update.
+void LoraDora(float* weight, const float* delta, const float* magnitude,
+              int rows, int cols, float strength, hipStream_t stream);
 
 struct Matrix {
   std::shared_ptr<void> owner;
@@ -81,6 +90,12 @@ public:
   /// FP32 rotary tables; logical storage uses two BF16-sized slots per float.
   Matrix UploadFloat(std::span<const float> values, int rows, int cols);
   Matrix Weight(std::string_view name);
+  /// Replace the adapter terms by target name. Weights whose terms change
+  /// are dropped and rebuild from the mapped originals on next use. Returns
+  /// the names to rebuild for the switch: every target whose terms change or
+  /// that is not resident, and the dropped weights that lost their terms.
+  std::vector<std::string> SetLoras(
+      std::map<std::string, std::vector<LoraTerm>, std::less<>> terms);
   Matrix Linear(const Matrix& x, const std::string& name);
   Matrix Normalize(const Matrix& x, Norm kind, const std::string& weight = {},
                    float epsilon = 1e-6F, bool silu = false);
@@ -131,6 +146,7 @@ private:
   hipblasHandle_t blas_{nullptr};
   Gemm gemm_;
   std::map<std::string, Matrix, std::less<>> device_weights_;
+  std::map<std::string, std::vector<LoraTerm>, std::less<>> loras_;
   std::vector<std::string_view> prefetched_groups_;
   Matrix packed_source_, packed_input_;
   std::size_t weight_bytes_{0};
@@ -140,6 +156,7 @@ private:
   Matrix Raw(std::size_t bytes);
   Matrix PackedInput(const Matrix& x);
   void UploadMapped(void* device, const void* host, std::size_t bytes);
+  void MergeLoras(Matrix& weight, std::span<const LoraTerm> terms);
   void Matmul(const Matrix& x, const Matrix& w, Matrix& output,
               const Matrix* bias = nullptr, bool convolution = false);
 };

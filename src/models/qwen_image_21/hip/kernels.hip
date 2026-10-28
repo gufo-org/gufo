@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cfloat>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -574,6 +575,24 @@ __global__ void Position(const B* x, const B* table, B* y, int height,
   y[i] = Bf16(float(x[i]) + Round(p0 + p1 + p2 + p3));
 }
 
+// ComfyUI weight_decompose: the row norm is taken before the update, with the
+// FP32 epsilon; strength 1 stores the scaled weight directly.
+__global__ void Dora(float* w, const float* delta, const float* magnitude,
+                     int cols, float strength) {
+  __shared__ float scratch[256];
+  const auto offset = static_cast<std::size_t>(blockIdx.x) * cols;
+  float square = 0;
+  for (int c = threadIdx.x; c < cols; c += blockDim.x)
+    square += w[offset + c] * w[offset + c];
+  const float scale =
+      magnitude[blockIdx.x] / (sqrtf(Sum(square, scratch)) + FLT_EPSILON);
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) {
+    const float value = w[offset + c];
+    const float calc = (value + delta[offset + c]) * scale;
+    w[offset + c] = strength == 1 ? calc : value + strength * (calc - value);
+  }
+}
+
 void BlasCheck(hipblasStatus_t status) {
   if (status != HIPBLAS_STATUS_SUCCESS)
     throw std::runtime_error("Qwen-Image hipBLAS failed: " +
@@ -640,6 +659,27 @@ void ReorderHeads(const std::uint16_t* input, std::uint16_t* output, int rows,
     HeadLayout<<<Blocks(static_cast<std::size_t>(rows) * heads * dim), 256, 0,
                  stream>>>(x, y, rows, heads, kv_heads, dim, inverse);
   }
+}
+
+void LoraLowRank(hipblasHandle_t blas, float* weight, const float* up,
+                 const float* down, int rows, int cols, int rank, float scale) {
+  // Without atomics the reduction order is fixed, so rebuilding a merged
+  // weight after an adapter switch is bit-identical.
+  hipblasAtomicsMode_t atomics{};
+  BlasCheck(hipblasGetAtomicsMode(blas, &atomics));
+  BlasCheck(hipblasSetAtomicsMode(blas, HIPBLAS_ATOMICS_NOT_ALLOWED));
+  // Row-major W += s * U * D is column-major W^T += s * D^T * U^T.
+  const float one = 1;
+  const auto status =
+      hipblasSgemm(blas, HIPBLAS_OP_N, HIPBLAS_OP_N, cols, rows, rank, &scale,
+                   down, cols, up, rank, &one, weight, cols);
+  BlasCheck(hipblasSetAtomicsMode(blas, atomics));
+  BlasCheck(status);
+}
+
+void LoraDora(float* weight, const float* delta, const float* magnitude,
+              int rows, int cols, float strength, hipStream_t stream) {
+  Dora<<<rows, 256, 0, stream>>>(weight, delta, magnitude, cols, strength);
 }
 
 void Check(hipError_t status) {
@@ -840,6 +880,8 @@ Matrix Runtime::Weight(std::string_view name) {
     FloatToBf16<<<Blocks(count), 256, 0, stream_>>>(
         reinterpret_cast<const float*>(raw.data), Ptr(m), count);
   }
+  if (const auto lora = loras_.find(name); lora != loras_.end())
+    MergeLoras(m, lora->second);
   const bool packed_convolution = w.shape.size() == 4 && w.shape[2] == 3 &&
                                   w.shape[3] == 3 &&
                                   Convolve3Shape(w.shape[1], rows);
@@ -857,6 +899,87 @@ Matrix Runtime::Weight(std::string_view name) {
   weight_bytes_ += count * 2;
   device_weights_.emplace(std::string(name), m);
   return m;
+}
+
+// Terms apply in order to an FP32 copy of the uploaded BF16 weight, which
+// rounds back to BF16 (a second rounding for an FP32 checkpoint tensor).
+// Adapter tensors are widened to FP32 on the host; the device scratch comes
+// from the buffer pool like any other temporary.
+void Runtime::MergeLoras(Matrix& weight, std::span<const LoraTerm> terms) {
+  const auto upload = [&](const LoraTensor& tensor, std::size_t first,
+                          std::size_t count) {
+    const auto values = LoraFloats(tensor, first, count);
+    auto device = Raw(count * 4);
+    UploadMapped(device.data, values.data(), count * 4);
+    return device;
+  };
+  const auto n = weight.size();
+  auto scratch = Raw(n * 4);
+  auto* w = reinterpret_cast<float*>(scratch.data);
+  Bf16ToFloat<<<Blocks(n), 256, 0, stream_>>>(Ptr(weight), w, n);
+  for (const auto& term : terms) {
+    const auto& patch = *term.patch;
+    if (patch.rows != weight.rows || patch.cols != weight.cols)
+      throw std::logic_error("LoRA patch shape mismatch: " + patch.target);
+    const auto first = static_cast<std::size_t>(patch.first_row);
+    if (patch.diff.data) {
+      const auto diff = upload(patch.diff, first * patch.cols, n);
+      BlasCheck(hipblasSaxpy(blas_, static_cast<int>(n), &term.strength,
+                             reinterpret_cast<const float*>(diff.data), 1, w,
+                             1));
+      continue;
+    }
+    const auto up = upload(patch.up, first * patch.rank,
+                           static_cast<std::size_t>(patch.rows) * patch.rank);
+    const auto down = upload(
+        patch.down, 0, static_cast<std::size_t>(patch.rank) * patch.cols);
+    const auto* u = reinterpret_cast<const float*>(up.data);
+    const auto* d = reinterpret_cast<const float*>(down.data);
+    if (!patch.magnitude.data) {
+      LoraLowRank(blas_, w, u, d, patch.rows, patch.cols, patch.rank,
+                  patch.scale * term.strength);
+      continue;
+    }
+    auto delta = Raw(n * 4);
+    auto* dw = reinterpret_cast<float*>(delta.data);
+    Check(hipMemsetAsync(dw, 0, n * 4, stream_));
+    LoraLowRank(blas_, dw, u, d, patch.rows, patch.cols, patch.rank,
+                patch.scale);
+    const auto magnitude = upload(patch.magnitude, first, patch.rows);
+    LoraDora(w, dw, reinterpret_cast<const float*>(magnitude.data), patch.rows,
+             patch.cols, term.strength, stream_);
+  }
+  FloatToBf16<<<Blocks(n), 256, 0, stream_>>>(w, Ptr(weight), n);
+  Check(hipGetLastError());
+}
+
+std::vector<std::string> Runtime::SetLoras(
+    std::map<std::string, std::vector<LoraTerm>, std::less<>> terms) {
+  std::vector<std::string> rebuild;
+  const auto drop = [&](const std::string& name) {
+    const auto it = device_weights_.find(name);
+    if (it == device_weights_.end())
+      return false;
+    weight_bytes_ -= it->second.size() * 2;
+    device_weights_.erase(it);
+    return true;
+  };
+  for (const auto& entry : loras_)
+    if (!terms.contains(entry.first) && drop(entry.first))
+      rebuild.push_back(entry.first);
+  for (const auto& [name, next] : terms) {
+    const auto old = loras_.find(name);
+    if (old != loras_.end() && device_weights_.contains(name) &&
+        std::equal(old->second.begin(), old->second.end(), next.begin(),
+                   next.end(), [](const LoraTerm& a, const LoraTerm& b) {
+                     return a.patch == b.patch && a.strength == b.strength;
+                   }))
+      continue;
+    drop(name);
+    rebuild.push_back(name);
+  }
+  loras_ = std::move(terms);
+  return rebuild;
 }
 
 Matrix Runtime::PackedInput(const Matrix& x) {

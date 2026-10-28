@@ -15,4 +15,10 @@ Result Model::Generate(const Request&, const CancellationCheck&,
 std::vector<std::uint32_t> Model::Tokenize(std::string_view) const {
   throw std::runtime_error("Qwen-Image requires HIP");
 }
+LoraInfo Model::AddLora(const std::string&, const std::filesystem::path&) {
+  throw std::runtime_error("Qwen-Image requires HIP");
+}
+std::vector<Lora> Model::ActiveLoras() const {
+  return {};
+}
 }  // namespace gufo::models::qwen_image_21
