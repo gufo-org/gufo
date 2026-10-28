@@ -20,6 +20,7 @@
 | Extra F16 HC rounding | Rejected: fails official formula oracle and worsens probability comparisons. |
 | FP32 compressor/router | Rejected: local arithmetic improvements fail end-to-end continuation/trajectory controls. |
 | Paired IQ2 gate/up | Rejected (2026-09-19): exact forms slower; smaller tiles spill and fail exactness. |
+| Overlap IQ2 gate/up block loads with decode in the C1 routed-expert kernel | Retained locally (2026-10-28): each lane loads the next step's gate and up blocks while it decodes the current one. The kernel stages Q8_K activations in LDS with a 272-byte block stride, and `__launch_bounds__(256, 10)` keeps all 96 decode workgroups resident on 20 WGPs. The kernel pins the scale product, the FMA order, and an opaque zero, and 19.4M outputs at 1–8 tokens match the old kernel bit for bit. On gfx1151, tg64 improves 17.54→17.85 tok/s at d0, 15.47→15.71 at 32K and 15.18→15.42 at 64K. |
 | Transposed sparse values | Rejected (2026-09-19): no retained end-to-end gain. |
 | Constant pair indices in the 8-row IQ2 gate/up tiles | Retained (2026-10-08): runtime indices kept 144–176 B of per-thread arrays in scratch with clang 22 and 23. The explicit scale product and FMA keep every output bit-identical to the scalar LUT kernel; the tile kernel is 9–10% faster and pp8–pp24 1.7–2.0% faster in isolated PR measurements. |
 | Launch bound for the register-cached plain RMS norm | Retained (2026-10-08): the default 1,024-thread bound limited it to 192 VGPRs, and clang 23 spilled one; bit-identical. |
