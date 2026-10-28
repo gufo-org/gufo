@@ -145,6 +145,11 @@ struct qfn_stack_pool : public ggml_hip_pool {
     }
 
     void add_block(size_t bytes) {
+        /* Drain the device first, as the single arena did. On ROCm 10.1 an
+         * allocation made while kernels are in flight leaves later kernel
+         * launches slower for seconds (+14 ms per short MTP request). Blocks
+         * are only added by eager passes, never during capture. */
+        (void)hipDeviceSynchronize();
         char *base = nullptr;
         HIP_CHECK(gufo::hip::AllocateDevice(&base, bytes));
         blocks.push_back({base, bytes, 0});
