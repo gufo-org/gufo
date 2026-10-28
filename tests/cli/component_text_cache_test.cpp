@@ -1900,6 +1900,15 @@ void RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers() {
     std::vector<TextRunnerToken> conversation(12, 7);
     for (int turn = 0; turn < 2; ++turn) {
       auto lease = cache.Acquire(conversation, {}, {}, true, 0, true);
+      if (!enabled) {
+        assert(lease->PlannedCaptures(conversation.size()).empty());
+        // Off is a policy, independent of a caller's payload estimate.
+        for (const auto purpose :
+             {SnapshotPurpose::kContinuation, SnapshotPurpose::kRetry,
+              SnapshotPurpose::kBranchPoint, SnapshotPurpose::kHistory})
+          assert(!lease->TryReserveSnapshot(0, conversation.size(), false,
+                                            purpose, conversation));
+      }
       const auto cached = lease->cached_tokens();
       auto& state = dynamic_cast<State&>(lease->state());
       const auto tail = std::span(conversation).subspan(cached);
@@ -1954,6 +1963,8 @@ void RamCacheOffWithDiskCommitsOnlyStagingBacking() {
     ComponentTextCache cache(runner, 1, 1 << 24, disk, false, 0, false);
     assert(runner->committed != 0 && runner->committed <= 512ULL << 20);
     auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(!lease->TryReserveSnapshot(0, prompt.size(), false,
+                                      SnapshotPurpose::kHistory, prompt));
     auto& state = dynamic_cast<State&>(lease->state());
     runner->adapter->Append(state.slot, prompt, prompt);
     hash = runner->adapter->RecurrentHash(state.slot);

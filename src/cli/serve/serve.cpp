@@ -211,8 +211,8 @@ void AddCacheRamOption(gufo::cli::ArgParser& parser,
       "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
       "off keeps no RAM checkpoints and commits no cache memory; "
       "sessions still reuse their own live state, and --cache-disk still "
-      "works (Qwen and Flash-Next then pin a 512 MiB copy buffer for it). "
-      "Flash-Next pins it about 1 GiB at a time as captures need it",
+      "works (Qwen and Flash-Next then use up to 512 MiB of backing for "
+      "disk captures)",
       "Cache",
       [target](std::string_view, std::string_view value, std::string* error) {
         const auto parsed = server::ParseRamCacheOption(value, error);

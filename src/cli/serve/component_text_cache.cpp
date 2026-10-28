@@ -1450,6 +1450,9 @@ bool ComponentTextCache::Lease::HasSnapshotFor(
 bool ComponentTextCache::Lease::TryReserveSnapshot(
     std::size_t bytes, std::size_t boundary, bool preserve,
     SnapshotPurpose purpose, std::span<const ContinuationToken> tokens) {
+  if (!impl_->cache->ram_enabled &&
+      (!impl_->cache->queue || purpose == SnapshotPurpose::kHistory))
+    return false;
   if (!boundary || boundary > impl_->prompt.size() ||
       (bytes > impl_->cache->budget &&
        (!impl_->cache->queue || purpose == SnapshotPurpose::kHistory)))
@@ -1513,7 +1516,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
         std::string("schema=component-cache-v1 event=capture_failed reason=") +
             error.what());
   };
-  if (bytes > cache.budget) {
+  if (!cache.ram_enabled || bytes > cache.budget) {
     try {
       return request.CaptureDurable();
     } catch (const cache::ResourceExhausted&) {
