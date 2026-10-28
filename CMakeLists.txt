@@ -307,6 +307,7 @@ add_library(gufo_core STATIC
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
   src/core/sampling.cpp
+  src/core/sampling_logit_row.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
@@ -330,6 +331,16 @@ endif()
 find_package(OpenMP)
 if (OpenMP_CXX_FOUND)
   target_link_libraries(gufo_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+# The softmax-bracket error bounds in sampling_logit_row.cpp were swept without
+# FMA contraction.
+if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+  set_property(SOURCE src/core/sampling_logit_row.cpp
+    APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set_property(SOURCE src/core/sampling_logit_row.cpp
+    APPEND PROPERTY COMPILE_OPTIONS /clang:-ffp-contract=off)
 endif()
 
 if (ENGINE_ENABLE_HIP)
