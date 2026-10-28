@@ -42,5 +42,8 @@ function(gufo_qwen_image_21_register_tests)
     add_executable(qwen_image_21_probe
       ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/probe.cpp)
     target_link_libraries(qwen_image_21_probe PRIVATE gufo_qwen_image_21)
+    add_executable(qwen_image_21_lora_dump
+      ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/lora_dump.cpp)
+    target_link_libraries(qwen_image_21_lora_dump PRIVATE gufo_qwen_image_21)
   endif()
 endfunction()
