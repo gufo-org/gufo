@@ -1610,7 +1610,8 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
         uint64_t                group_dim,
         uint64_t                rank,
         uint32_t                n_groups,
-        const ds4_gpu_tensor *heads) {
+        const ds4_gpu_tensor *heads,
+        const ds4_gpu_tensor *heads_q8) {
     if (!low || !heads || !model_map || group_dim == 0 || rank == 0 || n_groups == 0) {
         return 0;
     }
@@ -1632,25 +1633,12 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
      * also cache-friendly. */
 
     const uint64_t x_rows = (uint64_t)n_groups;
-    const uint64_t xq_bytes = x_rows * blocks_a * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes =
-        scale_offset + x_rows * blocks_a * sizeof(float);
-    void *tmp = hip_tmp_alloc(tmp_bytes,
-                               "attention output low q8 prequant");
-    if (!tmp) return 0;
-    int8_t *xq = (int8_t *)tmp;
-    float* xscale = (float*)((char*)tmp + scale_offset);
+    int8_t *xq = NULL;
+    float *xscale = NULL;
     const int use_dp4a = 1;
-    dim3 qgrid((unsigned)blocks_a, (unsigned)x_rows, 1);
-    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
-            xq,
-            xscale,
-            (const float *)heads->ptr,
-            group_dim,
-            blocks_a);
-    if (!hip_ok(hipGetLastError(),
-                 "attention_output_low_q8 prequant launch")) {
+    if (heads_q8) {
+        if (group_dim % 32u != 0u || !hip_q8_0_act(heads_q8, x_rows, blocks_a, &xq, &xscale)) return 0;
+    } else if (!hip_quantize_q8_0_prequant(heads, group_dim, blocks_a, x_rows, &xq, &xscale)) {
         return 0;
     }
     const uint32_t rows_per_block = 32u;

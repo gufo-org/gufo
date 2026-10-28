@@ -267,6 +267,25 @@ __global__ static void head_rms_norm_kernel(float *x, uint32_t n_tok, uint32_t n
     }
 }
 
+/* RoPE tail of every head of one row, then the row's Q8_0 blocks, in one
+ * pass. A 32-value block is either all rotated tail or all untouched head
+ * (n_nope % 32 == 0); even lanes rotate their pair exactly as rope_tail_kernel
+ * does before the block reads the values back. */
+__global__ static void rope_tail_quantize_q8_0_kernel(
+        float *x, int8_t *xq, float *xscale, uint32_t head_dim, uint32_t pos,
+        ds4_rope_tail_args rope) {
+    const uint32_t b = blockIdx.x;
+    const uint32_t lane = threadIdx.x;
+    const uint64_t i0 = (uint64_t)b * 32u;
+    const uint32_t d0 = (uint32_t)(i0 % head_dim);
+    const uint32_t n_nope = head_dim - rope.n_rot;
+    if (d0 >= n_nope && (lane & 1u) == 0u) {
+        rope_tail_rotate_pair(x + (i0 - d0) + n_nope, (d0 - n_nope + lane) / 2u, pos, rope);
+    }
+    __syncthreads();
+    quantize_q8_0_block32(x[i0 + lane], lane, 32u, xq + i0, xscale + b);
+}
+
 /* FP8 (E4M3) scale of one 64-value KV group from each lane's |value|. Every
  * thread of the block calls it; `scratch` is this group's 64 shared floats. */
 __device__ static float dsv4_fp8_kv_group_scale(float *scratch, uint32_t lane, float absv) {
@@ -580,6 +599,22 @@ extern "C" int ds4_gpu_head_rms_norm_rope_tail_tensor(ds4_gpu_tensor *x, uint32_
             beta_fast, beta_slow, eps);
     return hip_ok(hipGetLastError(), "head_rms_norm_rope_tail lds launch");
 }
+extern "C" int ds4_gpu_rope_tail_quantize_q8_0_tensor(ds4_gpu_tensor *x, ds4_gpu_tensor *xq8, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow) {
+    const uint64_t n = (uint64_t)n_head * head_dim;
+    int8_t *xq = NULL;
+    float *xscale = NULL;
+    if (n_rot > head_dim || (n_rot & 1u) || head_dim % 32u != 0u ||
+        (head_dim - n_rot) % 32u != 0u || n == 0u || n / 32u > UINT32_MAX ||
+        !hip_tensor_has_f32(x, n) || !hip_q8_0_act(xq8, 1u, n / 32u, &xq, &xscale)) {
+        return 0;
+    }
+    rope_tail_quantize_q8_0_kernel<<<(uint32_t)(n / 32u), 32>>>(
+            (float *)x->ptr, xq, xscale, head_dim, pos,
+            ds4_rope_tail_args{n_rot, n_ctx_orig, inverse ? 1 : 0, freq_base, freq_scale,
+                               ext_factor, attn_factor, beta_fast, beta_slow});
+    return hip_ok(hipGetLastError(), "rope_tail_quantize_q8_0 launch");
+}
+
 static int hip_rope_tail_stride_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos0, uint32_t pos_stride, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow) {
     if (!x || n_rot > head_dim || (n_rot & 1) || x->bytes < (uint64_t)n_tok * n_head * head_dim * sizeof(float)) return 0;
     uint32_t pairs = n_tok * n_head * (n_rot / 2);
