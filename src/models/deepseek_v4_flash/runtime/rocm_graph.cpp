@@ -2784,7 +2784,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                   ok = false;
                 }
                 if (ok && ratio == 4) {
-                    ok = ds4_gpu_compressor_prefill_ratio4_replay_tensor(
+                    ok = ds4_gpu_compressor_prefill_replay_tensor(
                             attn_comp_target,
                             g->layer_attn_state_kv[il],
                             g->layer_attn_state_score[il],
@@ -2797,6 +2797,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                             layer->attn_compressor_norm->abs_offset,
                             layer->attn_compressor_norm->type,
                             DS4_N_HEAD_DIM,
+                            ratio,
                             pos0,
                             n_tokens,
                             DS4_N_ROT,
@@ -2864,6 +2865,57 @@ static bool rocm_graph_encode_layer_attention_batch(
                 rocm_graph_attn_comp_prefill_target_free(attn_comp_target);
             } else {
               for (uint32_t t = 0; ok && t < n_tokens;) {
+                const uint32_t whole =
+                    g->spec_capture_prefixes || (pos0 + t) % ratio != 0u
+                        ? 0u
+                        : (n_tokens - t) / ratio * ratio;
+                if (whole != 0u) {
+                  const uint32_t comp_row = g->layer_n_comp[il];
+                  const uint32_t n_new = whole / ratio;
+                  if (comp_row + n_new > g->layer_comp_cap[il]) {
+                    fprintf(stderr,
+                            "ds4: ROCm graph compressed KV cache capacity "
+                            "exceeded at layer %u\n",
+                            il);
+                    ok = false;
+                    break;
+                  }
+                  ds4_gpu_tensor* kv_view = ds4_gpu_tensor_view(
+                      g->batch_comp_kv, (uint64_t)t * comp_width * sizeof(float),
+                      (uint64_t)whole * comp_width * sizeof(float));
+                  ds4_gpu_tensor* sc_view = ds4_gpu_tensor_view(
+                      g->batch_comp_sc, (uint64_t)t * comp_width * sizeof(float),
+                      (uint64_t)whole * comp_width * sizeof(float));
+                  ds4_gpu_tensor* target =
+                      rocm_graph_attn_comp_prefill_target(g, il, comp_row, n_new);
+                  ds4_gpu_tensor* mirror =
+                      rocm_graph_attn_comp_prefill_mirror(g, il, comp_row, n_new);
+                  ok = kv_view && sc_view && target &&
+                       ds4_gpu_compressor_prefill_replay_tensor(
+                           target, g->layer_attn_state_kv[il],
+                           g->layer_attn_state_score[il], kv_view, sc_view,
+                           model->map, model->size,
+                           layer->attn_compressor_ape->abs_offset,
+                           layer->attn_compressor_ape->type,
+                           layer->attn_compressor_norm->abs_offset,
+                           layer->attn_compressor_norm->type, DS4_N_HEAD_DIM,
+                           ratio, pos0 + t, whole, DS4_N_ROT,
+                           compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, true,
+                           freq_base, freq_scale, ext_factor, attn_factor,
+                           DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW,
+                           DS4_RMS_EPS, mirror) != 0;
+                  if (ok) g->layer_n_comp[il] = comp_row + n_new;
+                  if (comp_counts) {
+                    for (uint32_t i = 0; i < whole; ++i)
+                      comp_counts[t + i] = comp_row + (i + 1u) / ratio;
+                  }
+                  rocm_graph_attn_comp_prefill_target_free(mirror);
+                  rocm_graph_attn_comp_prefill_target_free(target);
+                  ds4_gpu_tensor_free(sc_view);
+                  ds4_gpu_tensor_free(kv_view);
+                  t += whole;
+                  continue;
+                }
                 // A store span never crosses a pool/shift boundary.
                 // Verification retains every intermediate state for
                 // rejected-prefix rollback.
@@ -3084,7 +3136,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                         ok = index_view != NULL;
                     }
                     if (ok) {
-                        ok = ds4_gpu_compressor_prefill_ratio4_replay_tensor(
+                        ok = ds4_gpu_compressor_prefill_replay_tensor(
                                 index_view,
                                 g->layer_index_state_kv[il],
                                 g->layer_index_state_score[il],
@@ -3097,6 +3149,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                                 layer->indexer_compressor_norm->abs_offset,
                                 layer->indexer_compressor_norm->type,
                                 DS4_N_INDEXER_HEAD_DIM,
+                                ratio,
                                 pos0,
                                 n_tokens,
                                 DS4_N_ROT,
@@ -3140,6 +3193,64 @@ static bool rocm_graph_encode_layer_attention_batch(
                     ds4_gpu_tensor_free(index_view);
                 } else {
                   for (uint32_t t = 0; ok && t < n_tokens;) {
+                    const uint32_t whole =
+                        g->spec_capture_prefixes || (pos0 + t) % ratio != 0u
+                            ? 0u
+                            : (n_tokens - t) / ratio * ratio;
+                    if (whole != 0u) {
+                      const uint32_t index_row = g->layer_n_index_comp[il];
+                      const uint32_t n_new = whole / ratio;
+                      if (index_row + n_new > g->layer_comp_cap[il]) {
+                        fprintf(stderr,
+                                "ds4: ROCm graph indexer compressed KV cache "
+                                "capacity exceeded at layer %u\n",
+                                il);
+                        ok = false;
+                        break;
+                      }
+                      ds4_gpu_tensor* kv_view = ds4_gpu_tensor_view(
+                          g->batch_comp_kv,
+                          (uint64_t)t * index_width * sizeof(float),
+                          (uint64_t)whole * index_width * sizeof(float));
+                      ds4_gpu_tensor* sc_view = ds4_gpu_tensor_view(
+                          g->batch_comp_sc,
+                          (uint64_t)t * index_width * sizeof(float),
+                          (uint64_t)whole * index_width * sizeof(float));
+                      ds4_gpu_tensor* index_view = ds4_gpu_tensor_view(
+                          g->layer_index_comp_cache[il],
+                          (uint64_t)index_row * DS4_N_INDEXER_HEAD_DIM *
+                              sizeof(float),
+                          (uint64_t)n_new * DS4_N_INDEXER_HEAD_DIM *
+                              sizeof(float));
+                      ok = kv_view && sc_view && index_view &&
+                           ds4_gpu_compressor_prefill_replay_tensor(
+                               index_view, g->layer_index_state_kv[il],
+                               g->layer_index_state_score[il], kv_view,
+                               sc_view, model->map, model->size,
+                               layer->indexer_compressor_ape->abs_offset,
+                               layer->indexer_compressor_ape->type,
+                               layer->indexer_compressor_norm->abs_offset,
+                               layer->indexer_compressor_norm->type,
+                               DS4_N_INDEXER_HEAD_DIM, ratio, pos0 + t, whole,
+                               DS4_N_ROT,
+                               compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0,
+                               false, freq_base, freq_scale, ext_factor,
+                               attn_factor, DS4_ROPE_YARN_BETA_FAST,
+                               DS4_ROPE_YARN_BETA_SLOW, DS4_RMS_EPS,
+                               nullptr) != 0 &&
+                           ds4_gpu_dsv4_indexer_qat_tensor(
+                               index_view, n_new, DS4_N_INDEXER_HEAD_DIM) != 0;
+                      if (ok) g->layer_n_index_comp[il] = index_row + n_new;
+                      if (index_counts) {
+                        for (uint32_t i = 0; i < whole; ++i)
+                          index_counts[t + i] = index_row + (i + 1u) / ratio;
+                      }
+                      ds4_gpu_tensor_free(index_view);
+                      ds4_gpu_tensor_free(sc_view);
+                      ds4_gpu_tensor_free(kv_view);
+                      t += whole;
+                      continue;
+                    }
                     // A store span never crosses a pool/shift boundary.
                     // Verification retains every intermediate state for
                     // rejected-prefix rollback.
