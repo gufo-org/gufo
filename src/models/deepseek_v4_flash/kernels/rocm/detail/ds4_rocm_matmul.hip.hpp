@@ -922,8 +922,7 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
 
 static int hip_quantize_q8_0_prequant(const ds4_gpu_tensor *x, uint64_t in_dim, uint64_t blocks,
                                       uint64_t n_tok, int8_t **xq, float **xscale) {
-    const uint64_t xq_bytes = n_tok * blocks * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+    const uint64_t scale_offset = hip_q8_0_act_scale_offset(n_tok, blocks);
     const uint64_t tmp_bytes = scale_offset + n_tok * blocks * sizeof(float);
     void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 prequant");
     if (!tmp) return 0;
@@ -1179,8 +1178,8 @@ extern "C" int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model
 extern "C" int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uint64_t weight0_offset, uint64_t out0_dim,
                                                       ds4_gpu_tensor *out1, uint64_t weight1_offset, uint64_t out1_dim,
                                                       const void *model_map, uint64_t model_size, uint64_t in_dim,
-                                                      const ds4_gpu_tensor *x) {
-    if (!x || !model_map || in_dim == 0u || in_dim > UINT32_MAX || x->bytes < in_dim * sizeof(float)) return 0;
+                                                      const ds4_gpu_tensor *xq8) {
+    if (!model_map || in_dim == 0u || in_dim > UINT32_MAX) return 0;
     const uint64_t blocks = (in_dim + 31u) / 32u;
     ds4_gpu_tensor *outs[2] = {out0, out1};
     const uint64_t offsets[2] = {weight0_offset, weight1_offset};
@@ -1198,7 +1197,7 @@ extern "C" int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uin
     }
     int8_t *xq = NULL;
     float *xscale = NULL;
-    return hip_quantize_q8_0_prequant(x, in_dim, blocks, 1u, &xq, &xscale) &&
+    return hip_q8_0_act(xq8, 1u, blocks, &xq, &xscale) &&
            hip_launch_q8_0_decode_rows(out0, weights[0], xq, xscale, in_dim, out0_dim, blocks) &&
            hip_launch_q8_0_decode_rows(out1, weights[1], xq, xscale, in_dim, out1_dim, blocks);
 }
@@ -1276,6 +1275,7 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
         uint64_t out0_dim,
         uint64_t out1_dim,
         const ds4_gpu_tensor *x,
+        const ds4_gpu_tensor *xq8,
         uint64_t n_tok) {
   if (!out0 || !out1 || !x || !model_map || in_dim == 0 || out0_dim == 0 ||
       out1_dim == 0 || n_tok == 0 || in_dim > UINT32_MAX ||
@@ -1310,19 +1310,13 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
     if (!w0 || !w1)
       return 0;
 
-    const uint64_t xq_bytes = n_tok * blocks * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes = scale_offset + n_tok * blocks * sizeof(float);
-    void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 pair prequant");
-    if (!tmp) return 0;
-    int8_t *xq = (int8_t *)tmp;
-    float *xscale = (float *)((char *)tmp + scale_offset);
+    int8_t *xq = NULL;
+    float *xscale = NULL;
     const int use_dp4a = 1;
-    dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
-    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
-            xq, xscale, (const float *)x->ptr, in_dim, blocks);
-    if (!hip_ok(hipGetLastError(), "matmul_q8_0 pair quantize launch")) {
-        return 0;
+    if (xq8) {
+      if (n_tok != 1 || !hip_q8_0_act(xq8, 1u, blocks, &xq, &xscale)) return 0;
+    } else if (!hip_quantize_q8_0_prequant(x, in_dim, blocks, n_tok, &xq, &xscale)) {
+      return 0;
     }
     if (n_tok > 1) {
       for (uint32_t first = 0; first < n_tok; first += 4u) {

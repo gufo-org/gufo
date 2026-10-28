@@ -494,7 +494,8 @@ static int routed_moe_launch(
     uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim,
     uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor* selected,
     const ds4_gpu_tensor* weights, uint32_t n_total_expert, uint32_t n_expert,
-    float clamp, const ds4_gpu_tensor* x, uint32_t n_tokens) {
+    float clamp, const ds4_gpu_tensor* x, const ds4_gpu_tensor* xq8k,
+    uint32_t n_tokens) {
   routed_moe_launch_plan plan;
   if (!routed_moe_build_plan(
           out, gate, up, mid, down, model_map, model_size, gate_offset,
@@ -524,8 +525,11 @@ static int routed_moe_launch(
   const uint64_t midq_count = (uint64_t)n_tokens * n_expert * midq_blocks;
   const uint64_t xq_bytes = xq_count * sizeof(hip_block_q8_K);
   const uint64_t midq_bytes = midq_count * sizeof(hip_block_q8_K);
+  if (xq8k && !hip_tensor_has_bytes(xq8k, xq_bytes)) return 0;
   if (!q2k_path && down->bytes >= xq_bytes && gate->bytes >= midq_bytes) {
-    hip_block_q8_K* xq = (hip_block_q8_K*)down->ptr;
+    /* A producer may already have written x's Q8_K form. */
+    hip_block_q8_K* xq =
+        (hip_block_q8_K*)(xq8k ? xq8k->ptr : down->ptr);
     hip_block_q8_K* midq = (hip_block_q8_K*)gate->ptr;
     const uint32_t pair_count = n_tokens * n_expert;
     /*
@@ -608,7 +612,7 @@ static int routed_moe_launch(
     uint32_t h_sorted_counts[DS4_ROCM_N_EXPERT] = {0};
     int h_sorted_counts_valid = 0;
     uint32_t h_sorted_counts_max = 0;
-    if (!use_mmq_gateup) {
+    if (!use_mmq_gateup && !xq8k) {
       dim3 xq_grid(xq_blocks, n_tokens, 1);
       q8_K_quantize_kernel<<<xq_grid, 256>>>(xq, (const float*)x->ptr,
                                              expert_in_dim, n_tokens);
@@ -1650,12 +1654,16 @@ extern "C" int ds4_gpu_routed_moe_one_tensor(
     uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim,
     uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor* selected,
     const ds4_gpu_tensor* weights, uint32_t n_total_expert, uint32_t n_expert,
-    float clamp, const ds4_gpu_tensor* x) {
+    float clamp, const ds4_gpu_tensor* x, const ds4_gpu_tensor* xq8k) {
   return routed_moe_launch(
       out, gate, up, mid, down, model_map, model_size, gate_offset, up_offset,
       down_offset, gate_type, down_type, gate_expert_bytes, gate_row_bytes,
       down_expert_bytes, down_row_bytes, expert_in_dim, expert_mid_dim, out_dim,
-      selected, weights, n_total_expert, n_expert, clamp, x, 1);
+      selected, weights, n_total_expert, n_expert, clamp, x, xq8k, 1);
+}
+
+extern "C" uint64_t ds4_gpu_q8_K_act_bytes(uint64_t in_dim) {
+  return in_dim / ROCM_QK_K * sizeof(hip_block_q8_K);
 }
 
 extern "C" int ds4_gpu_routed_moe_batch_tensor(
@@ -1672,5 +1680,5 @@ extern "C" int ds4_gpu_routed_moe_batch_tensor(
       out, gate, up, mid, down, model_map, model_size, gate_offset, up_offset,
       down_offset, gate_type, down_type, gate_expert_bytes, gate_row_bytes,
       down_expert_bytes, down_row_bytes, expert_in_dim, expert_mid_dim, out_dim,
-      selected, weights, n_total_expert, n_expert, clamp, x, n_tokens);
+      selected, weights, n_total_expert, n_expert, clamp, x, NULL, n_tokens);
 }

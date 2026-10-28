@@ -77,6 +77,9 @@ struct ds4_rocm_graph {
     ds4_gpu_tensor *hc_comb;
     ds4_gpu_tensor *attn_cur;
     ds4_gpu_tensor *attn_norm;
+    /* Q8 forms of the normalized rows, written by their producer for the
+     * quantized projections that read them. */
+    ds4_gpu_tensor *attn_norm_q8;
     ds4_gpu_tensor *qr;
     ds4_gpu_tensor *qr_norm;
     ds4_gpu_tensor *q;
@@ -123,6 +126,8 @@ struct ds4_rocm_graph {
     ds4_gpu_tensor *after_attn_hc;
     ds4_gpu_tensor *ffn_cur;
     ds4_gpu_tensor *ffn_norm;
+    ds4_gpu_tensor *ffn_norm_q8;
+    ds4_gpu_tensor *ffn_norm_q8k;
     ds4_gpu_tensor *shared_gate;
     ds4_gpu_tensor *shared_up;
     ds4_gpu_tensor *shared_mid;
@@ -518,6 +523,8 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->shared_mid);
     ds4_gpu_tensor_free(g->shared_up);
     ds4_gpu_tensor_free(g->shared_gate);
+    ds4_gpu_tensor_free(g->ffn_norm_q8k);
+    ds4_gpu_tensor_free(g->ffn_norm_q8);
     ds4_gpu_tensor_free(g->ffn_norm);
     ds4_gpu_tensor_free(g->ffn_cur);
     ds4_gpu_tensor_free(g->after_attn_hc);
@@ -557,6 +564,7 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->q);
     ds4_gpu_tensor_free(g->qr_norm);
     ds4_gpu_tensor_free(g->qr);
+    ds4_gpu_tensor_free(g->attn_norm_q8);
     ds4_gpu_tensor_free(g->attn_norm);
     ds4_gpu_tensor_free(g->attn_cur);
     ds4_gpu_tensor_free(g->hc_comb);
@@ -775,6 +783,7 @@ static bool rocm_graph_alloc_raw_cap(
                                        (uint64_t)DS4_N_HC * DS4_N_HC * sizeof(float));
     g->attn_cur = ds4_gpu_tensor_alloc((uint64_t)DS4_N_EMBD * sizeof(float));
     g->attn_norm = ds4_gpu_tensor_alloc((uint64_t)DS4_N_EMBD * sizeof(float));
+    g->attn_norm_q8 = ds4_gpu_tensor_alloc(ds4_gpu_q8_0_act_bytes(DS4_N_EMBD));
     g->qr = ds4_gpu_tensor_alloc(q_rank * sizeof(float));
     g->qr_norm = ds4_gpu_tensor_alloc(q_rank * sizeof(float));
     g->q = ds4_gpu_tensor_alloc(q_dim * sizeof(float));
@@ -853,6 +862,8 @@ static bool rocm_graph_alloc_raw_cap(
     g->after_attn_hc = ds4_gpu_tensor_alloc(hc_dim * sizeof(float));
     g->ffn_cur = ds4_gpu_tensor_alloc((uint64_t)DS4_N_EMBD * sizeof(float));
     g->ffn_norm = ds4_gpu_tensor_alloc((uint64_t)DS4_N_EMBD * sizeof(float));
+    g->ffn_norm_q8 = ds4_gpu_tensor_alloc(ds4_gpu_q8_0_act_bytes(DS4_N_EMBD));
+    g->ffn_norm_q8k = ds4_gpu_tensor_alloc(ds4_gpu_q8_K_act_bytes(DS4_N_EMBD));
     g->shared_gate = ds4_gpu_tensor_alloc(shared_dim * sizeof(float));
     g->shared_up = ds4_gpu_tensor_alloc(shared_dim * sizeof(float));
     g->shared_mid = ds4_gpu_tensor_alloc(shared_dim * sizeof(float));
@@ -980,11 +991,13 @@ static bool rocm_graph_alloc_raw_cap(
     const bool ok =
         state_init_ok && layer_cache_ok && g->cur_hc && g->flat_hc &&
         g->hc_mix && g->hc_split && g->hc_pre && g->hc_post && g->hc_comb &&
-        g->attn_cur && g->attn_norm && g->qr && g->qr_norm && g->q &&
+        g->attn_cur && g->attn_norm && g->attn_norm_q8 && g->qr &&
+        g->qr_norm && g->q &&
         g->kv_raw && g->kv && g->comp_kv_cur && g->comp_sc_cur &&
         g->indexer_q && g->indexer_weights && g->indexer_scores &&
         g->comp_selected && g->heads && g->attn_low && g->attn_out &&
-        g->after_attn_hc && g->ffn_cur && g->ffn_norm && g->shared_gate &&
+        g->after_attn_hc && g->ffn_cur && g->ffn_norm && g->ffn_norm_q8 &&
+        g->ffn_norm_q8k && g->shared_gate &&
         g->shared_up && g->shared_mid && g->shared_out && g->router_logits &&
         g->router_probs && g->router_selected && g->router_weights &&
         g->routed_gate && g->routed_up && g->routed_mid && g->routed_down &&
@@ -1260,7 +1273,8 @@ static bool rocm_graph_encode_decode_layer(
                                                  hc_dim, mix_hc, g->flat_hc, 1);
     if (ok) {
       ok = ds4_gpu_hc_split_weighted_sum_norm_tensor(
-               g->attn_cur, g->attn_norm, g->hc_split, g->hc_mix, g->cur_hc,
+               g->attn_cur, g->attn_norm, g->attn_norm_q8, NULL, g->hc_split,
+               g->hc_mix, g->cur_hc,
                model->map, model->size, layer->hc_attn_scale->abs_offset,
                layer->hc_attn_base->abs_offset, layer->attn_norm->abs_offset,
                DS4_N_EMBD, DS4_N_HC, DS4_N_HC_SINKHORN_ITER, DS4_HC_EPS,
@@ -1272,7 +1286,7 @@ static bool rocm_graph_encode_decode_layer(
       ok = ds4_gpu_matmul_q8_0_shared_input_tensor(
                g->qr, layer->attn_q_a->abs_offset, q_rank, g->kv_raw,
                layer->attn_kv->abs_offset, DS4_N_HEAD_DIM, model->map,
-               model->size, DS4_N_EMBD, g->attn_norm) != 0;
+               model->size, DS4_N_EMBD, g->attn_norm_q8) != 0;
     {
       if (ok)
         ok = ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
@@ -1676,8 +1690,8 @@ static bool rocm_graph_encode_decode_layer(
                                                  hc_dim, mix_hc, g->flat_hc, 1);
     if (ok) {
       ok = ds4_gpu_hc_split_weighted_sum_norm_tensor(
-               g->ffn_cur, g->ffn_norm, g->hc_split, g->hc_mix,
-               g->after_attn_hc, model->map, model->size,
+               g->ffn_cur, g->ffn_norm, g->ffn_norm_q8, g->ffn_norm_q8k,
+               g->hc_split, g->hc_mix, g->after_attn_hc, model->map, model->size,
                layer->hc_ffn_scale->abs_offset, layer->hc_ffn_base->abs_offset,
                layer->ffn_norm->abs_offset, DS4_N_EMBD, DS4_N_HC,
                DS4_N_HC_SINKHORN_ITER, DS4_HC_EPS, DS4_RMS_EPS) != 0;
@@ -1715,14 +1729,15 @@ static bool rocm_graph_encode_decode_layer(
                down_expert_bytes, down_row_bytes, (uint32_t)expert_in_dim,
                (uint32_t)down_in_dim, (uint32_t)routed_out_dim,
                g->router_selected, g->router_weights, DS4_N_EXPERT,
-               DS4_N_EXPERT_USED, DS4_SWIGLU_CLAMP_EXP, g->ffn_norm) != 0;
+               DS4_N_EXPERT_USED, DS4_SWIGLU_CLAMP_EXP, g->ffn_norm,
+               g->ffn_norm_q8k) != 0;
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("routed_moe");
     if (ok) {
       ok = ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
                g->shared_gate, g->shared_up, g->shared_mid, model->map,
                model->size, layer->ffn_gate_shexp->abs_offset,
                layer->ffn_up_shexp->abs_offset, DS4_N_EMBD, shared_dim,
-               g->ffn_norm, DS4_SWIGLU_CLAMP_EXP, 1u) != 0;
+               g->ffn_norm, g->ffn_norm_q8, DS4_SWIGLU_CLAMP_EXP, 1u) != 0;
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("shared_gate_up");
     if (ok) {
@@ -3789,6 +3804,8 @@ static bool rocm_graph_encode_sessions_attention_batch(
         ok = ds4_gpu_hc_split_weighted_sum_norm_tensor(
                  attn_cur_view,
                  g->batch_attn_norm,
+                 NULL,
+                 NULL,
                  hc_split_view,
                  hc_mix_view,
                  g->batch_cur_hc,
@@ -4067,6 +4084,8 @@ static bool rocm_graph_encode_layer_ffn_batch(
         ok = ds4_gpu_hc_split_weighted_sum_norm_tensor(
                  ffn_cur_view,
                  g->batch_ffn_norm,
+                 NULL,
+                 NULL,
                  hc_split_view,
                  hc_mix_view,
                  g->batch_after_attn_hc,
@@ -4196,7 +4215,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
                g->batch_shared_gate, g->batch_shared_up, g->batch_shared_mid,
                model->map, model->size, layer->ffn_gate_shexp->abs_offset,
                layer->ffn_up_shexp->abs_offset, DS4_N_EMBD, shared_dim,
-               g->batch_ffn_norm, DS4_SWIGLU_CLAMP_EXP, n_tokens) != 0;
+               g->batch_ffn_norm, NULL, DS4_SWIGLU_CLAMP_EXP, n_tokens) != 0;
     } else {
       if (ok)
         ok = rocm_graph_matmul_q8_0_named_tensor(

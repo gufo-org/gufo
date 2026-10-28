@@ -3,6 +3,8 @@
 // Included from ds4_rocm.hip.cpp in the same translation unit to preserve current
 // static helper visibility and launch behavior.
 
+#include "ds4_rocm_device.hip.hpp"
+
 __device__ static void hc4_split_one(float *out, const float *mix, const float *scale, const float *base, uint32_t sinkhorn_iters, float epsv) {
 #if __clang_major__ >= 24
 #pragma clang fp reassociate(off)
@@ -369,9 +371,17 @@ __global__ static void hc_split_weighted_sum_fused_kernel(
     }
 }
 
+/* QCOLS != 0 is the single-token decode form for n_embd == QCOLS * 256: each
+ * thread keeps its QCOLS normalized values in registers and also writes the
+ * Q8_0 (norm_q8) and, when set, Q8_K (norm_q8k) forms of norm_out for the
+ * projections that read them, saving their quantize launches. */
+template <uint32_t QCOLS>
 __global__ static void hc_split_weighted_sum_norm_fused_kernel(
         float *out,
         float *norm_out,
+        int8_t *norm_q8,
+        float *norm_q8_scale,
+        hip_block_q8_K *norm_q8k,
         float *split,
         const float *mix,
         const float *residual_hc,
@@ -410,9 +420,23 @@ __global__ static void hc_split_weighted_sum_norm_fused_kernel(
         __syncthreads();
     }
     const float norm_scale = rsqrtf(partial[0] / (float)n_embd + norm_eps);
-    for (uint32_t col = d; col < n_embd; col += blockDim.x) {
-        const float v = out[(uint64_t)t * n_embd + col];
-        norm_out[(uint64_t)t * n_embd + col] = v * norm_scale * norm_w[col];
+    if constexpr (QCOLS == 0) {
+        for (uint32_t col = d; col < n_embd; col += blockDim.x) {
+            const float v = out[(uint64_t)t * n_embd + col];
+            norm_out[(uint64_t)t * n_embd + col] = v * norm_scale * norm_w[col];
+        }
+    } else {
+        float y[QCOLS];
+#pragma unroll
+        for (uint32_t k = 0; k < QCOLS; k++) {
+            const uint32_t col = k * 256u + d;
+            const float v = out[(uint64_t)t * n_embd + col];
+            y[k] = v * norm_scale * norm_w[col];
+            norm_out[(uint64_t)t * n_embd + col] = y[k];
+        }
+        quantize_q8_0_cols256<QCOLS>(y, d, norm_q8 + (uint64_t)t * n_embd,
+                                     norm_q8_scale + (uint64_t)t * (n_embd / 32u));
+        if (norm_q8k) quantize_q8_K_cols256<QCOLS>(y, d, norm_q8k + (uint64_t)t * QCOLS);
     }
 }
 
