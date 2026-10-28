@@ -19,7 +19,8 @@ This is an exhaustive list of functionalities and features offered by the gufo c
 The supported model types are LLM, image, video, audio (TTS, ASR), text
 embeddings and decision models.
 `gufo serve embedding` provides [EmbeddingGemma 2 text embeddings](SERVER.md#embeddings).
-`gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
+`gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md),
+with [LoRA adapters](models/qwen-image-2.1/README.md#lora-adapters) selected per request.
 
 For Nix command generation and deployment validation, see
 [Nix serving from extension metadata](model-extensions/serving.md).
