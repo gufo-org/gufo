@@ -149,6 +149,9 @@ public:
     bool operator==(const DsparkStats&) const = default;
   };
   [[nodiscard]] DsparkStats DsparkStatistics() const;
+  /// Valid until the next Evaluate, Sync, step, or restore on this session.
+  [[nodiscard]] std::span<const float> Logits(
+      std::string* error_msg = nullptr) const;
   [[nodiscard]] std::vector<float> CopyLogits(
       std::string* error_msg = nullptr) const;
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
