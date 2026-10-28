@@ -26,6 +26,7 @@
 | Transposed sparse values | Rejected (2026-09-19): no retained end-to-end gain. |
 | Constant pair indices in the 8-row IQ2 gate/up tiles | Retained (2026-10-08): runtime indices kept 144–176 B of per-thread arrays in scratch with clang 22 and 23. The explicit scale product and FMA keep every output bit-identical to the scalar LUT kernel; the tile kernel is 9–10% faster and pp8–pp24 1.7–2.0% faster in isolated PR measurements. |
 | Launch bound for the register-cached plain RMS norm | Retained (2026-10-08): the default 1,024-thread bound limited it to 192 VGPRs, and clang 23 spilled one; bit-identical. |
+| Fold C1 decode quantize, RoPE and KV-store launches into their producers | Retained locally (2026-10-28): at depth a token launches 1,205 kernels instead of 1,720, or 1,930 when ratio-4 compressors emit. Each launch costs about 1.6–2 µs of GPU gap on gfx1151. Every cache byte, intermediate, and logit is bit-identical over 43-layer synthetic-weight decodes at seven depths. Two variants changed bits and were replaced, a strided RoPE pair loop and a Q8_0 code computed from the rounded scale. On gfx1151, tg64 improves 18.10→18.48 tok/s at d0, 16.60→16.94 at 32K and 16.38→16.71 at 64K. |
 
 Next: resolve the [target arithmetic gaps](QUALITY.md) before claiming parity;
 refresh only affected cells in [benchmarks](BENCHMARKS.md). Raw profiles and
