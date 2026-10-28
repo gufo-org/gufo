@@ -1,10 +1,68 @@
 #include <cassert>
 #include <cstddef>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <system_error>
 
 #include "src/core/platform/prefault.hpp"
 
+#if !defined(_WIN32)
+// mincore reports page-cache residency, which MADV_DONTNEED deliberately
+// preserves. smaps measures this process's resident file-mapping pages.
+std::size_t ResidentKiB(const void* memory) {
+  std::ifstream smaps("/proc/self/smaps");
+  assert(smaps);
+  std::string line;
+  bool in_mapping = false;
+  while (std::getline(smaps, line)) {
+    unsigned long begin = 0, end = 0;
+    if (std::sscanf(line.c_str(), "%lx-%lx", &begin, &end) == 2) {
+      const auto address = reinterpret_cast<std::uintptr_t>(memory);
+      in_mapping = begin <= address && address < end;
+    } else if (in_mapping && line.starts_with("Rss:")) {
+      std::istringstream fields(line.substr(4));
+      std::size_t kib = 0;
+      fields >> kib;
+      assert(fields);
+      return kib;
+    }
+  }
+  assert(false && "mapping missing from smaps");
+  return 0;
+}
+
+void CheckReleaseMappedPages() {
+  const auto page_size = ::sysconf(_SC_PAGESIZE);
+  assert(page_size > 0);
+  const auto bytes = static_cast<std::size_t>(page_size) * 4;
+  std::FILE* file = std::tmpfile();
+  assert(file);
+  for (std::size_t i = 0; i < bytes; ++i)
+    assert(std::fputc(static_cast<int>(i % 251), file) != EOF);
+  assert(std::fflush(file) == 0);
+  const auto* memory = static_cast<const unsigned char*>(
+      ::mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, ::fileno(file), 0));
+  assert(memory != MAP_FAILED);
+  gufo::platform::PrefaultMappedRange(memory, bytes);
+  assert(ResidentKiB(memory) == bytes / 1024);
+  // Include the first partial page and the final byte of the mapping.
+  gufo::platform::ReleaseMappedPages(memory + 1, bytes - 1);
+  assert(ResidentKiB(memory) == 0);
+  for (std::size_t i = 0; i < bytes; ++i)
+    assert(memory[i] == i % 251);
+  assert(ResidentKiB(memory) == bytes / 1024);
+  assert(::munmap(const_cast<unsigned char*>(memory), bytes) == 0);
+  assert(std::fclose(file) == 0);
+}
+#endif
+
 int main() {
+  gufo::platform::ReleaseMappedPages(nullptr, 0);
+#if !defined(_WIN32)
+  CheckReleaseMappedPages();
+#endif
   constexpr std::size_t bytes = 32ULL << 20;
 #if defined(_WIN32)
   auto* memory = static_cast<char*>(
