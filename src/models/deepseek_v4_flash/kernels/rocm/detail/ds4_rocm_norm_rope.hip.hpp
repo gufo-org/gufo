@@ -23,26 +23,6 @@ __global__ static void rms_norm_weight_kernel(float *out, const float *x, const 
     }
 }
 
-__global__ static void head_rms_norm_kernel(float *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, float eps) {
-    uint32_t row = blockIdx.x;
-    if (row >= n_tok * n_head) return;
-    float *xr = x + (uint64_t)row * head_dim;
-    float sum = 0.0f;
-    for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) {
-        float v = xr[i];
-        sum += v * v;
-    }
-    __shared__ float partial[256];
-    partial[threadIdx.x] = sum;
-    __syncthreads();
-    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
-        __syncthreads();
-    }
-    float scale = rsqrtf(partial[0] / (float)head_dim + eps);
-    for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) xr[i] *= scale;
-}
-
 __device__ static float rope_yarn_ramp_dev(float low, float high, int i0);
 
 /* Head RMS norm and the rotated tail in one pass, with the row staged in LDS.
@@ -143,20 +123,30 @@ __device__ static float rope_yarn_ramp_dev(float low, float high, int i0) {
     return 1.0f - fminf(1.0f, fmaxf(0.0f, y));
 }
 
+struct ds4_rope_tail_args {
+    uint32_t n_rot;
+    uint32_t n_ctx_orig;
+    int inverse;
+    float freq_base;
+    float freq_scale;
+    float ext_factor;
+    float attn_factor;
+    float beta_fast;
+    float beta_slow;
+};
+
 /* Rotates pair `pair` of a RoPE tail in place at position `pos`. */
 __device__ __forceinline__ static void rope_tail_rotate_pair(
-        float *tail,
-        uint32_t pair,
-        uint32_t n_rot,
-        uint32_t pos,
-        uint32_t n_ctx_orig,
-        int inverse,
-        float freq_base,
-        float freq_scale,
-        float ext_factor,
-        float attn_factor,
-        float beta_fast,
-        float beta_slow) {
+        float *tail, uint32_t pair, uint32_t pos, const ds4_rope_tail_args &a) {
+    const uint32_t n_rot = a.n_rot;
+    const uint32_t n_ctx_orig = a.n_ctx_orig;
+    const int inverse = a.inverse;
+    const float freq_base = a.freq_base;
+    const float freq_scale = a.freq_scale;
+    const float ext_factor = a.ext_factor;
+    const float attn_factor = a.attn_factor;
+    const float beta_fast = a.beta_fast;
+    const float beta_slow = a.beta_slow;
     uint32_t i = pair * 2;
 
     float corr0 = 0.0f, corr1 = 0.0f;
@@ -213,9 +203,10 @@ __global__ static void rope_tail_kernel(
     uint32_t t = tmp / n_head;
     uint32_t n_nope = head_dim - n_rot;
     rope_tail_rotate_pair(x + ((uint64_t)t * n_head + h) * head_dim + n_nope,
-                          pair, n_rot, pos0 + t * pos_stride, n_ctx_orig,
-                          inverse, freq_base, freq_scale, ext_factor,
-                          attn_factor, beta_fast, beta_slow);
+                          pair, pos0 + t * pos_stride,
+                          ds4_rope_tail_args{n_rot, n_ctx_orig, inverse, freq_base,
+                                             freq_scale, ext_factor, attn_factor,
+                                             beta_fast, beta_slow});
 }
 
 __device__ static float dsv4_e4m3fn_value_dev(int i) {
@@ -243,6 +234,39 @@ __device__ static float dsv4_e4m3fn_dequant_dev(float x) {
     return sign * dsv4_e4m3fn_value_dev(best);
 }
 
+/* With kRope the rotated tail follows in the same pass: each row's RoPE reads
+ * the normalized values back after a barrier, exactly as the separate
+ * rope_tail_kernel launch would. */
+template <bool kRope>
+__global__ static void head_rms_norm_kernel(float *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, float eps,
+                                            uint32_t pos0, ds4_rope_tail_args rope) {
+    uint32_t row = blockIdx.x;
+    if (row >= n_tok * n_head) return;
+    float *xr = x + (uint64_t)row * head_dim;
+    float sum = 0.0f;
+    for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = xr[i];
+        sum += v * v;
+    }
+    __shared__ float partial[256];
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    float scale = rsqrtf(partial[0] / (float)head_dim + eps);
+    for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) xr[i] *= scale;
+    if (!kRope) return;
+    __syncthreads();
+    /* One pair per thread, as in rope_tail_kernel. A strided pair loop let the
+     * compiler hoist and contract the YaRN angle differently, which moved 13%
+     * of the rotated values in YaRN layers. */
+    if (threadIdx.x < rope.n_rot / 2u) {
+        rope_tail_rotate_pair(xr + head_dim - rope.n_rot, threadIdx.x, pos0 + row / n_head, rope);
+    }
+}
+
 /* FP8 (E4M3) scale of one 64-value KV group from each lane's |value|. Every
  * thread of the block calls it; `scratch` is this group's 64 shared floats. */
 __device__ static float dsv4_fp8_kv_group_scale(float *scratch, uint32_t lane, float absv) {
@@ -266,15 +290,8 @@ struct dsv4_qkv_decode_tail {
     int8_t *q_q8;
     float *q_q8_scale;
     float *raw_row;
-    uint32_t n_rot;
     uint32_t pos;
-    uint32_t n_ctx_orig;
-    float freq_base;
-    float freq_scale;
-    float ext_factor;
-    float attn_factor;
-    float beta_fast;
-    float beta_slow;
+    ds4_rope_tail_args rope;
 };
 
 template <bool kDecode>
@@ -320,13 +337,10 @@ __global__ static void dsv4_qkv_rms_norm_rows_kernel(
     }
     if (!kDecode || which == 0u) return;
 
-    const uint32_t n_nope = n - tail.n_rot;
+    const uint32_t n_nope = n - tail.rope.n_rot;
     __syncthreads();
-    if (threadIdx.x < tail.n_rot / 2u) {
-        rope_tail_rotate_pair(orow + n_nope, threadIdx.x, tail.n_rot, tail.pos,
-                              tail.n_ctx_orig, 0, tail.freq_base, tail.freq_scale,
-                              tail.ext_factor, tail.attn_factor, tail.beta_fast,
-                              tail.beta_slow);
+    if (threadIdx.x < tail.rope.n_rot / 2u) {
+        rope_tail_rotate_pair(orow + n_nope, threadIdx.x, tail.pos, tail.rope);
     }
     __shared__ float fp8_scratch[256];
     const uint32_t lane = threadIdx.x & 63u;
@@ -520,15 +534,9 @@ extern "C" int ds4_gpu_dsv4_qkv_rms_norm_decode_tensor(
             kv_weight_offset, kv_weight_bytes, "kv_rms_weight");
     if (!q_w || !kv_w) return 0;
     tail.raw_row = (float *)raw_cache->ptr + (uint64_t)raw_row * kv_n;
-    tail.n_rot = n_rot;
     tail.pos = pos;
-    tail.n_ctx_orig = n_ctx_orig;
-    tail.freq_base = freq_base;
-    tail.freq_scale = freq_scale;
-    tail.ext_factor = ext_factor;
-    tail.attn_factor = attn_factor;
-    tail.beta_fast = beta_fast;
-    tail.beta_slow = beta_slow;
+    tail.rope = ds4_rope_tail_args{n_rot, n_ctx_orig, 0, freq_base, freq_scale,
+                                   ext_factor, attn_factor, beta_fast, beta_slow};
     dsv4_qkv_rms_norm_rows_kernel<true><<<dim3(1u, 2u, 1u), 256>>>(
             (float *)q_out->ptr, (const float *)q->ptr, q_w, q_n,
             (float *)kv_out->ptr, (const float *)kv->ptr, kv_w, kv_n, 1u, eps, tail);
@@ -539,8 +547,21 @@ extern "C" int ds4_gpu_head_rms_norm_tensor(ds4_gpu_tensor *x, uint32_t n_tok, u
     if (!hip_u64_mul_checked(n_tok, n_head, &rows64) || rows64 > UINT32_MAX ||
         !hip_tensor_has_elems3(x, n_tok, n_head, head_dim, sizeof(float))) return 0;
     if (rows64 == 0u || head_dim == 0u) return 1;
-    head_rms_norm_kernel<<<(uint32_t)rows64, 256>>>((float *)x->ptr, n_tok, n_head, head_dim, eps);
+    head_rms_norm_kernel<false><<<(uint32_t)rows64, 256>>>((float *)x->ptr, n_tok, n_head, head_dim, eps,
+                                                         0u, ds4_rope_tail_args{});
     return hip_ok(hipGetLastError(), "head_rms_norm launch");
+}
+extern "C" int ds4_gpu_head_rms_norm_rope_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos0, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float eps) {
+    uint64_t rows64 = 0;
+    if (n_rot > head_dim || (n_rot & 1u) || n_rot / 2u > 256u ||
+        !hip_u64_mul_checked(n_tok, n_head, &rows64) || rows64 > UINT32_MAX ||
+        !hip_tensor_has_elems3(x, n_tok, n_head, head_dim, sizeof(float))) return 0;
+    if (rows64 == 0u || head_dim == 0u) return 1;
+    head_rms_norm_kernel<true><<<(uint32_t)rows64, 256>>>(
+            (float *)x->ptr, n_tok, n_head, head_dim, eps, pos0,
+            ds4_rope_tail_args{n_rot, n_ctx_orig, inverse ? 1 : 0, freq_base, freq_scale,
+                               ext_factor, attn_factor, beta_fast, beta_slow});
+    return hip_ok(hipGetLastError(), "head_rms_norm_rope launch");
 }
 extern "C" int ds4_gpu_head_rms_norm_rope_tail_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos0, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float eps) {
     uint64_t rows64 = 0;
