@@ -97,6 +97,8 @@ void check_indexer_scores(bool benchmark) {
         // The verifier crosses compression boundaries within its block.
         const uint32_t pos0 = (rows - 2) * ratio - 1;
         const uint32_t last_visible = (pos0 + tokens) / ratio;
+        const uint32_t tiles =
+            (rows + indexer_score_direct_keys - 1) / indexer_score_direct_keys;
         std::vector<float> q(tokens * heads * dim), k(rows * dim),
             weights(tokens * heads), ref(tokens * rows), out(ref.size());
         for (auto& v : q)
@@ -130,7 +132,7 @@ void check_indexer_scores(bool benchmark) {
                         hipMemcpyDeviceToHost));
         for (int repeat = 0; repeat < 2; ++repeat) {
           check(hipMemset(dout, 0xff, out.size() * sizeof(float)));
-          indexer_score_one_direct_kernel<<<dim3(rows, tokens), 128>>>(
+          indexer_score_one_direct_kernel<<<dim3(tiles, tokens), 128>>>(
               dout, dq, dw, dk, rows, pos0, ratio, scale, causal);
           check(hipGetLastError());
           check(hipMemcpy(out.data(), dout, out.size() * sizeof(float),
@@ -196,7 +198,7 @@ void check_indexer_scores(bool benchmark) {
               const bool candidate = (order + pass) % 2;
               auto launch = [&] {
                 if (candidate)
-                  indexer_score_one_direct_kernel<<<dim3(rows, tokens), 128>>>(
+                  indexer_score_one_direct_kernel<<<dim3(tiles, tokens), 128>>>(
                       dout, dq, dw, dk, rows, pos0, ratio, scale, causal);
                 else
                   reference_indexer_scores<<<dim3(rows, tokens), 128>>>(

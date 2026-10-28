@@ -337,7 +337,9 @@ static int indexer_scores_launch(
     return 0;
   if ((n_tokens == 1u || ds4_rocm_verifier_batch_mode()) && head_dim == 128u &&
       n_head == 64u) {
-    indexer_score_one_direct_kernel<<<dim3(n_comp, n_tokens), 128>>>(
+    const uint32_t tiles =
+        (n_comp + indexer_score_direct_keys - 1u) / indexer_score_direct_keys;
+    indexer_score_one_direct_kernel<<<dim3(tiles, n_tokens), 128>>>(
         (float*)scores->ptr, (const float*)q->ptr, (const float*)weights->ptr,
         (const float*)index_comp->ptr, n_comp, pos0, ratio, scale,
         causal ? 1 : 0);

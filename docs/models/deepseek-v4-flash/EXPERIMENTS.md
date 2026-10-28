@@ -13,6 +13,7 @@
 | Smaller Q8 launch groups on ROCm 10.1 | Rejected: rotating 16 weight matrices preserves exact outputs, but most gains are only 0–3%; four-row groups slow the 8192-wide scalar/HC kernels by 8–10%. Existing loads already compile to vector memory operations. |
 | Exact partial top-k | Retained for wide prefill through 32768 compressed keys; exact ties and bounded fallback. |
 | Indexer query packing and shared scratch | Retained; unchanged F16 bytes, scores and full-logit controls through 64K; no persistent KV precision change. |
+| Score 32 indexer keys per C1 decode block | Retained locally (2026-10-28): one block per compressed key reloaded the 32 KiB query. Each block now scores 32 keys, and each wave keeps 16 query heads in registers. The `permlanex16` and DPP butterfly adds the same partials as the old shuffle-down tree, and 27.3M scores over 378 cases are bit-identical. On gfx1151, tg64 improves 14.95→15.47 tok/s at 32K and 14.17→15.18 at 64K. At d0 it is unchanged. |
 | Batched speculative projections/attention | Retained; private session state and scalar-equivalent replay. |
 | Projection/mHC fusion | Retained only where independent HC/Sinkhorn and model guards pass. |
 | Compressed KV and use-sized scratch | Retained; capacity does not allocate a filled context. |
