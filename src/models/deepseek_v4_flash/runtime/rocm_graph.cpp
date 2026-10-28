@@ -1268,15 +1268,12 @@ static bool rocm_graph_encode_decode_layer(
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_hc_pre");
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("attn_norm");
-    if (ok) ok = ds4_gpu_matmul_q8_0_tensor(g->qr, model->map, model->size,
-                                              layer->attn_q_a->abs_offset,
-                                              DS4_N_EMBD, q_rank,
-                                              g->attn_norm, 1) != 0;
+    if (ok)
+      ok = ds4_gpu_matmul_q8_0_shared_input_tensor(
+               g->qr, layer->attn_q_a->abs_offset, q_rank, g->kv_raw,
+               layer->attn_kv->abs_offset, DS4_N_HEAD_DIM, model->map,
+               model->size, DS4_N_EMBD, g->attn_norm) != 0;
     {
-      if (ok)
-        ok = ds4_gpu_matmul_q8_0_tensor(g->kv_raw, model->map, model->size,
-                                        layer->attn_kv->abs_offset, DS4_N_EMBD,
-                                        DS4_N_HEAD_DIM, g->attn_norm, 1) != 0;
       if (ok)
         ok = ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
                  g->qr_norm, g->qr, model->map, model->size,
@@ -1841,8 +1838,7 @@ static bool rocm_graph_encode_token_raw_swa(
         const ds4_weights     *weights,
         int                    token,
         uint32_t               pos,
-        bool                   need_logits,
-        bool                   allow_split_flush) {
+        bool                   need_logits) {
     if (g->raw_cap == 0) {
         fprintf(stderr, "ds4: ROCm graph raw KV cache is not allocated\n");
         return false;
@@ -1858,15 +1854,6 @@ static bool rocm_graph_encode_token_raw_swa(
                                               (uint32_t)token,
                                               DS4_N_EMBD,
                                               DS4_N_HC) != 0;
-
-    /*
-     * Start executing the prefix of the decode graph while the CPU is still
-     * encoding the rest. The split point is layer-based because this executor is
-     * a fixed DS4 tape, not a dynamic node graph; four layers is the measured
-     * point where the prefix is large enough to hide useful work without
-     * starving the second command buffer.
-     */
-    const uint32_t split_after_layers = 4;
 
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         ok = rocm_graph_encode_decode_layer(g,
@@ -1884,9 +1871,6 @@ static bool rocm_graph_encode_token_raw_swa(
         g->after_ffn_hc = tmp;
         /* Capture after the swap so cur_hc holds this layer's output. */
         if (ok) ok = rocm_graph_dspark_capture_decode_layer(g, il);
-        if (ok && allow_split_flush && split_after_layers != 0 && il + 1u == split_after_layers) {
-            ok = ds4_gpu_flush_commands() != 0;
-        }
     }
 
     if (ok && need_logits) {
@@ -4309,7 +4293,7 @@ static bool rocm_graph_eval_token_raw_swa(
     const double t0 = profile ? ds4_now_seconds() : 0.0;
 
     bool ok = ds4_gpu_begin_commands() != 0;
-    if (ok) ok = rocm_graph_encode_token_raw_swa(g, model, weights, token, pos, logits != NULL, true);
+    if (ok) ok = rocm_graph_encode_token_raw_swa(g, model, weights, token, pos, logits != NULL);
     const double t_encoded = profile ? ds4_now_seconds() : 0.0;
     if (ok) ok = ds4_gpu_end_commands() != 0;
     const double t_done = profile ? ds4_now_seconds() : 0.0;

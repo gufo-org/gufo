@@ -982,7 +982,6 @@ extern "C" int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset,
 }
 
 extern "C" int ds4_gpu_begin_commands(void) { return 1; }
-extern "C" int ds4_gpu_flush_commands(void) { return hip_ok(hipDeviceSynchronize(), "flush"); }
 extern "C" int ds4_gpu_end_commands(void) {
     return hip_ok(hipDeviceSynchronize(), "end commands");
 }
