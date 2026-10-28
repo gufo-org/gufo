@@ -167,8 +167,11 @@ int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weigh
 int ds4_gpu_set_model_fd(gufo::platform::PlatformFile fd);
 int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size, uint64_t max_tensor_bytes);
 int ds4_gpu_shared_down_hc_expand_q8_0_tensor(ds4_gpu_tensor *out_hc, ds4_gpu_tensor *shared_out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *shared_mid, const ds4_gpu_tensor *shared_mid_q8, const ds4_gpu_tensor *routed_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
+/* xq8, when set, is x's Q8_0 form; mid_q8, when set, also receives mid's
+ * Q8_0 form. Both are single-token only. */
 int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
     ds4_gpu_tensor* gate, ds4_gpu_tensor* up, ds4_gpu_tensor* mid,
+    ds4_gpu_tensor* mid_q8,
     const void* model_map, uint64_t model_size, uint64_t gate_offset,
     uint64_t up_offset, uint64_t in_dim, uint64_t out_dim,
     const ds4_gpu_tensor* x, const ds4_gpu_tensor* xq8, float clamp,

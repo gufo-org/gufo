@@ -134,6 +134,7 @@ struct ds4_rocm_graph {
     ds4_gpu_tensor *shared_gate;
     ds4_gpu_tensor *shared_up;
     ds4_gpu_tensor *shared_mid;
+    ds4_gpu_tensor *shared_mid_q8;
     ds4_gpu_tensor *shared_out;
     ds4_gpu_tensor *router_logits;
     ds4_gpu_tensor *router_probs;
@@ -523,6 +524,7 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->router_probs);
     ds4_gpu_tensor_free(g->router_logits);
     ds4_gpu_tensor_free(g->shared_out);
+    ds4_gpu_tensor_free(g->shared_mid_q8);
     ds4_gpu_tensor_free(g->shared_mid);
     ds4_gpu_tensor_free(g->shared_up);
     ds4_gpu_tensor_free(g->shared_gate);
@@ -876,6 +878,7 @@ static bool rocm_graph_alloc_raw_cap(
     g->shared_gate = ds4_gpu_tensor_alloc(shared_dim * sizeof(float));
     g->shared_up = ds4_gpu_tensor_alloc(shared_dim * sizeof(float));
     g->shared_mid = ds4_gpu_tensor_alloc(shared_dim * sizeof(float));
+    g->shared_mid_q8 = ds4_gpu_tensor_alloc(ds4_gpu_q8_0_act_bytes(shared_dim));
     g->shared_out = ds4_gpu_tensor_alloc((uint64_t)DS4_N_EMBD * sizeof(float));
     g->router_logits = ds4_gpu_tensor_alloc(DS4_N_EXPERT * sizeof(float));
     g->router_probs = ds4_gpu_tensor_alloc(DS4_N_EXPERT * sizeof(float));
@@ -1009,7 +1012,8 @@ static bool rocm_graph_alloc_raw_cap(
         g->attn_out &&
         g->after_attn_hc && g->ffn_cur && g->ffn_norm && g->ffn_norm_q8 &&
         g->ffn_norm_q8k && g->shared_gate &&
-        g->shared_up && g->shared_mid && g->shared_out && g->router_logits &&
+        g->shared_up && g->shared_mid && g->shared_mid_q8 && g->shared_out &&
+        g->router_logits &&
         g->router_probs && g->router_selected && g->router_weights &&
         g->routed_gate && g->routed_up && g->routed_mid && g->routed_down &&
         g->routed_out && g->after_ffn_hc && g->output_pre &&
@@ -1728,7 +1732,7 @@ static bool rocm_graph_encode_decode_layer(
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("routed_moe");
     if (ok) {
       ok = ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
-               g->shared_gate, g->shared_up, g->shared_mid, model->map,
+               g->shared_gate, g->shared_up, g->shared_mid, g->shared_mid_q8, model->map,
                model->size, layer->ffn_gate_shexp->abs_offset,
                layer->ffn_up_shexp->abs_offset, DS4_N_EMBD, shared_dim,
                g->ffn_norm, g->ffn_norm_q8, DS4_SWIGLU_CLAMP_EXP, 1u) != 0;
@@ -1738,7 +1742,7 @@ static bool rocm_graph_encode_decode_layer(
       ok = ds4_gpu_shared_down_hc_expand_q8_0_tensor(
                g->after_ffn_hc, g->shared_out, model->map, model->size,
                layer->ffn_down_shexp->abs_offset, shared_dim, DS4_N_EMBD,
-               g->shared_mid, NULL, g->routed_out, g->after_attn_hc, g->hc_split,
+               g->shared_mid, g->shared_mid_q8, g->routed_out, g->after_attn_hc, g->hc_split,
                DS4_N_EMBD, DS4_N_HC) != 0;
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("shared_down");
@@ -4209,7 +4213,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
     GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("routed_moe");
     if (ok && n_tokens <= 136u && (n_tokens <= 16u || group_count != 0u)) {
       ok = ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
-               g->batch_shared_gate, g->batch_shared_up, g->batch_shared_mid,
+               g->batch_shared_gate, g->batch_shared_up, g->batch_shared_mid, NULL,
                model->map, model->size, layer->ffn_gate_shexp->abs_offset,
                layer->ffn_up_shexp->abs_offset, DS4_N_EMBD, shared_dim,
                g->batch_ffn_norm, NULL, DS4_SWIGLU_CLAMP_EXP, n_tokens) != 0;
