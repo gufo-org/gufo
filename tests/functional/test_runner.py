@@ -77,6 +77,23 @@ class FunctionalRunnerTest(unittest.TestCase):
             summarize([(1, json.dumps(body).encode())], False, False,
                       ("/v1/messages/count_tokens", {}, 200))
 
+    def test_openai_count_tokens_contract(self):
+        for endpoint in ("/v1/chat/completions/input_tokens", "/v1/responses/input_tokens"):
+            body = {"object": "response.input_tokens", "input_tokens": 318}
+            measured, fingerprint = summarize([(1, json.dumps(body).encode())], False, True,
+                                              (endpoint, {"stream": True}, 200))
+            self.assertEqual(measured, {"prompt_tokens": 318})
+            self.assertIsNotNone(fingerprint)
+            recorder = Recorder(None)
+            measurement = recorder.begin(endpoint, {"stream": True})
+            self.assertFalse(measurement.row["stream"])
+            for invalid in ({"input_tokens": 318}, {**body, "object": "wrong"},
+                            {**body, "input_tokens": True}, {**body, "input_tokens": -1},
+                            {**body, "input_tokens": 3.5}, {**body, "output_tokens": 0}):
+                with self.subTest(endpoint=endpoint, invalid=invalid), self.assertRaises(AssertionError):
+                    summarize([(1, json.dumps(invalid).encode())], False, True,
+                              (endpoint, {}, 200))
+
     def test_messages_count_tokens_includes_cached_prompt(self):
         for usage in ({"input_tokens": 318},
                       {"input_tokens": 18, "cache_read_input_tokens": 300},

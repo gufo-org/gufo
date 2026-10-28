@@ -136,11 +136,18 @@ public:
   }
   std::optional<std::size_t> count_chat_tokens(
       const gufo::server::ChatRequest& request) const override {
+    counted_chat = request;
     counted_messages = request.messages.size();
     counted_tools = request.tools.size();
+    if (count_failure == 1)
+      throw std::invalid_argument("invalid counting prompt");
+    if (count_failure == 2)
+      throw std::length_error("counting prompt too large");
     return chat_token_count;
   }
   std::optional<std::size_t> chat_token_count;
+  int count_failure{0};
+  mutable gufo::server::ChatRequest counted_chat;
   mutable std::size_t counted_messages{0};
   mutable std::size_t counted_tools{0};
   std::optional<std::string> render_chat_prompt(

@@ -1104,27 +1104,17 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
              "invalid_prompt");
 }
 
-HttpResponse OpenAiResponses(const HttpRequest& req,
-                             TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  chat.reasoning = b.reasoning_defaults();
-  if (auto error = ParseOpenAiResponseControls(body, &chat))
-    return std::move(*error);
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+std::optional<HttpResponse> ReadOpenAiResponseChat(
+    const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
+    std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
+  chat->reasoning = b.reasoning_defaults();
+  if (auto error = ParseOpenAiResponseControls(body, chat))
+    return error;
   if (auto error = ReadCompatibilityOptions(
-          body, b, "max_output_tokens", &max_tokens, &sampling_config,
-          chat.reasoning.enabled,
+          body, b, "max_output_tokens", max_tokens, sampling_config,
+          chat->reasoning.enabled,
           {.stream = true, .response_controls = true})) {
-    return std::move(*error);
+    return error;
   }
   if (const auto error = ParseResponsesLogprobs(body, &sampling_config))
     return Err(400, "Bad Request", error->message.c_str(),
@@ -1149,12 +1139,57 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
     return InvalidCompatibilityRequest(input_error);
   }
 
-  chat.messages = std::move(messages);
+  chat->messages = std::move(messages);
+  return std::nullopt;
+}
+
+HttpResponse OpenAiResponses(const HttpRequest& req,
+                             TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadOpenAiResponseChat(body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
   chat.client_id = req.client_id;
   return CreateOpenAiResponse(
       req, b, chat, max_tokens, sampling_config,
       body.find("stream") != nullptr && body.find("stream")->as_bool(),
       RequestedModel(body, b));
+} catch (const std::length_error& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "context_length_exceeded");
+} catch (const std::invalid_argument& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "invalid_prompt");
+}
+
+HttpResponse OpenAiResponsesInputTokens(const HttpRequest& req,
+                                        TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadOpenAiResponseChat(body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
+  chat.client_id = req.client_id;
+  return CountOpenAiInputTokens(chat, b);
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1893,7 +1928,9 @@ void HttpServer::register_routes() {
   // ---- OpenAI ----
   add("POST", "/v1/completions", OpenAiCompletions);
   add("POST", "/v1/chat/completions", HandleOpenAiChat);
+  add("POST", "/v1/chat/completions/input_tokens", HandleOpenAiChatInputTokens);
   add("POST", "/v1/responses", OpenAiResponses);
+  add("POST", "/v1/responses/input_tokens", OpenAiResponsesInputTokens);
   add("POST", "/v1/embeddings", NotImplemented);
 
   // ---- Anthropic ----

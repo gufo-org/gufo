@@ -630,6 +630,163 @@ void TestApplyTemplate() {
   server.backend->reasoning = {};
 }
 
+void TestOpenAiInputTokens() {
+  RunningServer server;
+  const auto body_of = [](const std::string& wire) {
+    return gufo::json::parse(wire.substr(wire.find("\r\n\r\n") + 4));
+  };
+  struct Endpoint {
+    const char* path;
+    const char* body;
+    const char* input;
+  };
+  const Endpoint endpoints[] = {
+      {"/v1/chat/completions",
+       R"({"model":"test","messages":[{"role":"system","content":"sys"},
+           {"role":"user","content":"café 東京"}]})",
+       "messages"},
+      {"/v1/responses",
+       R"({"model":"test","instructions":"sys","input":"café 東京"})", "input"},
+  };
+  server.backend->reasoning.enabled = true;
+  server.backend->reasoning.effort = gufo::ReasoningEffort::kMedium;
+  for (const auto& endpoint : endpoints) {
+    const auto path = std::string(endpoint.path) + "/input_tokens";
+    auto body = gufo::json::parse(endpoint.body);
+    const int calls = server.backend->calls;
+    // A registered endpoint reports an unsupported backend, not a fake count.
+    const auto unsupported = server.Post(path, body.dump());
+    ExpectStatus(unsupported, 501);
+    assert(body_of(unsupported).find("error")->member_str("code") ==
+           "not_implemented");
+
+    // Sizing must not reject a prompt merely because it exceeds the context.
+    server.backend->chat_token_count = server.backend->max_context() + 1;
+    const auto slots_before =
+        body_of(server.Send("GET /slots HTTP/1.1\r\n\r\n")).dump();
+    for (const auto stream : {gufo::json::Value(), gufo::json::Value(false),
+                              gufo::json::Value(true)}) {
+      body["stream"] = stream;
+      const auto wire = server.Post(path, body.dump());
+      ExpectStatus(wire, 200);
+      assert(wire.find("text/event-stream") == std::string::npos);
+      const auto counted = body_of(wire);
+      assert(counted.size() == 2);
+      assert(counted.member_str("object") == "response.input_tokens");
+      assert(counted.member_size("input_tokens") == 65537);
+      const auto& chat = server.backend->counted_chat;
+      assert(chat.messages.size() == 2);
+      assert(chat.messages[0].role == gufo::tokenization::ChatRole::kSystem);
+      assert(chat.messages[0].content == "sys");
+      assert(chat.messages[1].content == "café 東京");
+      assert(chat.reasoning.enabled == true);
+      assert(chat.reasoning.effort == gufo::ReasoningEffort::kMedium);
+      assert(!chat.client_id.empty());
+    }
+    assert(server.backend->calls == calls);
+    assert(body_of(server.Send("GET /slots HTTP/1.1\r\n\r\n")).dump() ==
+           slots_before);
+    // Generation still receives the same conversation and defaults.
+    body["stream"] = false;
+    ExpectStatus(server.Post(endpoint.path, body.dump()), 200);
+    const auto generated = server.backend->LastCall().chat;
+    assert(generated.messages.size() ==
+           server.backend->counted_chat.messages.size());
+    assert(generated.messages[0].content == "sys");
+    assert(generated.messages[1].content == "café 東京");
+    assert(generated.reasoning.effort == gufo::ReasoningEffort::kMedium);
+    assert(generated.client_id == server.backend->counted_chat.client_id);
+
+    for (const auto* invalid : {"{", "[]", "null"})
+      ExpectStatus(server.Post(path, invalid), 400);
+    for (const auto* field : {"model", "stream"}) {
+      auto invalid = body;
+      invalid[field] = 42;
+      ExpectStatus(server.Post(path, invalid.dump()), 400);
+    }
+    auto invalid = body;
+    invalid[endpoint.input] = gufo::json::Value::array();
+    ExpectStatus(server.Post(path, invalid.dump()), 400);
+    invalid = body;
+    invalid["model"] = "not-loaded";
+    ExpectStatus(server.Post(path, invalid.dump()), 404);
+    for (int failure : {1, 2}) {
+      server.backend->count_failure = failure;
+      const auto rejected = server.Post(path, body.dump());
+      ExpectStatus(rejected, 400);
+      assert(body_of(rejected).find("error")->member_str("code") ==
+             (failure == 1 ? "invalid_prompt" : "context_length_exceeded"));
+    }
+    server.backend->count_failure = 0;
+    server.backend->chat_token_count = 0;
+    const auto zero = server.Post(path, body.dump());
+    ExpectStatus(zero, 200);
+    assert(body_of(zero).member_size("input_tokens", 99) == 0);
+    server.backend->chat_token_count.reset();
+    assert(server.backend->calls == calls + 1);
+  }
+
+  server.backend->chat_token_count = 1234;
+  const int calls = server.backend->calls;
+  for (const auto& [path, body] :
+       {std::pair{"/v1/chat/completions/input_tokens",
+                  R"({"model":"test","messages":[
+                       {"role":"user","content":"look"},
+                       {"role":"assistant","content":null,"tool_calls":[
+                         {"id":"call_1","type":"function","function":
+                           {"name":"look","arguments":"{}"}}]},
+                       {"role":"tool","tool_call_id":"call_1","content":"found"}],
+                       "tools":[{"type":"function","function":{"name":"look",
+                         "parameters":{"type":"object"}}}],
+                       "tool_choice":{"type":"function","function":{"name":"look"}},
+                       "parallel_tool_calls":false,"reasoning_effort":"high"})"},
+        std::pair{"/v1/responses/input_tokens",
+                  R"({"model":"test","input":[
+                       {"role":"user","content":"look"},
+                       {"type":"function_call","call_id":"call_1","name":"look","arguments":"{}"},
+                       {"type":"function_call_output","call_id":"call_1","output":"found"}],
+                       "tools":[{"type":"function","name":"look","parameters":{"type":"object"}}],
+                       "tool_choice":{"type":"function","name":"look"},
+                       "parallel_tool_calls":false,"reasoning":{"effort":"high"}})"}}) {
+    ExpectStatus(server.Post(path, body), 200);
+    const auto& chat = server.backend->counted_chat;
+    assert(chat.messages.size() == 3 && chat.tools.size() == 1);
+    assert(chat.tools[0].name == "look");
+    assert(chat.messages[1].tool_calls.size() == 1);
+    assert(chat.messages[2].tool_call_id == "call_1");
+    assert(chat.messages[2].content == "found");
+    assert(chat.forced_tool_name == "look" && !chat.parallel_tool_calls);
+    assert(chat.reasoning.effort == gufo::ReasoningEffort::kHigh);
+  }
+  for (const auto& [path, body] :
+       {std::pair{"/v1/chat/completions/input_tokens",
+                  R"({"model":"test","messages":[{"role":"user","content":[
+                       {"type":"text","text":"pixels:"},
+                       {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":"low"}}]}],
+                       "response_format":{"type":"json_schema","json_schema":{
+                         "name":"color","description":"Return a color.","schema":{"type":"object"}}}})"},
+        std::pair{"/v1/responses/input_tokens",
+                  R"({"model":"test","input":[{"role":"user","content":[
+                       {"type":"input_text","text":"pixels:"},
+                       {"type":"input_image","image_url":"data:image/png;base64,AQID","detail":"low"}]}],
+                       "text":{"format":{"type":"json_schema","name":"color",
+                         "description":"Return a color.","schema":{"type":"object"}}}})"}}) {
+    server.backend->image_support = false;
+    ExpectStatus(server.Post(path, body), 400);
+    server.backend->image_support = true;
+    ExpectStatus(server.Post(path, body), 200);
+    const auto& chat = server.backend->counted_chat;
+    assert(chat.messages.size() == 1 && chat.messages[0].images.size() == 1);
+    const auto& image = chat.messages[0].images[0];
+    assert(image.offset == 7);
+    assert(*image.bytes == std::vector<std::uint8_t>({1, 2, 3}));
+    assert(image.detail == gufo::tokenization::ChatMessage::ImageDetail::kLow);
+    assert(chat.response_format != nullptr);
+    assert(chat.response_format_description == "Return a color.");
+  }
+  assert(server.backend->calls == calls);
+}
+
 void TestLlamaSlotsAndMetrics() {
   RunningServer server;
   const auto get = [&](const std::string& path) {
@@ -1387,11 +1544,11 @@ void TestCompatibilityRequests() {
            std::size_t{16});
   }
   for (const auto* invalid : {"2147483648", "18446744073709551616", "1e30"}) {
-    const auto rejected =
-        server.Post("/v1/messages",
-                    std::string(R"({"messages":[{"role":"user","content":"hi"}],
+    const auto rejected = server.Post(
+        "/v1/messages",
+        std::string(R"({"messages":[{"role":"user","content":"hi"}],
         "thinking":{"type":"enabled","budget_tokens":)") +
-                        invalid + "}}");
+            invalid + "}}");
     ExpectStatus(rejected, 400);
     assert(rejected.find("thinking.budget_tokens") != std::string::npos);
   }
@@ -3354,6 +3511,7 @@ int main() {
   TestFallbackBackendMetrics();
   TestLlamaProps();
   TestApplyTemplate();
+  TestOpenAiInputTokens();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
   TestTextOnlyBackendRefusesImagesBeforeReading();

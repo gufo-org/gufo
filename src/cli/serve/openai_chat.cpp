@@ -4113,6 +4113,44 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
   }
 }
 
+HttpResponse CountOpenAiInputTokens(const ChatRequest& chat,
+                                    TextGenerationBackend& backend) {
+  try {
+    const auto tokens = backend.count_chat_tokens(chat);
+    if (!tokens) {
+      json::Value response = json::Value::object();
+      json::Value error = json::Value::object();
+      error["message"] = "endpoint not implemented on this text model";
+      error["type"] = "server_error";
+      error["code"] = "not_implemented";
+      response["error"] = std::move(error);
+      return {
+          .status = 501, .reason = "Not Implemented", .body = response.dump()};
+    }
+    json::Value response = json::Value::object();
+    response["object"] = "response.input_tokens";
+    response["input_tokens"] = *tokens;
+    HttpResponse counted;
+    counted.body = response.dump();
+    return counted;
+  } catch (const TextGenerationError& exception) {
+    return GenerationError(exception);
+  } catch (const std::invalid_argument& exception) {
+    return Error(400, "Bad Request", exception.what(), "invalid_prompt");
+  } catch (const std::length_error& exception) {
+    return Error(400, "Bad Request", exception.what(),
+                 "context_length_exceeded");
+  }
+}
+
+HttpResponse HandleOpenAiChatInputTokens(const HttpRequest& request,
+                                         TextGenerationBackend& backend) {
+  ParsedChatRequest parsed;
+  if (auto error = ParseRequest(request, backend, &parsed))
+    return std::move(*error);
+  return CountOpenAiInputTokens(parsed.chat, backend);
+}
+
 HttpResponse HandleApplyTemplate(const HttpRequest& request,
                                  TextGenerationBackend& backend) {
   ParsedChatRequest parsed;

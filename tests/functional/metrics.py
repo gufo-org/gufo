@@ -13,6 +13,8 @@ NOISE_MS = 10
 PROBE_ENDPOINTS = ("/health", "/v1/health", "/ready", "/v1/ready")
 DISCOVERY_ENDPOINTS = (*PROBE_ENDPOINTS, "/v1/models")
 GENERATION_ENDPOINTS = ("/v1/chat/completions", "/v1/completions", "/v1/responses")
+OPENAI_COUNT_ENDPOINTS = ("/v1/chat/completions/input_tokens", "/v1/responses/input_tokens")
+COUNT_ENDPOINTS = ("/v1/messages/count_tokens", *OPENAI_COUNT_ENDPOINTS)
 
 
 class CaseComplete(BaseException):
@@ -331,11 +333,15 @@ def summarize(parts, streaming, ended, contract=None):
         usage["gufo"] = {aliases.get(key, key): value for key, value in timings.items()}
     if contract:
         validate_response(events, *contract, ended, usage, output, choices)
-        if contract[0] == "/v1/messages/count_tokens":
+        if contract[0] in COUNT_ENDPOINTS:
             assert ended and not streaming and len(events) == 1, "incomplete count response"
             value = events[0]
             if contract[2] == 200:
-                assert set(value) == {"input_tokens"}, value
+                fields = {"input_tokens"}
+                if contract[0] in OPENAI_COUNT_ENDPOINTS:
+                    fields.add("object")
+                    assert value.get("object") == "response.input_tokens", value
+                assert set(value) == fields, value
                 assert type(value["input_tokens"]) is int and value["input_tokens"] >= 0, value
                 return {"prompt_tokens": value["input_tokens"]}, digest(value)
             return {}, digest(value)
@@ -399,7 +405,8 @@ class Recorder:
                 raise CaseComplete()
             row = {"index": len(self.rows), "endpoint": path,
                    "request_sha256": digest({"endpoint": path, "body": body}),
-                   "stream": bool(body.get("stream")), "status": "running"}
+                   "stream": bool(body.get("stream")) and path not in COUNT_ENDPOINTS,
+                   "status": "running"}
             self.rows.append(row)
         return Measurement(self, row, body)
 
