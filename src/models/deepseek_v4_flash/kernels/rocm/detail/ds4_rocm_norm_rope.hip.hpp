@@ -23,42 +23,6 @@ __global__ static void rms_norm_weight_kernel(float *out, const float *x, const 
     }
 }
 
-__global__ static void dsv4_qkv_rms_norm_rows_kernel(
-        float *q_out,
-        const float *q,
-        const float *q_w,
-        uint32_t q_n,
-        float *kv_out,
-        const float *kv,
-        const float *kv_w,
-        uint32_t kv_n,
-        uint32_t rows,
-        float eps) {
-    const uint32_t row = blockIdx.x;
-    const uint32_t which = blockIdx.y;
-    if (row >= rows || which > 1u) return;
-    const uint32_t n = which == 0u ? q_n : kv_n;
-    const float *xr = (which == 0u ? q : kv) + (uint64_t)row * n;
-    float *orow = (which == 0u ? q_out : kv_out) + (uint64_t)row * n;
-    const float *w = which == 0u ? q_w : kv_w;
-    float sum = 0.0f;
-    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
-        const float v = xr[i];
-        sum += v * v;
-    }
-    __shared__ float partial[256];
-    partial[threadIdx.x] = sum;
-    __syncthreads();
-    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
-        __syncthreads();
-    }
-    const float scale = rsqrtf(partial[0] / (float)n + eps);
-    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
-        orow[i] = xr[i] * scale * w[i];
-    }
-}
-
 __global__ static void head_rms_norm_kernel(float *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, float eps) {
     uint32_t row = blockIdx.x;
     if (row >= n_tok * n_head) return;
@@ -179,6 +143,51 @@ __device__ static float rope_yarn_ramp_dev(float low, float high, int i0) {
     return 1.0f - fminf(1.0f, fmaxf(0.0f, y));
 }
 
+/* Rotates pair `pair` of a RoPE tail in place at position `pos`. */
+__device__ __forceinline__ static void rope_tail_rotate_pair(
+        float *tail,
+        uint32_t pair,
+        uint32_t n_rot,
+        uint32_t pos,
+        uint32_t n_ctx_orig,
+        int inverse,
+        float freq_base,
+        float freq_scale,
+        float ext_factor,
+        float attn_factor,
+        float beta_fast,
+        float beta_slow) {
+    uint32_t i = pair * 2;
+
+    float corr0 = 0.0f, corr1 = 0.0f;
+    if (ext_factor != 0.0f) {
+        float denom = 2.0f * logf(freq_base);
+        corr0 = floorf((float)n_rot * logf((float)n_ctx_orig / (beta_fast * 2.0f * (float)M_PI)) / denom);
+        corr1 = ceilf((float)n_rot * logf((float)n_ctx_orig / (beta_slow * 2.0f * (float)M_PI)) / denom);
+        corr0 = fmaxf(0.0f, corr0);
+        corr1 = fminf((float)(n_rot - 1), corr1);
+    }
+
+    const float theta_scale = powf(freq_base, -2.0f / (float)n_rot);
+    float theta_extrap = (float)pos * powf(theta_scale, (float)pair);
+    float theta_interp = freq_scale * theta_extrap;
+    float theta = theta_interp;
+    float mscale = attn_factor;
+    if (ext_factor != 0.0f) {
+        float ramp_mix = rope_yarn_ramp_dev(corr0, corr1, (int)i) * ext_factor;
+        theta = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+        mscale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
+    }
+    float c = cosf(theta) * mscale;
+    float s = sinf(theta) * mscale;
+    if (inverse) s = -s;
+
+    float x0 = tail[i];
+    float x1 = tail[i + 1];
+    tail[i] = x0 * c - x1 * s;
+    tail[i + 1] = x0 * s + x1 * c;
+}
+
 __global__ static void rope_tail_kernel(
         float *x,
         uint32_t n_tok,
@@ -203,36 +212,10 @@ __global__ static void rope_tail_kernel(
     uint32_t h = tmp % n_head;
     uint32_t t = tmp / n_head;
     uint32_t n_nope = head_dim - n_rot;
-    uint32_t i = pair * 2;
-
-    float corr0 = 0.0f, corr1 = 0.0f;
-    if (ext_factor != 0.0f) {
-        float denom = 2.0f * logf(freq_base);
-        corr0 = floorf((float)n_rot * logf((float)n_ctx_orig / (beta_fast * 2.0f * (float)M_PI)) / denom);
-        corr1 = ceilf((float)n_rot * logf((float)n_ctx_orig / (beta_slow * 2.0f * (float)M_PI)) / denom);
-        corr0 = fmaxf(0.0f, corr0);
-        corr1 = fminf((float)(n_rot - 1), corr1);
-    }
-
-    const float theta_scale = powf(freq_base, -2.0f / (float)n_rot);
-    float theta_extrap = (float)(pos0 + t * pos_stride) * powf(theta_scale, (float)pair);
-    float theta_interp = freq_scale * theta_extrap;
-    float theta = theta_interp;
-    float mscale = attn_factor;
-    if (ext_factor != 0.0f) {
-        float ramp_mix = rope_yarn_ramp_dev(corr0, corr1, (int)i) * ext_factor;
-        theta = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
-        mscale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
-    }
-    float c = cosf(theta) * mscale;
-    float s = sinf(theta) * mscale;
-    if (inverse) s = -s;
-
-    float *tail = x + ((uint64_t)t * n_head + h) * head_dim + n_nope;
-    float x0 = tail[i];
-    float x1 = tail[i + 1];
-    tail[i] = x0 * c - x1 * s;
-    tail[i + 1] = x0 * s + x1 * c;
+    rope_tail_rotate_pair(x + ((uint64_t)t * n_head + h) * head_dim + n_nope,
+                          pair, n_rot, pos0 + t * pos_stride, n_ctx_orig,
+                          inverse, freq_base, freq_scale, ext_factor,
+                          attn_factor, beta_fast, beta_slow);
 }
 
 __device__ static float dsv4_e4m3fn_value_dev(int i) {
@@ -258,6 +241,107 @@ __device__ static float dsv4_e4m3fn_dequant_dev(float x) {
         if (nd < bd || (nd == bd && (((best + 1) & 1) == 0) && ((best & 1) != 0))) best++;
     }
     return sign * dsv4_e4m3fn_value_dev(best);
+}
+
+/* FP8 (E4M3) scale of one 64-value KV group from each lane's |value|. Every
+ * thread of the block calls it; `scratch` is this group's 64 shared floats. */
+__device__ static float dsv4_fp8_kv_group_scale(float *scratch, uint32_t lane, float absv) {
+    scratch[lane] = absv;
+    __syncthreads();
+    for (uint32_t stride = 32; stride > 0; stride >>= 1) {
+        if (lane < stride) scratch[lane] = fmaxf(scratch[lane], scratch[lane + stride]);
+        __syncthreads();
+    }
+    return exp2f(ceilf(log2f(fmaxf(scratch[0], 1.0e-4f) / 448.0f)));
+}
+
+__device__ static float dsv4_fp8_kv_round(float v, float scale) {
+    return dsv4_e4m3fn_dequant_dev(fminf(448.0f, fmaxf(-448.0f, v / scale))) * scale;
+}
+
+/* What single-token decode does with the normalized q/kv rows besides the
+ * norm: q's Q8_0 form for q_b, and the KV row finished in place (RoPE tail,
+ * FP8 rounding of the rest, F16-rounded store to the raw cache). */
+struct dsv4_qkv_decode_tail {
+    int8_t *q_q8;
+    float *q_q8_scale;
+    float *raw_row;
+    uint32_t n_rot;
+    uint32_t pos;
+    uint32_t n_ctx_orig;
+    float freq_base;
+    float freq_scale;
+    float ext_factor;
+    float attn_factor;
+    float beta_fast;
+    float beta_slow;
+};
+
+template <bool kDecode>
+__global__ static void dsv4_qkv_rms_norm_rows_kernel(
+        float *q_out,
+        const float *q,
+        const float *q_w,
+        uint32_t q_n,
+        float *kv_out,
+        const float *kv,
+        const float *kv_w,
+        uint32_t kv_n,
+        uint32_t rows,
+        float eps,
+        dsv4_qkv_decode_tail tail) {
+    const uint32_t row = blockIdx.x;
+    const uint32_t which = blockIdx.y;
+    if (row >= rows || which > 1u) return;
+    const uint32_t n = which == 0u ? q_n : kv_n;
+    const float *xr = (which == 0u ? q : kv) + (uint64_t)row * n;
+    float *orow = (which == 0u ? q_out : kv_out) + (uint64_t)row * n;
+    const float *w = which == 0u ? q_w : kv_w;
+    float sum = 0.0f;
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+        const float v = xr[i];
+        sum += v * v;
+    }
+    __shared__ float partial[256];
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    const float scale = rsqrtf(partial[0] / (float)n + eps);
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+        const float y = xr[i] * scale * w[i];
+        orow[i] = y;
+        if (kDecode && which == 0u) {
+            quantize_q8_0_block32(y, threadIdx.x & 31u, 32u, tail.q_q8 + (i & ~31u),
+                                  tail.q_q8_scale + (i >> 5));
+        }
+    }
+    if (!kDecode || which == 0u) return;
+
+    const uint32_t n_nope = n - tail.n_rot;
+    __syncthreads();
+    if (threadIdx.x < tail.n_rot / 2u) {
+        rope_tail_rotate_pair(orow + n_nope, threadIdx.x, tail.n_rot, tail.pos,
+                              tail.n_ctx_orig, 0, tail.freq_base, tail.freq_scale,
+                              tail.ext_factor, tail.attn_factor, tail.beta_fast,
+                              tail.beta_slow);
+    }
+    __shared__ float fp8_scratch[256];
+    const uint32_t lane = threadIdx.x & 63u;
+    for (uint32_t g0 = 0; g0 * 64u < n_nope; g0 += blockDim.x / 64u) {
+        __syncthreads();
+        const uint32_t d = g0 * 64u + threadIdx.x;
+        const float v = d < n_nope ? orow[d] : 0.0f;
+        const float fp8_scale = dsv4_fp8_kv_group_scale(
+                fp8_scratch + (threadIdx.x & ~63u), lane, d < n_nope ? fabsf(v) : 0.0f);
+        if (d < n_nope) orow[d] = dsv4_fp8_kv_round(v, fp8_scale);
+    }
+    __syncthreads();
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+        tail.raw_row[i] = f16_bits_to_f32(f32_to_f16_bits_hip_round(orow[i]));
+    }
 }
 
 __device__ static float dsv4_e2m1fn_value_dev(int i) {
@@ -377,7 +461,7 @@ extern "C" int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
             kv_weight_offset, kv_weight_bytes, "kv_rms_weight");
     if (!q_w || !kv_w) return 0;
     dim3 grid(rows, 2u, 1u);
-    dsv4_qkv_rms_norm_rows_kernel<<<grid, 256>>>(
+    dsv4_qkv_rms_norm_rows_kernel<false><<<grid, 256>>>(
             (float *)q_out->ptr,
             (const float *)q->ptr,
             q_w,
@@ -387,8 +471,68 @@ extern "C" int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
             kv_w,
             kv_n,
             rows,
-            eps);
+            eps,
+            dsv4_qkv_decode_tail{});
     return hip_ok(hipGetLastError(), "dsv4 qkv rms norm rows launch");
+}
+
+extern "C" int ds4_gpu_dsv4_qkv_rms_norm_decode_tensor(
+        ds4_gpu_tensor       *q_out,
+        ds4_gpu_tensor       *q_q8,
+        const ds4_gpu_tensor *q,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                q_weight_offset,
+        uint32_t                q_n,
+        ds4_gpu_tensor       *kv_out,
+        const ds4_gpu_tensor *kv,
+        uint64_t                kv_weight_offset,
+        uint32_t                kv_n,
+        ds4_gpu_tensor       *raw_cache,
+        uint32_t                raw_cap,
+        uint32_t                raw_row,
+        uint32_t                n_rot,
+        uint32_t                pos,
+        uint32_t                n_ctx_orig,
+        float                   freq_base,
+        float                   freq_scale,
+        float                   ext_factor,
+        float                   attn_factor,
+        float                   beta_fast,
+        float                   beta_slow,
+        float                   eps) {
+    const uint64_t q_weight_bytes = (uint64_t)q_n * sizeof(float);
+    const uint64_t kv_weight_bytes = (uint64_t)kv_n * sizeof(float);
+    dsv4_qkv_decode_tail tail = {};
+    if (!model_map || q_n == 0u || kv_n == 0u || q_n % 32u != 0u ||
+        (n_rot & 1u) || n_rot > kv_n || n_rot / 2u > 256u || raw_row >= raw_cap ||
+        !hip_model_range_fits(model_size, q_weight_offset, q_weight_bytes) ||
+        !hip_model_range_fits(model_size, kv_weight_offset, kv_weight_bytes) ||
+        !hip_tensor_has_f32(q_out, q_n) || !hip_tensor_has_f32(q, q_n) ||
+        !hip_tensor_has_f32(kv_out, kv_n) || !hip_tensor_has_f32(kv, kv_n) ||
+        !hip_tensor_has_elems2(raw_cache, raw_cap, kv_n, sizeof(float)) ||
+        !hip_q8_0_act(q_q8, 1u, q_n / 32u, &tail.q_q8, &tail.q_q8_scale)) {
+        return 0;
+    }
+    const float *q_w = (const float *)hip_model_range_ptr(model_map,
+            q_weight_offset, q_weight_bytes, "q_rms_weight");
+    const float *kv_w = (const float *)hip_model_range_ptr(model_map,
+            kv_weight_offset, kv_weight_bytes, "kv_rms_weight");
+    if (!q_w || !kv_w) return 0;
+    tail.raw_row = (float *)raw_cache->ptr + (uint64_t)raw_row * kv_n;
+    tail.n_rot = n_rot;
+    tail.pos = pos;
+    tail.n_ctx_orig = n_ctx_orig;
+    tail.freq_base = freq_base;
+    tail.freq_scale = freq_scale;
+    tail.ext_factor = ext_factor;
+    tail.attn_factor = attn_factor;
+    tail.beta_fast = beta_fast;
+    tail.beta_slow = beta_slow;
+    dsv4_qkv_rms_norm_rows_kernel<true><<<dim3(1u, 2u, 1u), 256>>>(
+            (float *)q_out->ptr, (const float *)q->ptr, q_w, q_n,
+            (float *)kv_out->ptr, (const float *)kv->ptr, kv_w, kv_n, 1u, eps, tail);
+    return hip_ok(hipGetLastError(), "dsv4 qkv rms norm decode launch");
 }
 extern "C" int ds4_gpu_head_rms_norm_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, float eps) {
     uint64_t rows64 = 0;

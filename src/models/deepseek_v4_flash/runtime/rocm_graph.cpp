@@ -82,6 +82,7 @@ struct ds4_rocm_graph {
     ds4_gpu_tensor *attn_norm_q8;
     ds4_gpu_tensor *qr;
     ds4_gpu_tensor *qr_norm;
+    ds4_gpu_tensor *qr_norm_q8;
     ds4_gpu_tensor *q;
     ds4_gpu_tensor *kv_raw;
     ds4_gpu_tensor *kv;
@@ -562,6 +563,7 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->kv);
     ds4_gpu_tensor_free(g->kv_raw);
     ds4_gpu_tensor_free(g->q);
+    ds4_gpu_tensor_free(g->qr_norm_q8);
     ds4_gpu_tensor_free(g->qr_norm);
     ds4_gpu_tensor_free(g->qr);
     ds4_gpu_tensor_free(g->attn_norm_q8);
@@ -786,6 +788,7 @@ static bool rocm_graph_alloc_raw_cap(
     g->attn_norm_q8 = ds4_gpu_tensor_alloc(ds4_gpu_q8_0_act_bytes(DS4_N_EMBD));
     g->qr = ds4_gpu_tensor_alloc(q_rank * sizeof(float));
     g->qr_norm = ds4_gpu_tensor_alloc(q_rank * sizeof(float));
+    g->qr_norm_q8 = ds4_gpu_tensor_alloc(ds4_gpu_q8_0_act_bytes(q_rank));
     g->q = ds4_gpu_tensor_alloc(q_dim * sizeof(float));
     g->kv_raw = ds4_gpu_tensor_alloc((uint64_t)DS4_N_HEAD_DIM * sizeof(float));
     g->kv = ds4_gpu_tensor_alloc((uint64_t)DS4_N_HEAD_DIM * sizeof(float));
@@ -992,7 +995,7 @@ static bool rocm_graph_alloc_raw_cap(
         state_init_ok && layer_cache_ok && g->cur_hc && g->flat_hc &&
         g->hc_mix && g->hc_split && g->hc_pre && g->hc_post && g->hc_comb &&
         g->attn_cur && g->attn_norm && g->attn_norm_q8 && g->qr &&
-        g->qr_norm && g->q &&
+        g->qr_norm && g->qr_norm_q8 && g->q &&
         g->kv_raw && g->kv && g->comp_kv_cur && g->comp_sc_cur &&
         g->indexer_q && g->indexer_weights && g->indexer_scores &&
         g->comp_selected && g->heads && g->attn_low && g->attn_out &&
@@ -1287,18 +1290,19 @@ static bool rocm_graph_encode_decode_layer(
                g->qr, layer->attn_q_a->abs_offset, q_rank, g->kv_raw,
                layer->attn_kv->abs_offset, DS4_N_HEAD_DIM, model->map,
                model->size, DS4_N_EMBD, g->attn_norm_q8) != 0;
-    {
-      if (ok)
-        ok = ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
-                 g->qr_norm, g->qr, model->map, model->size,
-                 layer->attn_q_a_norm->abs_offset, (uint32_t)q_rank, g->kv,
-                 g->kv_raw, layer->attn_kv_a_norm->abs_offset, DS4_N_HEAD_DIM,
-                 1, DS4_RMS_EPS) != 0;
-    }
     if (ok)
-      ok = ds4_gpu_matmul_q8_0_tensor(g->q, model->map, model->size,
-                                      layer->attn_q_b->abs_offset, q_rank,
-                                      q_dim, g->qr_norm, 1) != 0;
+      ok = ds4_gpu_dsv4_qkv_rms_norm_decode_tensor(
+               g->qr_norm, g->qr_norm_q8, g->qr, model->map, model->size,
+               layer->attn_q_a_norm->abs_offset, (uint32_t)q_rank, g->kv,
+               g->kv_raw, layer->attn_kv_a_norm->abs_offset, DS4_N_HEAD_DIM,
+               raw_cache, raw_cap, raw_row, DS4_N_ROT, pos,
+               compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, freq_base,
+               freq_scale, ext_factor, attn_factor, DS4_ROPE_YARN_BETA_FAST,
+               DS4_ROPE_YARN_BETA_SLOW, DS4_RMS_EPS) != 0;
+    if (ok)
+      ok = ds4_gpu_matmul_q8_0_preq_tensor(g->q, model->map, model->size,
+                                           layer->attn_q_b->abs_offset, q_rank,
+                                           q_dim, g->qr_norm_q8) != 0;
     if (ok)
       ok = ds4_gpu_head_rms_norm_tensor(g->q, 1, DS4_N_HEAD, DS4_N_HEAD_DIM,
                                         DS4_RMS_EPS) != 0;
@@ -1308,17 +1312,6 @@ static bool rocm_graph_encode_decode_layer(
                                             false, freq_base, freq_scale, ext_factor, attn_factor,
                                             DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("q_path");
-
-    if (ok)
-      ok = ds4_gpu_rope_tail_tensor(
-               g->kv, 1, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, DS4_N_ROT, pos,
-               compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, false, freq_base,
-               freq_scale, ext_factor, attn_factor, DS4_ROPE_YARN_BETA_FAST,
-               DS4_ROPE_YARN_BETA_SLOW) != 0;
-    /* RoPE stays as the exact standalone kernel above.  The decode fusion
-     * starts after that, where FP8 KV quantization and raw-cache storage can
-     * share one pass without changing the trigonometric path. */
-    if (ok) ok = rocm_graph_decode_kv_store(g->kv, raw_cache, raw_cap, raw_row);
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("kv_path");
 
     uint32_t n_comp = 0;

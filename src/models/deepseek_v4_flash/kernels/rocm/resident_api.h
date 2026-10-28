@@ -56,6 +56,10 @@ int ds4_gpu_compressor_update_tensor(const ds4_gpu_tensor *kv_cur, const ds4_gpu
 int ds4_gpu_dsv4_fp8_kv_quantize_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);
 int ds4_gpu_dsv4_fp8_kv_quantize_mirror_f16_tensor(ds4_gpu_tensor *x, ds4_gpu_tensor *mirror_f16, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);
 int ds4_gpu_dsv4_indexer_qat_tensor(ds4_gpu_tensor *x, uint32_t n_rows, uint32_t head_dim);
+/* Single-token form of ds4_gpu_dsv4_qkv_rms_norm_rows_tensor that also writes
+ * q's Q8_0 row and finishes the KV row in place (RoPE tail, FP8 rounding) and
+ * stores its F16-rounded copy at raw_row of raw_cache. */
+int ds4_gpu_dsv4_qkv_rms_norm_decode_tensor(ds4_gpu_tensor *q_out, ds4_gpu_tensor *q_q8, const ds4_gpu_tensor *q, const void *model_map, uint64_t model_size, uint64_t q_weight_offset, uint32_t q_n, ds4_gpu_tensor *kv_out, const ds4_gpu_tensor *kv, uint64_t kv_weight_offset, uint32_t kv_n, ds4_gpu_tensor *raw_cache, uint32_t raw_cap, uint32_t raw_row, uint32_t n_rot, uint32_t pos, uint32_t n_ctx_orig, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float eps);
 int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
     ds4_gpu_tensor* q_out, const ds4_gpu_tensor* q, const void* model_map,
     uint64_t model_size, uint64_t q_weight_offset, uint32_t q_n,
@@ -113,8 +117,10 @@ int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model_map, uint6
  * producer writes for the narrow projections that consume it. */
 uint64_t ds4_gpu_q8_0_act_bytes(uint64_t in_dim);
 uint64_t ds4_gpu_q8_K_act_bytes(uint64_t in_dim);
-/* Two single-token projections of one Q8_0 activation row; launches exactly
- * what two ds4_gpu_matmul_q8_0_tensor calls would after their quantize pass. */
+/* Single-token projection of a Q8_0 activation row; launches exactly what
+ * ds4_gpu_matmul_q8_0_tensor would after its quantize pass. */
+int ds4_gpu_matmul_q8_0_preq_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *xq8);
+/* Two such projections of one row. */
 int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uint64_t weight0_offset, uint64_t out0_dim, ds4_gpu_tensor *out1, uint64_t weight1_offset, uint64_t out1_dim, const void *model_map, uint64_t model_size, uint64_t in_dim, const ds4_gpu_tensor *xq8);
 int ds4_gpu_output_hc_weights_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *pre, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, float eps);
 int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps);
