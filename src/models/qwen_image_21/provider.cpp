@@ -22,6 +22,7 @@ public:
         .height = request.height,
         .steps = request.steps,
         .seed = request.seed,
+        .loras = request.loras,
     };
     req.images.reserve(request.images.size());
     for (const auto& img : request.images) {
@@ -43,8 +44,18 @@ public:
                 .total_ms = result.metrics.total_ms,
                 .resident_weight_bytes = result.metrics.resident_weight_bytes,
                 .steps = result.metrics.steps,
+                .lora_ms = result.metrics.lora_ms,
             },
     };
+  }
+
+  ext::ImageLoraInfo AddLora(const std::string& name,
+                             const std::string& path) override {
+    return model_->AddLora(name, path);
+  }
+
+  std::vector<ext::ImageLora> ActiveLoras() const override {
+    return model_->ActiveLoras();
   }
 
 private:
