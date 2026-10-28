@@ -1175,31 +1175,32 @@ extern "C" int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model
                                            in_dim, out_dim, x, n_tok, "q8_0");
 }
 
+extern "C" int ds4_gpu_matmul_q8_0_preq_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size,
+                                              uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim,
+                                              const ds4_gpu_tensor *xq8) {
+    if (!out || !model_map || in_dim == 0u || in_dim > UINT32_MAX || out_dim == 0u ||
+        out_dim > UINT32_MAX || out->bytes < out_dim * sizeof(float) || weight_offset > model_size) {
+        return 0;
+    }
+    const uint64_t blocks = (in_dim + 31u) / 32u;
+    uint64_t weight_bytes = 0;
+    if (!hip_u64_mul3_checked(out_dim, blocks, 34u, &weight_bytes) ||
+        weight_bytes > model_size - weight_offset) {
+        return 0;
+    }
+    const char *wptr = hip_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0");
+    int8_t *xq = NULL;
+    float *xscale = NULL;
+    return wptr && hip_q8_0_act(xq8, 1u, blocks, &xq, &xscale) &&
+           hip_launch_q8_0_decode_rows(out, wptr, xq, xscale, in_dim, out_dim, blocks);
+}
+
 extern "C" int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uint64_t weight0_offset, uint64_t out0_dim,
                                                       ds4_gpu_tensor *out1, uint64_t weight1_offset, uint64_t out1_dim,
                                                       const void *model_map, uint64_t model_size, uint64_t in_dim,
                                                       const ds4_gpu_tensor *xq8) {
-    if (!model_map || in_dim == 0u || in_dim > UINT32_MAX) return 0;
-    const uint64_t blocks = (in_dim + 31u) / 32u;
-    ds4_gpu_tensor *outs[2] = {out0, out1};
-    const uint64_t offsets[2] = {weight0_offset, weight1_offset};
-    const uint64_t dims[2] = {out0_dim, out1_dim};
-    const char *weights[2] = {NULL, NULL};
-    for (int i = 0; i < 2; i++) {
-        uint64_t weight_bytes = 0;
-        if (!outs[i] || dims[i] == 0u || dims[i] > UINT32_MAX ||
-            outs[i]->bytes < dims[i] * sizeof(float) || offsets[i] > model_size ||
-            !hip_u64_mul3_checked(dims[i], blocks, 34u, &weight_bytes) ||
-            weight_bytes > model_size - offsets[i])
-            return 0;
-        weights[i] = hip_model_range_ptr(model_map, offsets[i], weight_bytes, "q8_0");
-        if (!weights[i]) return 0;
-    }
-    int8_t *xq = NULL;
-    float *xscale = NULL;
-    return hip_q8_0_act(xq8, 1u, blocks, &xq, &xscale) &&
-           hip_launch_q8_0_decode_rows(out0, weights[0], xq, xscale, in_dim, out0_dim, blocks) &&
-           hip_launch_q8_0_decode_rows(out1, weights[1], xq, xscale, in_dim, out1_dim, blocks);
+    return ds4_gpu_matmul_q8_0_preq_tensor(out0, model_map, model_size, weight0_offset, in_dim, out0_dim, xq8) &&
+           ds4_gpu_matmul_q8_0_preq_tensor(out1, model_map, model_size, weight1_offset, in_dim, out1_dim, xq8);
 }
 
 extern "C" int ds4_gpu_matmul_q8_0_group_pairs_tensor(
