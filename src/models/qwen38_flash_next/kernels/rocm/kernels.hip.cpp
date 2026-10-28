@@ -2900,7 +2900,9 @@ __global__ void CompactSelectionKernel(
   const std::uint32_t wave = i >> 5u;
   const std::uint32_t n_kv = *start_pos + t + 1;
   const std::uint32_t n_complete = n_kv / ratio;  // tail_start / ratio
-  const std::uint32_t n_words = (n_complete + 31) / 32;
+  // The position comes from the device, the row size from the host: blocks
+  // past mask_words have no mask bits and are not selected.
+  const std::uint32_t n_words = min((n_complete + 31) / 32, mask_words);
   const std::uint32_t* words = mask + static_cast<std::size_t>(t) * mask_words;
   std::uint32_t* out = lists + static_cast<std::size_t>(t) * capacity;
   std::uint32_t written = 0;  // selected blocks of the earlier passes
@@ -3258,7 +3260,9 @@ __global__ void AttentionKernel(
       std::uint32_t flags = 0;
       std::uint32_t count = 0;
       const std::uint32_t b0 = w0 + (i * 4);
-      const std::uint32_t word = b0 < n_complete ? words[b0 / 32] : 0u;
+      // Blocks past the mask row are unselected (see CompactSelectionKernel).
+      const std::uint32_t word =
+          b0 < n_complete && b0 / 32 < mask_words ? words[b0 / 32] : 0u;
       for (std::uint32_t k = 0; k < 4; ++k) {
         const std::uint32_t b = b0 + k;
         const bool set = b < n_complete && ((word >> (b % 32)) & 1u);

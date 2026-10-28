@@ -809,6 +809,77 @@ void CheckLists(std::uint32_t n_tokens, std::uint32_t start_pos,
   std::cout << " bitwise-equal\n";
 }
 
+// The position is a device value while the host sizes the mask rows. A
+// position past a row must attend as if the blocks after it were not
+// selected, without reading the words that follow the row.
+void CheckPositionPastMask() {
+  constexpr std::uint32_t kBudget = 512;
+  constexpr std::uint32_t mask_words = 20, start_pos = 4 * 32 * 26 + 2;
+  constexpr std::uint32_t wide_words = 32, guard = 64;
+  constexpr std::uint32_t n_kv = start_pos + 1;
+  const std::size_t kv_count = static_cast<std::size_t>(n_kv) * kKvWidth;
+  const auto qv = MakeValues(kQWidth, 0x9A5C0DE5U, 4.0F);
+  std::vector<__half> kh(kv_count);
+  std::vector<__half> vh(kv_count);
+  {
+    const auto kf = MakeValues(kv_count, 0x6B1D7A11U, 1.0F);
+    const auto vf = MakeValues(kv_count, 0x1F00D5EDU, 1.0F);
+    for (std::size_t i = 0; i < kv_count; ++i) {
+      kh[i] = __float2half(kf[i]);
+      vh[i] = __float2half(vf[i]);
+    }
+  }
+  // Every fourth block of the row is selected. Past the row, the narrow
+  // mask is followed by guard words that would select every block; the
+  // wide mask selects none of them.
+  std::vector<std::uint32_t> narrow(mask_words + guard, 0xFFFFFFFFU);
+  std::vector<std::uint32_t> wide(wide_words, 0U);
+  for (std::uint32_t w = 0; w < mask_words; ++w)
+    narrow[w] = wide[w] = 0x11111111U;
+  HipBuffer<float> d_q(kQWidth);
+  HipBuffer<__half> d_k(kv_count);
+  HipBuffer<__half> d_v(kv_count);
+  HipBuffer<std::uint32_t> d_narrow(narrow.size());
+  HipBuffer<std::uint32_t> d_wide(wide.size());
+  HipBuffer<std::uint32_t> d_pos(1);
+  HipBuffer<std::uint32_t> d_lists(kBudget);
+  HipBuffer<std::uint32_t> d_counts(1);
+  Upload(&d_q, qv);
+  Upload(&d_k, kh);
+  Upload(&d_v, vh);
+  Upload(&d_narrow, narrow);
+  Upload(&d_wide, wide);
+  Upload(&d_pos, std::vector<std::uint32_t>{start_pos});
+  for (const std::uint32_t splits : {0U, 8U}) {
+    HipBuffer<float> d_partials(static_cast<std::size_t>(kHeads) *
+                                std::max(splits, 1U) * (kDim + 2));
+    float* partials = splits == 0 ? nullptr : d_partials.get();
+    const auto attend = [&](HipBuffer<std::uint32_t>& mask, std::uint32_t words,
+                            bool lists) {
+      HipBuffer<float> d_out(kQWidth);
+      q::Attention(d_q.get(), d_k.get(), d_v.get(), mask.get(), words,
+                   d_out.get(), partials, splits, 1, d_pos.get(), kHeads,
+                   kKvHeads, kDim, kRatio, nullptr,
+                   lists ? d_lists.get() : nullptr,
+                   lists ? d_counts.get() : nullptr, lists ? kBudget : 0);
+      CheckHip(hipDeviceSynchronize(), "attention past the mask row");
+      return Download(&d_out, kQWidth);
+    };
+    const auto reference = attend(d_wide, wide_words, false);
+    for (const bool lists : {false, true}) {
+      const auto out = attend(d_narrow, mask_words, lists);
+      if (std::memcmp(out.data(), reference.data(), kQWidth * sizeof(float)) !=
+          0)
+        throw std::runtime_error(std::string("attention read past its mask "
+                                             "row: ") +
+                                 (lists ? "lists" : "walk") +
+                                 " splits=" + std::to_string(splits));
+    }
+  }
+  std::cout << "attention past " << mask_words * 32
+            << " mask bits: walk and lists ignore the following words\n";
+}
+
 void CheckChunks(std::uint32_t n, std::uint32_t split) {
   const std::size_t count = std::size_t(n) * kQWidth;
   HipBuffer<float> queries(count), gates(count), full(count), chunked(count);
@@ -880,6 +951,7 @@ int main() {
     CheckChunks(136, 94);
     CheckChunks(2048, 1025);
     CheckWmmaLiveExtent();
+    CheckPositionPastMask();
     CheckPreparation(1, 0, 64);
     CheckPreparation(8, 4096, 64);
     CheckPreparation(65, 131069, 64);
