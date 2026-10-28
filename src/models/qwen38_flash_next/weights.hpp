@@ -151,6 +151,12 @@ struct MtpWeights {
       std::string* error_msg = nullptr);
 };
 
+/// Hyper-connection inject and GDN alpha/beta tensors of `layer` stored as
+/// Q8_0. The official trunk GGUF keeps them in F32; the device expands Q8_0
+/// copies to F32 at load, because their W8A8 route breaks copied identifiers.
+[[nodiscard]] std::size_t ExpandedQ8_0Tensors(
+    const LayerWeights& layer) noexcept;
+
 }  // namespace gufo::models::qwen38_flash_next
 
 #endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_WEIGHTS_HPP_

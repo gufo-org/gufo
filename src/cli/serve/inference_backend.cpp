@@ -3239,6 +3239,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                "Failed to create Qwen3.8-Flash-Next model: " + load_error);
       return false;
     }
+    if (const std::size_t expanded = model->ExpandedQ8_0Tensors();
+        expanded != 0) {
+      Logger::Warn("loader",
+                   "event=q8_0_expanded tensors=" + std::to_string(expanded) +
+                       " reason=hc_inject_and_ssm_alpha_beta_are_q8_0"
+                       " (the official GGUF keeps them F32; expanded to F32 "
+                       "at load, re-quantize them as F32)");
+    }
     if (rope_scaling) {
       Logger::Info(
           "loader",

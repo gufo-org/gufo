@@ -318,4 +318,13 @@ std::optional<MtpWeights> MtpWeights::Bind(const core::GgufReader& reader,
   return m;
 }
 
+std::size_t ExpandedQ8_0Tensors(const LayerWeights& layer) noexcept {
+  std::size_t count = 0;
+  for (const TensorRef* t : {&layer.hc_attn.inject, &layer.hc_ffn.inject,
+                             &layer.ssm_alpha, &layer.ssm_beta}) {
+    count += !t->empty() && t->type == GgmlType::kQ8_0;
+  }
+  return count;
+}
+
 }  // namespace gufo::models::qwen38_flash_next

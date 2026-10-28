@@ -252,6 +252,14 @@ bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
 }
 
+std::size_t Model::ExpandedQ8_0Tensors() const noexcept {
+  std::size_t count = 0;
+  for (const LayerWeights& layer : weights_->layers) {
+    count += qwen38_flash_next::ExpandedQ8_0Tensors(layer);
+  }
+  return count;
+}
+
 bool Model::InDraftSubset(std::int32_t token) const {
   return token >= 0 && (static_cast<std::uint32_t>(token) < kMtpDraftVocab ||
                         tokenizer_->IsSpecialToken(

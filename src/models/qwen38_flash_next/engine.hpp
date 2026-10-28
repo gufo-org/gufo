@@ -90,6 +90,10 @@ public:
     return options_.max_context;
   }
   [[nodiscard]] bool HasMtp() const noexcept;
+  /// Trunk tensors the official GGUF keeps in F32 but this artifact stores
+  /// as Q8_0 (see `ExpandedQ8_0Tensors`). The official MTP sidecar ships its
+  /// inject as Q8_0, so the draft block is not counted.
+  [[nodiscard]] std::size_t ExpandedQ8_0Tensors() const noexcept;
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
   }
