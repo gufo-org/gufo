@@ -711,13 +711,18 @@ function(gufo_qwen_image_21_register_tests)
       LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
     add_executable(qwen_image_21_kernel_test
       ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/kernel_test.hip)
-    target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip
+      hip::host roc::hipblas)
     add_test(NAME qwen_image_21_kernel_test COMMAND qwen_image_21_kernel_test)
     set_tests_properties(qwen_image_21_kernel_test PROPERTIES
       LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
     add_executable(qwen_image_21_probe
       ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/probe.cpp)
     target_link_libraries(qwen_image_21_probe PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    add_executable(qwen_image_21_lora_dump
+      ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/lora_dump.cpp)
+    target_link_libraries(qwen_image_21_lora_dump PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip
+      hip::host roc::hipblas OpenSSL::Crypto)
   endif()
 endfunction()
 
