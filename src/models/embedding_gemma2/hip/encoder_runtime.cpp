@@ -149,6 +149,8 @@ struct EncoderRuntime::Impl {
     std::vector<LayerWeights> layers;
     DeviceBuffer pixels, pixels_bf16, state, normed, qkv, query, key, value,
         context, temp, gate_up, act, pooled, features;
+    /// Soft tokens per image the scratch above holds.
+    std::size_t capacity{0};
   };
   std::unique_ptr<Vision> vision;
   std::unique_ptr<AudioRuntime> audio;
@@ -196,6 +198,7 @@ struct EncoderRuntime::Impl {
 
   void Upload();
   void LoadVision();
+  void ReserveVision(std::size_t soft_tokens);
   void RunVision(const ImagePatches& image, std::size_t offset);
   void Allocate();
   // Mirrors the text server's probe: after a reset even a 4-byte memset
@@ -314,28 +317,47 @@ void EncoderRuntime::Impl::LoadVision() {
         {p + "mlp.gate_proj.linear.weight", p + "mlp.up_proj.linear.weight"});
     layer.down = upload(p + "mlp.down_proj.linear.weight");
   }
-  constexpr std::size_t n = std::size_t{kMaxImageSoftTokens} * 9, h = 768;
-  candidate->pixels = DeviceBuffer(n * h * sizeof(float));
-  candidate->pixels_bf16 = DeviceBuffer(n * h * 2);
-  candidate->state = DeviceBuffer(n * h * sizeof(float));
-  candidate->normed = DeviceBuffer(n * h * 2);
-  candidate->qkv = DeviceBuffer(n * h * 3 * sizeof(float));
-  candidate->query = DeviceBuffer(n * h * 2);
-  candidate->key = DeviceBuffer(n * h * 2);
-  candidate->value = DeviceBuffer(n * h * 2);
-  candidate->context = DeviceBuffer(n * h * 2);
-  candidate->temp = DeviceBuffer(n * h * sizeof(float));
-  candidate->gate_up =
-      DeviceBuffer(std::min(n, kChunkTokens) * 6144 * sizeof(float));
-  candidate->act = DeviceBuffer(n * 3072 * 2);
-  candidate->pooled = DeviceBuffer(kMaxImageSoftTokens * h * 2);
-  candidate->features = DeviceBuffer(kMaxImageSoftTokens * 512 * sizeof(float));
   vision = std::move(candidate);
+}
+
+// The scratch starts at the default budget and grows to the smallest budget
+// that holds a larger image, so requests at the default keep their footprint.
+void EncoderRuntime::Impl::ReserveVision(std::size_t soft_tokens) {
+  auto& v = *vision;
+  if (soft_tokens <= v.capacity)
+    return;
+  // Validation caps an image at kMaxImageSoftTokens, the largest budget.
+  std::size_t tokens = kMaxImageSoftTokens;
+  for (const std::size_t budget : kImageSoftTokenBudgets) {
+    if (budget >= std::max<std::size_t>(soft_tokens, kDefaultImageSoftTokens)) {
+      tokens = budget;
+      break;
+    }
+  }
+  // Earlier images may still be using the old buffers.
+  HIP_CHECK(hipStreamSynchronize(stream));
+  const std::size_t n = tokens * 9, h = 768;
+  v.pixels = DeviceBuffer(n * h * sizeof(float));
+  v.pixels_bf16 = DeviceBuffer(n * h * 2);
+  v.state = DeviceBuffer(n * h * sizeof(float));
+  v.normed = DeviceBuffer(n * h * 2);
+  v.qkv = DeviceBuffer(n * h * 3 * sizeof(float));
+  v.query = DeviceBuffer(n * h * 2);
+  v.key = DeviceBuffer(n * h * 2);
+  v.value = DeviceBuffer(n * h * 2);
+  v.context = DeviceBuffer(n * h * 2);
+  v.temp = DeviceBuffer(n * h * sizeof(float));
+  v.gate_up = DeviceBuffer(std::min(n, kChunkTokens) * 6144 * sizeof(float));
+  v.act = DeviceBuffer(n * 3072 * 2);
+  v.pooled = DeviceBuffer(tokens * h * 2);
+  v.features = DeviceBuffer(tokens * 512 * sizeof(float));
+  v.capacity = tokens;
 }
 
 void EncoderRuntime::Impl::RunVision(const ImagePatches& image,
                                      std::size_t offset) {
   LoadVision();
+  ReserveVision(image.soft_tokens());
   auto& v = *vision;
   const std::size_t n = std::size_t{image.rows} * image.columns;
   v.pixels.UploadAsync(0, image.pixels.data(),
