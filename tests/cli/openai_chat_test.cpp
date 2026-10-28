@@ -5421,6 +5421,15 @@ void TestToolClosingFraming() {
       {call, 1, R"({"text":"42"})", ""},
       {"</invoke>\n\n" + call, 1, R"({"text":"42"})", "</invoke>\n\n"},
       {"</invoke>", 0, "", "</invoke>"},
+      // The prose shapes of tool_reasoning.py ENVELOPE_CASES, which Qwen27 Q4
+      // answers with a terminal call instead of writing them.
+      {"</invoke>\nIt closes an invoke element.", 0, "",
+       "</invoke>\nIt closes an invoke element."},
+      {"<｜DSML｜invoke name=\"f\">", 0, "", "<｜DSML｜invoke name=\"f\">"},
+      {"The call opens with `<invoke name=\"f\">` and that is only the opener.",
+       0, "",
+       "The call opens with `<invoke name=\"f\">` and that is only the "
+       "opener."},
       {"Text </parameter>", 0, "", "Text </parameter>"},
       {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},
       {"<parameter>x</parameter>", 0, "", "<parameter>x</parameter>"},

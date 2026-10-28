@@ -195,6 +195,8 @@ NO_TOOLS_PROMPT = "Go."
 # output in TestToolClosingFraming (tests/cli/openai_chat_test.cpp). Qwen27 Q4
 # can omit the requested literal line and Q8 can call a tool instead; these
 # prompts tested instruction following rather than whether the parser lost text.
+# Asked to write markup, Qwen27 Q4 also prints it with terminal instead, so the
+# prose shapes below accept a native call and have exact unit fixtures there.
 ENVELOPE_CASES = {
     # Quoted inside a fence the same tags are prose, and prose survives.
     "closer_quoted": (
@@ -473,13 +475,13 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
                     "markup the model wrote instead of a call stays visible", result)
             elif name in commands:
                 assert_terminal_call(result, commands[name])
-            elif (not deepseek and result["tools"] and name in (
-                    "explain_tool_call_syntax", "envelope_documented_then_prose",
-                    "qwen_envelope_documented_then_prose")):
+            elif not deepseek and result["tools"]:
                 # A literal <tool_call> in Qwen prose triggers the call grammar,
-                # and calls end the output, exactly as in llama.cpp (#438). The
-                # forced call must still be native and leak no framing.
-                assert result["finish"] == "tool_calls", result
+                # and calls end the output, exactly as in llama.cpp (#438), and a
+                # model asked to write markup may print it with terminal instead.
+                # Either call must still be native and leak no framing; the
+                # documented shapes can keep calling until the token limit.
+                assert result["finish"] in ("tool_calls", "length"), result
                 assert all(call["function"]["name"] == "terminal"
                            for call in result["tools"]), result
                 assert not any(tag in text for tag in ENVELOPE_CLOSERS), result
