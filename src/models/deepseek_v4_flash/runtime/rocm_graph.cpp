@@ -1520,16 +1520,12 @@ static bool rocm_graph_encode_decode_layer(
                          layer->indexer_attn_q_b->abs_offset, q_rank,
                          indexer_q_dim, g->qr_norm, 1) != 0;
               if (ok)
-                ok = ds4_gpu_rope_tail_tensor(
-                         g->indexer_q, 1, DS4_N_INDEXER_HEAD,
-                         DS4_N_INDEXER_HEAD_DIM, DS4_N_ROT, pos,
-                         compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, false,
-                         freq_base, freq_scale, ext_factor, attn_factor,
-                         DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
-              if (ok)
-                ok = ds4_gpu_dsv4_indexer_qat_tensor(
+                ok = ds4_gpu_dsv4_indexer_rope_qat_tensor(
                          g->indexer_q, DS4_N_INDEXER_HEAD,
-                         DS4_N_INDEXER_HEAD_DIM) != 0;
+                         DS4_N_INDEXER_HEAD_DIM, DS4_N_ROT, pos,
+                         compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, freq_base,
+                         freq_scale, ext_factor, attn_factor,
+                         DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
               if (ok)
                 ok = ds4_gpu_matmul_f16_tensor(
                          g->indexer_weights, model->map, model->size,

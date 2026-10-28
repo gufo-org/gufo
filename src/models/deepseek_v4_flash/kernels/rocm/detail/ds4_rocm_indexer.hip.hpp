@@ -10,11 +10,21 @@ static hipError_t ds4_hip_set_dynamic_shared_memory(Kernel kernel,
                                bytes);
 }
 
-__global__ static void indexer_hadamard_fp4_kernel(float *x, uint32_t n_rows, uint32_t head_dim) {
+/* kRope first rotates each row's RoPE tail at `pos`, one pair per thread as
+ * rope_tail_kernel does, then reads the rotated row back. */
+template <bool kRope>
+__global__ static void indexer_hadamard_fp4_kernel(float *x, uint32_t n_rows, uint32_t head_dim,
+                                                   uint32_t pos, ds4_rope_tail_args rope) {
     uint32_t row = blockIdx.x;
     uint32_t tid = threadIdx.x;
     if (row >= n_rows || head_dim != 128u || tid >= 128u) return;
 
+    if (kRope) {
+        if (tid < rope.n_rot / 2u) {
+            rope_tail_rotate_pair(x + (uint64_t)row * head_dim + head_dim - rope.n_rot, tid, pos, rope);
+        }
+        __syncthreads();
+    }
     __shared__ float vals[128];
     __shared__ float absbuf[128];
     float *xr = x + (uint64_t)row * head_dim;
@@ -586,8 +596,21 @@ extern "C" int ds4_gpu_dsv4_indexer_qat_tensor(ds4_gpu_tensor *x, uint32_t n_row
         x->bytes < (uint64_t)n_rows * head_dim * sizeof(float)) {
         return 0;
     }
-    indexer_hadamard_fp4_kernel<<<n_rows, 128>>>((float *)x->ptr, n_rows, head_dim);
+    indexer_hadamard_fp4_kernel<false><<<n_rows, 128>>>((float *)x->ptr, n_rows, head_dim, 0u,
+                                                         ds4_rope_tail_args{});
     return hip_ok(hipGetLastError(), "indexer_hadamard_fp4 launch");
+}
+
+extern "C" int ds4_gpu_dsv4_indexer_rope_qat_tensor(ds4_gpu_tensor *x, uint32_t n_rows, uint32_t head_dim, uint32_t n_rot, uint32_t pos, uint32_t n_ctx_orig, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow) {
+    if (!x || n_rows == 0 || head_dim != 128u || n_rot > head_dim || (n_rot & 1u) ||
+        x->bytes < (uint64_t)n_rows * head_dim * sizeof(float)) {
+        return 0;
+    }
+    indexer_hadamard_fp4_kernel<true><<<n_rows, 128>>>(
+            (float *)x->ptr, n_rows, head_dim, pos,
+            ds4_rope_tail_args{n_rot, n_ctx_orig, 0, freq_base, freq_scale, ext_factor,
+                               attn_factor, beta_fast, beta_slow});
+    return hip_ok(hipGetLastError(), "indexer rope hadamard_fp4 launch");
 }
 
 /* Decode the packed (value, index) key produced by the Markov argmax reduce. */
