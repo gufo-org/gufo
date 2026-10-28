@@ -99,6 +99,59 @@ void ReleaseCommittedPages(void* base, std::size_t bytes) noexcept {
   }
 }
 
+bool CanVisitMappedChunks() noexcept {
+  return true;
+}
+
+void VisitMappedChunks(
+    const void* source_data, std::size_t bytes, std::size_t chunk_bytes,
+    std::size_t workers,
+    const std::function<bool(std::size_t worker, std::size_t offset,
+                             const void* chunk, std::size_t chunk_size)>&
+        visit) {
+  if (source_data == nullptr || bytes == 0 || chunk_bytes == 0)
+    return;
+  const auto chunks = bytes / chunk_bytes + (bytes % chunk_bytes != 0);
+  std::atomic<std::size_t> next{0};
+  std::atomic<int> failure{0};
+  std::atomic<bool> stopped{false};
+  auto visit_chunks = [&](std::size_t worker) {
+    while (failure.load(std::memory_order_relaxed) == 0 &&
+           !stopped.load(std::memory_order_relaxed)) {
+      const auto index = next.fetch_add(1, std::memory_order_relaxed);
+      if (index >= chunks)
+        break;
+      const auto offset = index * chunk_bytes;
+      const auto size = std::min(chunk_bytes, bytes - offset);
+      auto* input = const_cast<std::uint8_t*>(
+                        static_cast<const std::uint8_t*>(source_data)) +
+                    offset;
+      if (madvise(input, size, MADV_POPULATE_READ) != 0) {
+        failure.store(errno, std::memory_order_relaxed);
+        break;
+      }
+      const bool keep_going = visit(worker, offset, input, size);
+      // The visitor owns a copy of these bytes now. Keep the mapping valid
+      // for the reader without retaining its populated PTEs.
+      (void)madvise(input, size, MADV_DONTNEED);
+      if (!keep_going) {
+        stopped.store(true, std::memory_order_relaxed);
+        break;
+      }
+    }
+  };
+  {
+    std::vector<std::jthread> threads;
+    const auto count = std::clamp<std::size_t>(workers, 1, chunks);
+    for (std::size_t worker = 1; worker < count; ++worker)
+      threads.emplace_back(visit_chunks, worker);
+    visit_chunks(0);
+  }
+  if (const auto error = failure.load(); error != 0)
+    throw std::system_error(error, std::generic_category(),
+                            "cannot read mapped Qwen weights");
+}
+
 void* CloneMappedWeightsToAnonymousPages(const void* source_data,
                                          std::size_t bytes) {
   if (source_data == nullptr || bytes == 0) {
@@ -110,42 +163,18 @@ void* CloneMappedWeightsToAnonymousPages(const void* source_data,
     return nullptr;
   }
   (void)madvise(host_copy, bytes, MADV_HUGEPAGE);
-
-  constexpr std::size_t kChunkBytes = 16ULL << 20;
-  const auto chunks = bytes / kChunkBytes + (bytes % kChunkBytes != 0);
-  std::atomic<std::size_t> next{0};
-  std::atomic<int> failure{0};
-  auto copy_chunk = [&] {
-    while (failure.load(std::memory_order_relaxed) == 0) {
-      const auto index = next.fetch_add(1, std::memory_order_relaxed);
-      if (index >= chunks)
-        break;
-      const auto offset = index * kChunkBytes;
-      const auto chunk_bytes = std::min(kChunkBytes, bytes - offset);
-      auto* input = const_cast<std::uint8_t*>(
-                        static_cast<const std::uint8_t*>(source_data)) +
-                    offset;
-      if (madvise(input, chunk_bytes, MADV_POPULATE_READ) != 0) {
-        failure.store(errno, std::memory_order_relaxed);
-        break;
-      }
-      std::memcpy(static_cast<std::uint8_t*>(host_copy) + offset, input,
-                  chunk_bytes);
-      // The immutable copy now owns these resident bytes. Keep the original
-      // mapping valid for the reader without retaining its populated PTEs.
-      (void)madvise(input, chunk_bytes, MADV_DONTNEED);
-    }
-  };
-  {
-    std::vector<std::jthread> workers;
-    for (std::size_t i = 1; i < std::min<std::size_t>(16, chunks); ++i)
-      workers.emplace_back(copy_chunk);
-    copy_chunk();
-  }
-  if (const auto error = failure.load(); error != 0) {
+  try {
+    VisitMappedChunks(source_data, bytes, 16ULL << 20, 16,
+                      [&](std::size_t, std::size_t offset, const void* chunk,
+                          std::size_t size) {
+                        std::memcpy(
+                            static_cast<std::uint8_t*>(host_copy) + offset,
+                            chunk, size);
+                        return true;
+                      });
+  } catch (...) {
     munmap(host_copy, bytes);
-    throw std::system_error(error, std::generic_category(),
-                            "cannot read mapped Qwen weights");
+    throw;
   }
   return host_copy;
 }

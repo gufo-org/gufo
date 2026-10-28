@@ -1,11 +1,13 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <span>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/weight_upload.hpp"
@@ -79,11 +81,53 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
   return hipSuccess;
 }
 
-/// Streams one region from the read-only mapping through a pinned staging
-/// buffer. Fallback for sources WeightUpload cannot read, such as in-memory
-/// images without a file.
+/// Streams one region from the read-only mapping into device memory. Where
+/// the platform can drop the mapping's pages as it goes, eight workers each
+/// copy 64 MiB chunks through their own pinned staging buffer, so a shard in
+/// the page cache uploads at memory speed. A hipMemcpy straight from the
+/// pageable mapping pins it page by page and runs at a small fraction of
+/// that. Elsewhere one staging buffer streams the prefaulted mapping; that is
+/// the fallback for sources WeightUpload cannot read, such as in-memory images
+/// without a file.
 [[nodiscard]] hipError_t CopyMappedRegion(const core::GgufMappedRegion& source,
                                           void* device_data) {
+  const auto free_staging = [](void* pointer) { (void)hipHostFree(pointer); };
+  using Staging = std::unique_ptr<void, decltype(free_staging)>;
+  if (platform::CanVisitMappedChunks()) {
+    constexpr std::size_t kChunkBytes = 64ULL << 20;
+    constexpr std::size_t kWorkers = 8;
+    std::vector<Staging> staging;
+    staging.reserve(kWorkers);
+    for (std::size_t i = 0; i < kWorkers; ++i)
+      staging.emplace_back(nullptr, free_staging);
+    std::atomic<hipError_t> failure{hipSuccess};
+    platform::VisitMappedChunks(
+        source.data, source.size, kChunkBytes, kWorkers,
+        [&](std::size_t worker, std::size_t offset, const void* chunk,
+            std::size_t size) {
+          auto& buffer = staging[worker];
+          if (!buffer) {
+            void* pointer = nullptr;
+            if (const auto status = hipHostMalloc(&pointer, kChunkBytes);
+                status != hipSuccess) {
+              failure.store(status, std::memory_order_relaxed);
+              return false;
+            }
+            buffer.reset(pointer);
+          }
+          std::memcpy(buffer.get(), chunk, size);
+          const auto status =
+              hipMemcpy(static_cast<std::uint8_t*>(device_data) + offset,
+                        buffer.get(), size, hipMemcpyHostToDevice);
+          if (status != hipSuccess) {
+            failure.store(status, std::memory_order_relaxed);
+            return false;
+          }
+          return true;
+        });
+    return failure.load();
+  }
+
   platform::PrefaultMappedRange(source.data, source.size);
 
   constexpr std::size_t kChunkBytes = 16ULL << 20;
@@ -91,9 +135,7 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
   hipError_t status = hipHostMalloc(&staging, kChunkBytes);
   if (status != hipSuccess)
     return status;
-  const auto free_staging = [&](void* pointer) { (void)hipHostFree(pointer); };
-  std::unique_ptr<void, decltype(free_staging)> owned_staging(staging,
-                                                              free_staging);
+  Staging owned_staging(staging, free_staging);
 
   const auto chunks =
       source.size / kChunkBytes + (source.size % kChunkBytes != 0);
@@ -167,32 +209,40 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
       // migrates it. A registered anonymous copy is: every migration makes
       // the driver evict and restore the GPU mapping, and kernels reading it
       // stall for seconds.
+      // Read through the page cache where the platform allows it, so a
+      // warm reload does not wait on the disk; otherwise (Windows) the
+      // bounded file pipeline fills the region without touching the mapping.
       std::size_t free_bytes = 0;
       std::size_t total_bytes = 0;
       if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess &&
           HeapFitsAboveReserve(free_bytes, source.size) &&
           AllocateDeviceRegion(source, destination) == hipSuccess) {
-        device_regions.push_back(i);
-        continue;
-      }
-      (void)hipGetLastError();
-      destination = {};
-      bool source_was_read = false;
-      map_error = MapRegisteredRegion(source, destination, source_was_read);
-      if (map_error != hipSuccess) {
-        // The device-resident upload preserves single-copy residency
-        // wherever registration is refused.
+        if (platform::CanVisitMappedChunks())
+          map_error = CopyMappedRegion(source, destination.device_data);
+        else {
+          map_error = hipSuccess;
+          device_regions.push_back(i);
+        }
+      } else {
+        (void)hipGetLastError();
         destination = {};
-        map_error = AllocateDeviceRegion(source, destination);
-        if (map_error == hipSuccess) {
-          if (source_was_read) {
-            // A successful clone has already read the mapping. Reuse those
-            // cached bytes if registration fails instead of rereading the
-            // shard with direct I/O. When cloning is unavailable (Windows),
-            // keep the bounded file pipeline without touching the mapping.
-            map_error = CopyMappedRegion(source, destination.device_data);
-          } else {
-            device_regions.push_back(i);
+        bool source_was_read = false;
+        map_error = MapRegisteredRegion(source, destination, source_was_read);
+        if (map_error != hipSuccess) {
+          // The device-resident upload preserves single-copy residency
+          // wherever registration is refused.
+          destination = {};
+          map_error = AllocateDeviceRegion(source, destination);
+          if (map_error == hipSuccess) {
+            if (source_was_read) {
+              // A successful clone has already read the mapping. Reuse those
+              // cached bytes if registration fails instead of rereading the
+              // shard with direct I/O. When cloning is unavailable (Windows),
+              // keep the bounded file pipeline without touching the mapping.
+              map_error = CopyMappedRegion(source, destination.device_data);
+            } else {
+              device_regions.push_back(i);
+            }
           }
         }
       }

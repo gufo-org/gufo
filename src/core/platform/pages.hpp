@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace gufo::platform {
@@ -31,6 +32,24 @@ void ReleaseCommittedPages(void* base, std::size_t bytes) noexcept;
 /// allocation fails; throws std::system_error if page population fails.
 void* CloneMappedWeightsToAnonymousPages(const void* source_data,
                                          std::size_t bytes);
+
+/// True when VisitMappedChunks can read a file mapping without keeping its
+/// pages in the process: Linux drops each chunk's page-table entries after
+/// the visit, while Windows would keep the whole range in the working set.
+bool CanVisitMappedChunks() noexcept;
+
+/// Visits a read-only file mapping range in `chunk_bytes` pieces from up to
+/// `workers` threads. Each chunk is populated from the page cache or disk
+/// before `visit(worker, offset, chunk, chunk_size)` runs and its page-table
+/// entries are dropped afterwards; the page cache keeps the file data. A
+/// `false` from `visit` stops the remaining chunks. Requires
+/// CanVisitMappedChunks(); throws std::system_error if population fails.
+void VisitMappedChunks(
+    const void* source_data, std::size_t bytes, std::size_t chunk_bytes,
+    std::size_t workers,
+    const std::function<bool(std::size_t worker, std::size_t offset,
+                             const void* chunk, std::size_t chunk_size)>&
+        visit);
 
 /// Populates writable anonymous pages across up to `worker_limit` threads and
 /// requests transparent huge pages where supported.

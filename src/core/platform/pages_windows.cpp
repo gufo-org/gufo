@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,6 +31,16 @@ void ReleaseCommittedPages(void* base, std::size_t) noexcept {
 
 void* CloneMappedWeightsToAnonymousPages(const void*, std::size_t) {
   return nullptr;
+}
+
+bool CanVisitMappedChunks() noexcept {
+  return false;
+}
+
+void VisitMappedChunks(const void*, std::size_t, std::size_t, std::size_t,
+                       const std::function<bool(std::size_t, std::size_t,
+                                                const void*, std::size_t)>&) {
+  throw std::logic_error("mapped chunk visits are not supported on Windows");
 }
 
 void PopulateWritablePages(void* data, std::size_t bytes,

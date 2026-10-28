@@ -14,3 +14,10 @@ add_executable(platform_fs_test
   src/core/platform/mapped_file.cpp)
 add_test(NAME platform_fs_test COMMAND platform_fs_test)
 set_tests_properties(platform_fs_test PROPERTIES LABELS "cpu;platform")
+add_executable(platform_pages_test
+  tests/core/platform_pages_test.cpp
+  "$<$<NOT:$<PLATFORM_ID:Windows>>:src/core/platform/pages_posix.cpp>"
+  "$<$<PLATFORM_ID:Windows>:src/core/platform/pages_windows.cpp>")
+target_link_libraries(platform_pages_test PRIVATE Threads::Threads)
+add_test(NAME platform_pages_test COMMAND platform_pages_test)
+set_tests_properties(platform_pages_test PROPERTIES LABELS "cpu;platform")
