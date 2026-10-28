@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/weight_upload.hpp"
 #include "src/core/platform/pages.hpp"
 #include "src/core/platform/prefault.hpp"
@@ -162,11 +163,25 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
     auto& destination = weight_regions[i];
     hipError_t map_error;
     try {
+      // Device memory is not on the kernel's page LRU, so compaction never
+      // migrates it. A registered anonymous copy is: every migration makes
+      // the driver evict and restore the GPU mapping, and kernels reading it
+      // stall for seconds.
+      std::size_t free_bytes = 0;
+      std::size_t total_bytes = 0;
+      if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess &&
+          HeapFitsAboveReserve(free_bytes, source.size) &&
+          AllocateDeviceRegion(source, destination) == hipSuccess) {
+        device_regions.push_back(i);
+        continue;
+      }
+      (void)hipGetLastError();
+      destination = {};
       bool source_was_read = false;
       map_error = MapRegisteredRegion(source, destination, source_was_read);
       if (map_error != hipSuccess) {
-        // Mapped registration is the Linux fast path; the device-resident
-        // upload preserves single-copy residency wherever it is refused.
+        // The device-resident upload preserves single-copy residency
+        // wherever registration is refused.
         destination = {};
         map_error = AllocateDeviceRegion(source, destination);
         if (map_error == hipSuccess) {
