@@ -64,7 +64,6 @@ int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
 int ds4_gpu_embed_token_hc_tensor(ds4_gpu_tensor *out_hc, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t token, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_embed_tokens_hc_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *tokens, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t n_tokens, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_end_commands(void);
-int ds4_gpu_flush_commands(void);
 int ds4_gpu_hc_expand_add_split_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *block_add, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 /* Same expansion with the routed per-expert F16 rows summed in place of a
  * materialized block_out. Pair with ds4_gpu_set_routed_defer_sum and only use it
@@ -107,6 +106,9 @@ int ds4_gpu_matmul_f32_tensor(ds4_gpu_tensor *out, const void *model_map, uint64
 int ds4_gpu_matmul_q8_0_hc_expand_tensor(ds4_gpu_tensor *out_hc, ds4_gpu_tensor *block_out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_matmul_q8_0_group_pairs_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok, const uint32_t *group_offsets, uint32_t group_count);
 int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok);
+/* Two single-token projections of one input; quantizes it once and otherwise
+ * launches exactly what two ds4_gpu_matmul_q8_0_tensor calls would. */
+int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uint64_t weight0_offset, uint64_t out0_dim, ds4_gpu_tensor *out1, uint64_t weight1_offset, uint64_t out1_dim, const void *model_map, uint64_t model_size, uint64_t in_dim, const ds4_gpu_tensor *x);
 int ds4_gpu_output_hc_weights_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *pre, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, float eps);
 int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps);
 /* F16-result form of the hyper-connection row norm, paired with
