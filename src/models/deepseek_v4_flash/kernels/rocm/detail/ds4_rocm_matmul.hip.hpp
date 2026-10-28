@@ -1576,17 +1576,16 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         return hipblas_ok(st, "f16 matmul");
     }
     /* The 4096x256 F16 router projection is latency-bound and the ordered
-     * 32-thread row kernel is at least as fast on gfx1151; keep shared-X for
-     * compressor/indexer F16 decode where reusing x across rows is the win. */
+     * 32-thread row kernel is at least as fast on gfx1151; use the warp-row
+     * kernel for compressor/indexer F16 decode. */
     if (n_tok == 1u && !f16_decode_router_shape) {
-        if (in_dim <= 8192u && in_dim * sizeof(float) <= 65536u) {
-            const uint32_t rows_per_block = 32u;
-            matmul_f16_f32_sharedx_warp_rows_w32_kernel<<<
+        if (in_dim <= 8192u) {
+            const uint32_t rows_per_block = F16_DECODE_ROWS_PER_BLOCK;
+            matmul_f16_f32_warp_rows_w32_kernel<<<
                     ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
-                    rows_per_block * 32u,
-                    (size_t)in_dim * sizeof(float)>>>(
+                    rows_per_block * 32u>>>(
                     (float *)out->ptr, w, (const float *)x->ptr, (uint32_t)in_dim, out_dim);
-            return hip_ok(hipGetLastError(), "matmul_f16 sharedx launch");
+            return hip_ok(hipGetLastError(), "matmul_f16 warp rows launch");
         }
     }
     dim3 grid((unsigned)out_dim, (unsigned)n_tok, 1);
@@ -1842,15 +1841,14 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
     const __half *w0 = (const __half *)hip_model_range_ptr(model_map, weight0_offset, weight_bytes, "f16_pair0");
     const __half *w1 = (const __half *)hip_model_range_ptr(model_map, weight1_offset, weight_bytes, "f16_pair1");
     if (!w0 || !w1) return 0;
-    if (in_dim <= 8192u && in_dim * sizeof(float) <= 65536u) {
-        const uint32_t rows_per_block = 32u;
-        matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel<<<
+    if (in_dim <= 8192u) {
+        const uint32_t rows_per_block = F16_DECODE_ROWS_PER_BLOCK;
+        matmul_f16_pair_f32_warp_rows_w32_kernel<<<
                 ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
-                rows_per_block * 32u,
-                (size_t)in_dim * sizeof(float)>>>(
+                rows_per_block * 32u>>>(
                 (float *)out0->ptr, (float *)out1->ptr, w0, w1,
                 (const float *)x->ptr, (uint32_t)in_dim, out_dim);
-        return hip_ok(hipGetLastError(), "matmul_f16_pair sharedx launch");
+        return hip_ok(hipGetLastError(), "matmul_f16_pair warp rows launch");
     }
     matmul_f16_pair_ordered_chunks_kernel<<<(unsigned)out_dim, 32>>>(
         (float *)out0->ptr,
