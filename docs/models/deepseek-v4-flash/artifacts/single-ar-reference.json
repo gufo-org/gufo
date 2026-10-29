@@ -13,16 +13,16 @@
       "gpuDriver": "amdgpu",
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
-      "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "kernelRelease": "7.2.9-200.fc44.x86_64",
+      "memoryTotalBytes": 134297587712,
       "memoryType": "LPDDR5X (Unified)",
-      "rocmVersion": "7.2.3",
+      "rocmVersion": "10.1.0",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "6a00ba111e0ba4f715799d4fb9dd494ab94a336e71a45179b26e52c2d1b6a917",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-24",
+  "measuredOn": "2026-10-30",
   "mode": null,
   "model": {
     "id": "DeepSeek-V4-Flash",
@@ -36,162 +36,154 @@
   "referenceName": "antirez/ds4",
   "rows": {
     "0": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43089 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 0,
-          "completion_sha256": "a3feec2968666d13af0ac8ee77c7a0d776437a049a5bd4e5ab029e223c93a366",
+          "completion_sha256": "b0d11308ab8a3a88c1b8667f370629396571795d3698d04f5e30967fdbdf7f59",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2035
         }
       ],
-      "pp": 248.41,
+      "pp": 237.46,
       "pp_sd": null,
       "samples": 1,
-      "tg": 14.83,
+      "tg": 14.75,
       "tg_sd": null,
       "workload": "prose"
     },
     "12288": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 12242,
-          "completion_sha256": "4abb0fe9f5bb2f02cc44528a173d1b650871059445d562b2d84a080d7cbdd386",
+          "completion_sha256": "4dcc6fe24d2f1d5e560ce0cfd281516a1b5ac07e1e47522d38ccc35f65c482bc",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2041
         }
       ],
-      "pp": 212.41,
+      "pp": 213.14,
       "pp_sd": null,
       "samples": 1,
-      "tg": 13.78,
+      "tg": 13.76,
       "tg_sd": null,
       "workload": "prose"
     },
     "131072": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 131249,
-          "completion_sha256": "3600ae1a59f8b53cc4134fd3d7ffea910a327c814c31d8d379170b8db9d0774d",
+          "completion_sha256": "bd30f966077dcd360bfccd73744ed0b77fccff47e255d8a4d767afbb00ac3a5a",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2051
         }
       ],
-      "pp": 140.04,
+      "pp": 143.49,
       "pp_sd": null,
       "samples": 1,
-      "tg": 10.15,
+      "tg": 10.21,
       "tg_sd": null,
       "workload": "prose"
     },
     "16384": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 16365,
-          "completion_sha256": "c6333437ae1ed5749f66875de6509bef9679090c76ce81b8d32feb2ebc6ae3dc",
+          "completion_sha256": "f8e021fae9ad1e6fb8e512c4111ffe554f01c6e66b63a95e894efed45f9f8595",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2053
         }
       ],
-      "pp": 214.97,
+      "pp": 213.56,
       "pp_sd": null,
       "samples": 1,
-      "tg": 13.64,
+      "tg": 13.63,
       "tg_sd": null,
       "workload": "prose"
     },
     "32768": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 32799,
-          "completion_sha256": "ab2b9b7f8925b0dd03ebd0fd726dce0c20ab24073f92faa99fe091b47a3bab40",
+          "completion_sha256": "6f3d3057fcd6461d882854a769c092404317031ea6df7bf32004312cd53dccb3",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2034
         }
       ],
-      "pp": 205.7,
+      "pp": 205.29,
       "pp_sd": null,
       "samples": 1,
-      "tg": 12.96,
+      "tg": 12.98,
       "tg_sd": null,
       "workload": "prose"
     },
     "4096": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43089 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 4117,
-          "completion_sha256": "3079cfcd00e0d7d38bbd82703fe850759d0ee10bccd757711d434a679bb60132",
+          "completion_sha256": "f205389c61fe1815de23657eae31ee39f624cd9116d16f476b991e9cffaa6454",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2039
         }
       ],
-      "pp": 238.93,
+      "pp": 236.0,
       "pp_sd": null,
       "samples": 1,
-      "tg": 14.12,
+      "tg": 14.11,
       "tg_sd": null,
       "workload": "prose"
     },
     "65536": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 65570,
-          "completion_sha256": "ecea793ebd581c802d945d126aea59ddfe3a3313df4574d1f1b84974bc15a29f",
+          "completion_sha256": "aeb4afe7bd6d310713eef6c4768ef870164ec99dbe335c453c0564a31827a0a5",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2055
         }
       ],
-      "pp": 177.43,
+      "pp": 178.8,
       "pp_sd": null,
       "samples": 1,
-      "tg": 12.0,
+      "tg": 12.04,
       "tg_sd": null,
       "workload": "story"
     },
     "8192": {
-      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
-      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43989 --host 127.0.0.1 --rocm",
       "counts": [
         {
           "cache_n": 8178,
-          "completion_sha256": "ed2e1059b1c9057b598abafb105772176d5257a09b729595634d2777e800f39b",
+          "completion_sha256": "912dd815fd7b76e399f0bc0ab841904509358d6e875c6aaa04c53894dfe53537",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2027
         }
       ],
-      "pp": 223.24,
+      "pp": 221.99,
       "pp_sd": null,
       "samples": 1,
-      "tg": 13.9,
+      "tg": 13.88,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -205,7 +197,7 @@
       "--ctx",
       "133760",
       "--port",
-      "37507",
+      "43989",
       "--host",
       "127.0.0.1",
       "--rocm"
@@ -213,8 +205,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+    "dirty": false,
+    "revision": "07206ea40c4aadc5ea7da081073bf10a570cb1af"
   },
   "table": "single-ar",
   "target": "reference"
