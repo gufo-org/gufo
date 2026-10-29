@@ -264,29 +264,57 @@ __launch_bounds__(256) __global__
     if (wr >= WM / 2)
       return;
   }
+  // Lane halves hold alternate rows of a token. Swapping four values gives
+  // every lane eight consecutive rows, stored as two 16-byte writes.
+  const auto other_half = [](float value) {
+    return __builtin_bit_cast(float, __builtin_amdgcn_permlanex16(
+                                         __builtin_bit_cast(int, value),
+                                         __builtin_bit_cast(int, value),
+                                         0x76543210, 0xfedcba98, false, false));
+  };
 #pragma unroll
   for (int j = 0; j < RN; ++j) {
     const int local = (wt * RN + j) * 16 + sub, token = t_block + local;
-    if (token >= tokens)
-      continue;
-    const float scale = x.scale[token];
+    const float scale = token < tokens ? x.scale[token] : 0;
 #pragma unroll
-    for (int i = 0; i < RM; ++i)
+    for (int i = 0; i < RM; ++i) {
+      float value[8];
 #pragma unroll
       for (int l = 0; l < 8; ++l) {
         const int tile_row = (wr * RM + i) * 16 + 2 * l + half;
-        const int row = r_block + tile_row;
-        if (row >= M)
-          continue;
-        float value = acc[i][j][l] * scale;
+        value[l] = acc[i][j][l] * scale;
         if constexpr (kSwiGLU) {
           // The separate SwiGLU kernel's formula.
-          const float g = value, u = s_up[tile_row][local];
+          const float g = value[l], u = s_up[tile_row][local];
           const float sig_g = 1.0F / (1.0F + expf(-g));
-          value = (g * sig_g) * u;
+          value[l] = (g * sig_g) * u;
         }
-        y[std::size_t(token) * M + row] = value;
       }
+      float received[4], rows[8];
+#pragma unroll
+      for (int l = 0; l < 4; ++l)
+        received[l] = other_half(half ? value[l] : value[4 + l]);
+#pragma unroll
+      for (int l = 0; l < 4; ++l) {
+        rows[2 * l] = half ? received[l] : value[l];
+        rows[2 * l + 1] = half ? value[4 + l] : received[l];
+      }
+      const int row = r_block + (wr * RM + i) * 16 + 8 * half;
+      if (token >= tokens)
+        continue;
+      float* dst = y + std::size_t(token) * M + row;
+      if (row + 8 <= M && M % 4 == 0) {
+        reinterpret_cast<float4*>(dst)[0] =
+            make_float4(rows[0], rows[1], rows[2], rows[3]);
+        reinterpret_cast<float4*>(dst)[1] =
+            make_float4(rows[4], rows[5], rows[6], rows[7]);
+      } else {
+#pragma unroll
+        for (int l = 0; l < 8; ++l)
+          if (row + l < M)
+            dst[l] = rows[l];
+      }
+    }
   }
 }
 }  // namespace gufo::models::lfm3::gpu
