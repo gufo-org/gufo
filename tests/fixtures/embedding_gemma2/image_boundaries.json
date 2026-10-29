@@ -1,0 +1,60 @@
+{
+  "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+  "transformers_revision": "50e35cc0ca18ec19b80653690de553e6decf74f5",
+  "transformers": "5.21.0.dev0",
+  "torch": "2.14.1",
+  "cases": [
+    {
+      "name": "image_70_7",
+      "max_soft_tokens": 70,
+      "base_tokens": 67,
+      "padding": 8124,
+      "exact_tokens": 8192,
+      "overflow_tokens": 8193
+    },
+    {
+      "name": "image_140_7",
+      "max_soft_tokens": 140,
+      "base_tokens": 134,
+      "padding": 8057,
+      "exact_tokens": 8192,
+      "overflow_tokens": 8193
+    },
+    {
+      "name": "image_0",
+      "max_soft_tokens": 280,
+      "base_tokens": 256,
+      "padding": 7935,
+      "exact_tokens": 8192,
+      "overflow_tokens": 8193
+    },
+    {
+      "name": "image_560_7",
+      "max_soft_tokens": 560,
+      "base_tokens": 524,
+      "padding": 7667,
+      "exact_tokens": 8192,
+      "overflow_tokens": 8193
+    },
+    {
+      "name": "image_1120_7",
+      "max_soft_tokens": 1120,
+      "base_tokens": 1106,
+      "padding": 7085,
+      "exact_tokens": 8192,
+      "overflow_tokens": 8193
+    }
+  ],
+  "image_counts": [
+    {
+      "images": 32,
+      "max_soft_tokens": 70,
+      "tokens": 2114
+    },
+    {
+      "images": 33,
+      "max_soft_tokens": 70,
+      "tokens": 2180
+    }
+  ]
+}

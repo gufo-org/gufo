@@ -57,9 +57,20 @@ antialiased uint8 bicubic resize preserving aspect ratio, no crop, rescale by
 per image by default; the actual count depends on aspect ratio. A request can
 pick the processor's other budgets with
 `"mm_processor_kwargs": {"max_soft_tokens": N}`, where N is 70, 140, 280, 560
-or 1120, as in vLLM; one budget applies to every image of the request. At 1120
+or 1120, as in vLLM; one budget applies to every image of the request, including
+mixed batches. Video frames retain their separate 140-token budget. At 1120
 the 8,192-token limit fits at most seven images that use the whole budget. These tokens and their
 boundary markers count toward the 8,192-token input limit and reported usage.
+The 32-image request cap is a deliberate server resource limit, not a model
+limit: it bounds retained decoded patch memory across all inputs in a request.
+At budget 70, 32 square images fit in one input (2,114 tokens including
+boundaries); a 33rd image is still refused with `too_many_images`. The cap is
+shared across inputs, even when each input separately fits the context. Patches
+use 27,648 bytes per soft token, so 32 full-budget 1120-token images across
+multiple inputs can retain about 945 MiB of patch data, plus decoding and
+framing overhead. The shared media byte/read-time and per-image pixel limits
+still apply. Smaller budgets reduce vision work and memory at the cost of
+spatial detail; [benchmarks](BENCHMARKS.md#image-budgets) record measured costs.
 Text parts containing literal `<|image|>` placeholders are refused when images
 are present. Unsupported processor or vision configurations are refused.
 

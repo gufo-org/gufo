@@ -114,6 +114,18 @@ def main():
         status, body = post(inputs)
         assert status == 200, body
         check(body, probes)
+        # Image budgets must not change the distinct 140-token video default.
+        # Explicit default-image options also preserve the joint multimodal
+        # reference, including both placeholder kinds in one input.
+        for budget in (70, 1120):
+            status, body = post([content(cases['short'])],
+                                mm_processor_kwargs={'max_soft_tokens': budget})
+            assert status == 200, body
+            check(body, [cases['short']])
+        status, body = post([content(cases['mixed'])],
+                            mm_processor_kwargs={'max_soft_tokens': 280})
+        assert status == 200, body
+        check(body, [cases['mixed']])
         if not args.smoke:
             for case in fixture['cases']:
                 status, body = post([content(case)], video_options=case['options'])

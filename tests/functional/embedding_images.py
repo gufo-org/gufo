@@ -39,7 +39,10 @@ def main():
     parser.add_argument("--model", default="embeddinggemma-2")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    if Path(args.output).exists():
+        parser.error("output must not exist")
     fixture = json.loads((Path(__file__).resolve().parents[1] / "fixtures/embedding_gemma2/image_golden.json").read_text())
+    boundaries = json.loads((Path(__file__).resolve().parents[1] / "fixtures/embedding_gemma2/image_boundaries.json").read_text())
     results = []
 
     def post(inputs, **options):
@@ -58,6 +61,14 @@ def main():
                         "request": {"input": inputs, **options}, "response": body})
         return status, body
 
+    def check_usage(body, tokens):
+        assert body["usage"] == {"prompt_tokens": tokens, "total_tokens": tokens}, body["usage"]
+
+    def check_vector(vector, reference, dimensions=768):
+        assert len(vector) == dimensions and all(math.isfinite(v) for v in vector)
+        assert cosine(vector, reference[:dimensions]) >= 0.9999
+        assert abs(sum(v*v for v in vector)-1) < 1e-5
+
     inputs = []
     for case in fixture["cases"]:
         fragments = case["text"].split("<|image|>")
@@ -68,7 +79,23 @@ def main():
             if i < len(case["images"]):
                 content.append({"type": "image_url", "image_url": {"url": picture(case["images"][i])}})
         inputs.append({"content": content})
+    representatives = []
+    for boundary in boundaries["cases"]:
+        index = next(i for i, case in enumerate(fixture["cases"]) if case["name"] == boundary["name"])
+        representatives.append((boundary["max_soft_tokens"], fixture["cases"][index], inputs[index]))
     try:
+        # Start with small scratch, then grow/reuse it through concurrent
+        # budgets. A final default request must retain reference agreement.
+        def budget_request(probe):
+            budget, case, item = probe
+            status, body = post([item], mm_processor_kwargs={"max_soft_tokens": budget})
+            assert status == 200, body
+            check_vector(body["data"][0]["embedding"], case["embedding"])
+            check_usage(body, len(case["token_ids"]))
+        budget_request(representatives[0])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            list(pool.map(budget_request, reversed(representatives)))
+        budget_request(next(probe for probe in representatives if probe[0] == 280))
         # Each request is retained, including cold vision initialization.
         for case, item in zip(fixture["cases"], inputs):
             budget = case.get("max_soft_tokens")
@@ -78,10 +105,63 @@ def main():
             agreement = cosine(vector, case["embedding"])
             assert len(vector) == 768 and agreement >= 0.9999, (case["name"], agreement)
             assert body["usage"]["prompt_tokens"] == len(case["token_ids"]), body["usage"]
+            check_usage(body, len(case["token_ids"]))
             assert abs(sum(v*v for v in vector)-1) < 1e-5
             results[-1]["case"] = case["name"]
             results[-1]["cosine"] = agreement
             print(case["name"], agreement, results[-1]["elapsed_ms"], flush=True)
+
+        # Every budget applies across a mixed batch, preserves ordering/usage,
+        # and retains all Matryoshka dimensions. References are the independent
+        # full vectors, truncated and normalized by cosine for smaller outputs.
+        status, text = post(["hello"])
+        assert status == 200, text
+        text_tokens = text["usage"]["prompt_tokens"]
+        for budget in (70, 140, 280, 560, 1120):
+            boundary = next(case for case in boundaries["cases"] if case["max_soft_tokens"] == budget)
+            index = next(i for i, case in enumerate(fixture["cases"]) if case["name"] == boundary["name"])
+            case, item = fixture["cases"][index], inputs[index]
+            for dimensions in (128, 256, 512, 768):
+                status, body = post([item, "hello", item], dimensions=dimensions,
+                    mm_processor_kwargs={"max_soft_tokens": budget})
+                assert status == 200, body
+                assert [entry["index"] for entry in body["data"]] == [0, 1, 2]
+                for entry, reference in zip(body["data"],
+                        (case["embedding"], text["data"][0]["embedding"], case["embedding"])):
+                    check_vector(entry["embedding"], reference, dimensions)
+                check_usage(body, 2*len(case["token_ids"]) + text_tokens)
+
+            # <eos> is the pinned tokenizer's single added token (ID 1 in the
+            # independent fixtures). It cannot BPE-merge at text/image joins.
+            # Put text on both sides to exercise true interleaving at exactly
+            # 8192 tokens, then overflow by one with/without explicit truncation.
+            assert len(case["token_ids"]) == boundary["base_tokens"]
+            assert boundary["exact_tokens"] == 8192 and boundary["overflow_tokens"] == 8193
+            padding = boundary["padding"]
+            prefix = {"type": "text", "text": "<eos>"}
+            suffix = {"type": "text", "text": "<eos>" * padding}
+            content = [prefix, *item["content"], suffix]
+            options = {"mm_processor_kwargs": {"max_soft_tokens": budget}}
+            status, exact = post([{"content": content}], **options)
+            assert status == 200, exact
+            check_usage(exact, 8192)
+            longer = {"type": "text", "text": suffix["text"] + "<eos>"}
+            for truncate in (False, True):
+                status, body = post([{"content": [prefix, *item["content"], longer]}],
+                                    truncate=truncate, **options)
+                if truncate:
+                    assert status == 200, body
+                    check_usage(body, 8192)
+                    check_vector(body["data"][0]["embedding"], exact["data"][0]["embedding"])
+                else:
+                    assert status == 400 and body["error"]["code"] == "context_length_exceeded", body
+            # Moving overflow before the image would remove media: refuse even
+            # when truncation is requested, rather than silently dropping it.
+            before = {"type": "text", "text": longer["text"] + "<eos>"}
+            status, body = post([{"content": [before, *item["content"]]}],
+                                truncate=True, **options)
+            assert status == 400 and body["error"]["code"] == "context_length_exceeded", body
+
         status, body = post([inputs[1], "hello", inputs[0], {"content": [{"type": "text", "text": "hello"}]}])
         assert status == 200, body
         assert [v["index"] for v in body["data"]] == list(range(4))
@@ -126,6 +206,17 @@ def main():
         assert status == 400 and body["error"]["code"] == "context_length_exceeded", body
         status, body = post([{"content": [part] * 33}])
         assert status == 400 and body["error"]["code"] == "too_many_images", body
+        # 32 is a server count cap, independent of the model context. At budget
+        # 70 a square has an 8x8 pooled grid: 32*(64+2)+2 = 2114 tokens.
+        # This grid is pinned by the independent 32-image processor fixture.
+        small_options = {"mm_processor_kwargs": {"max_soft_tokens": 70}}
+        status, body = post([{"content": [part] * 32}], **small_options)
+        assert status == 200, body
+        check_usage(body, next(case["tokens"] for case in boundaries["image_counts"] if case["images"] == 32))
+        assert next(case["tokens"] for case in boundaries["image_counts"] if case["images"] == 33) < 8192
+        for items in ([{"content": [part] * 33}], [{"content": [part]}] * 33):
+            status, body = post(items, **small_options)
+            assert status == 400 and body["error"]["code"] == "too_many_images", body
         status, body = post([{"content": [part, {"type": "text", "text": "<|image|>"}]}])
         assert status == 400 and body["error"]["code"] == "invalid_image_input", body
         status, body = post([{"content": [{"type": "text", "text": "<|ima"},

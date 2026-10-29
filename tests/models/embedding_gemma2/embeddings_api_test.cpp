@@ -962,6 +962,12 @@ void TestImageSoftTokens() {
   for (const char* body :
        {R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":281}})",
         R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":0}})",
+        R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":-70}})",
+        R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":null}})",
+        R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":true}})",
+        R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":[]}})",
+        R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":{}}})",
+        R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":1121}})",
         R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":280.5}})",
         R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":"280"}})",
         R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":4294967576}})",
@@ -970,6 +976,14 @@ void TestImageSoftTokens() {
                 std::string("refused: ") + body);
   }
   Check(runner.calls == calls, "invalid kwargs never reach the service");
+  Check(
+      Send(
+          *service,
+          R"({"input":"a","mm_processor_kwargs":{"max_soft_tokens":70},"video_options":{"fps":0.5,"max_frames":3}})")
+              .status == 200,
+      "image and video processor options coexist");
+  Check(runner.last_image_soft_tokens == 70,
+        "video options do not override the image budget");
 }
 
 // The native path's cut for inputs with images: 2 = <bos>, 1 = <eos>,

@@ -550,7 +550,6 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
     }
   }
 
-
   EmbeddingBatch batch;
   std::string error;
   switch (service.EmbedInputs(inputs, request.is_cancelled, &batch, &error,

@@ -71,7 +71,17 @@ python3 tools/models/embedding_gemma2/reference_images.py \
   --model models/embeddinggemma-2 \
   --transformers-revision 50e35cc0ca18ec19b80653690de553e6decf74f5 \
   --output tests/fixtures/embedding_gemma2/image_golden.json
+python3 tools/models/embedding_gemma2/reference_image_boundaries.py \
+  --model models/embeddinggemma-2 \
+  --transformers-revision 50e35cc0ca18ec19b80653690de553e6decf74f5 \
+  --output tests/fixtures/embedding_gemma2/image_boundaries.json
 ```
+
+The processor-only boundary oracle records exact 8,192/8,193-token interleaved
+inputs for every budget, plus 32/33 square images at budget 70 (2,114/2,180
+tokens). It uses the official processor without a Gufo implementation or model
+forward. These counts qualify expansion and the deliberate server image cap;
+they are not additional final-vector reference fixtures.
 
 `embedding_gemma2_image_processor_test` checks every resized byte without a GPU
 or weights. `embedding_gemma2_image_golden_hip_test` additionally runs the native
