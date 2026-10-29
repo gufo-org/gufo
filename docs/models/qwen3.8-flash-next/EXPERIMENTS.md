@@ -49,6 +49,20 @@ one, 1,741 without both). Their removal is left to a ROCm 10.1 measurement.
 | q/k held by quad lanes, broadcast as DPP operands of the FMAs | Rejected. Byte-identical, with 4× fewer LDS loads, but the combiner left 300 `v_mov_dpp` per token (1.10 → 1.24 µs/row). Inline-asm `v_fmac_f32_dpp` lost dual issue and chained badly (1.36–1.80). |
 | 4 rows per lane (4 waves); 8 lanes × 16 keys × 4 rows; scheduling barriers interleaving the row chains; crossed-component update order for dual issue | Rejected: 1.73 / 1.19–1.24 / unchanged / unchanged against 1.10 µs/row (the last cut the instruction count 200 → 180 with no time gain). Microbenchmark: dual FMAs with six VGPR reads issue no faster than two single FMAs, so the recurrence is bound by VGPR operand reads rather than by instruction count. |
 
+## 8-bit K/V (October 25, 2026)
+
+Quality evidence is in [QUALITY.md](QUALITY.md#8-bit-kv-cache-october-25-2026).
+Measured on a production fork of this model (v3 recipe + MTP, Strix Halo,
+ROCm 7.2.4) and rebased onto main.
+
+| Experiment | Outcome |
+| --- | --- |
+| 8-bit K/V with an F16 scale per 16 values (the "KV-Q8 b16" format of our Qwen3.6 port), replacing the F16 caches of the twelve attention layers and the draft layer | Retained. 576 instead of 1,024 bytes per row and K or V; 14,596 instead of 25,348 continuation bytes per target token. Writers round to F16 first, so the fused projection and `PrepareAttention` stay byte-identical; codes use an exact reciprocal-and-remainder rounding because fast-math division differs between kernels (a first `x / d` version mismatched the CPU format by one code). Readers see f16(scale × code), so FP64 checks apply to the dequantized cache. On Qwen3.6-35B, 32-value scale blocks measured −4/149 on an internal question set and 16-value blocks within noise; 16 here too. |
+| F32 dequantization (cvt, multiply, round to F16) | Replaced by a packed F16 form (sign-flipped byte under 0x64 is 1152 + code, one `v_pk_sub`, one `v_pk_mul`), byte-identical hashes in both attention benches: decode attention rows 8 at d32K 153.9 → 142.6 µs, prefill WMMA 4,096 tokens at d0/d32K/d118K 15.17/20.80/21.88 → 13.32/19.23/20.33 ms (F16 13.00/18.63/19.99). |
+| Quantizing in the fused QKV projection's GEMM epilogue | Rejected: tripled the kernel (727 → 2,108 ms over a 25.7K prefill, 8% of prefill). The epilogue again writes F16 rows to idle K/V scratch and two `StoreKv` launches quantize them (8 ms per 25.7K prefill); outputs byte-identical. |
+| Whole K scale blocks per thread in sparse WMMA attention | Retained: one 16-code load and one scale per thread instead of two of each; identical hashes; sparse call at d32K/d128K 40.2/70.5 → 39.1/68.9 ms in the model (F16 37.7/67.1). |
+| Widening the next tiles' rows before the phase barrier | Rejected: moving dequantization off the softmax phase made the sparse call slower (68.9 → 70.8 ms at d128K). |
+
 ## Prefill route independence (October 23, 2026)
 
 A prompt restored from a checkpoint and finished by a short prefill pass must

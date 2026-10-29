@@ -425,7 +425,7 @@ conversations:
   here, enough for a 200k-token checkpoint plus a 50k one instead of only the
   first.
 - Run fewer `--sessions`: each Flash-Next session at 262144 context holds about
-  6.3 GB of state that the cache can use instead.
+  3.6 GB of 8-bit K/V that the cache can use instead.
 - Add `--cache-disk` so checkpoints that leave RAM can still be restored from
   disk. The other models also need `--cache-disk-staging-bytes` above the
   snapshot size; Flash-Next streams any size through its default buffer.

@@ -837,10 +837,16 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
   for (std::size_t i = 0; i < serial.size(); ++i) {
     const auto a = serial[i]->SaveSnapshot(&error);
     const auto b = batched[i]->SaveSnapshot(&error);
-    Require(a && b &&
-                std::equal(a->bytes().begin(), a->bytes().end(),
-                           b->bytes().begin(), b->bytes().end()),
-            "batched snapshot state differs: " + std::to_string(i));
+    Require(a && b, error);
+    const auto x = a->bytes(), y = b->bytes();
+    if (!std::equal(x.begin(), x.end(), y.begin(), y.end())) {
+      const auto at = std::ranges::mismatch(x, y).in1 - x.begin();
+      Require(false, "batched snapshot state differs: " + std::to_string(i) +
+                         " at byte " + std::to_string(at) + " of " +
+                         std::to_string(x.size()) + "/" +
+                         std::to_string(y.size()) + " (" +
+                         std::to_string(x.size() - at) + " from the end)");
+    }
   }
   std::cout << "batch independent_state_exact=1\n" << std::flush;
 }
@@ -1602,9 +1608,12 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
   std::vector<std::int32_t> prompt(prompt_tokens);
   for (std::size_t i = 0; i < prompt.size(); ++i)
     prompt[i] = pattern[i % pattern.size()];
+  if (with_image && !model->VisionEncoder()) {
+    std::cout << "image execution modes: matching vision sidecar unavailable\n";
+    return;
+  }
   if (with_image) {
-    Require(model->VisionEncoder() != nullptr && prompt_tokens >= 4,
-            "image prefill requires its encoder and four image tokens");
+    Require(prompt_tokens >= 4, "image prefill requires four image tokens");
     auto image = std::make_shared<vision::Prompt>();
     const vision::ImageGrid grid{0, 2, 2};
     std::fill_n(prompt.begin(), 4, vision::kImageToken);
