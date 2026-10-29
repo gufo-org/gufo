@@ -101,8 +101,8 @@ whole-image truncation, concurrent scratch growth/reuse, 32-small-budget-image
 acceptance, 33-image rejection within and across inputs, malformed inputs and
 recovery. Six video smoke requests retain independent joint multimodal parity
 and verify that image-budget options leave the 140-token video default intact.
-The [retained rebase record](artifacts/gfx1151-pr870-review.json) includes both
-HTTP runs, source/binary/fixture hashes, native results and every timing arm.
+Both HTTP runs, source/binary/fixture hashes, native results and every timing
+arm are retained in local review evidence.
 The initial mixed-media timing flags remain inconclusive; the affected-history
 follow-up and unchanged-main controls are documented in
 [benchmarks](BENCHMARKS.md#image-budget-rebase-controls). This is Linux

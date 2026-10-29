@@ -195,9 +195,8 @@ The default rows show the mean of the two passes.  The vision scratch grows only
 Requalified on gfx1151 against main `a3edb56f`, with the pinned Nix GCC 16.2.0 /
 ROCm 10.1 toolchain and the production release preset. Each arm starts a fresh
 server and uses the same text, image, video and mixed-media request history.
-The [retained record](artifacts/gfx1151-pr870-review.json) includes every
-request, startup phase, memory observation, comparison and unchanged-main
-control. Timings below are server milliseconds for each paired repeat, without
+Local review evidence retains every request, startup phase, memory
+observation, comparison and unchanged-main control. Timings below are server milliseconds for each paired repeat, without
 averaging across requests.
 
 | Request | Repeat 1 main → candidate | Repeat 2 main → candidate |
