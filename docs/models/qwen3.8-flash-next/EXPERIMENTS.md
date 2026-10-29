@@ -1,10 +1,24 @@
 # Qwen3.8 Flash-Next experiments
 
+## K/V rows that grow with the context (October 25, 2026)
+
+Quality evidence is in [QUALITY.md](QUALITY.md#kv-rows-that-grow-with-the-context-october-25-2026),
+memory and speed in [BENCHMARKS.md](BENCHMARKS.md#kv-memory-october-25-2026).
+Measured on a production fork of this model (mixed K-quant recipe + MTP,
+Strix Halo, ROCm 7.2.4) before the rebase onto main.
+
+| Experiment | Outcome |
+| --- | --- |
+| Growable K/V via HIP virtual memory management | Retained. `tools/bench/vmm_probe.hip` on gfx1151/ROCm 7.2.4: VMM supported, 4 KiB granularity, a graph captured over 4 chunks reads chunks mapped after capture and after unmap/remap, 0.088 ms per 2 MiB create/map/access, read bandwidth equal to `hipMalloc` (242 GB/s over 512 MiB). Each session reserves full-context virtual ranges for its 39 K, V and pooled-key buffers and maps 2 MiB chunks (or the whole buffer when smaller) before a forward, MTP step or restore writes; addresses never move, so captured graphs and borrowed views stay valid. `--kv-cache-bytes` bounds the mapped total; a growth past it first releases rows idle sessions no longer hold (after their borrowers were preserved, as an overwrite would) and otherwise fails the request with "K/V memory exhausted" before any state changes. Startup claims fixed state plus an equal share of the budget per session. |
+| Freeing each buffer's address range with `hipMemAddressFree` | Replaced: on ROCm 7.2.4 chunks mapped into a range that an earlier `hipMemAddressFree` or `hipFree` had released intermittently faulted on first access (a GPU page fault in `__amd_rocclr_fillBufferAligned`, the zero fill of freshly mapped chunks, in 4 of 5 `snapshot_test` runs; each time the range had held a destroyed session's buffers or a freed `hipMalloc` allocation). Draining the stream before growth, mapping every chunk up front, never unmapping and disabling SDMA did not help; never returning ranges did. `KvPool` now keeps every range it reserves and hands a released one to the next buffer of the same size: 10/10 `snapshot_test` runs pass. A minimal reproducer outside the model did not fault. |
+| Draining the stream before each growth | Rejected: cost each prefill pass its host/GPU overlap (128K prefill 1,633 → 1,546 tok/s in one round); mapping beside rows queued work uses needs no drain. |
+| Mapping the next prompt pass's rows while a pass runs | Retained: mapping between passes left the GPU idle for about 7 ms per pass in `gufo bench`, up to 70 ms behind a server. A long eager prompt pass (2,048+ rows) now leaves its work queued, maps the K/V rows of the next pass and of its own draft catch-up from what the budget has free, then waits; the passes themselves still reserve anything left. |
+
 ## 8-bit K/V (October 25, 2026)
 
 Quality evidence is in [QUALITY.md](QUALITY.md#8-bit-kv-cache-october-25-2026).
 Measured on a production fork of this model (v3 recipe + MTP, Strix Halo,
-ROCm 7.2.4) and rebased onto main.
+ROCm 7.2.4) before the rebase onto main.
 
 | Experiment | Outcome |
 | --- | --- |

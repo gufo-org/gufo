@@ -1,5 +1,25 @@
 # Qwen3.8 Flash-Next quality
 
+## K/V rows that grow with the context, October 25, 2026
+
+`growable_kv_test` checks rows that grow with the tokens held against
+sessions whose rows were already backed: prefill passes ending around the
+first K/V chunk (row 3,641) and the first pooled-key chunk (token 16,384),
+greedy MTP decode with verification and rollback across a chunk, restore of
+a 9,000-token snapshot into a session with no backed rows and over more
+backed rows, a prefill cancelled after growing then repeated, eight batched
+sessions of 100–9,000 tokens crossing chunks (also pre-grown), and a 300 MiB
+budget: a third 6,000-token session is refused with "K/V memory exhausted",
+its peers keep decoding exactly, and once one goes idle its rows are reused
+while its borrowed checkpoint keeps its bytes. All logits, tokens and state
+bytes are exact.
+
+On main `34ebb5fe` with the 8-bit K/V and this change, UD-Q4_K_XL + shared
+Q8_0 MTP, ROCm 7.2.4: `growable_kv_test`, `continuation_adapter_test` and
+`snapshot_test` pass, as do the 20 `qwen38_flash_next` ctests.
+`snapshot_test` is the check for address-range reuse: with ranges returned
+by `hipMemAddressFree` it faulted in 4 of 5 runs.
+
 ## 8-bit K/V cache, October 25, 2026
 
 K and V of the twelve attention layers and the draft layer are stored as

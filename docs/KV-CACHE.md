@@ -356,6 +356,7 @@ captured; RAM-retained snapshots and their captures in progress share the RAM bu
 | RAM checkpoint records | 128, independent of `--sessions` | internal safety limit |
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
 | Disk staging bytes | smaller of `MemAvailable / 8` and the disk budget | `--cache-disk-staging-bytes` |
+| Flash-Next device K/V rows, all sessions | 0: every session can grow to its full context | `--kv-cache-bytes` |
 
 `--cache-ram-bytes off` turns the RAM cache off. The server then keeps no
 checkpoint in RAM, commits no cache backing, and computes no budget. Without
@@ -424,8 +425,9 @@ conversations:
   `slot_pinned_bytes` on Qwen3.8-27B): about 10.5 GB
   here, enough for a 200k-token checkpoint plus a 50k one instead of only the
   first.
-- Run fewer `--sessions`: each Flash-Next session at 262144 context holds about
-  3.6 GB of 8-bit K/V that the cache can use instead.
+- Cap Flash-Next's device K/V with `--kv-cache-bytes`: each session maps
+  about 15.6 KiB of K/V, pooled keys and draft rows per token it holds (about
+  4 GB at 262,144 tokens) and only grows to its context as tokens arrive.
 - Add `--cache-disk` so checkpoints that leave RAM can still be restored from
   disk. The other models also need `--cache-disk-staging-bytes` above the
   snapshot size; Flash-Next streams any size through its default buffer.
