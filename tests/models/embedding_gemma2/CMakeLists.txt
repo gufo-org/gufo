@@ -150,3 +150,10 @@ target_compile_definitions(embedding_gemma2_audio_decoder_test PRIVATE
 add_test(NAME embedding_gemma2_audio_decoder_test COMMAND embedding_gemma2_audio_decoder_test)
 set_tests_properties(embedding_gemma2_audio_decoder_test PROPERTIES
   LABELS "cpu;models;embedding-gemma2;audio;quality")
+
+add_executable(embedding_gemma2_video_processor_test video_processor_test.cpp)
+target_link_libraries(embedding_gemma2_video_processor_test PRIVATE gufo_embedding_gemma2 gufo_core)
+target_compile_definitions(embedding_gemma2_video_processor_test PRIVATE
+  GUFO_VIDEO_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/video_golden.json")
+add_test(NAME embedding_gemma2_video_processor_test COMMAND embedding_gemma2_video_processor_test)
+set_tests_properties(embedding_gemma2_video_processor_test PROPERTIES LABELS "cpu;models;embedding-gemma2;video;quality")

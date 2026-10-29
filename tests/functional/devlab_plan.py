@@ -80,7 +80,8 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
             for field in ('groups', 'deferred', 'release_only', 'out_of_scope', 'obligations'):
                 result[field].extend(planned[field])
         else:
-            suites = {'embedding': ['embedding-text', 'embedding-images'],
+            suites = {'embedding': (['embedding-smoke'] if tier == 'pr' else
+                                     ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video']),
                       'asr': ['asr-http'], 'tts': ['tts-http']}[model['category']]
             result['groups'].append({'profile': key + '/native', 'configuration': 'standard',
                                      'settings': {}, 'suites': suites})

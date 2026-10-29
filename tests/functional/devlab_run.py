@@ -54,6 +54,8 @@ def execute(plan, binary, baseline, assets_path, output, report, logs):
             else:
                 destination = output / key
                 command = service_args(key, binary, baseline, assets, destination)
+                if model['category'] == 'embedding':
+                    command += ['--embedding-suite', 'smoke' if plan['tier'] == 'pr' else 'full']
                 with (output / (key + '.log')).open('w') as log:
                     result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=900)
                 path = destination / 'report.json'

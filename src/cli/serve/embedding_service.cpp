@@ -16,6 +16,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/library.hpp"
 #include "src/models/embedding_gemma2/audio_decoder.hpp"
 #include "src/models/embedding_gemma2/audio_processor.hpp"
 #include "src/models/embedding_gemma2/image_processor.hpp"
@@ -61,6 +62,8 @@ struct EmbeddingService::Impl {
         options.model_root.string(), &image_processor_error);
     (void)models::embedding_gemma2::ValidateAudioProcessor(
         options.model_root.string(), &audio_processor_error);
+    (void)models::embedding_gemma2::ValidateVideoProcessor(
+        options.model_root.string(), &video_processor_error);
     encoder = models::embedding_gemma2::hip::EncoderRuntime::Create(
         options.model_root.string(), &error);
     if (encoder == nullptr) {
@@ -88,6 +91,8 @@ struct EmbeddingService::Impl {
         EmbeddingService::kMaxInputTokens * tokenizer->max_token_bytes();
     std::size_t image_count = 0;
     std::size_t audio_count = 0;
+    std::size_t video_count = 0;
+    std::size_t video_frames = 0;
     for (std::size_t index = 0; index < inputs.size(); ++index) {
       if (is_cancelled && is_cancelled())
         return EmbeddingStatus::kCancelled;
@@ -101,6 +106,42 @@ struct EmbeddingService::Impl {
           return EmbeddingStatus::kCancelled;
         if (part.type == EmbeddingPart::Type::kText) {
           text += part.value;
+        } else if (part.type == EmbeddingPart::Type::kVideo) {
+          if (!encoder->config().supported_video ||
+              !video_processor_error.empty()) {
+            if (error)
+              *error = video_processor_error.empty()
+                           ? "unsupported embedding vision configuration"
+                           : video_processor_error;
+            return EmbeddingStatus::kInvalidVideoInput;
+          }
+          try {
+            if (++video_count > EmbeddingService::kMaxVideos)
+              throw std::invalid_argument(
+                  "embedding requests accept at most 32 videos");
+            const auto bytes = core::ReadVideoUrl(part.value, budget);
+            auto frames =
+                ProcessVideo(bytes, request.video, is_cancelled,
+                             EmbeddingService::kMaxVideoFrames - video_frames);
+            video_frames += frames.size();
+            if (video_frames > EmbeddingService::kMaxVideoFrames)
+              throw std::invalid_argument(
+                  "embedding requests accept at most 64 sampled video frames");
+            text += FrameVideo(frames, request.video);
+            for (auto& frame : frames)
+              sequence.images.push_back(
+                  {0, std::move(frame.patches), kVideoTokenId});
+          } catch (const platform::LibraryError& failure) {
+            if (error)
+              *error = failure.what();
+            return EmbeddingStatus::kFailed;
+          } catch (const std::exception& failure) {
+            if (is_cancelled && is_cancelled())
+              return EmbeddingStatus::kCancelled;
+            if (error)
+              *error = failure.what();
+            return EmbeddingStatus::kInvalidVideoInput;
+          }
         } else if (part.type == EmbeddingPart::Type::kAudio) {
           if (!encoder->config().supported_audio ||
               !audio_processor_error.empty()) {
@@ -197,19 +238,20 @@ struct EmbeddingService::Impl {
                                            EmbeddingService::kMaxInputTokens)
               : tokenizer->Encode(text);
       if (!sequence.images.empty()) {
-        std::size_t expected = 0;
-        for (const auto& image : sequence.images)
-          expected += image.patches.soft_tokens();
-        // Validate after joining and tokenizing: a literal placeholder may
-        // straddle adjacent text parts. It must never capture another image's
-        // features or leave an unfilled image token in the text backbone.
-        if (static_cast<std::size_t>(std::ranges::count(
-                sequence.tokens, kImageTokenId)) != expected) {
-          if (error)
-            *error =
-                "text must not contain image placeholders when images are "
-                "supplied";
-          return EmbeddingStatus::kInvalidInput;
+        for (const auto token : {kImageTokenId, kVideoTokenId}) {
+          std::size_t expected = 0;
+          for (const auto& image : sequence.images)
+            if (image.token_id == token)
+              expected += image.patches.soft_tokens();
+          if (static_cast<std::size_t>(
+                  std::ranges::count(sequence.tokens, token)) != expected) {
+            if (error)
+              *error =
+                  "text must not contain image/video placeholders when vision "
+                  "inputs are supplied";
+            return token == kVideoTokenId ? EmbeddingStatus::kInvalidVideoInput
+                                          : EmbeddingStatus::kInvalidInput;
+          }
         }
       }
       if (!sequence.audio.empty()) {
@@ -227,6 +269,14 @@ struct EmbeddingService::Impl {
       }
       if (request.truncate &&
           sequence.tokens.size() > EmbeddingService::kMaxInputTokens) {
+        const auto last_video = std::ranges::find(
+            sequence.tokens.rbegin(), sequence.tokens.rend(), kVideoTokenId);
+        if (last_video != sequence.tokens.rend() &&
+            static_cast<std::size_t>(sequence.tokens.rend() - last_video) + 1 >
+                EmbeddingService::kMaxInputTokens - 1) {
+          batch->failed_index = index;
+          return EmbeddingStatus::kInputTooLong;
+        }
         const auto last = std::ranges::find(
             sequence.tokens.rbegin(), sequence.tokens.rend(), kAudioTokenId);
         if (!sequence.audio.empty() && last != sequence.tokens.rend() &&
@@ -246,7 +296,7 @@ struct EmbeddingService::Impl {
       std::size_t cursor = 0;
       for (auto& image : sequence.images) {
         while (cursor < sequence.tokens.size() &&
-               sequence.tokens[cursor] != kImageTokenId)
+               sequence.tokens[cursor] != image.token_id)
           ++cursor;
         image.offset = cursor;
         cursor += image.patches.soft_tokens();
@@ -287,6 +337,7 @@ struct EmbeddingService::Impl {
   std::string initialization_error;
   std::string image_processor_error;
   std::string audio_processor_error;
+  std::string video_processor_error;
   // Serializes the injected runner, which has no device turns of its own.
   std::mutex runner_mutex;
   std::atomic<bool> device_lost{false};

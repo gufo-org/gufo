@@ -89,6 +89,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 pkg_check_modules(SOXR REQUIRED IMPORTED_TARGET soxr)
+pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
@@ -1089,6 +1090,25 @@ if (BUILD_TESTING)
   add_test(NAME kernel_bench_test COMMAND kernel_bench_test)
   set_tests_properties(kernel_bench_test PROPERTIES
     LABELS "cpu;benchmarks;statistics;json")
+
+  add_library(platform_library_fixture SHARED tests/core/platform_library_fixture.cpp)
+  set_target_properties(platform_library_fixture PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/core/fixtures"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/core")
+  add_executable(platform_library_test tests/core/platform_library_test.cpp)
+  target_link_libraries(platform_library_test PRIVATE gufo_platform)
+  add_dependencies(platform_library_test platform_library_fixture)
+  add_test(NAME platform_library_test COMMAND platform_library_test
+    "$<TARGET_FILE:platform_library_fixture>")
+  set_tests_properties(platform_library_test PROPERTIES LABELS "cpu;platform")
+  if(NOT WIN32)
+    add_test(NAME platform_library_relocated_test COMMAND platform_library_test
+      "/gufo-missing-build-path/$<TARGET_FILE_NAME:platform_library_fixture>")
+    set_tests_properties(platform_library_relocated_test PROPERTIES
+      LABELS "cpu;platform"
+      ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:platform_library_fixture>")
+  endif()
 
   # the publish suite drives descriptors through dup2
   if (NOT WIN32)

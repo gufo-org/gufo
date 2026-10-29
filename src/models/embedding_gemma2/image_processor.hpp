@@ -30,7 +30,8 @@ struct ImagePatches {
 
 /// Gemma4ImageProcessor: aspect-preserving 280-soft-token budget, uint8
 /// antialiased bicubic resize, rescale, then patchify. Does not crop.
-[[nodiscard]] ImagePatches ProcessImage(const core::Image& image);
+[[nodiscard]] ImagePatches ProcessImage(const core::Image& image,
+                                        std::size_t soft_token_budget = 280);
 
 }  // namespace gufo::models::embedding_gemma2
 #endif

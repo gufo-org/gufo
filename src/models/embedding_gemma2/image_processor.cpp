@@ -160,7 +160,10 @@ bool ValidateImageProcessor(const std::string& model_dir, std::string* error) {
   return false;
 }
 
-ImagePatches ProcessImage(const core::Image& image) {
+ImagePatches ProcessImage(const core::Image& image,
+                          std::size_t soft_token_budget) {
+  if (soft_token_budget != 140 && soft_token_budget != 280)
+    throw std::invalid_argument("unsupported embedding vision budget");
   if (image.width == 0 || image.height == 0 || image.width > kMaxImageSide ||
       image.height > kMaxImageSide ||
       std::size_t{image.width} * image.height > core::kMaxImagePixels ||
@@ -168,7 +171,7 @@ ImagePatches ProcessImage(const core::Image& image) {
     throw std::invalid_argument(
         "invalid embedding image dimensions or RGB data");
   }
-  constexpr int kBudget = 280;
+  const int kBudget = static_cast<int>(soft_token_budget);
   constexpr int kStride = 48;
   const double factor =
       std::sqrt((kBudget * 9.0 * 256) /

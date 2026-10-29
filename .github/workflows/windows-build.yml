@@ -270,6 +270,12 @@ jobs:
             if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
           }
           Copy-Item "$build\vcpkg_installed\x64-windows-release\bin\*.dll" $dist -Force
+          if (Test-Path "$build\gufo-video-libraries.txt") {
+            Copy-Item "$build\gufo-video-libraries.txt" $dist
+            $videoTest = Get-ChildItem $build -Recurse -Filter 'embedding_gemma2_video_processor_test.exe' | Select-Object -First 1
+            if (-not $videoTest) { throw 'video decoder CPU test was not built' }
+            Copy-Item $videoTest.FullName $dist
+          }
           Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
           'LLVM OpenMP 18.1.8, source: https://github.com/llvm/llvm-project/tree/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/openmp; Apache-2.0 WITH LLVM-exception; built with OPENMP_MSVC_NAME_SCHEME=ON.' |
             Set-Content "$dist/llvm-openmp-version.txt" -Encoding ascii
@@ -316,6 +322,10 @@ jobs:
               $output = & ./gufo.exe $argument
               if ($LASTEXITCODE -ne 0 -or -not $output) { throw "bundled gufo $argument failed" }
             }
+            if (Test-Path './embedding_gemma2_video_processor_test.exe') {
+              & ./embedding_gemma2_video_processor_test.exe tests/fixtures/embedding_gemma2/video_golden.json
+              if ($LASTEXITCODE -ne 0) { throw 'bundled video decoder checks failed' }
+            }
             & ./gufo.exe diagnose --section platform
             if ($LASTEXITCODE -ne 0) { throw 'extracted bundle platform diagnosis failed' }
           } finally { Pop-Location }
@@ -341,6 +351,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item "$bundle\gufo.exe", "$bundle\*.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $dist
           Copy-Item "$bundle/llvm-openmp-LICENSE.txt", "$bundle/llvm-openmp-version.txt" $dist
+          if (Test-Path "$bundle/gufo-video-libraries.txt") {
+            Copy-Item "$bundle/gufo-video-libraries.txt" $dist
+          }
           Copy-Item licenses "$dist\third-party" -Recurse
           Copy-Item src\models\deepseek_v4_flash\LICENSE.ds4 "$dist\third-party"
           foreach ($dir in 'rocblas', 'hipblaslt') {
@@ -357,6 +370,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'cannot extract Windows release' }
           python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_bundle.py" $extracted
           if ($LASTEXITCODE -ne 0) { throw 'release ZIP has unshipped DLL dependencies' }
+          # Use an external CPU harness beside the extracted release DLLs.
+          # Tests and fixtures stay out of the published ZIP.
+          if (Test-Path "$bundle/embedding_gemma2_video_processor_test.exe") {
+            Copy-Item "$bundle/embedding_gemma2_video_processor_test.exe" $extracted
+          }
           $env:PATH = "$extracted;$env:SystemRoot/System32;$env:SystemRoot"
           Push-Location $extracted
           try {
@@ -367,6 +385,10 @@ jobs:
             }
             $help = & ./gufo.exe --help
             if ($LASTEXITCODE -ne 0 -or -not $help) { throw 'release help failed' }
+            if (Test-Path './embedding_gemma2_video_processor_test.exe') {
+              & ./embedding_gemma2_video_processor_test.exe "$bundle/tests/fixtures/embedding_gemma2/video_golden.json"
+              if ($LASTEXITCODE -ne 0) { throw 'bundled video decoder checks failed' }
+            }
             & ./gufo.exe diagnose --section platform
             if ($LASTEXITCODE -ne 0) { throw 'release platform diagnosis failed' }
           } finally { Pop-Location }

@@ -14,7 +14,7 @@
 
 The probes are English, Spanish, and Chinese queries and passages, code, emoji, whitespace runs, literal special-token text, and one long document.  They measure agreement with the reference implementation, not retrieval quality on a benchmark, and Gufo reports no MTEB score.  Activations stay float32 between BF16 matrix products, so Gufo is closer to the float32 reference than the model's BF16 execution is.
 
-Google published the retrieval accuracy of this checkpoint on MTEB, code, and multilingual tasks, and Gufo did not re-measure it.  Video embeddings are unsupported; image and audio qualification is below.  Quantized variants are unsupported and unmeasured.  The model card states a 1,024-token sliding window.  The checkpoint's configuration and the Hugging Face code use a radius of 512 positions on each side, or 1,025 keys, and Gufo follows them.  Hugging Face's `sliding_window_bidirectional_overlay` in `transformers/masking_utils.py` keeps keys where `abs(q_idx - kv_idx) <= sliding_window`, and `create_bidirectional_sliding_window_mask` passes `config.sliding_window` (512).  The `+ 1` in `modeling_embedding_gemma2.py` applies only to the flash-attention path.
+Google published the retrieval accuracy of this checkpoint on MTEB, code, and multilingual tasks, and Gufo did not re-measure it.  Image, video and audio qualification is below.  Quantized variants are unsupported and unmeasured.  The model card states a 1,024-token sliding window.  The checkpoint's configuration and the Hugging Face code use a radius of 512 positions on each side, or 1,025 keys, and Gufo follows them.  Hugging Face's `sliding_window_bidirectional_overlay` in `transformers/masking_utils.py` keeps keys where `abs(q_idx - kv_idx) <= sliding_window`, and `create_bidirectional_sliding_window_mask` passes `config.sliding_window` (512).  The `+ 1` in `modeling_embedding_gemma2.py` applies only to the flash-attention path.
 
 ## Reproduce
 
@@ -102,7 +102,7 @@ Feature and decoder fixtures are independent of the production C++ implementatio
 These establish reference agreement, rather than speech recognition, audio
 classification or retrieval benchmark accuracy. The environmental and music
 probes are synthetic; the speech recording is the existing reviewed functional
-fixture. Video remains unsupported.
+fixture. Video qualification is below.
 
 The [retained evidence](artifacts/gfx1151-2026-10-26-audio.json) records revision,
 binary/harness/fixture hashes, every reference cosine, memory observations,
@@ -112,3 +112,86 @@ idle main/candidate controls preserve byte-identical vectors and work counts;
 every request and phase is within the 5% and 10 ms margins. No overall speedup
 is claimed. Native Windows compilation is checked by CI; local numerical and
 HTTP evidence here is Linux gfx1151 only.
+
+
+## Video reference parity
+
+Qualified on gfx1151 with checkpoint
+`914f7f89142e33e77833254d9c9b90c3cef7303b` and the official transformers
+implementation at `50e35cc0ca18ec19b80653690de553e6decf74f5`.
+`tools/models/embedding_gemma2/reference_video.py` decodes retained encoded clips
+with PyAV and runs the official processor on RGB arrays with explicit frame
+count, average FPS and duration metadata. This also covers containers such as
+WebM that omit PyAV's header frame count. Reference metadata retains the PyAV,
+FFmpeg library, torch and Hugging Face Hub versions and attention backends.
+The teacher uses float32; no Gufo code participates in fixture generation.
+
+Thirteen probes cover sub-second and fractional-FPS clips, portrait and landscape,
+32-frame and overflow boundaries, floating linspace rounding, uniform/truncate selection, timestamped
+upsampling, repeated clips, embedded soundtracks, and joint text/video/image/audio.
+All selected frame indices, unpadded patch shapes and resized patch bytes match
+in the CPU test. HTTP expanded-token usage agrees with reference token counts;
+the worst cosine across thirteen video/mixed vectors is 0.99997998 versus the teacher, with
+finite normalized outputs. Existing image controls exceed 0.9999 and text/image
+GPU golden tests pass with weights loaded. This establishes reference parity on
+these fixtures, not a video retrieval benchmark.
+
+The full focused video HTTP run retains 29 requests, including Matryoshka
+128/256/512, concurrent/repeated requests, malformed and oversized media,
+private/local URL refusal, pixel/duration/frame/request-work limits, context
+overflow with and without truncation, cancellation correlated with its server
+request ID, and successful recovery. Peak logged process RSS was 628 MiB in
+that run; this is host RSS, not a GPU memory measurement. Raw reports, responses,
+server logs and speed observations are retained under `artifacts/issue-761/`.
+
+Reproduce the bounded smoke check with `model_services.py embedding` (see
+[functional tests](../../../tests/functional/README.md)); use
+`--embedding-suite full` for all modality suites. Generate goldens in the pinned
+reference environment with:
+
+```sh
+PYTHONPATH=/path/to/pinned/transformers/src python3 \
+  tools/models/embedding_gemma2/reference_video.py \
+  --model models/embeddinggemma-2 \
+  --output tests/fixtures/embedding_gemma2/video_golden.json
+```
+
+That source needs Hugging Face Hub >=1.31.0 (qualification used 1.31.0), in
+addition to the reference tools in `nix develop`. Existing encoded fixtures are
+reused and their SHA256 values are recorded. `--case NAME` generates only one
+probe for focused investigation; a subset is not full qualification.
+
+
+The [retained qualification evidence](artifacts/gfx1151-2026-10-29-video.json)
+records revisions, checkpoint/binary/harness/fixture hashes, reference cosines,
+per-request latency and memory observations. The linspace rounding regression
+and affected overflow controls also pass focused HTTP replay after the review
+fix. The final three-request smoke check takes about four seconds including
+startup on this host. The standard 11-workload speed benchmark retains 60
+requests per workload. All 36 resident text/image timing pairs and nine warm-up
+pairs pass the per-request 5% and 10 ms thresholds against main `6feba906`, with
+identical work counts. No aggregate speedup is claimed. Initial harness failures
+and missing-model skips remain explicitly unqualified in the evidence record.
+Three fresh-context review rounds found one sampling issue, which was fixed;
+the last two rounds reported no findings.
+
+
+### CI follow-up
+
+The initial Windows package built and passed CPU tests, but its dependency
+validator misclassified the Windows CNG `ncrypt.dll` imported by FFmpeg. Adding
+that inbox DLL to the allowlist fixed the native Windows package job. Codec
+DLLs remain mandatory. Tests also cover explicit manifests for libraries loaded
+on demand, and the extracted release ZIP is checked with an external video CPU
+harness without shipping test executables or fixtures to users.
+
+Devlab additionally measured a consistent 18–24 ms process-init regression in
+embedding, ASR and TTS: eager FFmpeg linkage initialized its transitive libraries
+for every service. FFmpeg now loads on the first video request through an OS
+library leaf. It is absent from the executable's startup dependency graph.
+Three local matched startup pairs pass the 5%/10 ms thresholds; video CPU
+fixtures, all 30 video HTTP requests and the owned multimodal smoke check pass.
+The [CI follow-up evidence](artifacts/gfx1151-2026-10-29-video-ci.json) retains the
+original flags, matched startup observations, binary/harness identity and checks.
+Two additional independent reviews covered the fix; a release validation gap was
+addressed and the final review reported no findings.

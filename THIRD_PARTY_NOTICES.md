@@ -28,7 +28,7 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | libwebp | Linked; WebP decoding | `BSD-3-Clause` | 1.6.0; flake.lock | [webmproject/libwebp](https://chromium.googlesource.com/webm/libwebp) |
 | libsndfile | Linked; audio decoding | `LGPL-2.1-or-later` | 1.2.2; flake.lock | [libsndfile](https://github.com/libsndfile/libsndfile) |
 | libsoxr | Linked; audio resampling | `LGPL-2.1-or-later` | 0.1.3; flake.lock | [SoX Resampler](https://sourceforge.net/projects/soxr/) |
-| FFmpeg | Separate ffmpeg/ffprobe executables for media | `GPL-3.0-or-later` (Nix build with GPL/version3 components) | 8.1.2; flake.lock | [FFmpeg](https://github.com/FFmpeg/FFmpeg) |
+| FFmpeg | Linked libavformat/libavcodec/libavutil/libswscale for video embeddings; ffmpeg/ffprobe executables for media | `GPL-3.0-or-later` (Nix build with GPL/version3 components) | 9.0.2; flake.lock | [FFmpeg](https://github.com/FFmpeg/FFmpeg) |
 | LLVM OpenMP | Windows runtime built from upstream source; Microsoft-compatible DLL naming | `Apache-2.0 WITH LLVM-exception` | 18.1.8 (`3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff`) | [LLVM](https://github.com/llvm/llvm-project/tree/llvmorg-18.1.8/openmp); [license](licenses/llvm-openmp.txt) |
 | GNU C/C++/OpenMP runtimes | System runtime libraries; no Gufo source import | `LGPL-2.1-or-later AND (GPL-3.0-or-later WITH GCC-exception-3.1)` | glibc/GCC packages in flake.lock | [GNU](https://www.gnu.org/software/) |
 | llama.cpp / ggml | Adapted quantization, attention and model-private HIP kernels | `MIT` | `5c0e9468378eba6bf3cc1989ff5d62fbbe4d9e3a`; attention `e9fa0781f1c25fc4fe8c86be1edc6970661ad6f0` | [llama.cpp](https://github.com/ggml-org/llama.cpp) |
@@ -54,8 +54,9 @@ This software is based in part on the work of the Independent JPEG Group.
 The mikealanni/gufo fork retains the same Copyright (c) 2026 gufo contributors
 notice and MIT text as Gufo's root `LICENSE`.
 
-FFmpeg is invoked as a separate process, not linked into Gufo. The pinned Nix
-build enables GPL/version3 components; a system FFmpeg build can have different
+Gufo loads FFmpeg libraries on demand for video embeddings and invokes
+ffmpeg/ffprobe as separate processes for media tools. The pinned Nix build
+enables GPL/version3 components; a system FFmpeg build can have different
 terms. Redistributors bundling FFmpeg or other copyleft dependencies must also
 provide their applicable license texts and corresponding source/build materials,
 not just this MIT license. The pinned Nixpkgs expressions and `flake.lock`

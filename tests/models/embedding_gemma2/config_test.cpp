@@ -148,6 +148,12 @@ int main() {
   const auto vision = embedding_gemma2::ParseModelConfig(vision_config);
   Check(vision && vision->supported_vision,
         "released vision geometry is supported");
+  Check(vision->supported_video, "released video placeholder is supported");
+  const auto wrong_video = embedding_gemma2::ParseModelConfig(Replace(
+      vision_config, "\"video_token_id\": 258884", "\"video_token_id\": 42"));
+  Check(wrong_video && wrong_video->supported_vision &&
+            !wrong_video->supported_video,
+        "unsupported video token preserves image support");
   for (const auto& changed :
        {Replace(vision_config, "\"head_dim\": 64", "\"head_dim\": 128"),
         Replace(vision_config, "\"pooling_kernel_size\": 3",

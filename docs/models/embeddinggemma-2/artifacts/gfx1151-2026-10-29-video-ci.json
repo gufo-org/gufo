@@ -1,0 +1,196 @@
+{
+  "schema": 1,
+  "date": "2026-10-29",
+  "candidate_code_revision": "739a8fdd106631724d3bb4fdbdf8ba1069529276",
+  "binary_sha256": "5e164b64cea3f69051ab932843b6b76f9b6b5459f2c1c2ac4977dd8639831b3a",
+  "windows_failure": {
+    "run": 40848600507,
+    "cause": "avformat-63.dll requires unbundled ncrypt.dll",
+    "fix": "Recognize inbox Windows CNG runtime; retain codec DLL checks",
+    "fixed_build_run": 40852625849,
+    "fixed_build_job": 123375625555,
+    "build_status": "success"
+  },
+  "linux_startup_failure": {
+    "run": 40848680299,
+    "flags": {
+      "embedding-gemma2.phases": [
+        {
+          "group": "startup",
+          "key": "startup.init",
+          "label": "init",
+          "base": [
+            72.79733242467046,
+            76.0394437238574
+          ],
+          "head": [
+            94.45651294663548,
+            94.20524211600423
+          ],
+          "verdict": "slower",
+          "checked": true
+        }
+      ],
+      "qwen3-asr.phases": [
+        {
+          "group": "startup",
+          "key": "startup.init",
+          "label": "init",
+          "base": [
+            74.03909182175994,
+            78.01739312708378
+          ],
+          "head": [
+            98.19441335275769,
+            96.01445822045207
+          ],
+          "verdict": "slower",
+          "checked": true
+        }
+      ],
+      "qwen3-tts-base.phases": [
+        {
+          "group": "startup",
+          "key": "startup.init",
+          "label": "init",
+          "base": [
+            74.79083118960261,
+            76.10890129581094
+          ],
+          "head": [
+            96.41655767336488,
+            97.4049479700625
+          ],
+          "verdict": "slower",
+          "checked": true
+        }
+      ]
+    },
+    "cause": "Eager FFmpeg linking loaded codec/network DSOs before every service initialization",
+    "fix": "First-use typed symbol binding through platform Library; no FFmpeg load-time dependencies"
+  },
+  "matched_startup": {
+    "base_revision": "6feba906",
+    "arms": [
+      {
+        "side": "base",
+        "startup": {
+          "listen_source": "server",
+          "init": 54.3047170212958,
+          "weights": 1922.0,
+          "vision": null,
+          "structured": null,
+          "listen": 0.099
+        }
+      },
+      {
+        "side": "head",
+        "startup": {
+          "listen_source": "server",
+          "init": 52.17735798214562,
+          "weights": 1642.0,
+          "vision": null,
+          "structured": null,
+          "listen": 0.123
+        }
+      },
+      {
+        "side": "head",
+        "startup": {
+          "listen_source": "server",
+          "init": 51.826708018779755,
+          "weights": 1635.0,
+          "vision": null,
+          "structured": null,
+          "listen": 0.103
+        }
+      },
+      {
+        "side": "base",
+        "startup": {
+          "listen_source": "server",
+          "init": 52.05013099475764,
+          "weights": 1640.0,
+          "vision": null,
+          "structured": null,
+          "listen": 0.11
+        }
+      },
+      {
+        "side": "base",
+        "startup": {
+          "listen_source": "server",
+          "init": 53.738362999865785,
+          "weights": 1648.0,
+          "vision": null,
+          "structured": null,
+          "listen": 0.098
+        }
+      },
+      {
+        "side": "head",
+        "startup": {
+          "listen_source": "server",
+          "init": 51.58790500718169,
+          "weights": 1648.0,
+          "vision": null,
+          "structured": null,
+          "listen": 0.116
+        }
+      }
+    ],
+    "init_pairs": [
+      {
+        "base_ms": 54.3047170212958,
+        "head_ms": 52.17735798214562,
+        "flag": false
+      },
+      {
+        "base_ms": 52.05013099475764,
+        "head_ms": 51.826708018779755,
+        "flag": false
+      },
+      {
+        "base_ms": 53.738362999865785,
+        "head_ms": 51.58790500718169,
+        "flag": false
+      }
+    ],
+    "thresholds": {
+      "fraction": 0.05,
+      "milliseconds": 10
+    }
+  },
+  "checks": {
+    "cpu_platform_library": "passed; real DLL/so fixture, missing library and missing symbol",
+    "cpu_api_video_processor": "passed; 13 independent reference probes and resource checks",
+    "windows_bundle_unit_tests": "7 passed",
+    "windows_library_cross_compile": "passed (MinGW x86-64 C++20)",
+    "http_video": {
+      "status": "passed",
+      "requests": 30,
+      "cancellation": "2026-10-29 11:04:40 [WARN] [http] request=r31 event=completed method=POST path=/v1/embeddings status=499 duration_ms=25.1 outcome=completed  error_code=cancelled rss_mib=507 host_available_mib=118414"
+    },
+    "owned_multimodal_smoke": "passed"
+  },
+  "packaging": "Generated DLL manifest is checked in validation bundles and exact release ZIPs. CPU video harness validates extracted DLLs; test binary and fixtures stay out of the released ZIP.",
+  "reviews": [
+    {
+      "findings": 1,
+      "addressed": "Copy runtime manifest into release ZIP and validate extracted release DLLs using an external CPU video harness"
+    },
+    {
+      "findings": 0
+    }
+  ],
+  "harness_sha256": {
+    "tools/windows/check_bundle.py": "fda8a4001c20a661686119f2e6cb1544ce82d07a877cdf81891511b98474bef8",
+    "tests/tools/windows_bundle_test.py": "495833e0237423e04d71aa914465a55c91bbf347bf57b7f38412daa23b533536",
+    "tests/functional/embedding_video.py": "1ec21a20b79b468f031bc214d263fb1dd3b06ac6efafc116f705ef09d0db0967"
+  },
+  "runtime_loader_followup": {
+    "windows_failure": "94f99ff1: CPU video test Windows error 126; configured DLL path used forward slashes. Normalize to native separators and use wide LoadLibraryExW. Move fixture outside executable directory to exercise absolute-path fallback.",
+    "linux_failure": "94f99ff1: relocated package video HTTP returned 500 because build-host Nix path is absent. Resolve versioned FFmpeg filename during configuration; fall back to loader search for relocated pinned closure.",
+    "regression_tests": "Native library load, relocated Linux library load, missing symbol/library, CPU video reference probes; Windows hosted rerun pending."
+  }
+}

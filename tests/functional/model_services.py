@@ -23,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('service', choices=('embedding', 'asr', 'tts'))
+    parser.add_argument('--embedding-suite', choices=('smoke', 'full'), default='smoke')
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
@@ -70,7 +71,7 @@ def main():
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
                   ('model_services.py', 'service_http.py', 'asr_service.py', 'tts_service.py',
-                   'embeddings.py', 'embedding_images.py', 'embedding_audio.py')}}
+                   'embeddings.py', 'embedding_images.py', 'embedding_audio.py', 'embedding_video.py')}}
     evidence = Evidence(output, report)
     evidence.save()
     url = f'http://127.0.0.1:{port}'
@@ -83,11 +84,16 @@ def main():
                 models = evidence.json(url + '/v1/models', label='models', method='GET')
                 assert public_model in [item['id'] for item in models['data']], models
             if args.service == 'embedding':
-                for script in ('embeddings.py', 'embedding_images.py', 'embedding_audio.py'):
+                scripts = ('embedding_video.py',) if args.embedding_suite == 'smoke' else (
+                    'embeddings.py', 'embedding_images.py', 'embedding_audio.py', 'embedding_video.py')
+                report['embedding_suite'] = args.embedding_suite
+                for script in scripts:
                     with evidence.case(script):
                         launch = [sys.executable, str(HERE / script), '--base-url', url + '/v1',
                                   '--model', public_model, '--output', str(output / (script + '.json'))]
-                        if script == 'embedding_audio.py':
+                        if script == 'embedding_video.py' and args.embedding_suite == 'smoke':
+                            launch += ['--smoke']
+                        if script in ('embedding_audio.py', 'embedding_video.py'):
                             launch += ['--server-log', str(output / 'server.log')]
                         with (output / (script + '.log')).open('w') as log:
                             result = subprocess.run(launch, stdout=log, stderr=subprocess.STDOUT, timeout=600)

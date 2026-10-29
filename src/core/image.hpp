@@ -49,5 +49,9 @@ struct ImageReadBudget {
 [[nodiscard]] std::vector<std::uint8_t> ReadAudioUrl(std::string_view url,
                                                      ImageReadBudget& budget);
 
+/// Video uses the same shared byte/deadline and public HTTPS protections.
+[[nodiscard]] std::vector<std::uint8_t> ReadVideoUrl(std::string_view url,
+                                                     ImageReadBudget& budget);
+
 }  // namespace gufo::core
 #endif

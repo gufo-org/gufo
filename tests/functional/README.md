@@ -30,6 +30,15 @@ nix develop -c python3 tests/functional/model_services.py tts \
   --output artifacts/model-services/tts-base-1
 ```
 
+Embedding uses `--embedding-suite smoke` by default, including Devlab's PR tier.
+It retains independent reference-vector checks for all four modalities in one
+small batch, then checks an invalid clip and successful text recovery. This is
+a smoke check, not full model qualification. Select `--embedding-suite full`
+for the existing numerical/API suites plus video goldens, sampling/timestamps,
+dimensions, concurrent requests, context overflow, cancellation and recovery.
+Devlab's full tier selects that suite. Both retain individual request timings;
+manual invocations do not qualify performance against main.
+
 The default audio root is the packaged `fixtures/audio/` English WAV and reviewed
 transcript, authorized by the maintainer for publication. Override `--audio-root`
 only with a folder containing that English pair. ASR generates silence in memory
@@ -41,7 +50,7 @@ VoiceDesign model (fixed English voice instructions). Neither requires a clone.
 
 | Suite | Required checks |
 | --- | --- |
-| Embedding | Text, image and audio HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, invalid inputs, cancellation and recovery |
+| Embedding | The default three-request smoke check covers text, image, video, mixed video/audio/image input, malformed-video rejection and recovery. `--embedding-suite full` retains the text, image, audio and video HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, invalid inputs, cancellation and recovery |
 | ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, rejected options, malformed WAV recovery, stream cancellation and subsequent valid inference |
 | TTS | Voice discovery, valid non-silent 24-kHz mono PCM16 audio, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, rejected inputs, stream cancellation and subsequent valid inference |
 

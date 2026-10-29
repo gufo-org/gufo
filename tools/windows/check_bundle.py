@@ -14,7 +14,7 @@ import pefile
 # Windows 11 inbox libraries, not development tools, CRT or GPU SDK runtimes.
 SYSTEM_DLLS = frozenset(
     """advapi32.dll bcrypt.dll cfgmgr32.dll crypt32.dll gdi32.dll iphlpapi.dll
-    kernel32.dll ntdll.dll ole32.dll oleaut32.dll psapi.dll secur32.dll setupapi.dll
+    kernel32.dll ncrypt.dll ntdll.dll ole32.dll oleaut32.dll psapi.dll secur32.dll setupapi.dll
     shell32.dll shlwapi.dll user32.dll version.dll winmm.dll ws2_32.dll""".split()
 )
 
@@ -45,6 +45,18 @@ def check_bundle(directory):
     if "gufo.exe" not in images:
         raise ValueError("bundle is missing gufo.exe")
     missing = []
+    # Lazy-loaded video libraries do not appear in gufo.exe's import table.
+    # Older releases have no manifest and retain their import-only contract.
+    manifest = directory / "gufo-video-libraries.txt"
+    if manifest.is_file():
+        names = manifest.read_text(encoding="utf-8").splitlines()
+        if not names or any(not name.lower().endswith(".dll") or
+                            "/" in name or "\\" in name for name in names):
+            raise ValueError("invalid video runtime library manifest")
+        for name in names:
+            if name.lower() not in images:
+                missing.append(f"video runtime requires unbundled {name.lower()}")
+
     for name, path in sorted(images.items()):
         for dependency in sorted(imported_dlls(path)):
             if dependency not in images and not is_system_dll(dependency):

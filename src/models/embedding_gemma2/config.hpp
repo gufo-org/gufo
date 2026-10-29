@@ -14,6 +14,8 @@ namespace gufo::models::embedding_gemma2 {
 /// reference applies the same constant but keeps the product in float32.
 inline constexpr float kEmbedScale = 22.625F;
 inline constexpr std::uint32_t kImageTokenId = 258880;
+inline constexpr std::uint32_t kVideoTokenId = 258884;
+inline constexpr const char* kVideoToken = "<|video|>";
 inline constexpr std::uint32_t kAudioTokenId = 258881;
 inline constexpr const char* kAudioToken = "<|audio|>";
 inline constexpr const char* kBeginAudioToken = "<|audio>";
@@ -62,6 +64,7 @@ struct ModelConfig {
   std::string hidden_activation;
   TextConfig text;
   bool supported_vision{false};
+  bool supported_video{false};
   bool supported_audio{false};
 };
 

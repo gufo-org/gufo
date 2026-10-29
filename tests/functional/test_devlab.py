@@ -88,6 +88,13 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(self.models('src/models/qwen_image_21/model.cpp'), set())
         self.assertEqual(self.models('src/models/minimax_h3/runtime.cpp'), set())
 
+    def test_embedding_smoke_and_full_coverage(self):
+        pr = self.plan('src/models/embedding_gemma2/video_processor.cpp')
+        self.assertEqual(pr['groups'][0]['suites'], ['embedding-smoke'])
+        full = self.plan('src/models/embedding_gemma2/video_processor.cpp', tier='full')
+        self.assertEqual(full['groups'][0]['suites'],
+                         ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video'])
+
     def test_full_tts_and_optional_ar(self):
         self.assertEqual(self.models('src/models/qwen3_tts/config.cpp', tier='full'),
                          {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design'})

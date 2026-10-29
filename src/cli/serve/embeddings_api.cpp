@@ -167,7 +167,7 @@ bool LooksLikeAudio(std::string_view base64) {
 bool IsKnownField(std::string_view name, bool native) {
   return name == "input" || name == "model" || name == "encoding_format" ||
          name == "dimensions" || name == "user" || name == "truncate" ||
-         name == "prompt_name" ||
+         name == "prompt_name" || name == "video_options" ||
          (native && (name == "content" || name == "embd_normalize"));
 }
 
@@ -220,6 +220,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
   std::vector<EmbeddingInput> inputs;
   std::size_t image_count = 0;
   std::size_t audio_count = 0;
+  std::size_t video_count = 0;
   const auto parse_item = [&](const json::Value& item) -> HttpResponse {
     EmbeddingInput parsed;
     if (item.is_string()) {
@@ -316,6 +317,28 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
             return BadRequest("embedding requests accept at most 32 images",
                               "too_many_images");
           parsed.content.push_back({EmbeddingPart::Type::kImage, url->str()});
+        } else if (type == "input_video") {
+          const auto* video = part.find("input_video");
+          if (part.size() != 2 || !video || !video->is_object())
+            return BadRequest("video parts require an 'input_video' object",
+                              "invalid_parameter_type");
+          for (const auto& [key, value] : video->members()) {
+            if ((key != "data" && key != "url") || !value.is_string())
+              return BadRequest(
+                  "input_video accepts string data and url fields",
+                  "invalid_parameter_type");
+          }
+          const auto* source = video->find("data");
+          if (!source)
+            source = video->find("url");
+          if (!source || source->str().empty())
+            return BadRequest("input_video requires nonempty data or url",
+                              "invalid_parameter_type");
+          if (++video_count > EmbeddingService::kMaxVideos)
+            return BadRequest("embedding requests accept at most 32 videos",
+                              "too_many_videos");
+          parsed.content.push_back(
+              {EmbeddingPart::Type::kVideo, source->str()});
         } else if (type == "input_audio") {
           const auto* audio = part.find("input_audio");
           if (part.size() != 2 || !audio || !audio->is_object())
@@ -456,6 +479,42 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
   }
 
   EmbeddingRequestOptions options;
+  if (const auto* video = Optional(root, "video_options")) {
+    if (!video->is_object())
+      return BadRequest("video_options must be an object",
+                        "invalid_parameter_type");
+    for (const auto& [key, value] : video->members()) {
+      if (key == "fps") {
+        if (!value.is_number() || !std::isfinite(value.as_double()) ||
+            value.as_double() <= 0 || value.as_double() > 120)
+          return BadRequest("video fps must be in (0, 120]",
+                            "invalid_video_options");
+        options.video.fps = value.as_double();
+      } else if (key == "max_frames") {
+        const auto n = value.as_size(0);
+        if (!value.is_number() || n < 1 || n > 32 ||
+            value.as_double() != static_cast<double>(n))
+          return BadRequest("video max_frames must be an integer in [1, 32]",
+                            "invalid_video_options");
+        options.video.max_frames = n;
+      } else if (key == "add_timestamps") {
+        if (!value.is_bool())
+          return BadRequest("add_timestamps must be boolean",
+                            "invalid_video_options");
+        options.video.timestamps = value.as_bool();
+      } else if (key == "overflow_strategy") {
+        if (!value.is_string() ||
+            (value.str() != "uniform" && value.str() != "truncate"))
+          return BadRequest(
+              "video overflow_strategy must be uniform or truncate",
+              "invalid_video_options");
+        options.video.truncate_overflow = value.str() == "truncate";
+      } else
+        return BadRequest("unsupported video option: " + key,
+                          "invalid_video_options");
+    }
+  }
+
   if (const json::Value* truncate = Optional(root, "truncate");
       truncate != nullptr) {
     if (!truncate->is_bool()) {
@@ -479,6 +538,8 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
                             std::to_string(EmbeddingService::kMaxInputTokens) +
                             "-token context window",
                         "context_length_exceeded");
+    case EmbeddingStatus::kInvalidVideoInput:
+      return BadRequest(error, "invalid_video_input");
     case EmbeddingStatus::kInvalidAudioInput:
       return BadRequest(error, "invalid_audio_input");
     case EmbeddingStatus::kInvalidInput:

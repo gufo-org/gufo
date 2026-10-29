@@ -52,6 +52,35 @@ class WindowsBundleTest(unittest.TestCase):
                 (root / "libmpg123.dll").touch()
                 self.assertEqual(bundle.check_bundle(root), [])
 
+    def test_video_imports_allow_ncrypt_but_require_bundled_codecs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("gufo.exe", "avformat-63.dll"):
+                (root / name).touch()
+            imports = {
+                "gufo.exe": {"avformat-63.dll"},
+                "avformat-63.dll": {"NCRYPT.DLL", "avcodec-63.dll"},
+                "avcodec-63.dll": {"kernel32.dll"},
+            }
+            with patch.object(bundle, "imported_dlls", side_effect=lambda p: imports[p.name]):
+                self.assertEqual(
+                    bundle.check_bundle(root),
+                    ["avformat-63.dll requires unbundled avcodec-63.dll"],
+                )
+                (root / "avcodec-63.dll").touch()
+                self.assertEqual(bundle.check_bundle(root), [])
+
+    def test_lazy_video_libraries_are_required_without_pe_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gufo.exe").touch()
+            (root / "gufo-video-libraries.txt").write_text("avformat-63.dll\n", encoding="utf-8")
+            with patch.object(bundle, "imported_dlls", return_value={"kernel32.dll"}):
+                self.assertEqual(bundle.check_bundle(root),
+                                 ["video runtime requires unbundled avformat-63.dll"])
+                (root / "AVFORMAT-63.DLL").touch()
+                self.assertEqual(bundle.check_bundle(root), [])
+
     def test_developer_and_crt_libraries_are_not_system_dependencies(self):
         for name in ("libomp140.x86_64.dll", "libomp.dll", "msvcp140.dll", "vcruntime140.dll"):
             with self.subTest(name=name):

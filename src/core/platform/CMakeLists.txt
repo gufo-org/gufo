@@ -2,6 +2,7 @@
 # (GUFO_PLATFORM_ONLY) share this list.
 add_library(gufo_platform STATIC
   env.cpp
+  library.cpp
   mapped_file.cpp
   net.cpp
   shutdown_signal.cpp
@@ -14,7 +15,7 @@ add_library(gufo_platform STATIC
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/pages_windows.cpp>"
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/page_pin_windows.cpp>")
 target_include_directories(gufo_platform PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(gufo_platform PUBLIC Threads::Threads)
+target_link_libraries(gufo_platform PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 if (WIN32)
   target_link_libraries(gufo_platform PUBLIC ${GUFO_PLATFORM_LIBS})
 endif()

@@ -493,7 +493,13 @@ void EncoderRuntime::Impl::RunBatch(
                          clip.features.soft_tokens(), stream);
     }
     for (const auto& image : sequences[s]->images) {
+      if (sequences[s]->is_cancelled && sequences[s]->is_cancelled())
+        throw std::runtime_error(kCancelledMessage);
       RunVision(image.patches, host_offsets[s] + image.offset);
+      // Bound outstanding video work to one frame, so a disconnected long
+      // clip releases the device before encoding the remaining frames.
+      if (image.token_id == kVideoTokenId)
+        HIP_CHECK(hipStreamSynchronize(stream));
     }
   }
 
@@ -743,7 +749,9 @@ bool EncoderRuntime::EmbedMultimodal(
         return fail("embedding_gemma2: invalid image patches or token offset");
       }
       for (std::size_t j = 0; j < n; ++j) {
-        if (sequence.tokens[image.offset + j] != kImageTokenId) {
+        if ((image.token_id != kImageTokenId &&
+             image.token_id != kVideoTokenId) ||
+            sequence.tokens[image.offset + j] != image.token_id) {
           return fail("embedding_gemma2: image placeholder mismatch");
         }
       }
