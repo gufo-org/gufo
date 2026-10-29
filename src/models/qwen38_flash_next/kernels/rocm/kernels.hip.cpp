@@ -8020,6 +8020,54 @@ void MtpAddEmbedding(const float* embedding, float* residual,
                      stream, embedding, residual, hidden, streams);
 }
 
+/// One block: the softmax probability of the argmax row[0] names, written
+/// as float bits into row[1]. Nonfinite logits contribute nothing.
+__launch_bounds__(1024) __global__
+    void ArgmaxConfidenceKernel(const float* logits, std::int32_t* row,
+                                std::uint32_t vocab) {
+  __shared__ float partial[32];
+  const float top = logits[row[0]];
+  float sum = 0.0F;
+  // One block reads the whole row: issue a thread's next 16 loads together,
+  // then add them in the same order. One load per step waited on memory
+  // latency: 23 us over the draft head's 99,328 logits (now 9 us) and 48 us
+  // over the full head (now 14 us), with the same sums.
+  constexpr std::uint32_t kBatch = 16;
+  std::uint32_t i = threadIdx.x;
+  for (; i + (kBatch - 1) * blockDim.x < vocab; i += kBatch * blockDim.x) {
+    float l[kBatch];
+#pragma unroll
+    for (std::uint32_t k = 0; k < kBatch; ++k)
+      l[k] = logits[i + k * blockDim.x];
+#pragma unroll
+    for (std::uint32_t k = 0; k < kBatch; ++k)
+      if (isfinite(l[k]))
+        sum += __expf(l[k] - top);
+  }
+  for (; i < vocab; i += blockDim.x) {
+    const float l = logits[i];
+    if (isfinite(l))
+      sum += __expf(l - top);
+  }
+  sum = WaveSum(sum);
+  if ((threadIdx.x & 31U) == 0)
+    partial[threadIdx.x >> 5U] = sum;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float total = 0.0F;
+    for (unsigned w = 0; w < blockDim.x / 32U; ++w)
+      total += partial[w];
+    const float p = isfinite(top) && total > 0.0F ? 1.0F / total : 0.0F;
+    row[1] = __float_as_int(p);
+  }
+}
+
+void ArgmaxConfidence(const float* logits, std::int32_t* row,
+                      std::uint32_t vocab, hipStream_t stream) {
+  hipLaunchKernelGGL(ArgmaxConfidenceKernel, dim3(1), dim3(1024), 0, stream,
+                     logits, row, vocab);
+}
+
 void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
             std::uint32_t n_tokens, std::uint32_t vocab, hipStream_t stream) {
   hipLaunchKernelGGL(ArgmaxPartialKernel, dim3(kArgmaxParts, n_tokens),

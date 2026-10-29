@@ -323,6 +323,8 @@ public:
   /// when only the draft state is needed.
   struct MtpOutput {
     std::int32_t* token{nullptr};
+    /// With `token`: the draft head's softmax probability of it.
+    float* confidence{nullptr};
     MtpCandidateLogits* candidates{nullptr};
     MtpTrace* trace{nullptr};  ///< final-row diagnostic; disables graph capture
     /// Prefill and headless steps need only persistent KV. A full forward with

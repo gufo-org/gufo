@@ -319,6 +319,8 @@ private:
                      std::optional<std::uint32_t> batch_drafts = {},
                      std::uint32_t occupancy = 1);
   static void AppendDraft(PendingDecode& pending);
+  /// Whether the chain ends after its latest neural proposal.
+  static bool GateStops(const PendingDecode& pending);
   /// Appends copies within the prepared budget, stopping at EOG when enabled.
   bool AppendLookup(PendingDecode& pending, bool stop_at_eos,
                     std::size_t minimum = 1, bool require_resume = false);
@@ -330,6 +332,7 @@ private:
   std::vector<std::int32_t> tokens_;
   std::vector<float> logits_;
   std::int32_t draft_token_{0};
+  float draft_confidence_{1.0F};  ///< the head's probability of draft_token_
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;

@@ -13,6 +13,15 @@
 namespace gufo::models::qwen38_flash_next {
 
 inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
+/// A chain ends after its first proposal below its gate: the head's
+/// probability of a greedy draft, or the proposal probability q of a sampled
+/// one.
+inline constexpr float kMtpGateProbability = 0.85F;
+inline constexpr float kMtpSampledGateProbability = 0.95F;
+/// In a jointly planned greedy batch a final proposal below this
+/// probability is not verified: its row costs a C8 cycle more than the
+/// expected accepted token returns.
+inline constexpr float kMtpBatchDropProbability = 0.6F;
 
 /// The occupancy an unplanned draft cycle is priced at, or 0 for the
 /// configured session count. Greedy output does not depend on the width, and

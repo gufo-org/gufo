@@ -1,5 +1,14 @@
 # Qwen3.8 Flash-Next experiments
 
+## Confidence-gated MTP chains (October 29, 2026)
+
+Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
+
+| Experiment | Outcome |
+| --- | --- |
+| End a chain after its first draft below the head's probability 0.85 (sampled: q below 0.95); unplanned cycles draft to `--draft-tokens`; planned greedy batches keep their width and drop a final proposal below 0.6 | Retained. Replies byte-identical. C1 MTP 50.3 (main, three runs) → 55.8/55.9 tok/s (+11%; every prompt faster, +4% to +16%). On a four-session server: C1 49.7 → 53.3, C4 wall throughput 76.2/76.9 → 85.4 tok/s (+11%). 16-token replies (four runs per arm), decode rate after the first token, main against the branch: prompts 1 and 2 41.5-42.0 → 37.5-37.7 and 52.7-54.0 → 47.5-48.2 tok/s (about −10%, +35 to +65 ms per reply), prompt 3 unchanged, prompt 4 24.3 → 25.3-25.6, prompt 5 within its run-to-run spread (44.9-63.1 against 59.9-62.0). This short-reply cost is not fixed; keeping the controller's first-cycle width until acceptance is observed did not change it. Two 1.5-1.8 s first-token outliers on the branch (and 0.35-0.37 s ones on main) are prefill time, before any drafting. |
+| Downstream sweeps (Q4_K/Q3_K-class recipe) | Greedy gate 0.7-0.95: 0.85 best on prose and four/eight users; sampled 0.9-0.98 within noise. Acceptance of verified C8 drafts by head probability: 0.1-0.2 22%, 0.4-0.5 53%, 0.6-0.7 71%, 0.8-0.9 86%, ≥ 0.9 97%; batch drop thresholds 0.35/0.5/0.65/0.8 gave 347.9/345.9/345.8/349.3 s against 352.6 s on an eight-way 28-question slice. Rejected: continuing while the product of acceptance estimates stays above 0.55/0.45; C1 gates 0.7/0.5 (−3.0%/−7.1%). |
+
 ## Chunked DeltaNet removed (October 27, 2026)
 
 The release-tier functional `tool-reasoning` suite failed in both MTP and AR

@@ -579,6 +579,9 @@ struct ArgmaxCandidate {
 /// n_tokens * kArgmaxParts candidates.
 void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
             std::uint32_t n_tokens, std::uint32_t vocab, hipStream_t stream);
+/// row[1] = float bits of softmax(logits)[row[0]] over `vocab` entries.
+void ArgmaxConfidence(const float* logits, std::int32_t* row,
+                      std::uint32_t vocab, hipStream_t stream);
 
 /// Gather selected IDs and their original logits from independent rows.
 /// The caller checks finite values only for the verification prefix it visits.
