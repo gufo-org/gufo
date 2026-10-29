@@ -34,6 +34,12 @@ void RequireExact(std::span<const float> expected,
           message);
 }
 
+/// Allocated bytes apart from K/V rows, which stay backed for reuse after a
+/// reset until another session needs the memory.
+std::size_t StateBytes(const qfn::Session& session) {
+  return session.AllocatedBytes() - session.KvBytes();
+}
+
 void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model,
                                      bool warm_storage,
                                      bool protect_rows = false) {
@@ -114,7 +120,7 @@ void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
                       : gufo::core::SessionMode::kAutoregressive,
       4096, &error);
   Require(session != nullptr, error);
-  const auto initial_bytes = session->AllocatedBytes();
+  const auto initial_bytes = StateBytes(*session);
   const auto& c = model->config();
   const auto checkpoint_bytes =
       std::size_t{c.num_layers - c.num_layers / c.full_attention_interval} *
@@ -169,7 +175,7 @@ void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
   Require(session->Sync(prompt, &error), error);
   RequireExact(expected, session->Logits(),
                "cancelled restore leaked device state");
-  Require(session->AllocatedBytes() == initial_bytes,
+  Require(StateBytes(*session) == initial_bytes,
           "reset retained rollback allocations");
   std::cout
       << "cancelled forward/restore recover exactly; rollback starts empty\n";
@@ -184,7 +190,7 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
                       : gufo::core::SessionMode::kAutoregressive,
       context, &error);
   Require(session != nullptr, error);
-  const auto empty_bytes = session->AllocatedBytes();
+  const auto empty_bytes = StateBytes(*session);
   Require(session->Sync(prompt, &error), error);
   sampling::SamplerState sampler(
       {.seed = 73},
@@ -192,7 +198,7 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
   qfn::Session::DecodeResult step;
   Require(session->DecodeStep(2, sampler, &step, &error, false), error);
   const auto warm_bytes = session->AllocatedBytes();
-  Require(warm_bytes > empty_bytes &&
+  Require(StateBytes(*session) > empty_bytes &&
               warm_bytes <= model->SessionBytes(
                                 gufo::core::SessionMode::kSpeculative, context),
           "rollback allocation exceeded its configured bound");
@@ -217,10 +223,10 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
     Require(session->Evaluate(prompt.front(), &error), error);
   const auto full = session->SaveSnapshot(&error);
   Require(full && session->RestoreSnapshot(*full, &error), error);
-  Require(session->AllocatedBytes() == empty_bytes,
+  Require(StateBytes(*session) == empty_bytes,
           "restore kept rollback that the restored context cannot use");
   session->Reset();
-  Require(session->AllocatedBytes() == empty_bytes,
+  Require(StateBytes(*session) == empty_bytes,
           "explicit reset retained rollback");
   std::cout
       << "rollback restore is bounded, reuses warm rows and replays exactly\n";

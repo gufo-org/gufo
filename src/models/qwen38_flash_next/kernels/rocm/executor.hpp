@@ -24,6 +24,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/kv_memory.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
@@ -120,6 +121,8 @@ public:
     return mutation_epoch_;
   }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  /// The part of AllocatedBytes held by growable K/V rows.
+  [[nodiscard]] std::size_t KvBytes() const noexcept;
   /// PLE rows this session has gathered, including prefetches, since creation.
   [[nodiscard]] NgramTotals NgramRowTotals() const noexcept {
     return ngram_counters_.Load();
@@ -152,11 +155,19 @@ private:
   };
   struct AttentionState {
     const qwen::vision::DeviceRope* rope{nullptr};
-    /// 8-bit rows [max_context][KvRowBytes(kv_heads*d)] (see kKvBlock).
+    /// 8-bit rows [max_context][KvRowBytes(kv_heads*d)] (see kKvBlock),
+    /// backed as far as Executor::ReserveKv has grown them.
     std::uint8_t* k_cache{nullptr};
     std::uint8_t* v_cache{nullptr};
     float* index_k{nullptr};   ///< [index_capacity_][indexer_dim] raw ring
-    __half* block_k{nullptr};  ///< [max_context/ratio][indexer_dim]
+    __half* block_k{nullptr};  ///< [max_context/ratio + 1][indexer_dim]
+  };
+  /// The rows that grow with the tokens held: K, V and pooled keys of each
+  /// attention layer in layer order, then the draft block's three. Prefill
+  /// checkpoint views share their source's rows.
+  struct KvRows {
+    std::vector<GrowableRows> target;
+    std::vector<GrowableRows> draft;
   };
   /// Per-launch values the kernels read from device memory, so a captured
   /// graph replays at any position.
@@ -210,6 +221,7 @@ private:
   std::unordered_map<std::uint64_t, hipGraphExec_t> graphs_;
   std::unordered_set<std::uint64_t> warmed_;
   std::vector<void*> allocations_;
+  std::shared_ptr<KvRows> kv_;
   std::size_t allocated_bytes_{0};
   std::size_t rollback_bytes_{0};
   std::function<bool()> is_cancelled_;
@@ -248,6 +260,9 @@ public:
     /// Largest session context. Zero selects the native context; values
     /// above it require YaRN (Config::MaxContextLength()).
     std::uint32_t max_context{0};
+    /// Device bytes of K/V rows all sessions may hold at once. Each session's
+    /// rows grow with its tokens; zero leaves the device heap as the limit.
+    std::size_t kv_budget{0};
   };
 
   ~Executor();
@@ -267,6 +282,22 @@ public:
   [[nodiscard]] std::size_t SessionBytes(
       core::SessionMode mode, std::uint32_t max_context,
       std::uint32_t rollback_depth) const noexcept;
+  /// The part of SessionBytes that grows with the tokens a session holds
+  /// (mapped in KvPool::kChunkBytes steps per buffer).
+  [[nodiscard]] std::size_t GrowableBytes(core::SessionMode mode,
+                                          std::uint32_t tokens) const noexcept;
+  [[nodiscard]] std::size_t kv_budget() const noexcept {
+    return options_.kv_budget;
+  }
+  /// K/V bytes currently mapped across this executor's sessions.
+  [[nodiscard]] std::size_t KvMappedBytes() const;
+  /// Backs the session's first `rows` trunk and `draft_rows` draft positions
+  /// (and their pooled keys) before a write. When the budget is short,
+  /// rows idle sessions no longer hold are released first; sessions in
+  /// `busy` are left alone. Fails without touching the session state.
+  [[nodiscard]] bool ReserveKv(Session& session, std::uint32_t rows,
+                               std::uint32_t draft_rows, std::string* error_msg,
+                               std::span<Session* const> busy = {}) const;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
@@ -440,6 +471,7 @@ public:
   [[nodiscard]] bool has_mtp() const noexcept { return model_->has_mtp(); }
 
 private:
+  friend class Session;  // unregisters itself from idle K/V release
   Executor() = default;
 
   /// Visits every device region of a snapshot in payload order with
@@ -593,9 +625,20 @@ private:
            const std::function<bool()>& body, std::string* error_msg,
            bool synchronize = true) const;
 
+  /// Releases backed K/V rows past what idle sessions hold until `want`
+  /// bytes are free or none are left. Returns the bytes released.
+  std::size_t ReleaseIdleKv(std::size_t want,
+                            std::span<Session* const> busy) const;
+  void Unregister(const Session* session) const;
+
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
   Options options_;
+  std::unique_ptr<KvPool> kv_pool_;
+  /// Live sessions created here (not checkpoint views), for releasing the
+  /// rows an idle session no longer holds.
+  mutable std::mutex sessions_mutex_;
+  mutable std::vector<Session*> sessions_;
   [[nodiscard]] std::shared_ptr<SnapshotAllocator> GetSnapshotAllocator() const;
   mutable std::once_flag snapshot_allocator_once_;
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;

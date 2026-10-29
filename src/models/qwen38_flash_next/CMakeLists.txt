@@ -56,6 +56,7 @@ if (ENGINE_ENABLE_HIP)
     ${QFN_ROCM_DIR}/blaslt.cpp
     ${QFN_ROCM_DIR}/device_model.cpp
     ${QFN_ROCM_DIR}/executor.cpp
+    ${QFN_ROCM_DIR}/kv_memory.cpp
     ${QFN_ROCM_DIR}/batch.cpp
     engine.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})

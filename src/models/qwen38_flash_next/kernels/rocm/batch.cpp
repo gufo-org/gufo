@@ -219,6 +219,18 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     return MtpForward(*item.session, item.tokens, item.hidden_row,
                       {.kv_only = item.kv_only}, error);
   }
+  std::array<Session*, kBatchSessions> members{};
+  for (std::size_t i = 0; i < items.size(); ++i)
+    members[i] = items[i].session;
+  for (const auto& item : items) {
+    auto& session = *item.session;
+    if (!session.Cancelled() &&
+        !ReserveKv(session, session.position_,
+                   session.mtp_.position +
+                       static_cast<std::uint32_t>(item.tokens.size()),
+                   error, std::span(members.data(), items.size())))
+      return false;
+  }
   for (const auto& item : items) {
     auto& session = *item.session;
     if (!session.Cancelled() && session.continuation_hooks_) {
@@ -852,6 +864,19 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   }
   if (!AnyActive(items))
     return true;
+  std::array<Session*, kBatchSessions> members{};
+  for (std::size_t i = 0; i < items.size(); ++i)
+    members[i] = items[i].session;
+  for (const auto& item : items) {
+    auto& session = *item.session;
+    if (!session.Cancelled() &&
+        !ReserveKv(
+            session,
+            session.position_ + static_cast<std::uint32_t>(item.tokens.size()),
+            session.mtp_.position, error,
+            std::span(members.data(), items.size())))
+      return false;
+  }
   for (const auto& item : items) {
     auto& session = *item.session;
     if (!session.Cancelled() && session.continuation_hooks_) {

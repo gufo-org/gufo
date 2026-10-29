@@ -621,6 +621,7 @@ void PrintServeHelp(std::string_view program_name,
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    std::size_t kv_cache_bytes = 0;
     bool enable_yarn = false;
     std::string trace_path;
 
@@ -729,6 +730,12 @@ void PrintServeHelp(std::string_view program_name,
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    parser.AddOption(
+        "", "--kv-cache-bytes", "N",
+        "Flash-Next: device bytes of K/V rows shared by all sessions; each "
+        "session's rows grow with the tokens it holds (default: 0 = every "
+        "session's full context)",
+        "Cache", &kv_cache_bytes);
     AddCacheRamOption(parser, &cache_ram);
     parser.AddOption("", "--cache-disk", "DIR",
                      "Opt-in restart-safe continuation cache directory "
@@ -1232,6 +1239,7 @@ int RunServe(std::span<const char* const> args) {
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    std::size_t kv_cache_bytes = 0;
     bool enable_yarn = false;
     std::string trace_path;
 
@@ -1348,6 +1356,12 @@ int RunServe(std::span<const char* const> args) {
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    llm_parser.AddOption(
+        "", "--kv-cache-bytes", "N",
+        "Flash-Next: device bytes of K/V rows shared by all sessions; each "
+        "session's rows grow with the tokens it holds (default: 0 = every "
+        "session's full context)",
+        "Cache", &kv_cache_bytes);
     AddCacheRamOption(llm_parser, &cache_ram);
     llm_parser.AddOption("", "--cache-disk", "DIR",
                          "Opt-in restart-safe continuation cache directory "
@@ -1529,7 +1543,7 @@ int RunServe(std::span<const char* const> args) {
             .staging_capacity_bytes = cache_disk_staging_bytes,
             .model_artifact_fingerprint = {},
         },
-        vision_model_path, cache_ram, enable_yarn);
+        vision_model_path, cache_ram, enable_yarn, kv_cache_bytes);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";

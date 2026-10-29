@@ -414,6 +414,10 @@ void ContinuationAdapter::BeginRestore(
   state.session->tokens_.reserve(target);
   state.session->logits_.reserve(model_->VocabSize());
   std::vector<Coverage> coverage(descriptors_.size());
+  std::string error;
+  if (!model_->executor_->ReserveKv(*state.session->session_, target, draft,
+                                    &error))
+    throw std::runtime_error(error);
   state.GuardAll();
   Check(hipStreamSynchronize(model_->executor_->stream()));
   state.session->session_->PreserveSnapshots(0, 0);

@@ -2395,7 +2395,10 @@ public:
   }
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
-    return {.per_request_state_bytes = session_->AllocatedBytes(),
+    // K/V rows grow with the tokens held and are bounded by the model's K/V
+    // budget; the claim charges each state a share of it, not its rows.
+    return {.per_request_state_bytes =
+                session_->AllocatedBytes() - session_->KvBytes(),
             .temporary_scratch_bytes = 0};
   }
 
@@ -3089,7 +3092,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+                            bool enable_yarn, std::size_t kv_cache_bytes) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3103,6 +3106,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       reader->GetMetadataString("general.architecture").value_or("");
   if (enable_yarn && architecture != "qwen4exp") {
     SetError(error, "--enable-yarn applies only to Qwen3.8-Flash-Next");
+    return false;
+  }
+  if (kv_cache_bytes != 0 && architecture != "qwen4exp") {
+    SetError(error, "--kv-cache-bytes applies only to Qwen3.8-Flash-Next");
     return false;
   }
   // Read once, reused below to derive YaRN from --context for qwen4exp.
@@ -3234,6 +3241,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .decode_concurrency = static_cast<std::uint32_t>(
                 std::clamp<std::size_t>(session_count, 1, 8)),
             .rope_scaling = rope_scaling,
+            .kv_cache_bytes = kv_cache_bytes,
         },
         &load_error);
     if (model == nullptr) {
@@ -3321,6 +3329,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)vision_model_path;
   (void)ram_cache_config;
   (void)enable_yarn;
+  (void)kv_cache_bytes;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif
