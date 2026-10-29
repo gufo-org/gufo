@@ -40,6 +40,8 @@ struct PromptOptions {
   // DeepSeek V4 Flash DSpark support model. DSpark is DS4's own drafter and
   // is unrelated to the Qwen DFlash paths above.
   std::string dspark_model_path;
+  // NVIDIA's LiLiCorr DFlash drafter for Nemotron 3.5 Bolt.
+  std::string lilicorr_model_path;
   std::uint32_t draft_tokens = 7;
   std::uint32_t min_draft_tokens = 1;
 };

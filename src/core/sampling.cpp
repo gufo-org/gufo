@@ -159,6 +159,8 @@ void ApplyMinP(std::vector<Candidate>* candidates,
 }
 
 constexpr std::size_t kSkipBlock = 64;
+/// Top-p over a larger vocabulary normalizes by the full-row softmax sum.
+constexpr std::size_t kTopPFullSumVocabulary = 1024;
 
 /// Largest value in a block, ignoring NaN; +inf is returned as is.
 [[nodiscard]] float BlockMaximum(std::span<const float> block) noexcept {
@@ -271,6 +273,25 @@ bool SamplingConfig::uses_random_sampling() const noexcept {
 bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
   return !constraint && !reasoning_budget && temperature == 0.0F &&
          !penalties_enabled();
+}
+
+std::optional<LogitHeadFilter> SamplingConfig::logit_head_filter()
+    const noexcept {
+  if (!(temperature > 0.0F) || penalties_enabled())
+    return std::nullopt;
+  const std::size_t minimum = std::max<std::size_t>(min_keep, 1);
+  if (top_k > 0)
+    return LogitHeadFilter{
+        .temperature = temperature,
+        .keep = std::max(static_cast<std::size_t>(top_k), minimum),
+        .top_p = top_p,
+        .minimum = minimum};
+  if (top_p < 1.0F)
+    return LogitHeadFilter{.temperature = temperature,
+                           .keep = 0,
+                           .top_p = top_p,
+                           .minimum = minimum};
+  return std::nullopt;
 }
 
 bool SamplerState::CanSelectArgmax(TokenId token,
@@ -851,6 +872,49 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
   return Distribution(logits).Sample(&rng_state_);
 }
 
+TokenId SamplerState::Sample(std::span<const float> logits,
+                             const LogitHead& head) {
+  const auto filter = config_.logit_head_filter();
+  // Forced, pending and masked draws, and top-p over a small vocabulary,
+  // take the full-row path.
+  if (!filter || head.candidates.empty() ||
+      head.temperature != config_.temperature || ForcedToken() ||
+      pending_sample_ || NeedsConstraintMask() ||
+      (filter->keep == 0 && logits.size() <= kTopPFullSumVocabulary))
+    return Sample(logits);
+  config_.Validate();
+  // The head is a prefix of the full row's (value, ID) order, so the same
+  // selection and filters on it reproduce PrepareSelected's candidates.
+  auto& candidates = candidate_scratch_;
+  candidates.clear();
+  candidates.reserve(head.candidates.size());
+  for (const auto& candidate : head.candidates) {
+    if (candidate.token >= logits.size() || !std::isfinite(candidate.value))
+      throw std::invalid_argument("logit head is malformed");
+    candidates.push_back({candidate.token, candidate.value});
+  }
+  std::ranges::sort(candidates, IsBetterProbability);
+  if (candidates.front().value != static_cast<double>(head.maximum))
+    throw std::invalid_argument("logit head is malformed");
+  bool covered = false;
+  if (filter->keep != 0) {
+    const std::size_t keep = std::min(filter->keep, logits.size());
+    covered = candidates.size() >= keep;
+    if (covered) {
+      candidates.resize(keep);
+      FilterSelected();
+    }
+  } else {
+    covered = candidates.size() >= filter->minimum &&
+              FilterSelected(head.softmax_sum, true);
+  }
+  if (!covered) {
+    candidates.clear();
+    return Sample(logits);
+  }
+  return SelectedDistribution().Sample(&rng_state_);
+}
+
 TokenId SamplerState::SampleResidual(
     std::span<const float> target_logits,
     std::span<const TokenId> candidate_ids,
@@ -1099,7 +1163,7 @@ void SamplerState::PrepareSelected(std::span<const float> logits) {
         std::max<std::size_t>(static_cast<std::size_t>(config_.top_k),
                               std::max<std::size_t>(config_.min_keep, 1)));
     select_best(keep);
-  } else if (config_.top_p < 1.0F && logits.size() > 1024) {
+  } else if (config_.top_p < 1.0F && logits.size() > kTopPFullSumVocabulary) {
     double maximum = -std::numeric_limits<double>::infinity();
     bool found = false;
     for_each_adjusted([&](std::size_t, double adjusted) {
@@ -1140,11 +1204,12 @@ void SamplerState::PrepareSelected(std::span<const float> logits) {
   FilterSelected(full_softmax_sum, has_full_softmax_sum);
 }
 
-void SamplerState::FilterSelected(double full_softmax_sum,
+bool SamplerState::FilterSelected(double full_softmax_sum,
                                   bool has_full_softmax_sum) {
   std::size_t keep = candidate_scratch_.size();
+  bool reached = true;
   const std::size_t minimum = MinimumKept(config_, candidate_scratch_.size());
-  if (config_.top_p < 1.0F && keep > 1) {
+  if (config_.top_p < 1.0F && keep > 0) {
     const double maximum = candidate_scratch_.front().value;
     double sum = full_softmax_sum;
     if (!has_full_softmax_sum) {
@@ -1164,6 +1229,7 @@ void SamplerState::FilterSelected(double full_softmax_sum,
         break;
       }
     }
+    reached = top_p_keep >= minimum && cumulative >= target;
     keep = top_p_keep;
   }
   if (config_.min_p > 0.0F && keep > 1) {
@@ -1178,6 +1244,7 @@ void SamplerState::FilterSelected(double full_softmax_sum,
     keep = std::min(keep, std::max(min_p_keep, minimum));
   }
   candidate_scratch_.resize(keep);
+  return reached;
 }
 
 std::uint64_t NextRandom(std::uint64_t* state) {

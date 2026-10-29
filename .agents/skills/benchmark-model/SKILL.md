@@ -343,9 +343,11 @@ place loading immediately before memory in the rendered card:
    request reuses the entire prompt (at most four final tokens may be reevaluated)
    and generates all 128 tokens. Retain preparation evidence separately.
    Antirez DS4 uses a zero-output preparation request because generating a
-   token advances its live cache past the prompt. Gufo DS4 first builds a C1
-   prompt checkpoint, then prepares the concurrent sessions from it to keep
-   prefill arithmetic consistent. Record both choices in the artifacts.
+   token advances its live cache past the prompt. Gufo DS4 and Nemotron
+   (`gufo.checkpoint_preparation` in `bench.json`) first build a C1 prompt
+   checkpoint, then prepare the concurrent sessions from it to keep prefill
+   arithmetic consistent: a second cold prefill beside an active decode runs
+   in `--prefill-chunk` pieces. Record both choices in the artifacts.
    llama.cpp's recurrent checkpoint is four tokens before the prompt frontier;
    other models may only need the final token for logits. This avoids mixing
    Gufo's active decode clock with llama.cpp's elapsed

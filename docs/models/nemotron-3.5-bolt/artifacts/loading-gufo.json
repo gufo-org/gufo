@@ -1,0 +1,77 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-38-generic",
+      "memoryTotalBytes": 131738591232,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "bdd4fb6c23514ab329c2f5138ebac2220d5dd2aa0b6a79a6edbe313f2d730694",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-30",
+  "mode": "lilicorr",
+  "model": {
+    "id": "Nemotron 3.5 Bolt 74B-A9B",
+    "variant": null
+  },
+  "notes": [
+    "file cache reset before each launch with the supplied --drop-caches command",
+    "readiness = HTTP 200 on /ready"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "default": {
+      "command": "gufo serve --port 60205 --sessions 1 llm --model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative lilicorr --lilicorr-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf",
+      "ready_s": 6.152,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "60205",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
+      "--context",
+      "262144",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--speculative",
+      "lilicorr",
+      "--lilicorr-model",
+      "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "cmake-release",
+    "dirty": false,
+    "revision": "925bedc632500d30b02f92fb6d982600efa443ef"
+  },
+  "table": "loading",
+  "target": "gufo"
+}

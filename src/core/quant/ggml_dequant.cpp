@@ -187,7 +187,10 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       block_bytes = 84;
       break;
     case core::GgmlType::kIQ2_XXS:
-      block_bytes = 66;
+      block_bytes = sizeof(block_iq2_xxs);
+      break;
+    case core::GgmlType::kNVFP4:
+      block_bytes = sizeof(block_nvfp4);
       break;
     case core::GgmlType::kQ3_K:
       block_bytes = sizeof(block_q3_K);
@@ -595,10 +598,134 @@ float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
   return negate ? -db * magnitude : db * magnitude;
 }
 
+// 256-entry IQ2_XXS grid, verbatim from ggml-common.h. Each entry packs eight
+// uint8 magnitudes for one group of eight elements.
+constexpr std::uint64_t kIq2xxsGrid[256] = {
+    0x0808080808080808ULL, 0x080808080808082bULL, 0x0808080808081919ULL,
+    0x0808080808082b08ULL, 0x0808080808082b2bULL, 0x0808080808190819ULL,
+    0x0808080808191908ULL, 0x08080808082b0808ULL, 0x08080808082b082bULL,
+    0x08080808082b2b08ULL, 0x08080808082b2b2bULL, 0x0808080819080819ULL,
+    0x0808080819081908ULL, 0x0808080819190808ULL, 0x0808080819192b08ULL,
+    0x08080808192b0819ULL, 0x08080808192b1908ULL, 0x080808082b080808ULL,
+    0x080808082b08082bULL, 0x080808082b082b2bULL, 0x080808082b2b082bULL,
+    0x0808081908080819ULL, 0x0808081908081908ULL, 0x0808081908190808ULL,
+    0x0808081908191919ULL, 0x0808081919080808ULL, 0x080808192b081908ULL,
+    0x080808192b192b08ULL, 0x0808082b08080808ULL, 0x0808082b0808082bULL,
+    0x0808082b082b082bULL, 0x0808082b2b08082bULL, 0x0808190808080819ULL,
+    0x0808190808081908ULL, 0x0808190808190808ULL, 0x08081908082b0819ULL,
+    0x08081908082b1908ULL, 0x0808190819080808ULL, 0x080819081908082bULL,
+    0x0808190819082b08ULL, 0x08081908192b0808ULL, 0x080819082b080819ULL,
+    0x080819082b081908ULL, 0x080819082b190808ULL, 0x080819082b2b1908ULL,
+    0x0808191908080808ULL, 0x080819190808082bULL, 0x0808191908082b08ULL,
+    0x08081919082b0808ULL, 0x080819191908192bULL, 0x08081919192b2b19ULL,
+    0x080819192b080808ULL, 0x080819192b190819ULL, 0x0808192b08082b19ULL,
+    0x0808192b08190808ULL, 0x0808192b19080808ULL, 0x0808192b2b081908ULL,
+    0x0808192b2b2b1908ULL, 0x08082b0808080808ULL, 0x08082b0808081919ULL,
+    0x08082b0808082b08ULL, 0x08082b0808191908ULL, 0x08082b08082b2b08ULL,
+    0x08082b0819080819ULL, 0x08082b0819081908ULL, 0x08082b0819190808ULL,
+    0x08082b081919082bULL, 0x08082b082b082b08ULL, 0x08082b1908081908ULL,
+    0x08082b1919080808ULL, 0x08082b2b0808082bULL, 0x08082b2b08191908ULL,
+    0x0819080808080819ULL, 0x0819080808081908ULL, 0x0819080808190808ULL,
+    0x08190808082b0819ULL, 0x0819080819080808ULL, 0x08190808192b0808ULL,
+    0x081908082b081908ULL, 0x081908082b190808ULL, 0x081908082b191919ULL,
+    0x0819081908080808ULL, 0x0819081908082b08ULL, 0x08190819082b0808ULL,
+    0x0819081919190808ULL, 0x0819081919192b2bULL, 0x081908192b080808ULL,
+    0x0819082b082b1908ULL, 0x0819082b19081919ULL, 0x0819190808080808ULL,
+    0x0819190808082b08ULL, 0x08191908082b0808ULL, 0x08191908082b1919ULL,
+    0x0819190819082b19ULL, 0x081919082b080808ULL, 0x0819191908192b08ULL,
+    0x08191919192b082bULL, 0x0819192b08080808ULL, 0x0819192b0819192bULL,
+    0x08192b0808080819ULL, 0x08192b0808081908ULL, 0x08192b0808190808ULL,
+    0x08192b0819080808ULL, 0x08192b082b080819ULL, 0x08192b1908080808ULL,
+    0x08192b1908081919ULL, 0x08192b192b2b0808ULL, 0x08192b2b19190819ULL,
+    0x082b080808080808ULL, 0x082b08080808082bULL, 0x082b080808082b2bULL,
+    0x082b080819081908ULL, 0x082b0808192b0819ULL, 0x082b08082b080808ULL,
+    0x082b08082b08082bULL, 0x082b0819082b2b19ULL, 0x082b081919082b08ULL,
+    0x082b082b08080808ULL, 0x082b082b0808082bULL, 0x082b190808080819ULL,
+    0x082b190808081908ULL, 0x082b190808190808ULL, 0x082b190819080808ULL,
+    0x082b19081919192bULL, 0x082b191908080808ULL, 0x082b191919080819ULL,
+    0x082b1919192b1908ULL, 0x082b192b2b190808ULL, 0x082b2b0808082b08ULL,
+    0x082b2b08082b0808ULL, 0x082b2b082b191908ULL, 0x082b2b2b19081908ULL,
+    0x1908080808080819ULL, 0x1908080808081908ULL, 0x1908080808190808ULL,
+    0x1908080808192b08ULL, 0x19080808082b0819ULL, 0x19080808082b1908ULL,
+    0x1908080819080808ULL, 0x1908080819082b08ULL, 0x190808081919192bULL,
+    0x19080808192b0808ULL, 0x190808082b080819ULL, 0x190808082b081908ULL,
+    0x190808082b190808ULL, 0x1908081908080808ULL, 0x19080819082b0808ULL,
+    0x19080819192b0819ULL, 0x190808192b080808ULL, 0x190808192b081919ULL,
+    0x1908082b08080819ULL, 0x1908082b08190808ULL, 0x1908082b19082b08ULL,
+    0x1908082b1919192bULL, 0x1908082b192b2b08ULL, 0x1908190808080808ULL,
+    0x1908190808082b08ULL, 0x19081908082b0808ULL, 0x190819082b080808ULL,
+    0x190819082b192b19ULL, 0x190819190819082bULL, 0x19081919082b1908ULL,
+    0x1908192b08080808ULL, 0x19082b0808080819ULL, 0x19082b0808081908ULL,
+    0x19082b0808190808ULL, 0x19082b0819080808ULL, 0x19082b0819081919ULL,
+    0x19082b1908080808ULL, 0x19082b1919192b08ULL, 0x19082b19192b0819ULL,
+    0x19082b192b08082bULL, 0x19082b2b19081919ULL, 0x19082b2b2b190808ULL,
+    0x1919080808080808ULL, 0x1919080808082b08ULL, 0x1919080808190819ULL,
+    0x1919080808192b19ULL, 0x19190808082b0808ULL, 0x191908082b080808ULL,
+    0x191908082b082b08ULL, 0x1919081908081908ULL, 0x191908191908082bULL,
+    0x191908192b2b1908ULL, 0x1919082b2b190819ULL, 0x191919082b190808ULL,
+    0x191919082b19082bULL, 0x1919191908082b2bULL, 0x1919192b08080819ULL,
+    0x1919192b19191908ULL, 0x19192b0808080808ULL, 0x19192b0808190819ULL,
+    0x19192b0808192b19ULL, 0x19192b08192b1908ULL, 0x19192b1919080808ULL,
+    0x19192b2b08082b08ULL, 0x192b080808081908ULL, 0x192b080808190808ULL,
+    0x192b080819080808ULL, 0x192b0808192b2b08ULL, 0x192b081908080808ULL,
+    0x192b081919191919ULL, 0x192b082b08192b08ULL, 0x192b082b192b0808ULL,
+    0x192b190808080808ULL, 0x192b190808081919ULL, 0x192b191908190808ULL,
+    0x192b19190819082bULL, 0x192b19192b081908ULL, 0x192b2b081908082bULL,
+    0x2b08080808080808ULL, 0x2b0808080808082bULL, 0x2b08080808082b2bULL,
+    0x2b08080819080819ULL, 0x2b0808082b08082bULL, 0x2b08081908081908ULL,
+    0x2b08081908192b08ULL, 0x2b08081919080808ULL, 0x2b08082b08190819ULL,
+    0x2b08190808080819ULL, 0x2b08190808081908ULL, 0x2b08190808190808ULL,
+    0x2b08190808191919ULL, 0x2b08190819080808ULL, 0x2b081908192b0808ULL,
+    0x2b08191908080808ULL, 0x2b0819191908192bULL, 0x2b0819192b191908ULL,
+    0x2b08192b08082b19ULL, 0x2b08192b19080808ULL, 0x2b08192b192b0808ULL,
+    0x2b082b080808082bULL, 0x2b082b1908081908ULL, 0x2b082b2b08190819ULL,
+    0x2b19080808081908ULL, 0x2b19080808190808ULL, 0x2b190808082b1908ULL,
+    0x2b19080819080808ULL, 0x2b1908082b2b0819ULL, 0x2b1908190819192bULL,
+    0x2b1908192b080808ULL, 0x2b19082b19081919ULL, 0x2b19190808080808ULL,
+    0x2b191908082b082bULL, 0x2b19190819081908ULL, 0x2b19191919190819ULL,
+    0x2b192b082b080819ULL, 0x2b192b19082b0808ULL, 0x2b2b08080808082bULL,
+    0x2b2b080819190808ULL, 0x2b2b08082b081919ULL, 0x2b2b081908082b19ULL,
+    0x2b2b082b08080808ULL, 0x2b2b190808192b08ULL, 0x2b2b2b0819190808ULL,
+    0x2b2b2b1908081908ULL,
+};
+
+// Sign byte of a 7-bit IQ2 sign index: the eighth sign is the index parity,
+// matching ggml's ksigns_iq2xs table.
+constexpr std::uint8_t Iq2SignByte(std::uint32_t index) noexcept {
+  std::uint32_t parity = index;
+  parity ^= parity >> 4U;
+  parity ^= parity >> 2U;
+  parity ^= parity >> 1U;
+  return static_cast<std::uint8_t>(index | ((parity & 1U) << 7U));
+}
+
+// E2M1 values doubled, as in ggml's kvalues_mxfp4; the halving is folded into
+// Ue4m3ToFloat.
+constexpr std::int8_t kValuesE2m1x2[16] = {0, 1,  2,  3,  4,  6,  8,  12,
+                                           0, -1, -2, -3, -4, -6, -8, -12};
+
+// Unsigned E4M3 (bias 7) scale times 0.5, mirroring ggml_ue4m3_to_fp32.
+float Ue4m3ToFloat(std::uint8_t x) noexcept {
+  if (x == 0 || x == 0x7F) {
+    return 0.0F;
+  }
+  const int exponent = (x >> 3U) & 0x0F;
+  const int mantissa = x & 0x07;
+  const float raw =
+      exponent == 0 ? std::ldexp(static_cast<float>(mantissa), -9)
+                    : std::ldexp(1.0F + (static_cast<float>(mantissa) / 8.0F),
+                                 exponent - 7);
+  return raw * 0.5F;
+}
+
 }  // namespace
 
 const std::uint32_t* Iq3sGrid() noexcept {
   return kIq3sGrid;
+}
+
+const std::uint64_t* Iq2xxsGrid() noexcept {
+  return kIq2xxsGrid;
 }
 
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k) {
@@ -627,6 +754,45 @@ void DequantizeIQ3_S(const void* src, float* dst, std::size_t k) {
   for (std::size_t b = 0; b < nb; ++b) {
     for (std::size_t i = 0; i < 256; ++i) {
       dst[(b * 256) + i] = Iq3sValue(blocks[b], i);
+    }
+  }
+}
+
+void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq2_xxs*>(src);
+  const std::size_t nb = k / 256;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    for (std::size_t ib32 = 0; ib32 < 8; ++ib32) {
+      std::uint32_t aux[2];
+      std::memcpy(aux, blocks[b].qs + (4 * ib32), sizeof(aux));
+      const float db = d * (0.5F + static_cast<float>(aux[1] >> 28U)) * 0.25F;
+      float* y = dst + (b * 256) + (ib32 * 32);
+      for (std::uint32_t l = 0; l < 4; ++l) {
+        const std::uint64_t grid = kIq2xxsGrid[(aux[0] >> (8U * l)) & 0xFFU];
+        const std::uint8_t signs = Iq2SignByte((aux[1] >> (7U * l)) & 127U);
+        for (std::uint32_t j = 0; j < 8; ++j) {
+          const auto magnitude = static_cast<float>((grid >> (8U * j)) & 0xFFU);
+          y[(l * 8) + j] = (signs & kSignMaskIq2xs[j]) != 0 ? -db * magnitude
+                                                            : db * magnitude;
+        }
+      }
+    }
+  }
+}
+
+void DequantizeNVFP4(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_nvfp4*>(src);
+  const std::size_t nb = k / 64;
+  for (std::size_t b = 0; b < nb; ++b) {
+    for (std::size_t s = 0; s < 4; ++s) {
+      const float d = Ue4m3ToFloat(blocks[b].d[s]);
+      float* y = dst + (b * 64) + (s * 16);
+      for (std::size_t j = 0; j < 8; ++j) {
+        const std::uint8_t packed = blocks[b].qs[(s * 8) + j];
+        y[j] = static_cast<float>(kValuesE2m1x2[packed & 0x0FU]) * d;
+        y[j + 8] = static_cast<float>(kValuesE2m1x2[packed >> 4U]) * d;
+      }
     }
   }
 }

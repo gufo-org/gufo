@@ -29,6 +29,8 @@ set(gufo_pr_targets
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
+  nemotron35_bolt_config_test nemotron35_bolt_tokenizer_test
+  nemotron35_bolt_chat_template_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test
   qwen3_asr_config_test qwen3_asr_audio_api_test
   embedding_gemma2_config_test embedding_gemma2_embeddings_api_test
@@ -46,10 +48,14 @@ list(REMOVE_ITEM gufo_pr_tests
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
+  nemotron35_bolt_config_test nemotron35_bolt_tokenizer_test
+  nemotron35_bolt_chat_template_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test)
 list(APPEND gufo_pr_tests
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
   "qwen38_flash_next\\.rope_scaling" "qwen38_flash_next\\.continuation_layout"
+  "nemotron35_bolt\\.config" "nemotron35_bolt\\.pretokenizer"
+  "nemotron35_bolt\\.chat_template"
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
   cache_workloads_test cache_disk_faults_test

@@ -22,6 +22,10 @@ namespace gufo::models::deepseek_v4_flash {
 class Model;
 }
 
+namespace gufo::models::nemotron35_bolt {
+class Model;
+}
+
 namespace gufo::models::qwen38_flash_next {
 class Model;
 }
@@ -36,7 +40,8 @@ enum class TextSpeculativeBackend : std::uint8_t {
   kDisabled,
   kDFlash,
   kDSpark,
-  kMtp,  ///< Qwen MTP draft block
+  kMtp,       ///< Qwen MTP draft block
+  kLiliCorr,  ///< NVIDIA LiLiCorr DFlash drafter (Nemotron 3.5 Bolt)
 };
 
 struct TextSpeculativeConfig {
@@ -105,6 +110,17 @@ public:
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
+
+  /// Installs a previously loaded Nemotron 3.5 Bolt model with request-owned
+  /// sessions and live-prefix reuse. With a loaded drafter and a nonzero
+  /// `draft_tokens`, decoding drafts up to that many tokens per round.
+  bool load(std::shared_ptr<models::nemotron35_bolt::Model> model,
+            std::string* error, std::uint32_t max_context = 0,
+            std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextRunnerRamCacheOptions ram_cache_config = {},
+            std::uint32_t draft_tokens = 0);
 
   /// Installs a previously loaded Qwen3.8-Flash-Next model with
   /// request-owned sessions, the model's tokenizer, and host-memory

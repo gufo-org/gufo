@@ -106,6 +106,17 @@ class Session:
         return self.config.data["reference"].get("kind", "llama.cpp")
 
     @property
+    def checkpoint_preparation(self) -> bool:
+        """Gufo prepares concurrent sessions from a C1 prompt checkpoint.
+
+        A second cold prefill beside an active decode runs in scheduler chunks,
+        which changes the prefill arithmetic of models whose products depend
+        on the chunk size.
+        """
+        return self.target == "gufo" and (
+            self.reference_kind == "ds4" or bool(self.config.data["gufo"].get("checkpoint_preparation")))
+
+    @property
     def request_model(self) -> str:
         # The upstream alias disables default DeepSeek thinking for corpus requests too.
         return "deepseek-chat" if self.target == "reference" and self.reference_kind == "ds4" else MODEL_ALIAS
@@ -623,8 +634,7 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                         suite_bytes = json.dumps(
                             {"recipe": "single-user-d0", "task": task, "prompt": prompt},
                             sort_keys=True).encode()
-                        if (prefill_first and users > 1 and session.target == "gufo"
-                                and session.reference_kind == "ds4"):
+                        if prefill_first and users > 1 and session.checkpoint_preparation:
                             # Keep prefill arithmetic identical to the C1 control;
                             # simultaneous cold prefills use smaller scheduler chunks.
                             session.request(server.base_url, prompt, 1)
@@ -693,8 +703,7 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                 }
                 result["promptPreparation"] = (
                     "C1 checkpoint followed by concurrent preparation"
-                    if prefill_first and users > 1 and session.target == "gufo"
-                    and session.reference_kind == "ds4"
+                    if prefill_first and users > 1 and session.checkpoint_preparation
                     else "concurrent preparation" if prefill_first else "cold prompts"
                 )
             if combined is None or combined.get("artifactType") != report.get("artifactType"):

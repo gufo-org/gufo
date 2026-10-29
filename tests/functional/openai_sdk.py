@@ -311,7 +311,7 @@ def image_content(color):
 
 
 def check_sampling_defaults(client, model, checks, preset, overrides, vision=False,
-                            server_thinking=None):
+                            server_thinking=None, server_log=None):
     """Omission and explicit presets must replay within each execution mode."""
     def signature(value):
         return value["text"].strip(), value["reasoning"].strip(), value["finish"]
@@ -384,6 +384,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
 
         # Each change targets one independent control, with and without all
         # other defaults written out; this also checks explicit neutral values.
+        replay_start = log_offset(server_log)
         for label, override, extra in (
             ("temperature_only", {"temperature": .4}, {}),
             ("top_p_only", {"top_p": .6}, {}),
@@ -406,11 +407,16 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             record(f"sampling_{label}_thinking{thinking}", actual)
 
         # Reusing model state must not restore the preceding request's sampler.
+        replay_end = log_offset(server_log)
         cached = chat_result(client, {
             **request, "extra_body": {**request["extra_body"], "cache_prompt": True}}, True)
         assert signature(cached) == signature(inherited), (cached, inherited)
         assert cached["usage"]["cached_tokens"] > 0, cached
-        assert cached["usage"]["gufo"]["prefill_tokens"] == 0, cached
+        # A template that rewrites the assistant opening keeps the complete
+        # prompt as an optional copy, which a full cache may refuse.
+        check_unchanged_retry(f"sampling_cached_preset_thinking{thinking}", cached,
+                              cached["usage"]["gufo"]["prefill_tokens"], server_log,
+                              replay_start, replay_end)
         record(f"sampling_cached_preset_thinking{thinking}", cached)
 
         # Distinct request-owned samplers must replay when admitted together.
@@ -794,7 +800,8 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
     checks[f"batch_c{width}_greedy_short_replies_match_serial"] = batched
 
 
-def check_conversations(client, model, checks, vision=False, server_log=None):
+def check_conversations(client, model, checks, vision=False, server_log=None,
+                        sampling_preset="qwen38"):
     """Exercise thinking controls and cache reuse after a client disconnect."""
 
     def signature(result):
@@ -906,7 +913,11 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
             warm = chat(label + "_resume", request)
             assert warm["usage"]["cached_tokens"] >= 128, warm
             if not retain:
-                assert warm["usage"]["gufo"]["prefill_tokens"] <= 16, warm
+                # Nemotron's template appends "{reasoning effort: efficient}"
+                # to the last user turn only; the previous turn loses its
+                # 8-token hint and is prefilled from there.
+                bound = 16 + (8 if sampling_preset == "nemotron35" else 0)
+                assert warm["usage"]["gufo"]["prefill_tokens"] <= bound, warm
             replay = chat(label + "_replay", request, True)
             assert (
                 warm["text"].strip(),
@@ -1666,7 +1677,7 @@ def check_native_tools(client, model, checks, vision=False):
     record("chat_tool_thinking_low", thought)
     with client.responses.stream(**{
             **base, "tools": [{"type": "function", **thinking_function}],
-            "reasoning": {"effort": "high"}, "max_output_tokens": 256}) as stream:
+            "reasoning": {"effort": "high"}, "max_output_tokens": 1024}) as stream:
         list(stream)
         thought = stream.get_final_response()
     signature(thought, value="alpha")
@@ -2117,7 +2128,7 @@ def check_auto_tools(client, model, checks, vision=False):
         record("auto_image_argument_stop_retry", {"stopped": stopped, "retry": retry})
 
 
-def check_structured_limits(client, model, checks, vision=False):
+def check_structured_limits(client, model, checks, vision=False, sampling_preset="qwen38"):
     """Short boundary checks; valid prefixes may be incomplete at a limit."""
     schema = {"type": "object", "properties": {
         "text": {"type": "string", "const": 'é😀 "\\ ' * 24}},
@@ -2181,8 +2192,9 @@ def check_structured_limits(client, model, checks, vision=False):
 
     # Greedy GPU winners include penalties, but still obey the tool grammar.
     # Invalid speculative proposals must not mutate its state while staging
-    # conditional penalty histories.
-    for choice in ("auto", "required"):
+    # conditional penalty histories. Under these penalties Nemotron 3.5 Bolt
+    # answers an optional call in prose, also under llama.cpp.
+    for choice in ("auto", "required") if sampling_preset != "nemotron35" else ("required",):
         request = dict(model=model, temperature=0, seed=79,
             presence_penalty=1.5, frequency_penalty=.2,
             max_completion_tokens=96, tool_choice=choice, parallel_tool_calls=False,
@@ -2776,7 +2788,7 @@ def main():
     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "nemotron35"),
                         help="Expected text defaults; required for all/sampling-defaults")
     parser.add_argument("--sampling-overrides", type=json.loads, default={},
                         help="JSON object of explicit server sampling CLI values")
@@ -2791,7 +2803,7 @@ def main():
                         help="Requests in the batch suite; must fit server --sessions")
     parser.add_argument("--context", type=int, default=8192,
                         help="Server capacity; long-context fills roughly half, measured in usage")
-    parser.add_argument("--speculative", choices=("off", "mtp", "dflash2", "dspark"),
+    parser.add_argument("--speculative", choices=("off", "mtp", "dflash2", "dspark", "lilicorr"),
                         default="off", help="Server mode; determines sampled replay guarantees")
     parser.add_argument("--snapshot-capacity-bytes", type=int,
                         help="Configured RAM checkpoint budget; required for cache-bridge")
@@ -2857,7 +2869,8 @@ def main():
                                                    async_local_only, args.expect_reasoning),
             "stops": lambda: check_stops(client, args.model, checks),
             "conversation": lambda: check_conversations(
-                client, args.model, checks, args.vision, args.server_log),
+                client, args.model, checks, args.vision, args.server_log,
+                args.sampling_preset),
             "image-inputs": lambda: check_image_inputs(
                 client, args.model, checks, image_content, chat_result, response_result),
             "image-count": lambda: check_image_count(
@@ -2868,7 +2881,8 @@ def main():
                 args.server_log),
             "image-detail": lambda: check_image_detail(client, args.model, checks, chat_result),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
-            "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
+            "structured-limits": lambda: check_structured_limits(
+                client, args.model, checks, args.vision, args.sampling_preset),
             "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
             "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
             "tool-edges": lambda: check_tool_edges(
@@ -2876,7 +2890,8 @@ def main():
             "tool-reasoning": lambda: check_tool_reasoning(
                 client, args.model, checks, chat_result, args.sampling_preset),
             "reasoning-separator": lambda: check_reasoning_separator(
-                client, args.model, checks, chat_result, args.server_log),
+                client, args.model, checks, chat_result, args.server_log,
+                args.sampling_preset),
             "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
             "reasoning-budget": lambda: check_reasoning_budget(
                 client, args.model, checks, chat_result),
@@ -2903,12 +2918,13 @@ def main():
             "tool-parameter-order": lambda: check_tool_parameter_order(
                 client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(
-                client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
+                client, args.model, checks, chat_result, args.vision, image_content, args.server_log,
+                args.sampling_preset),
             "state-edges": lambda: check_state_edges(
                 client, args.model, checks, args.speculative, args.vision, args.server_log),
             "sampling-defaults": lambda: check_sampling_defaults(
                 client, args.model, checks, args.sampling_preset, args.sampling_overrides,
-                args.vision, args.server_thinking),
+                args.vision, args.server_thinking, args.server_log),
             "logprobs": lambda: check_logprobs(client, args.model, checks, CompletionStreamFrame),
             "responses-logprobs": lambda: check_responses_logprobs(client, args.model, checks),
             "sampling-ranges": lambda: check_sampling_ranges(client, args.model, checks),
@@ -2928,7 +2944,8 @@ def main():
             "cache-edits": lambda: check_cache_edits(
                 client, args.model, checks, chat_result, args.server_log),
             "cache-growth": lambda: check_cache_growth(
-                client, args.model, checks, chat_result, args.server_log),
+                client, args.model, checks, chat_result, args.server_log,
+                args.sampling_preset),
             "cache-depth": lambda: check_cache_depth(
                 client, args.model, checks, chat_result, args.concurrency, args.server_log),
             "cache-stalls": lambda: check_cache_stalls(

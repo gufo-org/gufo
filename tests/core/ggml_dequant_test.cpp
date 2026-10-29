@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <numeric>
@@ -265,6 +266,80 @@ void TestQ8_0() {
              expected_dot, "Q8_0 dot product");
 }
 
+void TestIq2Xxs() {
+  gufo::quant::block_iq2_xxs block{};
+  block.d = 0x3C00;  // fp16 1.0
+  // Group 0: grid indices {0, 1, 0, 0}, sign index 1 on the first eight
+  // (odd parity: elements 0 and 7 negate), group scale 3.
+  const std::uint32_t group0[2] = {0x00000100U, 0x30000001U};
+  // Group 1: sign index 3 (even parity: only elements 0 and 1 negate).
+  const std::uint32_t group1[2] = {0U, 3U};
+  std::memcpy(block.qs, group0, sizeof(group0));
+  std::memcpy(block.qs + 4, group1, sizeof(group1));
+
+  std::array<float, kBlockElements> actual{};
+  gufo::quant::DequantizeIQ2_XXS(&block, actual.data(), actual.size());
+
+  // Grid entry 0 is all 8s; entry 1 replaces its first byte with 0x2b.
+  // db = d * (0.5 + scale) / 4.
+  std::array<float, kBlockElements> expected{};
+  expected.fill(8.0F * 0.125F);
+  for (std::size_t i = 0; i < 32; ++i) {
+    expected[i] = 8.0F * 0.875F;
+  }
+  expected[0] = -expected[0];
+  expected[7] = -expected[7];
+  expected[8] = 43.0F * 0.875F;
+  expected[32] = -expected[32];
+  expected[33] = -expected[33];
+  for (std::size_t i = 0; i < kBlockElements; ++i) {
+    ExpectNear(actual[i], expected[i], "IQ2_XXS dequant value");
+  }
+  if (gufo::quant::QuantizedRowBytes(gufo::core::GgmlType::kIQ2_XXS, 512) !=
+      132) {
+    std::cerr << "IQ2_XXS row bytes\n";
+    std::exit(1);
+  }
+}
+
+void TestNvfp4() {
+  gufo::quant::block_nvfp4 block{};
+  // UE4M3 scales, halved like ggml: 0x38 = 1.0 -> 0.5, 0x40 = 2.0 -> 1.0,
+  // 0x7F is the NaN code and decodes to zero, 0x01 is the subnormal 2^-9.
+  block.d[0] = 0x38;
+  block.d[1] = 0x40;
+  block.d[2] = 0x7F;
+  block.d[3] = 0x01;
+  block.qs[0] = 0xF2;   // element 0: code 2 (1.0), element 8: code 15 (-6.0)
+  block.qs[1] = 0x97;   // element 1: code 7 (6.0), element 9: code 9 (-0.5)
+  block.qs[8] = 0x5A;   // element 16: code 10 (-1.0), element 24: code 5 (3.0)
+  block.qs[16] = 0x77;  // zero scale
+  block.qs[24] = 0x07;  // element 48: code 7 (6.0)
+
+  std::array<float, 64> actual{};
+  gufo::quant::DequantizeNVFP4(&block, actual.data(), actual.size());
+  std::array<float, 64> expected{};
+  expected[0] = 1.0F;
+  expected[8] = -6.0F;
+  expected[1] = 6.0F;
+  expected[9] = -0.5F;
+  expected[16] = -2.0F;
+  expected[24] = 6.0F;
+  expected[48] = 12.0F * 0.0009765625F;
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    ExpectNear(actual[i], expected[i], "NVFP4 dequant value", 0.0F);
+  }
+
+  using gufo::core::GgmlType;
+  if (gufo::quant::QuantizedBlockElements(GgmlType::kNVFP4) != 64 ||
+      gufo::quant::QuantizedRowBytes(GgmlType::kNVFP4, 4096) != 64 * 36 ||
+      gufo::quant::QuantizedRowBytes(GgmlType::kNVFP4, 32) != 0 ||
+      gufo::core::ToString(GgmlType::kNVFP4) != "NVFP4") {
+    std::cerr << "NVFP4 storage geometry\n";
+    std::exit(1);
+  }
+}
+
 void TestQ5_K() {
   constexpr std::size_t kQ5Elements = 256;
   struct Q5Block {
@@ -455,6 +530,8 @@ int main() {
   TestQ3();
   TestQ8();
   TestQ8_0();
+  TestIq2Xxs();
+  TestNvfp4();
   TestQ5_K();
   if (const char* model = std::getenv("GUFO_MTP_MODEL");
       model != nullptr && std::string_view(model).size() > 0) {

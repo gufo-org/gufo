@@ -1,0 +1,89 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-38-generic",
+      "memoryTotalBytes": 131738591232,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "bdd4fb6c23514ab329c2f5138ebac2220d5dd2aa0b6a79a6edbe313f2d730694",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-30",
+  "mode": "lilicorr",
+  "model": {
+    "id": "Nemotron 3.5 Bolt 74B-A9B",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.8.0-dev (build 11969, commit c3df4b7e2)",
+    "file cache reset before each launch with the supplied --drop-caches command",
+    "readiness = HTTP 200 on /health"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "default": {
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 262144 -np 1 --port 44643 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "ready_s": 10.171,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
+      "-c",
+      "262144",
+      "-np",
+      "1",
+      "--port",
+      "44643",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-dflash",
+      "--spec-draft-model",
+      "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf",
+      "--spec-draft-ngl",
+      "999",
+      "--spec-draft-n-max",
+      "7"
+    ]
+  },
+  "source": {
+    "buildMode": "cmake-release",
+    "dirty": false,
+    "revision": "4684338ace7bd0573eb07c98b2b05514c3eab5ed"
+  },
+  "table": "loading",
+  "target": "reference"
+}

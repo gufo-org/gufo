@@ -1,8 +1,10 @@
 #include "src/core/sampling.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -244,6 +246,128 @@ void TestCompactTargetContract() {
   }
 }
 
+// The head a device would report: the exact sequential host softmax sum and
+// every finite token at least as large as the `size`-th best, shuffled.
+gufo::sampling::LogitHead HeadOf(const std::vector<float>& logits,
+                                 float temperature, std::size_t size,
+                                 std::uint64_t* rng) {
+  gufo::sampling::LogitHead head;
+  std::vector<float> finite;
+  for (const float x : logits)
+    if (std::isfinite(x))
+      finite.push_back(x);
+  std::ranges::sort(finite, std::greater<>());
+  head.maximum = finite.front();
+  head.temperature = temperature;
+  for (const float x : logits)
+    if (std::isfinite(x))
+      head.softmax_sum +=
+          std::exp((static_cast<double>(x) - head.maximum) / temperature);
+  const float floor = finite[std::min(size, finite.size()) - 1];
+  for (std::size_t i = 0; i < logits.size(); ++i)
+    if (std::isfinite(logits[i]) && logits[i] >= floor)
+      head.candidates.push_back({static_cast<TokenId>(i), logits[i]});
+  for (std::size_t i = head.candidates.size(); i > 1; --i)
+    std::swap(head.candidates[i - 1],
+              head.candidates[gufo::sampling::NextRandom(rng) % i]);
+  return head;
+}
+
+void TestLogitHead() {
+  std::uint64_t rng = 7;
+  const auto normal = [&rng] {
+    const double u = (gufo::sampling::Uniform(&rng) + 1e-12);
+    const double v = gufo::sampling::Uniform(&rng);
+    return std::sqrt(-2 * std::log(u)) * std::cos(6.283185307179586 * v);
+  };
+  const std::vector<SamplingConfig> configs{
+      {.temperature = 1.0F, .top_p = 0.95F, .seed = 1},
+      {.temperature = 0.7F, .top_p = 0.9F, .min_p = 0.05F, .seed = 2},
+      {.temperature = 0.6F, .top_p = 0.5F, .min_keep = 3, .seed = 3},
+      {.temperature = 1.0F, .top_k = 40, .seed = 4},
+      {.temperature = 1.3F,
+       .top_k = 40,
+       .top_p = 0.9F,
+       .min_keep = 50,
+       .seed = 5},
+      // Read the full row: greedy, penalties, temperature alone.
+      {.temperature = 0.0F, .seed = 6},
+      {.temperature = 1.0F,
+       .top_p = 0.95F,
+       .seed = 7,
+       .presence_penalty = 0.5F},
+      {.temperature = 1.0F, .min_p = 0.1F, .seed = 8},
+  };
+  for (const auto& config : configs) {
+    SamplerState row_sampler(config), head_sampler(config);
+    for (int step = 0; step < 300; ++step) {
+      // Sharp, moderate and flat rows over 4096 tokens, with ties and
+      // non-finite entries.
+      const double spread = step % 3 == 0 ? 6.0 : step % 3 == 1 ? 2.0 : 0.3;
+      std::vector<float> logits(4096);
+      for (auto& x : logits)
+        x = static_cast<float>(spread * normal());
+      logits[step % 4096] += 8.0F;
+      logits[(step * 7) % 4096] = logits[(step * 13 + 1) % 4096];
+      logits[(step * 31 + 5) % 4096] = -INFINITY;
+      logits[(step * 17 + 9) % 4096] = NAN;
+      // Heads of 1, 64 and 4096 tokens: too small ones fall back.
+      const std::size_t size = step % 5 == 0 ? 1 : step % 5 < 3 ? 64 : 4096;
+      const auto head =
+          HeadOf(logits, std::max(config.temperature, 1e-3F), size, &rng);
+      if (step % 11 == 0) {
+        // A pending draw ignores both row and head.
+        row_sampler.DeferSample(3);
+        head_sampler.DeferSample(3);
+      }
+      const auto expected = row_sampler.Sample(logits);
+      const auto actual = head_sampler.Sample(logits, head);
+      Expect(expected == actual &&
+                 row_sampler.rng_state() == head_sampler.rng_state(),
+             "a logit head draws the full row's token with the same RNG");
+      row_sampler.Accept(expected);
+      head_sampler.Accept(actual);
+    }
+  }
+  // A head whose sum claims twice the mass narrows top-p, so the draws
+  // differ when the head is read.
+  SamplerState row_sampler(configs[0]), head_sampler(configs[0]);
+  std::size_t differ = 0;
+  for (int step = 0; step < 100; ++step) {
+    std::vector<float> logits(4096);
+    for (auto& x : logits)
+      x = static_cast<float>(2.0 * normal());
+    auto head = HeadOf(logits, 1.0F, 4096, &rng);
+    head.softmax_sum *= 0.5;
+    differ += row_sampler.Sample(logits) != head_sampler.Sample(logits, head);
+  }
+  Expect(differ > 10, "a covering head is read instead of the row");
+  // A head summed at another temperature is ignored.
+  SamplerState plain(configs[0]), stale(configs[0]);
+  for (int step = 0; step < 50; ++step) {
+    std::vector<float> logits(4096);
+    for (auto& x : logits)
+      x = static_cast<float>(2.0 * normal());
+    auto head = HeadOf(logits, 0.5F, 4096, &rng);
+    Expect(plain.Sample(logits) == stale.Sample(logits, head) &&
+               plain.rng_state() == stale.rng_state(),
+           "a head at another temperature falls back to the row");
+  }
+  const std::vector<float> logits{0.0F, 2.0F, 1.0F, 2.0F};
+  gufo::sampling::LogitHead wrong{.maximum = 2.0F,
+                                  .temperature = 1.0F,
+                                  .softmax_sum = 1.0,
+                                  .candidates = {{2, 1.0F}}};
+  bool refused = false;
+  try {
+    SamplerState sampler({.temperature = 1.0F, .top_k = 1});
+    (void)sampler.Sample(logits, wrong);
+  } catch (const std::invalid_argument&) {
+    refused = true;
+  }
+  Expect(refused, "a head whose maximum is not its best logit is refused");
+}
+
 }  // namespace
 
 void TestRawLogprobs() {
@@ -325,6 +449,7 @@ int main() {
   TestReasoningBudgetKeepsLiteralAnswer();
   TestReasoningBudgetWithGrammar();
   TestCompactTargetContract();
+  TestLogitHead();
   std::cout << "sampling_test passed\n";
   return 0;
 }

@@ -437,9 +437,13 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
 correctness matrix on main. A baseline must match the revision, harness,
 toolchain, weights, settings and preceding cache history.
 
-Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
-DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
-`--mmproj` enables image cases. Keep informational server logging enabled.
+Use `deepseek4` for DeepSeek and `nemotron35` for Nemotron 3.5 Bolt, whose
+defaults (temperature 1.0, top-p 0.95, top-k off) carry neither the Qwen nor the
+DeepSeek tool-framing expectations. Pass the model's normal speculative options
+for DFlash2, MTP, DSpark or LiLiCorr. Server sampling arguments become the
+expected defaults; `--mmproj` enables image cases. Keep informational server
+logging enabled. Nemotron has no persistent disk cache yet, so its runs list the
+suites of `all` without `cache`, which starts the server with `--cache-disk`.
 
 Each invocation tests **one model and one mode**. Model-specific changes need
 only the affected target/modes. For shared text changes, run the affected suites

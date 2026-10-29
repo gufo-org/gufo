@@ -635,6 +635,34 @@ void TestIntegerRoutingTensor() {
          "integer routing extent overflow is rejected");
 }
 
+void TestNvfp4Tensor() {
+  GgufBuilder builder;
+  builder.AddMetadataString("general.architecture", "nemotron_h_moe");
+  // NVFP4 rows are 64-element blocks of 36 bytes; the per-tensor scale is a
+  // separate F32 tensor.
+  builder.AddTensor("blk.0.ssm_in.weight", {128, 3},
+                    gufo::core::GgmlType::kNVFP4, 0);
+  builder.AddTensor("blk.0.ssm_in.scale", {1}, gufo::core::GgmlType::kF32, 256);
+  auto bytes = builder.Build();
+  std::string error;
+  auto reader =
+      gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), &error);
+  Expect(reader != nullptr, "NVFP4 tensor loads: " + error);
+  const auto* weight = reader->FindTensor("blk.0.ssm_in.weight");
+  Expect(weight && weight->type == gufo::core::GgmlType::kNVFP4 &&
+             weight->size_bytes == 3 * 2 * 36,
+         "NVFP4 payload covers two 36-byte blocks per row");
+
+  GgufBuilder misaligned;
+  misaligned.AddMetadataString("general.architecture", "nemotron_h_moe");
+  misaligned.AddTensor("blk.0.ssm_in.weight", {96, 1},
+                       gufo::core::GgmlType::kNVFP4, 0);
+  bytes = misaligned.Build();
+  Expect(
+      !gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), &error),
+      "NVFP4 row that is not a multiple of 64 is rejected");
+}
+
 void TestMappedPrefetch() {
   char path[] = "/tmp/gufo-prefetch-XXXXXX";
   const int fd = mkstemp(path);
@@ -668,6 +696,7 @@ void TestMappedPrefetch() {
 int main() {
   TestMappedPrefetch();
   TestIntegerRoutingTensor();
+  TestNvfp4Tensor();
   TestVisionMetadataArrays();
   TestNarrowIntegerArrays();
   std::cout << "Running GgufReader unit tests...\n";

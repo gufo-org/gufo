@@ -601,6 +601,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_policy;
     std::string dspark_model_path;
     std::string mtp_model_path;
+    std::string lilicorr_model_path;
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
@@ -675,7 +676,8 @@ void PrintServeHelp(std::string_view program_name,
 
     // Speculative & Hardware
     parser.AddOption("", "--speculative", "MODE",
-                     "HTTP draft backend: dspark, dflash2, mtp, or off",
+                     "HTTP draft backend: dspark, dflash2, mtp, lilicorr, or "
+                     "off",
                      "Speculative", &speculative_backend);
     parser.AddOption("", "--dflash-model", "PATH",
                      "Path to Qwen DFlash2 GGUF file", "Speculative",
@@ -691,6 +693,10 @@ void PrintServeHelp(std::string_view program_name,
                      "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
                      "mtp-...-shared-*.gguf sidecar)",
                      "Speculative", &mtp_model_path);
+    parser.AddOption("", "--lilicorr-model", "PATH",
+                     "Path to NVIDIA's LiLiCorr drafter GGUF for Nemotron 3.5 "
+                     "Bolt",
+                     "Speculative", &lilicorr_model_path);
     parser.AddOption(
         "-d", "--draft-tokens", "N",
         "Maximum speculative draft tokens evaluated per step (default: 7)",
@@ -1211,6 +1217,7 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_policy;
     std::string dspark_model_path;
     std::string mtp_model_path;
+    std::string lilicorr_model_path;
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
@@ -1291,7 +1298,8 @@ int RunServe(std::span<const char* const> args) {
         "(default: -1)",
         "Reasoning Defaults", &reasoning_budget);
     llm_parser.AddOption("", "--speculative", "MODE",
-                         "HTTP draft backend: dspark, dflash2, mtp, or off",
+                         "HTTP draft backend: dspark, dflash2, mtp, lilicorr, "
+                         "or off",
                          "Speculative", &speculative_backend);
     llm_parser.AddOption("", "--dflash-model", "PATH",
                          "Path to Qwen DFlash2 GGUF file", "Speculative",
@@ -1308,6 +1316,10 @@ int RunServe(std::span<const char* const> args) {
         "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
         "mtp-...-shared-*.gguf sidecar)",
         "Speculative", &mtp_model_path);
+    llm_parser.AddOption("", "--lilicorr-model", "PATH",
+                         "Path to NVIDIA's LiLiCorr drafter GGUF for Nemotron "
+                         "3.5 Bolt",
+                         "Speculative", &lilicorr_model_path);
     llm_parser.AddOption(
         "-d", "--draft-tokens", "N",
         "Maximum speculative draft tokens evaluated per step (default: 7)",
@@ -1459,6 +1471,8 @@ int RunServe(std::span<const char* const> args) {
       speculative_config.backend = server::TextSpeculativeBackend::kDSpark;
     } else if (speculative_backend == "mtp") {
       speculative_config.backend = server::TextSpeculativeBackend::kMtp;
+    } else if (speculative_backend == "lilicorr") {
+      speculative_config.backend = server::TextSpeculativeBackend::kLiliCorr;
     } else {
       std::cerr << "Error: speculative backend '" << speculative_backend
                 << "' is not supported by the HTTP server\n";
@@ -1480,11 +1494,21 @@ int RunServe(std::span<const char* const> args) {
                    "--min-draft-tokens 1; bound blocks with --draft-tokens\n";
       return 2;
     }
+    if (speculative_config.backend ==
+            server::TextSpeculativeBackend::kLiliCorr &&
+        (lilicorr_model_path.empty() || min_draft_tokens != 1)) {
+      std::cerr << "Error: LiLiCorr requires --lilicorr-model and "
+                   "--min-draft-tokens 1; bound rounds with --draft-tokens\n";
+      return 2;
+    }
     speculative_config.draft_model_path =
         speculative_config.backend == server::TextSpeculativeBackend::kDSpark
             ? dspark_model_path
         : speculative_config.backend == server::TextSpeculativeBackend::kMtp
             ? mtp_model_path
+        : speculative_config.backend ==
+                server::TextSpeculativeBackend::kLiliCorr
+            ? lilicorr_model_path
             : dflash_model_path;
     speculative_config.max_draft_tokens =
         static_cast<std::uint32_t>(draft_tokens);
@@ -1549,25 +1573,28 @@ int RunServe(std::span<const char* const> args) {
     default_request.reasoning = *reasoning_defaults;
     const auto initial_output = backend->initial_output_state(default_request);
     std::ostringstream sampling_log;
-    sampling_log
-        << "event=defaults thinking="
-        << (initial_output == server::TextGenerationBackend::
-                                  InitialOutputState::kReasoning
-                ? "on"
-            : initial_output ==
-                    server::TextGenerationBackend::InitialOutputState::kContent
-                ? "off"
-                : "auto")
-        << " temperature=" << effective_sampling.temperature
-        << " top_k=" << effective_sampling.top_k
-        << " top_p=" << effective_sampling.top_p
-        << " min_p=" << effective_sampling.min_p
-        << " min_keep=" << effective_sampling.min_keep
-        << " seed=" << effective_sampling.seed
-        << " repeat_penalty=" << effective_sampling.repeat_penalty
-        << " repeat_last_n=" << effective_sampling.repeat_last_n
-        << " frequency_penalty=" << effective_sampling.frequency_penalty
-        << " presence_penalty=" << effective_sampling.presence_penalty;
+    sampling_log << "event=defaults thinking="
+                 << (initial_output == server::TextGenerationBackend::
+                                           InitialOutputState::kReasoning
+                         ? "on"
+                     : initial_output == server::TextGenerationBackend::
+                                             InitialOutputState::kContent ||
+                             initial_output ==
+                                 server::TextGenerationBackend::
+                                     InitialOutputState::kContentAfterReasoning
+                         ? "off"
+                         : "auto")
+                 << " temperature=" << effective_sampling.temperature
+                 << " top_k=" << effective_sampling.top_k
+                 << " top_p=" << effective_sampling.top_p
+                 << " min_p=" << effective_sampling.min_p
+                 << " min_keep=" << effective_sampling.min_keep
+                 << " seed=" << effective_sampling.seed
+                 << " repeat_penalty=" << effective_sampling.repeat_penalty
+                 << " repeat_last_n=" << effective_sampling.repeat_last_n
+                 << " frequency_penalty="
+                 << effective_sampling.frequency_penalty
+                 << " presence_penalty=" << effective_sampling.presence_penalty;
     server::Logger::Info("sampling", sampling_log.str());
     const char* speculation =
         speculative_config.backend == server::TextSpeculativeBackend::kDFlash
@@ -1576,6 +1603,9 @@ int RunServe(std::span<const char* const> args) {
             ? "dspark"
         : speculative_config.backend == server::TextSpeculativeBackend::kMtp
             ? "mtp"
+        : speculative_config.backend ==
+                server::TextSpeculativeBackend::kLiliCorr
+            ? "lilicorr"
             : "off";
     std::string served_names;
     if (const auto ids = backend->model_ids(); ids.size() > 1) {

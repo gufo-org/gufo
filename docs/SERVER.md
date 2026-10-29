@@ -99,6 +99,7 @@ setting independently, including when changing thinking mode.
 | Model / mode | Temperature | Top-p | Top-k | Presence penalty |
 | --- | --- | --- | --- | --- |
 | DeepSeek V4 Flash 0731 (agentic) | 1.0 | 0.95 | 0 | 0 |
+| Nemotron 3.5 Bolt 74B-A9B | 1.0 | 0.95 | 0 | 0 |
 | Qwen3.8 27B / Flash-Next, thinking | 1.0 | 0.95 | 20 | 0 |
 | Qwen3.8 27B / Flash-Next, thinking off | 0.7 | 0.8 | 20 | 1.5 |
 
@@ -112,7 +113,8 @@ DeepSeek maps `minimal`/`low` to `low`, `medium`/`high`/`xhigh` to `high`,
 and `max` to `max`.
 The [functional suite](../tests/functional/README.md) with
 `--suite sampling-defaults --sampling-preset qwen38` (or
-`deepseek4`) compares omitted and explicit settings, including C2 replay.
+`deepseek4`, `nemotron35`) compares omitted and explicit settings, including C2
+replay.
 
 Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
 [Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices),

@@ -33,7 +33,7 @@ REQUIRED_DOC_FILES = [
     *[f"docs/models/{model}/{document}.md"
       for model in ("deepseek-v4-flash", "qwen3.8-27b", "qwen3.8-flash-next",
                     "qwen3-asr", "qwen3-tts", "qwen-image-2.1", "minimax-h3",
-                    "embeddinggemma-2")
+                    "embeddinggemma-2", "nemotron-3.5-bolt")
       for document in ("README", "BENCHMARKS", "QUALITY", "EXPERIMENTS")],
 ]
 

@@ -218,8 +218,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             baseline = record(label + "_control", chat_result(client, control))
             delta = first["usage"]["prompt_tokens"] - baseline["usage"]["prompt_tokens"]
             # Each renamed keyword may add a token; the instruction alone was
-            # about 40 tokens on main.
-            tolerance = 2 + 2 * triggers(NEIGHBORS[name])
+            # about 40 tokens on main. Nemotron's template renders schema
+            # keywords as XML tags, spelling each one twice.
+            per_keyword = 4 if sampling_preset == "nemotron35" else 2
+            tolerance = 2 + per_keyword * triggers(NEIGHBORS[name])
             assert tolerance < 30 and abs(delta) <= tolerance, (
                 label, "prompt changed beyond the schema text", delta, tolerance,
                 first["usage"], baseline["usage"])
@@ -276,7 +278,8 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             label, "the generated call was not reused on the next turn",
             first["usage"], done["usage"])
 
-    check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
+    check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek,
+                           sampling_preset == "nemotron35")
     check_finite_argument_types(client, model, checks, chat_result, image)
 
     # A strict union stays native too; llama.cpp has no strict mode. (Strict
@@ -521,7 +524,8 @@ def streamed_call_order(client, request):
     return before, after, calls, finish
 
 
-def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek):
+def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek,
+                           nemotron=False):
     """Behaviors llama.cpp's Qwen3-Coder/DeepSeek grammars define (#438)."""
     def record(label, result):
         checks[label] = result
@@ -604,7 +608,11 @@ def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
             arguments[choice] = json.loads(result["tools"][0]["function"]["arguments"])
             assert_native(result, label)
         # The forced call is exact; an optional call may pick another valid
-        # value of the union, but keeps its JSON type.
+        # value of the union, but keeps its JSON type. Nemotron 3.5 Bolt
+        # writes Python's None for the null, under llama.cpp too, and a union
+        # admitting strings keeps that word as text.
+        if nemotron and name == "str_null":
+            expected = "None"
         assert arguments["required"] == {"value": expected}, (name, arguments)
         allowed = {"str_null": (str, type(None)), "union_integer": (str, int),
                    "all_of_string": (str,), "recursive": (int, float, str, bool, list,

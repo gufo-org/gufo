@@ -176,6 +176,10 @@ public:
     kAuto,
     kReasoning,
     kContent,
+    /// Content after a reasoning block the prompt itself closed (an empty
+    /// "<think></think>"): the separator the model writes first is framing,
+    /// as after a generated "</think>".
+    kContentAfterReasoning,
   };
 
   struct SamplingDefaults {

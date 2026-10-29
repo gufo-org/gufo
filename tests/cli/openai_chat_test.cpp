@@ -6733,6 +6733,62 @@ void TestParallelCallSeparatorIsNotContent() {
     }
 }
 
+void TestPromptClosedReasoningSeparatorIsNotContent() {
+  // A prompt ending in "<think></think>" (Nemotron without thinking) leaves
+  // the model to write the separator; it is framing, as after "</think>".
+  const std::string call =
+      "<tool_call>\n<function=get_alpha>\n</function>\n</tool_call>";
+  for (const bool stream : {false, true})
+    for (const bool constrained : {false, true})
+      for (const bool tool : {false, true}) {
+        auto body = gufo::json::parse(R"({
+          "model":"test-model","messages":[{"role":"user","content":"go"}],
+          "tool_choice":"auto",
+          "tools":[{"type":"function","function":{"name":"get_alpha",
+            "parameters":{"type":"object","properties":{}}}}]})");
+        body["stream"] = stream;
+        FakeBackend backend;
+        backend.initial_output_state_override =
+            FakeBackend::InitialOutputState::kContentAfterReasoning;
+        if (constrained)
+          backend.tool_format =
+              gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+        for (char byte : "\n" + (tool ? call : std::string("Hello.")))
+          backend.pieces.emplace_back(1, byte);
+        const auto response =
+            gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+        std::string content;
+        std::size_t calls = 0;
+        if (stream) {
+          response.streaming_body([&](std::string_view chunk) {
+            if (chunk == "data: [DONE]\n\n")
+              return true;
+            const auto event = gufo::json::parse(chunk.substr(6));
+            for (const auto& choice : event.find("choices")->items())
+              if (const auto* delta = choice.find("delta")) {
+                content += delta->member_str("content");
+                if (const auto* list = delta->find("tool_calls"))
+                  for (const auto& item : list->items())
+                    if (const auto* function = item.find("function"))
+                      calls += !function->member_str("name").empty();
+              }
+            return true;
+          });
+        } else {
+          const auto parsed = gufo::json::parse(response.body);
+          const auto& message =
+              *parsed.find("choices")->items()[0].find("message");
+          if (const auto* text = message.find("content"); !text->is_null())
+            content = text->str();
+          if (const auto* list = message.find("tool_calls"))
+            calls = list->items().size();
+        }
+        Expect(content == (tool ? "" : "Hello.") && calls == (tool ? 1U : 0U),
+               "the separator after a prompt-closed reasoning block is not "
+               "content");
+      }
+}
+
 void TestLogprobs() {
   using gufo::json::Value;
   for (const bool stream : {false, true}) {
@@ -6876,6 +6932,7 @@ int main() {
   TestResponsesLogprobs();
   TestNativeToolTransports();
   TestParallelCallSeparatorIsNotContent();
+  TestPromptClosedReasoningSeparatorIsNotContent();
   TestJsonToolStringOwnership();
   TestNativeToolDialectSelection();
   TestNativeToolTextOutsideEnvelopes();

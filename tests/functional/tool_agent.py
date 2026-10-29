@@ -425,6 +425,9 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
             # llama.cpp, so Python's None is the string "None". Ask for the
             # JSON spelling the expected null needs.
             prompt += " Write the value as the JSON literal null."
+            if sampling_preset == "nemotron35":
+                # Nemotron 3.5 Bolt still writes None, under llama.cpp too.
+                arguments = {"value": "None"}
         if name == "nullable_string":
             # Both alternatives are valid schema values; explicitly select
             # the string. Qwen's native syntax, like its chat template and
@@ -502,7 +505,8 @@ def check_union_continuation(client, model, checks, chat_result):
               "Replaced one block.")
 
 
-def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content, server_log=None):
+def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content, server_log=None,
+                            sampling_preset="qwen38"):
     """Admitted arguments preserve JSON types; invalid schemas cannot dead-end."""
     wildcard = {"type": "object", "properties": {"value": {"type": "string"}},
                 "required": ["value"], "patternProperties": {"^x_": {}}}
@@ -545,6 +549,12 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
         call = result["tools"][0]["function"]
         assert call["name"] == "record", result
         actual = json.loads(call["arguments"])
+        if label.startswith("wildcard_") and sampling_preset == "nemotron35":
+            # Nemotron 3.5 Bolt writes the whole object into the declared
+            # string, as under llama.cpp; it stays that exact string.
+            assert actual.keys() == {"value"} and \
+                json.loads(actual["value"]) == expected, result
+            return result
         if declared is not None:
             # Names only a pattern or branch admits are not native parameters
             # in llama.cpp's Qwen grammar; DeepSeek's string flag may carry them.

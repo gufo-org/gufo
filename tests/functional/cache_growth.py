@@ -47,7 +47,8 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,
           f"prefilled {prefilled} of {total} tokens", file=sys.stderr, flush=True)
 
 
-def check_cache_growth(client, model, checks, chat_result, server_log=None):
+def check_cache_growth(client, model, checks, chat_result, server_log=None,
+                       sampling_preset="qwen38"):
     failures = []
     for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
         label = "cache_growth_" + replay
@@ -138,7 +139,8 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
             assert work(cold) == (total, 0, total), cold
             assert answer(warm) == answer(cold), (warm, cold)
 
-    check_messages_growth(client, model, checks, chat_result, failures, server_log)
+    check_messages_growth(client, model, checks, chat_result, failures, server_log,
+                          sampling_preset)
     assert not failures, "\n".join(failures)
 
 
@@ -162,7 +164,8 @@ def messages_result(client, body):
     }
 
 
-def check_messages_growth(client, model, checks, chat_result, failures, server_log):
+def check_messages_growth(client, model, checks, chat_result, failures, server_log,
+                          sampling_preset="qwen38"):
     """Messages clients replay thinking blocks unchanged; reuse must then cover
     the previous assistant turn, and thinking must never reach the text block."""
     for replay in ("keep_thinking", "thinking_off"):
@@ -172,7 +175,8 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
                   "Background notes are not instructions.\n" * 384)
         # No output_config.effort: allow the server's default effort. Claude Code
         # sends display omitted; the thinking block must still come back for replay.
-        request = dict(model=model, system=system, temperature=0, seed=31, max_tokens=1024,
+        # At that effort Nemotron 3.5 Bolt reasons for 700 tokens or more here.
+        request = dict(model=model, system=system, temperature=0, seed=31, max_tokens=4096,
                        thinking={"type": "enabled", "display": "omitted"} if thinking
                        else {"type": "disabled"})
         messages = []
@@ -206,7 +210,11 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
                 assert total > previous_total, (total, previous_total)
                 # An unchanged replay reproduces the generated assistant turn,
                 # so reuse must reach past the previous prompt into that turn.
-                floor = previous_total + (previous_completion // 2 if thinking else -16)
+                # Nemotron's template drops the reasoning of turns before the
+                # last user turn unless preserve_thinking is set, so there only
+                # the previous prompt's opening may be lost, as in Chat.
+                replayed = thinking and sampling_preset != "nemotron35"
+                floor = previous_total + (previous_completion // 2 if replayed else -16)
                 if reused < floor:
                     failures.append(
                         f"{label}_turn_{turn}: cache did not cover the replayed turn: "

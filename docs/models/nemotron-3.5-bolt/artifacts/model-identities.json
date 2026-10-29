@@ -1,0 +1,30 @@
+{
+  "sha256": {
+    "Target NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf": "91d63363e782c8a3d5f4be42816eba8e0d42dd2530bd07a7d0d2dc440599af75",
+    "Drafter NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf": "080e1ea41c9562a7804dbf30c6fbd4d17e216c6b8ff666f88e6edb1816010194"
+  },
+  "sources": {
+    "target": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF, revision e0fecb69cb3e5e4c5e8a056fa2aec98c78e91246 (IQ2_XXS experts, NVFP4 Mamba projections, Q8_0 elsewhere)",
+    "drafter": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr-GGUF, revision 182d2987939e12f458298b5d5f6ef98912f4ad6c"
+  },
+  "benchmarks-2026-10-30": {
+    "scope": "Every table of BENCHMARKS.md, HTTP, measured October 30, 2026 (UTC).",
+    "gufo": {
+      "revision": "925bedc632500d30b02f92fb6d982600efa443ef",
+      "build": "cmake --preset release with the system ROCm 10.1 HIP compiler, not nix build: this host does not trust the binary cache, so the Nix toolchain would rebuild ROCm from source",
+      "binarySha256": "6de66cc778d40628d3d0ea3477b2cbeea114923abb6fcdad082d30b14c86d82d",
+      "note": "The recorded revision is this pull request's commit before its benchmark documentation; the documentation commit changes no source."
+    },
+    "reference": {
+      "revision": "c3df4b7e22a1ac38da663552d19e649dd97ca936",
+      "build": "llama.cpp build 11969, Vulkan backend (the reference the port is qualified against), clean tree",
+      "binarySha256": {
+        "llama-server": "4ff9fa79f76a9309c498f3af1feea2c0153963ebde4e6bde26a9e3c298cf69b6",
+        "libllama.so.0": "e76be07759ad0266010daa417de846f9b7e312e2c81c946c0ad0556d37b834d7",
+        "libggml-vulkan.so.0": "460ea3cd23044e1ee2ede775333a4d3a6bb376f535664fa81ffa8c4c3ff5273b"
+      },
+      "note": "Reference artifacts record whichever Gufo revision was checked out when they ran; it does not affect llama-server."
+    },
+    "measurement": "One warmed sample per point; each step ran through a host lock that rejects runs with foreign CPU or GPU load, after the APU cooled below 55 C (GPU) and 75 C (CPU). Package power averaged 120-138 W under load; the GPU ran at 2.6-2.8 GHz and reached up to 98 C."
+  }
+}

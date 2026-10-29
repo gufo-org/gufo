@@ -1128,6 +1128,10 @@ with tempfile.TemporaryDirectory() as directory:
     check(report["results"]["c2"]["promptPreparation"] ==
           "C1 checkpoint followed by concurrent preparation",
           "the artifact records the prefill arithmetic control")
+    config.data["reference"]["kind"] = "llama.cpp"
+    check(not session.checkpoint_preparation, "llama.cpp-referenced models prepare concurrently")
+    config.data["gufo"]["checkpoint_preparation"] = True
+    check(session.checkpoint_preparation, "bench.json can request the C1 prompt checkpoint")
 
 # An AR-only benchmark must not require the optional MTP build on PATH.
 config = load_config(ROOT, "qwen3.8-flash-next")

@@ -30,6 +30,16 @@ struct ReasoningBudget {
   std::shared_ptr<const std::vector<bool>> partial_utf8;
 };
 
+/// What a LogitHead must hold for a sampling configuration: with `keep`
+/// nonzero, the keep best tokens (top-k raised to min-keep); otherwise at
+/// least `minimum` tokens and `top_p` of the softmax mass at `temperature`.
+struct LogitHeadFilter {
+  float temperature{1.0F};
+  std::size_t keep{0};
+  float top_p{1.0F};
+  std::size_t minimum{1};
+};
+
 /// Model-independent controls for selecting a token from a logit row.
 ///
 /// Filters run in this order: penalties, temperature, top-k, top-p, min-p.
@@ -56,6 +66,10 @@ struct SamplingConfig {
   [[nodiscard]] bool penalties_enabled() const noexcept;
   [[nodiscard]] bool uses_random_sampling() const noexcept;
   [[nodiscard]] bool can_use_unmodified_argmax() const noexcept;
+  /// The head random sampling can read instead of the full row; none for
+  /// greedy decoding, penalties, or temperature alone (with min-p).
+  [[nodiscard]] std::optional<LogitHeadFilter> logit_head_filter()
+      const noexcept;
 };
 
 /// Unique token counts: repetition window and full generated response.
@@ -73,6 +87,18 @@ struct Probability {
 struct LogitCandidate {
   TokenId token;
   float value;
+};
+
+/// A logit row summarized where it was computed, so that sampling need not
+/// pass over the whole vocabulary: its largest finite logit, the sum over
+/// every finite logit of exp((logit - maximum) / temperature), and every
+/// finite token whose logit reaches some floor, ties included, in any order.
+/// No candidates means no head.
+struct LogitHead {
+  float maximum{0.0F};
+  float temperature{0.0F};
+  double softmax_sum{0.0};
+  std::vector<LogitCandidate> candidates;
 };
 
 struct TokenLogprob {
@@ -191,6 +217,12 @@ public:
   /// preserve this draw along with the RNG; resetting history discards it.
   void DeferSample(TokenId token);
   [[nodiscard]] TokenId Sample(std::span<const float> logits);
+  /// Draws the token Sample(logits) draws, reading `head` instead of the
+  /// full row when it covers this sampler's filters. Only the head's softmax
+  /// sum may differ from the sequential host sum, in its last bits; the
+  /// top-p cut moves by that relative amount.
+  [[nodiscard]] TokenId Sample(std::span<const float> logits,
+                               const LogitHead& head);
   [[nodiscard]] TokenId SampleResidual(
       std::span<const float> target_logits,
       std::span<const TokenId> candidate_ids,
@@ -209,7 +241,9 @@ private:
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
   void PrepareSelected(std::span<const float> logits);
-  void FilterSelected(double full_softmax_sum = 0,
+  /// Applies top-p and min-p to the sorted candidates; false when top-p ran
+  /// out of candidates before reaching its mass.
+  bool FilterSelected(double full_softmax_sum = 0,
                       bool has_full_softmax_sum = false);
   [[nodiscard]] SamplingDistribution SelectedDistribution();
   void StartReasoning();

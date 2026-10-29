@@ -14,6 +14,7 @@ def main() -> int:
     excluded = (
         "src/models/deepseek_v4_flash/runtime/",
         "src/models/deepseek_v4_flash/kernels/rocm/",
+        "src/models/nemotron35_bolt/kernels/rocm/mmq/",
         "src/models/qwen38_flash_next/kernels/rocm/mmq/",
     )
     files = sorted(

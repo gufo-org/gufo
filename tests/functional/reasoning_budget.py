@@ -16,6 +16,10 @@ from messages_tools import messages_stream
 
 PROMPT = "Is 1001 a prime number? Think it through step by step, then answer yes or no."
 BUDGETS = (0, 1, 4, 16, 64)
+# Room for the complete answer: Nemotron 3.5 Bolt reasons 484 tokens and then
+# writes its trial divisions out, past 600 tokens. Greedy output that ends
+# sooner is unchanged by the larger limit.
+MAX_TOKENS = 2048
 
 
 def same(result, expected):
@@ -32,7 +36,7 @@ def check_reasoning_budget(client, model, checks, chat_result):
 
     def responses(label, budget=None, temperature=0, seed=None,
                   budget_field="reasoning_budget_tokens", prompt=PROMPT,
-                  max_tokens=600, require_complete=True):
+                  max_tokens=MAX_TOKENS, require_complete=True):
         extra = {} if budget is None else {budget_field: budget}
         if seed is not None:
             extra["seed"] = seed
@@ -49,13 +53,13 @@ def check_reasoning_budget(client, model, checks, chat_result):
                               "usage": usage})
 
     def chat(label, budget, streaming=False, budget_field="reasoning_budget_tokens"):
-        body = {"model": model, "temperature": 0, "max_tokens": 600,
+        body = {"model": model, "temperature": 0, "max_tokens": MAX_TOKENS,
                 "messages": [{"role": "user", "content": PROMPT}],
                 "extra_body": {budget_field: budget}}
         return record(label, chat_result(client, body, streaming))
 
     def messages(label, thinking, streaming=False):
-        body = {"model": model, "max_tokens": 600, "temperature": 0,
+        body = {"model": model, "max_tokens": MAX_TOKENS, "temperature": 0,
                 "thinking": thinking, "messages": [{"role": "user", "content": PROMPT}]}
         if streaming:
             result = messages_stream(client, body)
@@ -178,7 +182,7 @@ def check_reasoning_budget(client, model, checks, chat_result):
     reuse = {}
     for label, thinking in (("uncapped", {"type": "enabled"}),
                             ("capped", {"type": "enabled", "budget_tokens": 16})):
-        body = {"model": model, "max_tokens": 600, "temperature": 0, "thinking": thinking,
+        body = {"model": model, "max_tokens": MAX_TOKENS, "temperature": 0, "thinking": thinking,
                 "system": f"reasoning_budget_replay_{label}",
                 "messages": [{"role": "user", "content": PROMPT}]}
         first = record(f"replay_{label}_first", client.post("/messages", body=body,

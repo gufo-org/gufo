@@ -1,0 +1,267 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-38-generic",
+      "memoryTotalBytes": 131738591232,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "bdd4fb6c23514ab329c2f5138ebac2220d5dd2aa0b6a79a6edbe313f2d730694",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-30",
+  "mode": "lilicorr",
+  "model": {
+    "id": "Nemotron 3.5 Bolt 74B-A9B",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.8.0-dev (build 11969, commit c3df4b7e2)",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.174 tokens/word, template overhead 16 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 25.55,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.72,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 5,
+          "completion_sha256": "9aa0e4ed2185797b94c085f3b55426cd8aad0864bdfadcb7e52dd2a8b14c6ca2",
+          "draft_n": 317,
+          "draft_n_accepted": 81,
+          "predicted_n": 128,
+          "prompt_n": 2030
+        }
+      ],
+      "pp": 512.76,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 29.7,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "acceptance": 25.71,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.72,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 12290,
+          "completion_sha256": "db952b44b8575b71b1a3e8c83d71ff9e8cba985110f91d94823affbbdbe6424a",
+          "draft_n": 315,
+          "draft_n_accepted": 81,
+          "predicted_n": 128,
+          "prompt_n": 2050
+        }
+      ],
+      "pp": 458.36,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 28.07,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "acceptance": 17.51,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.17,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 131202,
+          "completion_sha256": "d5ab0cebd6805c4e436cebc6969a9986aa3f5e20a0c7011b564310f2a11af1d1",
+          "draft_n": 394,
+          "draft_n_accepted": 69,
+          "predicted_n": 128,
+          "prompt_n": 2044
+        }
+      ],
+      "pp": 276.74,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.76,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "acceptance": 25.96,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.72,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 16346,
+          "completion_sha256": "455ac01c956941cf703b7f31957a4a5491528aa833da82ae26bef2c353114f44",
+          "draft_n": 312,
+          "draft_n_accepted": 81,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 446.02,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 27.62,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "acceptance": 19.3,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.29,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 32765,
+          "completion_sha256": "9a1cf54bf1f88b118c1ea97c727899a298e9f237a6b4c18a379ae8313acb5f7d",
+          "draft_n": 373,
+          "draft_n_accepted": 72,
+          "predicted_n": 128,
+          "prompt_n": 2029
+        }
+      ],
+      "pp": 408.58,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 22.72,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "acceptance": 22.45,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.51,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 4092,
+          "completion_sha256": "715ccfa2e68cb037d0eb988d2c9e534a38c0c63df02b992275b5f4269a3d4cb6",
+          "draft_n": 343,
+          "draft_n_accepted": 77,
+          "predicted_n": 128,
+          "prompt_n": 2027
+        }
+      ],
+      "pp": 496.55,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 27.14,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "acceptance": 26.13,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.72,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 65571,
+          "completion_sha256": "28bdec1ea8008d9d185fe52a79e3a06379756db2a5d6576489f4fdb3772365f7",
+          "draft_n": 310,
+          "draft_n_accepted": 81,
+          "predicted_n": 128,
+          "prompt_n": 2045
+        }
+      ],
+      "pp": 352.38,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 26.03,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "8192": {
+      "acceptance": 27.57,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.84,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf -c 133760 -np 1 --port 44173 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf --spec-draft-ngl 999 --spec-draft-n-max 7",
+      "counts": [
+        {
+          "cache_n": 8184,
+          "completion_sha256": "0313e040315b390802a94bd48141729aecfb520176a18bd14491ef2a34aab7e2",
+          "draft_n": 301,
+          "draft_n_accepted": 83,
+          "predicted_n": 128,
+          "prompt_n": 2044
+        }
+      ],
+      "pp": 473.66,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 29.32,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "44173",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-dflash",
+      "--spec-draft-model",
+      "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf",
+      "--spec-draft-ngl",
+      "999",
+      "--spec-draft-n-max",
+      "7"
+    ]
+  },
+  "source": {
+    "buildMode": "cmake-release",
+    "dirty": false,
+    "revision": "87c84d9f85abce93378608bfa07bd37583be5f88"
+  },
+  "table": "single-lilicorr",
+  "target": "reference"
+}

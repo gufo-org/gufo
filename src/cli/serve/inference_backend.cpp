@@ -42,6 +42,10 @@
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/nemotron35_bolt/chat_template.hpp"
+#include "src/models/nemotron35_bolt/drafter.hpp"
+#include "src/models/nemotron35_bolt/engine.hpp"
+#include "src/models/nemotron35_bolt/speculative.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -2358,6 +2362,573 @@ bool FingerprintArtifactFile(std::string_view label,
 #if defined(ENGINE_ENABLE_HIP)
 // Each Flash-Next request owns its recurrent/KV state and snapshots. Target
 // projections share batches; sampling and rollback remain request-local.
+constexpr std::string_view kNemotronStateAbi =
+    "nemotron35_bolt/state/v2;layout=kv_f16+mamba_f32_state_major";
+
+/// One Nemotron session plus the next-token distribution at its frontier.
+class NemotronTextRunnerState final : public TextRunnerState {
+public:
+  NemotronTextRunnerState(
+      const std::shared_ptr<models::nemotron35_bolt::Model>& model,
+      std::uint32_t max_context) {
+    std::string error;
+    session_ = model->CreateSession(max_context, &error);
+    if (session_ == nullptr)
+      throw std::runtime_error("Nemotron session allocation failed: " + error);
+    frontier_.logits.resize(model->config().vocab_size);
+  }
+
+  [[nodiscard]] models::nemotron35_bolt::Session& session() const {
+    return *session_;
+  }
+  [[nodiscard]] std::vector<float>& logits() noexcept {
+    return frontier_.logits;
+  }
+  [[nodiscard]] const std::vector<float>& logits() const noexcept {
+    return frontier_.logits;
+  }
+  [[nodiscard]] models::nemotron35_bolt::Frontier& frontier() noexcept {
+    return frontier_;
+  }
+  /// The head filter of the request decoding from this state, for the
+  /// device summary of each next row.
+  std::optional<sampling::LogitHeadFilter> head_filter;
+  /// Logits hold the distribution after the session's last token.
+  bool frontier_ready{false};
+
+  void Invalidate() noexcept override {
+    session_->Invalidate();
+    frontier_ready = false;
+  }
+
+private:
+  std::unique_ptr<models::nemotron35_bolt::Session> session_;
+  models::nemotron35_bolt::Frontier frontier_;
+};
+
+NemotronTextRunnerState& RequireNemotronState(TextRunnerState& state) {
+  auto* nemotron = dynamic_cast<NemotronTextRunnerState*>(&state);
+  if (nemotron == nullptr)
+    throw std::logic_error("Nemotron runner received foreign state");
+  return *nemotron;
+}
+
+const NemotronTextRunnerState& RequireNemotronState(
+    const TextRunnerState& state) {
+  const auto* nemotron = dynamic_cast<const NemotronTextRunnerState*>(&state);
+  if (nemotron == nullptr)
+    throw std::logic_error("Nemotron runner received foreign state");
+  return *nemotron;
+}
+
+/// Host copy of a Nemotron session, with its frontier distribution when the
+/// position ends a prompt or a decoded token.
+class NemotronTextRunnerSnapshot final : public TextRunnerSnapshot {
+public:
+  NemotronTextRunnerSnapshot(
+      std::shared_ptr<const models::nemotron35_bolt::Model> owner,
+      models::nemotron35_bolt::SessionSnapshot saved,
+      std::vector<float> frontier)
+      : model(std::move(owner)),
+        session(std::move(saved)),
+        logits(std::move(frontier)) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return session.Bytes() + logits.size() * sizeof(float);
+  }
+
+  std::shared_ptr<const models::nemotron35_bolt::Model> model;
+  models::nemotron35_bolt::SessionSnapshot session;
+  std::vector<float> logits;  ///< Empty without a decode frontier.
+};
+
+/// Serial-per-session runner: chunked prefill, one decode step per token or
+/// one LiLiCorr draft-and-verify round, live-prefix reuse at the exact
+/// frontier (Mamba states cannot rewind) and host snapshots for earlier
+/// boundaries.
+class NemotronTextRunner final : public HipTextModelRunner {
+public:
+  /// `draft_tokens` bounds the drafts of one round; zero decodes one token
+  /// per step. Drafting needs the model's drafter.
+  NemotronTextRunner(std::shared_ptr<models::nemotron35_bolt::Model> model,
+                     std::uint32_t max_context, std::uint32_t draft_tokens)
+      : model_(std::move(model)),
+        max_context_(max_context),
+        draft_tokens_(model_->drafter() == nullptr
+                          ? 0
+                          : std::min(draft_tokens,
+                                     model_->drafter()->config().Slots())) {}
+
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat ToolFormat()
+      const override {
+    return sampling::JsonConstraint::ToolFormat::kQwen;
+  }
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_->ModelName(),
+        // Snapshots of a drafting runner also carry the drafter's context.
+        .state_abi = std::string(kNemotronStateAbi) +
+                     (draft_tokens_ != 0 ? ";draft=lilicorr" : ""),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = true,
+                .fork = true,
+                .final_token_advance_required = true,
+                .incremental_text_is_exact = true,
+                .multi_token_decode = draft_tokens_ != 0,
+                // Concurrent drafting requests decode one token each.
+                .batched_multi_token_decode = draft_tokens_ != 0,
+                .batched_multi_token_decode_max_width =
+                    draft_tokens_ != 0 ? kNemotronBatchWidth : 0,
+                .prefix_reuse = true,
+            },
+        .persistence = std::nullopt,
+    };
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess)
+      capacity = free_bytes;
+    return {
+        .resident_weights_bytes = model_->ResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = model_->SessionBytes(max_context_),
+        .temporary_scratch_bytes = std::nullopt,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    // Concurrent requests decode one token each in a shared pass; drafting
+    // stays with a request decoding alone.
+    std::vector<TextExecutionPlan> plans{
+        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= kNemotronBatchWidth; ++width)
+      plans.push_back(
+          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    return plans;
+  }
+
+  [[nodiscard]] bool HasDecodeFrontier(
+      const TextRunnerState& state) const override {
+    return RequireNemotronState(state).frontier_ready;
+  }
+
+  [[nodiscard]] std::size_t SnapshotPayloadBytes(
+      const TextRunnerState& state) const override {
+    const auto& nemotron = RequireNemotronState(state);
+    return nemotron.session().SnapshotBytes() +
+           (nemotron.frontier_ready ? nemotron.logits().size() * sizeof(float)
+                                    : 0);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    const auto& nemotron = RequireNemotronState(state);
+    models::nemotron35_bolt::SessionSnapshot saved;
+    std::string error;
+    if (!nemotron.session().Save(&saved, &error))
+      throw std::runtime_error("Nemotron snapshot failed: " + error);
+    return std::make_unique<NemotronTextRunnerSnapshot>(
+        model_, std::move(saved),
+        nemotron.frontier_ready ? nemotron.logits() : std::vector<float>{});
+  }
+
+  void RestoreOrFork(TextRunnerState& state,
+                     const TextRunnerSnapshot& snapshot) const override {
+    const auto* saved =
+        dynamic_cast<const NemotronTextRunnerSnapshot*>(&snapshot);
+    if (saved == nullptr || saved->model.get() != model_.get())
+      throw std::invalid_argument(
+          "Nemotron snapshot does not belong to this model");
+    auto& restored = RequireNemotronState(state);
+    std::string error;
+    if (!restored.session().Restore(saved->session, &error))
+      throw std::runtime_error("Nemotron snapshot restore failed: " + error);
+    restored.frontier_ready = !saved->logits.empty();
+    restored.frontier().head.candidates.clear();
+    if (restored.frontier_ready)
+      restored.logits() = saved->logits;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    const auto& tokenizer = model_->tokenizer();
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        static_cast<std::uint32_t>(tokenizer.VocabSize()),
+        [&tokenizer](std::uint32_t id) {
+          return sampling::ConstraintVocabulary::Piece{
+              std::string(tokenizer.TokenBytes(id)), tokenizer.IsStop(id)};
+        });
+  }
+  [[nodiscard]] std::uint32_t VocabularySize() const override {
+    return static_cast<std::uint32_t>(model_->tokenizer().VocabSize());
+  }
+
+  // Raw prompts map control-token spellings to their special tokens, as the
+  // chat template's render does and as llama-server's /completion does.
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    const auto ids = model_->tokenizer().Encode(text, true);
+    return {ids.begin(), ids.end()};
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    std::vector<models::nemotron35_bolt::ContentSpan> spans;
+    const auto rendered = Render(request, &spans);
+    const auto ids = models::nemotron35_bolt::TokenizeChat(model_->tokenizer(),
+                                                           rendered, spans);
+    return std::vector<TextRunnerToken>(ids.begin(), ids.end());
+  }
+
+  [[nodiscard]] std::optional<std::string> RenderPrompt(
+      const ChatRequest& request) const override {
+    return Render(request, nullptr);
+  }
+
+  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+      const ChatRequest& request) const override {
+    auto prepared = TextModelRunner::PreparePrompt(request);
+    if (prepared) {
+      // The template rewrites earlier assistant turns (history reasoning
+      // becomes "<think></think>") and moves the effort hint to the last user
+      // turn. Render the conversation continued by this turn's reply and
+      // another user turn, and keep the snapshot boundary where both agree:
+      // the complete prompt without thinking, "<think>" with it.
+      auto continuation = request;
+      continuation.messages.emplace_back(tokenization::ChatRole::kAssistant,
+                                         "");
+      continuation.messages.emplace_back(tokenization::ChatRole::kUser, "");
+      const auto continued = RenderAndTokenize(continuation);
+      if (continued) {
+        const auto common = static_cast<std::size_t>(
+            std::mismatch(prepared->tokens.begin(), prepared->tokens.end(),
+                          continued->begin(), continued->end())
+                .first -
+            prepared->tokens.begin());
+        // Zero keeps the complete prompt as the stable checkpoint rather
+        // than as an optional retry copy.
+        prepared->cache_prefix_tokens =
+            common == prepared->tokens.size() ? 0 : common;
+      }
+    }
+    return prepared;
+  }
+
+  // llama.cpp forces "\n</think>" for this template, the newline after
+  // "<think>" in the generation prompt counting toward the budget.
+  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+    return {"<think>", "\n</think>", {"</think>"}};
+  }
+
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+      const ChatRequest& request) const override {
+    // Without thinking the prompt ends in "<think></think>".
+    return models::nemotron35_bolt::ResolveChatOptions(request.reasoning)
+                   .enable_thinking
+               ? TextGenerationBackend::InitialOutputState::kReasoning
+               : TextGenerationBackend::InitialOutputState::
+                     kContentAfterReasoning;
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    std::string text;
+    for (const TextRunnerToken token : tokens)
+      text += model_->tokenizer().TokenBytes(token);
+    return text;
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<NemotronTextRunnerState>(model_, max_context_);
+  }
+
+  void PreparePrefixReuse(
+      TextRunnerState& state,
+      std::span<const TextRunnerToken> prefix) const override {
+    if (RequireNemotronState(state).session().Position() != prefix.size())
+      throw std::logic_error("Nemotron reused prefix does not match its state");
+  }
+
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& nemotron = RequireNemotronState(state);
+    auto& session = nemotron.session();
+    if (offset != session.Position())
+      throw std::logic_error("Nemotron prefill offset does not match state");
+    if (offset >= prompt.size())
+      throw std::logic_error("Nemotron prefill has no remaining input");
+    const std::size_t consumed = std::min<std::size_t>(
+        {max_input_tokens, prompt.size() - offset, kNemotronPrefillChunk});
+    const bool decode_ready = offset + consumed == prompt.size();
+    const std::vector<std::int32_t> tokens(
+        prompt.begin() + static_cast<std::ptrdiff_t>(offset),
+        prompt.begin() + static_cast<std::ptrdiff_t>(offset + consumed));
+    std::string error;
+    if (!session.Append(tokens,
+                        decode_ready ? std::span<float>(nemotron.logits())
+                                     : std::span<float>(),
+                        &error))
+      throw std::runtime_error("Nemotron prefill failed: " + error);
+    nemotron.frontier().head.candidates.clear();
+    nemotron.frontier_ready = decode_ready;
+    return {.consumed_tokens = consumed, .decode_ready = decode_ready};
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& nemotron = RequireNemotronState(state);
+    if (nemotron.session().Position() >= max_context_)
+      return {.stop = true, .piece = {}};
+    if (!nemotron.frontier_ready)
+      throw std::logic_error("Nemotron selection before its frontier");
+    const auto& logits = nemotron.logits();
+    nemotron.head_filter = sampler.config().logit_head_filter();
+    const auto token = sampler.Sample(logits, nemotron.frontier().head);
+    const bool stop =
+        nemotron.stop_at_eos() && model_->tokenizer().IsStop(token);
+    return {.stop = stop,
+            .token = token,
+            .piece = stop ? std::string{}
+                          : std::string(model_->tokenizer().TokenBytes(token)),
+            .logprobs = sampling::CollectLogprobs(logits, token,
+                                                  sampler.config().logprobs)};
+  }
+
+  /// Requests decoding together take one token each from a shared pass;
+  /// drafting needs a request decoding alone.
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const override {
+    if (decodes.size() < 2 || decodes.size() > kNemotronBatchWidth)
+      return TextModelRunner::DecodeBatch(decodes);
+    std::vector<TextDecodeStep> steps(decodes.size());
+    std::vector<TextRunnerAdvance> advances;
+    std::vector<std::size_t> advanced;
+    for (std::size_t i = 0; i < decodes.size(); ++i) {
+      try {
+        auto selection =
+            SelectNext(decodes[i].state.get(), decodes[i].sampler.get());
+        if (selection.stop) {
+          steps[i].stop = true;
+          steps[i].terminal_logprobs = std::move(selection.logprobs);
+          continue;
+        }
+        advances.push_back(
+            {.state = decodes[i].state, .token = selection.token});
+        advanced.push_back(i);
+        steps[i].selections.push_back(std::move(selection));
+      } catch (...) {
+        steps[i].failure = std::current_exception();
+      }
+    }
+    try {
+      if (advances.size() == 1)
+        Advance(advances.front().state.get(), advances.front().token);
+      else if (advances.size() > 1)
+        AdvanceBatch(advances);
+    } catch (...) {
+      for (const std::size_t i : advanced)
+        steps[i].failure = std::current_exception();
+    }
+    const TextExecutionPlan plan{
+        .kind = advances.size() > 1 ? TextExecutionPlanKind::kBatched
+                                    : TextExecutionPlanKind::kSerial,
+        .physical_width = std::max<std::size_t>(advances.size(), 1)};
+    for (auto& step : steps)
+      step.execution_plan = plan;
+    return steps;
+  }
+
+  void AdvanceBatch(
+      std::span<const TextRunnerAdvance> advances) const override {
+    if (advances.size() < 2 || advances.size() > kNemotronBatchWidth)
+      throw std::invalid_argument(
+          "Nemotron batched decode requires two to eight sessions");
+    std::array<NemotronTextRunnerState*, kNemotronBatchWidth> states{};
+    std::array<models::nemotron35_bolt::Session*, kNemotronBatchWidth>
+        sessions{};
+    std::array<std::int32_t, kNemotronBatchWidth> tokens{};
+    std::array<std::span<float>, kNemotronBatchWidth> logits{};
+    std::array<const sampling::LogitHeadFilter*, kNemotronBatchWidth> filters{};
+    std::array<sampling::LogitHead, kNemotronBatchWidth> heads{};
+    const std::size_t n = advances.size();
+    for (std::size_t i = 0; i < n; ++i) {
+      auto& nemotron = RequireNemotronState(advances[i].state.get());
+      if (advances[i].token >= model_->tokenizer().VocabSize())
+        throw std::invalid_argument("Nemotron token ID exceeds the vocabulary");
+      states[i] = &nemotron;
+      sessions[i] = &nemotron.session();
+      tokens[i] = static_cast<std::int32_t>(advances[i].token);
+      logits[i] = nemotron.logits();
+      filters[i] = nemotron.head_filter ? &*nemotron.head_filter : nullptr;
+    }
+    std::string error;
+    if (!models::nemotron35_bolt::Session::DecodeBatch(
+            std::span(sessions).first(n), std::span(tokens).first(n),
+            std::span(logits).first(n), std::span(filters).first(n),
+            std::span(heads).first(n), &error)) {
+      for (std::size_t i = 0; i < n; ++i)
+        states[i]->frontier_ready = false;
+      throw std::runtime_error("Nemotron batched decode failed: " + error);
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      states[i]->frontier().head = std::move(heads[i]);
+      states[i]->frontier_ready = true;
+    }
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    auto& nemotron = RequireNemotronState(state);
+    if (token >= model_->tokenizer().VocabSize())
+      throw std::invalid_argument("Nemotron token ID exceeds the vocabulary");
+    const std::int32_t one[] = {static_cast<std::int32_t>(token)};
+    std::string error;
+    auto& frontier = nemotron.frontier();
+    frontier.head.candidates.clear();
+    const bool ok =
+        nemotron.head_filter
+            ? nemotron.session().Append(one, frontier.logits,
+                                        *nemotron.head_filter, &frontier.head,
+                                        &error)
+            : nemotron.session().Append(one, frontier.logits, &error);
+    if (!ok)
+      throw std::runtime_error("Nemotron decode failed: " + error);
+    nemotron.frontier_ready = true;
+  }
+
+  /// A LiLiCorr round: the drafter proposes, the trunk verifies them in one
+  /// pass and the tokens the request's sampler agrees with are kept. The
+  /// pool accepts the returned tokens; only the RNG and a pending draw from
+  /// a rejected draft carry over.
+  [[nodiscard]] TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    if (draft_tokens_ == 0 || max_tokens <= 1)
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    auto& nemotron = RequireNemotronState(state);
+    auto& session = nemotron.session();
+    if (session.Position() >= max_context_)
+      return {.selections = {}, .stop = true};
+    if (!nemotron.frontier_ready)
+      throw std::logic_error("Nemotron selection before its frontier");
+    const auto budget = static_cast<std::uint32_t>(
+        std::min<std::size_t>(max_tokens, std::size_t{draft_tokens_} + 1));
+    const bool stop_at_eos = nemotron.stop_at_eos();
+    const auto& tokenizer = model_->tokenizer();
+    const auto is_stop = [&](std::int32_t token) {
+      return stop_at_eos &&
+             tokenizer.IsStop(
+                 static_cast<models::nemotron35_bolt::TokenId>(token));
+    };
+    const auto logprobs = sampler.config().logprobs;
+    sampling::SamplerState working = sampler;
+    models::nemotron35_bolt::SpeculativeRound round;
+    std::string error;
+    if (!models::nemotron35_bolt::SpeculativeStep(
+            session, working, nemotron.frontier(), budget, is_stop,
+            logprobs.has_value(), &round, &error)) {
+      nemotron.frontier_ready = false;
+      throw std::runtime_error("Nemotron draft round failed: " + error);
+    }
+    sampler.CopyDrawStateFrom(working);
+    const std::size_t vocab = nemotron.logits().size();
+    TextDecodeStep step;
+    for (std::size_t i = 0; i < round.tokens.size(); ++i) {
+      const auto token = static_cast<TextRunnerToken>(round.tokens[i]);
+      std::optional<sampling::TokenLogprobs> token_logprobs;
+      if (logprobs)
+        token_logprobs = sampling::CollectLogprobs(
+            std::span<const float>(round.rows.data() + i * vocab, vocab), token,
+            logprobs);
+      if (round.stop && i + 1 == round.tokens.size()) {
+        step.stop = true;
+        step.terminal_logprobs = std::move(token_logprobs);
+        break;
+      }
+      step.selections.push_back(
+          {.stop = false,
+           .token = token,
+           .piece = std::string(tokenizer.TokenBytes(token)),
+           .logprobs = std::move(token_logprobs)});
+    }
+    step.draft_rounds = round.drafted != 0 ? 1 : 0;
+    step.draft_tokens = round.drafted;
+    step.draft_accepted_tokens = round.accepted;
+    return step;
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireNemotronState(state).session().Position();
+  }
+
+private:
+  std::string Render(
+      const ChatRequest& request,
+      std::vector<models::nemotron35_bolt::ContentSpan>* spans) const {
+    std::vector<models::nemotron35_bolt::ChatMessage> messages;
+    messages.reserve(request.messages.size());
+    for (const auto& message : request.messages) {
+      if (!message.images.empty())
+        throw std::invalid_argument("model does not support image input");
+      models::nemotron35_bolt::ChatMessage converted;
+      switch (message.role) {
+        case tokenization::ChatRole::kSystem:
+        case tokenization::ChatRole::kDeveloper:
+          converted.role = models::nemotron35_bolt::ChatRole::kSystem;
+          break;
+        case tokenization::ChatRole::kUser:
+          converted.role = models::nemotron35_bolt::ChatRole::kUser;
+          break;
+        case tokenization::ChatRole::kAssistant:
+          converted.role = models::nemotron35_bolt::ChatRole::kAssistant;
+          break;
+        case tokenization::ChatRole::kTool:
+          converted.role = models::nemotron35_bolt::ChatRole::kTool;
+          break;
+      }
+      converted.content = message.content + message.framing_suffix;
+      converted.reasoning = message.thought;
+      for (const auto& call : message.tool_calls) {
+        models::nemotron35_bolt::ChatToolCall out{call.name, {}};
+        for (const auto& argument : call.arguments)
+          out.arguments.push_back(
+              {argument.name, argument.value, argument.is_string});
+        converted.tool_calls.push_back(std::move(out));
+      }
+      messages.push_back(std::move(converted));
+    }
+    std::vector<models::nemotron35_bolt::ChatTool> tools;
+    if (request.tool_choice != ChatRequest::ToolChoice::kNone) {
+      for (const auto& tool : request.tools)
+        tools.push_back({tool.name, tool.description, tool.parameters_json,
+                         tool.definition_json});
+    }
+    return models::nemotron35_bolt::RenderChat(
+        messages, tools,
+        models::nemotron35_bolt::ResolveChatOptions(request.reasoning), spans);
+  }
+
+  /// Tokens per prefill work unit, so long prompts yield to other requests.
+  static constexpr std::size_t kNemotronPrefillChunk = 2048;
+  /// Sessions one Session::DecodeBatch pass takes.
+  static constexpr std::size_t kNemotronBatchWidth = 8;
+
+  std::shared_ptr<models::nemotron35_bolt::Model> model_;
+  std::uint32_t max_context_;
+  std::uint32_t draft_tokens_;
+};
+
 constexpr std::string_view kQwenFlashNextStateAbi =
     "qwen38-flash-next-rocm-session-v1";
 
@@ -3190,6 +3761,54 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
+  if (architecture == "nemotron_h_moe") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "Nemotron 3.5 Bolt does not support --mmproj yet");
+      return false;
+    }
+    const bool lilicorr =
+        speculative_config.backend == TextSpeculativeBackend::kLiliCorr;
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+        !lilicorr) {
+      SetError(error,
+               "Nemotron 3.5 Bolt supports only LiLiCorr speculative "
+               "decoding (--speculative lilicorr --lilicorr-model)");
+      return false;
+    }
+    if (lilicorr && (speculative_config.draft_model_path.empty() ||
+                     speculative_config.max_draft_tokens == 0 ||
+                     speculative_config.min_draft_tokens != 1)) {
+      SetError(error,
+               "LiLiCorr requires --lilicorr-model, a positive --draft-tokens "
+               "and --min-draft-tokens 1");
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error, "Nemotron 3.5 Bolt has no persistent disk cache yet");
+      return false;
+    }
+    auto model = models::nemotron35_bolt::Model::Load(
+        model_path,
+        models::nemotron35_bolt::ModelOptions{.max_context = max_context},
+        &load_error);
+    if (model == nullptr) {
+      SetError(error,
+               "Failed to create Nemotron 3.5 Bolt model: " + load_error);
+      return false;
+    }
+    std::uint32_t draft_tokens = 0;
+    if (lilicorr) {
+      if (!model->LoadDrafter(speculative_config.draft_model_path,
+                              &load_error)) {
+        SetError(error, "Failed to load the LiLiCorr drafter: " + load_error);
+        return false;
+      }
+      draft_tokens = speculative_config.max_draft_tokens;
+    }
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, ram_cache_config,
+                draft_tokens);
+  }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
         speculative_config.backend != TextSpeculativeBackend::kMtp) {
@@ -3352,6 +3971,10 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   }
   if (speculative_config.backend == TextSpeculativeBackend::kMtp) {
     SetError(error, "MTP HTTP decoding requires a Qwen Flash-Next model");
+    return false;
+  }
+  if (speculative_config.backend == TextSpeculativeBackend::kLiliCorr) {
+    SetError(error, "LiLiCorr HTTP decoding requires Nemotron 3.5 Bolt");
     return false;
   }
   if (session_count == 0) {
@@ -3545,6 +4168,53 @@ bool InferenceBackend::load(
     auto runner_pool = std::make_shared<TextRunnerPool>(
         std::move(runner), session_count, std::move(runner_disk_cache),
         ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
+bool InferenceBackend::load(
+    std::shared_ptr<models::nemotron35_bolt::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextRunnerRamCacheOptions ram_cache_config, std::uint32_t draft_tokens) {
+  if (model == nullptr) {
+    SetError(error, "Nemotron model must not be null");
+    return false;
+  }
+  if (draft_tokens != 0 && model->drafter() == nullptr) {
+    SetError(error, "Nemotron draft rounds need a loaded drafter");
+    return false;
+  }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+  if (session_count == 0) {
+    SetError(error, "HTTP session count must be at least one");
+    return false;
+  }
+  if (max_context > model->MaxContext()) {
+    SetError(error, "HTTP context exceeds the loaded Nemotron model context");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kNemotron35Bolt;
+    new_state->sampling_defaults.supplied = {};
+    auto runner = std::make_shared<NemotronTextRunner>(
+        std::move(model), max_context, draft_tokens);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::nullopt, ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {

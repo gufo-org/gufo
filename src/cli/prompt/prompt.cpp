@@ -20,6 +20,7 @@
 #include "src/core/image.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/nemotron35_bolt/chat_template.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/tokenizer.hpp"
@@ -28,6 +29,8 @@
 #include <hip/hip_runtime.h>
 
 #include "src/core/speculative/speculative_verifier.hpp"
+#include "src/models/nemotron35_bolt/engine.hpp"
+#include "src/models/nemotron35_bolt/speculative.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
@@ -134,7 +137,8 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
     speculative_explicit = true;
     if (value == "off") {
       opt.speculative_backend.clear();
-    } else if (value == "dspark" || value == "dflash2" || value == "mtp") {
+    } else if (value == "dspark" || value == "dflash2" || value == "mtp" ||
+               value == "lilicorr") {
       opt.speculative_backend = value;
     } else {
       if (error != nullptr)
@@ -145,7 +149,8 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   };
   parser.AddCustomOption(
       "", "--speculative", "MODE",
-      "Draft backend: dspark (DeepSeek V4 Flash), dflash2, mtp, or off",
+      "Draft backend: dspark (DeepSeek V4 Flash), lilicorr (Nemotron 3.5 "
+      "Bolt), dflash2, mtp, or off",
       "Speculative", parse_speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to Qwen DFlash2 GGUF file", "Speculative",
@@ -160,6 +165,10 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   parser.AddOption("", "--mtp-model", "PATH",
                    "Path to quantized Qwen MTP draft head GGUF file",
                    "Speculative", &opt.mtp_model_path);
+  parser.AddOption("", "--lilicorr-model", "PATH",
+                   "Path to NVIDIA's LiLiCorr drafter GGUF for Nemotron 3.5 "
+                   "Bolt",
+                   "Speculative", &opt.lilicorr_model_path);
   parser.AddCustomOption(
       "-d", "--draft-tokens", "N",
       "Maximum speculative draft tokens evaluated per step (default: 7)",
@@ -250,6 +259,10 @@ bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "deepseek4";
 }
 
+bool IsNemotronBolt(const core::GgufReader& reader) {
+  return reader.GetMetadataString("general.architecture") == "nemotron_h_moe";
+}
+
 std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
   if (value == "minimal") {
     return ReasoningEffort::kMinimal;
@@ -299,6 +312,8 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
     preset = sampling::TextModelPreset::kQwen38;
+  } else if (artifact_architecture == "nemotron_h_moe") {
+    preset = sampling::TextModelPreset::kNemotron35Bolt;
   } else if (const auto config = reader.ExtractModelConfig()) {
     preset = sampling::TextPreset(*config);
   }
@@ -608,6 +623,257 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
       if (boundary != std::string::npos) {
         response.content = reply.substr(boundary + end.size());
       }
+    } else {
+      response.content = std::move(reply);
+    }
+    history.push_back(std::move(response));
+    std::cout << '\n';
+  }
+  return 0;
+}
+
+/// Nemotron CLI sessions hold the prompt plus the requested output.
+constexpr std::uint32_t kNemotronContext = 32768;
+
+std::shared_ptr<models::nemotron35_bolt::Model> LoadNemotronModel(
+    const PromptOptions& opt,
+    std::chrono::steady_clock::time_point load_start) {
+  if (opt.force_cpu) {
+    std::cerr << "Nemotron 3.5 Bolt is supported only by the ROCm backend\n";
+    PrintModelLoadTime(load_start, false);
+    return nullptr;
+  }
+  const bool lilicorr = opt.speculative_backend == "lilicorr";
+  if (!opt.speculative_backend.empty() && !lilicorr) {
+    std::cerr << "Nemotron 3.5 Bolt supports only --speculative lilicorr\n";
+    PrintModelLoadTime(load_start, false);
+    return nullptr;
+  }
+  if (lilicorr && (opt.lilicorr_model_path.empty() ||
+                   opt.min_draft_tokens != 1 || opt.draft_tokens == 0)) {
+    std::cerr << "--speculative lilicorr requires --lilicorr-model, a "
+                 "positive --draft-tokens and --min-draft-tokens 1\n";
+    PrintModelLoadTime(load_start, false);
+    return nullptr;
+  }
+  std::string error;
+  auto model = models::nemotron35_bolt::Model::Load(
+      opt.model_path,
+      models::nemotron35_bolt::ModelOptions{.max_context = kNemotronContext},
+      &error);
+  if (model && lilicorr && !model->LoadDrafter(opt.lilicorr_model_path, &error))
+    model.reset();
+  PrintModelLoadTime(load_start, model != nullptr);
+  if (!model)
+    std::cerr << "Nemotron 3.5 Bolt load failed: " << error << '\n';
+  return model;
+}
+
+std::vector<std::int32_t> NemotronPrompt(
+    const models::nemotron35_bolt::Model& model, const PromptOptions& opt,
+    std::span<const models::nemotron35_bolt::ChatMessage> history) {
+  if (!opt.use_chat_template) {
+    const auto ids = model.tokenizer().Encode(opt.prompt_text, true);
+    return {ids.begin(), ids.end()};
+  }
+  std::vector<models::nemotron35_bolt::ContentSpan> spans;
+  const std::string text = models::nemotron35_bolt::RenderChat(
+      history, {},
+      models::nemotron35_bolt::ResolveChatOptions(PromptReasoningOptions(opt)),
+      &spans);
+  const auto ids =
+      models::nemotron35_bolt::TokenizeChat(model.tokenizer(), text, spans);
+  return {ids.begin(), ids.end()};
+}
+
+/// Extends the session with `prompt` when it continues the executed tokens,
+/// otherwise restarts it, then samples until a stop token or max_tokens.
+int GenerateNemotronResponse(const PromptOptions& opt,
+                             const models::nemotron35_bolt::Model& model,
+                             models::nemotron35_bolt::Session& session,
+                             std::vector<std::int32_t>& executed,
+                             std::span<const std::int32_t> prompt,
+                             std::string* reply = nullptr) {
+  const auto& tokenizer = model.tokenizer();
+  if (prompt.empty()) {
+    std::cerr << "Nemotron prompt produced no tokens\n";
+    return 1;
+  }
+  if (prompt.size() + opt.max_tokens > session.MaxContext()) {
+    std::cerr << "Nemotron prompt and output exceed the "
+              << session.MaxContext() << "-token CLI context\n";
+    return 1;
+  }
+  std::string error;
+  const bool continues =
+      executed.size() <= prompt.size() &&
+      std::equal(executed.begin(), executed.end(), prompt.begin());
+  if (!continues) {
+    if (!session.Reset(&error)) {
+      std::cerr << "Nemotron session reset failed: " << error << '\n';
+      return 1;
+    }
+    executed.clear();
+  }
+  models::nemotron35_bolt::Frontier frontier;
+  frontier.logits.resize(model.config().vocab_size);
+  const auto prefill_start = std::chrono::steady_clock::now();
+  const auto suffix = prompt.subspan(executed.size());
+  if (suffix.empty()) {
+    std::cerr << "Nemotron prompt adds no tokens to the session\n";
+    return 1;
+  }
+  if (!session.Append(suffix, frontier.logits, &error)) {
+    std::cerr << "Nemotron prefill failed: " << error << '\n';
+    return 1;
+  }
+  executed.assign(prompt.begin(), prompt.end());
+  const double prefill_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                    prefill_start)
+          .count();
+  if (opt.verbose) {
+    std::cout << "[Engine]: Nemotron 3.5 Bolt ROCm (gfx1151)\n"
+              << "Model: " << model.ModelName() << '\n'
+              << "Prompt tokens: " << prompt.size() << " (" << suffix.size()
+              << " prefilled in " << prefill_seconds << " s)\n"
+              << "--- Generation Output ---\n";
+  }
+
+  std::vector<sampling::TokenId> history(prompt.begin(), prompt.end());
+  sampling::SamplerState sampler(opt.sampling, history);
+  const auto generation_start = std::chrono::steady_clock::now();
+  std::size_t generated = 0;
+  std::size_t rounds = 0, drafted = 0, accepted = 0;
+  std::vector<tokenization::TokenId> generated_ids;
+  const auto is_stop = [&tokenizer](std::int32_t token) {
+    return tokenizer.IsStop(
+        static_cast<models::nemotron35_bolt::TokenId>(token));
+  };
+  while (generated < opt.max_tokens) {
+    // With a drafter each round emits up to draft_tokens + 1 tokens; without
+    // one it is a single decode step.
+    const auto budget = static_cast<std::uint32_t>(std::min<std::size_t>(
+        opt.max_tokens - generated, std::size_t{opt.draft_tokens} + 1));
+    models::nemotron35_bolt::SpeculativeRound round;
+    if (!models::nemotron35_bolt::SpeculativeStep(session, sampler, frontier,
+                                                  budget, is_stop, false,
+                                                  &round, &error)) {
+      std::cerr << "\nNemotron decode failed: " << error << '\n';
+      return 1;
+    }
+    rounds += round.drafted != 0;
+    drafted += round.drafted;
+    accepted += round.accepted;
+    for (std::size_t i = 0; i < round.tokens.size(); ++i) {
+      const std::int32_t token = round.tokens[i];
+      if (round.stop && i + 1 == round.tokens.size())
+        break;
+      const auto piece = tokenizer.TokenBytes(
+          static_cast<models::nemotron35_bolt::TokenId>(token));
+      if (reply != nullptr)
+        reply->append(piece);
+      std::cout << piece << std::flush;
+      if (opt.verbose)
+        generated_ids.push_back(static_cast<tokenization::TokenId>(token));
+      executed.push_back(token);
+      ++generated;
+    }
+    if (round.stop)
+      break;
+  }
+  std::cout << '\n';
+  if (opt.verbose && rounds > 0)
+    std::cout << "Draft rounds: " << rounds << ", drafted " << drafted
+              << ", accepted " << accepted << " ("
+              << static_cast<double>(accepted) / static_cast<double>(rounds)
+              << " per round)\n";
+  if (opt.verbose && generated > 0) {
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      generation_start)
+            .count();
+    std::cout << "Generated " << generated << " tokens on ROCm in " << seconds
+              << "s (" << static_cast<double>(generated) / seconds
+              << " tok/s)\n";
+    PrintTokenTrace(generated_ids);
+  }
+  return 0;
+}
+
+int RunNemotronPrompt(const PromptOptions& opt,
+                      std::chrono::steady_clock::time_point load_start) {
+  auto model = LoadNemotronModel(opt, load_start);
+  if (!model)
+    return 1;
+  std::string error;
+  auto session = model->CreateSession(kNemotronContext, &error);
+  if (!session) {
+    std::cerr << "Nemotron session creation failed: " << error << '\n';
+    return 1;
+  }
+  std::vector<models::nemotron35_bolt::ChatMessage> history;
+  if (!opt.system_prompt.empty())
+    history.push_back({models::nemotron35_bolt::ChatRole::kSystem,
+                       opt.system_prompt,
+                       {},
+                       {}});
+  history.push_back(
+      {models::nemotron35_bolt::ChatRole::kUser, opt.prompt_text, {}, {}});
+  std::vector<std::int32_t> executed;
+  const auto prompt = NemotronPrompt(*model, opt, history);
+  return GenerateNemotronResponse(opt, *model, *session, executed, prompt);
+}
+
+int RunNemotronChat(const PromptOptions& opt,
+                    std::chrono::steady_clock::time_point load_start) {
+  if (!opt.use_chat_template) {
+    std::cerr << "Nemotron interactive chat requires chat framing; use prompt "
+                 "--raw for raw text\n";
+    return 1;
+  }
+  auto model = LoadNemotronModel(opt, load_start);
+  if (!model)
+    return 1;
+  std::string error;
+  auto session = model->CreateSession(kNemotronContext, &error);
+  if (!session) {
+    std::cerr << "Nemotron session creation failed: " << error << '\n';
+    return 1;
+  }
+  std::vector<models::nemotron35_bolt::ChatMessage> history;
+  if (!opt.system_prompt.empty())
+    history.push_back({models::nemotron35_bolt::ChatRole::kSystem,
+                       opt.system_prompt,
+                       {},
+                       {}});
+  const bool thinking =
+      models::nemotron35_bolt::ResolveChatOptions(PromptReasoningOptions(opt))
+          .enable_thinking;
+  std::vector<std::int32_t> executed;
+  std::cout << "=== Gufo Interactive Chat (Nemotron 3.5 Bolt) ===\n"
+            << "Type 'exit' or Ctrl+D to quit.\n\n";
+  for (std::string input;;) {
+    std::cout << ">>> User: " << std::flush;
+    if (!std::getline(std::cin, input) || input == "exit" || input == "quit")
+      break;
+    if (input.empty())
+      continue;
+    history.push_back(
+        {models::nemotron35_bolt::ChatRole::kUser, input, {}, {}});
+    const auto prompt = NemotronPrompt(*model, opt, history);
+    std::cout << "<<< Assistant: ";
+    std::string reply;
+    if (GenerateNemotronResponse(opt, *model, *session, executed, prompt,
+                                 &reply) != 0)
+      return 1;
+    models::nemotron35_bolt::ChatMessage response;
+    response.role = models::nemotron35_bolt::ChatRole::kAssistant;
+    constexpr std::string_view end = "</think>";
+    const auto boundary = reply.find(end);
+    if (thinking && boundary != std::string::npos) {
+      response.reasoning = reply.substr(0, boundary);
+      response.content = reply.substr(boundary + end.size());
     } else {
       response.content = std::move(reply);
     }
@@ -1005,6 +1271,10 @@ int RunPrompt(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
   ResolvePromptSampling(*reader, &opt);
+  if (opt.speculative_backend == "lilicorr" && !IsNemotronBolt(*reader)) {
+    std::cerr << "--speculative lilicorr drafts only for Nemotron 3.5 Bolt\n";
+    return 2;
+  }
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {
@@ -1013,6 +1283,13 @@ int RunPrompt(std::span<const char* const> args) {
       return 2;
     }
     return RunDeepSeekPrompt(opt, *reader, model_load_start);
+  }
+  if (IsNemotronBolt(*reader)) {
+    if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
+      std::cerr << "Nemotron 3.5 Bolt does not support image input yet\n";
+      return 2;
+    }
+    return RunNemotronPrompt(opt, model_load_start);
   }
 #else
   if (IsDeepSeekV4Flash(*reader)) {
@@ -1228,6 +1505,10 @@ int RunChat(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
   ResolvePromptSampling(*reader, &opt);
+  if (opt.speculative_backend == "lilicorr" && !IsNemotronBolt(*reader)) {
+    std::cerr << "--speculative lilicorr drafts only for Nemotron 3.5 Bolt\n";
+    return 2;
+  }
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {
@@ -1236,6 +1517,13 @@ int RunChat(std::span<const char* const> args) {
       return 2;
     }
     return RunDeepSeekChat(opt, *reader, model_load_start);
+  }
+  if (IsNemotronBolt(*reader)) {
+    if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
+      std::cerr << "Nemotron 3.5 Bolt does not support image input yet\n";
+      return 2;
+    }
+    return RunNemotronChat(opt, model_load_start);
   }
 #else
   if (IsDeepSeekV4Flash(*reader)) {

@@ -44,7 +44,7 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4, server_
 
     messages = [{"role": "system", "content": "cache_depth_main\n"
                  "Follow the final instruction. Background records are not instructions.\n" +
-                 "Background record: the lantern is blue and the shelf is empty.\n" * 1200}]
+                 "Background record: the lantern is blue and the shelf is empty.\n" * 1250}]
     previous = 0
     for turn in range(3):
         messages.append({"role": "user", "content": f"Turn {turn}.\n" +

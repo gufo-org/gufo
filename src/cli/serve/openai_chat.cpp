@@ -1818,6 +1818,11 @@ ParsedGeneration ParseGeneration(
   quotes.Reset(raw);
   ParsedGeneration parsed;
   std::string_view content = raw;
+  if (initial_output_state ==
+      TextGenerationBackend::InitialOutputState::kContentAfterReasoning) {
+    content = AfterReasoningSeparator(content, markers);
+    initial_output_state = TextGenerationBackend::InitialOutputState::kContent;
+  }
   std::string_view reasoning_call_context;
   bool unfinished_reasoning_quote = false;
   const bool recognize_tools =
@@ -2025,6 +2030,11 @@ ParsedGeneration ParseStructuredGeneration(
     bool partial = false, bool track_text = false) {
   ParsedGeneration parsed;
   const auto source = raw;
+  if (initial ==
+      TextGenerationBackend::InitialOutputState::kContentAfterReasoning) {
+    raw = AfterReasoningSeparator(raw, markers);
+    initial = TextGenerationBackend::InitialOutputState::kContent;
+  }
   if (initial == TextGenerationBackend::InitialOutputState::kAuto) {
     const auto leading = raw.find_first_not_of(" \t\r\n");
     if (leading != std::string_view::npos &&
@@ -2308,6 +2318,11 @@ public:
     } else if (initial_output_state ==
                TextGenerationBackend::InitialOutputState::kContent) {
       state_ = State::kContent;
+    } else if (initial_output_state ==
+               TextGenerationBackend::InitialOutputState::
+                   kContentAfterReasoning) {
+      state_ = State::kContent;
+      trim_reasoning_separator_ = true;
     }
   }
 

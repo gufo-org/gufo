@@ -1,0 +1,17 @@
+{
+  "single-lilicorr": {
+    "*": "llama.cpp c3df4b7e2 draft-dflash greedy output differs from its own AR output on the matched pp2048/tg128 control (single-user d0 and prepared C1) and at every depth; its rates stay in the artifacts."
+  },
+  "single-lilicorr-repetition": {
+    "*": "llama.cpp c3df4b7e2 draft-dflash greedy output differs from its own AR output on the matched pp2048/tg128 control (single-user d0 and prepared C1) and at every depth; its rates stay in the artifacts."
+  },
+  "multi-mixed": {
+    "*": "llama.cpp c3df4b7e2 draft-dflash greedy output differs from its own AR output on the matched pp2048/tg128 control (single-user d0 and prepared C1) and at every depth; its rates stay in the artifacts."
+  },
+  "multi-repetition": {
+    "*": "llama.cpp c3df4b7e2 draft-dflash greedy output differs from its own AR output on the matched pp2048/tg128 control (single-user d0 and prepared C1) and at every depth; its rates stay in the artifacts."
+  },
+  "memory": {
+    "*": "The Vulkan reference allocates outside HIP, so hipMemGetInfo, the counter the driver samples, does not see its model (it read the 0.73 GiB idle baseline)."
+  }
+}

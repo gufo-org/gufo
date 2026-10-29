@@ -14,6 +14,7 @@ are downloaded separately and are not part of the runtime package.
 | Qwen3-TTS 12Hz 1.7B | BF16 safetensors; text/reference audio to speech | [Voice modes](qwen3-tts/README.md) |
 | Qwen-Image-2.1 | BF16 safetensors; generation and image editing | [Usage](qwen-image-2.1/README.md) |
 | MiniMax H3 FL2VA | Pinned safetensors; text to audiovisual output | [Presets and usage](minimax-h3/README.md) |
+| Nemotron 3.5 Bolt 74B-A9B | NVIDIA 24GB GGUF and LiLiCorr drafter; text, in development (no vision yet) | [Usage and status](nemotron-3.5-bolt/README.md) |
 
 Each model folder contains:
 

@@ -88,6 +88,22 @@ struct block_iq3_s {
   std::uint8_t signs[32];
   std::uint8_t scales[4];
 };
+
+// IQ2_XXS: super-block of 256 as eight groups of 32. Each group stores two
+// little-endian words: four 8-bit kIq2xxsGrid indices, then four 7-bit sign
+// indices and a 4-bit group scale in the top nibble.
+struct block_iq2_xxs {
+  std::uint16_t d;
+  std::uint16_t qs[32];
+};
+
+// NVFP4: 64 E2M1 values as four 16-element sub-blocks, each with an unsigned
+// E4M3 scale. Within a sub-block, low nibbles hold elements 0..7 and high
+// nibbles elements 8..15. A per-tensor F32 scale is applied by the caller.
+struct block_nvfp4 {
+  std::uint8_t d[4];
+  std::uint8_t qs[32];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(block_q4_K) == 144, "block_q4_K must be 144 bytes");
@@ -99,6 +115,8 @@ static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
 static_assert(sizeof(block_iq4_nl) == 18, "block_iq4_nl must be 18 bytes");
 static_assert(sizeof(block_iq4_xs) == 136, "block_iq4_xs must be 136 bytes");
 static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
+static_assert(sizeof(block_iq2_xxs) == 66, "block_iq2_xxs must be 66 bytes");
+static_assert(sizeof(block_nvfp4) == 36, "block_nvfp4 must be 36 bytes");
 
 /// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
 inline constexpr std::int8_t kValuesIq4Nl[16] = {
@@ -117,6 +135,8 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ8_0:
     case core::GgmlType::kIQ4_NL:
       return 32;
+    case core::GgmlType::kNVFP4:
+      return 64;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
     case core::GgmlType::kIQ4_XS:
@@ -185,6 +205,12 @@ void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);
 // Dequantize row of IQ3_S to float
 void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
 
+// Dequantize row of IQ2_XXS to float
+void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of NVFP4 to float, without the per-tensor scale
+void DequantizeNVFP4(const void* src, float* dst, std::size_t k);
+
 // Compute dot product of IQ4_NL quantized row with FP32 vector
 float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,
                        std::size_t k);
@@ -198,6 +224,10 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
 /// Returns the 512-entry IQ3_S grid table (each entry packs four uint8
 /// magnitudes).
 [[nodiscard]] const std::uint32_t* Iq3sGrid() noexcept;
+
+/// Returns the 256-entry IQ2_XXS grid table (each entry packs eight uint8
+/// magnitudes).
+[[nodiscard]] const std::uint64_t* Iq2xxsGrid() noexcept;
 
 // Compute dot product of Q8_0 quantized row with FP32 vector
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,

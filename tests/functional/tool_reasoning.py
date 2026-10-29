@@ -59,7 +59,8 @@ def response_result(client, request, streaming):
                 finish="tool_calls" if calls else "stop", usage=response.usage.to_dict())
 
 
-def check_reasoning_separator(client, model, checks, chat_result, server_log=None):
+def check_reasoning_separator(client, model, checks, chat_result, server_log=None,
+                              sampling_preset="qwen38"):
     """Reasoning framing is not visible text, with or without constraints (#439)."""
     from cache_growth import check_unchanged_retry, log_offset
     function = {"name": "unused", "description": "Not needed for arithmetic.",
@@ -133,8 +134,14 @@ def check_reasoning_separator(client, model, checks, chat_result, server_log=Non
                 next_ = save("reasoning_separator_continuation",
                             chat_result(client, followup, True))
                 assert next_["text"] == "10" and not next_["tools"], next_
-                assert next_["usage"]["prompt_tokens_details"]["cached_tokens"] == (
-                    result["usage"]["total_tokens"]), (result, next_)
+                cached = next_["usage"]["prompt_tokens_details"]["cached_tokens"]
+                if sampling_preset == "nemotron35":
+                    # Nemotron's template drops reasoning before the last user
+                    # turn and moves the effort hint to it: as in cache-growth,
+                    # only the previous prompt's rewritten tail may be lost.
+                    assert cached >= result["usage"]["prompt_tokens"] - 16, (result, next_)
+                else:
+                    assert cached == result["usage"]["total_tokens"], (result, next_)
                 # Thinking off still preserves paragraph breaks inside content.
                 plain = {**request, "reasoning_effort": "none", "messages": [
                     {"role": "user", "content":
@@ -699,7 +706,8 @@ def without_fenced_blocks(text):
     return "\n".join(kept)
 
 
-def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=False):
+def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=False,
+                                call_expected=True):
     """A documented envelope stays prose while the call after it is parsed.
 
     The prompt hands the markup over and asks for both acts; the case reads the
@@ -725,13 +733,17 @@ def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=Fal
             checks[label] = result
             print(f"CHECK {label}", file=sys.stderr, flush=True)
             names = [tool["function"]["name"] for tool in result["tools"]]
-            assert names == ["terminal"], (
-                "the only call parsed is the one the model made", result)
-            arguments = json.loads(result["tools"][0]["function"]["arguments"])
-            assert "pwd" in arguments.get("command", ""), (
-                "the call carries the command the model was asked to run", result)
-            assert result["finish"] == "tool_calls", (
-                "a parsed call ends the turn as tool_calls", result)
+            if not call_expected:
+                assert not names and result["finish"] == "stop", (
+                    "documented markup is not a call", result)
+            else:
+                assert names == ["terminal"], (
+                    "the only call parsed is the one the model made", result)
+                arguments = json.loads(result["tools"][0]["function"]["arguments"])
+                assert "pwd" in arguments.get("command", ""), (
+                    "the call carries the command the model was asked to run", result)
+                assert result["finish"] == "tool_calls", (
+                    "a parsed call ends the turn as tool_calls", result)
             # Documentation the model chose to write stays visible, fence and all.
             if "```" in result["text"]:
                 documented += 1
@@ -864,5 +876,8 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
     check_unfinished_lookalike(client, model, checks, chat_result)
     check_literal_protocol_data(client, model, checks, chat_result)
     check_html_content(client, model, checks, chat_result)
-    check_quoted_then_real_call(client, model, checks, chat_result, deepseek)
+    # Nemotron 3.5 Bolt documents the markup and stops without the call, as
+    # it does under llama.cpp with the same GGUF.
+    check_quoted_then_real_call(client, model, checks, chat_result, deepseek,
+                                call_expected=sampling_preset != "nemotron35")
     check_unfinished_inline_then_call(client, model, checks, chat_result)

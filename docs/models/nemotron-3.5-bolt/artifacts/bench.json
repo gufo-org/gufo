@@ -1,0 +1,232 @@
+{
+  "schema": "gufo-model-bench/1",
+  "category": "llm",
+  "model": {
+    "id": "Nemotron 3.5 Bolt 74B-A9B",
+    "docs": "nemotron-3.5-bolt",
+    "label": "Nemotron 3.5 Bolt 24GB"
+  },
+  "files": {
+    "gguf": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
+    "draft": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf (LiLiCorr DFlash drafter)"
+  },
+  "variants": {
+    "default": {
+      "label": "24GB",
+      "requires": [
+        "gguf"
+      ]
+    }
+  },
+  "sampling": {
+    "temperature": 0,
+    "seed": 1
+  },
+  "speculative": {
+    "mode": "lilicorr",
+    "label": "LiLiCorr",
+    "gufo_args": [
+      "--speculative",
+      "lilicorr",
+      "--lilicorr-model",
+      "{draft}"
+    ],
+    "reference": {
+      "args": [
+        "--spec-type",
+        "draft-dflash",
+        "--spec-draft-model",
+        "{draft}",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-draft-n-max",
+        "7"
+      ]
+    }
+  },
+  "tables": {
+    "single-ar": {
+      "title": "Single user, autoregressive",
+      "per_variant": false,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 133760,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher"
+    },
+    "single-lilicorr": {
+      "title": "Single user, LiLiCorr",
+      "per_variant": false,
+      "speculative": true,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 133760,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "workloads": {
+        "single-lilicorr": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-lilicorr-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
+    },
+    "multi-ar": {
+      "title": "Multiple users, autoregressive",
+      "per_variant": false,
+      "modes": [
+        "ar"
+      ],
+      "corpus_layout": "homogeneous",
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "prompt_tokens": 2048,
+      "workload": "prose",
+      "prefill_first": true
+    },
+    "multi-lilicorr": {
+      "per_variant": false,
+      "modes": [
+        "lilicorr"
+      ],
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "title": "Multiple users, LiLiCorr",
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "corpus_layout": "homogeneous",
+          "workload": "prose"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "corpus_layout": "homogeneous",
+          "workload": "repetition"
+        }
+      },
+      "prompt_tokens": 2048,
+      "prefill_first": true
+    },
+    "loading": {
+      "title": "Loading time",
+      "per_variant": false,
+      "sessions": 1,
+      "repetitions": 1,
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants",
+      "context": 262144
+    },
+    "memory": {
+      "title": "Memory occupation",
+      "per_variant": false,
+      "context": 133121,
+      "workloads": [
+        {
+          "id": "pp2048 + tg128",
+          "depth": 0,
+          "prompt_tokens": 2048,
+          "output_tokens": 128
+        },
+        {
+          "id": "16K prefix, pp4096 + tg128",
+          "depth": 16384,
+          "prompt_tokens": 4096,
+          "output_tokens": 128
+        }
+      ],
+      "metric": "GiB",
+      "better": "lower",
+      "mode": "ar"
+    }
+  },
+  "gufo": {
+    "serve": [],
+    "llm": [
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8"
+    ],
+    "readiness": "/ready",
+    "checkpoint_preparation": true
+  },
+  "reference": {
+    "name": "llama.cpp",
+    "server": "llama-server",
+    "args": [
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ],
+    "endpoint_profile": "openai",
+    "readiness": "/health"
+  }
+}
