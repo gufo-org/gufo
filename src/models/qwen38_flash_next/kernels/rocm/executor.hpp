@@ -773,12 +773,10 @@ private:
   Session::Control* control_host_{nullptr};
   std::int32_t* tokens_host_{nullptr};
   std::uint32_t* counts_host_{nullptr};
-  std::int32_t* tiles_host_{nullptr};         ///< routed tile map staging
-  mutable std::uint32_t routed_max_rows_{0};  ///< 0 = no readback yet
-  mutable std::uint32_t routed_n_tiles_{0};   ///< routed_tile_rows_ tiles
-  mutable std::uint32_t routed_64_tiles_{0};  ///< wide batches' down tiles
-  mutable std::uint32_t routed_pair_offset_{0};
-  mutable std::uint32_t routed_pair_tiles_{0};
+  std::int32_t* tiles_host_{nullptr};           ///< routed tile map staging
+  mutable std::uint32_t routed_max_rows_{0};    ///< 0 = no readback yet
+  mutable std::uint32_t routed_n_tiles_{0};     ///< routed_tile_rows_ tiles
+  mutable std::uint32_t routed_wide_tiles_{0};  ///< prefill 128-row tiles
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};

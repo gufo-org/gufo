@@ -1790,9 +1790,7 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   const Config& c = config();
   routed_max_rows_ = 0;
   routed_n_tiles_ = 0;
-  routed_64_tiles_ = 0;
-  routed_pair_tiles_ = 0;
-  routed_pair_offset_ = 0;
+  routed_wide_tiles_ = 0;
   if (!ExpertMatrixRows(n_tokens)) {
     return true;
   }
@@ -1820,13 +1818,10 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
     }
   };
   if (WidePrefill(n_tokens)) {
-    // Prefill batches: 64-token tiles for the down projection, then 128-token
-    // tiles for the paired gate/up projections.
-    append(64);
-    routed_64_tiles_ = n_tiles;
-    routed_pair_offset_ = n_tiles;
+    // Prefill batches: one map of 128-token tiles serves the paired gate/up
+    // and the down projections.
     append(128);
-    routed_pair_tiles_ = n_tiles - routed_pair_offset_;
+    routed_wide_tiles_ = n_tiles;
   } else {
     append(routed_tile_rows_);
     routed_n_tiles_ = n_tiles;
@@ -2841,12 +2836,12 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                                      ? WeightType::kQ5_K
                                      : WeightType::kQ4_K;
     const bool gated_ok =
-        routed_64_tiles_ != 0
-            ? RoutedGatedF16Gemm(
-                  l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
-                  s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
-                  s_.routed_bounds, s_.rows_token, s_.rows_slot, up_half,
-                  c.expert_ff, c.hidden_size, stream_)
+        routed_wide_tiles_ != 0
+            ? RoutedGatedF16Gemm(l.ffn_gate_exps.data, l.ffn_up_exps.data,
+                                 gate_type, x_half, s_.routed_tiles,
+                                 routed_wide_tiles_, s_.routed_bounds,
+                                 s_.rows_token, s_.rows_slot, up_half,
+                                 c.expert_ff, c.hidden_size, stream_)
             : (RoutedF16Gemm(l.ffn_gate_exps.data, gate_type, x_half,
                              s_.routed_tiles, routed_n_tiles_,
                              routed_tile_rows_, s_.routed_bounds, s_.rows_token,
@@ -2864,15 +2859,15 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     const WeightType down_type = l.ffn_down_exps.type == GgmlType::kQ8_0
                                      ? WeightType::kQ8_0
                                      : WeightType::kQ5_1;
-    // Prefill takes the 64-token down tiles: they decode each expert's
-    // weights over more rows, also where narrower tiles would be fewer.
-    const bool wide_down = routed_64_tiles_ != 0;
+    // Prefill takes the gate/up map's 128-token tiles: each wave decodes its
+    // rows' weights once for up to 128 tokens.
+    const bool wide_down = routed_wide_tiles_ != 0;
     // The down projection's rows are F16 too: the epilogue reads half the
     // bytes of the largest routed intermediate.
     if (!RoutedF16Gemm(l.ffn_down_exps.data, down_type, up_half,
                        s_.routed_tiles,
-                       wide_down ? routed_64_tiles_ : routed_n_tiles_,
-                       wide_down ? 64 : routed_tile_rows_, s_.routed_bounds,
+                       wide_down ? routed_wide_tiles_ : routed_n_tiles_,
+                       wide_down ? 128 : routed_tile_rows_, s_.routed_bounds,
                        s_.rows_slot, s_.rows_slot, nullptr, nullptr,
                        reinterpret_cast<__half*>(s_.down_e), c.hidden_size,
                        c.expert_ff, stream_)) {

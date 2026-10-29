@@ -376,13 +376,21 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   for (std::size_t i = 0; i < x.size(); ++i) {
     x_half[i] = __float2half(x[i]);
   }
-  std::vector<std::int32_t> tiles;
-  for (std::size_t e = 0; e < experts; ++e) {
-    const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
-    for (std::uint32_t j = 0; j < (padded + tile_rows - 1) / tile_rows; ++j) {
-      tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+  // The 128-row tile is the wide down projection (F16 output only): the F32
+  // output comes from 48-row tiles, so the F16 check below compares the two
+  // tile heights bit for bit.
+  const std::uint32_t f32_rows = tile_rows == 128 ? 48 : tile_rows;
+  const auto tile_map = [&](std::uint32_t rows) {
+    std::vector<std::int32_t> map;
+    for (std::size_t e = 0; e < experts; ++e) {
+      const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
+      for (std::uint32_t j = 0; j < (padded + rows - 1) / rows; ++j)
+        map.push_back(static_cast<std::int32_t>(e | (j << 16)));
     }
-  }
+    return map;
+  };
+  const std::vector<std::int32_t> tiles = tile_map(f32_rows);
+  const std::vector<std::int32_t> half_tiles = tile_map(tile_rows);
   __half* d_x_half = nullptr;
   CheckHip(hipMalloc(&d_x_half, x_half.size() * sizeof(__half)),
            "exact F16 input allocation");
@@ -390,9 +398,10 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                      hipMemcpyHostToDevice),
            "F16 input upload");
   std::int32_t* d_tiles = Upload(tiles);
+  std::int32_t* d_half_tiles = Upload(half_tiles);
   float* d_f16 = Upload(zero_out);
   if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
-                        static_cast<std::uint32_t>(tiles.size()), tile_rows,
+                        static_cast<std::uint32_t>(tiles.size()), f32_rows,
                         d_bounds, d_rows_token, d_rows_slot, nullptr, d_f16,
                         nullptr, m, k, nullptr)) {
     throw std::runtime_error("routed F16 GEMM rejected the shape");
@@ -403,39 +412,16 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   const __half half_guard = __float2half(123.0F);
   __half* d_f16_half =
       Upload(std::vector<__half>(slots * m + kHalfGuard, half_guard));
-  if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
-                        static_cast<std::uint32_t>(tiles.size()), tile_rows,
-                        d_bounds, d_rows_token, d_rows_slot, nullptr, nullptr,
-                        d_f16_half, m, k, nullptr)) {
+  if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_half_tiles,
+                        static_cast<std::uint32_t>(half_tiles.size()),
+                        tile_rows, d_bounds, d_rows_token, d_rows_slot, nullptr,
+                        nullptr, d_f16_half, m, k, nullptr)) {
     throw std::runtime_error("routed F16 GEMM (F16 out) rejected the shape");
   }
   CheckHip(hipDeviceSynchronize(), "routed GEMMs");
   const auto mmq = Download(d_mmq, slots * m);
   const auto f16 = Download(d_f16, slots * m);
   const auto f16_half = Download(d_f16_half, slots * m);
-  if (tile_rows == 64) {
-    std::vector<std::int32_t> narrow_tiles;
-    for (std::size_t e = 0; e < experts; ++e) {
-      const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
-      for (std::uint32_t j = 0; j < (padded + 47u) / 48u; ++j) {
-        narrow_tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
-      }
-    }
-    auto* d_narrow_tiles = Upload(narrow_tiles);
-    if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_narrow_tiles,
-                          static_cast<std::uint32_t>(narrow_tiles.size()), 48,
-                          d_bounds, d_rows_token, d_rows_slot, nullptr, d_f16,
-                          nullptr, m, k, nullptr)) {
-      throw std::runtime_error("routed reference tile rejected");
-    }
-    CheckHip(hipDeviceSynchronize(), "routed tile comparison");
-    const auto narrow = Download(d_f16, slots * m);
-    if (std::memcmp(narrow.data(), f16.data(), f16.size() * sizeof(float)) !=
-        0) {
-      throw std::runtime_error("routed tile widths change output bits");
-    }
-    CheckHip(hipFree(d_narrow_tiles), "free reference tiles");
-  }
   for (std::size_t i = 0; i < slots * m; ++i) {
     const __half expected = __float2half(f16[i]);
     if (std::memcmp(&expected, &f16_half[i], sizeof(__half)) != 0) {
@@ -562,13 +548,14 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
             << r.vs_ref << ", worst |MMQ - F64| " << r.mmq_vs_ref
             << ", MMQ NMSE " << r.mmq_sq_error / r.ref_sq << " (scale "
             << r.scale << ", widest bucket " << max_bucket << ")\n";
-  for (void* p : {static_cast<void*>(d_w), static_cast<void*>(d_x),
-                  static_cast<void*>(d_ids), static_cast<void*>(d_counts),
-                  static_cast<void*>(d_bounds), static_cast<void*>(d_cursors),
-                  static_cast<void*>(d_rows_token),
-                  static_cast<void*>(d_rows_slot), static_cast<void*>(d_mmq),
-                  static_cast<void*>(d_x_half), static_cast<void*>(d_tiles),
-                  static_cast<void*>(d_f16), static_cast<void*>(d_f16_half)}) {
+  for (void* p :
+       {static_cast<void*>(d_w), static_cast<void*>(d_x),
+        static_cast<void*>(d_ids), static_cast<void*>(d_counts),
+        static_cast<void*>(d_bounds), static_cast<void*>(d_cursors),
+        static_cast<void*>(d_rows_token), static_cast<void*>(d_rows_slot),
+        static_cast<void*>(d_mmq), static_cast<void*>(d_x_half),
+        static_cast<void*>(d_tiles), static_cast<void*>(d_half_tiles),
+        static_cast<void*>(d_f16), static_cast<void*>(d_f16_half)}) {
     (void)hipFree(p);
   }
   return r;
@@ -912,10 +899,285 @@ void CheckPairedMmq() {
     throw std::runtime_error("paired MMQ differs from separate projections");
 }
 
+/// Routing over `experts` with host-built tile maps for one token range.
+struct Routing {
+  std::vector<std::int32_t> ids;
+  std::vector<std::uint32_t> counts;
+  std::int32_t* d_bounds = nullptr;
+  std::int32_t* d_rows_token = nullptr;
+  std::int32_t* d_rows_slot = nullptr;
+  std::size_t slots = 0;
+
+  Routing(const std::vector<std::int32_t>& all_ids, std::size_t first,
+          std::size_t n_tokens, std::size_t used, std::size_t experts)
+      : ids(all_ids.begin() + first * used,
+            all_ids.begin() + (first + n_tokens) * used),
+        counts(experts, 0),
+        slots(n_tokens * used) {
+    for (const auto e : ids)
+      ++counts[e];
+    auto* d_ids = Upload(ids);
+    auto* d_counts = Upload(counts);
+    auto* d_cursors = Upload(std::vector<std::int32_t>(experts, 0));
+    const std::size_t compact = q::RoutedCompactRows(slots, experts);
+    d_bounds = Upload(std::vector<std::int32_t>(experts + 1, 0));
+    d_rows_token = Upload(std::vector<std::int32_t>(compact, 0));
+    d_rows_slot = Upload(std::vector<std::int32_t>(compact, 0));
+    q::RoutedCompact(d_ids, d_counts, d_bounds, d_cursors, d_rows_token,
+                     d_rows_slot, static_cast<std::uint32_t>(n_tokens),
+                     static_cast<std::uint32_t>(used),
+                     static_cast<std::uint32_t>(experts), nullptr);
+    CheckHip(hipDeviceSynchronize(), "routing compaction");
+    for (void* p : {static_cast<void*>(d_ids), static_cast<void*>(d_counts),
+                    static_cast<void*>(d_cursors)})
+      (void)hipFree(p);
+  }
+  ~Routing() {
+    for (void* p :
+         {static_cast<void*>(d_bounds), static_cast<void*>(d_rows_token),
+          static_cast<void*>(d_rows_slot)})
+      (void)hipFree(p);
+  }
+  std::int32_t* Tiles(std::uint32_t tile_rows, std::uint32_t* n) const {
+    std::vector<std::int32_t> tiles;
+    for (std::size_t e = 0; e < counts.size(); ++e)
+      for (std::uint32_t j = 0; j < (counts[e] + tile_rows - 1) / tile_rows;
+           ++j)
+        tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+    *n = static_cast<std::uint32_t>(tiles.size());
+    return tiles.empty() ? nullptr : Upload(tiles);
+  }
+};
+
+/// Paired 128-row gate/up launch (the wide prefill route): F16 SwiGLU rows.
+std::vector<__half> PairedSwiglu(const Routing& r, const void* gate,
+                                 const void* up, q::WeightType type,
+                                 const __half* x, std::size_t m,
+                                 std::size_t k) {
+  std::uint32_t n = 0;
+  auto* tiles = r.Tiles(128, &n);
+  auto* out = Upload(std::vector<__half>(r.slots * m, __float2half(-7.0F)));
+  if (!q::RoutedGatedF16Gemm(gate, up, type, x, tiles, n, r.d_bounds,
+                             r.d_rows_token, r.d_rows_slot, out, m, k, nullptr))
+    throw std::runtime_error("paired routed launch rejected");
+  CheckHip(hipDeviceSynchronize(), "paired routed launch");
+  auto host = Download(out, r.slots * m);
+  (void)hipFree(tiles);
+  (void)hipFree(out);
+  return host;
+}
+
+/// Separate gate (F32) and up (SwiGLU, F16) launches at one tile height (the
+/// short-pass and decode-batch route). `gate_out` receives the F32 gate.
+std::vector<__half> SeparateSwiglu(const Routing& r, const void* gate,
+                                   const void* up, q::WeightType type,
+                                   const __half* x, std::size_t m,
+                                   std::size_t k, std::uint32_t tile_rows,
+                                   std::vector<float>* gate_out = nullptr) {
+  std::uint32_t n = 0;
+  auto* tiles = r.Tiles(tile_rows, &n);
+  auto* g = Upload(std::vector<float>(r.slots * m, -7.0F));
+  auto* out = Upload(std::vector<__half>(r.slots * m, __float2half(-7.0F)));
+  if (!q::RoutedF16Gemm(gate, type, x, tiles, n, tile_rows, r.d_bounds,
+                        r.d_rows_token, r.d_rows_slot, nullptr, g, nullptr, m,
+                        k, nullptr) ||
+      !q::RoutedF16Gemm(up, type, x, tiles, n, tile_rows, r.d_bounds,
+                        r.d_rows_token, r.d_rows_slot, g, nullptr, out, m, k,
+                        nullptr))
+    throw std::runtime_error("separate routed launch rejected");
+  CheckHip(hipDeviceSynchronize(), "separate routed launch");
+  auto host = Download(out, r.slots * m);
+  if (gate_out != nullptr)
+    *gate_out = Download(g, r.slots * m);
+  (void)hipFree(tiles);
+  (void)hipFree(g);
+  (void)hipFree(out);
+  return host;
+}
+
+/// Counts differing F16 bit patterns between `a` rows and `b` rows, where
+/// b's slot s corresponds to a's slot s + a_offset; reports the first.
+std::size_t CountDiffs(const std::vector<__half>& a, std::size_t a_offset,
+                       const std::vector<__half>& b, std::size_t m,
+                       const std::string& what) {
+  std::size_t diffs = 0;
+  for (std::size_t i = 0; i < b.size(); ++i) {
+    std::uint16_t x, y;
+    std::memcpy(&x, &a[a_offset * m + i], 2);
+    std::memcpy(&y, &b[i], 2);
+    if (x != y) {
+      if (diffs == 0)
+        std::cout << "  " << what << ": first diff slot " << i / m << " row "
+                  << i % m << ": " << __half2float(a[a_offset * m + i])
+                  << " vs " << __half2float(b[i]) << '\n';
+      ++diffs;
+    }
+  }
+  std::cout << "  " << what << ": " << diffs << " of " << b.size()
+            << " values differ\n";
+  return diffs;
+}
+
+/// Packed random blocks without the dequantized copy (model-sized shapes):
+/// every byte random, then sane F16 scales (Q4_K/Q5_K d and dmin; Q5_1/Q8_0
+/// d, Q5_1 m).
+std::vector<std::uint8_t> MakePacked(q::WeightType type, std::size_t e,
+                                     std::size_t m, std::size_t k,
+                                     std::uint32_t seed) {
+  const bool k_quant =
+      type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K;
+  const std::size_t block = k_quant ? 256 : 32;
+  const std::size_t bytes = type == q::WeightType::kQ4_K   ? 144
+                            : type == q::WeightType::kQ5_K ? 176
+                            : type == q::WeightType::kQ5_1 ? 24
+                                                           : 34;
+  std::vector<std::uint8_t> packed(e * m * (k / block) * bytes);
+  for (auto& b : packed)
+    b = static_cast<std::uint8_t>(NextRandom(&seed) >> 24);
+  for (std::size_t b = 0; b < packed.size(); b += bytes) {
+    // Model-like magnitudes: weights near 0.02 against unit activations.
+    const float d = k_quant ? 4e-4F * (1.0F + Uniform(&seed, 0.5F))
+                            : 1.5e-3F * (1.0F + Uniform(&seed, 0.5F));
+    const __half dh = __float2half(d);
+    std::memcpy(packed.data() + b, &dh, 2);
+    if (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ||
+        type == q::WeightType::kQ5_1) {
+      const __half mh =
+          __float2half(type == q::WeightType::kQ5_1 ? -16.0F * d : 0.5F * d);
+      std::memcpy(packed.data() + b + 2, &mh, 2);
+    }
+  }
+  return packed;
+}
+
+/// Routed F16 down projection (slot rows in and out) at one tile height.
+std::vector<__half> RoutedDown(const Routing& r, const void* w,
+                               q::WeightType type, const __half* x,
+                               std::size_t m, std::size_t k,
+                               std::uint32_t tile_rows) {
+  std::uint32_t n = 0;
+  auto* tiles = r.Tiles(tile_rows, &n);
+  auto* out = Upload(std::vector<__half>(r.slots * m, __float2half(-7.0F)));
+  if (!q::RoutedF16Gemm(w, type, x, tiles, n, tile_rows, r.d_bounds,
+                        r.d_rows_slot, r.d_rows_slot, nullptr, nullptr, out, m,
+                        k, nullptr))
+    throw std::runtime_error("routed down launch rejected");
+  CheckHip(hipDeviceSynchronize(), "routed down launch");
+  auto host = Download(out, r.slots * m);
+  (void)hipFree(tiles);
+  (void)hipFree(out);
+  return host;
+}
+
+/// A prompt row's expert outputs must not depend on the pass that computes
+/// it: the wide prefill pass (paired gate/up and down, 128-row tiles over
+/// every token) against short passes over some tokens alone (up to eight
+/// rows: separate 16-row tiles; more: the wide routes again, and the 48-row
+/// separate tiles), and every separate tile height against the paired route,
+/// bit for bit. Model shapes (640 x 2560 gate/up, top-10, ragged buckets
+/// over many experts; 2560 x 640 down).
+bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type,
+                     const std::vector<std::uint8_t>* gate_bytes = nullptr,
+                     const std::vector<std::uint8_t>* up_bytes = nullptr,
+                     std::size_t experts = 128) {
+  constexpr std::size_t m = 640, k = 2560, used = 10, n_tokens = 1619;
+  const auto gate =
+      gate_bytes ? *gate_bytes : MakePacked(gate_type, experts, m, k, 0xA11CE);
+  const auto up =
+      up_bytes ? *up_bytes : MakePacked(gate_type, experts, m, k, 0xB0B0);
+  const auto down = MakePacked(down_type, experts, k, m, 0xD0D0);
+  auto* d_gate = Upload(gate);
+  auto* d_up = Upload(up);
+  auto* d_down = Upload(down);
+  std::uint32_t state = 0xC2C0C2C0U ^ static_cast<std::uint32_t>(gate_type);
+  std::vector<std::int32_t> ids(n_tokens * used);
+  for (std::size_t t = 0; t < n_tokens; ++t) {
+    std::vector<std::int32_t> chosen;
+    while (chosen.size() < used) {
+      const std::uint32_t r = NextRandom(&state);
+      const auto e = static_cast<std::int32_t>(
+          (r % 3 == 0 ? r / 3 % 16 : r / 3) % experts);
+      if (std::find(chosen.begin(), chosen.end(), e) == chosen.end())
+        chosen.push_back(e);
+    }
+    std::copy(chosen.begin(), chosen.end(), ids.begin() + t * used);
+  }
+  std::vector<__half> x(n_tokens * k);
+  for (std::size_t i = 0; i < x.size(); ++i)
+    x[i] = __float2half(Uniform(&state, (i / k) % 3 == 0 ? 0.05F : 3.0F));
+  auto* d_x = Upload(x);
+  const std::string name =
+      std::string(TypeName(gate_type)) + "/" + TypeName(down_type);
+  bool ok = true;
+  const Routing all(ids, 0, n_tokens, used, experts);
+  const auto paired = PairedSwiglu(all, d_gate, d_up, gate_type, d_x, m, k);
+  for (std::uint32_t tile : {16U, 48U}) {
+    ok = CountDiffs(
+             paired, 0,
+             SeparateSwiglu(all, d_gate, d_up, gate_type, d_x, m, k, tile), m,
+             name + " gate/up paired vs separate " + std::to_string(tile)) ==
+             0 &&
+         ok;
+  }
+  auto* d_act = Upload(paired);
+  const auto wide_down = RoutedDown(all, d_down, down_type, d_act, k, m, 128);
+  for (std::uint32_t tile : {16U, 48U}) {
+    ok = CountDiffs(wide_down, 0,
+                    RoutedDown(all, d_down, down_type, d_act, k, m, tile), k,
+                    name + " down 128 vs " + std::to_string(tile)) == 0 &&
+         ok;
+  }
+  // Short passes: a restored prompt's tail, ragged middle chunks, and the
+  // smallest wide passes.
+  for (const auto [first, count] : {std::array<std::size_t, 2>{n_tokens - 7, 7},
+                                    std::array<std::size_t, 2>{n_tokens - 1, 1},
+                                    std::array<std::size_t, 2>{n_tokens - 9, 9},
+                                    std::array<std::size_t, 2>{300, 33},
+                                    std::array<std::size_t, 2>{701, 95},
+                                    std::array<std::size_t, 2>{1000, 96}}) {
+    const Routing part(ids, first, count, used, experts);
+    const std::string what = name + " " + std::to_string(count) +
+                             "-token pass at " + std::to_string(first);
+    const std::uint32_t tile = count <= 8 ? 16 : 48;
+    const auto gated = SeparateSwiglu(part, d_gate, d_up, gate_type,
+                                      d_x + first * k, m, k, tile);
+    ok = CountDiffs(paired, first * used, gated, m, what + " gate/up") == 0 &&
+         ok;
+    const auto short_down = RoutedDown(part, d_down, down_type,
+                                       d_act + first * used * m, k, m, tile);
+    ok = CountDiffs(wide_down, first * used, short_down, k, what + " down") ==
+             0 &&
+         ok;
+    if (count > 8) {
+      ok = CountDiffs(paired, first * used,
+                      PairedSwiglu(part, d_gate, d_up, gate_type,
+                                   d_x + first * k, m, k),
+                      m, what + " paired gate/up") == 0 &&
+           ok;
+      ok = CountDiffs(wide_down, first * used,
+                      RoutedDown(part, d_down, down_type,
+                                 d_act + first * used * m, k, m, 128),
+                      k, what + " wide down") == 0 &&
+           ok;
+    }
+  }
+  for (void* p : {static_cast<void*>(d_gate), static_cast<void*>(d_up),
+                  static_cast<void*>(d_down), static_cast<void*>(d_x),
+                  static_cast<void*>(d_act)})
+    (void)hipFree(p);
+  return ok;
+}
+
 }  // namespace
 
 int main() {
   try {
+    bool routes = true;
+    for (const auto gate : {q::WeightType::kQ4_K, q::WeightType::kQ5_K})
+      for (const auto down : {q::WeightType::kQ5_1, q::WeightType::kQ8_0})
+        routes = CheckPassRoutes(gate, down) && routes;
+    if (!routes)
+      throw std::runtime_error("routed expert rows depend on the pass route");
     ReportVectorAccuracy();
     CheckVectorGrouping();
     CheckVectorGrouping(true);
@@ -926,16 +1188,18 @@ int main() {
          ok;
     // Down view: single-expert slot rows, 2560 x 640 Q5_1.
     ok = Ok(Run(q::WeightType::kQ5_1, 3000, 1, 64, 2560, 640, 0x0BADF00DU,
-                64)) &&
+                128)) &&
          ok;
-    ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 64)) &&
+    ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 128)) &&
          ok;
     // Q5_K gate/up view (one layer).
     ok = Ok(Run(q::WeightType::kQ5_K, 300, 10, 64, 640, 2560, 0x5A5A0001U)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
-                64)) &&
+                128)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ8_0, 97, 1, 8, 129, 640, 0x0C0FFEE1U, 128)) &&
          ok;
     // Ragged rows against the 128-row tile and a tiny batch.
     ok = Ok(Run(q::WeightType::kQ4_K, 40, 4, 8, 201, 512, 0xDEADBEEFU)) && ok;
