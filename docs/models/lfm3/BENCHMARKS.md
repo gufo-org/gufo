@@ -1,5 +1,35 @@
 # LFM3 benchmarks
 
+## October 29, 2026: current
+
+Same machine, toolchain, weights and harness as below. Production `release`
+build at commit `2bf3140d` against the preserved October 28 binary (`base`,
+commit `54d260b3`). Q8_0, FP32 KV, C1, single runs per depth; depth rows use
+pp512/tg128 after preparing the stated history. Tokens/s.
+
+| Test | Depth | Base | Current |
+| --- | --: | --: | --: |
+| pp2048 (3 reps) | 0 | 2424–2431 | 4961 / 4997 / 4986 |
+| tg128 (3 reps) | 0 | 97.9–98.0 | 105.6 / 105.7 / 105.6 |
+| pp512 | 4096 | 1563 | 4240 |
+| tg128 | 4096 | 36.5 | 98.9 |
+| pp512 | 16384 | 431 | 2893 |
+| tg128 | 16384 | 13.1 | 85.1 |
+| pp512 | 32768 | 236 | 2073 |
+| tg128 | 32768 | 7.0 | 73.7 |
+| pp512 | 65536 | — | 1320 |
+| tg128 | 65536 | — | 57.4 |
+| pp512 | 131072 | — | 595 |
+| tg128 | 131072 | — | 38.7 |
+
+Base was not run beyond 32K (its 32K row alone takes minutes). At 128K,
+decode reads 3.2 GB of FP32 K/V per token beside 1.84 GB of weights; the
+current 25.8 ms per token is about 88% of that bandwidth floor. Prompt
+attention at depth runs at about 5.8 TFLOPS FP32 and dominates long prefills.
+Repeated runs on this host vary by about 2% with temperature.
+
+## October 28, 2026
+
 October 28, 2026, Linux x86-64 / Ryzen AI Max+ 395, `gfx1151`, 128 GB unified
 memory. Production CMake `release` builds, GCC 16.2 / ROCm 10.1 HIP Clang 24.
 Official BF16 and Q8_0 GGUF revision

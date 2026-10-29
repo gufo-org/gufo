@@ -65,3 +65,29 @@ Native GGUF control-token discovery and uninterrupted ordinary BPE fix tool
 history reuse without parsing client literal tags as framing. API schemas use
 the existing native Qwen-style tool syntax because LFM3 uses those exact tool
 delimiters. Independent Jinja and tokenizer fixtures remain model-private.
+
+## October 29 pass
+
+Q8_0, pp2048/tg128 unless stated; quality evidence in QUALITY.md.
+
+| Mechanism | Decision and evidence |
+| --- | --- |
+| Split activations into FP16 high/low pairs, two F16 WMMA chains per K32 block | Retained. Replaces the three-digit int8 encoding: lower FP64 projection error and 1.5x faster GEMMs (about 31 raw F16 TFLOPS). pp2048 3010 → 4430. |
+| Register-prefetched, LDS double-buffered stages; 256x64 tiles (64x64 under 1024 rows) | Retained. The loop with no global loads, commits or scales still reaches only 39 raw TFLOPS: barriers and LDS fragments set the ceiling. |
+| Register-resident weight tiles without LDS | Rejected: 256 VGPRs with spills, 15–25% slower. |
+| Split-K for 2048-row projections | Rejected: 1152 versus 1024 µs with its reduction; block count is not the limit. |
+| 1024 / 2048 / 256-token chunks | Rejected: 4100 / 3940 / 4600 versus 4720 at 512; larger chunks leave the 32 MiB MALL. |
+| Shared input split for q/k/v/gate and gate/up; SwiGLU in the gate/up epilogue | Retained, byte-identical: 4430 → 4660. |
+| Fused post-norm, residual add, RMSNorm and split per row | Retained, byte-identical (same reduction order): 4660 → 4720. |
+| 16-byte output stores after a lane-half swap | Retained, byte-identical: stores cost 5–12% of GEMM time; 4800 → 4930. |
+| Down projection splits FP32 inputs while staging, using SwiGLU row maxima | Retained, byte-identical: about +1%, about 5000. The same for conv and attention outputs was neutral and was dropped. |
+| Prompt attention: lanes own keys, queries broadcast by DPP row_share FMAs | Retained: 156 → 26 ms per pp2048, lower FP64 error. |
+| DPP broadcast of P for P·V instead of readlane | Rejected: DPP FMAs cannot dual-issue, 52 → 64 ms. |
+| Scalar-loaded queries for dual-issued QK | Rejected: hoisted loads spill 914 SGPRs. |
+| Row-parallel convolution; RoPE frequency table | Retained, byte-identical: convolution 452 → about 30 µs per 512 rows. |
+| Split-K decode attention, 64-key tiles staged in LDS, at most 64 spans | Retained: tg128 at 4096 36.5 → 98.9, at 128K 38.7 (about 88% of the K/V+weight bandwidth floor). |
+| Prompt attention split into ≥8192-key spans scheduled together | Retained: lower error over long histories; pp512 at 32K 1891 → 2073. Compute (about 5.8 TFLOPS FP32) remains the limit. |
+
+The next prompt-depth lever is attention arithmetic. The current FP32 SIMT
+kernel reaches about 40% of the issue rate; matrix-core attention would need a
+precision decision (for example split FP16 products).

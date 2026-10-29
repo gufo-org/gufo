@@ -17,12 +17,14 @@ weight-memory advantage over BF16. Q4/Q5/Q6, multimodal and decision variants
 are not supported by this initial backend.
 
 Weights stay packed on the GPU. Activations, accumulation, convolution history
-and KV caches remain FP32. Q8 prompt projections encode activations into three
-balanced base-256 digits (about 22 bits relative to each row maximum) and fuse
-their integer WMMA products in one kernel. This approximation passes the
-independent projection and model probability gates; decode uses the existing
-Strix Halo quantized GEMV kernels. BF16 prefill shares weights across rows using
-the existing exact BF16/FP32 projection kernels.
+and KV caches remain FP32. Q8 prompt projections scale each activation row by a
+power of two and split it into an FP16 high part plus the FP16 rounding of the
+remainder (about 22 significant bits per element), chained into one FP32 F16
+WMMA accumulator per Q8 K32 block. This approximation passes the independent
+projection and model probability gates with lower error than the earlier
+three-digit integer encoding; decode uses the existing Strix Halo quantized
+GEMV kernels. BF16 prefill shares weights across rows using the existing exact
+BF16/FP32 projection kernels. Attention stays FP32 for prompts and decode.
 
 Download from the [official GGUF repository](https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/tree/b3f2ae5d73cd3c91bf40e8ba752c648aa05dffdf):
 

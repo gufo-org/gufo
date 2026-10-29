@@ -39,8 +39,9 @@ in [tools/lfm3](../../../tools/lfm3/README.md).
 
 The explicit `lfm3_session_test MODEL.gguf` covers 513-token chunked versus
 serial execution, reset, independent sessions, invalid-token/context rejection
-without state mutation and continuation. BF16 logits match exactly between
-batching modes; Q8 differs by at most `0.000038` after fused three-digit WMMA.
+without state mutation and continuation. Prompt and decode attention now use
+different FP32 summation orders, so batched and serial logits differ by at most
+`0.0000067` (BF16) and `0.000015` (Q8, previously `0.000038`).
 Reset reproduces the same path's logits exactly.
 
 Tokenizer IDs match independently generated Hugging Face `tokenizers` goldens
@@ -142,3 +143,26 @@ a relative output path and sent no requests; that failure remains retained in
 The shared compiler is covered by CPU tests for all three native tool formats.
 GPU functional evidence here covers LFM3; the other four model profiles were
 not rerun and no cross-model release pass is claimed.
+
+## October 29 optimization pass
+
+Every changed operator kept or lowered its error against the unchanged FP64
+operator formulas. Maximum errors: Q8 projection at 512 rows `8.6e-7`
+(three-digit encoding `1.13e-6`), prompt attention at 512 rows `6.0e-7`
+(`8.6e-7`), decode attention `1.5e-7` (`3.0e-7`). A new 40-row prompt over a
+17000-token history passes the `2e-6` gate split into key spans (`1.4e-6`);
+the same case unsplit fails it (`2.7e-6`). Decode cases at position 4999
+cover multi-tile key spans.
+
+Against the scalar Gufo FP32 oracle on the same random token histories
+(Q8 weights, all 128000 logits of the last position):
+
+| Tokens | Before KL | After KL | Before max logit error | After max logit error |
+| --: | --: | --: | --: | --: |
+| 600 | `1.44e-10` | `1.24e-10` | `8.4e-5` | `5.7e-5` |
+| 1100 | `7.81e-10` | `5.38e-10` | `2.3e-4` | `2.0e-4` |
+
+Top-1 matches in all cases. Layout-only steps (shared splits, fused SwiGLU,
+fused residual/norm/split, 16-byte stores, staged down-projection splits)
+produce byte-identical logits at 3, 36, 1100 and 9000 tokens, BF16 included.
+The llama.cpp teacher comparison was not repeated in this pass.
