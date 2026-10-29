@@ -175,7 +175,10 @@ public:
   }
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
-    return {.per_request_state_bytes = session_->AllocatedBytes(),
+    // K/V rows grow with the tokens held and are bounded by the model's K/V
+    // budget; the claim charges each state a share of it, not its rows.
+    return {.per_request_state_bytes =
+                session_->AllocatedBytes() - session_->KvBytes(),
             .temporary_scratch_bytes = 0};
   }
 
@@ -819,6 +822,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
               use_mtp ? options.speculative.draft_model_path : std::string{},
           .vision_model_path = options.vision_model_path,
           .rope_scaling = rope_scaling,
+          .kv_cache_bytes = options.kv_cache_bytes,
       },
       &load_error);
   if (!model) {

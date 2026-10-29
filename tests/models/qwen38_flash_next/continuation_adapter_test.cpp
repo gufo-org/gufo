@@ -21,6 +21,11 @@ namespace sampling = gufo::sampling;
 void FailNextResetSubmission();
 void FailNextTransferWait();
 namespace {
+/// Allocated bytes apart from K/V rows, which stay backed for reuse after a
+/// reset until another session needs the memory.
+std::size_t StateBytes(const qfn::Session& session) {
+  return session.AllocatedBytes() - session.KvBytes();
+}
 void Require(bool ok, const std::string& message) {
   if (!ok)
     throw std::runtime_error(message);
@@ -239,7 +244,7 @@ void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   std::string error;
   auto fresh = model->CreateSession(mode, 4096, &error);
   Require(bool(fresh), error);
-  const auto empty_bytes = reused.AllocatedBytes();
+  const auto empty_bytes = StateBytes(reused);
   const auto first = model->Tokenize("Continue: red, blue, red, blue,");
   const auto next = model->Tokenize(
       "Write a Python function that retries a failed request three times.");
@@ -250,8 +255,9 @@ void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
     Require(warm_bytes <= model->SessionBytes(mode, 4096),
             "slot scratch exceeded its admission bound");
     if (mtp)
-      Require(warm_bytes > empty_bytes && reused.Statistics().drafted > 0,
-              "slot reuse did not exercise MTP rollback");
+      Require(
+          StateBytes(reused) > empty_bytes && reused.Statistics().drafted > 0,
+          "slot reuse did not exercise MTP rollback");
     Require(adapter.Invalidate(*slot), "slot reassignment failed");
     Require(reused.Position() == 0 && reused.Tokens().empty(),
             "slot reassignment retained logical state");
@@ -275,12 +281,12 @@ void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   Require(!reused.Evaluate(first.front(), &error) && !reused.IsValid(),
           "cancelled slot remained valid");
   reused.SetCancellationCheck({});
-  Require(adapter.Invalidate(*slot) && reused.AllocatedBytes() == empty_bytes,
+  Require(adapter.Invalidate(*slot) && StateBytes(reused) == empty_bytes,
           "failed slot retained rollback scratch");
   Require(reused.Sync(next, &error), error);
   (void)Decode(reused, 16);
   reused.Reset();
-  Require(reused.AllocatedBytes() == empty_bytes,
+  Require(StateBytes(reused) == empty_bytes,
           "explicit reset retained rollback scratch");
   std::cout << (mtp ? "MTP" : "AR")
             << ",slot_reuse,sampled/greedy/cancellation/reset,PASS\n";
