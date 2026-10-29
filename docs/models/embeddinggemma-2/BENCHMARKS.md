@@ -172,6 +172,10 @@ retained as controls; the first inconclusive observations are not discarded.
 
 ## Image budgets
 
+The following table is historical evidence from the original image-budget
+branch before video integration, using ROCm 7.2.3. It is not a comparison with
+current main or the pinned ROCm 10.1 toolchain; see the rebase controls below.
+
 Measured on 2026-10-29 on Linux with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors and release builds with the ROCm 7.2.3 runtime, not the Nix image.  Each request sends one 1231 × 947 PNG at concurrency 1 after one warm-up request, with `mm_processor_kwargs.max_soft_tokens` set to the budget, or left out for the default.  The default rows ran main f1b6c54f and this change in the order main, change, change, main, 30 requests each; the other rows ran this change once with 20 requests each.  GTT growth is `mem_info_gtt_used` after each budget minus the value after the default budget.
 
 | Budget | Tokens/request | Median | p95 | GTT growth |
@@ -185,3 +189,34 @@ Measured on 2026-10-29 on Linux with a Radeon 8060S GPU of architecture gfx1151,
 | 1120 | 1,106 | 6,853.92 ms | 6,863.86 ms | 256 MiB |
 
 The default rows show the mean of the two passes.  The vision scratch grows only when a larger budget arrives, so a server that only sees the default keeps main's device footprint.
+
+### Image-budget rebase controls
+
+Requalified on gfx1151 against main `a3edb56f`, with the pinned Nix GCC 16.2.0 /
+ROCm 10.1 toolchain and the production release preset. Each arm starts a fresh
+server and uses the same text, image, video and mixed-media request history.
+The [retained record](artifacts/gfx1151-pr870-review.json) includes every
+request, startup phase, memory observation, comparison and unchanged-main
+control. Timings below are server milliseconds for each paired repeat, without
+averaging across requests.
+
+| Request | Repeat 1 main → candidate | Repeat 2 main → candidate |
+| --- | ---: | ---: |
+| Cold default image | 595.6 → 603.1 | 599.3 → 594.4 |
+| Warm default image | 525.5 → 537.8 | 526.9 → 525.6 |
+| Second image shape | 467.4 → 472.5 | 469.6 → 466.7 |
+| Default video | 183.1 → 180.2 | 183.7 → 181.1 |
+| First mixed video/image/audio input | 1202.0 → 1209.4 | 1207.1 → 1208.7 |
+| Warm mixed input | 1115.3 → 1116.5 | 1113.2 → 1113.1 |
+| Mixed replay | 1119.0 → 1116.2 | 1116.4 → 1116.4 |
+
+Every request in this follow-up, including the standard short/second/replay
+text benchmark, stays within the unchanged 5% and 10 ms margins. Work counts
+match exactly and main/candidate vector cosine is at least 0.99999. Default
+image GTT usage is identical across main and candidate arms.
+
+The initial run flagged the first mixed-media request at 1215.3 → 1277.7 ms
+and 1206.7 → 1307.7 ms; video was noisy. These observations remain visibly
+inconclusive in the record. They did not reproduce in the affected-history
+follow-up, which also retains warm mixed replays and two unchanged-main arms.
+No overall speedup is claimed and the initial flags are not discarded.

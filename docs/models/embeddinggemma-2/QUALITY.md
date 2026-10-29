@@ -89,6 +89,25 @@ vision/text encoders. [`embedding_images.py`](../../../tests/functional/embeddin
 checks the HTTP path. Raw request evidence is retained with the
 [review qualification record](artifacts/gfx1151-pr759-review.json).
 
+Requalified October 29, 2026, after rebasing the image-budget PR onto video
+support in main `a3edb56f`, on gfx1151 with the pinned ROCm 10.1 / GCC 16.2.0
+toolchain. All 19 patch/vector fixtures pass the retained 0.9999 cosine bound;
+the HTTP fixture minimum is 0.9999569. Four focused native tests pass without
+skips (API, image processor, image HIP golden and video processor).
+
+The final image HTTP suite passes 89 requests: all budgets with mixed batches,
+128/256/512/768 dimensions, exact usage, interleaved 8,192/8,193-token inputs,
+whole-image truncation, concurrent scratch growth/reuse, 32-small-budget-image
+acceptance, 33-image rejection within and across inputs, malformed inputs and
+recovery. Six video smoke requests retain independent joint multimodal parity
+and verify that image-budget options leave the 140-token video default intact.
+The [retained rebase record](artifacts/gfx1151-pr870-review.json) includes both
+HTTP runs, source/binary/fixture hashes, native results and every timing arm.
+The initial mixed-media timing flags remain inconclusive; the affected-history
+follow-up and unchanged-main controls are documented in
+[benchmarks](BENCHMARKS.md#image-budget-rebase-controls). This is Linux
+qualification; Windows runtime checks remain the CI workflow's responsibility.
+
 ## Audio and interleaved input parity
 
 Qualified October 26, 2026, on gfx1151. The checkpoint SHA256 is
