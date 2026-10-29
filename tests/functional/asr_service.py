@@ -1,4 +1,8 @@
-"""Real-model Qwen3-ASR HTTP transcription, isolation and streaming contracts."""
+"""Real-model ASR HTTP transcription, isolation and streaming contracts.
+
+Qwen3-ASR transcribes digital silence as empty text. LFM3-Audio answers it
+with a short word, as its FP32 reference does, so its silence transcript is
+recorded (silent_text) and only required to be identical across peers."""
 
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -8,7 +12,7 @@ import wave
 from service_http import events, sha256, transcript_events, word_error_rate
 
 
-def run(evidence, url, audio_root, model):
+def run(evidence, url, audio_root, model, silence_empty=True):
     fixtures = []
     for language in ('english',):
         path = audio_root / f'clear-{language}-voice.wav'
@@ -63,7 +67,9 @@ def run(evidence, url, audio_root, model):
             audio.writeframes(bytes(32000))
         result = evidence.json(endpoint, label='silence', data={'model': model},
             files={'file': ('silence.wav', buffer.getvalue(), 'audio/wav')})
-        assert not result['text'].strip(), result
+        silent_text = result['text'].strip()
+        evidence.report['silence_transcript'] = silent_text
+        assert not silent_text or not silence_empty, result
 
     with evidence.case('concurrent-speech-and-silence'):
         def silent_peer():
@@ -73,7 +79,7 @@ def run(evidence, url, audio_root, model):
             speech = pool.submit(request, item, 'speech-peer')
             silence = pool.submit(silent_peer)
             assert speech.result()['text'] == references[0]
-            assert not silence.result()['text'].strip()
+            assert silence.result()['text'].strip() == silent_text
 
     with evidence.case('rejections-and-recovery'):
         for options, code in [({'model': 'unknown'}, 'invalid_model'),

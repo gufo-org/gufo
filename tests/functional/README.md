@@ -38,6 +38,9 @@ for its second concurrent input. Base TTS registers the English recording as the
 For the other checkpoints, select `--variant custom` with the CustomVoice model
 (default speaker `ryan`, override with `--voice`) or `--variant design` with the
 VoiceDesign model (fixed English voice instructions). Neither requires a clone.
+LFM3-Audio runs both suites from its GGUF pair: pass the backbone as `--model`
+with `--mmproj`, and `--variant custom --voice female` for TTS. Its silence
+transcript is recorded rather than required to be empty.
 
 | Suite | Required checks |
 | --- | --- |
