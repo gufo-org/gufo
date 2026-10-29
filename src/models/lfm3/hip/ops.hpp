@@ -2,6 +2,8 @@
 #define GUFO_MODELS_LFM3_HIP_OPS_HPP_
 #include <hip/hip_runtime.h>
 
+#include <span>
+
 #include "src/models/lfm3/weights.hpp"
 namespace gufo::models::lfm3::gpu {
 void Embed(const Tensor& weight, const std::uint32_t* tokens, float* out, int n,
@@ -11,6 +13,19 @@ struct DenseWorkspace {
   void* quantized{};
 };
 std::size_t DenseWorkspaceBytes(std::size_t rows, std::size_t K);
+struct Output {
+  const Tensor* weight;
+  float* out;
+};
+// Projects one input through up to four weights with the same column count.
+// Q8_0 prompts split the input once and share one launch.
+void Project(std::span<const Output> outputs, const float* x, int n,
+             hipStream_t stream, DenseWorkspace workspace);
+// silu(gate x) * (up x) into out; up_scratch holds up x when the projections
+// cannot share the fused prompt launch.
+void ProjectSwiGLU(const Tensor& gate, const Tensor& up, const float* x,
+                   float* out, float* up_scratch, int n, hipStream_t stream,
+                   DenseWorkspace workspace);
 void Dense(const Tensor& weight, const float* x, float* out, int n,
            hipStream_t stream, DenseWorkspace workspace = {});
 void ShortConv(const float* projection, const float* weight, float* history,

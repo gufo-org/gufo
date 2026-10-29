@@ -11,6 +11,7 @@
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
+#include "src/models/qwen/hip/ops/swiglu.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 namespace gufo::models::lfm3::gpu {
 namespace {
@@ -334,19 +335,80 @@ void Embed(const Tensor& w, const std::uint32_t* tokens, float* out, int n,
 std::size_t DenseWorkspaceBytes(std::size_t rows, std::size_t K) {
   return SplitActivationBytes(rows, K);
 }
+namespace {
+bool SplitPrompt(const Tensor& w, int n, DenseWorkspace workspace) {
+  return n >= 32 && w.type == core::GgmlType::kQ8_0 && workspace.quantized;
+}
+template<bool kSwiGLU = false>
+void LaunchSplit(std::span<const Output> outputs, SplitActivations split,
+                 int n, int K, hipStream_t s) {
+  constexpr int BN = 64;
+  Projections jobs{};
+  jobs.count = int(outputs.size());
+  int row_blocks = 0;
+  const bool wide = outputs[0].weight->rows >= 1024;
+  const int tile_rows = (wide ? 256 : 64) / (kSwiGLU ? 2 : 1);
+  for (int i = 0; i < jobs.count; ++i) {
+    const auto& w = *outputs[i].weight;
+    jobs.job[i] = {w.data, outputs[i].out, int(w.rows)};
+    jobs.first_block[i] = row_blocks;
+    if (!kSwiGLU || i == 0)
+      row_blocks += (int(w.rows) + tile_rows - 1) / tile_rows;
+  }
+  const dim3 grid((n + BN - 1) / BN, row_blocks);
+  if (kSwiGLU)
+    jobs.count = 1;  // Both weights belong to every row block.
+  if (wide)
+    SplitQ8Gemm<256, BN, 8, 1, kSwiGLU><<<grid, 256, 0, s>>>(jobs, split, n, K);
+  else
+    SplitQ8Gemm<64, BN, 4, 2, kSwiGLU><<<grid, 256, 0, s>>>(jobs, split, n, K);
+}
+}  // namespace
+void Project(std::span<const Output> outputs, const float* x, int n,
+             hipStream_t s, DenseWorkspace workspace) {
+  const auto K = outputs[0].weight->cols;
+  bool shared = outputs.size() <= Projections::kMax;
+  for (const auto& o : outputs)
+    shared = shared && o.weight->cols == K &&
+             SplitPrompt(*o.weight, n, workspace);
+  if (!shared) {
+    for (const auto& o : outputs)
+      Dense(*o.weight, x, o.out, n, s, workspace);
+    return;
+  }
+  const auto split = SplitActivations::In(workspace.quantized, n, K);
+  SplitRows<<<n, 256, 0, s>>>(x, split, K);
+  // Wide and narrow projections use different tiles.
+  Output wide[Projections::kMax], narrow[Projections::kMax];
+  std::size_t wide_count = 0, narrow_count = 0;
+  for (const auto& o : outputs)
+    (o.weight->rows >= 1024 ? wide[wide_count++] : narrow[narrow_count++]) = o;
+  if (wide_count)
+    LaunchSplit({wide, wide_count}, split, n, K, s);
+  if (narrow_count)
+    LaunchSplit({narrow, narrow_count}, split, n, K, s);
+}
+void ProjectSwiGLU(const Tensor& gate, const Tensor& up, const float* x,
+                   float* out, float* up_scratch, int n, hipStream_t s,
+                   DenseWorkspace workspace) {
+  if (SplitPrompt(gate, n, workspace) && SplitPrompt(up, n, workspace) &&
+      gate.rows == up.rows && gate.cols == up.cols) {
+    const auto split = SplitActivations::In(workspace.quantized, n, gate.cols);
+    SplitRows<<<n, 256, 0, s>>>(x, split, gate.cols);
+    const Output outputs[] = {{&gate, out}, {&up, nullptr}};
+    LaunchSplit<true>(outputs, split, n, gate.cols, s);
+    return;
+  }
+  Dense(gate, x, out, n, s, workspace);
+  Dense(up, x, up_scratch, n, s, workspace);
+  gufo::hip::LaunchBatchedSwiGLUActivation(out, up_scratch, out, nullptr,
+                                           std::size_t(n) * gate.rows, s);
+}
 void Dense(const Tensor& w, const float* x, float* out, int n, hipStream_t s,
            DenseWorkspace workspace) {
-  if (n >= 32 && w.type == core::GgmlType::kQ8_0 && workspace.quantized) {
-    const auto split = SplitActivations::In(workspace.quantized, n, w.cols);
-    SplitRows<<<n, 256, 0, s>>>(x, split, w.cols);
-    if (w.rows >= 1024)
-      SplitQ8Gemm<256, 64, 8, 1>
-          <<<dim3((n + 63) / 64, (w.rows + 255) / 256), 256, 0, s>>>(
-              w.data, split, out, n, w.rows, w.cols);
-    else
-      SplitQ8Gemm<64, 64, 4, 2>
-          <<<dim3((n + 63) / 64, (w.rows + 63) / 64), 256, 0, s>>>(
-              w.data, split, out, n, w.rows, w.cols);
+  if (SplitPrompt(w, n, workspace)) {
+    const Output output{&w, out};
+    Project({&output, 1}, x, n, s, workspace);
     return;
   }
   if (w.type == core::GgmlType::kF16)

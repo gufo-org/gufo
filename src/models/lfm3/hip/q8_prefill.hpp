@@ -67,21 +67,36 @@ __device__ __forceinline__ void Codes(std::uint32_t codes, __half2& lo,
   hi = __hadd2(__builtin_bit_cast(__half2, p1), magic);
 }
 }  // namespace detail
+// Up to four projections of the same split input share one launch; each
+// owns a contiguous range of row blocks.
+struct Projection {
+  const void* weight;
+  float* out;
+  int rows;
+};
+struct Projections {
+  static constexpr int kMax = 4;
+  Projection job[kMax];
+  int first_block[kMax];
+  int count;
+};
 // Q8_0 weights x split activations. For each K32 block the low and high
 // products chain into one FP32 WMMA accumulator, which is then scaled by the
 // block's weight scale; row scales apply after the K reduction. Block = BM
 // rows x BN tokens, waves = WM row groups x WN token groups. Global loads for
 // the next K block are issued before the current block's matrix work, and two
-// LDS stages leave one barrier per K block.
-template<int BM, int BN, int WM, int WN>
+// LDS stages leave one barrier per K block. With kSwiGLU, job 0 is the FFN
+// gate and job 1 its up projection: a block holds BM / 2 rows of each and
+// writes silu(gate) * up to job 0's output.
+template<int BM, int BN, int WM, int WN, bool kSwiGLU = false>
 __launch_bounds__(256) __global__
-    void SplitQ8Gemm(const void* __restrict__ weight, SplitActivations x,
-                     float* __restrict__ y, int tokens, int M, int K) {
+    void SplitQ8Gemm(Projections jobs, SplitActivations x, int tokens, int K) {
   using detail::v16h;
   using detail::v8f;
-  static_assert(WM * WN == 8);
+  static_assert(WM * WN == 8 && (!kSwiGLU || WM % 2 == 0));
   constexpr int RM = BM / 16 / WM, RN = BN / 16 / WN;
   constexpr int kAPer = (BM + 255) / 256, kBPer = (2 * BN + 255) / 256;
+  constexpr int kTileRows = kSwiGLU ? BM / 2 : BM;
   // One K block of a row or token is four 16-byte chunks; neighbouring rows
   // permute them so fragment reads cover all bank groups.
   __shared__ __attribute__((aligned(16))) uint4 s_a[2][BM][4];
@@ -91,15 +106,23 @@ __launch_bounds__(256) __global__
   const int blocks = K / 32, tid = threadIdx.x, lane = tid & 31,
             wave = tid >> 5, sub = lane & 15, half = lane >> 4;
   const int wr = wave / WN, wt = wave % WN;
-  const int r_block = blockIdx.y * BM, t_block = blockIdx.x * BN;
-  const auto* bytes = static_cast<const std::uint8_t*>(weight);
+  int job = 0;
+  for (int j = 1; j < jobs.count; ++j)
+    if (int(blockIdx.y) >= jobs.first_block[j])
+      job = j;
+  const int M = jobs.job[job].rows;
+  const int r_block = (blockIdx.y - jobs.first_block[job]) * kTileRows,
+            t_block = blockIdx.x * BN;
   const std::uint8_t* a_ptr[kAPer];
   bool a_live[kAPer];
 #pragma unroll
   for (int p = 0; p < kAPer; ++p) {
-    const int idx = p * 256 + tid, r = r_block + idx;
+    const int idx = p * 256 + tid;
+    const int source = kSwiGLU ? idx / kTileRows : job;
+    const int r = r_block + idx % kTileRows;
     a_live[p] = idx < BM && r < M;
-    a_ptr[p] = bytes + std::size_t(a_live[p] ? r : M - 1) * blocks * 34;
+    a_ptr[p] = static_cast<const std::uint8_t*>(jobs.job[source].weight) +
+               std::size_t(a_live[p] ? r : M - 1) * blocks * 34;
   }
   const __half* b_ptr[kBPer];
 #pragma unroll
@@ -220,9 +243,30 @@ __launch_bounds__(256) __global__
       commit(stage ^ 1);
     __syncthreads();
   }
+  float* y = jobs.job[job].out;
+  // Up waves hand their scaled results to the gate waves through LDS.
+  [[maybe_unused]] auto* s_up = reinterpret_cast<float (*)[BN]>(&s_a[0][0][0]);
+  static_assert(!kSwiGLU || sizeof(float) * kTileRows * BN <= sizeof(s_a));
+  if constexpr (kSwiGLU) {
+    if (wr >= WM / 2)
+#pragma unroll
+      for (int j = 0; j < RN; ++j) {
+        const int local = (wt * RN + j) * 16 + sub, token = t_block + local;
+        const float scale = token < tokens ? x.scale[token] : 0;
+#pragma unroll
+        for (int i = 0; i < RM; ++i)
+#pragma unroll
+          for (int l = 0; l < 8; ++l)
+            s_up[(wr * RM + i) * 16 + 2 * l + half - kTileRows][local] =
+                acc[i][j][l] * scale;
+      }
+    __syncthreads();
+    if (wr >= WM / 2)
+      return;
+  }
 #pragma unroll
   for (int j = 0; j < RN; ++j) {
-    const int token = t_block + (wt * RN + j) * 16 + sub;
+    const int local = (wt * RN + j) * 16 + sub, token = t_block + local;
     if (token >= tokens)
       continue;
     const float scale = x.scale[token];
@@ -230,9 +274,18 @@ __launch_bounds__(256) __global__
     for (int i = 0; i < RM; ++i)
 #pragma unroll
       for (int l = 0; l < 8; ++l) {
-        const int row = r_block + (wr * RM + i) * 16 + 2 * l + half;
-        if (row < M)
-          y[std::size_t(token) * M + row] = acc[i][j][l] * scale;
+        const int tile_row = (wr * RM + i) * 16 + 2 * l + half;
+        const int row = r_block + tile_row;
+        if (row >= M)
+          continue;
+        float value = acc[i][j][l] * scale;
+        if constexpr (kSwiGLU) {
+          // The separate SwiGLU kernel's formula.
+          const float g = value, u = s_up[tile_row][local];
+          const float sig_g = 1.0F / (1.0F + expf(-g));
+          value = (g * sig_g) * u;
+        }
+        y[std::size_t(token) * M + row] = value;
       }
   }
 }

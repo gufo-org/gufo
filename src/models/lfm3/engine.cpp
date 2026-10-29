@@ -201,10 +201,11 @@ struct Session::Impl {
           }
         dense(l.out_proj, a.floats(), out.floats(), n, s);
       } else {
-        dense(l.q, z.floats(), q.floats(), n, s);
-        dense(l.k, z.floats(), k.floats(), n, s);
-        dense(l.v, z.floats(), v.floats(), n, s);
-        dense(l.attn_gate, z.floats(), gate.floats(), n, s);
+        const gpu::Output projections[] = {{&l.q, q.floats()},
+                                           {&l.k, k.floats()},
+                                           {&l.v, v.floats()},
+                                           {&l.attn_gate, gate.floats()}};
+        gpu::Project(projections, z.floats(), n, s, {quantized.data});
         gufo::hip::LaunchBatchedPerHeadRMSNorm(
             q.floats(), static_cast<const float*>(l.q_norm.data), q.floats(), n,
             c.heads, c.head_dim, c.eps, s);
@@ -244,11 +245,8 @@ struct Session::Impl {
         norm(out.floats(), l.post_norm, out.floats(), n);
       add();
       norm(x.floats(), l.ffn_norm, z.floats(), n);
-      dense(l.gate, z.floats(), ff_gate.floats(), n, s);
-      dense(l.up, z.floats(), ff_up.floats(), n, s);
-      gufo::hip::LaunchBatchedSwiGLUActivation(ff_gate.floats(), ff_up.floats(),
-                                               ff_gate.floats(), nullptr,
-                                               n * c.intermediate, s);
+      gpu::ProjectSwiGLU(l.gate, l.up, z.floats(), ff_gate.floats(),
+                         ff_up.floats(), n, s, {quantized.data});
       dense(l.down, ff_gate.floats(), out.floats(), n, s);
       if (l.post_ffn_norm.data)
         norm(out.floats(), l.post_ffn_norm, out.floats(), n);
