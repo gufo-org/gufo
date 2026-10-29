@@ -186,12 +186,83 @@ void CheckFusedProjection(std::uint32_t tokens) {
   std::cerr << "HC projection fusion exact at " << tokens << " tokens\n";
 }
 
+// A wide prefill pass gets the FFN mixer's inject partials from the
+// attention combine (HcCombineF16 with inject_w); a short pass over the same
+// rows computes them in the mixer epilogue (HcMixEpilogueVec4F16, and
+// HcMixF16Gemm from 96 rows). Each token's partials must not depend on which
+// pass computes them, bit for bit: a 1-ulp difference changes the stream
+// weights of the next combine and with them the greedy tokens.
+void CheckFusedInjectPartials(std::uint32_t tokens) {
+  constexpr std::size_t kRank = 320;
+  constexpr std::size_t kDim = kStreams * kHidden;
+  constexpr float kEps = 1e-6F;
+  const std::uint32_t parts = q::HcInjectPartsVec4(kHidden);
+  const std::size_t rows = std::size_t{tokens} * kDim;
+  const std::size_t inject_count = std::size_t{tokens} * kStreams * parts;
+  HipBuffer<float> d_res(rows), d_block(std::size_t{tokens} * kHidden);
+  HipBuffer<float> d_inject(inject_count), d_gamma(kDim);
+  HipBuffer<float> d_inject_w(kStreams * kDim), d_defer(tokens * kStreams);
+  HipBuffer<float> d_fused(inject_count), d_epilogue(inject_count);
+  HipBuffer<float> d_gemm(inject_count), d_gate(rows);
+  HipBuffer<float> d_mixed(std::size_t{tokens} * kHidden);
+  HipBuffer<__half> d_xn(rows);
+  Upload(&d_res, MakeValues(rows, 0x51CE0001U + tokens, 0.8F));
+  Upload(&d_block,
+         MakeValues(std::size_t{tokens} * kHidden, 0x51CE0002U, 0.3F));
+  Upload(&d_inject, MakeValues(inject_count, 0x51CE0003U, 2.0F));
+  auto gamma = MakeValues(kDim, 0x51CE0004U, 0.5F);
+  for (float& g : gamma)
+    g += 1.0F;
+  Upload(&d_gamma, gamma);
+  Upload(&d_inject_w, MakeValues(kStreams * kDim, 0x51CE0005U, 0.05F));
+  Upload(&d_gate, MakeValues(rows, 0x51CE0006U, 2.0F));
+  if (!q::HcCombineF16(d_res.get(), d_block.get(), d_inject.get(), parts,
+                       d_gamma.get(), d_xn.get(), nullptr, tokens, kHidden,
+                       kStreams, kEps, nullptr, d_defer.get(), d_fused.get(),
+                       d_inject_w.get()))
+    throw std::runtime_error("deferring HC combine rejected");
+  q::HcMixEpilogueVec4F16(d_xn.get(), d_gate.get(), d_inject_w.get(),
+                          d_mixed.get(), nullptr, nullptr, d_epilogue.get(),
+                          tokens, kHidden, nullptr);
+  const auto fused = Download(&d_fused, inject_count);
+  const auto epilogue = Download(&d_epilogue, inject_count);
+  std::size_t diffs = 0;
+  for (std::size_t i = 0; i < inject_count; ++i)
+    diffs += std::memcmp(&fused[i], &epilogue[i], sizeof(float)) != 0;
+  std::cout << "HC inject partials, fused combine vs mixer epilogue at "
+            << tokens << " tokens: " << diffs << " of " << inject_count
+            << " differ\n";
+  if (diffs != 0)
+    throw std::runtime_error("HC inject partials depend on the pass route");
+  if (tokens >= 96) {
+    // The fused projection's partials (HcMixF16Gemm) over the same norm.
+    std::vector<std::uint8_t> weights(kDim * (kRank / 32) * 34, 0);
+    HipBuffer<std::uint8_t> d_up(weights.size());
+    HipBuffer<__half> d_low(std::size_t{tokens} * kRank);
+    CheckHip(hipMemcpy(d_up.get(), weights.data(), d_up.bytes(),
+                       hipMemcpyHostToDevice),
+             "zero up weights");
+    CheckHip(hipMemset(d_low.get(), 0, d_low.bytes()), "zero low rank");
+    if (!q::HcMixF16Gemm(d_up.get(), d_low.get(), d_xn.get(), d_inject_w.get(),
+                         d_mixed.get(), nullptr, nullptr, d_gemm.get(), tokens,
+                         kHidden, kRank, nullptr))
+      throw std::runtime_error("HC fused projection rejected");
+    const auto gemm = Download(&d_gemm, inject_count);
+    if (std::memcmp(gemm.data(), fused.data(), inject_count * sizeof(float)))
+      throw std::runtime_error("HC projection inject partials differ");
+    std::cout << "HC inject partials, fused projection equal at " << tokens
+              << " tokens\n";
+  }
+}
+
 }  // namespace
 
 int main() {
   try {
     CheckFusedProjection(96);
     CheckFusedProjection(2049);
+    for (std::uint32_t n : {7U, 96U, 1619U})
+      CheckFusedInjectPartials(n);
     constexpr std::size_t kHcDim = static_cast<std::size_t>(kHidden) * kStreams;
     constexpr std::size_t kRows = static_cast<std::size_t>(kTokens) * kHcDim;
     constexpr std::size_t kMixed = static_cast<std::size_t>(kTokens) * kHidden;

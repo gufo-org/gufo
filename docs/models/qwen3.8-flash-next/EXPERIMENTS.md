@@ -1,5 +1,17 @@
 # Qwen3.8 Flash-Next experiments
 
+## Prefill route independence (October 23, 2026)
+
+A prompt restored from a checkpoint and finished by a short prefill pass must
+decode like the same prompt prefilled in one pass. Short passes (below 96
+rows, or eight rows and fewer) take different kernels for the HC combines and
+mixers, the SSM convolution, the W8A8 GEMMs and the routed experts than wide
+passes, so every such pair must give a row the same bits.
+
+| Experiment | Outcome |
+| --- | --- |
+| HC mixer epilogue's inject partials in `HcInjectPart`'s pinned order | Retained. On a downstream Q3_K-expert GGUF, a two-session replay decoded differently after a checkpoint restore; the first differing value was layer 0's FFN-mixer inject partial of the last row, one ulp apart: a wide pass gets it from the attention combine (explicit product and FMA order), a short pass from `HcMixEpilogueF16Kernel`, whose `dot +=` chain fast-math contracts and reassociates per instantiation. It is data dependent. On main, `hc_mix_ops` finds 38 of 84 partials different at 7 tokens and `hc_route_ops` carries the difference into the residual, norms and mixed rows of short passes; both pass with the change. |
+
 ## Confidence-gated MTP chains (October 29, 2026)
 
 Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
