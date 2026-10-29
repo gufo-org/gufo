@@ -35,3 +35,26 @@ TODO and quality is measured separately in [QUALITY.md](QUALITY.md).
 PNG uses low compression with adaptive filters and preserves every RGBA pixel.
 The control's response PNG is approximately 1.00 MB; compression trades response
 size for lower CPU latency.
+
+## LoRA adapters
+
+Adapters are merged into the weights, so denoising runs the same kernels.
+Switching the selected set rebuilds the affected weights before the request
+(`lora_ms` in the request log, also counted in Total); repeated requests with
+the same set pay nothing.
+
+| 1024×1024, 40 steps, seed 7 | Denoising (s) | `lora_ms` |
+| --- | ---: | ---: |
+| No adapters | 93.1-93.3 | 0 |
+| One adapter, unchanged set | 93.1-93.3 | 0 |
+
+About 2.33 s per step either way.
+
+| Switch | `lora_ms` |
+| --- | ---: |
+| First selection after startup | ≈1795 |
+| One adapter → another | ≈1790 |
+| Adapter → none | 931 |
+
+Measured on gfx1151 with the final merge implementation (host-widened factors,
+pooled scratch). Stacked-adapter and DoRA switches were not re-measured.

@@ -8,6 +8,7 @@ offline evaluation; production loads safetensors directly.
 | [Qwen checkpoint](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | `b3179ad355be050328e483a9dfdd9e60cd62adfa` |
 | [Official model repository](https://github.com/QwenLM/Qwen-Image-2.1/tree/fb7ae1d1f9611cd91524d03c53c5246b36ac8577) | `fb7ae1d1f9611cd91524d03c53c5246b36ac8577` |
 | [Diffusers](https://github.com/huggingface/diffusers/tree/80c7ed262aeffbeb43ef13ae04baeb9b84515a69) | `80c7ed262aeffbeb43ef13ae04baeb9b84515a69` |
+| [ComfyUI](https://github.com/comfyanonymous/ComfyUI/tree/54a4e56ad1cabd17871068f160d0e75a1557db34) | `54a4e56ad1cabd17871068f160d0e75a1557db34`; [LoRA adapter semantics](#lora-adapters) only |
 | [Qwen3-VL implementation](https://github.com/huggingface/transformers/blob/v5.17.0/src/transformers/models/qwen3_vl/modeling_qwen3_vl.py) | Transformers `v5.17.0`; FP32 vision-position interpolation and the pipeline's pre-final-norm hook |
 | [llama-swap routes](https://github.com/mostlygeek/llama-swap/blob/96e6f94c018b51ae9cfc420b3166cfcace5bf97a/internal/server/server.go) | `96e6f94c018b51ae9cfc420b3166cfcace5bf97a` |
 | [OpenAI image generation](https://github.com/openai/openai-python/blob/main/src/openai/types/image_generate_params.py) / [editing schema](https://github.com/openai/openai-python/blob/main/src/openai/types/image_edit_params.py) | Reviewed 2026-09-20; inference tests use local servers only |
@@ -55,3 +56,31 @@ downloaded weights use the
 [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE),
 which limits the granted use to non-commercial purposes; commercial use requires
 a separate license. Gufo's MIT license does not relicense those weights.
+
+## LoRA adapters
+
+Adapter semantics follow
+[ComfyUI](https://github.com/comfyanonymous/ComfyUI/tree/54a4e56ad1cabd17871068f160d0e75a1557db34)
+`54a4e56ad1cabd17871068f160d0e75a1557db34`, the runtime most published
+Qwen-Image-2.1 adapters target. Relevant files under `comfy/`:
+
+- `lora.py` `load_lora` and `model_lora_keys_unet`: per-module `.alpha`,
+  `.dora_scale` and `.diff` tensors; bare, `transformer.`, `diffusion_model.`
+  and kohya `lora_unet_` module names. A fused `img_mlp.gate_up` weight is
+  `[gate_layer; proj]` (`ldm/qwen_image21/model.py` `SwiGLUFeedForward`,
+  `ops.py` `_swiglu_eager`), so a `gate_up` pair's up rows split in that order.
+- `weight_adapter/lora.py` `LoRAAdapter`: accepted pair layouts and
+  `alpha / rank` per pair (rank = rows of the down matrix), 1 without alpha.
+- `weight_adapter/base.py` `weight_decompose`: DoRA on the output axis
+  normalises each row by the norm of the weight **before** the update, plus
+  the FP32 epsilon, then blends with the strength.
+- `model_patcher.py` `patch_weight_to_device`: patches apply in list order to a
+  copy in `lora_compute_dtype` (FP32 on CPU, FP16 on some GPUs) that rounds to
+  BF16 once. Gufo always merges in FP32 from the uploaded BF16 weight.
+
+Gufo additionally reads `lora_alpha`/`use_rslora` from the Diffusers
+`lora_adapter_metadata` JSON when no `.alpha` tensor exists (Diffusers
+`loaders/lora_base.py`), and rejects whatever ComfyUI would skip or apply
+partially. `tools/models/qwen_image_21/lora_reference.py` reimplements these
+rules in FP64 with numpy for qualification; ComfyUI source is GPL-3.0 and is
+not copied.

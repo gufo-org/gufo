@@ -2179,6 +2179,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                  "server_error", "image_service_unavailable");
     return HandleImageApiRequest(req, *images_);
   }
+  if (req.path == "/sdapi/v1/loras" && images_ != nullptr)
+    return HandleImageLorasRequest(req, *images_);
   if (req.path == "/v1/audio/speech/stream") {
     if (!tts_ || !tts_->ready())
       return Err(503, "Service Unavailable", "TTS is not configured",

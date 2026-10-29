@@ -495,6 +495,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/audio/speech` | A TTS implementation is compiled and loaded |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
+| `GET` | `/sdapi/v1/loras` | Qwen-Image-2.1 image serving is configured; lists `--lora` adapters. A text server answers 501 |
 | `POST` | `/v1/videos` | A validated operator-supplied MiniMax H3 checkpoint is configured |
 | `GET` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
@@ -503,7 +504,9 @@ cache snapshots. HTTP handlers do not implement model kernels.
 Use `gufo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](models/qwen-image-2.1/README.md). Generation accepts JSON;
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
-and work through llama-swap's image routes.
+and work through llama-swap's image routes. LoRA adapters registered with
+`--lora NAME=PATH` are selected per request with the `loras` field; see
+[LoRA adapters](models/qwen-image-2.1/README.md#lora-adapters).
 
 Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 1.7B variants are supported; the variant is detected from the checkpoint's

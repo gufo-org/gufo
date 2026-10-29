@@ -1,4 +1,5 @@
-add_library(gufo_qwen_image_21 STATIC image.cpp weights.cpp tokenizer.cpp)
+add_library(gufo_qwen_image_21 STATIC image.cpp weights.cpp tokenizer.cpp
+  lora.cpp)
 target_include_directories(gufo_qwen_image_21 PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen_image_21 PUBLIC gufo_core ICU::i18n)
 
@@ -25,6 +26,12 @@ function(gufo_qwen_image_21_register_tests)
   target_link_libraries(qwen_image_21_test PRIVATE gufo_qwen_image_21 gufo_http)
   add_test(NAME qwen_image_21_test COMMAND qwen_image_21_test)
   set_tests_properties(qwen_image_21_test PROPERTIES LABELS "cpu;models;qwen-image")
+  add_executable(qwen_image_21_lora_test
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/lora_test.cpp)
+  target_link_libraries(qwen_image_21_lora_test PRIVATE gufo_qwen_image_21)
+  add_test(NAME qwen_image_21_lora_test COMMAND qwen_image_21_lora_test)
+  set_tests_properties(qwen_image_21_lora_test PROPERTIES
+    LABELS "cpu;models;qwen-image")
   if(ENGINE_ENABLE_HIP)
     add_executable(qwen_image_21_kernel_test
       ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/kernel_test.hip)
@@ -35,5 +42,8 @@ function(gufo_qwen_image_21_register_tests)
     add_executable(qwen_image_21_probe
       ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/probe.cpp)
     target_link_libraries(qwen_image_21_probe PRIVATE gufo_qwen_image_21)
+    add_executable(qwen_image_21_lora_dump
+      ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/lora_dump.cpp)
+    target_link_libraries(qwen_image_21_lora_dump PRIVATE gufo_qwen_image_21)
   endif()
 endfunction()

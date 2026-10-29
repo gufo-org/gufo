@@ -25,6 +25,13 @@ Image ResizeImage(const Image& image, int width, int height);
 std::uint64_t InitialNoiseSeed(std::uint64_t seed,
                                std::span<const Image> images);
 
+/// A registered adapter selected by name; strength multiplies its alpha/rank.
+struct Lora {
+  std::string name;
+  float scale{1};
+  bool operator==(const Lora&) const = default;
+};
+
 struct Request {
   std::string prompt;
   std::vector<Image> images;
@@ -32,19 +39,29 @@ struct Request {
   int height{1024};
   int steps{40};
   std::uint64_t seed{0};
+  // Applied in order; scale 0 entries are ignored.
+  std::vector<Lora> loras{};
 };
 
 struct Metrics {
   double prompt_ms{0};
   double denoise_ms{0};
   double vae_ms{0};
-  double total_ms{0};
+  double total_ms{0};  // includes lora_ms
   std::size_t resident_weight_bytes{0};
+  double lora_ms{0};  // adapter switch, before prompt encoding
 };
 
 struct Result {
   Image image;
   Metrics metrics;
+};
+
+struct LoraInfo {
+  std::string format;
+  std::size_t targets{0};  // base weights the adapter patches
+  int min_rank{0};
+  int max_rank{0};
 };
 
 using CancellationCheck = std::function<bool()>;
@@ -74,6 +91,12 @@ public:
                   const CancellationCheck& cancelled = {},
                   const Observer& observer = {});
   std::vector<std::uint32_t> Tokenize(std::string_view text) const;
+  /// Validate and register an adapter before serving; requests select it by
+  /// name.
+  LoraInfo AddLora(const std::string& name, const std::filesystem::path& path);
+  /// Adapters merged into the transformer weights now (does not wait for
+  /// Generate); empty while a switch is in progress or after one failed.
+  std::vector<Lora> ActiveLoras() const;
 
 private:
   struct Impl;
