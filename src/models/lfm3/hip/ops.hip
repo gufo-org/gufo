@@ -74,9 +74,13 @@ __global__ void ResidualNormKernel(const float* __restrict__ branch,
   __shared__ float scratch[256];
   const int row = blockIdx.x, tid = threadIdx.x, items = H / 256;
   float* xr = x + std::size_t(row) * H;
-  float v[kNormItems];
-  for (int i = 0; i < items; ++i)
+  // Every load is issued before the first reduction.
+  float v[kNormItems], pw[kNormItems], nw[kNormItems];
+  for (int i = 0; i < items; ++i) {
     v[i] = xr[tid + 256 * i];
+    pw[i] = branch && post_weight ? post_weight[tid + 256 * i] : 0;
+    nw[i] = weight ? weight[tid + 256 * i] : 0;
+  }
   if (branch) {
     float b[kNormItems], squares = 0;
     for (int i = 0; i < items; ++i) {
@@ -86,7 +90,7 @@ __global__ void ResidualNormKernel(const float* __restrict__ branch,
     if (post_weight) {
       const float inv = rsqrtf(RowSquares(squares, scratch) / float(H) + eps);
       for (int i = 0; i < items; ++i)
-        b[i] = (b[i] * inv) * post_weight[tid + 256 * i];
+        b[i] = (b[i] * inv) * pw[i];
     }
     for (int i = 0; i < items; ++i) {
       v[i] = v[i] + b[i];
@@ -101,7 +105,7 @@ __global__ void ResidualNormKernel(const float* __restrict__ branch,
   const float inv = rsqrtf(RowSquares(squares, scratch) / float(H) + eps);
   float maximum = 0;
   for (int i = 0; i < items; ++i) {
-    v[i] = (v[i] * inv) * weight[tid + 256 * i];
+    v[i] = (v[i] * inv) * nw[i];
     maximum = fmaxf(maximum, fabsf(v[i]));
   }
   if (z) {
@@ -163,14 +167,19 @@ __global__ void ConvolutionHistory(const float* p, float* history, int n,
   for (int j = 0; j < L - 1; ++j)
     history[ch * (L - 1) + j] = past[j];
 }
-// Each thread owns one frequency pair and rotates kRows (token, head) rows,
-// so the double-precision frequency power is evaluated once per pair.
+// Frequencies use a double-precision power rounded to FP32, computed once.
+__global__ void Frequencies(float* out, int D, float theta) {
+  int pair = threadIdx.x;
+  if (pair < D / 2)
+    out[pair] = float(pow(double(theta), double(-2.0F * pair / D)));
+}
+// Each thread owns one frequency pair and rotates kRopeRows (token, head) rows.
 constexpr int kRopeRows = 8;
-__global__ void Rotary(float* x, const float* factors, int n, int heads, int D,
-                       int position, float theta) {
+__global__ void Rotary(float* x, const float* frequencies, const float* factors,
+                       int n, int heads, int D, int position) {
   int pair = threadIdx.x % (D / 2), slots = blockDim.x / (D / 2);
   int first = blockIdx.x * slots * kRopeRows + threadIdx.x / (D / 2);
-  float frequency = float(pow(double(theta), double(-2.0F * pair / D)));
+  float frequency = frequencies[pair];
   for (int i = 0; i < kRopeRows; ++i) {
     int head = first + i * slots, token = head / heads;
     if (head >= n * heads)
@@ -655,11 +664,14 @@ void ShortConv(const float* p, const float* w, float* h, float* out, int n,
   Convolution<<<dim3((H + 127) / 128, n), 128, 0, s>>>(p, w, h, out, n, H, L);
   ConvolutionHistory<<<(H + 127) / 128, 128, 0, s>>>(p, h, n, H, L);
 }
-void Rope(float* x, const float* f, int n, int h, int d, int p, float theta,
-          hipStream_t s) {
+void RopeFrequencies(float* out, int d, float theta, hipStream_t s) {
+  Frequencies<<<1, d / 2, 0, s>>>(out, d, theta);
+}
+void Rope(float* x, const float* frequencies, const float* f, int n, int h,
+          int d, int p, hipStream_t s) {
   const int threads = d / 2 * std::max(1, 256 / (d / 2)), rows = threads / (d / 2);
   Rotary<<<(n * h + rows * kRopeRows - 1) / (rows * kRopeRows), threads, 0, s>>>(
-      x, f, n, h, d, p, theta);
+      x, frequencies, f, n, h, d, p);
 }
 std::size_t AttentionScratchBytes(int heads, int dim, int context) {
   return std::size_t((context + kDecodeKeys - 1) / kDecodeKeys) * heads *

@@ -121,7 +121,7 @@ struct Session::Impl {
     std::uint32_t capacity{};
   };
   std::vector<State> states;
-  Buffer quantized, attention_scratch;
+  Buffer quantized, attention_scratch, frequencies;
   Impl(std::shared_ptr<Model> m, std::uint32_t ctx)
       : model(std::move(m)),
         context(ctx),
@@ -145,6 +145,13 @@ struct Session::Impl {
     quantized = Buffer(gpu::DenseWorkspaceBytes(kChunk, width));
     attention_scratch =
         Buffer(gpu::AttentionScratchBytes(c.heads, c.head_dim, ctx));
+    // Global then sliding-window RoPE frequencies.
+    frequencies = Buffer(std::size_t(c.head_dim) * 4);
+    gpu::RopeFrequencies(frequencies.floats(), c.head_dim, c.theta,
+                         stream.value);
+    gpu::RopeFrequencies(frequencies.floats() + c.head_dim / 2, c.head_dim,
+                         c.theta_swa, stream.value);
+    Check(hipStreamSynchronize(stream.value));
 
     states.reserve(c.layers.size());
     for (std::size_t i = 0; i < c.layers.size(); ++i) {
@@ -254,10 +261,12 @@ struct Session::Impl {
           auto* qr = q.floats() + row * c.heads * c.head_dim;
           auto* kr = k.floats() + row * c.kv_heads[i] * c.head_dim;
           auto* vr = v.floats() + row * c.kv_heads[i] * c.head_dim;
-          gpu::Rope(qr, factors, count, c.heads, c.head_dim, owner.position,
-                    swa ? c.theta_swa : c.theta, s);
-          gpu::Rope(kr, factors, count, c.kv_heads[i], c.head_dim,
-                    owner.position, swa ? c.theta_swa : c.theta, s);
+          const float* table =
+              frequencies.floats() + (swa ? c.head_dim / 2 : 0);
+          gpu::Rope(qr, table, factors, count, c.heads, c.head_dim,
+                    owner.position, s);
+          gpu::Rope(kr, table, factors, count, c.kv_heads[i], c.head_dim,
+                    owner.position, s);
           gpu::Attention(qr, kr, vr, gate.floats() + row * c.heads,
                          state.k.floats(), state.v.floats(),
                          a.floats() + row * c.heads * c.head_dim, count,

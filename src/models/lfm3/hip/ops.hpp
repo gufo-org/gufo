@@ -41,8 +41,10 @@ void Dense(const Tensor& weight, const float* x, float* out, int n,
            hipStream_t stream, DenseWorkspace workspace = {});
 void ShortConv(const float* projection, const float* weight, float* history,
                float* out, int n, int hidden, int width, hipStream_t stream);
-void Rope(float* x, const float* factors, int n, int heads, int dim,
-          int position, float theta, hipStream_t stream);
+// Writes the dim / 2 RoPE frequencies of theta for Rope.
+void RopeFrequencies(float* out, int dim, float theta, hipStream_t stream);
+void Rope(float* x, const float* frequencies, const float* factors, int n,
+          int heads, int dim, int position, hipStream_t stream);
 // Reads previous cached rows plus the current chunk. Cache writes follow this
 // launch, so a sliding ring cannot overwrite history needed by early queries.
 // Single decode queries split long histories across blocks through scratch

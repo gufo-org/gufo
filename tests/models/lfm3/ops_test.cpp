@@ -119,8 +119,9 @@ void Rotary(int n) {
         expected[base + i + 64] =
             x[base + i + 64] * std::cos(angle) + x[base + i] * std::sin(angle);
       }
-  Buffer b(x), f(factors);
-  g::Rope(b.p, f.p, n, H, D, P, 1000000, nullptr);
+  Buffer b(x), f(factors), frequencies(D / 2);
+  g::RopeFrequencies(frequencies.p, D, 1000000, nullptr);
+  g::Rope(b.p, frequencies.p, f.p, n, H, D, P, nullptr);
   Check(hipDeviceSynchronize());
   Near(b.Read(x.size()), expected, 2e-5F);
 }
