@@ -1,5 +1,13 @@
 # Qwen3.8 Flash-Next experiments
 
+## Long prefill passes (October 23, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| 16,384-row lone-prompt passes, dense prefill GEMMs launched in 4,096-row token-tile groups | Retained. `GroupedRasterTile` maps blocks so each group of 4,096 rows sweeps every row tile before the next group starts (`DenseF16GEMMKernel`, `W8A8BlockedWmmaGEMMKernel`); grids up to one group keep their order, and only the block-to-tile mapping changes. On the production fork (mixed K-quant recipe + MTP, ROCm 7.2.4): routed experts per token at 16K rows pair 106.9 → 101.4, down 65.3 → 57.4 µs; the HC down GEMM 23.8 → 21.3. Long greedy replies (21,022 and 25,580-token prompts through `gufo serve`, 4,096 against 16,384-row plans) byte-identical; retrieval 48/48 (16.5K and 38.3K prompts). `gufo bench` MTP, alternating twice: pp32768 1,666/1,666 → 1,711/1,696; pp8192 1,758/1,734 → 1,749/1,754. HTTP probe, alternating twice: 26.5K 1,551/1,549 → 1,597/1,605, 7.3K 1,598/1,585 → 1,626/1,624. Peak GTT in `gufo bench` 68.5 → 72.6 GiB. On main `34ebb5fe` with UD-Q4_K_XL, `gufo bench -n 0 -r 2`, two rounds: pp16384 1,590 / 1,583 → 1,632 / 1,625 tok/s. A request that arrives during a lone long prefill now waits for up to one 16K pass (about 10 s). `projection_ops` checks W8A8 and F16 rows of 9,001-row passes against 1,031/4,096-row passes, including rows that straddle a group. |
+| 16,384-row passes in the original tile order | Rejected: experts −13.9 µs/token, but the dense GEMMs re-read activations for every row tile once a pass outgrew the caches (+17 µs/token; HC down +5.4, fused SSM projection +4.5), so pp32768 stayed 1,661 → 1,663. |
+| Per-pass fixed cost | Not a lever: head GEMV, MTP boundary row and idle gaps total about 3 ms per 4,096-row pass (0.7 µs/token); the GPU is 99.8% busy across a bench prefill. |
+
 ## Confidence-gated MTP chains (October 29, 2026)
 
 Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
