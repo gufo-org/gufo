@@ -47,6 +47,87 @@ __global__ void F16Dense(Tensor w, const float* x, float* y, int n) {
   if (!lane)
     y[std::size_t(token) * w.rows + row] = sum;
 }
+// Block-wide sum in the shared RMSNorm's order: a per-thread FMA chain over
+// strided elements, then a halving tree in LDS.
+__device__ float RowSquares(float sum, float* scratch) {
+  const int tid = threadIdx.x;
+  scratch[tid] = sum;
+  __syncthreads();
+  for (int stride = 128; stride > 0; stride /= 2) {
+    if (tid < stride)
+      scratch[tid] += scratch[tid + stride];
+    __syncthreads();
+  }
+  sum = scratch[0];
+  __syncthreads();
+  return sum;
+}
+constexpr int kNormItems = 16;
+// One block per row: x += post_norm(branch), then z = norm(x) as FP32 rows
+// or as split prompt activations. A null branch only normalizes x; a null
+// norm weight only updates x. Each step keeps the separate kernels' rounding.
+__global__ void ResidualNormKernel(const float* __restrict__ branch,
+                                   const float* __restrict__ post_weight,
+                                   float* __restrict__ x,
+                                   const float* __restrict__ weight, float* z,
+                                   SplitActivations split, int H, float eps) {
+  __shared__ float scratch[256];
+  const int row = blockIdx.x, tid = threadIdx.x, items = H / 256;
+  float* xr = x + std::size_t(row) * H;
+  float v[kNormItems];
+  for (int i = 0; i < items; ++i)
+    v[i] = xr[tid + 256 * i];
+  if (branch) {
+    float b[kNormItems], squares = 0;
+    for (int i = 0; i < items; ++i) {
+      b[i] = branch[std::size_t(row) * H + tid + 256 * i];
+      squares = __fmaf_rn(b[i], b[i], squares);
+    }
+    if (post_weight) {
+      const float inv = rsqrtf(RowSquares(squares, scratch) / float(H) + eps);
+      for (int i = 0; i < items; ++i)
+        b[i] = (b[i] * inv) * post_weight[tid + 256 * i];
+    }
+    for (int i = 0; i < items; ++i) {
+      v[i] = v[i] + b[i];
+      xr[tid + 256 * i] = v[i];
+    }
+  }
+  if (!weight)
+    return;
+  float squares = 0;
+  for (int i = 0; i < items; ++i)
+    squares = __fmaf_rn(v[i], v[i], squares);
+  const float inv = rsqrtf(RowSquares(squares, scratch) / float(H) + eps);
+  float maximum = 0;
+  for (int i = 0; i < items; ++i) {
+    v[i] = (v[i] * inv) * weight[tid + 256 * i];
+    maximum = fmaxf(maximum, fabsf(v[i]));
+  }
+  if (z) {
+    for (int i = 0; i < items; ++i)
+      z[std::size_t(row) * H + tid + 256 * i] = v[i];
+    return;
+  }
+  for (int d = 16; d; d /= 2)
+    maximum = fmaxf(maximum, __shfl_xor(maximum, d, 32));
+  if (!(tid % 32))
+    scratch[tid / 32] = maximum;
+  __syncthreads();
+  maximum = 0;
+  for (int w = 0; w < 8; ++w)
+    maximum = fmaxf(maximum, scratch[w]);
+  const int e = maximum > 0 ? 14 - ilogbf(maximum) : 0;
+  if (!tid)
+    split.scale[row] = ldexpf(1.0F, -e);
+  for (int i = 0; i < items; ++i) {
+    const float scaled = ldexpf(v[i], e);
+    const __half h = __float2half_rn(scaled);
+    const auto at = std::size_t(row) * H + tid + 256 * i;
+    split.high[at] = h;
+    split.low[at] = __float2half_rn(scaled - __half2float(h));
+  }
+}
 // One thread per (row, channel): earlier rows' B*x products are recomputed
 // from the projection, or read from the history before the chunk. The FMA
 // order over the window matches a sequential scan.
@@ -364,20 +445,37 @@ void LaunchSplit(std::span<const Output> outputs, SplitActivations split,
     SplitQ8Gemm<64, BN, 4, 2, kSwiGLU><<<grid, 256, 0, s>>>(jobs, split, n, K);
 }
 }  // namespace
-void Project(std::span<const Output> outputs, const float* x, int n,
-             hipStream_t s, DenseWorkspace workspace) {
-  const auto K = outputs[0].weight->cols;
+bool SharesSplit(std::span<const Output> outputs, int n,
+                 DenseWorkspace workspace) {
   bool shared = outputs.size() <= Projections::kMax;
   for (const auto& o : outputs)
-    shared = shared && o.weight->cols == K &&
+    shared = shared && o.weight->cols == outputs[0].weight->cols &&
              SplitPrompt(*o.weight, n, workspace);
-  if (!shared) {
+  return shared;
+}
+bool ResidualNorm(const float* branch, const Tensor* post_norm, float* x,
+                  const Tensor* norm, float* z, int n, int H, float eps,
+                  bool split, hipStream_t s, DenseWorkspace workspace) {
+  if (H % 256 || H / 256 > kNormItems)
+    return false;
+  ResidualNormKernel<<<n, 256, 0, s>>>(
+      branch, post_norm ? static_cast<const float*>(post_norm->data) : nullptr,
+      x, norm ? static_cast<const float*>(norm->data) : nullptr,
+      split ? nullptr : z, SplitActivations::In(workspace.quantized, n, H), H,
+      eps);
+  return true;
+}
+void Project(std::span<const Output> outputs, const float* x, int n,
+             hipStream_t s, DenseWorkspace workspace, bool split_ready) {
+  const auto K = outputs[0].weight->cols;
+  if (!SharesSplit(outputs, n, workspace)) {
     for (const auto& o : outputs)
       Dense(*o.weight, x, o.out, n, s, workspace);
     return;
   }
   const auto split = SplitActivations::In(workspace.quantized, n, K);
-  SplitRows<<<n, 256, 0, s>>>(x, split, K);
+  if (!split_ready)
+    SplitRows<<<n, 256, 0, s>>>(x, split, K);
   // Wide and narrow projections use different tiles.
   Output wide[Projections::kMax], narrow[Projections::kMax];
   std::size_t wide_count = 0, narrow_count = 0;
@@ -390,12 +488,12 @@ void Project(std::span<const Output> outputs, const float* x, int n,
 }
 void ProjectSwiGLU(const Tensor& gate, const Tensor& up, const float* x,
                    float* out, float* up_scratch, int n, hipStream_t s,
-                   DenseWorkspace workspace) {
-  if (SplitPrompt(gate, n, workspace) && SplitPrompt(up, n, workspace) &&
-      gate.rows == up.rows && gate.cols == up.cols) {
+                   DenseWorkspace workspace, bool split_ready) {
+  const Output outputs[] = {{&gate, out}, {&up, nullptr}};
+  if (SharesSplit(outputs, n, workspace) && gate.rows == up.rows) {
     const auto split = SplitActivations::In(workspace.quantized, n, gate.cols);
-    SplitRows<<<n, 256, 0, s>>>(x, split, gate.cols);
-    const Output outputs[] = {{&gate, out}, {&up, nullptr}};
+    if (!split_ready)
+      SplitRows<<<n, 256, 0, s>>>(x, split, gate.cols);
     LaunchSplit<true>(outputs, split, n, gate.cols, s);
     return;
   }

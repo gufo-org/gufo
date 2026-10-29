@@ -17,15 +17,26 @@ struct Output {
   const Tensor* weight;
   float* out;
 };
+// True when these projections of n rows read one split prompt input.
+bool SharesSplit(std::span<const Output> outputs, int n,
+                 DenseWorkspace workspace);
 // Projects one input through up to four weights with the same column count.
-// Q8_0 prompts split the input once and share one launch.
+// Q8_0 prompts split the input once and share one launch. split_ready means
+// the workspace already holds this input's split (see ResidualNorm).
 void Project(std::span<const Output> outputs, const float* x, int n,
-             hipStream_t stream, DenseWorkspace workspace);
+             hipStream_t stream, DenseWorkspace workspace,
+             bool split_ready = false);
 // silu(gate x) * (up x) into out; up_scratch holds up x when the projections
 // cannot share the fused prompt launch.
 void ProjectSwiGLU(const Tensor& gate, const Tensor& up, const float* x,
                    float* out, float* up_scratch, int n, hipStream_t stream,
-                   DenseWorkspace workspace);
+                   DenseWorkspace workspace, bool split_ready = false);
+// x += post_norm(branch) (branch may be null, post_norm may be null), then
+// z = norm(x) unless norm is null. With split, z goes to the workspace as a
+// split prompt input instead. Returns false when the width is unsupported.
+bool ResidualNorm(const float* branch, const Tensor* post_norm, float* x,
+                  const Tensor* norm, float* z, int n, int hidden, float eps,
+                  bool split, hipStream_t stream, DenseWorkspace workspace);
 void Dense(const Tensor& weight, const float* x, float* out, int n,
            hipStream_t stream, DenseWorkspace workspace = {});
 void ShortConv(const float* projection, const float* weight, float* history,

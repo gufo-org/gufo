@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <stdexcept>
@@ -178,15 +179,49 @@ struct Session::Impl {
           input, static_cast<const float*>(weight.data), output, nullptr, count,
           weight.cols, c.eps, s);
     };
-    auto add = [&] {
-      gufo::hip::LaunchBatchedResidualAdd(x.floats(), out.floats(), x.floats(),
-                                          n, c.hidden, s);
+    const gpu::DenseWorkspace workspace{quantized.data};
+    // x += post(branch), then z = norm(x), split for the next projections
+    // when they all read split prompt inputs. Returns whether z was split.
+    auto residual_norm = [&](const float* branch, const Tensor* post,
+                             const Tensor* next,
+                             std::span<const gpu::Output> consumers) {
+      const bool split = next && gpu::SharesSplit(consumers, n, workspace);
+      if (gpu::ResidualNorm(branch, post && post->data ? post : nullptr,
+                            x.floats(), next, z.floats(), n, c.hidden, c.eps,
+                            split, s, workspace))
+        return split;
+      if (branch) {
+        if (post && post->data)
+          norm(branch, *post, out.floats(), n);
+        gufo::hip::LaunchBatchedResidualAdd(
+            x.floats(), post && post->data ? out.floats() : branch, x.floats(),
+            n, c.hidden, s);
+      }
+      if (next)
+        norm(x.floats(), *next, z.floats(), n);
+      return false;
     };
+    // Projections reading the normalized input of layer i's mixer.
+    std::array<gpu::Output, 4> mixer;
+    std::span<const gpu::Output> inputs;
+    const auto mixer_inputs = [&](std::size_t i) {
+      const auto& l = w.layers[i];
+      if (c.layers[i] == LayerType::kConvolution) {
+        mixer[0] = {&l.in_proj, p.floats()};
+        return std::span<const gpu::Output>(mixer.data(), 1);
+      }
+      mixer = {{{&l.q, q.floats()},
+                {&l.k, k.floats()},
+                {&l.v, v.floats()},
+                {&l.attn_gate, gate.floats()}}};
+      return std::span<const gpu::Output>(mixer);
+    };
+    inputs = mixer_inputs(0);
+    bool split = residual_norm(nullptr, nullptr, &w.layers[0].norm, inputs);
     for (std::size_t i = 0; i < c.layers.size(); ++i) {
       const auto& l = w.layers[i];
-      norm(x.floats(), l.norm, z.floats(), n);
       if (c.layers[i] == LayerType::kConvolution) {
-        dense(l.in_proj, z.floats(), p.floats(), n, s);
+        gpu::Project(inputs, z.floats(), n, s, workspace, split);
         if (batch.empty()) {
           gpu::ShortConv(p.floats(), static_cast<const float*>(l.conv.data),
                          states[i].conv.floats(), a.floats(), n, c.hidden,
@@ -201,11 +236,7 @@ struct Session::Impl {
           }
         dense(l.out_proj, a.floats(), out.floats(), n, s);
       } else {
-        const gpu::Output projections[] = {{&l.q, q.floats()},
-                                           {&l.k, k.floats()},
-                                           {&l.v, v.floats()},
-                                           {&l.attn_gate, gate.floats()}};
-        gpu::Project(projections, z.floats(), n, s, {quantized.data});
+        gpu::Project(inputs, z.floats(), n, s, workspace, split);
         gufo::hip::LaunchBatchedPerHeadRMSNorm(
             q.floats(), static_cast<const float*>(l.q_norm.data), q.floats(), n,
             c.heads, c.head_dim, c.eps, s);
@@ -241,16 +272,17 @@ struct Session::Impl {
             attend(*batch[row], row, 1);
         dense(l.attn_out, a.floats(), out.floats(), n, s);
       }
-      if (l.post_norm.data)
-        norm(out.floats(), l.post_norm, out.floats(), n);
-      add();
-      norm(x.floats(), l.ffn_norm, z.floats(), n);
+      const gpu::Output ffn[] = {{&l.gate, ff_gate.floats()},
+                                 {&l.up, ff_up.floats()}};
+      split = residual_norm(out.floats(), &l.post_norm, &l.ffn_norm, ffn);
       gpu::ProjectSwiGLU(l.gate, l.up, z.floats(), ff_gate.floats(),
-                         ff_up.floats(), n, s, {quantized.data});
+                         ff_up.floats(), n, s, workspace, split);
       dense(l.down, ff_gate.floats(), out.floats(), n, s);
-      if (l.post_ffn_norm.data)
-        norm(out.floats(), l.post_ffn_norm, out.floats(), n);
-      add();
+      const bool last = i + 1 == c.layers.size();
+      if (!last)
+        inputs = mixer_inputs(i + 1);
+      split = residual_norm(out.floats(), &l.post_ffn_norm,
+                            last ? nullptr : &w.layers[i + 1].norm, inputs);
     }
     if (batch.empty()) {
       norm(x.floats() + (n - 1) * c.hidden, w.output_norm, frontier.floats(),
