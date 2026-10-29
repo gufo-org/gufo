@@ -169,3 +169,19 @@ overlapped the CPU contract workload, so that standard comparison is
 server and client time passes the unchanged 5% and 10 ms margins. All vectors
 are byte-identical and work counts match. The two unchanged-main runs are
 retained as controls; the first inconclusive observations are not discarded.
+
+## Image budgets
+
+Measured on 2026-10-29 on Linux with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors and release builds with the ROCm 7.2.3 runtime, not the Nix image.  Each request sends one 1231 × 947 PNG at concurrency 1 after one warm-up request, with `mm_processor_kwargs.max_soft_tokens` set to the budget, or left out for the default.  The default rows ran main f1b6c54f and this change in the order main, change, change, main, 30 requests each; the other rows ran this change once with 20 requests each.  GTT growth is `mem_info_gtt_used` after each budget minus the value after the default budget.
+
+| Budget | Tokens/request | Median | p95 | GTT growth |
+| --- | ---: | ---: | ---: | ---: |
+| default, main | 270 | 582.50 ms | 585.37 ms | — |
+| default, this change | 270 | 580.49 ms | 582.51 ms | 0 MiB |
+| 70 | 67 | 107.63 ms | 108.77 ms | 0 MiB |
+| 140 | 134 | 216.32 ms | 217.57 ms | 0 MiB |
+| 280 | 270 | 582.20 ms | 584.71 ms | 0 MiB |
+| 560 | 524 | 1,772.30 ms | 1,775.97 ms | 86 MiB |
+| 1120 | 1,106 | 6,853.92 ms | 6,863.86 ms | 256 MiB |
+
+The default rows show the mean of the two passes.  The vision scratch grows only when a larger budget arrives, so a server that only sees the default keeps main's device footprint.
