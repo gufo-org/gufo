@@ -36,6 +36,17 @@ public:
                            std::span<const std::uint32_t> tokens,
                            std::span<std::span<float>> logits,
                            std::string* error = nullptr);
+  // Advances rows of input embeddings (hidden floats per row) instead of
+  // token IDs. Rows live in host memory, or in device memory on this
+  // session's stream when on_device is set.
+  bool ForwardEmbeddings(std::span<const float> rows, bool on_device = false,
+                         std::span<float> logits = {},
+                         std::string* error = nullptr);
+  // Final-normed hidden state of the last advanced row (hidden floats).
+  bool ReadHidden(std::span<float> hidden, std::string* error = nullptr) const;
+  // Device copy of the same hidden state, valid until the next forward.
+  const float* DeviceHidden() const;
+  void* DeviceStream() const;
   bool Reset(std::string* error = nullptr);
   std::uint32_t Position() const;
   // Payloads are compact, immutable host bytes. Persistent callers must bind

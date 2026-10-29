@@ -169,16 +169,25 @@ struct Session::Impl {
       states.push_back(std::move(s));
     }
   }
+  // Rows of embeddings replace the token lookup when embeddings is set; it
+  // holds n * hidden floats on the host, or on the device when on_device.
   void Run(std::span<const std::uint32_t> tokens, bool output_logits,
-           std::span<Impl* const> batch = {}) {
+           std::span<Impl* const> batch = {}, const float* embeddings = nullptr,
+           std::size_t embedding_rows = 0, bool on_device = false) {
     const auto& w = model->impl_->weights;
     const auto& c = w.config;
     const auto s = stream.value;
-    const auto n = tokens.size();
-    Check(hipMemcpyAsync(ids.data, tokens.data(), tokens.size_bytes(),
-                         hipMemcpyHostToDevice, s));
-    gpu::Embed(w.embedding, static_cast<const std::uint32_t*>(ids.data),
-               x.floats(), n, s);
+    const auto n = embeddings ? embedding_rows : tokens.size();
+    if (embeddings)
+      Check(hipMemcpyAsync(
+          x.data, embeddings, n * c.hidden * 4,
+          on_device ? hipMemcpyDeviceToDevice : hipMemcpyHostToDevice, s));
+    else {
+      Check(hipMemcpyAsync(ids.data, tokens.data(), tokens.size_bytes(),
+                           hipMemcpyHostToDevice, s));
+      gpu::Embed(w.embedding, static_cast<const std::uint32_t*>(ids.data),
+                 x.floats(), n, s);
+    }
     auto dense = [&](const Tensor& weight, const float* input, float* output,
                      int count, hipStream_t stream) {
       gpu::Dense(weight, input, output, count, stream, {quantized.data});
@@ -383,6 +392,58 @@ bool Session::Forward(std::span<const std::uint32_t> tokens,
       *error = e.what();
     return false;
   }
+}
+bool Session::ForwardEmbeddings(std::span<const float> rows, bool on_device,
+                                std::span<float> logits, std::string* error) {
+  try {
+    const auto& c = impl_->model->config();
+    if (impl_->poisoned)
+      throw std::runtime_error(
+          "LFM3 session requires Reset after a device error");
+    const auto n = rows.size() / c.hidden;
+    if (!n || rows.size() % c.hidden || n > impl_->context - impl_->position ||
+        (!logits.empty() && logits.size() != c.vocab))
+      throw std::invalid_argument(
+          "invalid LFM3 embedding/logit count or context exhausted");
+    for (std::size_t offset = 0; offset < n; offset += Impl::kChunk) {
+      const auto count = std::min(Impl::kChunk, n - offset);
+      try {
+        impl_->Run({}, !logits.empty() && offset + count == n, {},
+                   rows.data() + offset * c.hidden, count, on_device);
+      } catch (...) {
+        impl_->poisoned = true;
+        throw;
+      }
+    }
+    if (!logits.empty())
+      Check(hipMemcpy(logits.data(), impl_->logits.data, logits.size_bytes(),
+                      hipMemcpyDeviceToHost));
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+bool Session::ReadHidden(std::span<float> hidden, std::string* error) const {
+  try {
+    if (impl_->poisoned || !impl_->position ||
+        hidden.size() != impl_->model->config().hidden)
+      throw std::invalid_argument("invalid LFM3 hidden frontier");
+    Check(hipMemcpy(hidden.data(), impl_->frontier.data, hidden.size_bytes(),
+                    hipMemcpyDeviceToHost));
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+const float* Session::DeviceHidden() const {
+  return impl_->frontier.floats();
+}
+void* Session::DeviceStream() const {
+  return impl_->stream.value;
 }
 bool Session::ForwardBatch(std::span<Session* const> sessions,
                            std::span<const std::uint32_t> tokens,
