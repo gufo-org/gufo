@@ -125,8 +125,8 @@ void Rotary(int n) {
   Check(hipDeviceSynchronize());
   Near(b.Read(x.size()), expected, 2e-5F);
 }
-void Attention(int n, int window) {
-  constexpr int H = 4, KH = 2, D = 128, P = 259;
+void Attention(int n, int window, int P = 259) {
+  constexpr int H = 4, KH = 2, D = 128;
   const int capacity = window ? window : P + n, stride = KH * D;
   auto q = Data(n * H * D, 0.7F), k = Data(n * stride, 0.5F),
        v = Data(n * stride, 0.9F), gates = Data(n * H, 0.7F);
@@ -193,6 +193,10 @@ int main() {
       std::cerr << "swa " << n << "\n";
       Attention(n, 256);
     }
+    // Long decode histories span several key tiles per block.
+    std::cerr << "decode 4999\n";
+    Attention(1, 0, 4999);
+    Attention(1, 256, 4999);
     std::cout << "PASS LFM3 convolution, RoPE, gated GQA and sliding ring "
                  "against independent formulas\n";
   } catch (const std::exception& e) {

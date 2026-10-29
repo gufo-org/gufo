@@ -403,12 +403,12 @@ __launch_bounds__(256) __global__
                     (acc[r].w / total) / g_scale);
   }
 }
-// One decode query per head. A block owns one KV group and up to kDecodeKeys
-// keys; four threads split each key's dot products and all heads of the
-// group share every loaded key and value row. With several key spans, each
-// block stores its maximum, denominator and unnormalized output for
-// DecodeCombine.
-constexpr int kDecodeKeys = 64, kMaxGroup = 8;
+// One decode query per head. A block owns one KV group and a span of keys,
+// processed in kDecodeKeys tiles with an online softmax; four threads split
+// each key's dot products and all heads of the group share every loaded key
+// and value row. With several spans, each block stores its maximum,
+// denominator and unnormalized output for DecodeCombine.
+constexpr int kDecodeKeys = 64, kMaxGroup = 8, kMaxDecodeSplits = 64;
 template<int D>
 __launch_bounds__(256) __global__
     void DecodeAttn(const float* __restrict__ q, const float* __restrict__ k,
@@ -416,98 +416,132 @@ __launch_bounds__(256) __global__
                     const float* __restrict__ gate,
                     const float* __restrict__ ck, const float* __restrict__ cv,
                     float* __restrict__ y, float* __restrict__ partial,
-                    int heads, int kh, int position, int capacity,
-                    int window) {
+                    int heads, int kh, int position, int capacity, int window,
+                    int span) {
   constexpr int kChunks = D / 16;  // float4 chunks per thread and row
   __shared__ float4 sq[kMaxGroup][D / 4];
   __shared__ float4 sv[kDecodeKeys][D / 4];
   __shared__ float sp[kMaxGroup][kDecodeKeys];
-  __shared__ float reduce[8];
+  __shared__ float reduce[8][kMaxGroup];
   const int g = blockIdx.x, split = blockIdx.y, splits = gridDim.y;
   const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
   const int j = tid / 4, part = tid % 4;
   const int group = heads / kh, stride = kh * D;
   const int first = window > 0 ? max(0, position + 1 - window) : 0;
-  const int base = first + split * kDecodeKeys;
-  const int keys = min(kDecodeKeys, position + 1 - base);
-  const int t = base + j;
-  const bool valid = j < keys;
-  float4 kk[kChunks];
-  if (valid) {
-    const float* key = t >= position ? k + std::size_t(t - position) * stride
-                                     : ck + std::size_t(t % capacity) * stride;
-    const float* value = t >= position
-                             ? v + std::size_t(t - position) * stride
-                             : cv + std::size_t(t % capacity) * stride;
-#pragma unroll
-    for (int c = 0; c < kChunks; ++c) {
-      kk[c] = reinterpret_cast<const float4*>(key + g * D)[c * 4 + part];
-      sv[j][c * 4 + part] =
-          reinterpret_cast<const float4*>(value + g * D)[c * 4 + part];
-    }
-  }
+  const int begin = first + split * span;
+  const int end = min(begin + span, position + 1);
   for (int i = tid; i < group * D / 4; i += 256)
     sq[i / (D / 4)][i % (D / 4)] = reinterpret_cast<const float4*>(
         q + (std::size_t(g) * group + i / (D / 4)) * D)[i % (D / 4)];
-  __syncthreads();
-  const auto block_reduce = [&](float value, bool maximum) {
-    for (int offset = 16; offset; offset /= 2) {
-      const float other = __shfl_xor(value, offset, 32);
-      value = maximum ? fmaxf(value, other) : value + other;
-    }
-    if (!lane)
-      reduce[wave] = value;
-    __syncthreads();
-    value = reduce[0];
-    for (int w = 1; w < 8; ++w)
-      value = maximum ? fmaxf(value, reduce[w]) : value + reduce[w];
-    __syncthreads();
-    return value;
-  };
-  const float scale = rsqrtf(float(D));
-  float maxima[kMaxGroup], sums[kMaxGroup];
-  for (int hh = 0; hh < group; ++hh) {
-    float dot = 0;
-    if (valid)
-#pragma unroll
-      for (int c = 0; c < kChunks; ++c) {
-        const float4 qq = sq[hh][c * 4 + part];
-        dot = fmaf(qq.x, kk[c].x, dot);
-        dot = fmaf(qq.y, kk[c].y, dot);
-        dot = fmaf(qq.z, kk[c].z, dot);
-        dot = fmaf(qq.w, kk[c].w, dot);
+  // Reduces one value per head across the block (maximum or sum).
+  const auto block_reduce = [&](float (&value)[kMaxGroup], bool maximum) {
+    for (int hh = 0; hh < group; ++hh) {
+      for (int offset = 16; offset; offset /= 2) {
+        const float other = __shfl_xor(value[hh], offset, 32);
+        value[hh] = maximum ? fmaxf(value[hh], other) : value[hh] + other;
       }
-    dot += __shfl_xor(dot, 1, 4);
-    dot += __shfl_xor(dot, 2, 4);
-    const float score = valid ? dot * scale : -INFINITY;
-    maxima[hh] = block_reduce(score, true);
-    const float p = valid ? expf(score - maxima[hh]) : 0;
-    if (!part)
-      sp[hh][j] = p;
-    // Each key appears in four lanes; count it once.
-    sums[hh] = block_reduce(part ? 0 : p, false);
-  }
+      if (!lane)
+        reduce[wave][hh] = value[hh];
+    }
+    __syncthreads();
+    for (int hh = 0; hh < group; ++hh) {
+      value[hh] = reduce[0][hh];
+      for (int w = 1; w < 8; ++w)
+        value[hh] = maximum ? fmaxf(value[hh], reduce[w][hh])
+                            : value[hh] + reduce[w][hh];
+    }
+    __syncthreads();
+  };
   // Threads split the group's heads; each owns D * group / 256 dimensions.
   const int per_head = 256 / group, dims = D / per_head;
-  const int hh = tid / per_head, d0 = (tid % per_head) * dims;
+  const int oh = tid / per_head, d0 = (tid % per_head) * dims;
   const auto* sv_floats = reinterpret_cast<const float*>(sv);
-  float acc[kMaxGroup / 2] = {};
-  for (int key = 0; key < keys; ++key) {
-    const float p = sp[hh][key];
-    for (int d = 0; d < dims; ++d)
-      acc[d] = fmaf(p, sv_floats[key * D + d0 + d], acc[d]);
+  const float scale = rsqrtf(float(D));
+  float maxima[kMaxGroup], sums[kMaxGroup], acc[kMaxGroup / 2] = {};
+  for (int hh = 0; hh < kMaxGroup; ++hh) {
+    maxima[hh] = -INFINITY;
+    sums[hh] = 0;
   }
-  const int h = g * group + hh;
+  for (int base = begin; base < end; base += kDecodeKeys) {
+    const int keys = min(kDecodeKeys, end - base), t = base + j;
+    const bool valid = j < keys;
+    float4 kk[kChunks];
+    __syncthreads();
+    if (valid) {
+      const float* key = t >= position
+                             ? k + std::size_t(t - position) * stride
+                             : ck + std::size_t(t % capacity) * stride;
+      const float* value = t >= position
+                               ? v + std::size_t(t - position) * stride
+                               : cv + std::size_t(t % capacity) * stride;
+#pragma unroll
+      for (int c = 0; c < kChunks; ++c) {
+        kk[c] = reinterpret_cast<const float4*>(key + g * D)[c * 4 + part];
+        sv[j][c * 4 + part] =
+            reinterpret_cast<const float4*>(value + g * D)[c * 4 + part];
+      }
+    }
+    __syncthreads();
+    float score[kMaxGroup], tile[kMaxGroup];
+    for (int hh = 0; hh < group; ++hh) {
+      float dot = 0;
+      if (valid)
+#pragma unroll
+        for (int c = 0; c < kChunks; ++c) {
+          const float4 qq = sq[hh][c * 4 + part];
+          dot = fmaf(qq.x, kk[c].x, dot);
+          dot = fmaf(qq.y, kk[c].y, dot);
+          dot = fmaf(qq.z, kk[c].z, dot);
+          dot = fmaf(qq.w, kk[c].w, dot);
+        }
+      dot += __shfl_xor(dot, 1, 4);
+      dot += __shfl_xor(dot, 2, 4);
+      score[hh] = valid ? dot * scale : -INFINITY;
+      tile[hh] = score[hh];
+    }
+    block_reduce(tile, true);
+    float alpha[kMaxGroup];
+    for (int hh = 0; hh < group; ++hh) {
+      const float next = fmaxf(maxima[hh], tile[hh]);
+      alpha[hh] = expf(maxima[hh] - next);
+      maxima[hh] = next;
+      const float p = valid ? expf(score[hh] - next) : 0;
+      if (!part)
+        sp[hh][j] = p;
+      // Each key appears in four lanes; count it once.
+      tile[hh] = part ? 0 : p;
+    }
+    block_reduce(tile, false);
+    for (int hh = 0; hh < group; ++hh)
+      sums[hh] = sums[hh] * alpha[hh] + tile[hh];
+    float own_alpha = alpha[0];
+    for (int hh = 1; hh < group; ++hh)
+      own_alpha = oh == hh ? alpha[hh] : own_alpha;
+    for (int d = 0; d < dims; ++d)
+      acc[d] *= own_alpha;
+    for (int key = 0; key < keys; ++key) {
+      const float p = sp[oh][key];
+      for (int d = 0; d < dims; ++d)
+        acc[d] = fmaf(p, sv_floats[key * D + d0 + d], acc[d]);
+    }
+  }
+  float own_max = maxima[0], own_sum = sums[0];
+  for (int hh = 1; hh < group; ++hh)
+    if (oh == hh) {
+      own_max = maxima[hh];
+      own_sum = sums[hh];
+    }
+  const int h = g * group + oh;
   if (splits == 1) {
     const float g_scale = 1 + expf(-gate[h]);
     for (int d = 0; d < dims; ++d)
-      y[std::size_t(h) * D + d0 + d] = (acc[d] / sums[hh]) / g_scale;
+      y[std::size_t(h) * D + d0 + d] = (acc[d] / own_sum) / g_scale;
     return;
   }
   float* out = partial + (std::size_t(split) * heads + h) * (D + 2);
   if (!(tid % per_head)) {
-    out[0] = maxima[hh];
-    out[1] = sums[hh];
+    out[0] = own_max;
+    out[1] = own_sum;
   }
   for (int d = 0; d < dims; ++d)
     out[2 + d0 + d] = acc[d];
@@ -674,8 +708,9 @@ void Rope(float* x, const float* frequencies, const float* f, int n, int h,
       x, frequencies, f, n, h, d, p);
 }
 std::size_t AttentionScratchBytes(int heads, int dim, int context) {
-  return std::size_t((context + kDecodeKeys - 1) / kDecodeKeys) * heads *
-         (dim + 2) * sizeof(float);
+  return std::size_t(std::min((context + kDecodeKeys - 1) / kDecodeKeys,
+                              kMaxDecodeSplits)) *
+         heads * (dim + 2) * sizeof(float);
 }
 void Attention(const float* q, const float* k, const float* v, const float* g,
                const float* ck, const float* cv, float* out, int n, int h,
@@ -685,9 +720,12 @@ void Attention(const float* q, const float* k, const float* v, const float* g,
   if (n == 1 && scratch && d == 128 && group >= 2 && group <= kMaxGroup &&
       256 % group == 0) {
     const int first = win > 0 ? std::max(0, p + 1 - win) : 0;
-    const int splits = (p + 1 - first + kDecodeKeys - 1) / kDecodeKeys;
+    const int tiles = (p + 1 - first + kDecodeKeys - 1) / kDecodeKeys;
+    const int span =
+        (tiles + kMaxDecodeSplits - 1) / kMaxDecodeSplits * kDecodeKeys;
+    const int splits = (p + 1 - first + span - 1) / span;
     DecodeAttn<128><<<dim3(kh, splits), 256, 0, s>>>(
-        q, k, v, g, ck, cv, out, scratch, h, kh, p, cap, win);
+        q, k, v, g, ck, cv, out, scratch, h, kh, p, cap, win, span);
     if (splits > 1)
       DecodeCombine<128><<<h, 128, 0, s>>>(scratch, g, out, h, splits);
     return;
