@@ -422,6 +422,7 @@ add_executable(gufo
   src/cli/banner.cpp
   src/cli/eval/eval.cpp
   src/cli/transcribe/transcribe.cpp
+  src/cli/speak/speak.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
   src/cli/serve/continuation_cache.cpp
@@ -433,6 +434,10 @@ add_executable(gufo
   src/eval/http_client.cpp
 )
 target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+if (ENGINE_ENABLE_HIP)
+  target_sources(gufo PRIVATE src/cli/serve/lfm3_audio_runner.cpp)
+  target_link_libraries(gufo PRIVATE gufo_lfm3_audio)
+endif()
 gufo_stage_hip_runtime(gufo)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"

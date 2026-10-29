@@ -38,6 +38,8 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
+
+#include "src/cli/serve/lfm3_audio_runner.hpp"
 #endif
 #include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
@@ -427,6 +429,7 @@ std::optional<ReasoningOptions> ResolveReasoningDefaults(
 
 struct SpeechOptions {
   std::filesystem::path model;
+  std::filesystem::path mmproj;
   std::size_t context;
   std::string served_model_name;
   std::vector<std::pair<std::string, std::string>> voice_specs;
@@ -435,10 +438,16 @@ struct SpeechOptions {
 };
 
 void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
-  parser.AddOption("-m", "--model", "DIR",
-                   tts ? "Qwen3-TTS 12Hz 1.7B model directory"
-                       : "Qwen3-ASR 1.7B model directory",
+  parser.AddOption("-m", "--model", "PATH",
+                   tts ? "Qwen3-TTS 12Hz 1.7B model directory, or an "
+                         "LFM3-Audio GGUF"
+                       : "Qwen3-ASR 1.7B model directory, or an LFM3-Audio "
+                         "GGUF",
                    "Model", &options->model);
+  parser.AddOption("", "--mmproj", "GGUF",
+                   "LFM3-Audio audio towers (default: the mmproj*.gguf beside "
+                   "--model)",
+                   "Model", &options->mmproj);
   parser.AddOption("-c", "--context", "N",
                    tts ? "Context capacity (default: 4096)"
                        : "Context capacity per audio chunk (default: 1024)",
@@ -1143,7 +1152,64 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     ModelLoadLog load_log(subcommand, options.model);
-    if (is_tts) {
+#if defined(ENGINE_ENABLE_HIP)
+    std::string audio_error;
+    const auto mmproj =
+        FindLfm3AudioMmproj(options.model, options.mmproj, &audio_error);
+    if (!audio_error.empty()) {
+      std::cerr << "Error: " << audio_error << '\n';
+      return 2;
+    }
+    if (!mmproj.empty()) {
+      // LFM3-Audio serves both endpoints through the speech services.
+      auto runtime = std::shared_ptr<Lfm3AudioRuntime>(Lfm3AudioRuntime::Create(
+          options.model, mmproj, std::uint32_t(options.context), &audio_error));
+      if (!runtime) {
+        std::cerr << "Error loading LFM3-Audio: " << audio_error << '\n';
+        return 1;
+      }
+      const std::string id = options.served_model_name.empty()
+                                 ? std::string("lfm3-audio-2b")
+                                 : options.served_model_name;
+      if (is_tts) {
+        if (!options.voice_specs.empty()) {
+          std::cerr << "Error: LFM3-Audio has female and male voices; "
+                       "--voice presets are not supported\n";
+          return 2;
+        }
+        tts = std::make_shared<server::TtsService>(server::TtsServiceOptions{
+            .model_root = options.model,
+            .native_context_tokens = options.context,
+            .validate_model = false,
+            .variant = models::qwen3_tts::ModelVariant::kCustomVoice,
+            .model_id = id,
+            .voices = {"female", "male"},
+            .voice_presets = {},
+            .runner =
+                [runtime](const auto& request, const auto& cancelled,
+                          auto* result, std::string* error) {
+                  return runtime->Synthesize(request, cancelled, result, error);
+                },
+        });
+      } else {
+        asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{
+            .model_root = options.model,
+            .native_context_tokens = options.context,
+            .validate_model = false,
+            .model_id = id,
+            .runner =
+                [runtime](const auto& request, const auto& cancelled,
+                          auto* result, std::string* error) {
+                  return runtime->Transcribe(request, cancelled, result, error);
+                },
+        });
+      }
+      load_log.Complete(
+          "model=" + id + " mmproj=" + mmproj.string() +
+          " sessions=1 context_tokens=" + std::to_string(options.context));
+    } else
+#endif
+        if (is_tts) {
       std::map<std::string, server::TtsVoicePreset> voice_presets;
       if (!BuildVoicePresets(options.voice_specs, options.voice_text_specs,
                              options.voice_lang_specs, &voice_presets,

@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,6 +16,9 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/cli/serve/lfm3_audio_runner.hpp"
+#endif
 
 namespace gufo::cli {
 namespace {
@@ -78,6 +83,7 @@ json::Value TimingsJson(const qwen3_asr::TranscriptionTimings& timings,
 
 void PrintTranscribeHelp(std::string_view program_name) {
   std::filesystem::path model;
+  std::filesystem::path mmproj;
   std::filesystem::path audio;
   std::string language;
   std::string context;
@@ -89,9 +95,15 @@ void PrintTranscribeHelp(std::string_view program_name) {
   std::vector<std::string> positionals;
   ArgParser parser(
       std::string(program_name) + " transcribe [OPTIONS] [WAV]",
-      "Transcribe a PCM or float WAV with native HIP Qwen3-ASR-1.7B.");
-  parser.AddOption("-m", "--model", "DIR", "Qwen3-ASR-1.7B model directory",
+      "Transcribe a PCM or float WAV with native HIP Qwen3-ASR-1.7B or "
+      "LFM3-Audio-2B.");
+  parser.AddOption("-m", "--model", "PATH",
+                   "Qwen3-ASR-1.7B model directory, or an LFM3-Audio GGUF",
                    "Model", &model);
+  parser.AddOption("", "--mmproj", "GGUF",
+                   "LFM3-Audio audio towers (default: the mmproj*.gguf beside "
+                   "--model)",
+                   "Model", &mmproj);
   parser.AddOption("-f", "--audio", "WAV", "Input WAV path", "Input", &audio);
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
@@ -120,6 +132,7 @@ void PrintTranscribeHelp(std::string_view program_name) {
 
 int RunTranscribe(std::span<const char* const> args) {
   std::filesystem::path model;
+  std::filesystem::path mmproj;
   std::filesystem::path audio;
   std::string language;
   std::string context;
@@ -132,9 +145,15 @@ int RunTranscribe(std::span<const char* const> args) {
 
   ArgParser parser(
       "gufo transcribe [OPTIONS] [WAV]",
-      "Transcribe a PCM or float WAV with native HIP Qwen3-ASR-1.7B.");
-  parser.AddOption("-m", "--model", "DIR", "Qwen3-ASR-1.7B model directory",
+      "Transcribe a PCM or float WAV with native HIP Qwen3-ASR-1.7B or "
+      "LFM3-Audio-2B.");
+  parser.AddOption("-m", "--model", "PATH",
+                   "Qwen3-ASR-1.7B model directory, or an LFM3-Audio GGUF",
                    "Model", &model);
+  parser.AddOption("", "--mmproj", "GGUF",
+                   "LFM3-Audio audio towers (default: the mmproj*.gguf beside "
+                   "--model)",
+                   "Model", &mmproj);
   parser.AddOption("-f", "--audio", "WAV", "Input WAV path", "Input", &audio);
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
@@ -192,14 +211,47 @@ int RunTranscribe(std::span<const char* const> args) {
     return 1;
   }
 
+  // Both runtimes expose the same transcription contract.
+  std::function<bool(const qwen3_asr::TranscriptionRequest&,
+                     const qwen3_asr::CancellationCheck&,
+                     qwen3_asr::TranscriptionResult*, std::string*)>
+      transcribe;
+  std::string backend = "qwen3-asr";
   const auto load_begin = std::chrono::steady_clock::now();
-  auto runtime = qwen3_asr_hip::TranscriptionHipRuntime::Create(
-      model.string(), capacity, &error);
-  const auto load_end = std::chrono::steady_clock::now();
-  if (runtime == nullptr) {
-    std::cerr << "Error loading Qwen3-ASR: " << error << '\n';
-    return 1;
+#if defined(ENGINE_ENABLE_HIP)
+  const auto audio_mmproj = FindLfm3AudioMmproj(model, mmproj, &error);
+  if (!error.empty()) {
+    std::cerr << "Error: " << error << '\n';
+    return 2;
   }
+  if (!audio_mmproj.empty()) {
+    auto lfm3 = Lfm3AudioRuntime::Create(model, audio_mmproj,
+                                         std::uint32_t(capacity), &error);
+    if (!lfm3) {
+      std::cerr << "Error loading LFM3-Audio: " << error << '\n';
+      return 1;
+    }
+    backend = "lfm3-audio";
+    transcribe = [lfm3](const auto& request, const auto& cancelled,
+                        auto* output, std::string* failure) {
+      return lfm3->Transcribe(request, cancelled, output, failure);
+    };
+  }
+#endif
+  std::unique_ptr<qwen3_asr_hip::TranscriptionHipRuntime> runtime;
+  if (!transcribe) {
+    runtime = qwen3_asr_hip::TranscriptionHipRuntime::Create(model.string(),
+                                                             capacity, &error);
+    if (runtime == nullptr) {
+      std::cerr << "Error loading Qwen3-ASR: " << error << '\n';
+      return 1;
+    }
+    transcribe = [&runtime](const auto& request, const auto& cancelled,
+                            auto* output, std::string* failure) {
+      return runtime->Transcribe(request, cancelled, output, failure);
+    };
+  }
+  const auto load_end = std::chrono::steady_clock::now();
   const double load_ms =
       std::chrono::duration<double, std::milli>(load_end - load_begin).count();
 
@@ -215,14 +267,14 @@ int RunTranscribe(std::span<const char* const> args) {
   qwen3_asr::TranscriptionResult result;
   bool transcribed = true;
   for (std::size_t run = 0; run < warmup && transcribed; ++run) {
-    transcribed = runtime->Transcribe(
+    transcribed = transcribe(
         request, [] { return g_cancel_requested != 0; }, &result, &error);
   }
   std::vector<qwen3_asr::TranscriptionTimings> run_timings;
   run_timings.reserve(repeat);
   std::string expected_text;
   for (std::size_t run = 0; run < repeat && transcribed; ++run) {
-    transcribed = runtime->Transcribe(
+    transcribed = transcribe(
         request, [] { return g_cancel_requested != 0; }, &result, &error);
     if (!transcribed) {
       break;
@@ -231,7 +283,7 @@ int RunTranscribe(std::span<const char* const> args) {
       expected_text = result.text;
     } else if (result.text != expected_text) {
       transcribed = false;
-      error = "repeated Qwen3-ASR transcription changed its transcript";
+      error = "repeated transcription changed its transcript";
       break;
     }
     run_timings.push_back(result.timings);
@@ -247,7 +299,7 @@ int RunTranscribe(std::span<const char* const> args) {
     return 0;
   }
   json::Value report = json::Value::object();
-  report["schema"] = "gufo.qwen3-asr.transcription.v1";
+  report["schema"] = "gufo." + backend + ".transcription.v1";
   report["backend"] = "native-hip";
   report["language"] = result.language;
   report["text"] = result.text;
