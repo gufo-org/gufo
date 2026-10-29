@@ -830,11 +830,15 @@ __global__ void HcCombineVec4Kernel(
   float w[kStreams];
 #pragma unroll
   for (std::uint32_t s = 0; s < kStreams; ++s) {
+    // The partials in order from zero, pinned like InjectParts::Sum: every
+    // instantiation (deferring, inject-writing, MoE-fused) must give a token
+    // the same stream weights whichever pass route computes it.
     float logit = 0.0f;
     for (std::uint32_t p = 0; p < inject_parts; ++p) {
-      logit +=
+      logit = __fadd_rn(
+          logit,
           inject[(static_cast<std::size_t>(t) * kStreams + s) * inject_parts +
-                 p];
+                 p]);
     }
     w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
   }
@@ -1001,11 +1005,15 @@ __global__ void HcCombineMoeF16Kernel(
   float w[kStreams];
 #pragma unroll
   for (std::uint32_t s = 0; s < kStreams; ++s) {
+    // The partials in order from zero, pinned like InjectParts::Sum: every
+    // instantiation (deferring, inject-writing, MoE-fused) must give a token
+    // the same stream weights whichever pass route computes it.
     float logit = 0.0f;
     for (std::uint32_t p = 0; p < inject_parts; ++p) {
-      logit +=
+      logit = __fadd_rn(
+          logit,
           inject[(static_cast<std::size_t>(t) * kStreams + s) * inject_parts +
-                 p];
+                 p]);
     }
     w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
   }
@@ -2221,6 +2229,19 @@ __global__ void SsmConvKernel(const float* qkv, std::uint32_t qkv_stride,
 /// loads. Lanes run along channels, so every access is a contiguous row.
 constexpr std::uint32_t kSsmConvTaps = 4;
 constexpr std::uint32_t kSsmConvTokensPerThread = 8;
+/// The four-tap convolution of one channel, SiLU applied, in one pinned
+/// F32 order. Every route uses it: a prefill pass of eight rows or fewer
+/// (SsmConv4Kernel<true, ...>), a wider one (SsmConv4Kernel<false, ...>) and
+/// the fused projection over its LDS tile, so a token's convolution does not
+/// depend on the pass width.
+__device__ __forceinline__ float SsmConv4Value(float4 w, float x0, float x1,
+                                               float x2, float x3) {
+  float acc = __fmaf_rn(w.x, x0, __fmul_rn(w.y, x1));
+  acc = __fmaf_rn(w.z, x2, acc);
+  acc = __fmaf_rn(w.w, x3, acc);
+  return SiluF(acc);
+}
+
 template<bool kSaveHistory, bool kBatch>
 __global__ void SsmConv4Kernel(const float* qkv, std::uint32_t qkv_stride,
                                const float* w, float* conv_state, float* out,
@@ -2263,9 +2284,8 @@ __global__ void SsmConv4Kernel(const float* qkv, std::uint32_t qkv_stride,
       break;
     }
     const float v = qkv[static_cast<std::size_t>(t) * qkv_stride + c];
-    const float acc = taps.x * window[0] + taps.y * window[1] +
-                      taps.z * window[2] + taps.w * v;
-    out[static_cast<std::size_t>(t) * channels + c] = SiluF(acc);
+    out[static_cast<std::size_t>(t) * channels + c] =
+        SsmConv4Value(taps, window[0], window[1], window[2], v);
     window[0] = window[1];
     window[1] = window[2];
     window[2] = v;
@@ -6529,16 +6549,6 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
     default:
       return false;
   }
-}
-
-// Keep the separate four-tap convolution's F32 rounding order when its
-// inputs come from the projection's LDS tile.
-__device__ __forceinline__ float SsmConv4Value(float4 w, float x0, float x1,
-                                               float x2, float x3) {
-  float acc = __fmaf_rn(w.x, x0, __fmul_rn(w.y, x1));
-  acc = __fmaf_rn(w.z, x2, acc);
-  acc = __fmaf_rn(w.w, x3, acc);
-  return SiluF(acc);
 }
 
 constexpr unsigned kSsmProjectionTileTokens = 32;

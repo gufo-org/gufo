@@ -651,6 +651,78 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
   }
 }
 
+// A prefill pass that finishes a prompt after a checkpoint restore covers
+// only its last rows: eight or fewer take the history-saving convolution,
+// wider ones the token-tiled one. Each row's output and the final recurrent
+// and convolution state must equal the single pass's, bit for bit.
+void CheckSplitPasses(std::uint32_t tokens) {
+  const std::size_t qkv_count = std::size_t{tokens} * kChannels;
+  const std::size_t state_count = std::size_t{kVHeads} * kDim * kDim;
+  const std::size_t conv_count = std::size_t{kKernel - 1} * kChannels;
+  const std::size_t out_count = std::size_t{tokens} * kZ;
+  const auto qkv = MakeValues(qkv_count, 0x5B117001U, 1.0F);
+  const auto z = MakeValues(out_count, 0x5B117002U, 2.0F);
+  const auto alpha_beta =
+      MakeValues(std::size_t{tokens} * 2 * kVHeads, 0x5B117003U, 2.0F);
+  const auto conv_w =
+      MakeValues(std::size_t{kChannels} * kKernel, 0x5B117004U, 0.5F);
+  const auto a = MakeValues(kVHeads, 0x5B117005U, 1.0F, -1.5F);
+  const auto dt = MakeValues(kVHeads, 0x5B117006U, 1.0F);
+  const auto norm_w = MakeValues(kDim, 0x5B117007U, 0.5F, 1.0F);
+  const auto conv_state = MakeValues(conv_count, 0x5B117008U, 1.0F);
+  const auto state = MakeValues(state_count, 0x5B117009U, 0.1F);
+  HipBuffer<float> d_qkv(qkv_count), d_z(out_count);
+  HipBuffer<float> d_alpha_beta(alpha_beta.size()), d_conv_w(conv_w.size());
+  HipBuffer<float> d_a(kVHeads), d_dt(kVHeads), d_norm_w(kDim);
+  HipBuffer<float> d_scratch(std::size_t{tokens + kKernel} * kChannels);
+  HipBuffer<float> d_qn(std::size_t{tokens} * kKHeads * kDim);
+  HipBuffer<float> d_kn(std::size_t{tokens} * kKHeads * kDim);
+  HipBuffer<float> d_raw(std::size_t{tokens} * kVHeads * kDim);
+  HipBuffer<float> d_conv_state(conv_count), d_state(state_count);
+  HipBuffer<float> d_out(out_count);
+  Upload(&d_qkv, qkv);
+  Upload(&d_z, z);
+  Upload(&d_alpha_beta, alpha_beta);
+  Upload(&d_conv_w, conv_w);
+  Upload(&d_a, a);
+  Upload(&d_dt, dt);
+  Upload(&d_norm_w, norm_w);
+  // Rows [first, first + count) continuing from the current state.
+  const auto pass = [&](std::uint32_t first, std::uint32_t count) {
+    q::GatedDeltaNet(
+        d_qkv.get() + std::size_t{first} * kChannels, kChannels,
+        d_z.get() + std::size_t{first} * kZ, kZ,
+        d_alpha_beta.get() + std::size_t{first} * 2 * kVHeads, d_conv_w.get(),
+        d_a.get(), d_dt.get(), d_norm_w.get(), d_conv_state.get(),
+        d_scratch.get(), d_qn.get(), d_kn.get(), d_raw.get(), d_state.get(),
+        d_out.get() + std::size_t{first} * kZ, nullptr, {}, {}, count, kKHeads,
+        kVHeads, kDim, kKernel, true, false, kEps, nullptr);
+  };
+  Upload(&d_conv_state, conv_state);
+  Upload(&d_state, state);
+  pass(0, tokens);
+  const auto out = Download(&d_out, out_count);
+  const auto final_state = Download(&d_state, state_count);
+  const auto final_conv = Download(&d_conv_state, conv_count);
+  for (const std::uint32_t tail : {1U, 7U, 8U, 9U, 40U}) {
+    const std::uint32_t prefix = tokens - tail;
+    Upload(&d_conv_state, conv_state);
+    Upload(&d_state, state);
+    pass(0, prefix);
+    pass(prefix, tail);
+    const auto split_out = Download(&d_out, out_count);
+    if (std::memcmp(split_out.data() + std::size_t{prefix} * kZ,
+                    out.data() + std::size_t{prefix} * kZ,
+                    std::size_t{tail} * kZ * sizeof(float)) != 0 ||
+        Download(&d_state, state_count) != final_state ||
+        Download(&d_conv_state, conv_count) != final_conv)
+      throw std::runtime_error("GDN rows depend on the prefill split (" +
+                               std::to_string(prefix) + " + " +
+                               std::to_string(tail) + " rows)");
+  }
+  std::cout << "GDN prefill splits of " << tokens << " rows: exact\n";
+}
+
 }  // namespace
 
 int main() {
@@ -665,6 +737,7 @@ int main() {
     }
     if (RunCase(1, true) != 0 || RunCase(8, true) != 0)
       return 1;
+    CheckSplitPasses(99);
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

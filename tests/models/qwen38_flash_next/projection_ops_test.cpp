@@ -1188,6 +1188,75 @@ void CheckMtpOutputHead(float input_scale) {
     CheckHip(hipFree(p), "MTP free");
 }
 
+// A prefill row's W8A8 projection must not depend on the pass width: a
+// prompt finished by a short pass after a checkpoint restore projects its
+// last rows with the 64-token tile (below 96 rows), a wide pass with the
+// 128-token tiles, their tail kernel or, from 1,024 rows of the 2560 x 6144
+// output projection, the wave64 kernel. Each short pass quantizes its own
+// rows, as its combine would.
+void CheckW8A8PassWidths(std::size_t m, std::size_t k, std::size_t wide,
+                         std::uint32_t seed) {
+  const Q8Weights w = MakeWeights(m, k, seed, false);
+  std::vector<float> x(wide * k);
+  std::uint32_t state = seed ^ 0x9A55U;
+  for (float& v : x)
+    v = Uniform(&state, 2.0F);
+  void* d_w = nullptr;
+  float* d_x = nullptr;
+  void* d_tiled = nullptr;
+  float* d_wide = nullptr;
+  float* d_short = nullptr;
+  CheckHip(hipMalloc(&d_w, w.blocks.size() + 4096), "width weights");
+  CheckHip(hipMalloc(&d_x, x.size() * 4), "width input");
+  CheckHip(hipMalloc(&d_tiled, q::Q8TiledBytes(wide, k)), "width tiles");
+  CheckHip(hipMalloc(&d_wide, wide * m * 4), "width wide output");
+  CheckHip(hipMalloc(&d_short, wide * m * 4), "width short output");
+  CheckHip(
+      hipMemcpy(d_w, w.blocks.data(), w.blocks.size(), hipMemcpyHostToDevice),
+      "width weight upload");
+  CheckHip(hipMemcpy(d_x, x.data(), x.size() * 4, hipMemcpyHostToDevice),
+           "width input upload");
+  q::QuantizeQ8Tiled(d_x, d_tiled, wide, k, nullptr);
+  if (!q::W8A8Gemm(d_w, d_tiled, d_wide, wide, m, k, nullptr))
+    throw std::runtime_error("W8A8 wide pass rejected");
+  std::vector<float> reference(wide * m);
+  CheckHip(hipMemcpy(reference.data(), d_wide, reference.size() * 4,
+                     hipMemcpyDeviceToHost),
+           "width wide download");
+  std::size_t failures = 0;
+  for (const std::size_t rows : {1U, 7U, 9U, 95U, 96U}) {
+    for (const std::size_t first :
+         {std::size_t{0}, (wide - rows) / 2, wide - rows}) {
+      q::QuantizeQ8Tiled(d_x + first * k, d_tiled, rows, k, nullptr);
+      if (!q::W8A8Gemm(d_w, d_tiled, d_short, rows, m, k, nullptr))
+        throw std::runtime_error("W8A8 short pass rejected");
+      std::vector<float> actual(rows * m);
+      CheckHip(hipMemcpy(actual.data(), d_short, actual.size() * 4,
+                         hipMemcpyDeviceToHost),
+               "width short download");
+      std::size_t differ = 0;
+      for (std::size_t r = 0; r < rows; ++r)
+        differ += std::memcmp(actual.data() + r * m,
+                              reference.data() + (first + r) * m, m * 4) != 0;
+      if (differ != 0) {
+        std::cout << "W8A8 m=" << m << " k=" << k << ": " << differ << " of "
+                  << rows << " rows from " << first << " differ from the "
+                  << wide << "-row pass\n";
+      }
+      failures += differ;
+    }
+  }
+  (void)hipFree(d_w);
+  (void)hipFree(d_x);
+  (void)hipFree(d_tiled);
+  (void)hipFree(d_wide);
+  (void)hipFree(d_short);
+  if (failures != 0)
+    throw std::runtime_error("W8A8 rows depend on the pass width");
+  std::cout << "W8A8 m=" << m << " k=" << k << " pass widths against " << wide
+            << " rows: exact\n";
+}
+
 }  // namespace
 
 int main() {
@@ -1223,6 +1292,12 @@ int main() {
     CheckExpandQ8_0(96, 2560, 0xE8A4D2U);
     CheckW8A8Tail(320, 10240, 0x7A1320U);
     CheckW8A8Tail(640, 2560, 0x7A1640U);
+    // The output projection takes the wave64 kernel from 1,024 rows; the
+    // others keep the blocked kernel, past a W8A8 tail at 1549 rows.
+    CheckW8A8PassWidths(2560, 6144, 1619, 0x5A6144U);
+    CheckW8A8PassWidths(2560, 6144, 1549, 0x5B6144U);
+    CheckW8A8PassWidths(320, 10240, 1549, 0x5A0320U);
+    CheckW8A8PassWidths(640, 2560, 1619, 0x5A0640U);
     bool ok = true;
     // Ragged batch and rows against the 128-wide macro tiles, the 64-token
     // tile below 96, and the model's ssm_out / shexp_down widths.
