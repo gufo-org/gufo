@@ -4,6 +4,32 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.27.0](https://github.com/gufo-org/gufo/compare/v0.26.0...v0.27.0) (2026-10-29)
+
+
+### Features
+
+* **minimax_h3:** run MiniMax H3 on Windows (MP4 mux, prompt-encoder loading, rocBLAS fallbacks) ([#856](https://github.com/gufo-org/gufo/issues/856)) ([6feba90](https://github.com/gufo-org/gufo/commit/6feba9060477e0d5358deee40ca978c37f3b3d77))
+* **serve:** add cache_persist=false to keep a request's prompt off the disk cache ([#811](https://github.com/gufo-org/gufo/issues/811)) ([b7a2d61](https://github.com/gufo-org/gufo/commit/b7a2d616f09cb64b7c438ad86762e02aa8d10c51))
+* **serve:** support generated token logprobs ([#814](https://github.com/gufo-org/gufo/issues/814)) ([e590d17](https://github.com/gufo-org/gufo/commit/e590d170f903967d7547c1d0d7037e1ce3c03ab4))
+
+
+### Bug Fixes
+
+* **ci:** pack the Windows release ZIP without ./ entry names ([#868](https://github.com/gufo-org/gufo/issues/868)) ([e011849](https://github.com/gufo-org/gufo/commit/e011849cab12f78b3284c3eb6a917681be1abf83))
+* **loader:** retry any failed unbuffered weight read through the buffered file ([#858](https://github.com/gufo-org/gufo/issues/858)) ([abbc5cb](https://github.com/gufo-org/gufo/commit/abbc5cb8c3e72c76b35a2a371b1e0959b874442f))
+* **qwen-flash:** bound draft-ID remapping and block selection by their buffers ([#849](https://github.com/gufo-org/gufo/issues/849)) ([81ff13c](https://github.com/gufo-org/gufo/commit/81ff13c3d394eb919d91074331ddd8d21701db45))
+* **qwen-flash:** preserve YaRN in batched MTP cache catch-up ([#854](https://github.com/gufo-org/gufo/issues/854)) ([0f34adc](https://github.com/gufo-org/gufo/commit/0f34adcb8972979a3ea2160fea62bea41c7bb00a))
+* **qwen38-flash-next:** run Q8_0 inject and alpha/beta weights on their F32 kernels ([#788](https://github.com/gufo-org/gufo/issues/788)) ([7b94a6a](https://github.com/gufo-org/gufo/commit/7b94a6a3fc52de630c15a822a0659a3e25f46bf7))
+* **qwen38-flash-next:** start each qfn_mmq stream arena small and grow it in blocks ([#740](https://github.com/gufo-org/gufo/issues/740)) ([1a6655f](https://github.com/gufo-org/gufo/commit/1a6655fcb1c63f7e1e8aae7394e9c903b25ad91f))
+* **qwen:** size the Q8_0 prefill GEMM activation scratch for its sum sidecar ([#777](https://github.com/gufo-org/gufo/issues/777)) ([2f10b15](https://github.com/gufo-org/gufo/commit/2f10b15d6deab4b19e7c45583ede120bb28dd2ed))
+
+
+### Performance
+
+* **qwen-flash:** keep the fused WMMA prefill attention past 262,144 visible tokens ([#866](https://github.com/gufo-org/gufo/issues/866)) ([538f6e4](https://github.com/gufo-org/gufo/commit/538f6e4dcb2d6a9d9574c9d6b001eea33c5e9c37))
+* **qwen:** run split 9-15-row K-quant prefill GEMM calls as one masked 16-row pass ([#779](https://github.com/gufo-org/gufo/issues/779)) ([1fc829e](https://github.com/gufo-org/gufo/commit/1fc829eaef81a7fa26a3d3dfc3380c2eba80b99e))
+
 ## [0.26.0](https://github.com/gufo-org/gufo/compare/v0.25.0...v0.26.0) (2026-10-28)
 
 
