@@ -121,7 +121,7 @@ struct Session::Impl {
     std::uint32_t capacity{};
   };
   std::vector<State> states;
-  Buffer quantized;
+  Buffer quantized, attention_scratch;
   Impl(std::shared_ptr<Model> m, std::uint32_t ctx)
       : model(std::move(m)),
         context(ctx),
@@ -143,6 +143,8 @@ struct Session::Impl {
     const auto width =
         std::max({c.hidden * 3, c.intermediate, c.heads * c.head_dim});
     quantized = Buffer(gpu::DenseWorkspaceBytes(kChunk, width));
+    attention_scratch =
+        Buffer(gpu::AttentionScratchBytes(c.heads, c.head_dim, ctx));
 
     states.reserve(c.layers.size());
     for (std::size_t i = 0; i < c.layers.size(); ++i) {
@@ -260,7 +262,8 @@ struct Session::Impl {
                          state.k.floats(), state.v.floats(),
                          a.floats() + row * c.heads * c.head_dim, count,
                          c.heads, c.kv_heads[i], c.head_dim, owner.position,
-                         state.capacity, swa ? c.window : 0, s);
+                         state.capacity, swa ? c.window : 0, s,
+                         owner.attention_scratch.floats());
           gpu::StoreKV(kr, vr, state.k.floats(), state.v.floats(), count,
                        c.kv_heads[i] * c.head_dim, owner.position,
                        state.capacity, s);

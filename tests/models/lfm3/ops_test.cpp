@@ -163,9 +163,10 @@ void Attention(int n, int window) {
             sum / (1 + std::exp(-double(gates[row * H + h])));
       }
     }
-  Buffer dq(q), dk(k), dv(v), dg(gates), dck(ck), dcv(cv), out(expected.size());
+  Buffer dq(q), dk(k), dv(v), dg(gates), dck(ck), dcv(cv), out(expected.size()),
+      scratch(g::AttentionScratchBytes(H, D, P + n) / 4);
   g::Attention(dq.p, dk.p, dv.p, dg.p, dck.p, dcv.p, out.p, n, H, KH, D, P,
-               capacity, window, nullptr);
+               capacity, window, nullptr, scratch.p);
   g::StoreKV(dk.p, dv.p, dck.p, dcv.p, n, stride, P, capacity, nullptr);
   Check(hipDeviceSynchronize());
   Near(out.Read(expected.size()), expected, 2e-6F);
