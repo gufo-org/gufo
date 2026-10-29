@@ -624,7 +624,7 @@ namespace {
 bool SplitPrompt(const Tensor& w, int n, DenseWorkspace workspace) {
   return n >= 32 && w.type == core::GgmlType::kQ8_0 && workspace.quantized;
 }
-template<bool kSwiGLU = false>
+template<bool kSwiGLU = false, bool kRaw = false>
 void LaunchSplit(std::span<const Output> outputs, SplitActivations split,
                  int n, int K, hipStream_t s) {
   constexpr int BN = 64;
@@ -644,9 +644,11 @@ void LaunchSplit(std::span<const Output> outputs, SplitActivations split,
   if (kSwiGLU)
     jobs.count = 1;  // Both weights belong to every row block.
   if (wide)
-    SplitQ8Gemm<256, BN, 8, 1, kSwiGLU><<<grid, 256, 0, s>>>(jobs, split, n, K);
+    SplitQ8Gemm<256, BN, 8, 1, kSwiGLU, kRaw>
+        <<<grid, 256, 0, s>>>(jobs, split, n, K);
   else
-    SplitQ8Gemm<64, BN, 4, 2, kSwiGLU><<<grid, 256, 0, s>>>(jobs, split, n, K);
+    SplitQ8Gemm<64, BN, 4, 2, kSwiGLU, kRaw>
+        <<<grid, 256, 0, s>>>(jobs, split, n, K);
 }
 }  // namespace
 bool SharesSplit(std::span<const Output> outputs, int n,
@@ -705,6 +707,31 @@ void ProjectSwiGLU(const Tensor& gate, const Tensor& up, const float* x,
   Dense(up, x, up_scratch, n, s, workspace);
   gufo::hip::LaunchBatchedSwiGLUActivation(out, up_scratch, out, nullptr,
                                            std::size_t(n) * gate.rows, s);
+}
+void ProjectFfn(const Tensor& gate, const Tensor& up, const Tensor& down,
+                const float* x, float* hidden, float* up_scratch, float* out,
+                int n, hipStream_t s, DenseWorkspace workspace,
+                bool split_ready) {
+  const Output first[] = {{&gate, hidden}, {&up, nullptr}};
+  if (workspace.row_max && SharesSplit(first, n, workspace) &&
+      gate.rows == up.rows && SplitPrompt(down, n, workspace) &&
+      down.cols == gate.rows) {
+    auto split = SplitActivations::In(workspace.quantized, n, gate.cols);
+    if (!split_ready)
+      SplitRows<<<n, 256, 0, s>>>(x, split, gate.cols);
+    split.row_max = workspace.row_max;
+    (void)hipMemsetAsync(workspace.row_max, 0, std::size_t(n) * 4, s);
+    LaunchSplit<true>(first, split, n, gate.cols, s);
+    SplitActivations raw{};
+    raw.raw = hidden;
+    raw.row_max = workspace.row_max;
+    const Output second[] = {{&down, out}};
+    LaunchSplit<false, true>(second, raw, n, down.cols, s);
+    return;
+  }
+  ProjectSwiGLU(gate, up, x, hidden, up_scratch, n, s, workspace,
+                split_ready);
+  Dense(down, hidden, out, n, s, workspace);
 }
 void Dense(const Tensor& w, const float* x, float* out, int n, hipStream_t s,
            DenseWorkspace workspace) {

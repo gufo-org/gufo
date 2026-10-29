@@ -13,15 +13,22 @@ namespace gufo::models::lfm3::gpu {
 inline std::size_t SplitActivationBytes(std::size_t tokens, std::size_t K) {
   return tokens * K * 2 * sizeof(__half) + tokens * sizeof(float);
 }
+// With raw, a projection reads FP32 rows and splits them while staging, with
+// the exponent from row_max (the bits of each row's maximum magnitude).
 struct SplitActivations {
   __half *high, *low;
   float* scale;
+  const float* raw = nullptr;
+  unsigned* row_max = nullptr;
   static SplitActivations In(void* base, std::size_t tokens, std::size_t K) {
     auto* half = static_cast<__half*>(base);
     return {half, half + tokens * K,
-            reinterpret_cast<float*>(half + 2 * tokens * K)};
+            reinterpret_cast<float*>(half + 2 * tokens * K), nullptr, nullptr};
   }
 };
+__device__ __forceinline__ int SplitExponent(float maximum) {
+  return maximum > 0 ? 14 - ilogbf(maximum) : 0;
+}
 __global__ void SplitRows(const float* __restrict__ x, SplitActivations out,
                           int K) {
   const int row = blockIdx.x, tid = threadIdx.x;
@@ -38,7 +45,7 @@ __global__ void SplitRows(const float* __restrict__ x, SplitActivations out,
   maximum = 0;
   for (float v : maxima)
     maximum = fmaxf(maximum, v);
-  const int e = maximum > 0 ? 14 - ilogbf(maximum) : 0;
+  const int e = SplitExponent(maximum);
   if (!tid)
     out.scale[row] = ldexpf(1.0F, -e);
   for (int k = tid; k < K; k += 256) {
@@ -88,7 +95,8 @@ struct Projections {
 // LDS stages leave one barrier per K block. With kSwiGLU, job 0 is the FFN
 // gate and job 1 its up projection: a block holds BM / 2 rows of each and
 // writes silu(gate) * up to job 0's output.
-template<int BM, int BN, int WM, int WN, bool kSwiGLU = false>
+template<int BM, int BN, int WM, int WN, bool kSwiGLU = false,
+         bool kRaw = false>
 __launch_bounds__(256) __global__
     void SplitQ8Gemm(Projections jobs, SplitActivations x, int tokens, int K) {
   using detail::v16h;
@@ -124,13 +132,20 @@ __launch_bounds__(256) __global__
     a_ptr[p] = static_cast<const std::uint8_t*>(jobs.job[source].weight) +
                std::size_t(a_live[p] ? r : M - 1) * blocks * 34;
   }
-  const __half* b_ptr[kBPer];
+  // Each B unit is one token's high or low K block, or with kRaw one half
+  // of its FP32 K block.
+  const void* b_ptr[kBPer];
+  [[maybe_unused]] int b_exponent[kBPer];
 #pragma unroll
   for (int p = 0; p < kBPer; ++p) {
     const int idx = p * 256 + tid, t = t_block + idx % BN;
-    b_ptr[p] = idx < 2 * BN && t < tokens
-                   ? (idx / BN ? x.low : x.high) + std::size_t(t) * K
-                   : nullptr;
+    const bool live = idx < 2 * BN && t < tokens;
+    if constexpr (kRaw) {
+      b_ptr[p] = live ? x.raw + std::size_t(t) * K + idx / BN * 16 : nullptr;
+      b_exponent[p] = live ? SplitExponent(__uint_as_float(x.row_max[t])) : 0;
+    } else
+      b_ptr[p] =
+          live ? (idx / BN ? x.low : x.high) + std::size_t(t) * K : nullptr;
   }
   uint4 a_codes[kAPer][2];
   std::uint16_t a_d[kAPer];
@@ -146,7 +161,9 @@ __launch_bounds__(256) __global__
 #pragma unroll
     for (int p = 0; p < kBPer; ++p) {
       if (b_ptr[p]) {
-        const auto* src = reinterpret_cast<const uint4*>(b_ptr[p] + kb * 32);
+        const auto* src = reinterpret_cast<const uint4*>(
+            static_cast<const std::uint8_t*>(b_ptr[p]) +
+            std::size_t(kb) * 32 * (kRaw ? sizeof(float) : sizeof(__half)));
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           b_data[p][c] = src[c];
@@ -183,10 +200,33 @@ __launch_bounds__(256) __global__
       const int idx = p * 256 + tid;
       if (idx >= 2 * BN)
         break;
-      const int plane = idx / BN, t = idx % BN;
+      const int t = idx % BN;
+      if constexpr (kRaw) {
+        // SplitRows' rounding: scale, round high, round the remainder.
+        float v[16];
+        __builtin_memcpy(v, b_data[p], sizeof(v));
+        __half high[16], low[16];
 #pragma unroll
-      for (int c = 0; c < 4; ++c)
-        s_b[stage][plane][t][swizzle(t, c)] = b_data[p][c];
+        for (int e = 0; e < 16; ++e) {
+          const float scaled = ldexpf(v[e], b_exponent[p]);
+          high[e] = __float2half_rn(scaled);
+          low[e] = __float2half_rn(scaled - __half2float(high[e]));
+        }
+        const int k_half = idx / BN;
+#pragma unroll
+        for (int c = 0; c < 2; ++c) {
+          uint4 h, l;
+          __builtin_memcpy(&h, high + 8 * c, 16);
+          __builtin_memcpy(&l, low + 8 * c, 16);
+          s_b[stage][0][t][swizzle(t, 2 * k_half + c)] = h;
+          s_b[stage][1][t][swizzle(t, 2 * k_half + c)] = l;
+        }
+      } else {
+        const int plane = idx / BN;
+#pragma unroll
+        for (int c = 0; c < 4; ++c)
+          s_b[stage][plane][t][swizzle(t, c)] = b_data[p][c];
+      }
     }
   };
   v8f acc[RM][RN] = {};
@@ -252,7 +292,13 @@ __launch_bounds__(256) __global__
 #pragma unroll
       for (int j = 0; j < RN; ++j) {
         const int local = (wt * RN + j) * 16 + sub, token = t_block + local;
-        const float scale = token < tokens ? x.scale[token] : 0;
+        float scale = 0;
+        if (token < tokens)
+          scale =
+              kRaw ? ldexpf(1.0F,
+                            -SplitExponent(__uint_as_float(x.row_max[token])))
+                   : x.scale[token];
+        [[maybe_unused]] float token_max = 0;
 #pragma unroll
         for (int i = 0; i < RM; ++i)
 #pragma unroll
@@ -275,7 +321,12 @@ __launch_bounds__(256) __global__
 #pragma unroll
   for (int j = 0; j < RN; ++j) {
     const int local = (wt * RN + j) * 16 + sub, token = t_block + local;
-    const float scale = token < tokens ? x.scale[token] : 0;
+    float scale = 0;
+    if (token < tokens)
+      scale =
+          kRaw ? ldexpf(1.0F, -SplitExponent(__uint_as_float(x.row_max[token])))
+               : x.scale[token];
+    [[maybe_unused]] float token_max = 0;
 #pragma unroll
     for (int i = 0; i < RM; ++i) {
       float value[8];
@@ -299,6 +350,9 @@ __launch_bounds__(256) __global__
         rows[2 * l] = half ? received[l] : value[l];
         rows[2 * l + 1] = half ? value[4 + l] : received[l];
       }
+      if constexpr (kSwiGLU)
+        for (int l = 0; l < 8; ++l)
+          token_max = fmaxf(token_max, fabsf(rows[l]));
       const int row = r_block + (wr * RM + i) * 16 + 8 * half;
       if (token >= tokens)
         continue;
@@ -314,6 +368,12 @@ __launch_bounds__(256) __global__
           if (row + l < M)
             dst[l] = rows[l];
       }
+    }
+    if constexpr (kSwiGLU) {
+      // Row maxima let the down projection split this output while staging.
+      token_max = fmaxf(token_max, other_half(token_max));
+      if (x.row_max && !half && token < tokens)
+        atomicMax(x.row_max + token, __float_as_uint(token_max));
     }
   }
 }

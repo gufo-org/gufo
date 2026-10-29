@@ -121,7 +121,7 @@ struct Session::Impl {
     std::uint32_t capacity{};
   };
   std::vector<State> states;
-  Buffer quantized, attention_scratch, frequencies;
+  Buffer quantized, row_max, attention_scratch, frequencies;
   Impl(std::shared_ptr<Model> m, std::uint32_t ctx)
       : model(std::move(m)),
         context(ctx),
@@ -143,6 +143,7 @@ struct Session::Impl {
     const auto width =
         std::max({c.hidden * 3, c.intermediate, c.heads * c.head_dim});
     quantized = Buffer(gpu::DenseWorkspaceBytes(kChunk, width));
+    row_max = Buffer(kChunk * sizeof(unsigned));
     attention_scratch =
         Buffer(gpu::AttentionScratchBytes(c.heads, c.head_dim, ctx, kChunk));
     // Global then sliding-window RoPE frequencies.
@@ -188,7 +189,8 @@ struct Session::Impl {
           input, static_cast<const float*>(weight.data), output, nullptr, count,
           weight.cols, c.eps, s);
     };
-    const gpu::DenseWorkspace workspace{quantized.data};
+    const gpu::DenseWorkspace workspace{quantized.data,
+                                        static_cast<unsigned*>(row_max.data)};
     // x += post(branch), then z = norm(x), split for the next projections
     // when they all read split prompt inputs. Returns whether z was split.
     auto residual_norm = [&](const float* branch, const Tensor* post,
@@ -287,9 +289,8 @@ struct Session::Impl {
       const gpu::Output ffn[] = {{&l.gate, ff_gate.floats()},
                                  {&l.up, ff_up.floats()}};
       split = residual_norm(out.floats(), &l.post_norm, &l.ffn_norm, ffn);
-      gpu::ProjectSwiGLU(l.gate, l.up, z.floats(), ff_gate.floats(),
-                         ff_up.floats(), n, s, workspace, split);
-      dense(l.down, ff_gate.floats(), out.floats(), n, s);
+      gpu::ProjectFfn(l.gate, l.up, l.down, z.floats(), ff_gate.floats(),
+                      ff_up.floats(), out.floats(), n, s, workspace, split);
       const bool last = i + 1 == c.layers.size();
       if (!last)
         inputs = mixer_inputs(i + 1);

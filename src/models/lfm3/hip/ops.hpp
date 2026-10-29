@@ -9,8 +9,11 @@ namespace gufo::models::lfm3::gpu {
 void Embed(const Tensor& weight, const std::uint32_t* tokens, float* out, int n,
            hipStream_t stream);
 // Prompt projections of n rows need SplitActivationBytes(n, K) here.
+// row_max (one word per prompt row) lets the FFN down projection split its
+// input while staging.
 struct DenseWorkspace {
   void* quantized{};
+  unsigned* row_max{};
 };
 std::size_t DenseWorkspaceBytes(std::size_t rows, std::size_t K);
 struct Output {
@@ -31,6 +34,11 @@ void Project(std::span<const Output> outputs, const float* x, int n,
 void ProjectSwiGLU(const Tensor& gate, const Tensor& up, const float* x,
                    float* out, float* up_scratch, int n, hipStream_t stream,
                    DenseWorkspace workspace, bool split_ready = false);
+// down(silu(gate x) * (up x)) into out, with the activation in hidden.
+void ProjectFfn(const Tensor& gate, const Tensor& up, const Tensor& down,
+                const float* x, float* hidden, float* up_scratch, float* out,
+                int n, hipStream_t stream, DenseWorkspace workspace,
+                bool split_ready = false);
 // x += post_norm(branch) (branch may be null, post_norm may be null), then
 // z = norm(x) unless norm is null. With split, z goes to the workspace as a
 // split prompt input instead. Returns false when the width is unsupported.
