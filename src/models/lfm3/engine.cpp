@@ -141,7 +141,7 @@ struct Session::Impl {
     const auto& c = model->config();
     const auto width =
         std::max({c.hidden * 3, c.intermediate, c.heads * c.head_dim});
-    quantized = Buffer(3 * gufo::hip::QuantizedActivationBytes(kChunk, width));
+    quantized = Buffer(gpu::DenseWorkspaceBytes(kChunk, width));
 
     states.reserve(c.layers.size());
     for (std::size_t i = 0; i < c.layers.size(); ++i) {

@@ -65,7 +65,7 @@ void Projection(int n) {
     }
   auto bytes = weights.size() * sizeof(weights[0]);
   Buffer w((bytes + 3) / 4), dx(x), out(n * M),
-      quant((3 * gufo::hip::QuantizedActivationBytes(n, K) + 3) / 4);
+      quant((g::DenseWorkspaceBytes(n, K) + 3) / 4);
   Check(hipMemcpy(w.p, weights.data(), bytes, hipMemcpyHostToDevice));
   gufo::models::lfm3::Tensor tensor{w.p, gufo::core::GgmlType::kQ8_0, K, M,
                                     bytes};

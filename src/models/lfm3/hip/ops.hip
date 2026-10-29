@@ -46,57 +46,6 @@ __global__ void F16Dense(Tensor w, const float* x, float* y, int n) {
   if (!lane)
     y[std::size_t(token) * w.rows + row] = sum;
 }
-// Encode each row into three signed base-256 digits with one power-of-two
-// scale, retaining about 22 bits relative to the row maximum. The constant
-// row scale can be applied after the K reduction. This is qualified against
-// the independent FP64 projection formula, not assumed to be lossless.
-__global__ void QuantizeFixedPoint(const float* x, unsigned char* quant,
-                                   std::size_t stride, int n, int K) {
-  int row = blockIdx.x, tid = threadIdx.x;
-  float maximum = 0;
-  for (int k = tid; k < K; k += 256)
-    if (row < n)
-      maximum = fmaxf(maximum, fabsf(x[std::size_t(row) * K + k]));
-  for (int d = 16; d; d /= 2)
-    maximum = fmaxf(maximum, __shfl_down(maximum, d, 32));
-  __shared__ float maxima[8], low_scale;
-  if (!(tid % 32))
-    maxima[tid / 32] = maximum;
-  __syncthreads();
-  if (!tid) {
-    maximum = 0;
-    for (float value : maxima)
-      maximum = fmaxf(maximum, value);
-    float scale =
-        maximum > 0 ? ldexpf(1.0F, max(-149, ilogbf(maximum) - 22)) : 0;
-    if (maximum > scale * (126.0F * 65536.0F))
-      scale *= 2;
-    low_scale = scale;
-  }
-  __syncthreads();
-  for (int k = tid; k < K; k += 256) {
-    float value = row < n ? x[std::size_t(row) * K + k] : 0;
-    int integer = low_scale > 0 ? __float2int_rn(value / low_scale) : 0;
-    int low = ((integer + 128) & 255) - 128;
-    int remain = (integer - low) / 256;
-    int middle = ((remain + 128) & 255) - 128;
-    int high = (remain - middle) / 256;
-    const int digits[3] = {high, middle, low};
-    const float scales[3] = {low_scale * 65536, low_scale * 256, low_scale};
-#pragma unroll
-    for (int pass = 0; pass < 3; ++pass) {
-      auto* tile = quant + pass * stride +
-                   (std::size_t(row / 16) * (K / 32) + k / 32) *
-                       gufo::hip::kQ8ActTileBytes;
-      reinterpret_cast<signed char*>(
-          tile)[((k % 32) / 16) * 256 + (row % 16) * 16 + k % 16] =
-          digits[pass];
-      if (!(k % 32))
-        reinterpret_cast<float*>(
-            tile + gufo::hip::kQ8ActScaleOffset)[row % 16] = scales[pass];
-    }
-  }
-}
 // One thread per (row, channel): earlier rows' B*x products are recomputed
 // from the projection, or read from the history before the chunk. The FMA
 // order over the window matches a sequential scan.
@@ -382,15 +331,22 @@ void Embed(const Tensor& w, const std::uint32_t* tokens, float* out, int n,
   Embedding<<<(std::size_t(n) * w.cols + 255) / 256, 256, 0, s>>>(w, tokens,
                                                                   out, n);
 }
+std::size_t DenseWorkspaceBytes(std::size_t rows, std::size_t K) {
+  return SplitActivationBytes(rows, K);
+}
 void Dense(const Tensor& w, const float* x, float* out, int n, hipStream_t s,
            DenseWorkspace workspace) {
   if (n >= 32 && w.type == core::GgmlType::kQ8_0 && workspace.quantized) {
-    const auto stride = gufo::hip::QuantizedActivationBytes(n, w.cols);
-    QuantizeFixedPoint<<<(n + 15) / 16 * 16, 256, 0, s>>>(
-        x, static_cast<unsigned char*>(workspace.quantized), stride, n, w.cols);
-    ResidualQ8Gemm<><<<dim3((n + 63) / 64, (w.rows + 63) / 64), 256, 0, s>>>(
-        w.data, static_cast<const unsigned char*>(workspace.quantized), stride,
-        out, n, w.rows, w.cols);
+    const auto split = SplitActivations::In(workspace.quantized, n, w.cols);
+    SplitRows<<<n, 256, 0, s>>>(x, split, w.cols);
+    if (w.rows >= 1024)
+      SplitQ8Gemm<256, 64, 8, 1>
+          <<<dim3((n + 63) / 64, (w.rows + 255) / 256), 256, 0, s>>>(
+              w.data, split, out, n, w.rows, w.cols);
+    else
+      SplitQ8Gemm<64, 64, 4, 2>
+          <<<dim3((n + 63) / 64, (w.rows + 63) / 64), 256, 0, s>>>(
+              w.data, split, out, n, w.rows, w.cols);
     return;
   }
   if (w.type == core::GgmlType::kF16)

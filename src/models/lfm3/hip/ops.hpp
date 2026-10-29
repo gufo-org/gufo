@@ -6,9 +6,11 @@
 namespace gufo::models::lfm3::gpu {
 void Embed(const Tensor& weight, const std::uint32_t* tokens, float* out, int n,
            hipStream_t stream);
+// Prompt projections of n rows need SplitActivationBytes(n, K) here.
 struct DenseWorkspace {
   void* quantized{};
 };
+std::size_t DenseWorkspaceBytes(std::size_t rows, std::size_t K);
 void Dense(const Tensor& weight, const float* x, float* out, int n,
            hipStream_t stream, DenseWorkspace workspace = {});
 void ShortConv(const float* projection, const float* weight, float* history,
