@@ -1,7 +1,8 @@
 // Launch-geometry sweep for the Qwen GPU verification projections.
 //
 // Loads one weight matrix from a GGUF, runs the production path
-// (TryLaunchVerifyGemm27, then LaunchBatchedQuantGEMMFp32) and a set of
+// (TryLaunchVerifyGemm27, then LaunchBatchedQuantGEMMFp32), the generic
+// LaunchBatchedQuantGEMMFp32 dispatch alone and a set of
 // SmallBatchKQuantExactFp32GEMMKernel launch shapes on the same input, checks
 // every candidate bit for bit against production and times them with HIP
 // events: alternating rounds, median, weights rotated through >= 512 MiB of
@@ -10,7 +11,8 @@
 //   qwen27b_verify_sweep <gguf> <offset> <type> <m> <k> <batch> [rounds]
 //
 // <type> is the GGUF type id: 12 Q4_K, 13 Q5_K, 14 Q6_K, 23 IQ4_XS. Output:
-// one "base" line and one line per candidate (Launch<> parameters, time,
+// one "base" line, a "listed" line (1 when verify_gemm_27b.hip lists the
+// shape) and one line per candidate ("generic" or Launch<> parameters, time,
 // GB/s, gain); see README.md.
 #include <hip/hip_runtime.h>
 
@@ -194,9 +196,23 @@ int main(int argc, char** argv) {
                     : type == GgmlType::kQ6_K
                         ? ForBatch<GgmlType::kQ6_K>(batch)
                         : ForBatch<GgmlType::kIQ4_XS>(batch);
+  // The dispatch without any listed shape; a listed shape slower than it is a
+  // regression.
+  candidates.insert(
+      candidates.begin(),
+      {"generic",
+       [type, batch](const void* w, const float* in, float* out,
+                     std::size_t rows, std::size_t cols, hipStream_t st) {
+         gufo::hip::LaunchBatchedQuantGEMMFp32(type, w, in, out, batch, rows,
+                                               cols, st);
+       }});
 
   std::vector<float> reference(batch * m), got(batch * m);
-  production(weights[0], y);
+  const bool listed =
+      gufo::hip::TryLaunchVerifyGemm27(type, weights[0], x, y, batch, m, k, s);
+  if (!listed)
+    gufo::hip::LaunchBatchedQuantGEMMFp32(type, weights[0], x, y, batch, m, k,
+                                          s);
   CHECK(hipStreamSynchronize(s));
   CHECK(hipMemcpy(reference.data(), y, reference.size() * sizeof(float),
                   hipMemcpyDeviceToHost));
@@ -244,6 +260,7 @@ int main(int argc, char** argv) {
       "base type=%d m=%zu k=%zu batch=%zu MB=%.1f copies=%zu %.1f us %.0f "
       "GB/s\n",
       type_id, m, k, batch, bytes / 1e6, copies, base, bytes / (base * 1e3));
+  std::printf("listed %d\n", listed ? 1 : 0);
   for (std::size_t i = 0; i < candidates.size(); ++i) {
     if (!exact[i]) {
       std::printf("cand %s NOT-EXACT\n", candidates[i].name.c_str());

@@ -134,9 +134,14 @@ def main() -> int:
                          float(match.group(3))) for line in lines
                         if (match := CANDIDATE.match(line))),
                        key=lambda c: c[2], default=("-", 0, 0.0))
+            generic = next((float(match.group(3)) for line in lines
+                            if (match := CANDIDATE.match(line))
+                            and match.group(1) == "generic"), 0.0)
+            if "listed 1" not in lines:
+                generic = 0.0  # production is the generic dispatch
             inexact = sum("NOT-EXACT" in line for line in lines)
             rows.append((TYPE_NAMES[kind], m, k, count, name, batch, base,
-                         best[1], best[2], best[0], inexact))
+                         best[1], best[2], best[0], inexact, generic))
             print(f"{TYPE_NAMES[kind]:6} {m:>6} {k:>6} layers={count:<3} "
                   f"rows={batch} {base:>4} -> {best[1]:>4} GB/s "
                   f"{best[2]:+6.1f}%  {best[0]}"
@@ -148,11 +153,18 @@ def main() -> int:
     print(f"\nGains of {args.min_gain:g}% or more, as verify_gemm_27b.hip "
           "entries (check the shape is not also a draft shape there):")
     for (type_name, m, k, count, name, batch, base, best_gbs, gain, launch,
-         _) in rows:
-        if gain >= args.min_gain:
+         _, _) in rows:
+        if gain >= args.min_gain and launch != "generic":
             print(f"  // {type_name} {m}x{k} ({count} layers, {name}), "
                   f"{batch} rows: {base} -> {best_gbs} GB/s, +{gain:g}%")
             print(f"  {launch}(w, x, y, m, k, stream);")
+    slower = [row for row in rows if row[11] > 0]
+    if slower:
+        print("\nListed shapes slower than the generic dispatch; remove them "
+              "or replace them with a shape that wins by --min-gain:")
+        for (type_name, m, k, count, name, batch, *_, generic) in slower:
+            print(f"  {type_name} {m}x{k} ({count} layers, {name}), "
+                  f"{batch} rows: generic {generic:+g}%")
     return 0
 
 
