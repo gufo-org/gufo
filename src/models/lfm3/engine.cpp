@@ -144,7 +144,7 @@ struct Session::Impl {
         std::max({c.hidden * 3, c.intermediate, c.heads * c.head_dim});
     quantized = Buffer(gpu::DenseWorkspaceBytes(kChunk, width));
     attention_scratch =
-        Buffer(gpu::AttentionScratchBytes(c.heads, c.head_dim, ctx));
+        Buffer(gpu::AttentionScratchBytes(c.heads, c.head_dim, ctx, kChunk));
     // Global then sliding-window RoPE frequencies.
     frequencies = Buffer(std::size_t(c.head_dim) * 4);
     gpu::RopeFrequencies(frequencies.floats(), c.head_dim, c.theta,

@@ -47,14 +47,15 @@ void Rope(float* x, const float* frequencies, const float* factors, int n,
           int heads, int dim, int position, hipStream_t stream);
 // Reads previous cached rows plus the current chunk. Cache writes follow this
 // launch, so a sliding ring cannot overwrite history needed by early queries.
-// Single decode queries split long histories across blocks through scratch
-// of AttentionScratchBytes(heads, dim, context) bytes.
+// Long histories split their keys across blocks through scratch of
+// AttentionScratchBytes(heads, dim, context, rows) bytes, where rows bounds
+// the queries of one call.
 void Attention(const float* q, const float* k, const float* v,
                const float* gate, const float* cache_k, const float* cache_v,
                float* out, int n, int heads, int kv_heads, int dim,
                int position, int capacity, int window, hipStream_t stream,
                float* scratch = nullptr);
-std::size_t AttentionScratchBytes(int heads, int dim, int context);
+std::size_t AttentionScratchBytes(int heads, int dim, int context, int rows);
 void StoreKV(const float* k, const float* v, float* cache_k, float* cache_v,
              int n, int stride, int position, int capacity, hipStream_t stream);
 }  // namespace gufo::models::lfm3::gpu

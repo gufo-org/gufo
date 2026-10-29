@@ -165,7 +165,7 @@ void Attention(int n, int window, int P = 259) {
       }
     }
   Buffer dq(q), dk(k), dv(v), dg(gates), dck(ck), dcv(cv), out(expected.size()),
-      scratch(g::AttentionScratchBytes(H, D, P + n) / 4);
+      scratch(g::AttentionScratchBytes(H, D, P + n, n) / 4);
   g::Attention(dq.p, dk.p, dv.p, dg.p, dck.p, dcv.p, out.p, n, H, KH, D, P,
                capacity, window, nullptr, scratch.p);
   g::StoreKV(dk.p, dv.p, dck.p, dcv.p, n, stride, P, capacity, nullptr);
@@ -197,6 +197,10 @@ int main() {
     std::cerr << "decode 4999\n";
     Attention(1, 0, 4999);
     Attention(1, 256, 4999);
+    // Prompts over long histories split their keys across blocks.
+    std::cerr << "prompt 17000\n";
+    Attention(40, 0, 17000);
+    Attention(40, 256, 17000);
     std::cout << "PASS LFM3 convolution, RoPE, gated GQA and sliding ring "
                  "against independent formulas\n";
   } catch (const std::exception& e) {

@@ -278,13 +278,14 @@ __launch_bounds__(256) __global__
     void TiledAttn(const float* __restrict__ q, const float* __restrict__ k,
                    const float* __restrict__ v, const float* __restrict__ gate,
                    const float* __restrict__ ck, const float* __restrict__ cv,
-                   float* __restrict__ y, int n, int heads, int kh,
-                   int position, int capacity, int window) {
+                   float* __restrict__ y, float* __restrict__ partial, int n,
+                   int heads, int kh, int position, int capacity, int window,
+                   int span) {
   constexpr int kRows = 8, kKeys = 32, kSlices = D / 16;
   static_assert(D == 128);
   __shared__ float4 sk[kKeys][D / 4 + 1], sv[kKeys][D / 4];
   const int group = heads / kh, queries = 64 / group;
-  const int g = blockIdx.y, q0 = blockIdx.x * queries, tid = threadIdx.x;
+  const int g = blockIdx.z, split = blockIdx.y, q0 = blockIdx.x * queries, tid = threadIdx.x;
   const int lane = tid % 32, wave = tid / 32;
   const int h = g * group + wave * kRows / queries;
   const int wq0 = q0 + wave * kRows % queries;
@@ -307,8 +308,12 @@ __launch_bounds__(256) __global__
     denominator[r] = 0;
   }
   const float scale = rsqrtf(float(D));
-  const int last_query = position + min(q0 + queries, n) - 1;
-  const int begin = window > 0 ? max(0, position + q0 + 1 - window) : 0;
+  // Long histories split their keys into spans of span keys, one per
+  // blockIdx.y; blocks of one span run together and share its K/V in cache.
+  const int last_query = min(position + min(q0 + queries, n) - 1,
+                             (split + 1) * span - 1);
+  const int begin = max(window > 0 ? max(0, position + q0 + 1 - window) : 0,
+                        split * span);
   const int wave_last = position + min(wq0 + kRows, n) - 1;
   const int wave_first = window > 0 ? max(0, position + wq0 + 1 - window) : 0;
   for (int base = begin; base <= last_query; base += kKeys) {
@@ -353,7 +358,8 @@ __launch_bounds__(256) __global__
     for (int r = 0; r < kRows; ++r) {
       const int query = position + wq0 + r;
       const int first = window > 0 ? max(0, query + 1 - window) : 0;
-      const bool valid = wq0 + r < n && t >= first && t <= query;
+      const bool valid =
+          wq0 + r < n && t >= first && t <= query && t <= last_query;
       float s = valid ? score[r] * scale : -INFINITY, tile_max = s;
 #pragma unroll
       for (int offset = 16; offset; offset /= 2)
@@ -396,6 +402,16 @@ __launch_bounds__(256) __global__
       total += __shfl_xor(total, offset, 32);
     if (row >= n)
       continue;
+    if (gridDim.y > 1) {
+      float* out =
+          partial + ((std::size_t(split) * n + row) * heads + h) * (D + 2);
+      if (!lane) {
+        out[0] = maximum[r];
+        out[1] = total;
+      }
+      reinterpret_cast<float4*>(out + 2)[lane] = acc[r];
+      continue;
+    }
     const float g_scale = 1 + expf(-gate[row * heads + h]);
     reinterpret_cast<float4*>(y + (std::size_t(row) * heads + h) * D)[lane] =
         make_float4((acc[r].x / total) / g_scale, (acc[r].y / total) / g_scale,
@@ -545,6 +561,25 @@ __launch_bounds__(256) __global__
   }
   for (int d = 0; d < dims; ++d)
     out[2 + d0 + d] = acc[d];
+}
+// Merges TiledAttn key spans: one block per (row, head).
+template<int D>
+__global__ void PromptCombine(const float* __restrict__ partial,
+                              const float* __restrict__ gate,
+                              float* __restrict__ y, int rows, int splits) {
+  const int rh = blockIdx.x, d = threadIdx.x;
+  float maximum = -INFINITY;
+  for (int s = 0; s < splits; ++s)
+    maximum =
+        fmaxf(maximum, partial[(std::size_t(s) * rows + rh) * (D + 2)]);
+  float sum = 0, acc = 0;
+  for (int s = 0; s < splits; ++s) {
+    const float* part = partial + (std::size_t(s) * rows + rh) * (D + 2);
+    const float w = expf(part[0] - maximum);
+    sum = fmaf(part[1], w, sum);
+    acc = fmaf(part[2 + d], w, acc);
+  }
+  y[std::size_t(rh) * D + d] = (acc / sum) / (1 + expf(-gate[rh]));
 }
 template<int D>
 __global__ void DecodeCombine(const float* __restrict__ partial,
@@ -707,9 +742,18 @@ void Rope(float* x, const float* frequencies, const float* f, int n, int h,
   Rotary<<<(n * h + rows * kRopeRows - 1) / (rows * kRopeRows), threads, 0, s>>>(
       x, frequencies, f, n, h, d, p);
 }
-std::size_t AttentionScratchBytes(int heads, int dim, int context) {
-  return std::size_t(std::min((context + kDecodeKeys - 1) / kDecodeKeys,
-                              kMaxDecodeSplits)) *
+constexpr int kMinPromptSpan = 8192, kMaxPromptSplits = 16;
+int PromptSplits(int keys, int& span) {
+  span = std::max(kMinPromptSpan,
+                  (keys + kMaxPromptSplits - 1) / kMaxPromptSplits);
+  return (keys + span - 1) / span;
+}
+std::size_t AttentionScratchBytes(int heads, int dim, int context, int rows) {
+  int span;
+  const int prompt = PromptSplits(context, span);
+  const std::size_t decode =
+      std::min((context + kDecodeKeys - 1) / kDecodeKeys, kMaxDecodeSplits);
+  return std::max(decode, std::size_t(prompt > 1 ? prompt * rows : 0)) *
          heads * (dim + 2) * sizeof(float);
 }
 void Attention(const float* q, const float* k, const float* v, const float* g,
@@ -731,8 +775,15 @@ void Attention(const float* q, const float* k, const float* v, const float* g,
     return;
   }
   if (d == 128 && group <= 8 && 64 % group == 0 && n >= 64 / group) {
-    TiledAttn<128><<<dim3((n + 64 / group - 1) / (64 / group), kh), 256, 0, s>>>(
-        q, k, v, g, ck, cv, out, n, h, kh, p, cap, win);
+    int span;
+    const int splits = scratch && !win ? PromptSplits(p + n, span) : 1;
+    if (splits == 1)
+      span = p + n;
+    TiledAttn<128><<<dim3((n + 64 / group - 1) / (64 / group), splits, kh),
+                      256, 0, s>>>(q, k, v, g, ck, cv, out, scratch, n, h, kh,
+                                   p, cap, win, span);
+    if (splits > 1)
+      PromptCombine<128><<<n * h, 128, 0, s>>>(scratch, g, out, n * h, splits);
     return;
   }
   Attn<<<dim3(h, n), 32, 0, s>>>(q, k, v, g, ck, cv, out, h, kh, d, p, cap,
