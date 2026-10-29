@@ -240,8 +240,8 @@ int main(int argc, char** argv) {
       std::size_t matched = 0;
       const std::size_t ref_frames = ref_codes.size() / 12;
       for (std::size_t f = 0; f < ref_frames + 1; ++f) {
-        Check(voice->SampleFrameOrdered(session->DeviceHidden(), greedy, rng,
-                                        frame, {}, &error),
+        Check(voice->SampleFrame(session->DeviceHidden(), greedy, rng, frame,
+                                 device, true, &error),
               error);
         if (std::find(frame.begin(), frame.end(), 2016) != frame.end())
           break;
@@ -249,7 +249,6 @@ int main(int argc, char** argv) {
         if (f < ref_frames &&
             std::equal(frame.begin(), frame.end(), ref_codes.begin() + f * 12))
           ++matched;
-        Check(voice->FrameEmbedding(frame, device, &error), error);
         Check(session->ForwardEmbeddings({device, hidden}, true, {}, &error),
               error);
       }

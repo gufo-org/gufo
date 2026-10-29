@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <future>
 #include <random>
 #include <stdexcept>
 #include <unordered_map>
@@ -250,12 +251,15 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
         cancelled = true;
       return cancelled;
     };
-    auto decode = [&](bool finalize) {
-      const auto t = Clock::now();
-      std::vector<float> samples;
-      ok(voice.Decode(unsent, finalize, &samples, &failure));
-      unsent.clear();
-      result->timings.codec_ms += Ms(t);
+    // Codec work runs on the voice's codec stream in a worker thread, so it
+    // overlaps the next backbone step; audio is emitted on this thread.
+    std::future<std::vector<float>> pending_audio;
+    double decode_started = 0;
+    auto join = [&]() {
+      if (!pending_audio.valid())
+        return;
+      auto samples = pending_audio.get();
+      result->timings.codec_ms += Ms(start) - decode_started;
       if (samples.empty())
         return;
       if (result->timings.first_audio_ms < 0)
@@ -264,6 +268,19 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
                              samples.end());
       if (callbacks.on_audio && !callbacks.on_audio(samples))
         cancelled = true;
+    };
+    auto decode = [&](bool finalize) {
+      join();
+      decode_started = Ms(start);
+      pending_audio = std::async(
+          std::launch::async, [&voice, frames = std::move(unsent), finalize]() {
+            std::vector<float> samples;
+            std::string decode_error;
+            if (!voice.Decode(frames, finalize, &samples, &decode_error))
+              throw std::runtime_error(decode_error);
+            return samples;
+          });
+      unsent.clear();
     };
     auto emit_text = [&](bool final) {
       const auto end = final ? text_bytes.size() : CompleteUtf8(text_bytes);
@@ -287,7 +304,7 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
       if (audio_slot) {
         auto t = Clock::now();
         ok(voice.SampleFrame(session.DeviceHidden(), o.audio, rng, codes,
-                             &failure));
+                             impl.frame_embedding, false, &failure));
         result->timings.depth_ms += Ms(t);
         const bool eos = std::any_of(codes.begin(), codes.end(), [](auto c) {
           return c == std::int32_t(AudioWeights::kCodes);
@@ -315,15 +332,13 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
         if (step + 1 == o.max_new_tokens)
           break;
         t = Clock::now();
-        ok(voice.FrameEmbedding(codes, impl.frame_embedding, &failure));
-        result->timings.depth_ms += Ms(t);
-        t = Clock::now();
         if (session.Position() >= impl.context)
           break;
         ok(session.ForwardEmbeddings(
             {impl.frame_embedding, std::size_t(config.hidden)}, true, {},
             &failure));
         result->timings.backbone_ms += Ms(t);
+        join();
       } else {
         auto t = Clock::now();
         ok(session.ReadLogits(logits, &failure));
@@ -399,6 +414,7 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
         t = Clock::now();
         ok(session.Forward({&token, 1}, {}, &failure));
         result->timings.backbone_ms += Ms(t);
+        join();
       }
       if (interleaving && !text_done) {
         if (--slots_left == 0) {
@@ -409,6 +425,7 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
     }
     if (!cancelled && result->frames)
       decode(true);
+    join();
     emit_text(true);
     result->text = text_bytes;
     result->cancelled = cancelled;

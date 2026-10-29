@@ -11,6 +11,9 @@ enum class Activation { kNone, kSilu, kGelu };
 // y[n, M] = act(x[n, K] W[M, K]^T + bias), with an F32 weight.
 void Sgemm(const float* x, const float* w, const float* bias, float* y, int n,
            int M, int K, Activation act, hipStream_t stream);
+// y = W x for one row of a BF16 or Q8_0 matrix whose columns are a
+// multiple of 128. Returns false (launching nothing) for other shapes.
+bool WideGemv(const Tensor& w, const float* x, float* y, hipStream_t stream);
 // y[n, M] = act(y + bias) in place.
 void BiasAct(float* y, const float* bias, int n, int M, Activation act,
              hipStream_t stream);
@@ -67,5 +70,36 @@ void Polar(float* spectrum, int n, int bins, hipStream_t stream);
 void CodebookNorm(const float* x, const float* norms, const std::int32_t* which,
                   float* out, int count, int dim, float eps,
                   hipStream_t stream);
+// logits[i, r] = table[which[i] * size + r] . x[i] for count codebooks.
+void CodebookLogits(const Tensor& table, const float* x,
+                    const std::int32_t* which, float* logits, int count,
+                    int size, hipStream_t stream);
+// Device state of speech sampling: codes and mask of the frame in progress
+// and the repetition window of earlier frames.
+struct FrameState {
+  std::int32_t* codes;     // [codebooks]
+  std::int32_t* masked;    // [codebooks]
+  std::int32_t* counts;    // [codebooks][size]: codes in the window
+  std::int32_t* ring;      // [window][codebooks]
+  std::int32_t* position;  // [2]: ring head, filled rows
+};
+struct FrameSampling {
+  float temperature, penalty;
+  int top_k, window;
+};
+// codes = 0 and every codebook masked.
+void StartFrame(FrameState state, int codebooks, hipStream_t stream);
+// Samples the codebooks which[0..count) from their logits rows (repetition
+// penalty over the window, temperature, top-k, inverse CDF of uniforms[c]),
+// then reveals them.
+void SampleCodes(const float* logits, const std::int32_t* which,
+                 const float* uniforms, FrameState state, FrameSampling s,
+                 int count, int size, hipStream_t stream);
+// Ends the frame: a frame holding the end code anywhere becomes all end
+// codes; others enter the repetition window. Writes the backbone input
+// embedding of the frame.
+void FinishFrame(const Tensor& audio_out, FrameState state, FrameSampling s,
+                 float* embedding, int codebooks, int size, int end_code,
+                 hipStream_t stream);
 }  // namespace gufo::models::lfm3_audio::gpu
 #endif

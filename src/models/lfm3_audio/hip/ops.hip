@@ -19,6 +19,9 @@ __device__ float Value(const Tensor& w, std::size_t i) {
   }
   return NAN;  // The host binder rejects other formats.
 }
+__device__ inline float Bf16(std::uint32_t v) {
+  return __uint_as_float(v << 16);
+}
 __device__ float Activate(float x, Activation act) {
   if (act == Activation::kSilu)
     return x / (1 + expf(-x));
@@ -306,6 +309,241 @@ __global__ void CodebookNormKernel(const float* x, const float* norms,
     out[std::size_t(blockIdx.x) * dim + i] =
         row[i] * inv * norms[std::size_t(c) * dim + i];
 }
+
+// One wave per logits row; Q8_0 rows read whole blocks per lane.
+template<core::GgmlType kType>
+__global__ void CodebookLogitsKernel(Tensor table, const float* x,
+                                     const std::int32_t* which, float* logits,
+                                     int size) {
+  const int i = blockIdx.y, lane = threadIdx.x % 32;
+  const int r = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
+  if (r >= size)
+    return;
+  const int K = table.cols;
+  const std::size_t row = std::size_t(which[i]) * size + r;
+  const float* v = x + std::size_t(i) * K;
+  float sum = 0;
+  if constexpr (kType == core::GgmlType::kQ8_0) {
+    const auto* blocks =
+        static_cast<const gufo::hip::Q8_0Block*>(table.data) + row * (K / 32);
+    for (int b = lane; b < K / 32; b += 32) {
+      const auto& q = blocks[b];
+      float dot = 0;
+#pragma unroll
+      for (int j = 0; j < 32; ++j)
+        dot = fmaf(float(q.qs[j]), v[b * 32 + j], dot);
+      sum = fmaf(__half2float(q.d), dot, sum);
+    }
+  } else if constexpr (kType == core::GgmlType::kBF16) {
+    const auto* w = static_cast<const std::uint16_t*>(table.data) + row * K;
+    for (int k = lane * 8; k < K; k += 256) {
+      const uint4 packed = *reinterpret_cast<const uint4*>(w + k);
+      const std::uint32_t words[4] = {packed.x, packed.y, packed.z, packed.w};
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        sum = fmaf(Bf16(words[j] & 0xFFFF), v[k + 2 * j], sum);
+        sum = fmaf(Bf16(words[j] >> 16), v[k + 2 * j + 1], sum);
+      }
+    }
+  } else {
+    for (int k = lane; k < K; k += 32)
+      sum = fmaf(Value(table, row * K + k), v[k], sum);
+  }
+  for (int offset = 16; offset; offset /= 2)
+    sum += __shfl_down(sum, offset, 32);
+  if (!lane)
+    logits[std::size_t(i) * size + r] = sum;
+}
+
+// One-row projection of a wide BF16 or Q8_0 matrix: a block owns four rows
+// and its eight waves split the columns in tiles of 128, so each wave
+// issues all its loads at once; partial sums meet in LDS. FP32 accumulation.
+constexpr int kGemvTile = 128, kGemvWaves = 8, kGemvRows = 4;
+template<bool kQ8>
+__device__ inline void LoadWeights(const void* w, int row, int K, int kt,
+                                   float* wv) {
+  const int lane = threadIdx.x % 32;
+  if constexpr (kQ8) {
+    const auto& blk = static_cast<const gufo::hip::Q8_0Block*>(
+        w)[std::size_t(row) * (K / 32) + kt / 32 + lane / 8];
+    const float d = __half2float(blk.d);
+    const int part = (lane % 8) * 4;
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+      wv[j] = d * float(blk.qs[part + j]);
+  } else {
+    const uint2 packed = *reinterpret_cast<const uint2*>(
+        static_cast<const std::uint16_t*>(w) + std::size_t(row) * K + kt +
+        lane * 4);
+    wv[0] = Bf16(packed.x & 0xFFFF);
+    wv[1] = Bf16(packed.x >> 16);
+    wv[2] = Bf16(packed.y & 0xFFFF);
+    wv[3] = Bf16(packed.y >> 16);
+  }
+}
+template<bool kQ8>
+__global__ void __launch_bounds__(256)
+    WideGemvKernel(const void* w, const float* x, float* y, int M, int K) {
+  __shared__ float partial[kGemvWaves][kGemvRows];
+  const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int first = blockIdx.x * kGemvRows;
+  float acc[kGemvRows] = {};
+  for (int kt = wave * kGemvTile; kt < K; kt += kGemvWaves * kGemvTile) {
+    float wv[kGemvRows][4];
+#pragma unroll
+    for (int j = 0; j < kGemvRows; ++j)
+      LoadWeights<kQ8>(w, min(first + j, M - 1), K, kt, wv[j]);
+    const float4 v = *reinterpret_cast<const float4*>(x + kt + lane * 4);
+#pragma unroll
+    for (int j = 0; j < kGemvRows; ++j) {
+      acc[j] = fmaf(wv[j][0], v.x, acc[j]);
+      acc[j] = fmaf(wv[j][1], v.y, acc[j]);
+      acc[j] = fmaf(wv[j][2], v.z, acc[j]);
+      acc[j] = fmaf(wv[j][3], v.w, acc[j]);
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < kGemvRows; ++j) {
+    float v = acc[j];
+#pragma unroll
+    for (int offset = 16; offset; offset /= 2)
+      v += __shfl_xor(v, offset, 32);
+    if (!lane)
+      partial[wave][j] = v;
+  }
+  __syncthreads();
+  if (threadIdx.x < kGemvRows && first + int(threadIdx.x) < M) {
+    float sum = 0;
+    for (int i = 0; i < kGemvWaves; ++i)
+      sum += partial[i][threadIdx.x];
+    y[first + threadIdx.x] = sum;
+  }
+}
+constexpr int kSortSize = 2048;
+// One block per sampled codebook. Ties keep the lowest index, like argmax
+// and the top-k threshold of the reference sampler.
+__global__ void SampleCodesKernel(const float* logits,
+                                  const std::int32_t* which,
+                                  const float* uniforms, FrameState state,
+                                  FrameSampling sampling, int size) {
+  __shared__ float values[kSortSize];
+  __shared__ int indices[kSortSize];
+  const int i = blockIdx.x, c = which[i], tid = threadIdx.x;
+  const float* row = logits + std::size_t(i) * size;
+  const std::int32_t* counts = state.counts + std::size_t(c) * size;
+  for (int r = tid; r < kSortSize; r += blockDim.x) {
+    float v = -INFINITY;
+    if (r < size) {
+      v = row[r];
+      if (sampling.penalty != 1.0F && counts[r] > 0)
+        v = v < 0 ? v * sampling.penalty : v / sampling.penalty;
+      if (sampling.temperature > 0)
+        v /= sampling.temperature;
+    }
+    values[r] = v;
+    indices[r] = r;
+  }
+  __syncthreads();
+  // Bitonic sort, descending by value, ascending by index on ties.
+  for (int k = 2; k <= kSortSize; k *= 2)
+    for (int j = k / 2; j > 0; j /= 2) {
+      for (int a = tid; a < kSortSize; a += blockDim.x) {
+        const int b = a ^ j;
+        if (b <= a)
+          continue;
+        const bool before = values[a] > values[b] ||
+                            (values[a] == values[b] && indices[a] < indices[b]);
+        const bool descending = (a & k) == 0;
+        if (descending != before) {
+          const float tv = values[a];
+          values[a] = values[b];
+          values[b] = tv;
+          const int ti = indices[a];
+          indices[a] = indices[b];
+          indices[b] = ti;
+        }
+      }
+      __syncthreads();
+    }
+  if (tid)
+    return;
+  int pick = indices[0];
+  if (sampling.temperature > 0) {
+    int kept = size;
+    if (sampling.top_k > 0 && sampling.top_k < size) {
+      const float kth = values[sampling.top_k - 1];
+      kept = sampling.top_k;
+      while (kept < size && values[kept] >= kth)
+        ++kept;
+    }
+    float total = 0;
+    for (int r = 0; r < kept; ++r)
+      total += expf(values[r] - values[0]);
+    float target = uniforms[c] * total;
+    for (int r = 0; r < kept; ++r) {
+      pick = indices[r];
+      target -= expf(values[r] - values[0]);
+      if (target < 0)
+        break;
+    }
+  }
+  state.codes[c] = pick;
+  state.masked[c] = 0;
+}
+__global__ void StartFrameKernel(FrameState state, int codebooks) {
+  const int c = threadIdx.x;
+  if (c < codebooks) {
+    state.codes[c] = 0;
+    state.masked[c] = 1;
+  }
+}
+__global__ void FinishFrameKernel(Tensor table, FrameState state,
+                                  FrameSampling sampling, float* embedding,
+                                  int codebooks, int size, int end_code) {
+  __shared__ int codes[32];
+  __shared__ bool end;
+  const int tid = threadIdx.x;
+  if (tid < codebooks)
+    codes[tid] = state.codes[tid];
+  __syncthreads();
+  if (!tid) {
+    end = false;
+    for (int c = 0; c < codebooks; ++c)
+      end = end || codes[c] == end_code;
+  }
+  __syncthreads();
+  if (end && tid < codebooks)
+    codes[tid] = end_code;
+  __syncthreads();
+  const int dim = table.cols;
+  const int i = blockIdx.x * blockDim.x + tid;
+  if (i < dim) {
+    float sum = 0;
+    for (int c = 0; c < codebooks; ++c)
+      sum += Value(table, (std::size_t(c) * size + codes[c]) * dim + i);
+    embedding[i] = sum;
+  }
+  if (blockIdx.x)
+    return;
+  if (end && tid < codebooks)
+    state.codes[tid] = end_code;
+  if (end || sampling.window <= 0)
+    return;
+  const int head = state.position[0], filled = state.position[1];
+  if (tid < codebooks) {
+    std::int32_t* counts = state.counts + std::size_t(tid) * size;
+    std::int32_t& slot = state.ring[std::size_t(head) * codebooks + tid];
+    if (filled == sampling.window)
+      --counts[slot];
+    slot = codes[tid];
+    ++counts[codes[tid]];
+  }
+  __syncthreads();
+  if (!tid) {
+    state.position[0] = (head + 1) % sampling.window;
+    state.position[1] = min(filled + 1, sampling.window);
+  }
+}
 unsigned Blocks(std::size_t count, int threads = 256) {
   return unsigned((count + threads - 1) / threads);
 }
@@ -409,5 +647,45 @@ void Polar(float* spectrum, int n, int bins, hipStream_t s) {
 void CodebookNorm(const float* x, const float* norms, const std::int32_t* which,
                   float* out, int count, int dim, float eps, hipStream_t s) {
   CodebookNormKernel<<<count, 256, 0, s>>>(x, norms, which, out, dim, eps);
+}
+void CodebookLogits(const Tensor& table, const float* x,
+                    const std::int32_t* which, float* logits, int count,
+                    int size, hipStream_t s) {
+  const dim3 grid((size + 7) / 8, count);
+  if (table.type == core::GgmlType::kQ8_0)
+    CodebookLogitsKernel<core::GgmlType::kQ8_0>
+        <<<grid, 256, 0, s>>>(table, x, which, logits, size);
+  else if (table.type == core::GgmlType::kBF16)
+    CodebookLogitsKernel<core::GgmlType::kBF16>
+        <<<grid, 256, 0, s>>>(table, x, which, logits, size);
+  else
+    CodebookLogitsKernel<core::GgmlType::kF32>
+        <<<grid, 256, 0, s>>>(table, x, which, logits, size);
+}
+void StartFrame(FrameState state, int codebooks, hipStream_t s) {
+  StartFrameKernel<<<1, 32, 0, s>>>(state, codebooks);
+}
+void SampleCodes(const float* logits, const std::int32_t* which,
+                 const float* uniforms, FrameState state, FrameSampling sampling,
+                 int count, int size, hipStream_t s) {
+  SampleCodesKernel<<<count, 256, 0, s>>>(logits, which, uniforms, state,
+                                          sampling, size);
+}
+void FinishFrame(const Tensor& audio_out, FrameState state,
+                 FrameSampling sampling, float* embedding, int codebooks,
+                 int size, int end_code, hipStream_t s) {
+  FinishFrameKernel<<<Blocks(audio_out.cols), 256, 0, s>>>(
+      audio_out, state, sampling, embedding, codebooks, size, end_code);
+}
+bool WideGemv(const Tensor& w, const float* x, float* y, hipStream_t s) {
+  const bool q8 = w.type == core::GgmlType::kQ8_0;
+  if ((!q8 && w.type != core::GgmlType::kBF16) || w.cols % kGemvTile)
+    return false;
+  const dim3 grid((w.rows + kGemvRows - 1) / kGemvRows);
+  if (q8)
+    WideGemvKernel<true><<<grid, 256, 0, s>>>(w.data, x, y, w.rows, w.cols);
+  else
+    WideGemvKernel<false><<<grid, 256, 0, s>>>(w.data, x, y, w.rows, w.cols);
+  return true;
 }
 }  // namespace gufo::models::lfm3_audio::gpu

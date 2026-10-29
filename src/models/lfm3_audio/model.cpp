@@ -490,68 +490,191 @@ bool Model::Encode(std::span<const float> pcm, std::vector<float>* embeddings,
 }
 
 struct Voice::Impl {
+  static constexpr int K = AudioWeights::kCodebooks;
+  static constexpr int V = AudioWeights::kCodebookSize;
   std::shared_ptr<Model> model;
-  Stream stream;
+  // Frames sample on stream; the codec decodes on codec_stream, so a
+  // caller may overlap decoding with the next backbone step.
+  Stream stream, codec_stream;
   Scratch depth, codec;
   StackState codec_state;
-  Buffer depth_base, depth_out, head_inputs, logits, codes, masked, which,
-      frame, codec_codes, latents, quantized_latents, spectrum, frames;
-  Pinned host_codes, host_masked, host_which, host_logits;
-  // Repetition history: per codebook, counts of codes in the window.
-  std::vector<std::vector<std::int32_t>> history;
-  std::vector<std::array<std::int32_t, AudioWeights::kCodebooks>> recent;
-  std::size_t recent_start{};
+  Buffer depth_base, head_inputs, logits, codes, masked, which, frame, counts,
+      ring, position, randoms, codec_codes, latents, quantized_latents,
+      spectrum, frames;
+  Pinned host_codes, host_masked, host_which, host_logits, host_randoms,
+      host_frame, host_codec_codes;
+  // The captured frame graph and what it was captured with.
+  hipGraphExec_t graph{};
+  const float* graph_hidden{};
+  float* graph_embedding{};
+  gpu::FrameSampling graph_sampling{};
+  bool graph_failed{};
+  std::size_t window{};
   // Overlap-add carry of the codec's synthesis.
-  std::vector<float> carry_audio, carry_envelope;
+  std::vector<float> carry_audio, carry_envelope, host_frames;
   bool started{};
   explicit Impl(std::shared_ptr<Model> m)
       : model(std::move(m)),
         depth(model->weights().depth, stream.value),
-        codec(model->weights().codec, stream.value),
+        codec(model->weights().codec, codec_stream.value),
         codec_state(model->weights().codec, model->weights().codec_window),
-        host_codes(AudioWeights::kCodebooks * kRows * 4),
-        host_masked(AudioWeights::kCodebooks * 4),
-        host_which(AudioWeights::kCodebooks * 4),
-        host_logits(std::size_t(AudioWeights::kCodebooks) *
-                    AudioWeights::kCodebookSize * 4) {
+        host_codes(K * 4),
+        host_masked(K * 4),
+        host_which(K * 4),
+        host_logits(std::size_t(K) * V * 4),
+        host_randoms(2 * K * 4),
+        host_frame(K * 4),
+        host_codec_codes(std::size_t(K) * kRows * 4) {
     const auto& w = model->weights();
-    constexpr auto K = AudioWeights::kCodebooks;
     depth_base = Buffer(std::size_t(K) * w.depth.hidden * 4);
-    depth_out = Buffer(std::size_t(K) * w.depth.hidden * 4);
     head_inputs = Buffer(std::size_t(K) * w.depth.hidden * 4);
-    logits = Buffer(std::size_t(K) * AudioWeights::kCodebookSize * 4);
+    logits = Buffer(std::size_t(K) * V * 4);
     codes = Buffer(K * 4);
     masked = Buffer(K * 4);
     which = Buffer(K * 4);
     frame = Buffer(std::size_t(model->backbone().config().hidden) * 4);
+    counts = Buffer(std::size_t(K) * V * 4);
+    position = Buffer(2 * 4);
+    randoms = Buffer(2 * K * 4);  // reveal order, then uniforms
     codec_codes = Buffer(std::size_t(K) * kRows * 4);
     const int max_frames = kRows / int(w.frame_stack);
     latents = Buffer(std::size_t(max_frames) * K * 4 * 4);
     quantized_latents = Buffer(std::size_t(max_frames) * w.fsq_out.rows * 4);
     spectrum = Buffer(std::size_t(kRows) * w.codec_out.rows * 4);
     frames = Buffer(std::size_t(kRows) * w.n_fft * 4);
-    history.assign(K, std::vector<std::int32_t>(AudioWeights::kCodebookSize));
     Reset();
   }
+  ~Impl() {
+    if (graph)
+      (void)hipGraphExecDestroy(graph);
+  }
   void Reset() {
-    codec_state.Clear(model->weights().codec, stream.value);
+    codec_state.Clear(model->weights().codec, codec_stream.value);
+    Check(hipStreamSynchronize(codec_stream.value));
+    Check(hipMemsetAsync(counts.data, 0, counts.bytes, stream.value));
+    Check(hipMemsetAsync(position.data, 0, position.bytes, stream.value));
     Check(hipStreamSynchronize(stream.value));
-    for (auto& h : history)
-      std::fill(h.begin(), h.end(), 0);
-    recent.clear();
-    recent_start = 0;
     carry_audio.clear();
     carry_envelope.clear();
     started = false;
   }
-  // One depth pass: logits of the codebooks in which, given codes/mask.
+  gpu::FrameState State() {
+    return {codes.ints(), masked.ints(), counts.ints(), ring.ints(),
+            position.ints()};
+  }
+  void Base(const float* device_hidden, hipStream_t s) {
+    const auto& w = model->weights();
+    if (!gpu::WideGemv(w.depth_in, device_hidden, depth_base.floats(), s))
+      lfm3::gpu::Dense(w.depth_in, device_hidden, depth_base.floats(), 1, s);
+    gpu::BiasAct(depth_base.floats(), F(w.depth_in_bias), 1, w.depth_in.rows,
+                 Activation::kNone, s);
+  }
+  // The depth stack over the 12 slots for the current codes and mask.
+  void Trunk(hipStream_t s) {
+    const auto& w = model->weights();
+    gpu::DepthInputs(depth_base.floats(), F(w.mask_embedding),
+                     w.code_embeddings, codes.ints(), masked.ints(),
+                     depth.x.floats(), K, V, s);
+    RunStack(w.depth, nullptr, K, 0, depth, s);
+  }
+  // Every kernel of one frame: three reveal passes, sampling, repetition
+  // window and the next backbone input. No host synchronization inside.
+  void Record(const float* hidden, float* embedding,
+              const gpu::FrameSampling& sampling, hipStream_t s) {
+    const auto& w = model->weights();
+    Check(hipMemcpyAsync(randoms.data, host_randoms.data, randoms.bytes,
+                         hipMemcpyHostToDevice, s));
+    Base(hidden, s);
+    gpu::StartFrame(State(), K, s);
+    const auto* order = randoms.ints();
+    const auto* uniforms = randoms.floats() + K;
+    constexpr int kPasses = 3, kPerPass = K / kPasses;
+    for (int pass = 0; pass < kPasses; ++pass) {
+      const auto* picked = order + pass * kPerPass;
+      Trunk(s);
+      gpu::CodebookNorm(depth.z.floats(), F(w.head_norms), picked,
+                        head_inputs.floats(), kPerPass, int(w.depth.hidden),
+                        w.depth.eps, s);
+      gpu::CodebookLogits(w.code_embeddings, head_inputs.floats(), picked,
+                          logits.floats(), kPerPass, V, s);
+      gpu::SampleCodes(logits.floats(), picked, uniforms, State(), sampling,
+                       kPerPass, V, s);
+    }
+    gpu::FinishFrame(w.audio_out, State(), sampling, embedding, K, V,
+                     AudioWeights::kCodes, s);
+    Check(hipMemcpyAsync(host_frame.data, codes.data, K * 4,
+                         hipMemcpyDeviceToHost, s));
+  }
+  void Frame(const float* hidden, float* embedding, const Sampling& sampling,
+             std::mt19937_64& rng, bool ordered, std::span<std::int32_t> out) {
+    if (sampling.repetition_window > window) {
+      window = sampling.repetition_window;
+      ring = Buffer(std::max<std::size_t>(window, 1) * K * 4);
+      Check(hipMemsetAsync(position.data, 0, position.bytes, stream.value));
+      Check(hipMemsetAsync(counts.data, 0, counts.bytes, stream.value));
+      if (graph) {
+        (void)hipGraphExecDestroy(graph);
+        graph = nullptr;
+      }
+    }
+    std::array<int, K> order;
+    for (int i = 0; i < K; ++i)
+      order[i] = i;
+    if (!ordered)
+      std::shuffle(order.begin(), order.end(), rng);
+    std::uniform_real_distribution<float> uniform(0.0F, 1.0F);
+    for (int i = 0; i < K; ++i) {
+      host_randoms.ints()[i] = order[i];
+      host_randoms.floats()[K + i] = uniform(rng);
+    }
+    const gpu::FrameSampling fs{sampling.temperature,
+                                sampling.repetition_penalty, sampling.top_k,
+                                int(sampling.repetition_window)};
+    if (!embedding)
+      embedding = frame.floats();
+    const auto s = stream.value;
+    const bool reusable = graph && graph_hidden == hidden &&
+                          graph_embedding == embedding &&
+                          std::memcmp(&graph_sampling, &fs, sizeof(fs)) == 0;
+    if (!reusable && !graph_failed) {
+      if (graph) {
+        (void)hipGraphExecDestroy(graph);
+        graph = nullptr;
+      }
+      hipGraph_t captured{};
+      bool ok = hipStreamBeginCapture(s, hipStreamCaptureModeThreadLocal) ==
+                hipSuccess;
+      if (ok) {
+        Record(hidden, embedding, fs, s);
+        ok = hipStreamEndCapture(s, &captured) == hipSuccess && captured;
+      }
+      ok = ok && hipGraphInstantiate(&graph, captured, nullptr, nullptr, 0) ==
+                     hipSuccess;
+      if (captured)
+        (void)hipGraphDestroy(captured);
+      (void)hipGetLastError();
+      if (ok) {
+        graph_hidden = hidden;
+        graph_embedding = embedding;
+        graph_sampling = fs;
+      } else {
+        graph = nullptr;
+        graph_failed = true;
+      }
+    }
+    if (graph)
+      Check(hipGraphLaunch(graph, s));
+    else
+      Record(hidden, embedding, fs, s);
+    Check(hipStreamSynchronize(s));
+    std::memcpy(out.data(), host_frame.data, K * 4);
+  }
+  // Logits of the codebooks in which for given codes and mask (tests).
   void Pass(std::span<const std::int32_t> code_values,
             std::span<const std::int32_t> mask_values,
             std::span<const std::int32_t> which_values) {
     const auto& w = model->weights();
     const auto s = stream.value;
-    constexpr int K = AudioWeights::kCodebooks;
-    constexpr int V = AudioWeights::kCodebookSize;
     std::memcpy(host_codes.data, code_values.data(), K * 4);
     std::memcpy(host_masked.data, mask_values.data(), K * 4);
     std::memcpy(host_which.data, which_values.data(), which_values.size() * 4);
@@ -561,124 +684,25 @@ struct Voice::Impl {
                          hipMemcpyHostToDevice, s));
     Check(hipMemcpyAsync(which.data, host_which.data, which_values.size() * 4,
                          hipMemcpyHostToDevice, s));
-    gpu::DepthInputs(depth_base.floats(), F(w.mask_embedding),
-                     w.code_embeddings, codes.ints(), masked.ints(),
-                     depth.x.floats(), K, V, s);
-    RunStack(w.depth, nullptr, K, 0, depth, s);
+    Trunk(s);
     gpu::CodebookNorm(depth.z.floats(), F(w.head_norms), which.ints(),
                       head_inputs.floats(), int(which_values.size()),
                       int(w.depth.hidden), w.depth.eps, s);
-    for (std::size_t i = 0; i < which_values.size(); ++i)
-      Dense(Rows(w.code_embeddings, which_values[i] * V, V),
-            head_inputs.floats() + i * w.depth.hidden, logits.floats() + i * V,
-            1, s, depth);
+    gpu::CodebookLogits(w.code_embeddings, head_inputs.floats(), which.ints(),
+                        logits.floats(), int(which_values.size()), V, s);
     Check(hipMemcpyAsync(host_logits.data, logits.data,
                          which_values.size() * V * 4, hipMemcpyDeviceToHost,
                          s));
     Check(hipStreamSynchronize(s));
   }
-  void Base(const float* device_hidden) {
-    const auto& w = model->weights();
-    lfm3::gpu::Dense(w.depth_in, device_hidden, depth_base.floats(), 1,
-                     stream.value);
-    gpu::BiasAct(depth_base.floats(), F(w.depth_in_bias), 1, w.depth_in.rows,
-                 Activation::kNone, stream.value);
-  }
-  std::int32_t Sample(std::span<float> scores, int codebook,
-                      const Sampling& sampling, std::mt19937_64& rng) {
-    if (sampling.repetition_penalty != 1.0F)
-      for (std::size_t c = 0; c < scores.size(); ++c)
-        if (history[codebook][c])
-          scores[c] = scores[c] < 0 ? scores[c] * sampling.repetition_penalty
-                                    : scores[c] / sampling.repetition_penalty;
-    if (sampling.temperature <= 0)
-      return std::int32_t(std::max_element(scores.begin(), scores.end()) -
-                          scores.begin());
-    for (auto& v : scores)
-      v /= sampling.temperature;
-    if (sampling.top_k > 0 && std::size_t(sampling.top_k) < scores.size()) {
-      std::vector<float> sorted(scores.begin(), scores.end());
-      std::nth_element(sorted.begin(), sorted.begin() + (sampling.top_k - 1),
-                       sorted.end(), std::greater<>());
-      const float kth = sorted[sampling.top_k - 1];
-      for (auto& v : scores)
-        if (v < kth)
-          v = -INFINITY;
-    }
-    const float maximum = *std::max_element(scores.begin(), scores.end());
-    double total = 0;
-    for (auto& v : scores) {
-      v = std::isinf(v) ? 0.0F : std::exp(v - maximum);
-      total += v;
-    }
-    double target = std::uniform_real_distribution<double>(0, total)(rng);
-    for (std::size_t c = 0; c < scores.size(); ++c) {
-      target -= scores[c];
-      if (target <= 0 && scores[c] > 0)
-        return std::int32_t(c);
-    }
-    for (std::size_t c = scores.size(); c-- > 0;)
-      if (scores[c] > 0)
-        return std::int32_t(c);
-    return 0;
-  }
-  void Remember(std::span<const std::int32_t> frame_codes,
-                const Sampling& sampling) {
-    constexpr int K = AudioWeights::kCodebooks;
-    std::array<std::int32_t, K> row;
-    std::copy(frame_codes.begin(), frame_codes.end(), row.begin());
-    recent.push_back(row);
-    for (int c = 0; c < K; ++c)
-      ++history[c][row[c]];
-    while (recent.size() - recent_start > sampling.repetition_window) {
-      for (int c = 0; c < K; ++c)
-        --history[c][recent[recent_start][c]];
-      ++recent_start;
-    }
-    if (recent_start > 4096 && recent_start * 2 > recent.size()) {
-      recent.erase(recent.begin(), recent.begin() + recent_start);
-      recent_start = 0;
-    }
-  }
-  bool Sample(const float* hidden, const Sampling& sampling,
-              std::mt19937_64& rng, std::span<std::int32_t> out,
-              const std::array<int, AudioWeights::kCodebooks>& order,
-              std::span<float> scores) {
-    constexpr int K = AudioWeights::kCodebooks;
-    constexpr int V = AudioWeights::kCodebookSize;
-    Base(hidden);
-    std::array<std::int32_t, K> code_values{}, mask_values;
-    mask_values.fill(1);
-    constexpr int kPasses = 3, kPerPass = K / kPasses;
-    for (int pass = 0; pass < kPasses; ++pass) {
-      std::array<std::int32_t, kPerPass> which_values;
-      for (int i = 0; i < kPerPass; ++i)
-        which_values[i] = order[pass * kPerPass + i];
-      Pass(code_values, mask_values, which_values);
-      for (int i = 0; i < kPerPass; ++i) {
-        const int c = which_values[i];
-        std::span<float> row(host_logits.floats() + i * V, V);
-        if (!scores.empty())
-          std::copy(row.begin(), row.end(),
-                    scores.begin() + (std::size_t(pass) * K + c) * V);
-        code_values[c] = Sample(row, c, sampling, rng);
-      }
-      for (int i = 0; i < kPerPass; ++i)
-        mask_values[which_values[i]] = 0;
-    }
-    std::copy(code_values.begin(), code_values.end(), out.begin());
-    if (std::none_of(code_values.begin(), code_values.end(), [](auto c) {
-          return c >= std::int32_t(AudioWeights::kCodes);
-        }))
-      Remember(code_values, sampling);
-    return true;
-  }
 };
 Voice::Voice(std::shared_ptr<Model> model)
     : impl_(std::make_unique<Impl>(std::move(model))) {}
 Voice::~Voice() {
-  if (impl_)
+  if (impl_) {
     (void)hipStreamSynchronize(impl_->stream.value);
+    (void)hipStreamSynchronize(impl_->codec_stream.value);
+  }
 }
 std::unique_ptr<Voice> Model::CreateVoice(std::string* error) {
   try {
@@ -692,40 +716,14 @@ std::unique_ptr<Voice> Model::CreateVoice(std::string* error) {
 void Voice::Reset() {
   impl_->Reset();
 }
-void* Voice::DeviceStream() const {
-  return impl_->stream.value;
-}
 bool Voice::SampleFrame(const float* hidden, const Sampling& sampling,
                         std::mt19937_64& rng, std::span<std::int32_t> codes,
-                        std::string* error) {
+                        float* embedding, bool ordered, std::string* error) {
   try {
     if (codes.size() != AudioWeights::kCodebooks)
       throw std::invalid_argument("frame needs 12 codes");
-    std::array<int, AudioWeights::kCodebooks> order;
-    for (int i = 0; i < int(order.size()); ++i)
-      order[i] = i;
-    std::shuffle(order.begin(), order.end(), rng);
-    return impl_->Sample(hidden, sampling, rng, codes, order, {});
-  } catch (const std::exception& e) {
-    if (error)
-      *error = e.what();
-    return false;
-  }
-}
-bool Voice::SampleFrameOrdered(const float* hidden, const Sampling& sampling,
-                               std::mt19937_64& rng,
-                               std::span<std::int32_t> codes,
-                               std::span<float> scores, std::string* error) {
-  try {
-    constexpr auto K = AudioWeights::kCodebooks;
-    if (codes.size() != K ||
-        (!scores.empty() &&
-         scores.size() != std::size_t(3) * K * AudioWeights::kCodebookSize))
-      throw std::invalid_argument("invalid ordered frame buffers");
-    std::array<int, K> order;
-    for (int i = 0; i < int(K); ++i)
-      order[i] = i;
-    return impl_->Sample(hidden, sampling, rng, codes, order, scores);
+    impl_->Frame(hidden, embedding, sampling, rng, ordered, codes);
+    return true;
   } catch (const std::exception& e) {
     if (error)
       *error = e.what();
@@ -746,7 +744,7 @@ bool Voice::DepthLogits(std::span<const float> hidden,
       throw std::invalid_argument("invalid depth logit buffers");
     Check(hipMemcpyAsync(impl.frame.data, hidden.data(), hidden.size_bytes(),
                          hipMemcpyHostToDevice, impl.stream.value));
-    impl.Base(impl.frame.floats());
+    impl.Base(impl.frame.floats(), impl.stream.value);
     std::array<std::int32_t, K> all;
     for (int i = 0; i < int(K); ++i)
       all[i] = i;
@@ -789,7 +787,7 @@ bool Voice::Decode(std::span<const std::int32_t> all_frames, bool finalize,
     constexpr int K = AudioWeights::kCodebooks;
     auto& impl = *impl_;
     const auto& w = impl.model->weights();
-    const auto s = impl.stream.value;
+    const auto s = impl.codec_stream.value;
     if (all_frames.size() % K)
       throw std::invalid_argument("codec frames need 12 codes each");
     for (auto c : all_frames)
@@ -802,7 +800,6 @@ bool Voice::Decode(std::span<const std::int32_t> all_frames, bool finalize,
     samples->clear();
     const int total = int(all_frames.size() / K);
     const int chunk = kRows / stack;
-    std::vector<float> host_frames;
     auto emit = [&](std::vector<float>& audio, std::vector<float>& envelope,
                     bool last) {
       if (!impl.carry_audio.empty()) {
@@ -838,9 +835,10 @@ bool Voice::Decode(std::span<const std::int32_t> all_frames, bool finalize,
     for (int f0 = 0; f0 < total; f0 += chunk) {
       const int frames = std::min(chunk, total - f0), rows = frames * stack;
       const bool last = finalize && f0 + frames == total;
-      std::memcpy(impl.host_codes.data, all_frames.data() + std::size_t(f0) * K,
+      std::memcpy(impl.host_codec_codes.data,
+                  all_frames.data() + std::size_t(f0) * K,
                   std::size_t(frames) * K * 4);
-      Check(hipMemcpyAsync(impl.codec_codes.data, impl.host_codes.data,
+      Check(hipMemcpyAsync(impl.codec_codes.data, impl.host_codec_codes.data,
                            std::size_t(frames) * K * 4, hipMemcpyHostToDevice,
                            s));
       gpu::FsqLatents(F(w.fsq_table), impl.codec_codes.ints(),
@@ -861,16 +859,17 @@ bool Voice::Decode(std::span<const std::int32_t> all_frames, bool finalize,
       gpu::Sgemm(impl.spectrum.floats(),
                  impl.model->impl_->istft_basis.floats(), nullptr,
                  impl.frames.floats(), rows, N, 2 * bins, Activation::kNone, s);
-      host_frames.resize(std::size_t(rows) * N);
-      Check(hipMemcpyAsync(host_frames.data(), impl.frames.data,
-                           host_frames.size() * 4, hipMemcpyDeviceToHost, s));
+      impl.host_frames.resize(std::size_t(rows) * N);
+      Check(hipMemcpyAsync(impl.host_frames.data(), impl.frames.data,
+                           impl.host_frames.size() * 4, hipMemcpyDeviceToHost,
+                           s));
       Check(hipStreamSynchronize(s));
       const std::size_t length = std::size_t(rows - 1) * hop + N;
       std::vector<float> audio(length), envelope(length);
       for (int r = 0; r < rows; ++r)
         for (int n = 0; n < N; ++n) {
           audio[std::size_t(r) * hop + n] +=
-              host_frames[std::size_t(r) * N + n];
+              impl.host_frames[std::size_t(r) * N + n];
           envelope[std::size_t(r) * hop + n] += window[n] * window[n];
         }
       emit(audio, envelope, last);

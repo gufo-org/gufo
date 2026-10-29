@@ -32,16 +32,13 @@ public:
     float repetition_penalty{1.1F};
     std::size_t repetition_window{4096};
   };
+  // The whole frame runs on the device as one graph; embedding, when set,
+  // receives the frame's backbone input embedding (all end codes for an end
+  // frame). ordered reveals codebooks in index order, for reproducible tests.
   bool SampleFrame(const float* device_hidden, const Sampling& sampling,
                    std::mt19937_64& rng, std::span<std::int32_t> codes,
+                   float* embedding = nullptr, bool ordered = false,
                    std::string* error = nullptr);
-  // Same with a fixed reveal order (index order), for reproducible tests:
-  // logits of every pass are returned when scores is not empty
-  // (passes x 12 x 2017).
-  bool SampleFrameOrdered(const float* device_hidden, const Sampling& sampling,
-                          std::mt19937_64& rng, std::span<std::int32_t> codes,
-                          std::span<float> scores = {},
-                          std::string* error = nullptr);
   // Depth logits of all codebooks for a hidden state, codes and mask
   // (masked codebooks use the mask embedding), for tests: 12 x 2017.
   bool DepthLogits(std::span<const float> hidden,
@@ -57,9 +54,9 @@ public:
   // as one call over all frames.
   bool Decode(std::span<const std::int32_t> frames, bool finalize,
               std::vector<float>* samples, std::string* error = nullptr);
-  // Forgets codec state and repetition history.
+  // Forgets codec state and repetition history. Decode runs on its own
+  // stream, so it may overlap a backbone step of another thread.
   void Reset();
-  void* DeviceStream() const;
 
 private:
   friend class Model;
