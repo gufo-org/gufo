@@ -71,7 +71,8 @@ def main():
     try:
         # Each request is retained, including cold vision initialization.
         for case, item in zip(fixture["cases"], inputs):
-            status, body = post([item])
+            budget = case.get("max_soft_tokens")
+            status, body = post([item], **({"mm_processor_kwargs": {"max_soft_tokens": budget}} if budget else {}))
             assert status == 200, body
             vector = body["data"][0]["embedding"]
             agreement = cosine(vector, case["embedding"])
