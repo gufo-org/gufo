@@ -16,6 +16,7 @@
 
 #include "src/models/qwen38_flash_next/cpu_ops.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/kv_cache_format.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
@@ -30,6 +31,7 @@ constexpr std::uint32_t kDim = 256;
 constexpr std::uint32_t kRatio = 4;
 constexpr std::uint32_t kQWidth = kHeads * kDim;
 constexpr std::uint32_t kKvWidth = kKvHeads * kDim;
+constexpr std::size_t kKvRowBytes = qfn::KvRowBytes(kKvWidth);
 // The per-token kernel accumulates in FP32 over FP16 keys/values; its gated
 // output (order one) stays within this of an FP64 evaluation.
 constexpr double kFp64Limit = 1e-6;
@@ -90,6 +92,40 @@ std::vector<float> MakeValues(std::size_t count, std::uint32_t seed,
   return values;
 }
 
+/// Independent CPU form of the 8-bit cache (kv_cache_format.hpp): F16 rows
+/// in, cache bytes out. `values` becomes what the kernels read back,
+/// f16(scale * code), so FP64 references see the quantized cache.
+std::vector<std::uint8_t> QuantizeKv(std::vector<__half>* values,
+                                     std::uint32_t width = kKvWidth) {
+  const std::size_t rows = values->size() / width;
+  const std::size_t row_bytes = qfn::KvRowBytes(width);
+  std::vector<std::uint8_t> bytes(rows * row_bytes);
+  for (std::size_t r = 0; r < rows; ++r) {
+    __half* in = values->data() + r * width;
+    std::uint8_t* out = bytes.data() + r * row_bytes;
+    for (std::uint32_t b = 0; b < width / qfn::kKvBlock; ++b) {
+      float amax = 0.0F;
+      for (std::uint32_t i = 0; i < qfn::kKvBlock; ++i)
+        amax =
+            std::max(amax, std::abs(__half2float(in[b * qfn::kKvBlock + i])));
+      const __half scale = __float2half(amax * (1.0F / 127.0F));
+      const float d = __half2float(scale);
+      std::memcpy(out + width + b * 2, &scale, 2);
+      for (std::uint32_t i = 0; i < qfn::kKvBlock; ++i) {
+        __half& x = in[b * qfn::kKvBlock + i];
+        const float code = d > 0.0F
+                               ? std::clamp(std::nearbyint(__half2float(x) / d),
+                                            -127.0F, 127.0F)
+                               : 0.0F;
+        out[b * qfn::kKvBlock + i] =
+            static_cast<std::uint8_t>(static_cast<std::int8_t>(code));
+        x = __float2half(d * code);
+      }
+    }
+  }
+  return bytes;
+}
+
 template<typename T>
 void Upload(HipBuffer<T>* destination, const std::vector<T>& source) {
   CheckHip(hipMemcpy(destination->get(), source.data(), destination->bytes(),
@@ -115,8 +151,10 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
   HipBuffer<float> q_ref(count), gate_ref(count), q_out(count), gate_out(count);
   HipBuffer<float> k(static_cast<std::size_t>(n) * kKvWidth);
   HipBuffer<float> v(static_cast<std::size_t>(n) * kKvWidth);
-  HipBuffer<__half> k_ref(cache_rows * kKvWidth), v_ref(cache_rows * kKvWidth);
-  HipBuffer<__half> k_out(cache_rows * kKvWidth), v_out(cache_rows * kKvWidth);
+  HipBuffer<std::uint8_t> k_ref(cache_rows * kKvRowBytes),
+      v_ref(cache_rows * kKvRowBytes);
+  HipBuffer<std::uint8_t> k_out(cache_rows * kKvRowBytes),
+      v_out(cache_rows * kKvRowBytes);
   HipBuffer<std::uint32_t> pos(1);
   Upload(&packed, MakeValues(static_cast<std::size_t>(n) * stride, 17, 4.0F));
   auto qg = MakeValues(kDim, 37, 0.5F);
@@ -183,6 +221,29 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
     q::StoreKv(k.get(), k_ref.get(), n, kKvWidth, pos.get(), nullptr);
     q::StoreKv(v.get(), v_ref.get(), n, kKvWidth, pos.get(), nullptr);
     CheckHip(hipDeviceSynchronize(), "preparation reference ready");
+    // The cache writer against the independent CPU quantization of the same
+    // F16-rounded rows.
+    for (auto [rows, cache] : {std::pair{&k, &k_ref}, std::pair{&v, &v_ref}}) {
+      const auto f = Download(rows, std::size_t(n) * kKvWidth);
+      std::vector<__half> h(f.size());
+      std::transform(f.begin(), f.end(), h.begin(),
+                     [](float x) { return __float2half(x); });
+      const auto expected = QuantizeKv(&h);
+      std::vector<std::uint8_t> actual(expected.size());
+      CheckHip(
+          hipMemcpy(actual.data(),
+                    cache->get() + std::size_t(start + replay) * kKvRowBytes,
+                    actual.size(), hipMemcpyDeviceToHost),
+          "quantized cache");
+      const auto mismatch =
+          std::ranges::mismatch(actual, expected).in1 - actual.begin();
+      if (mismatch != static_cast<std::ptrdiff_t>(actual.size())) {
+        std::cerr << "8-bit cache n=" << n << " start=" << start
+                  << " byte=" << mismatch << " actual=" << int(actual[mismatch])
+                  << " expected=" << int(expected[mismatch]) << '\n';
+        throw std::runtime_error("8-bit cache differs from the CPU format");
+      }
+    }
     if (replay == 0) {
       CheckHip(
           hipStreamBeginCapture(capture.stream, hipStreamCaptureModeGlobal),
@@ -206,11 +267,11 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
     same(gate_ref.get(), gate_out.get(), count, "gates", replay);
     // Include the neighboring cache rows and replay at a new device position.
     const std::size_t first = start == 0 ? 0 : start - 1;
-    const std::size_t window = (cache_rows - first) * kKvWidth;
-    same(k_ref.get() + first * kKvWidth, k_out.get() + first * kKvWidth, window,
-         "key cache", replay);
-    same(v_ref.get() + first * kKvWidth, v_out.get() + first * kKvWidth, window,
-         "value cache", replay);
+    const std::size_t window = (cache_rows - first) * kKvRowBytes;
+    same(k_ref.get() + first * kKvRowBytes, k_out.get() + first * kKvRowBytes,
+         window, "key cache", replay);
+    same(v_ref.get() + first * kKvRowBytes, v_out.get() + first * kKvRowBytes,
+         window, "value cache", replay);
   }
   if (n >= 32) {
     // Each small prefill piece must match the full preparation, including
@@ -229,9 +290,9 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
       CheckHip(hipDeviceSynchronize(), "short prefill preparation");
       same(q_ref.get(), q_out.get(), count, "prefill queries", chunk);
       same(gate_ref.get(), gate_out.get(), count, "prefill gates", chunk);
-      same(k_ref.get(), k_out.get(), cache_rows * kKvWidth, "prefill keys",
+      same(k_ref.get(), k_out.get(), cache_rows * kKvRowBytes, "prefill keys",
            chunk);
-      same(v_ref.get(), v_out.get(), cache_rows * kKvWidth, "prefill values",
+      same(v_ref.get(), v_out.get(), cache_rows * kKvRowBytes, "prefill values",
            chunk);
     }
   }
@@ -440,6 +501,8 @@ double Compare(std::uint32_t n_tokens, std::uint32_t start_pos, bool masked,
     kh[i] = __float2half(kf[i]);
     vh[i] = __float2half(vf[i]);
   }
+  const auto kq = QuantizeKv(&kh);
+  const auto vq = QuantizeKv(&vh);
   std::vector<std::uint32_t> mask(static_cast<std::size_t>(n_tokens) *
                                   mask_words);
   std::uint32_t state = seed ^ 0x77777777U;
@@ -471,16 +534,16 @@ double Compare(std::uint32_t n_tokens, std::uint32_t start_pos, bool masked,
 
   HipBuffer<float> d_q(q_count);
   HipBuffer<float> d_gate(q_count);
-  HipBuffer<__half> d_k(kv_count);
-  HipBuffer<__half> d_v(kv_count);
+  HipBuffer<std::uint8_t> d_k(kq.size());
+  HipBuffer<std::uint8_t> d_v(vq.size());
   HipBuffer<std::uint32_t> d_mask(mask.size());
   HipBuffer<std::uint32_t> d_pos(1);
   HipBuffer<float> d_ref(q_count);
   HipBuffer<float> d_wmma(q_count);
   Upload(&d_q, qv);
   Upload(&d_gate, gate);
-  Upload(&d_k, kh);
-  Upload(&d_v, vh);
+  Upload(&d_k, kq);
+  Upload(&d_v, vq);
   Upload(&d_mask, mask);
   Upload(&d_pos, std::vector<std::uint32_t>{start_pos});
   const std::uint32_t* mask_ptr = masked ? d_mask.get() : nullptr;
@@ -621,6 +684,8 @@ void CheckStructured(const char* name, std::uint32_t n_tokens,
       vh[i] = __float2half(vf[i]);
     }
   }
+  const auto kq = QuantizeKv(&kh);
+  const auto vq = QuantizeKv(&vh);
   std::vector<std::uint32_t> mask(static_cast<std::size_t>(n_tokens) *
                                   mask_words);
   std::vector<std::uint32_t> blocks;
@@ -652,15 +717,15 @@ void CheckStructured(const char* name, std::uint32_t n_tokens,
 
   HipBuffer<float> d_q(q_count);
   HipBuffer<float> d_gate(q_count);
-  HipBuffer<__half> d_k(kv_count);
-  HipBuffer<__half> d_v(kv_count);
+  HipBuffer<std::uint8_t> d_k(kq.size());
+  HipBuffer<std::uint8_t> d_v(vq.size());
   HipBuffer<std::uint32_t> d_mask(mask.size());
   HipBuffer<std::uint32_t> d_pos(1);
   HipBuffer<float> d_out(q_count);
   Upload(&d_q, qv);
   Upload(&d_gate, gate);
-  Upload(&d_k, kh);
-  Upload(&d_v, vh);
+  Upload(&d_k, kq);
+  Upload(&d_v, vq);
   Upload(&d_mask, mask);
   Upload(&d_pos, std::vector<std::uint32_t>{start_pos});
   std::cout << "structured " << name << " ratio=" << ratio << " n=" << n_tokens
@@ -731,6 +796,8 @@ void CheckLists(std::uint32_t n_tokens, std::uint32_t start_pos,
       vh[i] = __float2half(vf[i]);
     }
   }
+  const auto kq = QuantizeKv(&kh);
+  const auto vq = QuantizeKv(&vh);
   std::vector<std::uint32_t> mask(static_cast<std::size_t>(n_tokens) *
                                   mask_words);
   std::uint32_t state = seed ^ 0x77777777U;
@@ -758,8 +825,8 @@ void CheckLists(std::uint32_t n_tokens, std::uint32_t start_pos,
 
   HipBuffer<float> d_q(q_count);
   HipBuffer<float> d_gate(q_count);
-  HipBuffer<__half> d_k(kv_count);
-  HipBuffer<__half> d_v(kv_count);
+  HipBuffer<std::uint8_t> d_k(kq.size());
+  HipBuffer<std::uint8_t> d_v(vq.size());
   HipBuffer<std::uint32_t> d_mask(mask.size());
   HipBuffer<std::uint32_t> d_pos(1);
   HipBuffer<std::uint32_t> d_lists(static_cast<std::size_t>(n_tokens) *
@@ -767,8 +834,8 @@ void CheckLists(std::uint32_t n_tokens, std::uint32_t start_pos,
   HipBuffer<std::uint32_t> d_counts(n_tokens);
   Upload(&d_q, qv);
   Upload(&d_gate, gate);
-  Upload(&d_k, kh);
-  Upload(&d_v, vh);
+  Upload(&d_k, kq);
+  Upload(&d_v, vq);
   Upload(&d_mask, mask);
   Upload(&d_pos, std::vector<std::uint32_t>{start_pos});
   std::cout << "lists n=" << n_tokens << " start=" << start_pos;
@@ -836,17 +903,19 @@ void CheckPositionPastMask() {
   std::vector<std::uint32_t> wide(wide_words, 0U);
   for (std::uint32_t w = 0; w < mask_words; ++w)
     narrow[w] = wide[w] = 0x11111111U;
+  const auto kq = QuantizeKv(&kh);
+  const auto vq = QuantizeKv(&vh);
   HipBuffer<float> d_q(kQWidth);
-  HipBuffer<__half> d_k(kv_count);
-  HipBuffer<__half> d_v(kv_count);
+  HipBuffer<std::uint8_t> d_k(kq.size());
+  HipBuffer<std::uint8_t> d_v(vq.size());
   HipBuffer<std::uint32_t> d_narrow(narrow.size());
   HipBuffer<std::uint32_t> d_wide(wide.size());
   HipBuffer<std::uint32_t> d_pos(1);
   HipBuffer<std::uint32_t> d_lists(kBudget);
   HipBuffer<std::uint32_t> d_counts(1);
   Upload(&d_q, qv);
-  Upload(&d_k, kh);
-  Upload(&d_v, vh);
+  Upload(&d_k, kq);
+  Upload(&d_v, vq);
   Upload(&d_narrow, narrow);
   Upload(&d_wide, wide);
   Upload(&d_pos, std::vector<std::uint32_t>{start_pos});
@@ -883,8 +952,8 @@ void CheckPositionPastMask() {
 void CheckChunks(std::uint32_t n, std::uint32_t split) {
   const std::size_t count = std::size_t(n) * kQWidth;
   HipBuffer<float> queries(count), gates(count), full(count), chunked(count);
-  HipBuffer<__half> keys(std::size_t(n) * kKvWidth),
-      values(std::size_t(n) * kKvWidth);
+  HipBuffer<std::uint8_t> keys(std::size_t(n) * kKvRowBytes),
+      values(std::size_t(n) * kKvRowBytes);
   Upload(&queries, MakeValues(count, 412, 4.0F));
   Upload(&gates, MakeValues(count, 721, 3.0F));
   for (auto* destination : {&keys, &values}) {
@@ -893,7 +962,7 @@ void CheckChunks(std::uint32_t n, std::uint32_t split) {
     std::vector<__half> half(f.size());
     std::transform(f.begin(), f.end(), half.begin(),
                    [](float x) { return __float2half(x); });
-    Upload(destination, half);
+    Upload(destination, QuantizeKv(&half));
   }
   const auto run = [&](std::uint32_t start, std::uint32_t rows, float* out) {
     const auto offset = std::size_t(start) * kQWidth;
@@ -927,7 +996,7 @@ void CheckChunks(std::uint32_t n, std::uint32_t split) {
 
 void CheckWmmaLiveExtent() {
   HipBuffer<float> qv(kQWidth), gate(kQWidth), out(kQWidth);
-  HipBuffer<__half> k(kKvWidth), v(kKvWidth);
+  HipBuffer<std::uint8_t> k(kKvRowBytes), v(kKvRowBytes);
   HipBuffer<std::uint32_t> mask(3200);
   // Both cases are refused before any launch, so the small buffers are safe.
   const auto accepts = [&](std::uint32_t n, std::uint32_t start,

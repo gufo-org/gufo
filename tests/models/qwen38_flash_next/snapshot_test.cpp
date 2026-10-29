@@ -292,7 +292,8 @@ void CheckCheckpointRetention(const std::shared_ptr<qfn::Model>& model,
   Require(large != nullptr, error);
   source->Reset();
   Require(source->Sync(prompt.first(16), &error), error);
-  Require(large->DeviceBytes() > before + (80ULL << 20),
+  // About 4,079 overwritten rows of twelve 8-bit K and V layers (54 MiB).
+  Require(large->DeviceBytes() > before + (45ULL << 20),
           "deep checkpoint did not preserve its overwritten rows");
   large.reset();
   // Count owned backing blocks rather than HIP's global heap cache. A short

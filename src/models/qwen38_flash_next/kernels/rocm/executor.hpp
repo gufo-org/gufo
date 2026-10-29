@@ -152,8 +152,9 @@ private:
   };
   struct AttentionState {
     const qwen::vision::DeviceRope* rope{nullptr};
-    __half* k_cache{nullptr};  ///< [max_context][kv_heads*d]
-    __half* v_cache{nullptr};  ///< [max_context][kv_heads*d]
+    /// 8-bit rows [max_context][KvRowBytes(kv_heads*d)] (see kKvBlock).
+    std::uint8_t* k_cache{nullptr};
+    std::uint8_t* v_cache{nullptr};
     float* index_k{nullptr};   ///< [index_capacity_][indexer_dim] raw ring
     __half* block_k{nullptr};  ///< [max_context/ratio][indexer_dim]
   };
@@ -167,8 +168,8 @@ private:
     std::uint32_t mtp_blocks;    ///< complete predictor indexer blocks
   };
   struct MtpState {
-    __half* k_cache{nullptr};
-    __half* v_cache{nullptr};
+    std::uint8_t* k_cache{nullptr};
+    std::uint8_t* v_cache{nullptr};
     float* index_k{nullptr};
     __half* block_k{nullptr};
     std::uint32_t blocks{0};

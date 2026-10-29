@@ -1278,7 +1278,7 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
   s->linear_.resize(c.num_layers);
   s->attention_.resize(c.num_layers);
   auto& a = s->allocations_;
-  const std::size_t kv_row = c.AttentionKvDim();
+  const std::size_t kv_bytes = KvRowBytes(c.AttentionKvDim());
   const std::size_t conv_elems =
       static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
   const std::size_t state_elems = static_cast<std::size_t>(c.ssm_num_v_heads) *
@@ -1291,12 +1291,12 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       l.state = Alloc<float>(a, state_elems, error_msg, &s->allocated_bytes_);
     } else {
       auto& at = s->attention_[il];
-      at.k_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
-      at.v_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
+      at.k_cache = Alloc<std::uint8_t>(
+          a, static_cast<std::size_t>(max_context) * kv_bytes, error_msg,
+          &s->allocated_bytes_);
+      at.v_cache = Alloc<std::uint8_t>(
+          a, static_cast<std::size_t>(max_context) * kv_bytes, error_msg,
+          &s->allocated_bytes_);
       at.index_k = Alloc<float>(
           a, static_cast<std::size_t>(s->index_capacity_) * c.indexer_head_dim,
           error_msg, &s->allocated_bytes_);
@@ -1318,11 +1318,11 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         a, static_cast<std::size_t>(options_.max_speculative) * c.HcDim(),
         error_msg, &s->allocated_bytes_);
     s->mtp_.k_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
+        Alloc<std::uint8_t>(a, static_cast<std::size_t>(max_context) * kv_bytes,
+                            error_msg, &s->allocated_bytes_);
     s->mtp_.v_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
+        Alloc<std::uint8_t>(a, static_cast<std::size_t>(max_context) * kv_bytes,
+                            error_msg, &s->allocated_bytes_);
     s->mtp_.index_k =
         Alloc<float>(a, std::size_t{s->index_capacity_} * c.indexer_head_dim,
                      error_msg, &s->allocated_bytes_);
@@ -1484,7 +1484,7 @@ std::size_t Executor::SessionBytes(
   const std::size_t ple =
       c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
   const std::size_t kv =
-      2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
+      2 * std::size_t{max_context} * KvRowBytes(c.AttentionKvDim());
   const std::size_t index =
       std::size_t{IndexerCapacity(c, options_.max_batch, max_context)} *
           c.indexer_head_dim * sizeof(float) +
@@ -2498,8 +2498,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
       prepared = AttentionF16Gemm(
           l.attn_qkv.data, static_cast<const __half*>(s_.x_half),
           l.attn_q_norm.f32(), l.attn_k_norm.f32(), s_.q, s_.attn_gate,
-          s.k_cache, s.v_cache, n_tokens, pos, c.rope_theta, c.rms_eps, stream_,
-          s.rope, yarn_);
+          s.k_cache, s.v_cache, reinterpret_cast<__half*>(s_.k),
+          reinterpret_cast<__half*>(s_.v), n_tokens, pos, c.rope_theta,
+          c.rms_eps, stream_, s.rope, yarn_);
       if (!prepared) {
         AssignError(error_msg, "fused attention projection failed");
         return false;
@@ -3476,7 +3477,7 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
 }
 
 constexpr std::array<char, 8> kSnapshotMagic{'Q', 'F', 'N', 'S',
-                                             'N', 'A', 'P', '6'};
+                                             'N', 'A', 'P', '7'};
 
 /// Fixed header ahead of the section bytes. It carries every geometry
 /// value the section sizes derive from, so a payload of another artifact
@@ -3600,8 +3601,8 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
               std::uint64_t{h.ple_elems} * sizeof(float), "PLE history")) {
     return 0;
   }
-  const std::uint64_t kv_bytes =
-      std::uint64_t{h.position} * h.kv_row * sizeof(__half);
+  const std::uint64_t kv_row_bytes = KvRowBytes(h.kv_row);
+  const std::uint64_t kv_bytes = std::uint64_t{h.position} * kv_row_bytes;
   const std::uint64_t index_row_bytes =
       std::uint64_t{h.indexer_head_dim} * sizeof(float);
   const std::uint32_t index_begin = h.blocks * h.compress_ratio;
@@ -3612,9 +3613,9 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
     if (((il + 1) % h.full_attention_interval) == 0) {
       const auto* at = attention(il);
       if (!region(at != nullptr ? at->k_cache : nullptr, kv_bytes, "K cache",
-                  std::uint64_t{h.kv_row} * sizeof(__half)) ||
+                  kv_row_bytes) ||
           !region(at != nullptr ? at->v_cache : nullptr, kv_bytes, "V cache",
-                  std::uint64_t{h.kv_row} * sizeof(__half))) {
+                  kv_row_bytes)) {
         return 0;
       }
       // Serialize only unpooled rows, in chronological order. The physical
@@ -3662,13 +3663,11 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
             std::uint64_t{h.indexer_head_dim} * sizeof(__half), true, true))
       return 0;
     const std::uint64_t mtp_kv_bytes =
-        std::uint64_t{h.mtp_position} * h.kv_row * sizeof(__half);
+        std::uint64_t{h.mtp_position} * kv_row_bytes;
     if (!region(mtp != nullptr ? mtp->k_cache : nullptr, mtp_kv_bytes,
-                "draft K cache", std::uint64_t{h.kv_row} * sizeof(__half),
-                true) ||
+                "draft K cache", kv_row_bytes, true) ||
         !region(mtp != nullptr ? mtp->v_cache : nullptr, mtp_kv_bytes,
-                "draft V cache", std::uint64_t{h.kv_row} * sizeof(__half),
-                true) ||
+                "draft V cache", kv_row_bytes, true) ||
         !region(
             mtp != nullptr ? mtp->h : nullptr,
             h.mtp_residual_valid ? std::uint64_t{h.hc_dim} * sizeof(float) : 0,

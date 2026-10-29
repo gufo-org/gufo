@@ -1,5 +1,46 @@
 # Qwen3.8 Flash-Next quality
 
+## 8-bit K/V cache, October 25, 2026
+
+K and V of the twelve attention layers and the draft layer are stored as
+int8 codes with one F16 scale per 16 values (`kv_cache_format.hpp`). Every
+attention kernel reads f16(scale × code), so the CPU format reference and the
+FP64 operator checks apply unchanged to the dequantized cache:
+`attention_ops_test` checks each writer (`StoreKv`, `PrepareAttention`, the
+fused projection) byte for byte against an independent CPU quantizer, keeps
+per-token attention within 1e-6 of FP64 and WMMA prefill within 2e-2, and
+the prefill chunk/route/replay checks stay bitwise. The packed F16
+dequantizer gives the same hashes as an F32 reference dequantizer in both
+attention benches. Disk/RAM snapshots carry the 8-bit rows (payload version
+19); F16 snapshots are refused.
+
+Serving on a production fork of this model (a mixed K-quant recipe of the
+same checkpoint + MTP, Strix Halo, ROCm 7.2.4), `--sessions 8 --context
+40960`, greedy, an internal 149-question set scored by deterministic matchers
+(no judge), the fork's F16 build against the same build with this change:
+
+| Run | F16 | KV8 |
+| --- | ---: | ---: |
+| Greedy, 149 questions | 140/149 | 139/149 |
+| Sampled T 0.6, 4 seeds, longctx_agg + reasoning (152) | 134/152 | 133/152 |
+| of which longctx_agg / reasoning | 77/80, 57/72 | 79/80, 54/72 |
+| Needles at 26.7K tokens (3 depths) | 3/3 | 3/3 |
+| Needles at 106K and 166K tokens (6) | 6/6 | 6/6, identical replies |
+
+Greedy flips: `code_08` F16 wrong → KV8 right, `lcagg_19` and `reason_03`
+right → wrong. Sampled flips: 6 gained, 7 lost. 18 of 149 greedy outputs are
+byte-identical; the others first differ at a median of character 264 (any
+change in long greedy reasoning diverges). Greedy KV8 generated 23% more
+tokens, mostly four `longctx_agg` answers reaching the 3,503-token thinking
+cap; the sampled run shows no such shift (153,368 vs 153,407 tokens, 8 vs 6
+capped `longctx_agg` answers), so this is trajectory variance. No measurable
+quality loss.
+
+Model tests on main `34ebb5fe` with this change, UD-Q4_K_XL + shared Q8_0
+MTP, ROCm 7.2.4: `snapshot_test` passes (the 4,095-token snapshot is
+184,125,676 bytes against 231,823,340 with F16 rows) and the 20
+`qwen38_flash_next` ctests pass.
+
 ## Sampled draft-head costs, October 23, 2026
 
 Based on main `41d93463`, including the expanded greedy-head eligibility.

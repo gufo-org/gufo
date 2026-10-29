@@ -61,11 +61,12 @@ void Check(bool mtp) {
     const auto positions =
         layout.Positions(target, draft, target / 4, draft / 4);
     // Twelve target attention layers, thirteen with the predictor. Two
-    // 512-element f16 KV rows each; one 128-element f16 pool per four tokens;
-    // host token history has four bytes per target token.
+    // 8-bit KV rows each (512 codes and 32 f16 scales); one 128-element f16
+    // pool per four tokens; host token history has four bytes per target
+    // token.
     const auto expected =
-        std::size_t{target} * 25348 +
-        (mtp ? std::size_t{draft} * 2048 + std::size_t{draft / 4} * 256 : 0);
+        std::size_t{target} * 14596 +
+        (mtp ? std::size_t{draft} * 1152 + std::size_t{draft / 4} * 256 : 0);
     Require(layout.RowBytes(target, draft, target / 4, draft / 4) == expected,
             "row byte claim used target position for the draft or pools");
     for (std::size_t i = 0; i < positions.size(); ++i) {
@@ -121,11 +122,11 @@ void CheckExtendedContext(bool mtp) {
             "extended context inflated the bounded raw ring");
     for (const auto target : {262145U, context}) {
       const auto draft = mtp ? target - 1 : 0;
-      // Twelve layers of 2048 KV bytes per token and 256 pooled bytes per
+      // Twelve layers of 1152 KV bytes per token and 256 pooled bytes per
       // complete four-token block, plus four history bytes per token.
       const auto expected =
-          std::size_t{target} * 24580 + std::size_t{target / 4} * 3072 +
-          (mtp ? std::size_t{draft} * 2048 + std::size_t{draft / 4} * 256 : 0);
+          std::size_t{target} * 13828 + std::size_t{target / 4} * 3072 +
+          (mtp ? std::size_t{draft} * 1152 + std::size_t{draft / 4} * 256 : 0);
       Require(layout.RowBytes(target, draft, target / 4, draft / 4) == expected,
               "extended frontier lost target or predictor rows");
     }
