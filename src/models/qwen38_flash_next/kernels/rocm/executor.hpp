@@ -293,11 +293,13 @@ public:
   [[nodiscard]] std::size_t KvMappedBytes() const;
   /// Backs the session's first `rows` trunk and `draft_rows` draft positions
   /// (and their pooled keys) before a write. When the budget is short,
-  /// rows idle sessions no longer hold are released first; sessions in
-  /// `busy` are left alone. Fails without touching the session state.
+  /// rows idle sessions no longer hold are released first (unless
+  /// `release_idle` is false); sessions in `busy` are left alone. Fails
+  /// without touching the session state.
   [[nodiscard]] bool ReserveKv(Session& session, std::uint32_t rows,
                                std::uint32_t draft_rows, std::string* error_msg,
-                               std::span<Session* const> busy = {}) const;
+                               std::span<Session* const> busy = {},
+                               bool release_idle = true) const;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
