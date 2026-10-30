@@ -1,3 +1,12 @@
+# Pre-migration serialization check needs neither HIP nor model weights.
+add_executable(qwen38_flash_next_continuation_identity_test continuation_identity_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp)
+target_include_directories(qwen38_flash_next_continuation_identity_test PRIVATE ${PROJECT_SOURCE_DIR})
+target_compile_definitions(qwen38_flash_next_continuation_identity_test PRIVATE
+  GUFO_IDENTITY_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/continuation_identity")
+add_test(NAME qwen38_flash_next_continuation_identity_test COMMAND qwen38_flash_next_continuation_identity_test)
+set_tests_properties(qwen38_flash_next_continuation_identity_test PROPERTIES LABELS "cpu;qwen38_flash_next;cache;correctness")
+
 # Small operator checks are the default. Full-model qualification and
 # diagnostic probes are built explicitly so routine iterations stay focused.
 add_custom_target(qwen38_flash_next_tests)
@@ -45,6 +54,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/component_text_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(qwen38_flash_next_session_test PRIVATE gufo_logging
     gufo_qwen38_flash_next gufo_deepseek_v4_flash gufo_cache_hip hip::host)

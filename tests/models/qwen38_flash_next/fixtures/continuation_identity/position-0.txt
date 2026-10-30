@@ -1,0 +1,11 @@
+schema=gufo-text-continuation-v2
+model_kind=qwen38-flash-next
+artifact_id=gguf-sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+tokenizer=embedded-in-artifact
+chat_template=qwen38-reasoning-compiled-v3
+chat_template_reference_sha256=c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041
+state_abi=qwen38-flash-next-rocm-session-v1
+payload_layout=qfn-rocm-session-snapshot-v18
+context_tokens=4096
+position_policy=absolute-yarn-v1;factor=0x1p+1;original=262144;beta_fast=0x1p+5;beta_slow=0x1p+0
+adapters=none

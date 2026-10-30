@@ -1,0 +1,16 @@
+schema=gufo-text-continuation-v2
+model_kind=deepseek4
+artifact_id=gguf-sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+tokenizer=joyai-byte-bpe-v1
+chat_template=deepseek-v4-flash-0731-compiled-v3
+chat_template_reference_sha256=abc0d26120250dda0ae077dc64aa28836026e61e970854aaeb792445e6a0dde6
+state_abi=deepseek-v4-flash-gfx1151-state-v4
+payload_layout=ds4-rocm-v4-window128-continuation
+numerics=ds4-scalar-verifier-v1
+context_tokens=4096
+position_policy=absolute-v1
+rope_window_policy=deepseek4-compiled-v1
+adapters=none
+support_id=gguf-sha256-v1:
+max_draft_tokens=0
+draft_policy=dspark-cost-v5-window128

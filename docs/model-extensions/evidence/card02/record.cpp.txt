@@ -1,0 +1,13 @@
+#include "/tmp/card02_original_writers.cpp"
+#include "/tmp/card02_cases.hpp"
+int main() {
+  for (auto [model, cases] : std::vector<std::pair<std::string, void(*)(const identity_test::Emit&)>>{{"qwen27b", identity_test::QwenCases}, {"qwen38_flash_next", identity_test::FlashCases}, {"deepseek_v4_flash", identity_test::DeepSeekCases}}) {
+    std::filesystem::path path = std::filesystem::path("tests/models") / model / "fixtures/continuation_identity";
+    std::filesystem::create_directories(path);
+    cases([&](std::string name, const auto& bytes) {
+      std::ofstream file(path / (name + ".txt"), std::ios::binary);
+      file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+      if (!file) throw std::runtime_error("capture failed");
+    });
+  }
+}

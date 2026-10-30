@@ -1,3 +1,12 @@
+# Pre-migration serialization check needs neither HIP nor model weights.
+add_executable(deepseek_v4_flash_continuation_identity_test continuation_identity_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp)
+target_include_directories(deepseek_v4_flash_continuation_identity_test PRIVATE ${PROJECT_SOURCE_DIR})
+target_compile_definitions(deepseek_v4_flash_continuation_identity_test PRIVATE
+  GUFO_IDENTITY_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/continuation_identity")
+add_test(NAME deepseek_v4_flash_continuation_identity_test COMMAND deepseek_v4_flash_continuation_identity_test)
+set_tests_properties(deepseek_v4_flash_continuation_identity_test PROPERTIES LABELS "cpu;deepseek_v4_flash;cache;correctness")
+
 # DS4 CTest checks are registered here. Shared CLI/parser and scheduler
 # tests remain with their shared components.
 add_executable(ds4_sampling_test sampling_test.cpp
@@ -78,6 +87,7 @@ if(ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/component_text_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(ds4_serving_test PRIVATE gufo_logging
     gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_cache_hip hip::host)

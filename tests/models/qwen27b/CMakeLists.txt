@@ -1,3 +1,12 @@
+# Pre-migration serialization check needs neither HIP nor model weights.
+add_executable(qwen27b_continuation_identity_test continuation_identity_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp)
+target_include_directories(qwen27b_continuation_identity_test PRIVATE ${PROJECT_SOURCE_DIR})
+target_compile_definitions(qwen27b_continuation_identity_test PRIVATE
+  GUFO_IDENTITY_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/continuation_identity")
+add_test(NAME qwen27b_continuation_identity_test COMMAND qwen27b_continuation_identity_test)
+set_tests_properties(qwen27b_continuation_identity_test PROPERTIES LABELS "cpu;qwen27b;cache;correctness")
+
 # Model-specific checks live here; generic Qwen operator controls stay in qwen/.
 add_test(NAME qwen27b.tools
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools_test.py)
@@ -53,6 +62,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/component_text_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(qwen_serving_test_support PUBLIC gufo_logging
     gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_cache_hip hip::host)

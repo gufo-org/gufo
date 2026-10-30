@@ -25,6 +25,8 @@ set(gufo_pr_targets
   component_text_cache_test text_model_runner_test continuation_disk_store_test
   bench_cli_test prompt_cli_test eval_http_client_test
   qwen_tokenizer_test qwen_chat_template_test
+  qwen27b_continuation_identity_test qwen38_flash_next_continuation_identity_test
+  deepseek_v4_flash_continuation_identity_test
   qwen27b_continuation_layout_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test

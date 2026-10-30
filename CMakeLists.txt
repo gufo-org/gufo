@@ -437,6 +437,7 @@ add_executable(gufo
   src/cli/serve/component_text_cache.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
+  src/cli/serve/continuation_identity.cpp
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
