@@ -64,6 +64,25 @@ class ArtifactTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'unbundled runtime'):
                     artifact.verify(root, 'a' * 40)
 
+    def test_kernels_for_either_rdna35_part_are_kept(self):
+        # A gfx1150 package must keep its own Tensile kernels. Dropping every
+        # name that is not gfx1151 silently produced a gfx1150 archive with no
+        # GEMM kernels at all.
+        for name in ('librocblas.so.1',
+                     'libhsa-runtime64.so.1',
+                     'rocblas/library/TensileLibrary_gfx1150.co',
+                     'rocblas/library/TensileLibrary_gfx1151.dat',
+                     'rocblas/library/Kernels_gfx1150-xnack-.hsaco',
+                     'hipblaslt/library/TensileLibrary_gfx1151.yaml'):
+            self.assertTrue(artifact.runtime_file(Path('/nix/store/x/lib/' + name)), name)
+
+    def test_kernels_for_other_architectures_are_dropped(self):
+        for name in ('rocblas/library/TensileLibrary_gfx942.co',
+                     'rocblas/library/TensileLibrary_gfx1030.hsaco',
+                     'hipblaslt/library/TensileLibrary_gfx1101.dat',
+                     'libmiopen_gfx90a.so'):
+            self.assertFalse(artifact.runtime_file(Path('/nix/store/x/lib/' + name)), name)
+
     def test_share_copy_is_removable(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'store/share'
