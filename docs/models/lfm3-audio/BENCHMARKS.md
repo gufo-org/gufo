@@ -70,6 +70,8 @@ WebSocket and base64 framing; they are single observations of the
 | Conversation, spoken question: `response.create` to first audio delta | 82.8 ms |
 | Conversation, typed follow-up: `response.create` to first text delta | 11.9 ms |
 | `response.cancel` to `response.done` (cancelled) | 14.2 ms |
+| Hands-free (`server_vad`, 500 ms silence): `speech_stopped` to first audio delta | 105.3 ms |
+| Barge-in: `speech_started` to the interrupted reply's `response.done` | 17.5 ms |
 
 The user's audio is prefilled while it arrives, so a reply starts from a
 context that already holds the turn: closing the turn and the assistant

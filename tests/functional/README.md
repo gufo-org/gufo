@@ -49,7 +49,12 @@ selected by a transcription prompt), then one conversation session with a
 spoken question whose reply speech the server transcribes back, a typed
 follow-up answered in text, a spoken function call and its answer after the
 function output, cancellation within one second, a reasoning text reply and
-rejected options. It synthesizes its spoken prompts with `gufo speak` first.
+rejected options. Server turn detection is checked too: a transcription
+that commits itself, a hands-free spoken question, and an interruption
+(speech over a long reply cancels it, truncates it to what was heard and is
+answered). `--browser /path/to/chromium` also loads the `/voice` page
+headless with the spoken question as a fake microphone and requires its
+answer. It synthesizes its spoken prompts with `gufo speak` first.
 
 ```sh
 nix develop -c python3 tests/functional/realtime_voice.py \

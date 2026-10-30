@@ -104,19 +104,52 @@ while the backbone computes the next frame.
 ## Realtime WebSockets
 
 `serve asr` accepts OpenAI Realtime WebSocket clients on `/v1/realtime`.
-Clients capture the microphone, detect turns themselves
-(`turn_detection: null`) and stream mono PCM16 at 24 kHz in
+Clients capture the microphone and stream mono PCM16 at 24 kHz in
 `input_audio_buffer.append` events of any size; the server resamples and
-encodes the stream causally as it arrives.
+encodes the stream causally as it arrives. Browsers, which cannot set
+headers on a WebSocket, pass the API key as the subprotocol
+`openai-insecure-api-key.<key>` (beside `realtime`), as OpenAI's browser
+clients do.
+
+**Turns.** With `turn_detection: null` the client commits each turn. With
+`{"type": "server_vad"}` (fields `threshold` 0–1, default 0.5;
+`prefix_padding_ms`, default 300; `silence_duration_ms`, default 500;
+`create_response` and `interrupt_response`, default true) the server finds
+them: `input_audio_buffer.speech_started` when the user starts speaking,
+`input_audio_buffer.speech_stopped` after the silence, then the commit and,
+in conversations, the reply. Audio before speech is kept only for the prefix
+padding. The detector compares the level of 20 ms frames with the quietest
+frame of the last three seconds (6–30 dB above it by `threshold`); it needs
+no model, so steady noise is ignored but loud background speech is not.
+`semantic_vad` is not supported.
+
+**Interruptions.** Speech heard by the server stops the running reply within
+one generation step (`response.done` with `status: cancelled`), and the
+interrupting turn is answered when it ends. A client that stops its own
+playback sends `conversation.item.truncate` with the reply's `item_id` and
+`audio_end_ms` (how much it played): the context then keeps only that much of
+the reply's speech, so the model knows what the user heard. With client
+turns, `response.cancel` plus new audio does the same.
+
+**Voice page.** `GET /voice` (served when the model holds conversations, and
+without the API key, which the page asks for) is a browser client:
+hands-free or push to talk, streamed reply speech and transcript,
+interruption with truncation, typed messages, instructions and function
+tools whose results are typed in. It uses the browser's echo cancellation
+and noise suppression, so the reply from loudspeakers rarely interrupts the
+model. Browsers grant the microphone only on `localhost` or HTTPS: open it
+through an SSH tunnel (`ssh -L 8080:localhost:8080 host`, then
+`http://localhost:8080/voice`) or behind a TLS proxy.
 
 **Transcription** (`?intent=transcription`): with no transcription prompt and
 English or no language, the session transcribes live. Text deltas
 (`conversation.item.input_audio_transcription.delta`) arrive while audio is
 still being appended, for the item that the next `input_audio_buffer.commit`
-creates; commit flushes the stream and sends `...completed`. The model writes
-a word once the audio after it has arrived, so commit after the speaker's
-trailing silence. Other languages and prompts transcribe the buffer at
-commit. `input_audio_buffer.clear` drops the utterance.
+creates; commit (yours, or the server's with `server_vad`) flushes the
+stream and sends `...completed`. The model writes a word once the audio after
+it has arrived, so commit after the speaker's trailing silence (server turns
+include it). Other languages and prompts transcribe the buffer at commit.
+`input_audio_buffer.clear` drops the utterance.
 
 **Conversation** (no `intent`): one spoken conversation per connection, on a
 private 8192-slot context (one slot per text token, audio token or 80 ms of
@@ -124,12 +157,13 @@ speech; the oldest turns leave when a reply needs room).
 
 | Client event | Effect |
 | --- | --- |
-| `session.update` | `instructions`, `output_modalities` (`["audio"]` or `["text"]`), `tools` (function tools; `tool_choice` `auto`), `max_output_tokens`, and for text replies the Gufo extension `reasoning: {"effort": "none" \| "low" \| "medium" \| "high"}` |
+| `session.update` | `instructions`, `output_modalities` (`["audio"]` or `["text"]`), `tools` (function tools; `tool_choice` `auto`), `max_output_tokens`, `audio.input.turn_detection` (null or `server_vad`), and for text replies the Gufo extension `reasoning: {"effort": "none" \| "low" \| "medium" \| "high"}` |
 | `input_audio_buffer.append` | Opens a user turn and prefills its audio while the user speaks |
 | `input_audio_buffer.commit` / `.clear` | Closes the turn (`input_audio_buffer.committed`, `conversation.item.created`) or drops it |
 | `conversation.item.create` | A user message of `input_text` or one `input_audio` part, or a `function_call_output` |
 | `response.create` | Optional `output_modalities` and `max_output_tokens`; the reply streams `response.output_audio_transcript.delta` and `response.output_audio.delta` (base64 PCM16, 24 kHz), or `response.output_text.delta` (and `response.reasoning_text.delta`), then `function_call` items and `response.done` |
 | `response.cancel` | Stops the reply within one generation step (`status: cancelled`) |
+| `conversation.item.truncate` | Keeps `audio_end_ms` of the latest reply's speech in the context (`conversation.item.truncated`) |
 
 Without instructions the session uses the model card's prompt for its output
 and tools; changing instructions, tools or the session's output modality
@@ -139,7 +173,7 @@ official template renders history. Events sent during a reply are handled
 after it; at most four realtime sessions (transcription or conversation) run
 at once, each on its own context beside the HTTP requests.
 
-Not supported: server voice-activity detection, transcription of the user's
+Not supported: semantic turn detection, WebRTC, transcription of the user's
 audio inside a conversation session, speech voices other than the model's
 own in conversations, the Omni and VL checkpoints (separate models), and Q4
 backbones. Digital silence transcribes as a short word ("Okay."), as in the
