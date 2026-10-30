@@ -18,6 +18,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/vision/encoder.hpp"
 
@@ -41,6 +42,11 @@ void CheckBlas(hipblasStatus_t status) {
     throw std::runtime_error("vision hipBLAS failure: " +
                              std::to_string(status));
   }
+}
+
+std::uint16_t ToBf16(float value) {
+  const auto bits = std::bit_cast<std::uint32_t>(value);
+  return static_cast<std::uint16_t>((bits + 0x7fff + ((bits >> 16) & 1)) >> 16);
 }
 
 struct Allocation {
@@ -89,12 +95,22 @@ public:
   PinnedUpload(const PinnedUpload&) = delete;
   PinnedUpload& operator=(const PinnedUpload&) = delete;
 
-  void Copy(void* destination, const void* source, std::size_t bytes) {
+  /// An F16 source is rounded to BF16 while staged, so conversion needs no
+  /// host copy beyond this buffer.
+  void Copy(void* destination, const void* source, std::size_t bytes,
+            bool f16 = false) {
     auto* out = static_cast<std::byte*>(destination);
     const auto* in = static_cast<const std::byte*>(source);
     for (std::size_t offset = 0; offset < bytes;) {
       const auto count = std::min(capacity_, bytes - offset);
-      std::memcpy(data_, in + offset, count);
+      if (f16) {
+        const auto* half = static_cast<const std::uint16_t*>(source);
+        auto* staged = static_cast<std::uint16_t*>(data_);
+        for (std::size_t i = 0; i < count / 2; ++i)
+          staged[i] = ToBf16(gufo::quant::Fp16ToFloat(half[offset / 2 + i]));
+      } else {
+        std::memcpy(data_, in + offset, count);
+      }
       Check(hipMemcpyAsync(out + offset, data_, count, hipMemcpyHostToDevice,
                            stream_));
       // The next CPU copy must not overwrite a buffer still read by the GPU.
@@ -350,11 +366,6 @@ __global__ void Finish(float* output, const float* bias, unsigned size,
   if (i < size)
     output[i] = Round(output[i] + bias[i % width]);
 }
-
-std::uint16_t ToBf16(float value) {
-  const auto bits = std::bit_cast<std::uint32_t>(value);
-  return static_cast<std::uint16_t>((bits + 0x7fff + ((bits >> 16) & 1)) >> 16);
-}
 }  // namespace
 
 struct Encoder::Impl {
@@ -429,7 +440,7 @@ struct Encoder::Impl {
       if (tensor == nullptr ||
           tensor->dimensions != std::vector<std::uint64_t>(shape) ||
           tensor->type != type) {
-        throw std::invalid_argument("invalid BF16 Qwen vision tensor: " + name);
+        throw std::invalid_argument("invalid Qwen vision tensor: " + name);
       }
       const auto bytes =
           tensor->ElementCount() * (type == core::GgmlType::kF32 ? 4 : 2);
@@ -444,6 +455,16 @@ struct Encoder::Impl {
       if (!mapped)
         throw std::invalid_argument("truncated Qwen vision tensor: " + name);
     };
+    // GEMM weights may also be F16, which Upload rounds to BF16.
+    const auto require_gemm = [&](const std::string& name,
+                                  std::initializer_list<std::uint64_t> shape,
+                                  core::GgmlType type) {
+      const auto* tensor = reader->FindTensor(name);
+      require(name, shape,
+              tensor != nullptr && tensor->type == core::GgmlType::kF16
+                  ? core::GgmlType::kF16
+                  : type);
+    };
     for (unsigned layer = 0; layer < 27; ++layer) {
       const auto prefix = "v.blk." + std::to_string(layer) + ".";
       for (const auto* norm : {"ln1", "ln2"}) {
@@ -455,20 +476,23 @@ struct Encoder::Impl {
                       std::tuple{"attn_out", kHidden, kHidden},
                       std::tuple{"ffn_up", kHidden, kFfn},
                       std::tuple{"ffn_down", kFfn, kHidden}}) {
-        require(prefix + name + ".weight", {in, out}, core::GgmlType::kBF16);
+        require_gemm(prefix + name + ".weight", {in, out},
+                     core::GgmlType::kBF16);
         require(prefix + name + ".bias", {out}, core::GgmlType::kF32);
       }
     }
-    require("v.patch_embd.weight", {16, 16, 3, kHidden}, core::GgmlType::kF32);
-    require("v.patch_embd.weight.1", {16, 16, 3, kHidden},
-            core::GgmlType::kF32);
+    require_gemm("v.patch_embd.weight", {16, 16, 3, kHidden},
+                 core::GgmlType::kF32);
+    require_gemm("v.patch_embd.weight.1", {16, 16, 3, kHidden},
+                 core::GgmlType::kF32);
     require("v.patch_embd.bias", {kHidden}, core::GgmlType::kF32);
     require("v.position_embd.weight", {kHidden, 2304}, core::GgmlType::kF32);
     require("v.post_ln.weight", {kHidden}, core::GgmlType::kF32);
     require("v.post_ln.bias", {kHidden}, core::GgmlType::kF32);
-    require("mm.0.weight", {kMergeHidden, kMergeHidden}, core::GgmlType::kBF16);
+    require_gemm("mm.0.weight", {kMergeHidden, kMergeHidden},
+                 core::GgmlType::kBF16);
     require("mm.0.bias", {kMergeHidden}, core::GgmlType::kF32);
-    require("mm.2.weight", {kMergeHidden, width}, core::GgmlType::kBF16);
+    require_gemm("mm.2.weight", {kMergeHidden, width}, core::GgmlType::kBF16);
     require("mm.2.bias", {width}, core::GgmlType::kF32);
     if (reader->GetTensorCount() != 334) {
       throw std::invalid_argument(
@@ -510,20 +534,25 @@ struct Encoder::Impl {
           tensor.ElementCount() * (tensor.type == core::GgmlType::kF32 ? 4 : 2);
       Allocation buffer = Allocation::Weight(bytes);
       bytes_uploaded += bytes;
-      upload.Copy(buffer.data, tensor.data, bytes);
+      upload.Copy(buffer.data, tensor.data, bytes,
+                  tensor.type == core::GgmlType::kF16);
       weights.emplace(tensor.name, std::move(buffer));
     }
-    const auto* first = static_cast<const float*>(
-        reader->FindTensor("v.patch_embd.weight")->data);
-    const auto* second = static_cast<const float*>(
-        reader->FindTensor("v.patch_embd.weight.1")->data);
+    const auto* first = reader->FindTensor("v.patch_embd.weight");
+    const auto* second = reader->FindTensor("v.patch_embd.weight.1");
+    const auto value = [](const core::GgufTensorInfo& tensor, std::size_t i) {
+      return tensor.type == core::GgmlType::kF16
+                 ? gufo::quant::Fp16ToFloat(
+                       static_cast<const std::uint16_t*>(tensor.data)[i])
+                 : static_cast<const float*>(tensor.data)[i];
+    };
     std::vector<std::uint16_t> patch(kHidden * kPatchDim);
     for (unsigned h = 0; h < kHidden; ++h) {
       for (unsigned c = 0; c < 3; ++c) {
         for (unsigned t = 0; t < 2; ++t) {
           for (unsigned p = 0; p < 256; ++p) {
             patch[h * kPatchDim + (c * 2 + t) * 256 + p] =
-                ToBf16((t == 0 ? first : second)[(h * 3 + c) * 256 + p]);
+                ToBf16(value(t == 0 ? *first : *second, (h * 3 + c) * 256 + p));
           }
         }
       }
@@ -564,9 +593,11 @@ std::shared_ptr<Encoder> Encoder::Open(const std::filesystem::path& target,
     return std::make_shared<Encoder>(sidecar, width);
   auto directory = target.parent_path();
   for (unsigned level = 0; level < 2; ++level) {
-    const auto path = directory / "mmproj-BF16.gguf";
-    if (std::filesystem::is_regular_file(path))
-      return std::make_shared<Encoder>(path, width);
+    for (const auto* name : {"mmproj-BF16.gguf", "mmproj-F16.gguf"}) {
+      const auto path = directory / name;
+      if (std::filesystem::is_regular_file(path))
+        return std::make_shared<Encoder>(path, width);
+    }
     directory = directory.parent_path();
   }
   return {};

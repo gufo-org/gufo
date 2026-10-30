@@ -110,7 +110,8 @@ creating sessions.
 ## Images
 
 Use this model's `mmproj-BF16.gguf`, discovered beside the target or selected
-with `--mmproj`. PNG/JPEG CLI and HTTP requests use the
+with `--mmproj`. Without one there, an `mmproj-F16.gguf` is discovered instead;
+its weights are rounded to BF16 at upload. PNG/JPEG CLI and HTTP requests use the
 [same image interface](../qwen3.8-27b/README.md#images). Image state participates
 in prefill, decoding, verification, multi-turn reuse and disk cache identity.
 The predictor embeds shifted text IDs; visual information comes from target

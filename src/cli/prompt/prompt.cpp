@@ -55,7 +55,7 @@ static void RegisterImageOptions(ArgParser& parser, PromptOptions& opt) {
                  "Prefix image inputs with Picture N: in the chat template",
                  "Prompt", &opt.add_vision_id);
   parser.AddOption("", "--mmproj", "PATH",
-                   "Qwen BF16 vision sidecar (auto-discovered beside model)",
+                   "Qwen vision sidecar (auto-discovered beside model)",
                    "Model", &opt.vision_model_path);
   parser.AddCustomOption(
       "", "--image", "PATH",
@@ -629,7 +629,7 @@ std::shared_ptr<models::qwen::vision::Encoder> LoadQwenVision(
       opt.model_path, opt.vision_model_path, 5120);
   if (!encoder)
     throw std::invalid_argument(
-        "image input requires a matching --mmproj BF16 sidecar");
+        "image input requires a matching --mmproj sidecar");
   return encoder;
 }
 
@@ -639,7 +639,7 @@ std::shared_ptr<const models::qwen::vision::Prompt> PrepareVision(
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder) {
   if (!encoder)
     throw std::invalid_argument(
-        "image input requires a matching --mmproj BF16 sidecar");
+        "image input requires a matching --mmproj sidecar");
   const auto reasoning = PromptReasoningOptions(opt);
   return std::make_shared<models::qwen::vision::Prompt>(
       models::qwen::vision::Prepare(

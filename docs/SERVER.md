@@ -284,7 +284,9 @@ cache is sized and before readiness: Gufo hashes the complete sidecar for image
 cache identities and uploads the encoder weights, so neither happens in the
 first image request and admission's free device memory already excludes them.
 The weights stay resident even if no image arrives, including a sidecar
-auto-discovered as `mmproj-BF16.gguf` in the model's directory or its parent.
+auto-discovered as `mmproj-BF16.gguf` in the model's directory or its parent,
+or as `mmproj-F16.gguf` when that directory has no BF16 sidecar. F16 weights
+are rounded to BF16 during the upload.
 The startup line `event=vision_prepared` reports `resident_bytes`,
 `identity_ms` and `upload_ms`. Startup fails if the upload does not fit. Image
 encoding scratch is still allocated per image.

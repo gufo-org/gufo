@@ -163,7 +163,7 @@ TextPreparedPrompt PrepareQwenPrompt(
     return {std::move(prompt->tokens), {}, cache_prefix};
   if (!encoder)
     throw std::invalid_argument(
-        "image input requires a matching --mmproj BF16 sidecar");
+        "image input requires a matching --mmproj sidecar");
   auto context = std::make_shared<QwenImageContext>();
   context->cache_identity = prompt->cache_identity;
   for (const auto& image : prompt->images) {

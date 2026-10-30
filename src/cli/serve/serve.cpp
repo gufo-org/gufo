@@ -632,7 +632,7 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("-m", "--model", "PATH",
                      "Path to GGUF model file (required)", "Model", &model);
     parser.AddOption("", "--mmproj", "PATH",
-                     "Qwen BF16 vision sidecar (auto-discovered beside model)",
+                     "Qwen vision sidecar (auto-discovered beside model)",
                      "Model", &vision_model_path);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API (repeatable; "
@@ -1240,10 +1240,9 @@ int RunServe(std::span<const char* const> args) {
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
     llm_parser.AddOption("-m", "--model", "PATH",
                          "Path to GGUF model file (required)", "Model", &model);
-    llm_parser.AddOption(
-        "", "--mmproj", "PATH",
-        "Qwen BF16 vision sidecar (auto-discovered beside model)", "Model",
-        &vision_model_path);
+    llm_parser.AddOption("", "--mmproj", "PATH",
+                         "Qwen vision sidecar (auto-discovered beside model)",
+                         "Model", &vision_model_path);
     llm_parser.AddCustomOption(
         "", "--served-model-name", "ID",
         "Model identifier exposed by the OpenAI API (repeatable; the first "

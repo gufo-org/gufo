@@ -39,7 +39,8 @@ public:
   using CancellationCheck = std::function<bool()>;
   Encoder(const std::filesystem::path& path, std::uint32_t output_width);
   /// An explicit sidecar is required to exist. Otherwise discover the canonical
-  /// sidecar beside the target or its quantization subdirectory.
+  /// sidecar beside the target or its quantization subdirectory, preferring
+  /// mmproj-BF16.gguf to mmproj-F16.gguf in each. F16 weights upload as BF16.
   [[nodiscard]] static std::shared_ptr<Encoder> Open(
       const std::filesystem::path& target, const std::filesystem::path& sidecar,
       std::uint32_t output_width);
