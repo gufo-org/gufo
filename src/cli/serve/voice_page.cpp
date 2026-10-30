@@ -68,6 +68,8 @@ form input { flex: 1; }
 <option value="vad">Hands-free: the server hears when you start and stop</option>
 <option value="ptt">Push to talk: hold the button (or Space)</option>
 </select>
+<label><input id="duplex" type="checkbox" style="width:auto"> I use headphones: keep the
+microphone open while the reply plays, so I can talk over it</label>
 <label for="output">Replies</label>
 <select id="output"><option value="audio">Speech with transcript</option>
 <option value="text">Text</option></select>
@@ -101,6 +103,7 @@ const saved = (k) => { try { return sessionStorage.getItem(k) || ""; } catch (e)
 const keep = (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) {} };
 for (const id of ["key", "mode", "output", "silence", "instructions", "tools"])
   if (saved(id)) $(id).value = saved(id);
+$("duplex").checked = saved("duplex") === "1";
 
 function status(text) { $("status").textContent = text; }
 function add(cls, text) {
@@ -135,6 +138,10 @@ function capture(block, rate) {
   for (const v of block) peak = Math.max(peak, Math.abs(v));
   $("meter").firstChild.style.width = Math.min(100, peak * 140) + "%";
   if (!streaming) return;
+  // From loudspeakers the reply would reach the microphone: unless the
+  // user wears headphones, the microphone waits until the reply has played.
+  if (!$("duplex").checked && !holding && playCtx && playCtx.currentTime < play.end + 0.25)
+    return;
   const step = rate / RATE;
   while (resampleT < block.length) {
     const i = Math.floor(resampleT), f = resampleT - i;
@@ -266,6 +273,7 @@ function handle(e) {
 async function connect() {
   if (ws) { ws.close(); return; }
   for (const id of ["key", "mode", "output", "silence", "instructions", "tools"]) keep(id, $(id).value);
+  keep("duplex", $("duplex").checked ? "1" : "");
   try {
     mic = await navigator.mediaDevices.getUserMedia({ audio: {
       channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });

@@ -210,12 +210,17 @@ int RunSpeak(std::span<const char* const> args) {
   audio::GenerateOptions options;
   if (text_mode)
     options.suppress_mixed = options.suppress_audio_out = true;
-  else if (chat && !tools.empty()) {
-    // A spoken reply starts with a call or with interleaved speech.
-    const auto call = model->tokenizer().Encode("<tool_call>", true);
-    if (call.size() == 1)
-      options.first_tokens = {call[0], model->tokens().mixed_start};
-  }
+  // Without reasoning the reply never opens or closes it.
+  if (!tts && !o.reasoning)
+    for (const auto* tag : {"<think>", "</think>"})
+      if (const auto id = model->tokenizer().Encode(tag, true); id.size() == 1)
+        options.suppress_tokens.push_back(id[0]);
+      else if (chat && !tools.empty()) {
+        // A spoken reply starts with a call or with interleaved speech.
+        const auto call = model->tokenizer().Encode("<tool_call>", true);
+        if (call.size() == 1)
+          options.first_tokens = {call[0], model->tokens().mixed_start};
+      }
   options.max_new_tokens = o.max_frames;
   options.seed = o.seed;
   options.audio.temperature = o.temperature;

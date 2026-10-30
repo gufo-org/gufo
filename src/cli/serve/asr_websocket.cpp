@@ -384,7 +384,17 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
               out["audio_end_ms"] = std::int64_t(event.sample * 1000 / 24000);
               if (!send(std::move(out)))
                 return;
-              if (audio_bytes.size() + live_bytes >= 2400 * 2 && !commit())
+              if (event.voiced_ms < VoiceActivity::kMinSpeechMs) {
+                // Too little speech is noise: drop the utterance.
+                audio_bytes.clear();
+                live.reset();
+                live_bytes = 0;
+                auto cleared = json::Value::object();
+                cleared["type"] = "input_audio_buffer.cleared";
+                if (!send(std::move(cleared)))
+                  return;
+              } else if (audio_bytes.size() + live_bytes >= 2400 * 2 &&
+                         !commit())
                 return;
             }
             cursor = at;

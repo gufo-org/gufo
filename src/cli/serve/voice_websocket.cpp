@@ -5,6 +5,7 @@
 // so response.cancel interrupts a reply within one generation step.
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -222,6 +223,8 @@ private:
       vad_.emplace(*settings, kRate);
       ring_.clear();
     }
+    // The client may still play the reply: its echo must not start a turn.
+    vad_->Guard(Now() < playing_until_.load() + 300'000);
     const auto events = vad_->Push(Pcm16(bytes));
     std::size_t cursor = 0;
     const auto ms = [](std::uint64_t sample) {
@@ -251,8 +254,11 @@ private:
         out["audio_end_ms"] = ms(event.sample);
         if (!Send(std::move(out)))
           return true;
+        // Too little speech is noise (a click, a breath): no turn.
         auto commit = json::Value::object();
-        commit["type"] = "_vad.commit";
+        commit["type"] = event.voiced_ms < VoiceActivity::kMinSpeechMs
+                             ? "_vad.clear"
+                             : "_vad.commit";
         commit["item_id"] = vad_item_;
         commit["respond"] = settings->create_response;
         Enqueue(std::move(commit), 64);
@@ -436,6 +442,12 @@ private:
       config_ = std::move(next);
       return Event("session.updated", "session", config_);
     }
+    if (type == "_vad.clear") {
+      if (!conversation_->ClearAudio(&failure))
+        throw std::runtime_error(failure);
+      turn_samples_ = 0;
+      return Event("input_audio_buffer.cleared");
+    }
     if (type == "_vad.commit") {
       bool sent = true;
       if (!Commit(message.member_str("item_id"), &sent))
@@ -462,6 +474,7 @@ private:
       if (!conversation_->TruncateReply(
               std::size_t(end->as_double() * kRate / 1000), &failure))
         throw std::runtime_error(failure);
+      playing_until_ = Now();  // the client stopped playing
       auto event = json::Value::object();
       event["type"] = "conversation.item.truncated";
       event["item_id"] = last_reply_item_;
@@ -660,6 +673,11 @@ private:
                                  std::string(text));
     };
     callbacks.on_audio = [&](std::span<const float> samples) {
+      // Playback on the client ends no sooner than this audio's duration
+      // after it arrives (or after the audio before it).
+      const auto now = Now();
+      playing_until_ = std::max(playing_until_.load(), now) +
+                       std::int64_t(samples.size()) * 1'000'000 / kRate;
       const auto pcm = EncodePcm16(samples);
       return sent = open() && delta("response.output_audio.delta",
                                     EncodeAudioBase64(pcm));
@@ -809,6 +827,13 @@ private:
   // The server hears the user speak (turn detection), and whether that
   // interrupts a reply.
   std::atomic<bool> speaking_{false}, interrupt_{false};
+  // Estimated end of the reply's playback on the client (Now() clock).
+  std::atomic<std::int64_t> playing_until_{0};
+  static std::int64_t Now() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
   std::mutex mutex_;
   std::condition_variable ready_;
   std::deque<std::pair<json::Value, std::size_t>> queue_;

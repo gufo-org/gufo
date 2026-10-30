@@ -76,6 +76,9 @@ struct GenerateOptions {
   bool suppress_mixed{false}, suppress_audio_out{false};
   // When set, the first generated token is one of these.
   std::vector<std::uint32_t> first_tokens;
+  // Text tokens never generated (for example <think> and </think> once the
+  // prompt closed reasoning).
+  std::vector<std::uint32_t> suppress_tokens;
   std::uint64_t seed{0};
   // Frames per codec decode once speech has started; the first chunk is
   // shorter so the first audio leaves sooner.

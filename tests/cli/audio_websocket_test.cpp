@@ -307,6 +307,18 @@ void VoiceActivityDetects() {
   assert(stop.size() == 1 && !stop[0].start);
   assert(stop[0].sample >= 36000 + 7200 && stop[0].sample <= 36000 + 7680);
   assert(!vad.speaking());
+  // A 60 ms click starts nothing; 140 ms of speech is too little for a turn.
+  assert(vad.Push(samples(Pcm(0.06, true) + Pcm(0.5, false))).empty());
+  const auto burst = vad.Push(samples(Pcm(0.14, true) + Pcm(0.5, false)));
+  assert(burst.size() == 2 && burst[1].voiced_ms < VoiceActivity::kMinSpeechMs);
+  // While the reply plays, quiet speech (its echo) starts no turn; loud
+  // speech does.
+  vad.Guard(true);
+  std::vector<float> quiet(12000);
+  for (std::size_t i = 0; i < quiet.size(); ++i)
+    quiet[i] = 0.01F * std::sin(0.11F * float(i));
+  assert(vad.Push(quiet).empty());
+  assert(vad.Push(samples(Pcm(0.3, true))).size() == 1);
   // Steady loud noise is the floor, not speech.
   VoiceActivity steady({}, 24000);
   bool started = false;

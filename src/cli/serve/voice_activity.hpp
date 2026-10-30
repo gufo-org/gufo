@@ -26,12 +26,16 @@ struct VadSettings {
   bool interrupt_response{true};
 };
 
-/// Energy voice activity: 20 ms frames whose level exceeds the noise floor
-/// (the quietest frame of the last three seconds; speech always has pauses)
-/// by the threshold margin are voiced. Speech starts after 60 ms of voiced
-/// frames and stops after silence_duration_ms without one.
+/// Energy voice activity: 20 ms frames are voiced when their level is above
+/// -50 dBFS and above the noise floor (the 10th percentile of the last three
+/// seconds; speech always has pauses) by the threshold margin. Speech starts
+/// after 100 ms of voiced frames and stops after silence_duration_ms without
+/// one; a turn with less than kMinSpeechMs of voiced frames is noise. While
+/// guarded (the reply is still playing on the client), a start needs 12 dB
+/// more and -38 dBFS, so the reply's echo does not start a turn.
 class VoiceActivity {
 public:
+  static constexpr int kMinSpeechMs = 200;
   struct Event {
     bool start;  ///< speech started (true) or stopped (false)
     /// Stream sample where speech started (its first voiced frame) or where
@@ -39,7 +43,10 @@ public:
     /// pushed piece (0 when it lies in an earlier piece).
     std::uint64_t sample;
     std::size_t offset;
+    /// Voiced audio of a stopped turn; below kMinSpeechMs it was noise.
+    int voiced_ms{0};
   };
+  void Guard(bool guarded) noexcept { guarded_ = guarded; }
   VoiceActivity(VadSettings settings, std::uint32_t rate)
       : settings_(settings),
         frame_(rate / 50),
@@ -64,22 +71,30 @@ public:
   }
 
 private:
-  static constexpr int kStartFrames = 3;
-  static constexpr double kSilenceDb = -60.0;  // never speech below
+  static constexpr int kStartFrames = 5;
+  static constexpr double kSilenceDb = -50.0, kGuardedDb = -38.0;
+  static constexpr double kGuardMarginDb = 12.0;
   void Frame(std::size_t end, std::vector<Event>* events) {
     const double level =
         10.0 * std::log10(energy_ / double(frame_) + 1e-12);  // dBFS
     levels_[next_++ % levels_.size()] = level;
     const auto filled = std::min(next_, levels_.size());
-    const double floor =
-        *std::min_element(levels_.begin(), levels_.begin() + filled);
+    std::array<double, 150> sorted;
+    std::copy_n(levels_.begin(), filled, sorted.begin());
+    std::nth_element(sorted.begin(), sorted.begin() + filled / 10,
+                     sorted.begin() + filled);
+    const double floor = sorted[filled / 10];
     const bool voiced = level > kSilenceDb && level > floor + margin_db_;
     const std::uint64_t at = position_ + end;
     if (!speaking_) {
-      run_ = voiced ? run_ + 1 : 0;
+      const bool loud =
+          !guarded_ ||
+          (level > kGuardedDb && level > floor + margin_db_ + kGuardMarginDb);
+      run_ = voiced && loud ? run_ + 1 : 0;
       if (run_ >= kStartFrames) {
         speaking_ = true;
         quiet_ = 0;
+        voiced_ = run_;
         const std::uint64_t start = at - std::uint64_t(run_) * frame_;
         events->push_back(
             {true, start,
@@ -88,10 +103,11 @@ private:
       return;
     }
     quiet_ = voiced ? 0 : quiet_ + 1;
+    voiced_ += voiced;
     if (quiet_ >= silence_frames_) {
       speaking_ = false;
       run_ = 0;
-      events->push_back({false, at, end});
+      events->push_back({false, at, end, voiced_ * 20});
     }
   }
   VadSettings settings_;
@@ -102,8 +118,8 @@ private:
   std::array<double, 150> levels_{};  // three seconds of frame levels
   std::size_t filled_{0}, next_{0};
   std::uint64_t position_{0};
-  int run_{0}, quiet_{0};
-  bool speaking_{false};
+  int run_{0}, quiet_{0}, voiced_{0};
+  bool speaking_{false}, guarded_{false};
 };
 
 /// Reads a Realtime turn_detection value: null (the client commits turns) or

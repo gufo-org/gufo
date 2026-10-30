@@ -376,12 +376,18 @@ public:
       options.seed = settings.seed ? *settings.seed : std::random_device{}();
       if (!settings.audio_output)
         options.suppress_mixed = options.suppress_audio_out = true;
-      else if (tools) {
-        // A spoken reply starts with a call or with interleaved speech.
-        const auto call = model_->tokenizer().Encode("<tool_call>", true);
-        Check(call.size() == 1, "tokenizer lacks <tool_call>");
-        options.first_tokens = {call[0], model_->tokens().mixed_start};
-      }
+      // Without reasoning the reply never opens or closes it.
+      if (prefix != "<think>")
+        for (const auto* tag : {"<think>", "</think>"})
+          if (const auto id = model_->tokenizer().Encode(tag, true);
+              id.size() == 1)
+            options.suppress_tokens.push_back(id[0]);
+          else if (tools) {
+            // A spoken reply starts with a call or with interleaved speech.
+            const auto call = model_->tokenizer().Encode("<tool_call>", true);
+            Check(call.size() == 1, "tokenizer lacks <tool_call>");
+            options.first_tokens = {call[0], model_->tokens().mixed_start};
+          }
       audio::ReplyParser parser(prefix == "<think>");
       audio::GenerateCallbacks hooks;
       hooks.cancelled = callbacks.cancelled;

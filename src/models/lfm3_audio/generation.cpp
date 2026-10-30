@@ -489,6 +489,9 @@ bool Generator::Continue(const GenerateOptions& o,
       suppress.push_back(ids.mixed_start);
     if (o.suppress_audio_out)
       suppress.push_back(ids.audio_start);
+    for (auto id : o.suppress_tokens)
+      if (id < config.vocab)
+        suppress.push_back(id);
     constexpr int kTextSlots = 6, kAudioSlots = 12;
     int slots_left = kTextSlots;
     bool speaking = false, text_done = false, finished = false;

@@ -118,10 +118,15 @@ clients do.
 them: `input_audio_buffer.speech_started` when the user starts speaking,
 `input_audio_buffer.speech_stopped` after the silence, then the commit and,
 in conversations, the reply. Audio before speech is kept only for the prefix
-padding. The detector compares the level of 20 ms frames with the quietest
-frame of the last three seconds (6–30 dB above it by `threshold`); it needs
-no model, so steady noise is ignored but loud background speech is not.
-`semantic_vad` is not supported.
+padding. The detector compares the level of 20 ms frames with the noise
+floor (the 10th percentile of the last three seconds; 6–30 dB above it by
+`threshold`, and above -50 dBFS). A turn starts after 100 ms of such frames,
+and one with less than 200 ms of them is noise: it is dropped
+(`input_audio_buffer.cleared`) instead of answered. While the client is still
+playing a reply (estimated from the speech sent), a start needs 12 dB more
+and -38 dBFS, so the reply's echo from loudspeakers does not start a turn.
+The detector needs no model: steady noise is ignored, loud background speech
+is not. `semantic_vad` is not supported.
 
 **Interruptions.** Speech heard by the server stops the running reply within
 one generation step (`response.done` with `status: cancelled`), and the
@@ -136,8 +141,10 @@ without the API key, which the page asks for) is a browser client:
 hands-free or push to talk, streamed reply speech and transcript,
 interruption with truncation, typed messages, instructions and function
 tools whose results are typed in. It uses the browser's echo cancellation
-and noise suppression, so the reply from loudspeakers rarely interrupts the
-model. Browsers grant the microphone only on `localhost` or HTTPS: open it
+and noise suppression; unless "I use headphones" is ticked, it also pauses
+the microphone while a reply plays (the browser's echo cancellation does not
+reliably cover Web Audio playback), so only headphones allow talking over a
+reply hands-free. The interrupt button works either way. Browsers grant the microphone only on `localhost` or HTTPS: open it
 through an SSH tunnel (`ssh -L 8080:localhost:8080 host`, then
 `http://localhost:8080/voice`) or behind a TLS proxy.
 
