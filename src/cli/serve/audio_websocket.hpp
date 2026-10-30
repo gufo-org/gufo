@@ -12,6 +12,8 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
 // that hears and speaks; see docs/models/lfm3-audio.
 HttpResponse HandleVoiceWebSocket(const HttpRequest& request,
                                   AsrService& service);
+// A browser client of the conversation WebSocket, served at /voice.
+std::string_view VoicePage();
 }  // namespace gufo::server
 
 #endif  // GUFO_SERVER_AUDIO_WEBSOCKET_HPP_

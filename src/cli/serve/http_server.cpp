@@ -247,6 +247,25 @@ bool IsAuthorized(const HttpRequest& request, const std::string& key_hash) {
       credential = value;
     }
   }
+  if (!found) {
+    // Browsers cannot set headers on a WebSocket: Realtime clients pass the
+    // key as the subprotocol "openai-insecure-api-key.<key>".
+    constexpr std::string_view kPrefix = "openai-insecure-api-key.";
+    const auto protocols = request.header("Sec-WebSocket-Protocol");
+    std::string_view offered = protocols;
+    while (!offered.empty()) {
+      const auto comma = offered.find(',');
+      auto token = offered.substr(0, comma);
+      while (token.starts_with(' '))
+        token.remove_prefix(1);
+      while (token.ends_with(' '))
+        token.remove_suffix(1);
+      if (token.starts_with(kPrefix) && IsWebSocketUpgrade(request))
+        return CredentialHash(token.substr(kPrefix.size())) == key_hash;
+      offered = comma == std::string_view::npos ? std::string_view{}
+                                                : offered.substr(comma + 1);
+    }
+  }
   const auto space = credential.find(' ');
   if (space == std::string_view::npos ||
       ToLower(credential.substr(0, space)) != "bearer") {
@@ -2082,6 +2101,16 @@ void HttpServer::reap_workers() {
 }
 
 HttpResponse HttpServer::handle_request(const HttpRequest& req) {
+  // The voice page holds no data; it asks for the API key itself and sends
+  // it with its WebSocket.
+  if (req.method == "GET" && req.path == "/voice" && asr_ &&
+      asr_->supports_voice()) {
+    HttpResponse page{
+        .status = 200, .reason = "OK", .body = std::string(VoicePage())};
+    page.headers.emplace_back("Content-Type", "text/html; charset=utf-8");
+    page.headers.emplace_back("Cache-Control", "no-store");
+    return page;
+  }
   if (!IsAuthorized(req, api_key_hash_)) {
     auto response = Err(401, "Unauthorized", "missing or invalid API key",
                         "authentication_error", "invalid_api_key");
