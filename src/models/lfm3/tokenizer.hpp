@@ -25,6 +25,11 @@ public:
                : bpe_->DecodeToken(token);
   }
   bool IsStop(std::uint32_t token) const { return bpe_->IsStopToken(token); }
+  // GGUF CONTROL tokens (special in the Hugging Face tokenizer), which
+  // decoding with skip_special_tokens drops.
+  bool IsControl(std::uint32_t token) const {
+    return token < control_.size() && control_[token];
+  }
   std::uint32_t Bos() const { return bpe_->GetBosTokenId(); }
   static std::string Render(
       std::span<const std::pair<std::string, std::string>> messages,
@@ -37,6 +42,7 @@ private:
   std::unique_ptr<tokenization::QwenTokenizer> bpe_;
   std::vector<std::pair<std::string, std::uint32_t>> special_tokens_;
   std::vector<std::string> special_pieces_;
+  std::vector<bool> control_;
 };
 }  // namespace gufo::models::lfm3
 #endif

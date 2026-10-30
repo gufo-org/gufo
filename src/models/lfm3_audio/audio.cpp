@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 
@@ -114,32 +115,50 @@ std::vector<std::byte> EncodeWav(std::span<const float> samples,
   }
   return out;
 }
-std::vector<float> Resample(std::span<const float> x, std::uint32_t from,
-                            std::uint32_t to) {
-  if (from == to || x.empty())
+Resampler::Resampler(std::uint32_t from, std::uint32_t to)
+    : ratio_(double(to) / from),
+      cutoff_(std::min(1.0, ratio_) * 0.95),
+      half_(24 / cutoff_),
+      same_(from == to) {}
+std::vector<float> Resampler::Push(std::span<const float> x, bool finish) {
+  if (same_)
     return {x.begin(), x.end()};
-  // Hann-windowed sinc with the cutoff below the lower Nyquist rate.
-  const double ratio = double(to) / from;
-  const double cutoff = std::min(1.0, ratio) * 0.95;
-  constexpr int kZeros = 24;
-  const double half = kZeros / cutoff;
-  const auto n = std::size_t(std::ceil(x.size() * ratio));
-  std::vector<float> y(n);
-  for (std::size_t i = 0; i < n; ++i) {
-    const double t = i / ratio;
-    const auto first = std::int64_t(std::ceil(t - half));
-    const auto last = std::int64_t(std::floor(t + half));
+  // Hann-windowed sinc with the cutoff below the lower Nyquist rate. Output
+  // i sits at input time i / ratio and waits until its window has arrived.
+  history_.insert(history_.end(), x.begin(), x.end());
+  received_ += x.size();
+  const auto total = std::int64_t(received_);
+  const auto end = finish ? std::uint64_t(std::ceil(received_ * ratio_))
+                          : std::numeric_limits<std::uint64_t>::max();
+  std::vector<float> y;
+  for (; next_ < end; ++next_) {
+    const double t = next_ / ratio_;
+    const auto first = std::int64_t(std::ceil(t - half_));
+    const auto last = std::int64_t(std::floor(t + half_));
+    if (!finish && last >= total)
+      break;
     double sum = 0;
     for (auto j = std::max<std::int64_t>(first, 0);
-         j <= std::min<std::int64_t>(last, std::int64_t(x.size()) - 1); ++j) {
+         j <= std::min<std::int64_t>(last, total - 1); ++j) {
       const double d = t - double(j);
-      const double a = std::numbers::pi * cutoff * d;
+      const double a = std::numbers::pi * cutoff_ * d;
       const double sinc = std::abs(a) < 1e-9 ? 1.0 : std::sin(a) / a;
-      const double window = 0.5 + 0.5 * std::cos(std::numbers::pi * d / half);
-      sum += x[j] * cutoff * sinc * window;
+      const double window = 0.5 + 0.5 * std::cos(std::numbers::pi * d / half_);
+      sum += history_[std::size_t(j - base_)] * cutoff_ * sinc * window;
     }
-    y[i] = float(sum);
+    y.push_back(float(sum));
   }
+  // Drop input the next output's window no longer reaches.
+  const auto keep = std::clamp<std::int64_t>(
+      std::int64_t(std::ceil(next_ / ratio_ - half_)), base_, total);
+  history_.erase(history_.begin(), history_.begin() + (keep - base_));
+  base_ = keep;
   return y;
+}
+std::vector<float> Resample(std::span<const float> x, std::uint32_t from,
+                            std::uint32_t to) {
+  if (x.empty())
+    return {};
+  return Resampler(from, to).Push(x, true);
 }
 }  // namespace gufo::models::lfm3_audio

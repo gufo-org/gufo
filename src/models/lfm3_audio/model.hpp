@@ -14,9 +14,29 @@ namespace gufo::models::lfm3_audio {
 // Special tokens of the LFM3-Audio vocabulary.
 struct Tokens {
   std::uint32_t audio{}, audio_out{}, audio_start{}, text_end{}, mixed_start{},
-      im_end{}, im_start{}, bos{};
+      im_end{}, im_start{}, bos{}, mixed_end{}, eos{};
 };
 class Model;
+// Causal encoder state of one 16 kHz audio stream. Samples arrive in pieces
+// of any size; each Push returns the projected embeddings of the audio tokens
+// the piece completes (one per eight mel frames, after seven frames of
+// lookahead). finish pads the last hop and flushes the trailing token. The
+// pieces of a stream give the same embeddings as one Model::Encode call.
+class AudioInput {
+public:
+  ~AudioInput();
+  bool Push(std::span<const float> samples, bool finish,
+            std::vector<float>* embeddings, std::string* error = nullptr);
+  std::uint64_t samples() const;
+  std::uint32_t tokens() const;
+  bool finished() const;
+
+private:
+  friend class Model;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  explicit AudioInput(std::shared_ptr<Model> model);
+};
 // Device state of one stream of speech output: the depth decoder sampling
 // codebook frames and the LiquidCodec decoder turning them into 24 kHz audio.
 // Weights are shared; state is per voice.
@@ -86,9 +106,11 @@ public:
   bool Encode(std::span<const float> samples, std::vector<float>* embeddings,
               std::string* error = nullptr);
   std::unique_ptr<Voice> CreateVoice(std::string* error = nullptr);
+  std::unique_ptr<AudioInput> CreateAudioInput(std::string* error = nullptr);
 
 private:
   friend class Voice;
+  friend class AudioInput;
   Model();
   struct Impl;
   std::unique_ptr<Impl> impl_;
@@ -103,5 +125,20 @@ std::vector<std::byte> EncodeWav(std::span<const float> samples,
 // Band-limited (windowed-sinc) resampling of mono samples.
 std::vector<float> Resample(std::span<const float> samples, std::uint32_t from,
                             std::uint32_t to);
+// Streaming Resample: pieces give the same samples as one call over their
+// concatenation; each output waits for the end of its filter window
+// (about 1.6 ms of 24 kHz input for 16 kHz output).
+class Resampler {
+public:
+  Resampler(std::uint32_t from, std::uint32_t to);
+  std::vector<float> Push(std::span<const float> samples, bool finish = false);
+
+private:
+  double ratio_, cutoff_, half_;
+  bool same_;
+  std::vector<float> history_;  // input from base_
+  std::int64_t base_{};
+  std::uint64_t received_{}, next_{};
+};
 }  // namespace gufo::models::lfm3_audio
 #endif

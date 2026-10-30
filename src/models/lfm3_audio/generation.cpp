@@ -13,6 +13,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "src/core/json.hpp"
+#include "src/models/qwen/chat_template.hpp"
+
 namespace gufo::models::lfm3_audio {
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -42,33 +45,95 @@ std::size_t CompleteUtf8(std::string_view text) {
   return end;
 }
 enum class Mode { kText, kAudio, kInterleaved };
+class PieceWriter {
+public:
+  explicit PieceWriter(std::vector<PromptPiece>* pieces) : pieces_(pieces) {}
+  void Template(std::string_view text) {
+    if (text.empty())
+      return;
+    if (!pieces_->empty() &&
+        pieces_->back().kind == PromptPiece::Kind::kTemplate)
+      pieces_->back().text += text;
+    else
+      pieces_->push_back({PromptPiece::Kind::kTemplate, std::string(text), {}});
+  }
+  void Literal(std::string_view text) {
+    if (!text.empty())
+      pieces_->push_back({PromptPiece::Kind::kLiteral, std::string(text), {}});
+  }
+  void Audio(const std::vector<float>& samples) {
+    pieces_->push_back({PromptPiece::Kind::kAudio, {}, samples});
+  }
+
+private:
+  std::vector<PromptPiece>* pieces_;
+};
 }  // namespace
+std::string ToolDefinition(std::string_view tool_json) {
+  auto tool = json::parse(tool_json);
+  if (!tool.is_object())
+    throw std::invalid_argument("tool definition must be an object");
+  const auto* fn = tool.find("function");
+  const auto& source = fn ? *fn : tool;
+  if (!source.is_object() || source.member_str("name").empty())
+    throw std::invalid_argument("tool definition requires a function name");
+  auto filtered = json::Value::object();
+  for (const auto& [key, value] : source.members())
+    if (key != "defer_loading")
+      filtered[key] = value;
+  return filtered.tojson();
+}
+std::vector<PromptPiece> SystemPieces(std::string_view system,
+                                      std::span<const std::string> tools) {
+  std::vector<PromptPiece> pieces;
+  PieceWriter out(&pieces);
+  out.Template("<|startoftext|>");
+  if (system.empty() && tools.empty())
+    return pieces;
+  out.Template("<|im_start|>system\n");
+  out.Literal(system);
+  if (!tools.empty()) {
+    out.Template(system.empty() ? "<tools>\n" : "\n\n<tools>\n");
+    for (std::size_t i = 0; i < tools.size(); ++i) {
+      if (i)
+        out.Template("\n");
+      out.Literal(tools[i]);
+    }
+    out.Template("\n</tools>");
+  }
+  out.Template("<|im_end|>\n");
+  return pieces;
+}
+std::vector<PromptPiece> MessagePieces(const ChatMessage& m) {
+  std::vector<PromptPiece> pieces;
+  PieceWriter out(&pieces);
+  out.Template("<|im_start|>" + m.role + "\n");
+  const bool tool = m.role == "tool";
+  if (tool)
+    out.Template("<tool_response>\n");
+  for (const auto& part : m.parts)
+    if (part.audio)
+      out.Audio(part.samples);
+    else
+      out.Literal(part.text);
+  if (tool)
+    out.Template("\n</tool_response>");
+  out.Template("<|im_end|>\n");
+  return pieces;
+}
 std::vector<PromptPiece> BuildPrompt(std::string_view system,
                                      std::span<const ChatMessage> messages,
-                                     std::string_view assistant_prefix) {
-  std::vector<PromptPiece> pieces;
-  auto add_template = [&](std::string text) {
-    if (!pieces.empty() && pieces.back().kind == PromptPiece::Kind::kTemplate)
-      pieces.back().text += text;
-    else
-      pieces.push_back({PromptPiece::Kind::kTemplate, std::move(text), {}});
-  };
-  add_template("<|startoftext|>");
-  if (!system.empty()) {
-    add_template("<|im_start|>system\n");
-    pieces.push_back({PromptPiece::Kind::kLiteral, std::string(system), {}});
-    add_template("<|im_end|>\n");
-  }
-  for (const auto& m : messages) {
-    add_template("<|im_start|>" + m.role + "\n");
-    for (const auto& part : m.parts)
-      if (part.audio)
-        pieces.push_back({PromptPiece::Kind::kAudio, {}, part.samples});
-      else if (!part.text.empty())
-        pieces.push_back({PromptPiece::Kind::kLiteral, part.text, {}});
-    add_template("<|im_end|>\n");
-  }
-  add_template("<|im_start|>assistant\n" + std::string(assistant_prefix));
+                                     std::string_view assistant_prefix,
+                                     std::span<const std::string> tools) {
+  auto pieces = SystemPieces(system, tools);
+  PieceWriter out(&pieces);
+  for (const auto& m : messages)
+    for (auto& piece : MessagePieces(m))
+      if (piece.kind == PromptPiece::Kind::kTemplate)
+        out.Template(piece.text);
+      else
+        pieces.push_back(std::move(piece));
+  out.Template("<|im_start|>assistant\n" + std::string(assistant_prefix));
   return pieces;
 }
 std::string AsrSystemPrompt(std::string_view language) {
@@ -127,6 +192,56 @@ struct Generator::Impl {
   std::unique_ptr<Voice> voice;
   std::uint32_t context{};
   float* frame_embedding{};  // device row of backbone width
+  // Inputs of the context in order, so Erase can recompute it: runs of
+  // tokens or of embedding rows.
+  struct Run {
+    std::vector<std::uint32_t> tokens;
+    std::vector<float> rows;
+  };
+  std::vector<Run> log;
+  std::uint32_t last_token{};
+  std::uint32_t Hidden() const { return model->backbone().config().hidden; }
+  void Fail(bool ok, const std::string& failure) const {
+    if (!ok)
+      throw std::runtime_error(failure.empty() ? "LFM3-Audio failure"
+                                               : failure);
+  }
+  void Record(std::span<const std::uint32_t> tokens) {
+    if (log.empty() || !log.back().rows.empty())
+      log.emplace_back();
+    log.back().tokens.insert(log.back().tokens.end(), tokens.begin(),
+                             tokens.end());
+  }
+  void Record(std::span<const float> rows) {
+    if (log.empty() || !log.back().tokens.empty())
+      log.emplace_back();
+    log.back().rows.insert(log.back().rows.end(), rows.begin(), rows.end());
+  }
+  std::vector<Run> Prepare(std::span<const PromptPiece> pieces,
+                           GenerateResult* result);
+  void Feed(const std::vector<Run>& runs);
+  void Room(std::size_t rows) const {
+    if (session->Position() + rows > context)
+      throw std::invalid_argument("LFM3-Audio prompt exceeds the context");
+  }
+  void Tokens(std::span<const std::uint32_t> tokens) {
+    if (tokens.empty())
+      return;
+    Room(tokens.size());
+    std::string failure;
+    Fail(session->Forward(tokens, {}, &failure), failure);
+    Record(tokens);
+    last_token = tokens.back();
+  }
+  void Rows(std::span<const float> rows, std::uint32_t token) {
+    if (rows.empty())
+      return;
+    Room(rows.size() / Hidden());
+    std::string failure;
+    Fail(session->ForwardEmbeddings(rows, false, {}, &failure), failure);
+    Record(rows);
+    last_token = token;
+  }
 };
 Generator::Generator() : impl_(std::make_unique<Impl>()) {}
 Generator::~Generator() {
@@ -135,6 +250,12 @@ Generator::~Generator() {
 }
 Model& Generator::model() const {
   return *impl_->model;
+}
+std::uint32_t Generator::Position() const {
+  return impl_->session->Position();
+}
+std::uint32_t Generator::Context() const {
+  return impl_->context;
 }
 std::unique_ptr<Generator> Generator::Create(std::shared_ptr<Model> model,
                                              std::uint32_t context,
@@ -157,8 +278,189 @@ std::unique_ptr<Generator> Generator::Create(std::shared_ptr<Model> model,
   }
   return g;
 }
+bool Generator::Reset(std::string* error) {
+  impl_->log.clear();
+  impl_->last_token = 0;
+  return impl_->session->Reset(error);
+}
+std::vector<Generator::Impl::Run> Generator::Impl::Prepare(
+    std::span<const PromptPiece> prompt, GenerateResult* result) {
+  const auto& tok = model->tokenizer();
+  const auto& ids = model->tokens();
+  std::vector<Run> runs;
+  // Adjacent text pieces encode as one string, client text as literal
+  // spans, so piece boundaries do not split BPE merges.
+  std::string text;
+  std::vector<std::pair<std::size_t, std::size_t>> literals;
+  auto flush = [&]() {
+    if (text.empty())
+      return;
+    const auto encoded = tok.EncodeFramed(text, literals);
+    for (auto id : encoded)
+      if (id == ids.audio || id == ids.audio_out)
+        throw std::invalid_argument(
+            "prompt text cannot hold speech placeholders");
+    if (runs.empty() || !runs.back().rows.empty())
+      runs.emplace_back();
+    runs.back().tokens.insert(runs.back().tokens.end(), encoded.begin(),
+                              encoded.end());
+    if (result)
+      result->prompt_tokens += encoded.size();
+    text.clear();
+    literals.clear();
+  };
+  for (const auto& piece : prompt) {
+    if (piece.kind == PromptPiece::Kind::kAudio) {
+      const auto t = Clock::now();
+      std::vector<float> embeddings;
+      std::string failure;
+      Fail(model->Encode(piece.audio, &embeddings, &failure), failure);
+      if (result)
+        result->timings.encode_ms += Ms(t);
+      flush();
+      if (runs.empty() || !runs.back().tokens.empty())
+        runs.emplace_back();
+      runs.back().rows.insert(runs.back().rows.end(), embeddings.begin(),
+                              embeddings.end());
+      if (result) {
+        result->prompt_tokens += embeddings.size() / Hidden();
+        result->audio_tokens += embeddings.size() / Hidden();
+      }
+      continue;
+    }
+    if (piece.kind == PromptPiece::Kind::kLiteral && !piece.text.empty())
+      literals.emplace_back(text.size(), piece.text.size());
+    text += piece.text;
+  }
+  flush();
+  return runs;
+}
+void Generator::Impl::Feed(const std::vector<Run>& runs) {
+  std::size_t rows = 0;
+  for (const auto& run : runs)
+    rows += run.tokens.size() + run.rows.size() / Hidden();
+  Room(rows);
+  for (const auto& run : runs)
+    if (run.rows.empty())
+      Tokens(run.tokens);
+    else
+      Rows(run.rows, model->tokens().audio);
+}
+bool Generator::Append(std::span<const PromptPiece> prompt,
+                       GenerateResult* result, std::string* error) {
+  try {
+    impl_->Feed(impl_->Prepare(prompt, result));
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+bool Generator::AppendEmbeddings(std::span<const float> rows,
+                                 std::string* error) {
+  try {
+    if (rows.size() % impl_->Hidden())
+      throw std::invalid_argument("embedding rows must have backbone width");
+    impl_->Rows(rows, impl_->model->tokens().audio);
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+bool Generator::Replace(std::uint32_t begin, std::uint32_t end,
+                        std::span<const PromptPiece> pieces,
+                        std::string* error) {
+  try {
+    auto& impl = *impl_;
+    const auto H = impl.Hidden();
+    if (begin > end || end > impl.session->Position())
+      throw std::invalid_argument("LFM3-Audio replace outside the context");
+    auto inserted = impl.Prepare(pieces, nullptr);
+    // Rows [0, begin), the replacement, then rows [end, position).
+    std::vector<Impl::Run> kept;
+    auto add = [&](const Impl::Run& run, std::size_t i) {
+      const bool rows = !run.rows.empty();
+      if (kept.empty() || kept.back().rows.empty() == rows)
+        kept.emplace_back();
+      if (rows)
+        kept.back().rows.insert(kept.back().rows.end(),
+                                run.rows.begin() + std::ptrdiff_t(i) * H,
+                                run.rows.begin() + std::ptrdiff_t(i + 1) * H);
+      else
+        kept.back().tokens.push_back(run.tokens[i]);
+    };
+    std::uint32_t at = 0;
+    bool spliced = false;
+    auto splice = [&]() {
+      for (const auto& run : inserted) {
+        const auto n =
+            run.rows.empty() ? run.tokens.size() : run.rows.size() / H;
+        for (std::size_t i = 0; i < n; ++i)
+          add(run, i);
+      }
+      spliced = true;
+    };
+    for (const auto& run : impl.log) {
+      const auto n = std::uint32_t(run.rows.empty() ? run.tokens.size()
+                                                    : run.rows.size() / H);
+      for (std::uint32_t i = 0; i < n; ++i, ++at) {
+        if (at == begin && !spliced)
+          splice();
+        if (at < begin || at >= end)
+          add(run, i);
+      }
+    }
+    if (!spliced)
+      splice();
+    const auto last = impl.last_token;
+    const bool tail = end == impl.session->Position();
+    std::string failure;
+    impl.Fail(impl.session->Reset(&failure), failure);
+    impl.log.clear();
+    impl.Feed(kept);
+    // The context still ends in the same input unless its end was replaced.
+    if (!tail)
+      impl.last_token = last;
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
 bool Generator::Generate(std::span<const PromptPiece> prompt,
                          const GenerateOptions& o,
+                         const GenerateCallbacks& callbacks,
+                         GenerateResult* result, std::string* error) {
+  *result = {};
+  const auto start = Clock::now();
+  if (!Reset(error) || !Append(prompt, result, error))
+    return false;
+  if (!impl_->session->Position()) {
+    if (error)
+      *error = "empty LFM3-Audio prompt";
+    return false;
+  }
+  const auto prefill_ms = Ms(start);
+  GenerateResult reply;
+  if (!Continue(o, callbacks, &reply, error))
+    return false;
+  reply.prompt_tokens = result->prompt_tokens;
+  reply.audio_tokens = result->audio_tokens;
+  reply.timings.encode_ms = result->timings.encode_ms;
+  reply.timings.prefill_ms = prefill_ms;
+  // Reply times count from the start of the prompt.
+  for (auto* t : {&reply.timings.first_text_ms, &reply.timings.first_audio_ms})
+    if (*t >= 0)
+      *t += prefill_ms;
+  reply.timings.total_ms += prefill_ms;
+  *result = std::move(reply);
+  return true;
+}
+bool Generator::Continue(const GenerateOptions& o,
                          const GenerateCallbacks& callbacks,
                          GenerateResult* result, std::string* error) {
   try {
@@ -172,62 +474,12 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
     *result = {};
     const auto start = Clock::now();
     std::string failure;
-    auto ok = [&](bool value) {
-      if (!value)
-        throw std::runtime_error(failure.empty() ? "LFM3-Audio failure"
-                                                 : failure);
-    };
-    ok(session.Reset(&failure));
+    auto ok = [&](bool value) { impl.Fail(value, failure); };
+    if (!session.Position())
+      throw std::invalid_argument("LFM3-Audio reply needs a prompt");
     voice.Reset();
     std::mt19937_64 rng(o.seed);
-
-    // Prefill: runs of tokens and of audio embeddings, in order.
-    std::vector<std::uint32_t> pending;
-    std::uint32_t last_token = 0;
-    auto flush = [&]() {
-      if (pending.empty())
-        return;
-      if (session.Position() + pending.size() > impl.context)
-        throw std::invalid_argument("LFM3-Audio prompt exceeds the context");
-      ok(session.Forward(pending, {}, &failure));
-      result->prompt_tokens += pending.size();
-      pending.clear();
-    };
-    for (const auto& piece : prompt) {
-      if (piece.kind == PromptPiece::Kind::kAudio) {
-        const auto t = Clock::now();
-        std::vector<float> embeddings;
-        ok(model.Encode(piece.audio, &embeddings, &failure));
-        result->timings.encode_ms += Ms(t);
-        flush();
-        const auto rows = embeddings.size() / config.hidden;
-        if (session.Position() + rows > impl.context)
-          throw std::invalid_argument("LFM3-Audio prompt exceeds the context");
-        ok(session.ForwardEmbeddings(embeddings, false, {}, &failure));
-        result->prompt_tokens += rows;
-        result->audio_tokens += rows;
-        last_token = ids.audio;
-        continue;
-      }
-      std::vector<std::uint32_t> encoded;
-      if (piece.kind == PromptPiece::Kind::kLiteral) {
-        const std::pair<std::size_t, std::size_t> span{0, piece.text.size()};
-        encoded = tok.EncodeFramed(piece.text, {&span, 1});
-      } else
-        encoded = tok.Encode(piece.text, true);
-      for (auto id : encoded)
-        if (id == ids.audio || id == ids.audio_out)
-          throw std::invalid_argument(
-              "prompt text cannot hold speech placeholders");
-      pending.insert(pending.end(), encoded.begin(), encoded.end());
-      if (!encoded.empty())
-        last_token = encoded.back();
-    }
-    flush();
-    if (!session.Position())
-      throw std::invalid_argument("empty LFM3-Audio prompt");
-    result->timings.prefill_ms = Ms(start);
-
+    const auto last_token = impl.last_token;
     Mode mode = last_token == ids.audio_start || last_token == ids.audio_out
                     ? Mode::kAudio
                 : last_token == ids.mixed_start ? Mode::kInterleaved
@@ -242,6 +494,7 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
     bool speaking = false, text_done = false, finished = false;
     std::deque<std::uint32_t> text_history;
     std::vector<float> logits(config.vocab);
+    std::vector<float> frame_row(config.hidden);
     std::vector<std::int32_t> unsent;  // frames not yet decoded
     std::string text_bytes;            // decoded but not yet emitted
     std::size_t emitted_text = 0;
@@ -337,6 +590,16 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
         ok(session.ForwardEmbeddings(
             {impl.frame_embedding, std::size_t(config.hidden)}, true, {},
             &failure));
+        // The frame embedding stays recorded for Erase.
+        if (hipMemcpyAsync(frame_row.data(), impl.frame_embedding,
+                           frame_row.size() * 4, hipMemcpyDeviceToHost,
+                           static_cast<hipStream_t>(session.DeviceStream())) !=
+                hipSuccess ||
+            hipStreamSynchronize(
+                static_cast<hipStream_t>(session.DeviceStream())) != hipSuccess)
+          throw std::runtime_error("cannot read the frame embedding");
+        impl.Record(frame_row);
+        impl.last_token = ids.audio_out;
         result->timings.backbone_ms += Ms(t);
         join();
       } else {
@@ -349,6 +612,14 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
                                         : logits[id] / o.repetition_penalty;
         for (auto id : suppress)
           logits[id] = -INFINITY;
+        if (result->tokens.empty() && !o.first_tokens.empty()) {
+          std::vector<float> allowed(o.first_tokens.size());
+          for (std::size_t i = 0; i < allowed.size(); ++i)
+            allowed[i] = logits.at(o.first_tokens[i]);
+          std::fill(logits.begin(), logits.end(), -INFINITY);
+          for (std::size_t i = 0; i < allowed.size(); ++i)
+            logits[o.first_tokens[i]] = allowed[i];
+        }
         std::uint32_t token;
         if (o.temperature <= 0) {
           token = std::uint32_t(std::max_element(logits.begin(), logits.end()) -
@@ -393,9 +664,9 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
             text_done = true;
             speaking = true;
           } else
-            finished = true;
+            finished = result->stopped = true;
         } else if (token == ids.im_end || tok.IsStop(token)) {
-          finished = true;
+          finished = result->stopped = true;
         } else if (!interleaving && token == ids.audio_start) {
           mode = Mode::kAudio;
         } else if (!interleaving && token == ids.mixed_start) {
@@ -403,7 +674,7 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
           slots_left = kTextSlots;
           speaking = false;
           text_done = false;
-        } else if (token != ids.audio_start && token != ids.mixed_start) {
+        } else if (!tok.IsControl(token)) {
           text_bytes += tok.Piece(token);
           emit_text(false);
         }
@@ -413,6 +684,8 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
           break;
         t = Clock::now();
         ok(session.Forward({&token, 1}, {}, &failure));
+        impl.Record(std::span<const std::uint32_t>(&token, 1));
+        impl.last_token = token;
         result->timings.backbone_ms += Ms(t);
         join();
       }
@@ -436,5 +709,286 @@ bool Generator::Generate(std::span<const PromptPiece> prompt,
       *error = e.what();
     return false;
   }
+}
+struct LiveTranscriber::Impl {
+  static constexpr std::uint32_t kChunk = 12;  // audio tokens, 0.96 s
+  // Audio tokens per language context: training chains samples of at most
+  // 30 seconds.
+  static constexpr std::uint32_t kContextAudio = 375;
+  static constexpr std::uint32_t kContext = 4096;
+  std::shared_ptr<Model> model;
+  std::unique_ptr<lfm3::Session> session;
+  std::unique_ptr<AudioInput> input;
+  std::vector<std::uint32_t> prompt;
+  // Fed before the next chunk's audio: the prompt of a new context or the
+  // <|text_end|> closing the previous block.
+  std::vector<std::uint32_t> pending;
+  std::vector<float> rows;  // completed audio tokens not yet in a chunk
+  std::vector<float> logits;
+  std::string text, bytes;
+  std::size_t emitted{};
+  std::uint32_t context_audio{}, chunks{};
+  bool finished{}, stopped{};
+  void Fail(bool ok, const std::string& failure) const {
+    if (!ok)
+      throw std::runtime_error(failure.empty() ? "LFM3-Audio failure"
+                                               : failure);
+  }
+  // Decodes one block after count audio tokens of rows.
+  void Chunk(std::uint32_t count, bool final, const TextCallback& on_text) {
+    const auto& ids = model->tokens();
+    const auto& tok = model->tokenizer();
+    const auto H = model->backbone().config().hidden;
+    const std::uint32_t budget = final ? 96 : 48;
+    std::string failure;
+    if (context_audio + count > kContextAudio ||
+        session->Position() + pending.size() + count + budget + 2 > kContext) {
+      Fail(session->Reset(&failure), failure);
+      pending = prompt;
+      context_audio = 0;
+    }
+    if (!pending.empty())
+      Fail(session->Forward(pending, {}, &failure), failure);
+    pending.clear();
+    if (count) {
+      Fail(session->ForwardEmbeddings({rows.data(), std::size_t(count) * H},
+                                      false, {}, &failure),
+           failure);
+      rows.erase(rows.begin(), rows.begin() + std::ptrdiff_t(count) * H);
+      context_audio += count;
+    }
+    ++chunks;
+    // Before the final chunk the turn cannot end: speech and the end-of-turn
+    // tokens are suppressed; placeholders always are.
+    std::vector<std::uint32_t> masked{ids.audio, ids.audio_out};
+    if (!final)
+      masked.insert(masked.end(), {ids.audio_start, ids.mixed_start, ids.im_end,
+                                   ids.mixed_end, ids.eos});
+    for (std::uint32_t n = 0; n < budget; ++n) {
+      Fail(session->ReadLogits(logits, &failure), failure);
+      for (auto id : masked)
+        logits[id] = -INFINITY;
+      const auto token = std::uint32_t(
+          std::max_element(logits.begin(), logits.end()) - logits.begin());
+      if (token == ids.text_end ||
+          (final && (token == ids.im_end || token == ids.eos ||
+                     token == ids.im_start || tok.IsStop(token))))
+        break;
+      if (!tok.IsControl(token)) {
+        bytes += tok.Piece(token);
+        const auto end = CompleteUtf8(bytes);
+        if (end > emitted) {
+          const std::string_view piece(bytes.data() + emitted, end - emitted);
+          text += piece;
+          emitted = end;
+          if (on_text && !on_text(piece)) {
+            stopped = true;
+            return;
+          }
+        }
+      }
+      if (session->Position() >= kContext)
+        break;
+      Fail(session->Forward({&token, 1}, {}, &failure), failure);
+    }
+    if (!final)
+      pending = {ids.text_end};
+  }
+};
+LiveTranscriber::LiveTranscriber() : impl_(std::make_unique<Impl>()) {}
+LiveTranscriber::~LiveTranscriber() = default;
+std::unique_ptr<LiveTranscriber> LiveTranscriber::Create(
+    std::shared_ptr<Model> model, std::string* error) {
+  auto live = std::unique_ptr<LiveTranscriber>(new LiveTranscriber);
+  auto& impl = *live->impl_;
+  impl.model = model;
+  impl.session = model->backbone().CreateSession(Impl::kContext, error);
+  if (!impl.session)
+    return nullptr;
+  impl.logits.resize(model->backbone().config().vocab);
+  impl.prompt =
+      model->tokenizer().Encode("<|startoftext|><|im_start|>system\n" +
+                                    std::string(kLiveAsrSystemPrompt) +
+                                    "<|im_end|>\n<|im_start|>assistant\n",
+                                true);
+  if (!live->Reset(error))
+    return nullptr;
+  return live;
+}
+bool LiveTranscriber::Reset(std::string* error) {
+  auto& impl = *impl_;
+  impl.input = impl.model->CreateAudioInput(error);
+  if (!impl.input || !impl.session->Reset(error))
+    return false;
+  impl.pending = impl.prompt;
+  impl.rows.clear();
+  impl.text.clear();
+  impl.bytes.clear();
+  impl.emitted = 0;
+  impl.context_audio = impl.chunks = 0;
+  impl.finished = impl.stopped = false;
+  return true;
+}
+const std::string& LiveTranscriber::text() const {
+  return impl_->text;
+}
+std::uint64_t LiveTranscriber::samples() const {
+  return impl_->input ? impl_->input->samples() : 0;
+}
+std::uint32_t LiveTranscriber::chunks() const {
+  return impl_->chunks;
+}
+bool LiveTranscriber::Push(std::span<const float> samples,
+                           const TextCallback& on_text, std::string* error) {
+  try {
+    auto& impl = *impl_;
+    if (impl.finished || impl.stopped)
+      throw std::logic_error("live transcription stream has ended");
+    std::vector<float> rows;
+    std::string failure;
+    impl.Fail(impl.input->Push(samples, false, &rows, &failure), failure);
+    impl.rows.insert(impl.rows.end(), rows.begin(), rows.end());
+    const auto H = impl.model->backbone().config().hidden;
+    while (!impl.stopped && impl.rows.size() >= std::size_t(Impl::kChunk) * H)
+      impl.Chunk(Impl::kChunk, false, on_text);
+    return true;
+  } catch (const std::exception& e) {
+    impl_->finished = true;
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+bool LiveTranscriber::Finish(const TextCallback& on_text, std::string* error) {
+  try {
+    auto& impl = *impl_;
+    if (impl.finished)
+      throw std::logic_error("live transcription stream has ended");
+    impl.finished = true;
+    if (impl.stopped)
+      return true;
+    std::vector<float> rows;
+    std::string failure;
+    impl.Fail(impl.input->Push({}, true, &rows, &failure), failure);
+    impl.rows.insert(impl.rows.end(), rows.begin(), rows.end());
+    const auto H = impl.model->backbone().config().hidden;
+    while (!impl.stopped && impl.rows.size() > std::size_t(Impl::kChunk) * H)
+      impl.Chunk(Impl::kChunk, false, on_text);
+    if (!impl.stopped)
+      impl.Chunk(std::uint32_t(impl.rows.size() / H), true, on_text);
+    if (!impl.stopped && impl.bytes.size() > impl.emitted) {
+      const std::string_view rest(impl.bytes.data() + impl.emitted,
+                                  impl.bytes.size() - impl.emitted);
+      impl.text += rest;
+      impl.emitted = impl.bytes.size();
+      if (on_text)
+        (void)on_text(rest);
+    }
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+
+namespace {
+constexpr std::string_view kThinkOpen = "<think>", kThinkClose = "</think>",
+                           kCallOpen = "<tool_call>";
+// Bytes at the end of text that could start tag.
+std::size_t PartialTag(std::string_view text, std::string_view tag) {
+  for (std::size_t n = std::min(text.size(), tag.size() - 1); n > 0; --n)
+    if (text.substr(text.size() - n) == tag.substr(0, n))
+      return n;
+  return 0;
+}
+}  // namespace
+ReplyParser::Delta ReplyParser::Feed(std::string_view text) {
+  pending_ += text;
+  return Drain(false);
+}
+ReplyParser::Delta ReplyParser::Drain(bool final) {
+  Delta out;
+  // A reply may open its own reasoning.
+  if (!thinking_ && reasoning_.empty() && content_.empty() && !calling_) {
+    const auto lead = pending_.find_first_not_of(" \n");
+    if (lead != std::string::npos &&
+        std::string_view(pending_).substr(lead).starts_with(kThinkOpen)) {
+      pending_.erase(0, lead + kThinkOpen.size());
+      thinking_ = true;
+    } else if (!final && (lead == std::string::npos ||
+                          kThinkOpen.starts_with(
+                              std::string_view(pending_).substr(lead))))
+      return out;
+  }
+  if (thinking_) {
+    const auto close = pending_.find(kThinkClose);
+    if (close == std::string::npos) {
+      const auto keep = final ? 0 : PartialTag(pending_, kThinkClose);
+      out.reasoning = pending_.substr(0, pending_.size() - keep);
+      pending_.erase(0, out.reasoning.size());
+      reasoning_ += out.reasoning;
+      return out;
+    }
+    out.reasoning = pending_.substr(0, close);
+    reasoning_ += out.reasoning;
+    pending_.erase(0, close + kThinkClose.size());
+    thinking_ = false;
+  }
+  if (!calling_) {
+    // Answers follow </think> after whitespace.
+    if (content_.empty()) {
+      const auto lead = pending_.find_first_not_of(" \n");
+      pending_.erase(0, lead == std::string::npos ? pending_.size() : lead);
+    }
+    const auto call = pending_.find(kCallOpen);
+    if (call != std::string::npos) {
+      out.content = pending_.substr(0, call);
+      calls_ = pending_.substr(call);
+      pending_.clear();
+      calling_ = true;
+    } else {
+      const auto keep = final ? 0 : PartialTag(pending_, kCallOpen);
+      out.content = pending_.substr(0, pending_.size() - keep);
+      pending_.erase(0, out.content.size());
+    }
+    content_ += out.content;
+  } else {
+    calls_ += pending_;
+    pending_.clear();
+  }
+  return out;
+}
+ReplyParser::Delta ReplyParser::Finish(std::vector<ToolCall>* calls) {
+  auto out = Drain(true);
+  calls->clear();
+  std::string_view rest = calls_;
+  while (true) {
+    const auto lead = rest.find_first_not_of(" \n");
+    rest.remove_prefix(lead == std::string_view::npos ? rest.size() : lead);
+    if (rest.empty())
+      break;
+    const auto scan = tokenization::ScanQwenToolCall(rest);
+    if (!scan.call || !scan.call->complete || !scan.call->native) {
+      // Text that is not a complete call stays visible.
+      out.content += rest;
+      content_ += rest;
+      break;
+    }
+    ToolCall call{scan.call->name, {}};
+    for (const auto& parameter : scan.call->parameters) {
+      ToolArgument argument{parameter.name, parameter.value, true};
+      try {
+        (void)json::parse(parameter.value);
+        argument.is_string = false;
+      } catch (const std::exception&) {
+      }
+      call.arguments.push_back(std::move(argument));
+    }
+    calls->push_back(std::move(call));
+    rest.remove_prefix(scan.end);
+  }
+  calls_.clear();
+  return out;
 }
 }  // namespace gufo::models::lfm3_audio

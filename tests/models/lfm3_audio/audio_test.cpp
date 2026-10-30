@@ -1,6 +1,7 @@
 // Host-side LFM3-Audio helpers: WAV round trip, resampling, prompt framing
 // and task prompts. Expected strings come from the model card and the
 // official chat template, not from production constants.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <numbers>
@@ -96,6 +97,110 @@ int main() {
              pieces[3].kind == audio::PromptPiece::Kind::kAudio &&
              pieces[4].kind == audio::PromptPiece::Kind::kLiteral,
          "piece kinds");
+
+  // Streaming resampling: arbitrary pieces give the one-call samples.
+  {
+    std::vector<float> noise(7919);
+    std::uint32_t state = 1;
+    for (auto& v : noise) {
+      state = state * 1664525U + 1013904223U;
+      v = float(state >> 8) / float(1U << 24) - 0.5F;
+    }
+    for (auto [from, to] :
+         {std::pair{24000U, 16000U}, {44100U, 16000U}, {16000U, 24000U}}) {
+      const auto whole = audio::Resample(noise, from, to);
+      audio::Resampler stream(from, to);
+      std::vector<float> pieces;
+      std::size_t at = 0, step = 1;
+      while (at < noise.size()) {
+        const auto n = std::min(step, noise.size() - at);
+        auto out = stream.Push(std::span(noise).subspan(at, n));
+        pieces.insert(pieces.end(), out.begin(), out.end());
+        at += n;
+        step = step * 3 % 487 + 1;
+      }
+      auto out = stream.Push({}, true);
+      pieces.insert(pieces.end(), out.begin(), out.end());
+      Expect(pieces == whole, "streaming resampler " + std::to_string(from) +
+                                  " -> " + std::to_string(to));
+    }
+  }
+
+  // Tools in the system turn and tool results, as the official template
+  // renders them (tojson spelling, one definition per line).
+  {
+    const std::string tool =
+        R"({"type":"function","function":{"name":"set_volume","description":"Set the device speaker volume.","parameters":{"type":"object","properties":{"volume":{"type":"integer"}},"required":["volume"]},"defer_loading":false}})";
+    const auto definition = audio::ToolDefinition(tool);
+    Expect(
+        definition ==
+            R"({"name": "set_volume", "description": "Set the device speaker volume.", "parameters": {"type": "object", "properties": {"volume": {"type": "integer"}}, "required": ["volume"]}})",
+        "tool definition: " + definition);
+    const std::vector<std::string> tools{definition};
+    std::vector<audio::ChatMessage> turn(2);
+    turn[0].role = "user";
+    turn[0].parts.push_back({false, "Turn it down.", {}});
+    turn[1].role = "tool";
+    turn[1].parts.push_back({false, R"([{"volume": 30}])", {}});
+    const auto framed = Render(audio::BuildPrompt(
+        audio::kToolsInterleavedSystemPrompt, turn, {}, tools));
+    Expect(framed ==
+               "<|startoftext|><|im_start|>system\nRespond with function "
+               "calls, and interleaved text and audio.\n\nList of tools:"
+               "\n\n<tools>\n" +
+                   definition +
+                   "\n</tools><|im_end|>\n<|im_start|>user\nTurn it "
+                   "down.<|im_end|>\n<|im_start|>tool\n<tool_response>\n"
+                   "[{\"volume\": 30}]\n</tool_response><|im_end|>\n"
+                   "<|im_start|>assistant\n",
+           "tool framing: " + framed);
+  }
+
+  // Reply parsing: reasoning, content and calls, with tags split anywhere.
+  {
+    const std::string reply =
+        "Let me think.</think>\n\nSure.<tool_call>\n<function=set_volume>\n"
+        "<parameter=volume>\n30\n</parameter>\n<parameter=room>\nkitchen\n"
+        "</parameter>\n</function>\n</tool_call>\n\n<tool_call>\n"
+        "<function=mute>\n</function>\n</tool_call>";
+    for (std::size_t step : {1U, 2U, 5U, 1000U}) {
+      audio::ReplyParser parser(true);
+      std::string reasoning, content;
+      for (std::size_t at = 0; at < reply.size(); at += step) {
+        auto delta = parser.Feed(reply.substr(at, step));
+        reasoning += delta.reasoning;
+        content += delta.content;
+      }
+      std::vector<audio::ToolCall> calls;
+      auto delta = parser.Finish(&calls);
+      reasoning += delta.reasoning;
+      content += delta.content;
+      Expect(reasoning == "Let me think." && content == "Sure.",
+             "reply split at " + std::to_string(step) + ": [" + reasoning +
+                 "] [" + content + "]");
+      Expect(calls.size() == 2 && calls[0].name == "set_volume" &&
+                 calls[0].arguments.size() == 2 &&
+                 calls[0].arguments[0].value == "30" &&
+                 !calls[0].arguments[0].is_string &&
+                 calls[0].arguments[1].value == "kitchen" &&
+                 calls[0].arguments[1].is_string && calls[1].name == "mute" &&
+                 calls[1].arguments.empty(),
+             "tool calls at " + std::to_string(step));
+    }
+    // A reply may open its own reasoning; plain replies pass through.
+    audio::ReplyParser opened;
+    auto a = opened.Feed("<think>hm</think>Yes");
+    std::vector<audio::ToolCall> calls;
+    auto b = opened.Finish(&calls);
+    Expect(a.reasoning + b.reasoning == "hm" &&
+               a.content + b.content == "Yes" && calls.empty(),
+           "self-opened reasoning");
+    audio::ReplyParser plain;
+    auto c = plain.Feed("Hello <tool");
+    auto d = plain.Finish(&calls);
+    Expect(c.content == "Hello " && d.content == "<tool" && calls.empty(),
+           "partial tag released at the end");
+  }
   std::printf(failures ? "FAILED %d\n" : "PASSED\n", failures);
   return failures ? 1 : 0;
 }

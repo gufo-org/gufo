@@ -50,9 +50,11 @@ std::unique_ptr<Tokenizer> Tokenizer::Load(const core::GgufReader& reader,
     return nullptr;
   }
   result->special_pieces_.resize(tokens.size());
+  result->control_.resize(tokens.size());
   for (std::size_t i = 0; i < tokens.size(); ++i) {
     auto type =
         signed_types ? std::uint64_t((*signed_types)[i]) : (*unsigned_types)[i];
+    result->control_[i] = type == 3;
     // GGUF CONTROL and USER_DEFINED include LFM3's native tool tags, which
     // the Qwen tokenizer's spelling catalogue does not enumerate.
     if (type == 3 || type == 4 || result->bpe_->IsSpecialToken(i)) {

@@ -15,6 +15,7 @@ Subcommands write fixtures consumed by the native tests:
   depth      hidden + codes + mask -> depth logits [12, 2017]
   codec      codes [F, 12] -> 24 kHz waveform
   asr        WAV -> greedy transcript (end to end)
+  live       WAV -> live (chunked) greedy transcript, as transcribe_live
   tts        text -> greedy codes and waveform (audio temperature 0)
 """
 import argparse
@@ -539,6 +540,7 @@ def write_wav(path, samples, rate):
 
 AUDIO, AUDIO_OUT, AUDIO_START, TEXT_END, MIXED_START, IM_END = 125031, 125032, 125012, 125014, 125015, 124900
 EOS_CODE = 2016
+IM_START, MIXED_END, ENDOFTEXT = 124899, 125016, 124895
 
 
 def tokenizer(path):
@@ -577,7 +579,47 @@ def main():
     model = Model(args.backbone, args.mmproj)
     summary = {}
 
-    if args.command in ("features", "encode", "asr"):
+    if args.command == "live":
+        # transcribe_live: the assistant turn holds chunks of 12 audio tokens,
+        # each followed by its greedy text and <|text_end|>; the last chunk
+        # may end the turn. Streaming features and the causal encoder equal
+        # the offline ones (complete stride-8 windows with lookahead), so the
+        # offline embeddings are split into chunks.
+        tok = tokenizer(args.tokenizer)
+        samples = read_wav(args.wav, 16000)
+        embeds = model.encode(log_mel(samples))
+        save(out / "audio_embeds.f32", embeds)
+        prompt = tok.encode(
+            "<|startoftext|><|im_start|>system\nPerform live ASR.<|im_end|>\n<|im_start|>assistant\n",
+            add_special_tokens=False,
+        ).ids
+        x = embed_prompt(model, prompt)
+        chunks, n, at = [], embeds.shape[0], 0
+        while n - at > 12:
+            chunks.append((at, at + 12, False))
+            at += 12
+        chunks.append((at, n, True))
+        blocks = []
+        for begin, end, final in chunks:
+            x = torch.cat((x, embeds[begin:end]))
+            generated = []
+            for _ in range(96 if final else 48):
+                logits = model.logits(model.backbone(x)[-1])
+                logits[[AUDIO, AUDIO_OUT]] = float("-inf")
+                if not final:
+                    logits[[AUDIO_START, MIXED_START, IM_END, MIXED_END, ENDOFTEXT]] = float("-inf")
+                token = int(logits.argmax())
+                if token == TEXT_END or (final and token in (IM_END, ENDOFTEXT, IM_START)):
+                    break
+                generated.append(token)
+                x = torch.cat((x, model.embedding[token][None]))
+            blocks.append(generated)
+            if not final:
+                x = torch.cat((x, model.embedding[TEXT_END][None]))
+        summary["blocks"] = blocks
+        summary["chunks"] = [[b, e] for b, e, _ in chunks]
+        summary["text"] = "".join(tok.decode(b) for b in blocks)
+    elif args.command in ("features", "encode", "asr"):
         samples = read_wav(args.wav, 16000)
         mel = log_mel(samples)
         save(out / "mel.f32", mel)

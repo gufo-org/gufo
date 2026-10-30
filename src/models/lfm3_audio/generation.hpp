@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -24,16 +25,24 @@ struct ChatPart {
   std::vector<float> samples;  // 16 kHz mono when audio
 };
 struct ChatMessage {
+  // user, assistant or tool; tool content is wrapped in <tool_response>.
   std::string role;
   std::vector<ChatPart> parts;
 };
-// Official chat framing: <|startoftext|>, an optional system turn, each
-// message as <|im_start|>role\n...<|im_end|>\n, then <|im_start|>assistant\n
-// followed by assistant_prefix (for example <|audio_start|>, which starts
-// speech, or <|mixed_start|>, which starts interleaved text and speech).
+// Official chat framing: <|startoftext|>, an optional system turn (with the
+// tool definitions, one JSON object per line), each message as
+// <|im_start|>role\n...<|im_end|>\n, then <|im_start|>assistant\n followed by
+// assistant_prefix (for example <|audio_start|>, which starts speech,
+// <|mixed_start|>, which starts interleaved text and speech, or <think>).
 std::vector<PromptPiece> BuildPrompt(std::string_view system,
                                      std::span<const ChatMessage> messages,
-                                     std::string_view assistant_prefix = {});
+                                     std::string_view assistant_prefix = {},
+                                     std::span<const std::string> tools = {});
+// Pieces of the system turn alone, with <|startoftext|> first.
+std::vector<PromptPiece> SystemPieces(std::string_view system,
+                                      std::span<const std::string> tools = {});
+// Pieces of one message turn, closed with <|im_end|>\n.
+std::vector<PromptPiece> MessagePieces(const ChatMessage& message);
 // System prompts of the model card's tasks.
 std::string AsrSystemPrompt(std::string_view language = {});
 // Language names or codes (en, en-gb, fr, ...) and female or male voices.
@@ -41,6 +50,18 @@ bool TtsSystemPrompt(std::string_view language, std::string_view voice,
                      std::string* prompt, std::string* error = nullptr);
 inline constexpr std::string_view kInterleavedSystemPrompt =
     "Respond with interleaved text and audio.";
+// With tools, the model either calls them or answers: in interleaved text
+// and speech, or (kToolsTextSystemPrompt) in text.
+inline constexpr std::string_view kToolsInterleavedSystemPrompt =
+    "Respond with function calls, and interleaved text and audio.\n\n"
+    "List of tools:";
+inline constexpr std::string_view kToolsTextSystemPrompt = "List of tools:";
+inline constexpr std::string_view kLiveAsrSystemPrompt = "Perform live ASR.";
+// A tool definition in the template's spelling: the function object (the
+// "function" member of an OpenAI tool, or the tool itself) without
+// defer_loading, as Jinja tojson writes it.
+std::string ToolDefinition(std::string_view tool_json);
+
 struct GenerateOptions {
   // Generated slots: a text token or a speech frame each.
   std::size_t max_new_tokens{1024};
@@ -53,6 +74,8 @@ struct GenerateOptions {
   Voice::Sampling audio;
   // Forbid <|mixed_start|> and <|audio_start|> in text mode.
   bool suppress_mixed{false}, suppress_audio_out{false};
+  // When set, the first generated token is one of these.
+  std::vector<std::uint32_t> first_tokens;
   std::uint64_t seed{0};
   // Frames per codec decode once speech has started; the first chunk is
   // shorter so the first audio leaves sooner.
@@ -70,17 +93,25 @@ struct GenerateTimings {
       backbone_ms{}, depth_ms{}, codec_ms{}, total_ms{};
 };
 struct GenerateResult {
-  std::string text;  // generated text without control tokens
+  // Generated text without control tokens (<think>, </think> and tool-call
+  // tags are ordinary text).
+  std::string text;
   std::vector<std::uint32_t> tokens;
   std::vector<std::int32_t> codes;  // frame-major [frames][12]
   std::vector<float> samples;       // 24 kHz
   std::size_t prompt_tokens{}, audio_tokens{}, frames{};
+  // The reply ended with <|im_end|> or another stop (not by the slot budget,
+  // the context or cancellation).
+  bool stopped{false};
   bool cancelled{false};
   GenerateTimings timings;
 };
+// A backbone context with one voice. Generate runs a prompt from scratch.
+// Conversations append turns instead, including user audio as it arrives,
+// and Continue the reply from the context, which then holds the reply.
 class Generator {
 public:
-  // context bounds the prompt plus generated slots of one Generate call.
+  // context bounds the prompt plus generated slots.
   static std::unique_ptr<Generator> Create(std::shared_ptr<Model> model,
                                            std::uint32_t context,
                                            std::string* error = nullptr);
@@ -89,12 +120,98 @@ public:
                 const GenerateOptions& options,
                 const GenerateCallbacks& callbacks, GenerateResult* result,
                 std::string* error = nullptr);
+  // Empties the context.
+  bool Reset(std::string* error = nullptr);
+  // Prefills pieces (audio clips are encoded) after the context. Counters
+  // and encode time accumulate into result when given.
+  bool Append(std::span<const PromptPiece> pieces,
+              GenerateResult* result = nullptr, std::string* error = nullptr);
+  // Prefills rows of backbone-width embeddings, such as AudioInput output.
+  bool AppendEmbeddings(std::span<const float> rows,
+                        std::string* error = nullptr);
+  // Generates from the context. The mode follows the last appended token:
+  // <|audio_start|> speaks, <|mixed_start|> interleaves, anything else is
+  // text (from which the model may switch). The context keeps the reply
+  // without its final sampled token; close the turn with
+  // Append(<|im_end|>\n) to continue the conversation.
+  bool Continue(const GenerateOptions& options,
+                const GenerateCallbacks& callbacks, GenerateResult* result,
+                std::string* error = nullptr);
+  std::uint32_t Position() const;
+  std::uint32_t Context() const;
+  // Replaces context rows [begin, end) with pieces (none erases them) and
+  // recomputes the context from the recorded inputs (tokens, audio
+  // embeddings and frame embeddings).
+  bool Replace(std::uint32_t begin, std::uint32_t end,
+               std::span<const PromptPiece> pieces = {},
+               std::string* error = nullptr);
   Model& model() const;
 
 private:
   Generator();
   struct Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+// Live speech recognition (English): the transcript of each 0.96 s of audio
+// (12 audio tokens) is decoded as soon as that audio has arrived, inside one
+// assistant turn: <prompt> [A x 12] text<|text_end|> [A x 12] text... The
+// language context restarts every 30 s while the encoder keeps following
+// the stream. Text is greedy, as the model card.
+class LiveTranscriber {
+public:
+  static std::unique_ptr<LiveTranscriber> Create(std::shared_ptr<Model> model,
+                                                 std::string* error = nullptr);
+  ~LiveTranscriber();
+  using TextCallback = std::function<bool(std::string_view)>;
+  // Feeds 16 kHz samples; text of completed chunks goes to on_text, whose
+  // false return stops the stream.
+  bool Push(std::span<const float> samples, const TextCallback& on_text,
+            std::string* error = nullptr);
+  // Flushes the audio and ends the transcript. Reset starts a new stream.
+  bool Finish(const TextCallback& on_text, std::string* error = nullptr);
+  bool Reset(std::string* error = nullptr);
+  const std::string& text() const;
+  std::uint64_t samples() const;
+  std::uint32_t chunks() const;
+
+private:
+  LiveTranscriber();
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+// Splits streamed reply text into reasoning (up to </think>, when the reply
+// started inside <think>), visible content and tool calls. Text after an
+// opening <tool_call> is held back; Finish parses the calls.
+struct ToolArgument {
+  std::string name;
+  std::string value;  // as written; JSON unless is_string
+  bool is_string{true};
+};
+struct ToolCall {
+  std::string name;
+  std::vector<ToolArgument> arguments;
+};
+class ReplyParser {
+public:
+  explicit ReplyParser(bool thinking = false) : thinking_(thinking) {}
+  struct Delta {
+    std::string reasoning, content;
+  };
+  Delta Feed(std::string_view text);
+  // Remaining deltas; tool calls written after the content.
+  Delta Finish(std::vector<ToolCall>* calls);
+  bool thinking() const { return thinking_; }
+  // A tool call has started: content is held back from here on.
+  bool calling() const { return calling_; }
+  const std::string& reasoning() const { return reasoning_; }
+  const std::string& content() const { return content_; }
+
+private:
+  Delta Drain(bool final);
+  bool thinking_, calling_{false};
+  std::string pending_, reasoning_, content_, calls_;
 };
 }  // namespace gufo::models::lfm3_audio
 #endif

@@ -164,6 +164,111 @@ int main(int argc, char** argv) {
           result.timings.first_text_ms, result.timings.total_ms,
           pcm.size() / 16.0 / result.timings.total_ms);
     }
+    // Streaming encoder: microphone-sized and irregular pieces give the
+    // offline embeddings.
+    std::vector<float> streamed_rows;
+    {
+      auto input = model->CreateAudioInput(&error);
+      Check(bool(input), error);
+      std::size_t at = 0, step = 1600;
+      std::vector<float> rows;
+      while (at < pcm.size()) {
+        const auto n = std::min(step, pcm.size() - at);
+        Check(input->Push({pcm.data() + at, n}, false, &rows, &error), error);
+        streamed_rows.insert(streamed_rows.end(), rows.begin(), rows.end());
+        at += n;
+        step = step == 1600 ? 37 : step == 37 ? 4001 : 1600;
+      }
+      Check(input->Push({}, true, &rows, &error), error);
+      streamed_rows.insert(streamed_rows.end(), rows.begin(), rows.end());
+      Compare("streamed embeddings", streamed_rows, embeddings, 1e-5);
+    }
+    // Incremental prefill: the same ASR turn built from streamed rows, a
+    // discarded turn erased from the context, then continued.
+    {
+      std::vector<audio::ChatMessage> none;
+      auto head = audio::SystemPieces(audio::AsrSystemPrompt("English"));
+      head.push_back({audio::PromptPiece::Kind::kTemplate,
+                      "<|im_start|>user\nNever mind.<|im_end|>\n",
+                      {}});
+      Check(
+          generator->Reset(&error) && generator->Append(head, nullptr, &error),
+          error);
+      const auto junk_end = generator->Position();
+      const auto junk_begin =
+          junk_end - std::uint32_t(model->tokenizer()
+                                       .Encode("<|im_start|>user\nNever "
+                                               "mind.<|im_end|>\n")
+                                       .size());
+      const std::vector<audio::PromptPiece> open{
+          {audio::PromptPiece::Kind::kTemplate, "<|im_start|>user\n", {}}};
+      Check(generator->Append(open, nullptr, &error), error);
+      for (std::size_t r = 0; r < streamed_rows.size(); r += 7 * hidden)
+        Check(generator->AppendEmbeddings(
+                  {streamed_rows.data() + r,
+                   std::min<std::size_t>(7 * hidden, streamed_rows.size() - r)},
+                  &error),
+              error);
+      const std::vector<audio::PromptPiece> close{
+          {audio::PromptPiece::Kind::kTemplate,
+           "<|im_end|>\n<|im_start|>assistant\n",
+           {}}};
+      Check(generator->Append(close, nullptr, &error), error);
+      Check(generator->Replace(junk_begin, junk_end, {}, &error), error);
+      audio::GenerateOptions options;
+      options.max_new_tokens = 96;
+      options.suppress_mixed = options.suppress_audio_out = true;
+      audio::GenerateResult result;
+      Check(generator->Continue(options, {}, &result, &error), error);
+      const bool ok = result.text == asr["text"].str();
+      failures += !ok;
+      std::printf("%-22s %s \"%s\" (first text %.1f ms after the turn)\n",
+                  "incremental asr", ok ? "ok  " : "FAIL", result.text.c_str(),
+                  result.timings.first_text_ms);
+    }
+    // Live ASR in 100 ms pieces against the reference's chunked decode.
+    if (fs::exists(ref / "live/live.json")) {
+      auto live_ref = Json(ref / "live/live.json");
+      auto live = audio::LiveTranscriber::Create(model, &error);
+      Check(bool(live), error);
+      std::vector<double> lag;
+      auto start = std::chrono::steady_clock::now();
+      auto on_text = [&](std::string_view) {
+        // Lag behind the audio pushed so far, were it spoken in real time.
+        const double now = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
+        lag.push_back(now);
+        return true;
+      };
+      double compute = 0;
+      for (std::size_t at = 0; at < pcm.size(); at += 1600) {
+        const auto t = std::chrono::steady_clock::now();
+        Check(live->Push({pcm.data() + at,
+                          std::min<std::size_t>(1600, pcm.size() - at)},
+                         on_text, &error),
+              error);
+        compute = std::max(compute, std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - t)
+                                        .count());
+      }
+      const auto t = std::chrono::steady_clock::now();
+      Check(live->Finish(on_text, &error), error);
+      const double finish = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t)
+                                .count();
+      const auto expected = live_ref["text"].str();
+      const bool ok = live->text() == expected;
+      failures += !ok;
+      std::printf("%-22s %s \"%s\"\n", "live asr", ok ? "ok  " : "FAIL",
+                  live->text().c_str());
+      if (!ok)
+        std::printf("  reference \"%s\"\n", expected.c_str());
+      std::printf("  %u chunks; slowest 100 ms piece %.1f ms; finish %.1f ms\n",
+                  live->chunks(), compute, finish);
+    } else {
+      std::printf("%-22s skipped (no live fixture)\n", "live asr");
+    }
     // Depth decoder and frame embedding.
     auto voice = model->CreateVoice(&error);
     Check(bool(voice), error);

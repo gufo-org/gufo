@@ -221,9 +221,15 @@ struct Model::Impl {
   std::unique_ptr<Stream> encoder_stream;
   std::unique_ptr<Scratch> encoder_scratch, projector_scratch;
   Buffer samples, stft_frames, spectrum, mel, c1, c2, c3, flat, embeddings;
-  Buffer stft_window, dft_basis, mel_filters;
+  Buffer stft_window, dft_basis, mel_filters, window_mel;
   // Computes impl.mel ([frames][128]) on the encoder stream.
   std::uint32_t ComputeMel(std::span<const float> pcm, Scratch& sc);
+  // Encodes tokens [t0, t1) of a stream into host rows of backbone width.
+  // mel holds frames [mel_first, frames) of the stream, frame-major on the
+  // host; frames is the stream's mel length (the right edge of the last
+  // token's receptive field when the stream is finished).
+  void EncodeTokens(std::span<const float> mel, int mel_first, int frames,
+                    int t0, int t1, StackState& state, float* out);
 };
 namespace {
 constexpr int kFft = 400, kHop = 160, kBins = kFft / 2 + 1;
@@ -305,7 +311,8 @@ std::shared_ptr<Model> Model::Load(const std::string& backbone,
     impl.tokens = {id("<|audio|>"),       id("<|audio_out|>"),
                    id("<|audio_start|>"), id("<|text_end|>"),
                    id("<|mixed_start|>"), id("<|im_end|>"),
-                   id("<|im_start|>"),    id("<|startoftext|>")};
+                   id("<|im_start|>"),    id("<|startoftext|>"),
+                   id("<|mixed_end|>"),   id("<|endoftext|>")};
     std::unordered_map<const void*, void*> uploaded;
     impl.weights.Visit([&](Tensor& t) {
       if (!t.data)
@@ -414,75 +421,175 @@ bool Model::Features(std::span<const float> pcm, std::vector<float>* mel,
     return false;
   }
 }
+void Model::Impl::EncodeTokens(std::span<const float> mel, int mel_first,
+                               int frames, int t0_all, int t1_all,
+                               StackState& state, float* out) {
+  constexpr int B = AudioWeights::kMelBins;
+  const auto& w = weights;
+  const auto& e = w.encoder;
+  const auto s = encoder_stream->value;
+  auto& sc = *encoder_scratch;
+  auto& ps = *projector_scratch;
+  const int C = int(w.downsample_channels);
+  const int hidden = int(backbone->config().hidden);
+  // Token t reads frames 8t - 7 .. 8t + 7 through three stride-2 levels;
+  // two tokens of margin make every kept token exact at window edges.
+  constexpr int kMargin = 16;
+  const int max_frames = kRows * 8 + 2 * kMargin;
+  c1.Reserve(std::size_t(max_frames / 2 + 1) * (B / 2) * C * 4);
+  c2.Reserve(std::size_t(max_frames / 4 + 1) * (B / 4) * C * 4);
+  c3.Reserve(std::size_t(max_frames / 4 + 1) * (B / 4) * C * 4);
+  flat.Reserve(std::size_t(max_frames / 8 + 1) * (B / 8) * C * 4);
+  embeddings.Reserve(std::size_t(kRows) * hidden * 4);
+  window_mel.Reserve(std::size_t(max_frames) * B * 4);
+  for (int t0 = t0_all; t0 < t1_all; t0 += kRows) {
+    const int t1 = std::min(t1_all, t0 + kRows), n = t1 - t0;
+    const int f0 = std::max(0, 8 * t0 - kMargin);
+    const int f1 = std::min(frames, 8 * t1 + kMargin);
+    if (f0 < mel_first || f1 - mel_first > int(mel.size() / B))
+      throw std::logic_error("LFM3-Audio encoder window outside its mel");
+    const int T = f1 - f0;
+    Check(hipMemcpyAsync(window_mel.data,
+                         mel.data() + std::size_t(f0 - mel_first) * B,
+                         std::size_t(T) * B * 4, hipMemcpyHostToDevice, s));
+    const int W1 = (T + 1) / 2, H1 = (B + 1) / 2;
+    const int W2 = (W1 + 1) / 2, H2 = (H1 + 1) / 2;
+    const int W3 = (W2 + 1) / 2, H3 = (H2 + 1) / 2;
+    gpu::ConvFirst(window_mel.floats(), F(w.conv_weight[0]), F(w.conv_bias[0]),
+                   c1.floats(), B, T, C, s);
+    gpu::ConvDepthwise(c1.floats(), F(w.conv_weight[1]), F(w.conv_bias[1]),
+                       c2.floats(), W1, H1, C, s);
+    gpu::Sgemm(c2.floats(), F(w.conv_weight[2]), F(w.conv_bias[2]), c3.floats(),
+               W2 * H2, C, C, Activation::kSilu, s);
+    gpu::ConvDepthwise(c3.floats(), F(w.conv_weight[3]), F(w.conv_bias[3]),
+                       c2.floats(), W2, H2, C, s);
+    gpu::Sgemm(c2.floats(), F(w.conv_weight[4]), F(w.conv_bias[4]), c3.floats(),
+               W3 * H3, C, C, Activation::kSilu, s);
+    gpu::FlattenChannels(c3.floats(), flat.floats(), W3, H3, C, s);
+    const int skip = t0 - f0 / 8;
+    DenseBias(w.pre_out, w.pre_out_bias,
+              flat.floats() + std::size_t(skip) * H3 * C, sc.x.floats(), n,
+              Activation::kNone, s, sc);
+    RunStack(e, &state, n, int(w.encoder_window), sc, s);
+    // Projector: LayerNorm, Linear + GELU, Linear.
+    gpu::LayerNorm(sc.z.floats(), F(w.proj_norm), F(w.proj_norm_bias),
+                   sc.o.floats(), n, e.hidden, 1e-5F, s);
+    DenseBias(w.proj1, w.proj1_bias, sc.o.floats(), ps.x.floats(), n,
+              Activation::kGelu, s, ps);
+    DenseBias(w.proj2, w.proj2_bias, ps.x.floats(), embeddings.floats(), n,
+              Activation::kNone, s, ps);
+    Check(hipMemcpyAsync(out + std::size_t(t0 - t0_all) * hidden,
+                         embeddings.data, std::size_t(n) * hidden * 4,
+                         hipMemcpyDeviceToHost, s));
+    Check(hipStreamSynchronize(s));
+  }
+  Check(hipGetLastError());
+}
 bool Model::Encode(std::span<const float> pcm, std::vector<float>* embeddings,
                    std::string* error) {
+  if (pcm.empty()) {
+    if (error)
+      *error = "empty LFM3-Audio clip";
+    return false;
+  }
+  auto input = CreateAudioInput(error);
+  return input && input->Push(pcm, true, embeddings, error);
+}
+struct AudioInput::Impl {
+  std::shared_ptr<Model> model;
+  StackState state;
+  // Samples from the first frame not yet computed; mel frames from
+  // mel_first, which the next tokens' receptive fields still read.
+  std::vector<float> pending, mel;
+  std::uint64_t samples{};
+  int frames{}, tokens{}, mel_first{};
+  bool finished{};
+};
+AudioInput::AudioInput(std::shared_ptr<Model> model)
+    : impl_(std::make_unique<Impl>()) {
+  impl_->model = std::move(model);
+  auto& m = *impl_->model->impl_;
+  impl_->state = StackState(m.weights.encoder, m.weights.encoder_window);
+  impl_->state.Clear(m.weights.encoder, m.encoder_stream->value);
+  Check(hipStreamSynchronize(m.encoder_stream->value));
+}
+AudioInput::~AudioInput() = default;
+std::uint64_t AudioInput::samples() const {
+  return impl_->samples;
+}
+std::uint32_t AudioInput::tokens() const {
+  return std::uint32_t(impl_->tokens);
+}
+bool AudioInput::finished() const {
+  return impl_->finished;
+}
+std::unique_ptr<AudioInput> Model::CreateAudioInput(std::string* error) {
+  try {
+    return std::unique_ptr<AudioInput>(new AudioInput(shared_from_this()));
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return nullptr;
+  }
+}
+bool AudioInput::Push(std::span<const float> pcm, bool finish,
+                      std::vector<float>* embeddings, std::string* error) {
   try {
     constexpr int B = AudioWeights::kMelBins;
-    if (pcm.empty())
-      throw std::invalid_argument("empty LFM3-Audio clip");
-    auto& impl = *impl_;
-    const auto& w = impl.weights;
-    const auto& e = w.encoder;
-    const std::lock_guard lock(impl.encoder_mutex);
-    const auto s = impl.encoder_stream->value;
-    auto& sc = *impl.encoder_scratch;
-    auto& ps = *impl.projector_scratch;
-    const auto frames = impl.ComputeMel(pcm, sc);
-    const int C = int(w.downsample_channels);
-    const int hidden = int(impl.backbone->config().hidden);
-    const int tokens = int(EncoderTokens(frames));
-    StackState state(e, w.encoder_window);
-    state.Clear(e, s);
-    embeddings->resize(std::size_t(tokens) * hidden);
-    // Token t reads frames 8t - 7 .. 8t + 7 through three stride-2 levels;
-    // two tokens of margin make every kept token exact at window edges.
-    constexpr int kMargin = 16;
-    const int max_frames = kRows * 8 + 2 * kMargin;
-    impl.c1.Reserve(std::size_t(max_frames / 2 + 1) * (B / 2) * C * 4);
-    impl.c2.Reserve(std::size_t(max_frames / 4 + 1) * (B / 4) * C * 4);
-    impl.c3.Reserve(std::size_t(max_frames / 4 + 1) * (B / 4) * C * 4);
-    impl.flat.Reserve(std::size_t(max_frames / 8 + 1) * (B / 8) * C * 4);
-    impl.embeddings.Reserve(std::size_t(kRows) * hidden * 4);
-    for (int t0 = 0; t0 < tokens; t0 += kRows) {
-      const int t1 = std::min(tokens, t0 + kRows), n = t1 - t0;
-      const int f0 = std::max(0, 8 * t0 - kMargin);
-      const int f1 = std::min(int(frames), 8 * t1 + kMargin);
-      const int T = f1 - f0;
-      const int W1 = (T + 1) / 2, H1 = (B + 1) / 2;
-      const int W2 = (W1 + 1) / 2, H2 = (H1 + 1) / 2;
-      const int W3 = (W2 + 1) / 2, H3 = (H2 + 1) / 2;
-      gpu::ConvFirst(impl.mel.floats() + std::size_t(f0) * B,
-                     F(w.conv_weight[0]), F(w.conv_bias[0]), impl.c1.floats(),
-                     B, T, C, s);
-      gpu::ConvDepthwise(impl.c1.floats(), F(w.conv_weight[1]),
-                         F(w.conv_bias[1]), impl.c2.floats(), W1, H1, C, s);
-      gpu::Sgemm(impl.c2.floats(), F(w.conv_weight[2]), F(w.conv_bias[2]),
-                 impl.c3.floats(), W2 * H2, C, C, Activation::kSilu, s);
-      gpu::ConvDepthwise(impl.c3.floats(), F(w.conv_weight[3]),
-                         F(w.conv_bias[3]), impl.c2.floats(), W2, H2, C, s);
-      gpu::Sgemm(impl.c2.floats(), F(w.conv_weight[4]), F(w.conv_bias[4]),
-                 impl.c3.floats(), W3 * H3, C, C, Activation::kSilu, s);
-      gpu::FlattenChannels(impl.c3.floats(), impl.flat.floats(), W3, H3, C, s);
-      const int skip = t0 - f0 / 8;
-      DenseBias(w.pre_out, w.pre_out_bias,
-                impl.flat.floats() + std::size_t(skip) * H3 * C, sc.x.floats(),
-                n, Activation::kNone, s, sc);
-      RunStack(e, &state, n, int(w.encoder_window), sc, s);
-      // Projector: LayerNorm, Linear + GELU, Linear.
-      gpu::LayerNorm(sc.z.floats(), F(w.proj_norm), F(w.proj_norm_bias),
-                     sc.o.floats(), n, e.hidden, 1e-5F, s);
-      DenseBias(w.proj1, w.proj1_bias, sc.o.floats(), ps.x.floats(), n,
-                Activation::kGelu, s, ps);
-      DenseBias(w.proj2, w.proj2_bias, ps.x.floats(), impl.embeddings.floats(),
-                n, Activation::kNone, s, ps);
-      Check(hipMemcpyAsync(embeddings->data() + std::size_t(t0) * hidden,
-                           impl.embeddings.data, std::size_t(n) * hidden * 4,
-                           hipMemcpyDeviceToHost, s));
-      Check(hipStreamSynchronize(s));
+    auto& st = *impl_;
+    auto& m = *st.model->impl_;
+    embeddings->clear();
+    if (st.finished)
+      throw std::logic_error("LFM3-Audio audio stream is finished");
+    st.pending.insert(st.pending.end(), pcm.begin(), pcm.end());
+    st.samples += pcm.size();
+    // Complete frames; the last one is padded on finish, as offline.
+    int count = 0;
+    if (finish)
+      count = st.samples ? int(MelFrames(st.samples)) - st.frames : 0;
+    else if (st.pending.size() >= std::size_t(kFft))
+      count = 1 + int((st.pending.size() - kFft) / kHop);
+    const int tokens = finish ? (st.frames + std::max(count, 0) + 7) / 8
+                              : (st.frames + count) / 8;
+    const std::lock_guard lock(m.encoder_mutex);
+    if (count > 0) {
+      const auto used =
+          finish ? st.pending.size() : std::size_t(count - 1) * kHop + kFft;
+      const auto T =
+          m.ComputeMel({st.pending.data(), used}, *m.encoder_scratch);
+      if (int(T) != count)
+        throw std::logic_error("LFM3-Audio streaming mel frame count");
+      const auto old = st.mel.size();
+      st.mel.resize(old + std::size_t(count) * B);
+      Check(hipMemcpyAsync(st.mel.data() + old, m.mel.data,
+                           std::size_t(count) * B * 4, hipMemcpyDeviceToHost,
+                           m.encoder_stream->value));
+      Check(hipStreamSynchronize(m.encoder_stream->value));
+      st.frames += count;
+      st.pending.erase(st.pending.begin(),
+                       st.pending.begin() +
+                           std::ptrdiff_t(std::min(st.pending.size(),
+                                                   std::size_t(count) * kHop)));
     }
-    Check(hipGetLastError());
+    const int hidden = int(m.backbone->config().hidden);
+    if (tokens > st.tokens) {
+      embeddings->resize(std::size_t(tokens - st.tokens) * hidden);
+      m.EncodeTokens(st.mel, st.mel_first, st.frames, st.tokens, tokens,
+                     st.state, embeddings->data());
+      st.tokens = tokens;
+    }
+    // Keep the frames the next token's window starts from.
+    const int keep = std::max(0, 8 * st.tokens - 16);
+    if (keep > st.mel_first) {
+      const auto drop =
+          std::min(st.mel.size(), std::size_t(keep - st.mel_first) * B);
+      st.mel.erase(st.mel.begin(), st.mel.begin() + std::ptrdiff_t(drop));
+      st.mel_first = keep;
+    }
+    st.finished = finish;
     return true;
   } catch (const std::exception& e) {
+    impl_->finished = true;
     if (error)
       *error = e.what();
     return false;
