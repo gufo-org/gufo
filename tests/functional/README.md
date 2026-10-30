@@ -47,6 +47,44 @@ for its second concurrent input. Base TTS registers the English recording as the
 For the other checkpoints, select `--variant custom` with the CustomVoice model
 (default speaker `ryan`, override with `--voice`) or `--variant design` with the
 VoiceDesign model (fixed English voice instructions). Neither requires a clone.
+LFM3-Audio runs both suites from its GGUF pair: pass the backbone as `--model`
+with `--mmproj`, and `--variant custom --voice female` for TTS. Its silence
+transcript is recorded rather than required to be empty.
+
+`realtime_voice.py` drives the `/v1/realtime` WebSockets of an owned
+`serve asr` with an LFM3-Audio pair as a streaming client would: live
+transcription (deltas while audio is appended, clear, and the commit-time path
+selected by a transcription prompt), then one conversation session with a
+spoken question whose reply speech the server transcribes back, a typed
+follow-up answered in text, a spoken function call and its answer after the
+function output, cancellation within one second, a reasoning text reply and
+rejected options. Server turn detection is checked too: a transcription
+that commits itself, a hands-free spoken question, and an interruption
+(speech over a long reply cancels it, truncates it to what was heard and is
+answered). `--browser /path/to/chromium` also loads the `/voice` page
+headless with the spoken question as a fake microphone and requires its
+answer. It synthesizes its spoken prompts with `gufo speak` first.
+
+```sh
+nix develop -c python3 tests/functional/realtime_voice.py \
+  --binary build/release/gufo --model models/lfm3-audio/LFM3-Audio-2B-Q8_0.gguf \
+  --mmproj models/lfm3-audio/mmproj-LFM3-Audio-2B-BF16.gguf \
+  --output artifacts/model-services/lfm3-audio-realtime
+```
+
+`lfm3_audio_context.py` separately exercises the native 32768-slot realtime
+context: over 32K retained text tokens, audio encoder prefill at that depth,
+old-turn eviction and recovery, and a near-capacity current input with a larger
+configured reply budget. Run it with the same `--binary`, `--model`, `--mmproj`
+and a fresh `--output` directory. Every case retains token usage and timings;
+this is a capacity/correctness check, not a speed comparison.
+
+`lfm3_vl.py` starts an owned LFM3-VL GGUF server with RAM and disk caching.
+It checks image/text generation, streaming, count tokens, interleaved images,
+changed-image isolation, low detail, JSON, reasoning budgets, tools,
+Responses/Messages, concurrency, cancellation and restart recovery. Pass
+`--binary`, `--model`, `--mmproj` and a fresh `--output` directory. Its PNGs
+are generated locally; no image download or hosted model inference runs.
 
 | Suite | Required checks |
 | --- | --- |
@@ -921,3 +959,32 @@ nix develop -c python3 tests/functional/embedding_audio.py \
   --base-url http://127.0.0.1:8080/v1 --server-log /path/to/server.log \
   --output /tmp/audio-embeddings.json
 ```
+
+## LFM3 focused qualification
+
+The LFM3 backend has explicit standalone checks:
+`lfm3.py` exercises a running HTTP server, and `lfm3_logits.py` compares full
+logits against the pinned independent teacher. See
+[the LFM3 tools guide](../../tools/lfm3/README.md). Both retain raw evidence
+under `artifacts/lfm3/`; they are outside hosted model CI and the ordinary
+multi-model functional matrix.
+
+The full text API matrix also accepts `--sampling-preset lfm3`. Its expected
+sampling defaults are temperature 0.1, top-p 1.0, top-k 50 and repetition penalty
+1.1. Native tools, structured output, effort/thinking controls, physical batched
+decode and RAM/disk continuations use the common harness without relaxed
+assertions. Run `--suite all --tier full` with text inputs and sufficient context
+(the retained release run uses 32768 tokens). A failed full matrix is retained
+separately from passing focused checks; model output failures remain failures.
+
+## d1-Omni GGUF decision checks
+
+`d1.py` compares already running Gufo and llama.cpp `/v1/systemone` servers
+with explicit local PNG/WAV fixtures. It covers text, image, audio, mixed
+media, spoken instructions, Unicode/control spellings, long prompts, isolation
+and invalid requests. It retains each request and duration; missing inputs
+fail rather than skip. See [d1 quality and reproduction](../../docs/models/d1/QUALITY.md).
+
+`d1_packed.py` adds packed-set and box checks, including 17-question partial
+tails, default set size, mixed audio/image/box requests and invalid limits.
+`tools/d1/reference.py` supplies the independent Python numerical teacher.

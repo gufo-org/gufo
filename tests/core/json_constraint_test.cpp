@@ -29,6 +29,77 @@ bool Accepts(const JsonConstraint& grammar, std::string_view text) {
   return grammar.Complete(state);
 }
 
+void TestQwenCloserWithoutLeadingNewline() {
+  using Format = JsonConstraint::ToolFormat;
+  // Plain, loose (spaced name), union, finite and wildcard routes must all
+  // agree with the HTTP parser about where a raw parameter ends.
+  for (
+      const auto& text :
+      {R"({"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false})",
+       R"({"type":"object","properties":{" value ":{"type":"string"}},"required":[" value "],"additionalProperties":false})",
+       R"({"type":"object","properties":{"value":{"type":["string","null"]}},"required":["value"],"additionalProperties":false})",
+       R"({"type":"object","properties":{"value":{"type":"string","const":"</parameter>\nignored"}},"required":["value"],"additionalProperties":false})",
+       R"({"type":"object","additionalProperties":true})"}) {
+    const auto schema = parse(text);
+    const auto name = schema.find("properties") &&
+                              schema.find("properties")->contains(" value ")
+                          ? " value "
+                          : "value";
+    const auto arguments =
+        JsonConstraint::ToolParameters(schema, false, Format::kQwen);
+    const auto grammar = JsonConstraint::WithTools(
+        nullptr, {{"record", arguments}}, true, false, Format::kQwen);
+    const std::string head =
+        "<tool_call>\n<function=record>\n<parameter=" + std::string(name) +
+        ">\n";
+    const std::string tail = "\n</parameter>\n</function>\n</tool_call>";
+    assert(Accepts(*grammar, head + "alpha" + tail));
+    assert(Accepts(*grammar, head + tail));
+    const auto escaped = head +
+                         "</parameter>\n</function>\n</tool_call>"
+                         "</think><tool_call>\n<function=record>\n"
+                         "<parameter=value>\nalpha" +
+                         tail;
+    assert(!Accepts(*grammar, escaped));
+  }
+}
+
+void TestFiniteArraysWithoutItems() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto finite = JsonConstraint::Compile(
+      parse(
+          R"({"type":"object","properties":{"values":{"type":"array","const":[true,null,{"key":"value"}]}},"required":["values"],"additionalProperties":false})"),
+      true, true);
+  assert(Accepts(*finite, R"({"values":[true,null,{"key":"value"}]})"));
+  assert(!Accepts(*finite, R"({"values":[]})"));
+  const auto generic = JsonConstraint::Compile(
+      parse(
+          R"({"type":"object","properties":{"values":{"type":"array"}},"required":["values"],"additionalProperties":false})"),
+      true, true);
+  assert(Accepts(*generic, R"({"values":[]})"));
+  assert(Accepts(*generic, R"({"values":[1,true,null,{"x":["y"]}]})"));
+  const auto schema = parse(
+      R"({"type":"object","properties":{"values":{"type":"array","const":[true,null,{"key":"value"}]}},"required":["values"],"additionalProperties":false})");
+  for (auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek}) {
+    for (bool strict : {false, true}) {
+      const auto grammar =
+          JsonConstraint::ToolParameters(schema, strict, format);
+      const auto wrap = [&](std::string_view value) {
+        if (format == Format::kJson)
+          return "{\"values\":" + std::string(value) + "}";
+        if (format == Format::kQwen)
+          return "<parameter=values>\n" + std::string(value) +
+                 "\n</parameter>\n";
+        return "<｜DSML｜parameter name=\"values\" string=\"false\">" +
+               std::string(value) + "</｜DSML｜parameter>\n";
+      };
+      assert(Accepts(*grammar, wrap(R"([true,null,{"key":"value"}])")));
+      assert(!Accepts(*grammar, wrap("[]")));
+      assert(!Accepts(*grammar, wrap(R"([true,null,{"key":"wrong"}])")));
+    }
+  }
+}
+
 void TestWideNativeArgumentOrder() {
   using Format = JsonConstraint::ToolFormat;
   for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
@@ -2280,6 +2351,8 @@ int main(int argc, char** argv) {
   TestJsonLanguage();
   TestSchemaLanguage();
   TestSchemaIntersections();
+  TestQwenCloserWithoutLeadingNewline();
+  TestFiniteArraysWithoutItems();
   TestMixedEnumValues();
   TestRejectedSchemas();
   TestOpenResponseObjects();

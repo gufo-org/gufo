@@ -77,6 +77,10 @@ HttpResponse UpgradeWebSocket(const HttpRequest& request,
       {"Sec-WebSocket-Accept",
        EncodeAudioBase64(std::string_view(
            reinterpret_cast<const char*>(digest.data()), size))}};
+  // Browser Realtime clients offer "realtime" (and carry their API key as a
+  // second protocol); the handshake must select one they offered.
+  if (HasToken(request.header("Sec-WebSocket-Protocol"), "realtime"))
+    response.headers.emplace_back("Sec-WebSocket-Protocol", "realtime");
   response.websocket = std::move(handler);
   return response;
 }

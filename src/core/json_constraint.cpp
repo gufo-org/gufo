@@ -16,6 +16,12 @@
 
 namespace gufo::sampling {
 namespace {
+bool ContainsNativeDelimiter(std::string_view value, std::string_view close) {
+  // The opening Qwen newline participates in the parser's delimiter search.
+  const std::string prefix = close == "\n</parameter>\n" ? "\n" : "";
+  return (prefix + std::string(value) + std::string(close)).find(close) !=
+         prefix.size() + value.size();
+}
 constexpr std::uint32_t kTerminal = 1U << 31;
 constexpr std::uint32_t kLexeme = 1U << 30;
 constexpr std::uint32_t kArguments = 1U << 29;
@@ -399,7 +405,7 @@ public:
                             ? schema->find("enum")->items()
                             : json::Value::Array{*schema->find("const")};
           for (const auto& item : values) {
-            if ((item.str() + close).find(close) != item.str().size())
+            if (ContainsNativeDelimiter(item.str(), close))
               return {};
             if (ValueFor(*schema, item))
               choices.push_back(Literal(item.str()));
@@ -540,7 +546,7 @@ public:
               bool literal = true;
               for (const auto& item : values) {
                 literal = literal && item.is_string() &&
-                          (item.str() + close).find(close) == item.str().size();
+                          !ContainsNativeDelimiter(item.str(), close);
                 if (literal && ValueFor(*schema, item))
                   choices.push_back(Literal(item.str()));
               }
@@ -1683,8 +1689,6 @@ private:
   }
   std::uint32_t Array(const json::Value& schema, std::size_t depth) {
     const auto* items = schema.find("items");
-    if (!items)
-      Invalid("arrays require an items schema");
     auto bound = [&](const char* name, std::size_t fallback) {
       const auto* value = schema.find(name);
       if (!value)
@@ -1700,7 +1704,11 @@ private:
         bound("maxItems", std::numeric_limits<std::uint32_t>::max());
     if (minimum > maximum)
       throw JsonSchemaEmpty("JSON Schema: minItems exceeds maxItems");
-    const auto item = Visit(*items, depth + 1);
+    // Omitted items means any JSON value. Requiring it also discarded a
+    // valid array const/enum while validating its unconstrained base schema,
+    // causing native non-strict tools to fall back to unconstrained arrays.
+    const auto item =
+        items ? Visit(*items, depth + 1) : GenericValue(kMaxDepth - depth);
     if (maximum == 0)
       return Seq({Byte('['), ws_, Byte(']')});
     const auto additional = Seq({ws_, Byte(','), ws_, item});

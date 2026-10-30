@@ -145,6 +145,8 @@ bool TtsService::Synthesize(
     }
     return false;
   }
+  if (impl_->options.concurrent)
+    return impl_->options.runner(request, is_cancelled, result, error);
   auto lease = impl_->generation_gate.Acquire(is_cancelled, error);
   if (!lease) {
     if (result)

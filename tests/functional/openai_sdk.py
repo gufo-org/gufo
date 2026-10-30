@@ -353,6 +353,9 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         native = {"top_k": 20 if preset == "qwen38" else 0,
                   "min_p": 0., "min_keep": 0, "repeat_penalty": 1.,
                   "repeat_last_n": 64}
+        if preset == "lfm3":
+            expected.update(temperature=.1, top_p=1., presence_penalty=0.)
+            native.update(top_k=50, repeat_penalty=1.1)
         assert overrides.keys() <= (expected.keys() | native.keys()), overrides
         expected.update({key: value for key, value in overrides.items() if key in expected})
         native.update({key: value for key, value in overrides.items() if key in native})
@@ -2776,7 +2779,7 @@ def main():
     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "lfm3"),
                         help="Expected text defaults; required for all/sampling-defaults")
     parser.add_argument("--sampling-overrides", type=json.loads, default={},
                         help="JSON object of explicit server sampling CLI values")

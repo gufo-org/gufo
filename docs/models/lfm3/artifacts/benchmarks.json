@@ -1,0 +1,603 @@
+{
+  "date": "2026-10-28",
+  "hardware": "Ryzen AI Max+ 395 / gfx1151 / 128 GB",
+  "compiler": "GCC 16.2 / ROCm 10.1 / HIP Clang 24",
+  "build": "CMake release",
+  "gguf_revision": "b3f2ae5d73cd3c91bf40e8ba752c648aa05dffdf",
+  "scope": "C1 pp2048 without vocabulary head; tg128 includes head, logit download and greedy sampling; depth 0; all prompt shapes warmed",
+  "requests": {
+    "baseline_q8": [
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 872.157,
+        "seconds": 2.3482
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 95.0881,
+        "seconds": 1.34612
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 865.332,
+        "seconds": 2.36672
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 94.4855,
+        "seconds": 1.3547
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 864.975,
+        "seconds": 2.3677
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 94.422,
+        "seconds": 1.35562
+      }
+    ],
+    "baseline_bf16": [
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 219.311,
+        "seconds": 9.33832
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 39.3802,
+        "seconds": 3.25036
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 219.093,
+        "seconds": 9.34762
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 39.4227,
+        "seconds": 3.24686
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 214.742,
+        "seconds": 9.53704
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 38.6564,
+        "seconds": 3.31122
+      }
+    ],
+    "candidate_q8": [
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 1293.3,
+        "seconds": 1.58354
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 95.3373,
+        "seconds": 1.3426
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 1290.86,
+        "seconds": 1.58653
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 94.5755,
+        "seconds": 1.35342
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 1265.78,
+        "seconds": 1.61798
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 94.5693,
+        "seconds": 1.3535
+      }
+    ],
+    "candidate_bf16": [
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 452.292,
+        "seconds": 4.52805
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 39.4349,
+        "seconds": 3.24586
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 451.412,
+        "seconds": 4.53688
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 39.3995,
+        "seconds": 3.24877
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 451.647,
+        "seconds": 4.53452
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 39.4172,
+        "seconds": 3.24731
+      }
+    ]
+  },
+  "optimization_requests": {
+    "q8_1291_control": [
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 1284.29,
+        "seconds": 1.59465
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 95.3037,
+        "seconds": 1.34308
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 1287.19,
+        "seconds": 1.59107
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 94.5064,
+        "seconds": 1.35441
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 1259.79,
+        "seconds": 1.62567
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 94.5062,
+        "seconds": 1.35441
+      }
+    ],
+    "q8_fixed_point_candidate": [
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 2348.62,
+        "seconds": 0.872001
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 97.7864,
+        "seconds": 1.30897
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 2356.82,
+        "seconds": 0.868968
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 97.8077,
+        "seconds": 1.30869
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 2337.75,
+        "seconds": 0.876057
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 97.3354,
+        "seconds": 1.31504
+      }
+    ],
+    "bf16_current": [
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 488.621,
+        "seconds": 4.19139
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 0,
+        "tokens_per_second": 39.8499,
+        "seconds": 3.21206
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 487.584,
+        "seconds": 4.2003
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 1,
+        "tokens_per_second": 39.8354,
+        "seconds": 3.21322
+      },
+      {
+        "test": "pp2048",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 488.05,
+        "seconds": 4.1963
+      },
+      {
+        "test": "tg128",
+        "depth": 0,
+        "repetition": 2,
+        "tokens_per_second": 39.8382,
+        "seconds": 3.213
+      }
+    ]
+  },
+  "optimization_control": "Preserved production 1291 tok/s binary, same compiler, inputs, formats, sampler and harness. Older requests retained as historical evidence.",
+  "serving_wiring_verification": {
+    "scope": "Final release rebuild; C1 pp2048/tg128 depth0, three repetitions each, no concurrent GPU work. Earlier measurements retained in wired-cli-benchmark.",
+    "rows": {
+      "serial-control": [
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 2365.13,
+          "seconds": 0.865914
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 97.9737,
+          "seconds": 1.30647
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 2377.46,
+          "seconds": 0.861422
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 98.0486,
+          "seconds": 1.30548
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 2364.43,
+          "seconds": 0.866169
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 97.6067,
+          "seconds": 1.31139
+        }
+      ],
+      "candidate": [
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 2362.33,
+          "seconds": 0.866939
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 97.7137,
+          "seconds": 1.30995
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 2366.2,
+          "seconds": 0.865522
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 97.7105,
+          "seconds": 1.30999
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 2357.56,
+          "seconds": 0.868694
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 97.2564,
+          "seconds": 1.31611
+        }
+      ]
+    },
+    "per_phase_comparison": [
+      {
+        "test": "pp2048",
+        "repetition": 0,
+        "delta_ms": 1.0250000000000536,
+        "delta_percent": 0.11837203232654137,
+        "regression": false
+      },
+      {
+        "test": "tg128",
+        "repetition": 0,
+        "delta_ms": 3.4799999999999276,
+        "delta_percent": 0.26636662150680834,
+        "regression": false
+      },
+      {
+        "test": "pp2048",
+        "repetition": 1,
+        "delta_ms": 4.0999999999999925,
+        "delta_percent": 0.4759571963567133,
+        "regression": false
+      },
+      {
+        "test": "tg128",
+        "repetition": 1,
+        "delta_ms": 4.510000000000014,
+        "delta_percent": 0.34546680148297426,
+        "regression": false
+      },
+      {
+        "test": "pp2048",
+        "repetition": 2,
+        "delta_ms": 2.5249999999999995,
+        "delta_percent": 0.29151354989616074,
+        "regression": false
+      },
+      {
+        "test": "tg128",
+        "repetition": 2,
+        "delta_ms": 4.719999999999835,
+        "delta_percent": 0.35992344001400944,
+        "regression": false
+      }
+    ],
+    "binary_sha256": {
+      "serial-control": "8e4503d2e763043be1d3bbda1a225ac8cff76b23b85365a5e98abb56954a109e",
+      "candidate": "d16bc57e2649bc9e15016cb71e2516731685869ee77dc1e0238a4c982022cc0d"
+    }
+  },
+  "serving_wiring_before_final_rebuild": {
+    "scope": "C1 pp2048/tg128 depth0 three repetitions; no other GPU workloads; preserved wired serial control versus final wiring candidate",
+    "rows": {
+      "serial-control": [
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 2350.18,
+          "seconds": 0.871424
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 97.9272,
+          "seconds": 1.30709
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 2365.62,
+          "seconds": 0.865734
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 97.9041,
+          "seconds": 1.3074
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 2359.41,
+          "seconds": 0.868015
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 97.4925,
+          "seconds": 1.31292
+        }
+      ],
+      "candidate": [
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 2345.67,
+          "seconds": 0.873099
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 0,
+          "tokens_per_second": 97.766,
+          "seconds": 1.30925
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 2361.29,
+          "seconds": 0.867321
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 1,
+          "tokens_per_second": 97.7787,
+          "seconds": 1.30908
+        },
+        {
+          "test": "pp2048",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 2355.76,
+          "seconds": 0.869359
+        },
+        {
+          "test": "tg128",
+          "depth": 0,
+          "repetition": 2,
+          "tokens_per_second": 97.3556,
+          "seconds": 1.31477
+        }
+      ]
+    },
+    "per_phase_comparison": [
+      {
+        "test": "pp2048",
+        "repetition": 0,
+        "delta_ms": 1.674999999999982,
+        "delta_percent": 0.1922141230904728,
+        "regression": false
+      },
+      {
+        "test": "tg128",
+        "repetition": 0,
+        "delta_ms": 2.1599999999999397,
+        "delta_percent": 0.16525258398427667,
+        "regression": false
+      },
+      {
+        "test": "pp2048",
+        "repetition": 1,
+        "delta_ms": 1.587000000000005,
+        "delta_percent": 0.1833126572365229,
+        "regression": false
+      },
+      {
+        "test": "tg128",
+        "repetition": 1,
+        "delta_ms": 1.6800000000001258,
+        "delta_percent": 0.12849931161083017,
+        "regression": false
+      },
+      {
+        "test": "pp2048",
+        "repetition": 2,
+        "delta_ms": 1.3440000000000119,
+        "delta_percent": 0.1548360339395094,
+        "regression": false
+      },
+      {
+        "test": "tg128",
+        "repetition": 2,
+        "delta_ms": 1.8499999999999073,
+        "delta_percent": 0.14090729061937424,
+        "regression": false
+      }
+    ],
+    "binary_sha256": {
+      "serial-control": "8e4503d2e763043be1d3bbda1a225ac8cff76b23b85365a5e98abb56954a109e",
+      "candidate": "6964981b3ab8dca2ecfb6f0869e790d1d5a57c455ec84e1634009dba2bf6b3e8"
+    }
+  }
+}

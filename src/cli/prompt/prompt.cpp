@@ -27,6 +27,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
+#include "src/cli/prompt/lfm3.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -54,12 +55,13 @@ static void RegisterImageOptions(ArgParser& parser, PromptOptions& opt) {
   parser.AddFlag("", "--add-vision-id",
                  "Prefix image inputs with Picture N: in the chat template",
                  "Prompt", &opt.add_vision_id);
-  parser.AddOption("", "--mmproj", "PATH",
-                   "Qwen BF16 vision sidecar (auto-discovered beside model)",
-                   "Model", &opt.vision_model_path);
+  parser.AddOption(
+      "", "--mmproj", "PATH",
+      "Vision GGUF sidecar (required for LFM3-VL; auto-discovered for Qwen)",
+      "Model", &opt.vision_model_path);
   parser.AddCustomOption(
       "", "--image", "PATH",
-      "PNG/JPEG attached before text in the first user turn; repeat for "
+      "PNG/JPEG/WebP attached before text in the first user turn; repeat for "
       "multiple images",
       "Prompt",
       [&opt](std::string_view, std::string_view value, std::string* error) {
@@ -295,7 +297,9 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
   sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
   const auto artifact_architecture =
       reader.GetMetadataString("general.architecture");
-  if (artifact_architecture == "deepseek4") {
+  if (artifact_architecture == "lfm3") {
+    preset = sampling::TextModelPreset::kLfm3;
+  } else if (artifact_architecture == "deepseek4") {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
     preset = sampling::TextModelPreset::kQwen38;
@@ -1005,6 +1009,14 @@ int RunPrompt(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
   ResolvePromptSampling(*reader, &opt);
+  if (reader->GetMetadataString("general.architecture") == "lfm3") {
+#if defined(ENGINE_ENABLE_HIP)
+    return RunLfm3Prompt(opt, false);
+#else
+    std::cerr << "LFM3 requires ENGINE_ENABLE_HIP=ON\n";
+    return 1;
+#endif
+  }
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {
@@ -1228,6 +1240,14 @@ int RunChat(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
   ResolvePromptSampling(*reader, &opt);
+  if (reader->GetMetadataString("general.architecture") == "lfm3") {
+#if defined(ENGINE_ENABLE_HIP)
+    return RunLfm3Prompt(opt, true);
+#else
+    std::cerr << "LFM3 requires ENGINE_ENABLE_HIP=ON\n";
+    return 1;
+#endif
+  }
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {

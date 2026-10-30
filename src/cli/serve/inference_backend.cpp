@@ -35,6 +35,7 @@
 #include "src/models/qwen/vision/image_cache.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
+#include "src/cli/serve/lfm3_runner.hpp"
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
@@ -3135,6 +3136,79 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     return false;
   }
 
+  if (architecture == "lfm3") {
+    if (!reader->GetMetadataBool("lfm3.attention.causal").value_or(true)) {
+      SetError(
+          error,
+          "d1 decision models require gufo serve decision (/v1/systemone)");
+      return false;
+    }
+    const bool vl = reader->GetMetadataString("general.basename") == "LFM3-VL";
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "LFM3 supports autoregressive inference; disable speculation");
+      return false;
+    }
+    if (vl != !vision_model_path.empty()) {
+      SetError(error, vl ? "LFM3-VL requires its matching --mmproj GGUF"
+                         : "a vision projector requires an LFM3-VL backbone");
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) &&
+        resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
+        !FingerprintArtifact(
+            "LFM3", *reader,
+            &resolved_disk_cache_config.model_artifact_fingerprint, error))
+      return false;
+    try {
+      auto model = models::lfm3::Model::Load(model_path, &load_error);
+      if (!model) {
+        SetError(error, load_error);
+        return false;
+      }
+      if (!session_count || max_context > model->config().context) {
+        SetError(error, "invalid LFM3 context/session count");
+        return false;
+      }
+      std::shared_ptr<models::lfm3_vl::Vision> vision;
+      if (vl) {
+        auto projector =
+            core::GgufReader::OpenFile(vision_model_path, &load_error);
+        if (!projector ||
+            projector->GetMetadataString("general.basename") != "LFM3-VL")
+          throw std::invalid_argument(
+              "--mmproj does not match the LFM3-VL backbone");
+        vision = models::lfm3_vl::Vision::Load(vision_model_path);
+      }
+      auto runner = CreateLfm3Runner(
+          std::move(model), max_context,
+          resolved_disk_cache_config.model_artifact_fingerprint,
+          std::move(vision));
+      auto new_state = std::make_shared<Impl::State>();
+      new_state->supports_images = vl;
+      new_state->sampling_defaults.model = sampling::TextModelPreset::kLfm3;
+      new_state->sampling_defaults.supplied = {};
+      new_state->model_id = runner->Descriptor().model_id;
+      new_state->max_context = max_context;
+      std::optional<TextRunnerDiskCacheOptions> disk;
+      if (DiskCacheEnabled(resolved_disk_cache_config))
+        disk = TextRunnerDiskCacheOptions{
+            .directory = resolved_disk_cache_config.directory,
+            .capacity_bytes = resolved_disk_cache_config.capacity_bytes,
+            .staging_capacity_bytes =
+                resolved_disk_cache_config.staging_capacity_bytes};
+      auto pool = std::make_shared<TextRunnerPool>(
+          runner, session_count, std::move(disk), ram_cache_config);
+      new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+          std::move(pool), prefill_policy, scheduler_policy);
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+      return true;
+    } catch (const std::exception& e) {
+      SetError(error, e.what());
+      return false;
+    }
+  }
   if (reader->GetMetadataString("general.architecture") == "deepseek4") {
     if (!vision_model_path.empty()) {
       SetError(error, "DeepSeek does not support --mmproj");

@@ -25,7 +25,9 @@ def main():
     parser.add_argument('service', choices=('embedding', 'asr', 'tts'))
     parser.add_argument('--embedding-suite', choices=('smoke', 'full'), default='smoke')
     parser.add_argument('--binary', type=Path, required=True)
-    parser.add_argument('--model', type=Path, required=True)
+    parser.add_argument('--model', type=Path, required=True,
+                        help='Model directory, or an LFM3-Audio GGUF with --mmproj')
+    parser.add_argument('--mmproj', type=Path, help='LFM3-Audio audio towers GGUF')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--audio-root', type=Path, default=HERE / 'fixtures/audio')
     parser.add_argument('--variant', choices=('base', 'custom', 'design'), default='base')
@@ -40,7 +42,10 @@ def main():
         parser.error('--startup-timeout must be positive')
     args.binary, args.model, args.audio_root = (path.resolve() for path in
                                                (args.binary, args.model, args.audio_root))
-    if not args.binary.is_file() or not (args.model / 'config.json').is_file():
+    gguf = args.model.suffix == '.gguf'
+    if gguf and not (args.model.is_file() and args.mmproj and args.mmproj.is_file()):
+        parser.error('a GGUF model needs an existing file and --mmproj; missing weights are not a pass')
+    if not args.binary.is_file() or not (gguf or (args.model / 'config.json').is_file()):
         parser.error('binary and model/config.json must exist; missing weights are not a pass')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -50,23 +55,30 @@ def main():
     public_model = 'functional-' + args.service
     command = [str(args.binary), 'serve', args.service, '--model', str(args.model),
                '--host', '127.0.0.1', '--port', str(port), '--served-model-name', public_model]
+    if gguf:
+        command += ['--mmproj', str(args.mmproj.resolve())]
     voice = args.voice or {'base': 'narrator', 'custom': 'ryan', 'design': 'voice-design'}[args.variant]
     if args.service == 'tts' and args.variant == 'base':
         command += ['--voice', f'{voice}={args.audio_root / "clear-english-voice.wav"}',
                     '--voice-text', f'{voice}={args.audio_root / "clear-english-voice.txt"}']
     identity = {}
+    model_root = args.model.parent if gguf else args.model
     for name in ('config.json', 'tokenizer_config.json', 'preprocessor_config.json'):
-        path = args.model / name
-        if path.is_file():
+        path = model_root / name
+        if path.is_file() and not gguf:
             identity[name] = sha256(path)
+    if gguf:
+        identity = {path.name: sha256(path) for path in (args.model, args.mmproj.resolve())}
+    weights = ([args.model, args.mmproj.resolve()] if gguf else
+               sorted(args.model.rglob('*.safetensors')))
     report = {**provenance(), 'schema': 1, 'service': args.service, 'status': 'running',
               'command': command, 'model_configuration_sha256': identity,
               'source_revision': subprocess.check_output(
                   ['git', '-C', str(HERE.parents[1]), 'rev-parse', 'HEAD'], text=True).strip(),
-              'model_download_metadata': {str(path.relative_to(args.model)): path.read_text()
-                  for path in sorted((args.model / '.cache/huggingface/download').rglob('*.metadata'))},
+              'model_download_metadata': {str(path.relative_to(model_root)): path.read_text()
+                  for path in sorted((model_root / '.cache/huggingface/download').rglob('*.metadata'))},
               'weights': [{'path': str(path), 'bytes': path.stat().st_size,
-                           'mtime_ns': path.stat().st_mtime_ns} for path in sorted(args.model.rglob('*.safetensors'))],
+                           'mtime_ns': path.stat().st_mtime_ns} for path in weights],
               'binary_sha256': sha256(args.binary), 'variant': args.variant if args.service == 'tts' else None,
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
@@ -100,7 +112,8 @@ def main():
                         assert result.returncode == 0, f'see {script}.log'
             elif args.service == 'asr':
                 import asr_service
-                asr_service.run(evidence, url, args.audio_root, public_model)
+                asr_service.run(evidence, url, args.audio_root, public_model,
+                                silence_empty=not gguf)
             else:
                 import tts_service
                 tts_service.run(evidence, url, public_model, voice, args.variant, args.audio_root,

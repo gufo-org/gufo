@@ -260,7 +260,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True,
                         help="New report directory; existing results are never overwritten")
-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"), required=True)
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "lfm3"), required=True)
     parser.add_argument("--suite", action="append", choices=("all", *SUITES), required=True,
                         help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),

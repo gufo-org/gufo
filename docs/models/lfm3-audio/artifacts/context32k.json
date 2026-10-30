@@ -1,0 +1,281 @@
+{
+  "context_slots": 32768,
+  "gguf_revision": "02355c1a141e464a064f2ab2c276638dbcb7f38a",
+  "model_sha256": {
+    "LFM3-Audio-2B-Q8_0.gguf": "d4e36902ba8f0ee7b333596030a59d650f88ac76660b4d9ba5ff77c3c2258fc0",
+    "mmproj-LFM3-Audio-2B-BF16.gguf": "683b3648484cb5b0bf06185eac8be37b1a9bff03591360641248bd482119afc1"
+  },
+  "binary_sha256": "726170cfedb89d8107f5b32e54e5d25ed23d60c5306e3ddafdfef695ed95e699",
+  "capacity_status": "passed",
+  "cases": [
+    {
+      "name": "native-32k-history",
+      "status": "passed",
+      "prefill_ms": 10707.533261040226,
+      "text": "OK",
+      "response": {
+        "id": "resp_r2_1",
+        "object": "realtime.response",
+        "status": "completed",
+        "output": [
+          {
+            "object": "realtime.item",
+            "type": "message",
+            "role": "assistant",
+            "id": "item_r2_2",
+            "status": "completed",
+            "content": [
+              {
+                "type": "text",
+                "text": "OK"
+              }
+            ]
+          }
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "usage": {
+          "input_tokens": 32023,
+          "output_tokens": 2,
+          "total_tokens": 32025
+        }
+      },
+      "first_ms": {
+        "response.output_text.delta": 142.27289700647816
+      },
+      "reply_ms": 294.05413096537814,
+      "usage": {
+        "input_tokens": 32023,
+        "output_tokens": 2,
+        "total_tokens": 32025
+      },
+      "elapsed_ms": 11001.957459957339
+    },
+    {
+      "name": "audio-after-32k-text",
+      "status": "passed",
+      "prefill_ms": 716.7798629961908,
+      "text": "OK",
+      "response": {
+        "id": "resp_r2_2",
+        "object": "realtime.response",
+        "status": "completed",
+        "output": [
+          {
+            "object": "realtime.item",
+            "type": "message",
+            "role": "assistant",
+            "id": "item_r2_4",
+            "status": "completed",
+            "content": [
+              {
+                "type": "text",
+                "text": "OK"
+              }
+            ]
+          }
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "usage": {
+          "input_tokens": 32049,
+          "output_tokens": 2,
+          "total_tokens": 32051
+        }
+      },
+      "first_ms": {
+        "response.output_text.delta": 140.31751902075484
+      },
+      "reply_ms": 292.2805180423893,
+      "usage": {
+        "input_tokens": 32049,
+        "output_tokens": 2,
+        "total_tokens": 32051
+      },
+      "elapsed_ms": 1009.2008080100641
+    },
+    {
+      "name": "evict-oldest-at-capacity",
+      "status": "passed",
+      "prefill_ms": 58.39069403009489,
+      "text": "OK",
+      "response": {
+        "id": "resp_r2_3",
+        "object": "realtime.response",
+        "status": "completed",
+        "output": [
+          {
+            "object": "realtime.item",
+            "type": "message",
+            "role": "assistant",
+            "id": "item_r2_6",
+            "status": "completed",
+            "content": [
+              {
+                "type": "text",
+                "text": "OK"
+              }
+            ]
+          }
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "usage": {
+          "input_tokens": 32168,
+          "output_tokens": 2,
+          "total_tokens": 32170
+        }
+      },
+      "first_ms": {
+        "response.output_text.delta": 140.7228159951046
+      },
+      "reply_ms": 292.83628100529313,
+      "usage": {
+        "input_tokens": 32168,
+        "output_tokens": 2,
+        "total_tokens": 32170
+      },
+      "next_prefill_ms": 200.64613199792802,
+      "recovered": {
+        "text": "OK",
+        "response": {
+          "id": "resp_r2_4",
+          "object": "realtime.response",
+          "status": "completed",
+          "output": [
+            {
+              "object": "realtime.item",
+              "type": "message",
+              "role": "assistant",
+              "id": "item_r2_8",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "OK"
+                }
+              ]
+            }
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "usage": {
+            "input_tokens": 576,
+            "output_tokens": 2,
+            "total_tokens": 578
+          }
+        },
+        "first_ms": {
+          "response.output_text.delta": 182.4404209619388
+        },
+        "reply_ms": 204.22588899964467,
+        "usage": {
+          "input_tokens": 576,
+          "output_tokens": 2,
+          "total_tokens": 578
+        }
+      },
+      "elapsed_ms": 756.3577489927411
+    },
+    {
+      "name": "keep-current-input-near-32768",
+      "status": "passed",
+      "prefill_ms": 11198.794030002318,
+      "text": "OK",
+      "response": {
+        "id": "resp_r3_1",
+        "object": "realtime.response",
+        "status": "completed",
+        "output": [
+          {
+            "object": "realtime.item",
+            "type": "message",
+            "role": "assistant",
+            "id": "item_r3_2",
+            "status": "completed",
+            "content": [
+              {
+                "type": "text",
+                "text": "OK"
+              }
+            ]
+          }
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "usage": {
+          "input_tokens": 32753,
+          "output_tokens": 2,
+          "total_tokens": 32755
+        }
+      },
+      "first_ms": {
+        "response.output_text.delta": 143.8626039889641
+      },
+      "reply_ms": 298.2898930204101,
+      "usage": {
+        "input_tokens": 32753,
+        "output_tokens": 2,
+        "total_tokens": 32755
+      },
+      "elapsed_ms": 11497.656633961014
+    }
+  ],
+  "realtime_status": "passed",
+  "realtime_cases": [
+    {
+      "name": "synthesize-prompts",
+      "status": "passed"
+    },
+    {
+      "name": "live-transcription",
+      "status": "passed"
+    },
+    {
+      "name": "transcription-turn-detection",
+      "status": "passed"
+    },
+    {
+      "name": "hands-free-question",
+      "status": "passed"
+    },
+    {
+      "name": "spoken-question",
+      "status": "passed"
+    },
+    {
+      "name": "reply-speech-transcribes-back",
+      "status": "passed"
+    },
+    {
+      "name": "typed-follow-up-text",
+      "status": "passed"
+    },
+    {
+      "name": "spoken-tool-call",
+      "status": "passed"
+    },
+    {
+      "name": "cancel-reply",
+      "status": "passed"
+    },
+    {
+      "name": "text-reasoning",
+      "status": "passed"
+    },
+    {
+      "name": "rejections",
+      "status": "passed"
+    }
+  ],
+  "timing_scope": "Capacity and correctness, not a qualified audio speed comparison",
+  "retained_failures": {
+    "realtime32k": "Harness git-only revision lookup rejected a jj workspace before inference; fixed harness supports both.",
+    "context32k-boundary": "32735 repeated tokens left insufficient generation/framing headroom. The final check reserves that headroom and verifies output-budget clamping."
+  }
+}

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/prompt/lfm3.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
@@ -1308,6 +1309,8 @@ int RunBench(std::span<const char* const> args) {
       std::move(reader_owner));
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (reader->GetMetadataString("general.architecture") == "lfm3")
+    return RunLfm3Bench(opt);
   if (opt.enable_yarn && !IsQwen38FlashNext(*reader)) {
     std::cerr << "Error: --enable-yarn applies only to Qwen3.8-Flash-Next\n";
     return 1;

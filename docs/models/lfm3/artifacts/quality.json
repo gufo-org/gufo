@@ -1,0 +1,419 @@
+{
+  "upstream_revision": "8642541b255bfb5dc39cd351a178be09013a55d6",
+  "gguf_revision": "b3f2ae5d73cd3c91bf40e8ba752c648aa05dffdf",
+  "scope": "Four fixed token histories; FP32 inference over original BF16 weights. Not a capability benchmark.",
+  "cases": {
+    "capital": {
+      "token_count": 5,
+      "bf16_vs_teacher": {
+        "max_abs": 3.0517578125e-05,
+        "rms": 8.918933480559496e-06,
+        "kl_teacher_candidate": 1.1493015162500924e-12,
+        "total_variation": 3.223495367875222e-07,
+        "top1_equal": true
+      },
+      "q8_vs_bf16": {
+        "max_abs": 1.177586555480957,
+        "rms": 0.29570602938305235,
+        "kl_teacher_candidate": 0.0025120786452577978,
+        "total_variation": 0.01377564053632013,
+        "top1_equal": true
+      }
+    },
+    "unicode": {
+      "token_count": 12,
+      "bf16_vs_teacher": {
+        "max_abs": 1.0848045349121094e-05,
+        "rms": 2.1332383084891736e-06,
+        "kl_teacher_candidate": 8.080055399971436e-13,
+        "total_variation": 3.4076353249170643e-07,
+        "top1_equal": true
+      },
+      "q8_vs_bf16": {
+        "max_abs": 0.25637149810791016,
+        "rms": 0.04873000573582537,
+        "kl_teacher_candidate": 0.0006504491920486244,
+        "total_variation": 0.013565915562239385,
+        "top1_equal": true
+      }
+    },
+    "chat": {
+      "token_count": 11,
+      "bf16_vs_teacher": {
+        "max_abs": 1.049041748046875e-05,
+        "rms": 1.890562943742919e-06,
+        "kl_teacher_candidate": 4.5416265042991033e-13,
+        "total_variation": 4.6807151824561005e-07,
+        "top1_equal": true
+      },
+      "q8_vs_bf16": {
+        "max_abs": 0.35912013053894043,
+        "rms": 0.06862777222425806,
+        "kl_teacher_candidate": 0.0005545093305265884,
+        "total_variation": 0.016499329609035343,
+        "top1_equal": true
+      }
+    },
+    "sliding-wrap": {
+      "token_count": 515,
+      "bf16_vs_teacher": {
+        "max_abs": 2.2411346435546875e-05,
+        "rms": 3.702330562808225e-06,
+        "kl_teacher_candidate": 3.4538337919045676e-13,
+        "total_variation": 6.606819426648437e-08,
+        "top1_equal": true
+      },
+      "q8_vs_bf16": {
+        "max_abs": 0.530441403388977,
+        "rms": 0.08748369475865922,
+        "kl_teacher_candidate": 7.979147309147497e-05,
+        "total_variation": 0.0009541294309302008,
+        "top1_equal": true
+      }
+    }
+  },
+  "session_checks": {
+    "tokens": 513,
+    "q8_batched_serial_max_abs": 3.76701e-05,
+    "bf16_batched_serial_max_abs": 0.0,
+    "reset_exact": true
+  },
+  "http_checks": [
+    "greedy",
+    "streaming equality",
+    "seeded sampled replay",
+    "multi-turn fresh replay",
+    "564-token prompt crossing 512-token chunk boundary",
+    "two-session isolation"
+  ],
+  "previous_teacher_cache": "Original retained teacher used upstream default FP16 KV; historical results remain in artifacts/lfm3/logits-optimized-final.",
+  "teacher_cache": "FP32 K/V; flash attention disabled; CPU teacher",
+  "multi_session_decode": {
+    "widths": [
+      2,
+      3,
+      4,
+      8
+    ],
+    "precisions": [
+      "Q8_0",
+      "BF16"
+    ],
+    "mixed_depths": [
+      1,
+      33,
+      257,
+      513
+    ],
+    "full_logits_serial_max_abs": 0,
+    "snapshot_frontier_exact": true
+  },
+  "functional_release": {
+    "latest_full_report": "artifacts/lfm3/wired-release-final/report.json",
+    "status": "failed",
+    "passed": 30,
+    "total": 46,
+    "followup": "artifacts/lfm3/wired-stable-prefix/report.json",
+    "followup_passed": 10,
+    "followup_total": 11,
+    "note": "Full run preceded final stable-prefix fix. Follow-up fixes conversation and text cancellation; cache-edits now restores 2048 tokens but fails exact model output. Reports are not combined into a full pass."
+  },
+  "failure_diagnostics": {
+    "person-year": {
+      "teacher-f32": [
+        {
+          "token": 12489,
+          "piece": "149",
+          "logit": 13.909562110900879
+        },
+        {
+          "token": 4910,
+          "piece": "150",
+          "logit": 13.807573318481445
+        },
+        {
+          "token": 11548,
+          "piece": "151",
+          "logit": 13.67898178100586
+        },
+        {
+          "token": 885,
+          "piece": "15",
+          "logit": 13.387285232543945
+        },
+        {
+          "token": 11897,
+          "piece": "147",
+          "logit": 13.378616333007812
+        },
+        {
+          "token": 11132,
+          "piece": "159",
+          "logit": 13.319473266601562
+        },
+        {
+          "token": 13514,
+          "piece": "148",
+          "logit": 13.031091690063477
+        },
+        {
+          "token": 11259,
+          "piece": "156",
+          "logit": 12.942956924438477
+        }
+      ],
+      "teacher-q8": [
+        {
+          "token": 12489,
+          "piece": "149",
+          "logit": 13.79547119140625
+        },
+        {
+          "token": 11548,
+          "piece": "151",
+          "logit": 13.599116325378418
+        },
+        {
+          "token": 4910,
+          "piece": "150",
+          "logit": 13.530142784118652
+        },
+        {
+          "token": 11897,
+          "piece": "147",
+          "logit": 13.39417552947998
+        },
+        {
+          "token": 885,
+          "piece": "15",
+          "logit": 13.118545532226562
+        },
+        {
+          "token": 13514,
+          "piece": "148",
+          "logit": 13.107490539550781
+        },
+        {
+          "token": 11132,
+          "piece": "159",
+          "logit": 13.057783126831055
+        },
+        {
+          "token": 11259,
+          "piece": "156",
+          "logit": 12.565168380737305
+        }
+      ],
+      "gufo-bf16": [
+        {
+          "token": 12489,
+          "piece": "149",
+          "logit": 13.909614562988281
+        },
+        {
+          "token": 4910,
+          "piece": "150",
+          "logit": 13.807608604431152
+        },
+        {
+          "token": 11548,
+          "piece": "151",
+          "logit": 13.679014205932617
+        },
+        {
+          "token": 885,
+          "piece": "15",
+          "logit": 13.387313842773438
+        },
+        {
+          "token": 11897,
+          "piece": "147",
+          "logit": 13.378628730773926
+        },
+        {
+          "token": 11132,
+          "piece": "159",
+          "logit": 13.319543838500977
+        },
+        {
+          "token": 13514,
+          "piece": "148",
+          "logit": 13.031133651733398
+        },
+        {
+          "token": 11259,
+          "piece": "156",
+          "logit": 12.943012237548828
+        }
+      ],
+      "gufo-q8": [
+        {
+          "token": 12489,
+          "piece": "149",
+          "logit": 13.781414031982422
+        },
+        {
+          "token": 4910,
+          "piece": "150",
+          "logit": 13.588603973388672
+        },
+        {
+          "token": 11548,
+          "piece": "151",
+          "logit": 13.513599395751953
+        },
+        {
+          "token": 11897,
+          "piece": "147",
+          "logit": 13.167112350463867
+        },
+        {
+          "token": 11132,
+          "piece": "159",
+          "logit": 13.143641471862793
+        },
+        {
+          "token": 885,
+          "piece": "15",
+          "logit": 13.111783981323242
+        },
+        {
+          "token": 13514,
+          "piece": "148",
+          "logit": 12.94837474822998
+        },
+        {
+          "token": 11259,
+          "piece": "156",
+          "logit": 12.642578125
+        }
+      ],
+      "bf16_vs_teacher": {
+        "max_abs": 9.441375732421875e-05,
+        "rms": 1.2701056090520186e-05,
+        "kl_teacher_candidate": 2.3171107819057614e-10,
+        "total_variation": 8.600848446599709e-06,
+        "top1_equal": true
+      },
+      "q8_vs_teacher_q8": {
+        "max_abs": 0.49925827980041504,
+        "rms": 0.08377843591094447,
+        "kl_teacher_candidate": 0.005074270485923532,
+        "total_variation": 0.04229586939430463,
+        "top1_equal": true
+      }
+    },
+    "long-alpha-suffix": {
+      "teacher-f32": [
+        {
+          "token": 22,
+          "piece": ".",
+          "logit": 26.05936050415039
+        },
+        {
+          "token": 124900,
+          "piece": "",
+          "logit": 15.739473342895508
+        },
+        {
+          "token": 63908,
+          "piece": ".\n\n",
+          "logit": 15.156578063964844
+        },
+        {
+          "token": 124902,
+          "piece": "</think>",
+          "logit": 13.512901306152344
+        },
+        {
+          "token": 646,
+          "piece": "\u3002",
+          "logit": 13.327483177185059
+        },
+        {
+          "token": 318,
+          "piece": ".\n",
+          "logit": 12.22119426727295
+        },
+        {
+          "token": 229,
+          "piece": " ",
+          "logit": 12.024025917053223
+        },
+        {
+          "token": 91948,
+          "piece": ".\n\n\n\n",
+          "logit": 12.01852035522461
+        }
+      ],
+      "gufo-bf16": [
+        {
+          "token": 22,
+          "piece": ".",
+          "logit": 26.059345245361328
+        },
+        {
+          "token": 124900,
+          "piece": "",
+          "logit": 15.73960018157959
+        },
+        {
+          "token": 63908,
+          "piece": ".\n\n",
+          "logit": 15.156564712524414
+        },
+        {
+          "token": 124902,
+          "piece": "</think>",
+          "logit": 13.513069152832031
+        },
+        {
+          "token": 646,
+          "piece": "\u3002",
+          "logit": 13.327503204345703
+        },
+        {
+          "token": 318,
+          "piece": ".\n",
+          "logit": 12.22116470336914
+        },
+        {
+          "token": 229,
+          "piece": " ",
+          "logit": 12.024114608764648
+        },
+        {
+          "token": 91948,
+          "piece": ".\n\n\n\n",
+          "logit": 12.018542289733887
+        }
+      ],
+      "bf16_vs_teacher": {
+        "max_abs": 0.0002491474151611328,
+        "rms": 4.069344776275979e-05,
+        "kl_teacher_candidate": 4.093407314160954e-13,
+        "total_variation": 5.821939721425176e-09,
+        "top1_equal": true
+      }
+    }
+  },
+  "pi_replay": {
+    "version": "0.87.0",
+    "path": "artifacts/lfm3/wired-pi-absolute/replay/",
+    "cases": {
+      "tools": {
+        "status": "pass",
+        "tool_calls": 3,
+        "tool_errors": [],
+        "verified_file": "hello.txt = bonjour"
+      },
+      "edit": {
+        "status": "pass",
+        "tool_calls": 3,
+        "tool_errors": [],
+        "verified_file": "src/calc.py contains return a + b"
+      }
+    },
+    "prior_harness_failure": "artifacts/lfm3/wired-pi/: relative output path; no HTTP requests sent"
+  }
+}
