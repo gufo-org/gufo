@@ -283,7 +283,8 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 /// projection's F32 output over the same rows) turns it into
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
-/// or 64 for Q5_1/Q8_0.
+/// or 128 for the prefill down projection (Q5_1/Q8_0, F16 output and no
+/// `swiglu_gate`). Every tile height gives each row the same bits.
 /// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
 /// and tile widths return false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
@@ -295,7 +296,8 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
 
 /// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
 /// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
-/// projections share one launch and never materialize the gate output.
+/// projections share one launch and never materialize the gate output;
+/// every row equals the separate gate and up launches bit for bit.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,
                         std::uint32_t n_tiles, const std::int32_t* pad_bounds,
