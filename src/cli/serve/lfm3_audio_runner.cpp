@@ -236,7 +236,7 @@ class Conversation final : public server::VoiceConversation {
 public:
   // Context of one conversation: turns, speech frames (12.5 per second) and
   // the reply budget. Older turns leave when a new one needs the room.
-  static constexpr std::uint32_t kContext = 8192;
+  static constexpr std::uint32_t kContext = 32768;
   Conversation(Slot slot, std::shared_ptr<audio::Model> model,
                std::unique_ptr<audio::Generator> generator, std::uint32_t rate)
       : slot_(std::move(slot)),
@@ -576,9 +576,11 @@ private:
       return n ? turns_[n - 1].end - turns_.front().begin : 0;
     };
     std::size_t drop = 0;
-    while (drop < turns_.size() &&
-           generator_->Position() - freed(drop) + reserve >
-               generator_->Context())
+    // A reply must keep the input it answers. If that turn nearly fills
+    // the native context, Respond clamps generation to the remaining room.
+    const auto droppable = turns_.size() - (!user && !turns_.empty() ? 1 : 0);
+    while (drop < droppable && generator_->Position() - freed(drop) + reserve >
+                                   generator_->Context())
       ++drop;
     if (drop) {
       // Pending rewrites refer to turn indices; dropping turns forgets them.

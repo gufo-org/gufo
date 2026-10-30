@@ -159,8 +159,10 @@ include it). Other languages and prompts transcribe the buffer at commit.
 `input_audio_buffer.clear` drops the utterance.
 
 **Conversation** (no `intent`): one spoken conversation per connection, on a
-private 8192-slot context (one slot per text token, audio token or 80 ms of
-speech; the oldest turns leave when a reply needs room).
+private 32768-slot context (one slot per text token, audio token or 80 ms of
+speech; the oldest turns leave when a reply needs room). The current input
+is retained even when it leaves less room than the requested reply budget;
+generation uses the remaining capacity.
 
 | Client event | Effect |
 | --- | --- |

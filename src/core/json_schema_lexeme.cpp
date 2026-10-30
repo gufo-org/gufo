@@ -780,8 +780,13 @@ public:
   }
   Match Advance(std::string& encoded, unsigned char byte) const override {
     auto state = encoded.empty() ? std::string() : encoded.substr(1);
+    // Qwen's opening >\n already supplies the first byte of its closing
+    // delimiter. Keep that prefix before the first value byte, so an empty
+    // unpadded value cannot swallow </parameter> as literal data.
+    const auto initial = delimiter_ == "\n</parameter>\n" ? 1U : 0U;
     std::string suffix(delimiter_.substr(
-        0, encoded.empty() ? 0 : static_cast<unsigned char>(encoded.front())));
+        0, encoded.empty() ? initial
+                           : static_cast<unsigned char>(encoded.front())));
     suffix += static_cast<char>(byte);
     auto matched = std::min(suffix.size(), delimiter_.size());
     while (matched && !suffix.ends_with(delimiter_.substr(0, matched)))

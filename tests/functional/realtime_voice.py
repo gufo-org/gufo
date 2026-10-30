@@ -37,6 +37,17 @@ HERE = Path(__file__).resolve().parent
 RATE = 24000
 
 
+def source_revision():
+    root = HERE.parents[1]
+    # A jj workspace need not have a colocated .git directory.
+    if (root / '.jj').is_dir():
+        command = ['jj', '--repository', str(root), 'log', '--no-graph',
+                   '-r', '@', '-T', 'commit_id']
+    else:
+        command = ['git', '-C', str(root), 'rev-parse', 'HEAD']
+    return subprocess.check_output(command, text=True).strip()
+
+
 class WebSocket:
     """Minimal RFC 6455 text client (masked frames, no extensions)."""
 
@@ -239,8 +250,7 @@ def main():
     report = {**provenance(), 'schema': 1, 'service': 'realtime-voice', 'status': 'running',
               'model_sha256': {p.name: sha256(p) for p in (model, mmproj)},
               'binary_sha256': sha256(binary),
-              'source_revision': subprocess.check_output(
-                  ['git', '-C', str(HERE.parents[1]), 'rev-parse', 'HEAD'], text=True).strip(),
+              'source_revision': source_revision(),
               'harness_sha256': sha256(Path(__file__)),
               'timing_qualification': 'observations only; no matched baseline comparison'}
     evidence = Evidence(output, report)

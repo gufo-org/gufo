@@ -99,3 +99,26 @@ nix develop -c python3 tests/functional/model_services.py tts --binary build/rel
 
 `tokenizer.json` comes from LiquidAI/LFM3-Audio-2B at `cddb56b5`; the `tts`
 fixture uses `--frames 80`. The reference needs about 16 GB of RAM.
+
+## Native 32K realtime context
+
+The October 30 production check uses the official Q8_0 backbone and BF16
+mmproj at GGUF revision `02355c1a141e464a064f2ab2c276638dbcb7f38a`.
+Realtime conversations now allocate 32768 slots. The current input survives
+reply preparation when its size leaves less room than the configured output
+budget; generation is capped to the available room.
+
+The focused `lfm3_audio_context.py` check verifies actual input-token usage
+beyond 32K, incremental audio encoding after that text history, eviction and
+recovery, and a 32753-token current input near the final context boundary. All four cases
+pass. The regular realtime voice suite also passes all 11 cases, including
+speech, live and offline transcription, turn detection, native tools,
+cancellation and reasoning. Capacity checks use silence to exercise the
+encoder at high positions; speech quality remains covered by the short
+realtime fixtures, not by a 32K speech-recognition benchmark. Raw events,
+usage, per-case timings, binary/model hashes and server logs remain under
+`artifacts/lfm3-audio/context32k-qualified/` and
+`artifacts/lfm3-audio/realtime32k-jj/`. Timings are observations without a
+matched audio speed claim.
+
+[Retained capacity and voice metrics](artifacts/context32k.json).

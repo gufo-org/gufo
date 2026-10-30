@@ -63,6 +63,13 @@ nix develop -c python3 tests/functional/realtime_voice.py \
   --output artifacts/model-services/lfm3-audio-realtime
 ```
 
+`lfm3_audio_context.py` separately exercises the native 32768-slot realtime
+context: over 32K retained text tokens, audio encoder prefill at that depth,
+old-turn eviction and recovery, and a near-capacity current input with a larger
+configured reply budget. Run it with the same `--binary`, `--model`, `--mmproj`
+and a fresh `--output` directory. Every case retains token usage and timings;
+this is a capacity/correctness check, not a speed comparison.
+
 | Suite | Required checks |
 | --- | --- |
 | Embedding | Text, image and audio HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, invalid inputs, cancellation and recovery |

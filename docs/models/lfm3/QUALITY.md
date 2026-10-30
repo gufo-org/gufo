@@ -166,3 +166,49 @@ Top-1 matches in all cases. Layout-only steps (shared splits, fused SwiGLU,
 fused residual/norm/split, 16-byte stores, staged down-projection splits)
 produce byte-identical logits at 3, 36, 1100 and 9000 tokens, BF16 included.
 The llama.cpp teacher comparison was not repeated in this pass.
+
+## October 30 failure follow-up
+
+A fresh replay of 12 previously failing suites reproduced the failures. The
+native Qwen argument grammar discarded the opening parameter newline when
+searching for a closing delimiter. An unpadded empty parameter could then
+absorb a complete call as raw data, allowing another call to satisfy a
+`parallel_tool_calls: false` grammar while the HTTP parser returned both.
+The raw matcher now carries that initial newline into delimiter matching;
+finite string checks use the same boundary. Literal tags followed by ordinary
+text remain valid argument data. CPU regressions cover plain, spaced-name,
+union, finite and wildcard routes, and all 688 existing independent grammar
+fixtures still pass. Previously uncalled finite-array checks now run too.
+
+The candidate passes the complete `tools` and `tool-native-schemas` suites
+(the latter includes 184 HTTP requests). The other 10 selected suites still
+fail: tool-untyped, tool-mixed, tool-agent, tool-reasoning, tool-streaming,
+reasoning-separator, cache-edits, cache-growth, cache-rotation and
+cache-shared-prefix. These include unfinished reasoning at fixture limits,
+wrong exact answers and incorrect sampled tool arguments. This focused run
+is not a new full API qualification pass. Raw reports and traces are retained
+under `artifacts/lfm3/failure-audit{,-fixed}-20261030/`.
+
+Timing flags in that combined replay include different subsequent cache states:
+the fixed native suite reaches cases the old suite could not execute. A fresh,
+isolated replay therefore compares the same 11 request histories on both
+builds, followed by an unchanged-build control. Outputs, cached tokens and
+prefill work match, and all 22 prefill/decode phase comparisons pass the
+unchanged 5% and 10 ms gates. Per-request data and both binaries are retained
+under `artifacts/lfm3/boundary-timing/`; no aggregate speedup is claimed.
+
+Three further failing histories were checked at fixed decision positions against
+the pinned independent llama.cpp graph with losslessly expanded F32 weights
+and FP32 K/V. The 3239-token cache edit prefers `The` (the start of the wrong
+sentence); the 2526-token BLUE rotation prefers `Cache`; and after 256 generated
+reasoning tokens the 357-token arithmetic history still prefers `.` over
+ending reasoning. Gufo BF16 and the teacher select the same token in each
+case: maximum logit errors are `7.09e-5`, `1.29e-4` and `2.96e-5`, respectively;
+KL is below `1e-9`. The two long cases use the independent HIP teacher, the
+short case the CPU teacher. This establishes agreement at those decisions,
+not a classification of every remaining failure. The first attempt used an
+older local teacher binary with a hardcoded 2048-slot context and failed;
+its logs remain beside the corrected-context results in
+`artifacts/lfm3/failure-reference-20261030/`.
+
+[Retained follow-up metrics](artifacts/failure-followup.json).
