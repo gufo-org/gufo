@@ -690,6 +690,15 @@ static bool accelerator_cache_model_tensors(const ds4_model *m) {
     return true;
 }
 
+/* Attention output A and B and the shared-expert down projection run through
+ * hipBLAS at prompt width on F16 copies of their Q8 weights, with B read
+ * transposed. Registering every copy at load lets the backend build the whole
+ * set at once. */
+static ds4_gpu_q8_f16_weight accelerator_f16_weight(const ds4_tensor *t,
+                                                    bool transposed) {
+    return {t->abs_offset, t->dim[0], t->dim[1], transposed ? 1u : 0u};
+}
+
 /* =========================================================================
  * Fixed Weight Binding and Model Validation.
  * =========================================================================
@@ -1599,6 +1608,20 @@ int ds4_dspark_open(ds4_dspark_model **out, const char *path) {
       if (!dspark_cache_tensors(d)) {
         return 1;
       }
+      /* Support attention runs per session at block width, at most
+       * DS4_DSPARK_MAX_BLOCK rows, which stays on the Q8 kernels. Only the
+       * shared expert, batched across sessions, reaches the F16 route. */
+      std::vector<ds4_gpu_q8_f16_weight> f16_weights;
+      for (uint32_t s = 0; s < d->n_stages; s++) {
+        f16_weights.push_back(
+            accelerator_f16_weight(d->stage[s].block.ffn_down_shexp, false));
+      }
+      if (!ds4_gpu_register_q8_f16_weights(d->model->map, d->model->size,
+                                           f16_weights.data(),
+                                           (uint32_t)f16_weights.size())) {
+        fprintf(stderr, "ds4: failed to register DSpark F16 weight copies\n");
+        return 1;
+      }
 
     gufo::server::Logger::LogFormatted(
             gufo::server::LogLevel::kInfo, "ds4",
@@ -1713,6 +1736,21 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     }
     if (!accelerator_cache_model_tensors(e->model)) {
         fprintf(stderr, "ds4: ROCm failed to prepare startup model cache\n");
+        ds4_engine_close(e);
+        *out = NULL;
+        return 1;
+    }
+    std::vector<ds4_gpu_q8_f16_weight> f16_weights;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const ds4_layer_weights *l = &e->weights->layer[il];
+        f16_weights.push_back(accelerator_f16_weight(l->attn_output_a, false));
+        f16_weights.push_back(accelerator_f16_weight(l->attn_output_b, true));
+        f16_weights.push_back(accelerator_f16_weight(l->ffn_down_shexp, false));
+    }
+    if (!ds4_gpu_register_q8_f16_weights(e->model->map, e->model->size,
+                                         f16_weights.data(),
+                                         (uint32_t)f16_weights.size())) {
+        fprintf(stderr, "ds4: ROCm failed to register F16 weight copies\n");
         ds4_engine_close(e);
         *out = NULL;
         return 1;

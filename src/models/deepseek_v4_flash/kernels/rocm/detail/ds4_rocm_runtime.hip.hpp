@@ -1,4 +1,6 @@
 #include <chrono>
+#include <map>
+#include <tuple>
 
 #include <gufo/ext/platform/mapped_file.hpp>
 #include <gufo/ext/platform/os_info.hpp>
@@ -67,18 +69,10 @@ struct hip_model_range {
     char *device_ptr;
 };
 
-struct hip_q8_f16_range {
-    const void *host_base;
-    uint64_t offset;
-    uint64_t weight_bytes;
-    uint64_t in_dim;
-    uint64_t out_dim;
-    __half *device_ptr;
-};
+/* Keyed by (model mapping, tensor offset, transposed layout). */
+using hip_q8_f16_key = std::tuple<const void *, uint64_t, bool>;
 
-struct hip_q8_f16_transpose_range {
-    const void *host_base;
-    uint64_t offset;
+struct hip_q8_f16_copy {
     uint64_t weight_bytes;
     uint64_t in_dim;
     uint64_t out_dim;
@@ -129,14 +123,10 @@ static uint64_t g_support_arena_bytes;
 static uint64_t g_support_arena_used;
 static bool g_support_managed;
 static std::vector<hip_model_range> g_support_ranges;
-static std::vector<hip_q8_f16_range> g_q8_f16_ranges;
-static std::unordered_map<uint64_t, size_t> g_q8_f16_by_offset;
-static std::vector<hip_q8_f16_transpose_range> g_q8_f16_transpose_ranges;
-static std::unordered_map<uint64_t, size_t> g_q8_f16_transpose_by_offset;
+static std::map<hip_q8_f16_key, hip_q8_f16_copy> g_q8_f16_copies;
+/* Registered copies not built yet; the next lookup builds them. */
+static bool g_q8_f16_pending;
 static uint64_t g_model_range_bytes;
-static uint64_t g_q8_f16_bytes;
-static int g_q8_f16_disabled_after_oom;
-static int g_q8_f16_budget_notice_printed;
 static uint64_t g_model_load_progress_next;
 static double g_model_load_progress_last;
 static int g_model_load_progress_started;
@@ -335,164 +325,105 @@ static int hip_model_range_is_cached(const void *model_map, uint64_t offset, uin
     return 0;
 }
 
+/*
+ * F16 copies of the Q8 weights that the hipBLAS prefill routes read.
+ *
+ * The engine registers the whole set when it loads a model. The first lookup
+ * builds every registered copy in one pass, which lets sessions created after
+ * load claim device memory first. Lookups never allocate, so memory cannot run
+ * out partway through a prompt and push later layers onto the Q8 kernels,
+ * whose arithmetic differs.
+ *
+ * gufo::hip::AllocateDevice places each copy. It uses device memory while the
+ * copy fits above the dispatch reserve, then coarse-grain managed memory,
+ * which is the same DRAM on Strix Halo. If managed allocation also fails, the
+ * pass keeps no copies and the Q8 kernels serve every layer for the rest of
+ * the process.
+ */
 static void hip_q8_f16_cache_release_all(void) {
-    for (const hip_q8_f16_transpose_range &r : g_q8_f16_transpose_ranges) {
-        (void)hipFree(r.device_ptr);
+    for (const auto &[key, copy] : g_q8_f16_copies) {
+        (void)hipFree(copy.device_ptr);
     }
-    for (const hip_q8_f16_range &r : g_q8_f16_ranges) {
-        (void)hipFree(r.device_ptr);
-    }
-    g_q8_f16_transpose_ranges.clear();
-    g_q8_f16_transpose_by_offset.clear();
-    g_q8_f16_ranges.clear();
-    g_q8_f16_by_offset.clear();
-    g_q8_f16_bytes = 0;
+    g_q8_f16_copies.clear();
+    g_q8_f16_pending = false;
 }
 
-static uint64_t hip_q8_f16_cache_limit_bytes(void) {
-    return UINT64_MAX;
-}
-
-static uint64_t hip_q8_f16_cache_reserve_bytes(uint64_t total_bytes) {
-    if (total_bytes >= 112ull * 1024ull * 1024ull * 1024ull) {
-        return 512ull * 1048576ull;
+static void hip_q8_f16_cache_build(void) {
+    g_q8_f16_pending = false;
+    std::vector<hip_q8_f16_key> pass;
+    for (const auto &[key, copy] : g_q8_f16_copies) {
+        if (!copy.device_ptr) pass.push_back(key);
     }
-
-    /* The expanded Q8->F16 cache is only an acceleration path.  Keep enough
-     * device memory free for cuBLAS workspaces, transient graph buffers, and
-     * driver bookkeeping instead of letting optional cached weights consume the
-     * last few GiB on 96 GiB cards. */
-    const uint64_t min_reserve = 4096ull * 1048576ull;
-    const uint64_t pct_reserve = total_bytes / 20u; /* 5% */
-    return pct_reserve > min_reserve ? pct_reserve : min_reserve;
-}
-
-static void hip_q8_f16_cache_budget_notice(
-        const char *reason,
-        uint64_t request_bytes,
-        uint64_t free_bytes,
-        uint64_t total_bytes,
-        uint64_t reserve_bytes,
-        uint64_t limit_bytes) {
-    if (g_q8_f16_budget_notice_printed) return;
-    g_q8_f16_budget_notice_printed = 1;
-    if (limit_bytes != UINT64_MAX && free_bytes == 0 && total_bytes == 0 && reserve_bytes == 0) {
+    const auto start = std::chrono::steady_clock::now();
+    uint64_t bytes = 0, managed_bytes = 0;
+    const char *failure = NULL;
+    uint64_t failed_bytes = 0;
+    for (const hip_q8_f16_key &key : pass) {
+        const auto &[host_base, offset, transposed] = key;
+        hip_q8_f16_copy &copy = g_q8_f16_copies[key];
+        const char *q8 = hip_model_range_ptr(host_base, offset, copy.weight_bytes, "q8_0");
+        if (!q8) {
+            failure = "weights not resident";
+            break;
+        }
+        const uint64_t out_bytes = copy.in_dim * copy.out_dim * sizeof(__half);
+        if (gufo::hip::AllocateDevice(&copy.device_ptr, (size_t)out_bytes) != hipSuccess) {
+            (void)hipGetLastError();
+            copy.device_ptr = NULL;
+            failure = "allocation failure";
+            failed_bytes = out_bytes;
+            break;
+        }
+        hipPointerAttribute_t attributes;
+        if (hipPointerGetAttributes(&attributes, copy.device_ptr) == hipSuccess &&
+            attributes.isManaged) {
+            managed_bytes += out_bytes;
+        }
+        const uint64_t blocks = (copy.in_dim + 31u) / 32u;
+        if (transposed) {
+            const dim3 grid(
+                    (unsigned)((copy.out_dim + DS4_Q8_T_TILE_ROW - 1u) / DS4_Q8_T_TILE_ROW),
+                    (unsigned)blocks,
+                    1u);
+            dequant_q8_0_to_f16_transpose_tiled_kernel<<<grid, 256>>>(
+                    copy.device_ptr, (const unsigned char *)q8,
+                    copy.in_dim, copy.out_dim, blocks);
+        } else {
+            const uint64_t n = copy.in_dim * copy.out_dim;
+            dequant_q8_0_to_f16_kernel<<<(n + 255) / 256, 256>>>(
+                    copy.device_ptr, (const unsigned char *)q8,
+                    copy.in_dim, copy.out_dim, blocks);
+        }
+        if (!hip_ok(hipGetLastError(), "q8 fp16 dequant launch")) {
+            failure = "dequant launch failure";
+            break;
+        }
+        bytes += out_bytes;
+    }
+    if (!failure && !hip_ok(hipDeviceSynchronize(), "q8 fp16 dequant")) {
+        failure = "dequant failure";
+    }
+    if (failure) {
+        for (const hip_q8_f16_key &key : pass) {
+            (void)hipFree(g_q8_f16_copies[key].device_ptr);
+            g_q8_f16_copies.erase(key);
+        }
         gufo::server::Logger::LogFormatted(
                 gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB)",
-                reason,
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0,
-                (double)limit_bytes / 1073741824.0);
-    } else if (limit_bytes == UINT64_MAX) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
-                reason,
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0,
-                (double)free_bytes / 1073741824.0,
-                (double)reserve_bytes / 1073741824.0,
-                (double)total_bytes / 1073741824.0);
-    } else {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
-                reason,
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0,
-                (double)limit_bytes / 1073741824.0,
-                (double)free_bytes / 1073741824.0,
-                (double)reserve_bytes / 1073741824.0,
-                (double)total_bytes / 1073741824.0);
+                "q8 fp16 weight cache unavailable after %s (request=%.2f MiB "
+                "built=%.2f GiB); using q8 kernels for every layer",
+                failure, (double)failed_bytes / 1048576.0,
+                (double)bytes / 1073741824.0);
+        return;
     }
-}
-
-static int hip_q8_f16_cache_has_budget(uint64_t request_bytes, const char *label) {
-    (void)label;
-    const uint64_t limit = hip_q8_f16_cache_limit_bytes();
-    if (limit == 0) return 0;
-    if (g_q8_f16_bytes > limit || request_bytes > limit - g_q8_f16_bytes) {
-        hip_q8_f16_cache_budget_notice("limit reached", request_bytes, 0, 0, 0, limit);
-        return 0;
-    }
-
-    size_t free_b = 0;
-    size_t total_b = 0;
-    hipError_t err = hipMemGetInfo(&free_b, &total_b);
-    if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache memory query failed: %s; using q8 kernels",
-                hipGetErrorString(err));
-        (void)hipGetLastError();
-        return 0;
-    }
-
-    const uint64_t free_bytes = (uint64_t)free_b;
-    const uint64_t total_bytes = (uint64_t)total_b;
-    const uint64_t reserve_bytes = hip_q8_f16_cache_reserve_bytes(total_bytes);
-    if (request_bytes > free_bytes ||
-        free_bytes - request_bytes < reserve_bytes) {
-        hip_q8_f16_cache_budget_notice("budget exhausted", request_bytes,
-                                        free_bytes, total_bytes,
-                                        reserve_bytes, limit);
-        return 0;
-    }
-    return 1;
-}
-
-static void hip_q8_f16_cache_disable_after_failure(const char *what, uint64_t request_bytes) {
-    if (!g_q8_f16_disabled_after_oom) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache disabled after %s "
-                "(request=%.2f MiB cached=%.2f GiB); using q8 kernels",
-                what ? what : "allocation failure",
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0);
-    }
-    g_q8_f16_disabled_after_oom = 1;
-    if (!g_q8_f16_ranges.empty()) {
-        (void)hipDeviceSynchronize();
-        hip_q8_f16_cache_release_all();
-    }
-    (void)hipGetLastError();
-}
-
-static int hip_q8_f16_cache_allowed(const char *label, uint64_t in_dim, uint64_t out_dim) {
-    if (g_q8_f16_disabled_after_oom) return 0;
-    if (!label) return 0;
-    if (strstr(label, "attn_output_a") != NULL ||
-        strstr(label, "attn_output_b") != NULL ||
-        strstr(label, "attention_output_a") != NULL ||
-        strstr(label, "attention_output_b") != NULL) {
-        return 1;
-    }
-    if (strstr(label, "attn_q_b") != NULL) {
-        return 1;
-    }
-    if (strstr(label, "ffn_gate_shexp") != NULL ||
-        strstr(label, "ffn_up_shexp") != NULL ||
-        strstr(label, "ffn_down_shexp") != NULL) {
-        return 1;
-    }
-    return (in_dim == 4096u && out_dim == 2048u) ||
-           (in_dim == 2048u && out_dim == 4096u) ||
-           (in_dim == 4096u && out_dim == 1024u) ||
-           (in_dim == 4096u && out_dim == 512u) ||
-           (in_dim == 1024u && out_dim == 32768u);
-}
-
-static int hip_q8_label_is_attention_output(const char *label) {
-    return label &&
-           (strstr(label, "attn_output_a") != NULL ||
-            strstr(label, "attn_output_b") != NULL ||
-            strstr(label, "attention_output_a") != NULL ||
-            strstr(label, "attention_output_b") != NULL);
+    gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "q8 fp16 weight cache built %zu copies, %.2f GiB "
+            "(%.2f GiB device, %.2f GiB managed) in %.3fs",
+            pass.size(), (double)bytes / 1073741824.0,
+            (double)(bytes - managed_bytes) / 1073741824.0,
+            (double)managed_bytes / 1073741824.0,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 }
 
 static const __half *hip_q8_f16_ptr(
@@ -501,119 +432,59 @@ static const __half *hip_q8_f16_ptr(
         uint64_t weight_bytes,
         uint64_t in_dim,
         uint64_t out_dim,
-        const char *label) {
-    auto exact = g_q8_f16_by_offset.find(offset);
-    if (exact != g_q8_f16_by_offset.end()) {
-        const hip_q8_f16_range &r = g_q8_f16_ranges[exact->second];
-        if (r.host_base == model_map && r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
+        bool transposed) {
+    if (g_q8_f16_pending) hip_q8_f16_cache_build();
+    const auto it = g_q8_f16_copies.find({model_map, offset, transposed});
+    if (it == g_q8_f16_copies.end()) return NULL;
+    const hip_q8_f16_copy &copy = it->second;
+    if (copy.weight_bytes != weight_bytes || copy.in_dim != in_dim || copy.out_dim != out_dim) {
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            gufo::server::Logger::LogFormatted(
+                    gufo::server::LogLevel::kWarn, "ds4",
+                    "q8 fp16 weight copy at offset %llu (%s) was registered as "
+                    "%llu x %llu (%llu bytes) but looked up as %llu x %llu "
+                    "(%llu bytes); using q8 kernels for it",
+                    (unsigned long long)offset, transposed ? "transposed" : "row-major",
+                    (unsigned long long)copy.in_dim, (unsigned long long)copy.out_dim,
+                    (unsigned long long)copy.weight_bytes,
+                    (unsigned long long)in_dim, (unsigned long long)out_dim,
+                    (unsigned long long)weight_bytes);
         }
-    }
-    for (const hip_q8_f16_range &r : g_q8_f16_ranges) {
-        if (r.host_base == model_map && r.offset == offset &&
-            r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
-        }
-    }
-    if (!hip_q8_f16_cache_allowed(label, in_dim, out_dim)) return NULL;
-
-    const char *q8 = hip_model_range_ptr(model_map, offset, weight_bytes, "q8_0");
-    if (!q8) return NULL;
-
-    uint64_t out_bytes = 0;
-    if (in_dim == 0u || out_dim == 0u ||
-        !hip_u64_mul3_checked(in_dim, out_dim, sizeof(__half), &out_bytes)) return NULL;
-    if (!hip_q8_f16_cache_has_budget(out_bytes, label)) return NULL;
-
-    __half *dev = NULL;
-    hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
-    if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache alloc failed (%.2f MiB): %s",
-                (double)out_bytes / 1048576.0, hipGetErrorString(err));
-        hip_q8_f16_cache_disable_after_failure("allocation failure", out_bytes);
         return NULL;
     }
-    const uint64_t blocks = (in_dim + 31) / 32;
-    const uint64_t n = in_dim * out_dim;
-    dequant_q8_0_to_f16_kernel<<<(n + 255) / 256, 256>>>(dev,
-                                                          (const unsigned char *)q8,
-                                                          in_dim,
-                                                          out_dim,
-                                                          blocks);
-    if (!hip_ok(hipGetLastError(), "q8 fp16 dequant launch")) {
-        (void)hipFree(dev);
-        hip_q8_f16_cache_disable_after_failure("dequant launch failure", out_bytes);
-        return NULL;
-    }
-    g_q8_f16_ranges.push_back({model_map, offset, weight_bytes, in_dim, out_dim, dev});
-    g_q8_f16_by_offset[offset] = g_q8_f16_ranges.size() - 1u;
-    g_q8_f16_bytes += out_bytes;
-    return dev;
+    return copy.device_ptr;
 }
 
-static const __half *hip_q8_f16_transpose_ptr(
+extern "C" int ds4_gpu_register_q8_f16_weights(
         const void *model_map,
-        uint64_t offset,
-        uint64_t weight_bytes,
-        uint64_t in_dim,
-        uint64_t out_dim,
-        const char *label) {
-    auto exact = g_q8_f16_transpose_by_offset.find(offset);
-    if (exact != g_q8_f16_transpose_by_offset.end()) {
-        const hip_q8_f16_transpose_range &r = g_q8_f16_transpose_ranges[exact->second];
-        if (r.host_base == model_map && r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
+        uint64_t model_size,
+        const ds4_gpu_q8_f16_weight *weights,
+        uint32_t count) {
+    if (!model_map || (count != 0u && !weights)) return 0;
+    std::vector<uint64_t> weight_bytes(count);
+    for (uint32_t i = 0; i < count; i++) {
+        const ds4_gpu_q8_f16_weight &w = weights[i];
+        uint64_t row_bytes = 0, f16_bytes = 0;
+        if (w.in_dim == 0u || w.out_dim == 0u ||
+            !hip_u64_mul_checked((w.in_dim + 31u) / 32u, 34u, &row_bytes) ||
+            !hip_u64_mul_checked(w.out_dim, row_bytes, &weight_bytes[i]) ||
+            !hip_u64_mul3_checked(w.in_dim, w.out_dim, sizeof(__half), &f16_bytes) ||
+            !hip_model_range_fits(model_size, w.offset, weight_bytes[i])) {
+            return 0;
         }
     }
-    for (const hip_q8_f16_transpose_range &r : g_q8_f16_transpose_ranges) {
-        if (r.host_base == model_map && r.offset == offset &&
-            r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
+    for (uint32_t i = 0; i < count; i++) {
+        const ds4_gpu_q8_f16_weight &w = weights[i];
+        if (g_q8_f16_copies
+                .try_emplace({model_map, w.offset, w.transposed != 0u},
+                             hip_q8_f16_copy{weight_bytes[i], w.in_dim, w.out_dim, NULL})
+                .second) {
+            g_q8_f16_pending = true;
         }
     }
-    if (!hip_q8_f16_cache_allowed(label, in_dim, out_dim)) return NULL;
-    const char *q8 = hip_model_range_ptr(model_map, offset, weight_bytes, "q8_0");
-    if (!q8) return NULL;
-    uint64_t out_bytes = 0;
-    if (in_dim == 0u || out_dim == 0u ||
-        !hip_u64_mul3_checked(in_dim, out_dim, sizeof(__half), &out_bytes)) return NULL;
-    if (!hip_q8_f16_cache_has_budget(out_bytes, label)) return NULL;
-    __half *dev = NULL;
-    hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
-    if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 transpose cache alloc failed (%.2f MiB): %s",
-                (double)out_bytes / 1048576.0, hipGetErrorString(err));
-        hip_q8_f16_cache_disable_after_failure("transpose allocation failure", out_bytes);
-        return NULL;
-    }
-    const uint64_t blocks = (in_dim + 31u) / 32u;
-    const dim3 grid(
-            (unsigned)((out_dim + DS4_Q8_T_TILE_ROW - 1u) / DS4_Q8_T_TILE_ROW),
-            (unsigned)blocks,
-            1u);
-    dequant_q8_0_to_f16_transpose_tiled_kernel<<<grid, 256>>>(
-            dev,
-            (const unsigned char *)q8,
-            in_dim,
-            out_dim,
-            blocks);
-    if (!hip_ok(hipGetLastError(), "q8 fp16 transpose dequant launch")) {
-        (void)hipFree(dev);
-        hip_q8_f16_cache_disable_after_failure("transpose launch failure", out_bytes);
-        return NULL;
-    }
-    g_q8_f16_transpose_ranges.push_back({model_map, offset, weight_bytes, in_dim, out_dim, dev});
-    g_q8_f16_transpose_by_offset[offset] = g_q8_f16_transpose_ranges.size() - 1u;
-    g_q8_f16_bytes += out_bytes;
-    return dev;
+    return 1;
 }
 
 static int hip_ok(hipError_t err, const char *what) {
@@ -855,8 +726,6 @@ extern "C" void ds4_gpu_cleanup(void) {
 #endif
     hip_model_range_release_all();
     hip_q8_f16_cache_release_all();
-    g_q8_f16_disabled_after_oom = 0;
-    g_q8_f16_budget_notice_printed = 0;
     if (g_hip_tmp) {
         (void)hipFree(g_hip_tmp);
         g_hip_tmp = NULL;
@@ -1016,8 +885,6 @@ static int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size) {
     if (g_model_host_base == model_map && g_model_registered_size == model_size) return 1;
     hip_model_range_release_all();
     hip_q8_f16_cache_release_all();
-    g_q8_f16_disabled_after_oom = 0;
-    g_q8_f16_budget_notice_printed = 0;
     g_model_host_base = model_map;
     g_model_registered_size = model_size;
     g_model_cache_full = 0;
@@ -1151,6 +1018,14 @@ extern "C" void ds4_gpu_set_small_batch_mode(int mode) {
 }
 
 extern "C" void ds4_gpu_release_support_map(void) {
+    for (auto it = g_q8_f16_copies.begin(); it != g_q8_f16_copies.end();) {
+        if (std::get<0>(it->first) != g_support_host_base) {
+            ++it;
+            continue;
+        }
+        (void)hipFree(it->second.device_ptr);
+        it = g_q8_f16_copies.erase(it);
+    }
     if (g_support_arena) (void)hipFree(g_support_arena);
     g_support_arena = NULL;
     g_support_arena_bytes = 0;

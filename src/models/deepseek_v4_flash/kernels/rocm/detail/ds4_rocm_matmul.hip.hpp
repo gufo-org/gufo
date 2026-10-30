@@ -791,7 +791,7 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
       x->bytes < x_bytes || out->bytes < out_bytes)
     return 0;
   const __half* w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes,
-                                       in_dim, out_dim, label);
+                                       in_dim, out_dim, false);
   if (!w_f16)
     return 0;
   const uint64_t xh_count = n_tok * in_dim;
@@ -839,84 +839,6 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
                                      HIPBLAS_GEMM_DEFAULT);
     if (st == HIPBLAS_STATUS_SUCCESS) return 1;
     fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " q8 f16 matmul failed: status %d\n", (int)st);
-    hip_q8_f16_cache_disable_after_failure(DS4_GPU_BLAS_NAME " f16 matmul failure",
-                                            in_dim * out_dim * sizeof(__half));
-    return 0;
-}
-
-static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
-        ds4_gpu_tensor *out_h,
-        const void *model_map,
-        uint64_t model_size,
-        uint64_t weight_offset,
-        uint64_t in_dim,
-        uint64_t out_dim,
-        const ds4_gpu_tensor *x,
-        uint64_t n_tok,
-        const char *label) {
-  if (!g_hipblas_ready || !out_h || !x || !model_map || in_dim == 0u ||
-      out_dim == 0u || n_tok == 0u || in_dim > UINT32_MAX ||
-      out_dim > UINT32_MAX || n_tok > UINT32_MAX)
-    return 0;
-  const uint64_t blocks = (in_dim + 31u) / 32u;
-  uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
-  if (weight_offset > model_size ||
-      !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
-      !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
-      weight_bytes > model_size - weight_offset ||
-      !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
-      !hip_u64_mul3_checked(n_tok, out_dim, sizeof(__half), &out_bytes) ||
-      x->bytes < x_bytes || out_h->bytes < out_bytes)
-    return 0;
-  const __half* w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes,
-                                       in_dim, out_dim, label);
-  if (!w_f16)
-    return 0;
-  const uint64_t xh_count = n_tok * in_dim;
-  __half* xh = hip_f16_input_lookup((const float*)x->ptr, xh_count);
-  if (!xh) {
-    xh = (__half*)hip_tmp_alloc(xh_count * sizeof(__half),
-                                "q8 f16-out gemm activations");
-    if (!xh)
-      return 0;
-    hip_launch_f32_to_f16(xh, (const float*)x->ptr, xh_count);
-    if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch"))
-      return 0;
-  }
-#ifdef __HIP_PLATFORM_AMD__
-  if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-      hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F16) &&
-      hipblaslt_gemm_f16(out_h->ptr, w_f16, xh, (uint32_t)out_dim,
-                         (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
-                         HIP_R_16F, label ? label : "q8 f16-out projection")) {
-    return 1;
-  }
-#endif
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    hipblasStatus_t st = hipblasGemmEx(g_hipblas,
-                                     HIPBLAS_OP_T,
-                                     HIPBLAS_OP_N,
-                                     (int)out_dim,
-                                     (int)n_tok,
-                                     (int)in_dim,
-                                     &alpha,
-                                     w_f16,
-                                     HIPBLAS_R_16F,
-                                     (int)in_dim,
-                                     xh,
-                                     HIPBLAS_R_16F,
-                                     (int)in_dim,
-                                     &beta,
-                                     out_h->ptr,
-                                     HIPBLAS_R_16F,
-                                     (int)out_dim,
-                                     HIPBLAS_COMPUTE_32F,
-                                     HIPBLAS_GEMM_DEFAULT);
-    if (st == HIPBLAS_STATUS_SUCCESS) return 1;
-    fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " q8 f16-out matmul failed: status %d\n", (int)st);
-    hip_q8_f16_cache_disable_after_failure(DS4_GPU_BLAS_NAME " f16-out matmul failure",
-                                            in_dim * out_dim * sizeof(__half));
     return 0;
 }
 
@@ -1099,47 +1021,6 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
                 n_tok,
                 blocks);
         return hip_ok(hipGetLastError(), "matmul_q8_0 f32 batch warp launch");
-    }
-    if (g_hipblas_ready && n_tok > 1) {
-        const __half *w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes, in_dim, out_dim, label);
-        if (w_f16) {
-            const uint64_t xh_count = n_tok * in_dim;
-            __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
-            if (!xh) {
-                xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
-                if (!xh) return 0;
-                hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-                if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
-            }
-            const float alpha = 1.0f;
-            const float beta = 0.0f;
-            hipblasStatus_t st = hipblasGemmEx(g_hipblas,
-                                             HIPBLAS_OP_T,
-                                             HIPBLAS_OP_N,
-                                             (int)out_dim,
-                                             (int)n_tok,
-                                             (int)in_dim,
-                                             &alpha,
-                                             w_f16,
-                                             HIPBLAS_R_16F,
-                                             (int)in_dim,
-                                             xh,
-                                             HIPBLAS_R_16F,
-                                             (int)in_dim,
-                                             &beta,
-                                             out->ptr,
-                                             HIPBLAS_R_32F,
-                                             (int)out_dim,
-                                             HIPBLAS_COMPUTE_32F,
-                                             HIPBLAS_GEMM_DEFAULT);
-            if (st == HIPBLAS_STATUS_SUCCESS) return 1;
-            fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " q8 f16 matmul failed: status %d\n", (int)st);
-            hip_q8_f16_cache_disable_after_failure(DS4_GPU_BLAS_NAME " f16 matmul failure",
-                                                    in_dim * out_dim * sizeof(__half));
-            /* The F16 expansion cache is only an optimization.  If hipBLAS
-             * rejects the cached path under memory pressure, retry the same
-             * operation through the native Q8 kernels below. */
-        }
     }
     int8_t *xq = NULL;
     float *xscale = NULL;
