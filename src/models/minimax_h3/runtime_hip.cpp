@@ -33,7 +33,8 @@ public:
       SetHipError(error, "hipGetDeviceProperties", status);
       return false;
     }
-    if (gufo::hip::IsRdna35(properties.gcnArchName) && properties.integrated != 0) {
+    if (gufo::hip::IsRdna35(properties.gcnArchName) &&
+        properties.integrated != 0) {
       return true;
     }
     if (error != nullptr) {

@@ -169,8 +169,8 @@ diagnostics::DiagnosticReport CollectDiagnostics(
 
     if (gufo::hip::IsRdna35(inventory.gpu.architecture)) {
       check.status = diagnostics::DiagnosticStatus::kPass;
-      check.message = std::string(gufo::hip::Rdna35MarketingName(
-          inventory.gpu.architecture));
+      check.message = std::string(
+          gufo::hip::Rdna35MarketingName(inventory.gpu.architecture));
     } else {
       check.status = diagnostics::DiagnosticStatus::kFail;
       check.message =

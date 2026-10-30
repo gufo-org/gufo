@@ -479,7 +479,8 @@ struct SpeechDecoderHipRuntime::Impl {
     hipDeviceProp_t properties{};
     RequireHip(hipGetDeviceProperties(&properties, device),
                "hipGetDeviceProperties");
-    if (!gufo::hip::IsRdna35(properties.gcnArchName) || properties.integrated == 0) {
+    if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
+        properties.integrated == 0) {
       throw std::runtime_error(
           "Qwen3-TTS speech decoder supports integrated RDNA 3.5 APUs "
           "(gfx1151 Strix Halo, gfx1150 Strix Point)");
