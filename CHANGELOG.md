@@ -4,6 +4,24 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.28.0](https://github.com/gufo-org/gufo/compare/v0.27.0...v0.28.0) (2026-10-30)
+
+
+### Features
+
+* **embedding:** select the EmbeddingGemma 2 image budget per request ([#870](https://github.com/gufo-org/gufo/issues/870)) ([6650f68](https://github.com/gufo-org/gufo/commit/6650f682beffda233f29cf4c69f83c022ff87a27))
+* **embeddings:** support video inputs ([#869](https://github.com/gufo-org/gufo/issues/869)) ([a3edb56](https://github.com/gufo-org/gufo/commit/a3edb56f8fb079ac4232699ede7b8a963552217f))
+
+
+### Bug Fixes
+
+* **qwen-image:** stream weights from the safetensors files, not the mapping ([#830](https://github.com/gufo-org/gufo/issues/830)) ([19968dc](https://github.com/gufo-org/gufo/commit/19968dcd2d89d370474ed1c4490d3b4a70d1708b))
+
+
+### Performance
+
+* **qwen:** tune Qwen3.8-27B verification GEMM geometries at 2-8 rows ([#874](https://github.com/gufo-org/gufo/issues/874)) ([72dc1a0](https://github.com/gufo-org/gufo/commit/72dc1a091bd98a6a8d3aa6cadf5a8783f785fdfd))
+
 ## [0.27.0](https://github.com/gufo-org/gufo/compare/v0.26.0...v0.27.0) (2026-10-29)
 
 
