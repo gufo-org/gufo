@@ -303,6 +303,25 @@ int main() {
                           d_next_inject.bytes()) != 0) {
             throw std::runtime_error("deferred combine changed inject bytes");
           }
+          // Prefill chunks below 96 rows leave the inject to the next
+          // mixer's epilogue; it must write the fused combine's bytes, or
+          // a prompt's logits would depend on its chunking.
+          HipBuffer<float> d_mix_gate(kResidual), d_mixed(kOut);
+          CheckHip(hipMemset(d_mix_gate.get(), 0, d_mix_gate.bytes()),
+                   "clear mix gate");
+          CheckHip(hipMemset(d_next_inject.get(), 0, d_next_inject.bytes()),
+                   "clear epilogue inject");
+          q::HcMixEpilogueVec4F16(d_norm_separate.get(), d_mix_gate.get(),
+                                  d_next_inject_w.get(), d_mixed.get(), nullptr,
+                                  nullptr, d_next_inject.get(), kTokens,
+                                  kHidden, nullptr);
+          const auto epilogue_inject =
+              Download(&d_next_inject, kTokens * 4 * parts);
+          if (std::memcmp(epilogue_inject.data(), reference_inject.data(),
+                          d_next_inject.bytes()) != 0) {
+            throw std::runtime_error(
+                "mix epilogue inject differs from the fused combine's");
+          }
         }
       }
     }

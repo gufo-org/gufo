@@ -460,6 +460,38 @@ __device__ __forceinline__ std::int8_t* Q8ActTile(void* base,
          (((tt * num_blocks) + kb) * kQ8ActTileBytes);
 }
 
+/// One thread's term of an inject partial on the F16 norm routes: weight
+/// row `w` dotted with the four streams' F16-rounded norm slices `x`, as
+/// one product, then FMAs in stream and component order. Explicit
+/// intrinsics keep -ffast-math from contracting or reassociating it
+/// differently per kernel: the mix epilogue (prefill chunks below 96 rows)
+/// and the fused combine (96+ rows) must agree bit for bit, or a prompt's
+/// logits would depend on how it was chunked.
+__device__ __forceinline__ float HcInjectDot(const float4 (&w)[4],
+                                             const float4 (&x)[4]) {
+  float dot = __fmul_rn(w[0].x, x[0].x);
+  dot = __fmaf_rn(w[0].y, x[0].y, dot);
+  dot = __fmaf_rn(w[0].z, x[0].z, dot);
+  dot = __fmaf_rn(w[0].w, x[0].w, dot);
+#pragma unroll
+  for (std::uint32_t s = 1; s < 4; ++s) {
+    dot = __fmaf_rn(w[s].x, x[s].x, dot);
+    dot = __fmaf_rn(w[s].y, x[s].y, dot);
+    dot = __fmaf_rn(w[s].z, x[s].z, dot);
+    dot = __fmaf_rn(w[s].w, x[s].w, dot);
+  }
+  return dot;
+}
+
+/// The inject partial from a block's wave totals, added in wave order.
+__device__ __forceinline__ float HcInjectTotal(const float* waves) {
+  float total = 0.0F;
+  for (std::uint32_t w = 0; w < kThreads / 32; ++w) {
+    total = __fadd_rn(total, waves[w]);
+  }
+  return total;
+}
+
 /// One token per block keeps independent rows in flight. The FP32 mixed
 /// row, optional F16/Q8 projection inputs and inject partials share one
 /// read of the four residual streams. Grid: (inject parts, tokens).
@@ -555,15 +587,7 @@ __global__ void HcMixEpilogueF16Kernel(const __half* xn, const float* gate,
   }
 #pragma unroll
   for (std::uint32_t o = 0; o < kStreams; ++o) {
-    float dot = 0.0F;
-#pragma unroll
-    for (std::uint32_t s = 0; s < kStreams; ++s) {
-      dot += wq[o][s].x * v[s].x;
-      dot += wq[o][s].y * v[s].y;
-      dot += wq[o][s].z * v[s].z;
-      dot += wq[o][s].w * v[s].w;
-    }
-    dot = WaveSum(dot);
+    const float dot = WaveSum(HcInjectDot(wq[o], v));
     if (lane == 0) {
       partial[o][wave] = dot;
     }
@@ -571,12 +595,8 @@ __global__ void HcMixEpilogueF16Kernel(const __half* xn, const float* gate,
 
   __syncthreads();
   if (threadIdx.x < kStreams) {
-    float total = 0.0F;
-    for (std::uint32_t w = 0; w < kThreads / 32; ++w) {
-      total += partial[threadIdx.x][w];
-    }
     inject[(static_cast<std::size_t>(t) * kStreams + threadIdx.x) * gridDim.x +
-           part] = total;
+           part] = HcInjectTotal(partial[threadIdx.x]);
   }
 }
 
@@ -769,20 +789,8 @@ __device__ __forceinline__ void HcInjectPart(
                          (static_cast<std::size_t>(s) * hidden) + i)
                    : float4{0.0F, 0.0F, 0.0F, 0.0F};
     }
-    // The separate kernel's sum from zero: one product, then FMAs in stream
-    // and component order.
-    float dot = __fmul_rn(wq[0].x, xh[0].x);
-    dot = __fmaf_rn(wq[0].y, xh[0].y, dot);
-    dot = __fmaf_rn(wq[0].z, xh[0].z, dot);
-    dot = __fmaf_rn(wq[0].w, xh[0].w, dot);
-#pragma unroll
-    for (std::uint32_t s = 1; s < kStreams; ++s) {
-      dot = __fmaf_rn(wq[s].x, xh[s].x, dot);
-      dot = __fmaf_rn(wq[s].y, xh[s].y, dot);
-      dot = __fmaf_rn(wq[s].z, xh[s].z, dot);
-      dot = __fmaf_rn(wq[s].w, xh[s].w, dot);
-    }
-    dots[o] = WaveSum(dot);
+    // The separate kernel's sum (HcMixEpilogueF16Kernel).
+    dots[o] = WaveSum(HcInjectDot(wq, xh));
   }
   __syncthreads();  // earlier readers of `shared`
   if (lane == 0) {
@@ -792,12 +800,8 @@ __device__ __forceinline__ void HcInjectPart(
   }
   __syncthreads();
   if (threadIdx.x < kStreams) {
-    float total = 0.0F;
-    for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
-      total += shared[threadIdx.x][q];
-    }
     inject[(static_cast<std::size_t>(t) * kStreams + threadIdx.x) * parts +
-           part] = total;
+           part] = HcInjectTotal(shared[threadIdx.x]);
   }
 }
 
