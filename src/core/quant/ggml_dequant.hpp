@@ -119,6 +119,11 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
       return 32;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
+    case core::GgmlType::kIQ2_XS:
+    case core::GgmlType::kIQ2_S:
+    case core::GgmlType::kIQ3_XXS:
+    case core::GgmlType::kIQ1_S:
+    case core::GgmlType::kIQ1_M:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
     case core::GgmlType::kQ3_K:
@@ -176,6 +181,9 @@ float DotProductQ8_K(const void* row_data, std::span<const float> vec,
 // Dequantize row of Q8_0 to float
 void DequantizeQ8_0(const void* src, float* dst, std::size_t k);
 
+// Dequantize row of Q5_1 to float
+void DequantizeQ5_1(const void* src, float* dst, std::size_t k);
+
 // Dequantize row of IQ4_NL to float
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k);
 
@@ -194,6 +202,26 @@ float DotProductIQ4_XS(const void* row_data, std::span<const float> vec,
 // Compute dot product of IQ3_S quantized row with FP32 vector
 float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
                       std::size_t k);
+
+// The remaining GGML block formats, element for element as ggml-quants.c's
+// dequantize_row_* (Q4_0, Q4_1, Q5_0: 32 elements; Q2_K and the IQ1/IQ2/IQ3
+// formats: 256).
+void DequantizeQ4_0(const void* src, float* dst, std::size_t k);
+void DequantizeQ4_1(const void* src, float* dst, std::size_t k);
+void DequantizeQ5_0(const void* src, float* dst, std::size_t k);
+void DequantizeQ2_K(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_S(const void* src, float* dst, std::size_t k);
+void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ1_S(const void* src, float* dst, std::size_t k);
+void DequantizeIQ1_M(const void* src, float* dst, std::size_t k);
+
+/// Dequantizes `k` elements of one row of any GGML storage type this header
+/// sizes (F32/F16/BF16 included); false for any other type or a row that is
+/// not block aligned.
+[[nodiscard]] bool DequantizeRow(core::GgmlType type, const void* src,
+                                 float* dst, std::size_t k);
 
 /// Returns the 512-entry IQ3_S grid table (each entry packs four uint8
 /// magnitudes).
