@@ -41,8 +41,9 @@ enum class GgmlType : std::uint16_t {
   kIQ4_XS = 23,
   kI32 = 26,
   kBF16 = 30,
-  // Agention Gyro trellis types (https://gitlab.com/agentionai-group/agention-gyro).
-  // Only dequantization on CPU is implemented so far; HIP compute kernels are TODO.
+  // Agention Gyro trellis types
+  // (https://gitlab.com/agentionai-group/agention-gyro). Qwen3.8-Flash-Next
+  // runs TQ2_T experts on HIP; the other types dequantize on CPU only.
   kTQ2_T = 144,
   kTQK6 = 145,
   kTQK7 = 146,

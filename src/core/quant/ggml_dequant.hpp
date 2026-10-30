@@ -194,8 +194,8 @@ void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);
 // Dequantize row of IQ3_S to float
 void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
 
-// Dequantize row of Gyro TQ2_T (trellis, 128 elements per 34-byte block) to float.
-// Reference implementation (AgentionAI, Apache 2.0). CPU only.
+// Dequantize row of Gyro TQ2_T (trellis, 128 elements per 34-byte block) to
+// float. Reference implementation (AgentionAI, Apache 2.0). CPU only.
 void DequantizeTQ2_T(const void* src, float* dst, std::size_t k);
 
 // Compute dot product of IQ4_NL quantized row with FP32 vector

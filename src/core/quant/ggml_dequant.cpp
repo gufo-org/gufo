@@ -1,10 +1,11 @@
 #include "src/core/quant/ggml_dequant.hpp"
-#include "src/core/quant/gyro/tq_ref.h"
 
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
+
+#include "src/core/quant/gyro/tq_ref.h"
 
 namespace gufo::quant {
 
