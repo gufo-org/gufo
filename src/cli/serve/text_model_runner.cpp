@@ -1768,7 +1768,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       const auto common = impl_->component_cache->CachedPrefixTokens(
           request.prompt(), request.impl_->context.get(), true);
       if (common >=
-              request.prefill_position() + Request::kSharedPrefixMinTokens &&
+              request.prefill_position() + Request::kSharedBranchMinTokens &&
           (common + Request::kSharedCheckpointSlack < request.prompt_tokens() ||
            (impl_->shared_prefix_max_boundaries &&
             common >= impl_->shared_prefix_min_tokens &&

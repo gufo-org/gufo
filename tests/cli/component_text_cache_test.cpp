@@ -1059,6 +1059,39 @@ void CancelledPrefillKeepsCompletedSteps() {
     resend.Invalidate();
   }
 }
+// A short system prompt shared by many short requests is learned at its
+// divergence point on the component path too, from 192 common tokens on.
+void ShortSharedSystemPromptIsLearned() {
+  const auto conversation = [](std::size_t shared, TextRunnerToken salt) {
+    std::vector<TextRunnerToken> prompt(shared + 300);
+    std::iota(prompt.begin(), prompt.begin() + shared, 10);
+    std::iota(prompt.begin() + shared, prompt.end(), salt);
+    return prompt;
+  };
+  for (const std::size_t shared : {300, 150}) {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1);
+    auto first = pool.Acquire(conversation(shared, 40000));
+    Prefill(first);
+    (void)Generate(first);
+    (void)first.Commit();
+    auto second = pool.Acquire(conversation(shared, 50000));
+    assert(second.cached_prompt_tokens() == 0);
+    const auto step = second.Prefill(4096);
+    if (shared == 300)
+      assert(step.consumed_tokens == shared && !step.decode_ready &&
+             "a 300-token shared prefix stops at its divergence point");
+    else
+      assert(step.decode_ready &&
+             "a shared prefix under 192 tokens is not worth a checkpoint");
+    Prefill(second);
+    (void)Generate(second);
+    (void)second.Commit();
+    auto third = pool.Acquire(conversation(shared, 60000));
+    assert(third.cached_prompt_tokens() == (shared == 300 ? shared : 0));
+    third.Invalidate();
+  }
+}
 void SharedPeerReusesTheCurrentStableCapture() {
   for (const bool settled : {false, true}) {
     auto runner = std::make_shared<Runner>();
@@ -4178,6 +4211,7 @@ int main() {
   InPassPromptTargetSurvivesACancelledLaterPass();
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
+  ShortSharedSystemPromptIsLearned();
   SharedPeerReusesTheCurrentStableCapture();
   BackingPreparationFollowsCaptures();
   PrefillLookaheadReachesTheNextFrontier();

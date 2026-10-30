@@ -110,9 +110,14 @@ public:
     /// use than capturing another one: followers prefill the gap themselves.
     static constexpr std::size_t kSharedCheckpointSlack = 64;
     /// A shared prefix must add at least this many tokens to what a request
-    /// can already restore before it waits for a peer or captures an extra
-    /// checkpoint for later requests. Shorter gaps cost less to prefill again.
+    /// can already restore before it waits for a peer's shared checkpoint.
+    /// Shorter gaps cost less to prefill again.
     static constexpr std::size_t kSharedPrefixMinTokens = 512;
+    /// A prompt that diverges from a retained one after at least this many
+    /// common tokens publishes a checkpoint there for later prompts. Lower
+    /// than kSharedPrefixMinTokens: nobody waits for it, and a short system
+    /// prompt shared by many short requests is worth one RAM copy.
+    static constexpr std::size_t kSharedBranchMinTokens = 192;
 
     void PrepareBatchExecution();
     /// With `yield`, a runner with a scheduling profile splits the pass into

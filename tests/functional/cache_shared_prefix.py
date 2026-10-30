@@ -16,8 +16,8 @@ CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
 # framing and tokenizer merges where the user message starts.
 BOUNDARY_ALLOWANCE = 96
 # Below this gain the server keeps the nearest existing checkpoint instead of
-# capturing another one (TextRunnerPool::Request::kSharedPrefixMinTokens).
-LEARN_MIN_TOKENS = 512
+# capturing another one (TextRunnerPool::Request::kSharedBranchMinTokens).
+LEARN_MIN_TOKENS = 192
 
 
 def check_cache_shared_prefix(client, model, checks, chat_result):
