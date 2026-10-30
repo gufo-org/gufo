@@ -83,6 +83,22 @@
     "inputs": "Pinned safetensors; text to audiovisual output",
     "guide": "docs/models/minimax-h3/README.md"
   },
+  "readme": {
+    "title": "MiniMax H3",
+    "license": {
+      "name": "MiniMax H3 Community (not for the US, EU, UK or Korea)",
+      "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE"
+    },
+    "rows": [
+      {
+        "section": "Video generation",
+        "cells": {
+          "Modes": "Text to video and audio",
+          "Speed": "In progress"
+        }
+      }
+    ]
+  },
   "tests": [
     {
       "target": "video_api_test",

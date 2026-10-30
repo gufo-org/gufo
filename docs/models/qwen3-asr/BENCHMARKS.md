@@ -14,6 +14,7 @@ removal: **TODO**. The decoder excludes the audio tower's weights, saving
 reference. Timings include audio decoding, features, encoder and text generation;
 model loading is excluded.
 
+<!-- bench:single -->
 | Metric | Result |
 | --- | ---: |
 | Median request | 985.67 ms |
@@ -21,6 +22,7 @@ model loading is excluded.
 | Audio seconds per wall second | 15.27 |
 | Audio encoder | 33.25 ms |
 | Text prefill and generation | 944.25 ms |
+<!-- /bench -->
 
 Stage medians are measured separately; do not sum them into another headline.
 Native convolutions remove MIOpen and improve the encoder by 8.2% in the matched

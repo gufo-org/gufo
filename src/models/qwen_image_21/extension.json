@@ -55,6 +55,57 @@
     "inputs": "BF16 safetensors; generation and image editing",
     "guide": "docs/models/qwen-image-2.1/README.md"
   },
+  "readme": {
+    "license": {
+      "name": "Qwen Research (non-commercial)",
+      "url": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE"
+    },
+    "rows": [
+      {
+        "section": "Image generation",
+        "cells": {
+          "Modes": "Generation, editing",
+          "Speed": {
+            "template": "**{0} s** per 1024×1024 image, 40 steps",
+            "values": [
+              {
+                "bench": "base",
+                "row": "Generation, C1",
+                "column": "Total (s)"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "section": "Image generation",
+        "title": "Qwen-Image-2.1-Turbo",
+        "guide": "docs/models/qwen-image-2.1/README.md#qwen-image-21-turbo",
+        "license": {
+          "name": "Qwen Research (non-commercial)",
+          "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/fc13ba1986fcb905854dc8de2f52eee395f49b5b/LICENSE"
+        },
+        "cells": {
+          "Modes": "Eight-step generation and editing",
+          "Speed": {
+            "template": "**{0} s** per 1024×1024 image, 8 steps, **{1}** faster than the base model",
+            "values": [
+              {
+                "bench": "turbo",
+                "row": "Generation, C1",
+                "column": "Total (s)"
+              },
+              {
+                "bench": "turbo",
+                "row": "Generation, C1",
+                "column": "vs base"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
   "tests": [
     {
       "target": "qwen_image_21_test",

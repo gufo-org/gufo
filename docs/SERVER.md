@@ -461,8 +461,8 @@ Pass the supported GGUF or safetensors directory through `--model`, with the
 matching projector or speculative sidecar where needed. Loaders validate
 tensor inventory, dimensions, quantization and tokenizer metadata. Model
 artifacts supply weights and metadata; executable kernels and templates are
-compiled into Gufo. See [model cards](models/README.md) for concrete paths
-and supported modes.
+compiled into Gufo. See each model's guide under
+`docs/models/<model>/README.md` for concrete paths and supported modes.
 
 ## Process and State Ownership
 

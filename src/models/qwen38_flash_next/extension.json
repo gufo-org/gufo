@@ -75,6 +75,61 @@
     "inputs": "Sharded Q4 GGUF; text/images",
     "guide": "docs/models/qwen3.8-flash-next/README.md"
   },
+  "readme": {
+    "license": {
+      "name": "Qwen Community License 1.0",
+      "url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/LICENSE"
+    },
+    "rows": [
+      {
+        "section": "Text generation",
+        "cells": {
+          "Weights": "UD-Q4_K_XL",
+          "Inputs": "Text, images",
+          "Prompt processing": {
+            "template": "**{0}** tok/s",
+            "values": [
+              {
+                "bench": "single-ar",
+                "row": "0",
+                "column": "Gufo pp (tok/s)"
+              }
+            ]
+          },
+          "Single-user decode": {
+            "template": "**{0} – {1}** tok/s",
+            "values": [
+              {
+                "bench": "single-ar",
+                "row": "0",
+                "column": "Gufo tg (tok/s)"
+              },
+              {
+                "bench": "single-mtp",
+                "row": "0",
+                "column": "Gufo tg repetitive (tok/s)"
+              }
+            ]
+          },
+          "8-user decode": {
+            "template": "**{0} – {1}** tok/s",
+            "values": [
+              {
+                "bench": "multi-ar",
+                "row": "8",
+                "column": "Gufo AR (tok/s)"
+              },
+              {
+                "bench": "multi-mtp",
+                "row": "8",
+                "column": "Gufo repetitive (tok/s)"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
   "tests": [
     {
       "target": "qwen38_flash_next_continuation_identity_test",

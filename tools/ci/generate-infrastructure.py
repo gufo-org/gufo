@@ -459,20 +459,149 @@ def generate_impact_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
     return json.dumps(result, indent=2) + "\n"
 
 
+# Section -> [(column header, right-aligned)]. Model comes first. The generator
+# fills Model and License from each extension's readme; other cells come from its rows.
+README_SECTIONS = {
+    "Embeddings": [
+        ("Model", False), ("Input", False), ("License", False),
+        ("Latency (one input)", True), ("Throughput", True),
+    ],
+    "Image generation": [
+        ("Model", False), ("Modes", False), ("License", False), ("Speed", False),
+    ],
+    "Speech recognition": [
+        ("Model", False), ("License", False), ("Speed (excludes loading)", True),
+    ],
+    "Speech synthesis": [
+        ("Model", False), ("Modes", False), ("License", False),
+        ("Speed (excludes loading)", True),
+    ],
+    "Text generation": [
+        ("Model", False), ("Weights", False), ("Inputs", False), ("License", False),
+        ("Prompt processing", True), ("Single-user decode", True), ("8-user decode", True),
+    ],
+    "Video generation": [
+        ("Model", False), ("Modes", False), ("License", False), ("Speed", False),
+    ],
+}
+
+
+def read_bench_value(root: Path, guide: str, bench_id: str, row: str, column: str) -> str:
+    """Return one cell from a BENCHMARKS.md table marked <!-- bench:ID -->."""
+    text = (root / guide).parent.joinpath("BENCHMARKS.md").read_text(encoding="utf-8")
+    match = re.search(
+        r"<!-- bench:" + re.escape(bench_id) + r" -->\n(.*?)<!-- /bench -->", text, re.DOTALL
+    )
+    if not match:
+        raise ValueError(f"{guide}: no bench:{bench_id} table")
+    lines = [line for line in match.group(1).splitlines() if line.startswith("|")]
+    header = [c.strip() for c in lines[0].strip("|").split("|")]
+    if column not in header:
+        raise ValueError(f"{guide}: bench:{bench_id} has no column '{column}'")
+    for line in lines[2:]:
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if cells[0] == row:
+            # Drop the measurement spread, such as " ± 0.10"; the README shows the central value.
+            return cells[header.index(column)].split(" ±")[0]
+    raise ValueError(f"{guide}: bench:{bench_id} has no row '{row}'")
+
+
+def resolve_readme_cell(root: Path, guide: str, cell: Any) -> str:
+    """Literal cells pass through; template cells fill {0}, {1}, ... from benchmark tables."""
+    if isinstance(cell, str):
+        return cell
+    values = [
+        read_bench_value(root, guide, spec["bench"], spec["row"], spec["column"])
+        for spec in cell["values"]
+    ]
+    return cell["template"].format(*values)
+
+
+def generate_readme_tables(root: Path, manifests: List[Dict[str, Any]]) -> str:
+    """Generate the per-section model tables in README.md from extension readme metadata."""
+    path = root / "README.md"
+    content = path.read_text(encoding="utf-8")
+    entries: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {
+        name: [] for name in README_SECTIONS
+    }
+    for manifest in manifests:
+        readme = manifest.get("readme")
+        docs = manifest.get("docs")
+        if not readme:
+            continue
+        if not docs:
+            raise ValueError(f"{manifest['name']}: readme requires a docs entry")
+        for row in readme["rows"]:
+            section = row["section"]
+            if section not in entries:
+                raise ValueError(f"{manifest['name']}: unknown README section '{section}'")
+            entries[section].append((readme, row))
+
+    for name, columns in README_SECTIONS.items():
+        table = []
+        headers = [header for header, _ in columns]
+        table.append("| " + " | ".join(headers) + " |")
+        table.append("| " + " | ".join("---:" if right else "---" for _, right in columns) + " |")
+
+        resolved = []
+        for readme, row in entries[name]:
+            docs = next(m["docs"] for m in manifests if m.get("readme") is readme)
+            resolved.append((
+                row.get("title", readme.get("title", docs["title"])),
+                row.get("guide", docs["guide"]),
+                row.get("license", readme["license"]),
+                row["cells"],
+            ))
+        for title, guide, lic, cells in sorted(
+            resolved, key=lambda r: (r[0], r[3].get("Weights", ""), r[3].get("Input", ""))
+        ):
+            expected = set(headers) - {"Model", "License"}
+            if set(cells) != expected:
+                raise ValueError(f"{title} {name}: cells {sorted(cells)} != {sorted(expected)}")
+            values = {"Model": f"[{title}]({guide})",
+                      "License": f"[{lic['name']}]({lic['url']})"}
+            for column, cell in cells.items():
+                values[column] = resolve_readme_cell(root, guide, cell)
+            table.append("| " + " | ".join(values[h] for h in headers) + " |")
+
+        begin = f"<!-- BEGIN GENERATED README TABLE: {name} -->"
+        end = f"<!-- END GENERATED README TABLE: {name} -->"
+        content = replace_marked_block(content, begin, end, "\n".join(table))
+    return content
+
+
+def generate_guide_licenses(root: Path, manifest: Dict[str, Any]) -> str:
+    """Write the weights license line at the top of a model guide."""
+    guide = manifest["docs"]["guide"]
+    path = root / guide
+    content = path.read_text(encoding="utf-8")
+    lic = manifest["readme"]["license"]
+    line = f"Weights license: [{lic['name']}]({lic['url']})."
+    return replace_marked_block(
+        content, "<!-- BEGIN GENERATED WEIGHTS LICENSE -->", "<!-- END GENERATED WEIGHTS LICENSE -->", line
+    )
+
+
 def get_generated_targets(
     root: Path, manifests: List[Dict[str, Any]] = None
 ) -> Dict[Path, str]:
     """Calculate the expected content for all generated targets."""
     if manifests is None:
         manifests = load_manifests(root)
-    return {
+    targets = {
         root / "cmake/Checks.cmake": generate_checks_cmake(root, manifests),
         root / "tools/ci/check-format.py": generate_check_format(root, manifests),
         root / "tools/ci/check-docs.py": generate_check_docs(root, manifests),
         root / "docs/models/README.md": generate_models_readme(root, manifests),
+        root / "README.md": generate_readme_tables(root, manifests),
         root / "tests/functional/devlab.json": generate_devlab_registry(root, manifests),
         root / "tests/functional/impact.json": generate_impact_registry(root, manifests),
     }
+    for manifest in manifests:
+        if manifest.get("readme") and manifest.get("docs"):
+            guide = root / manifest["docs"]["guide"]
+            targets[guide] = generate_guide_licenses(root, manifest)
+    return targets
 
 
 def check_targets(root: Path) -> Tuple[bool, Dict[str, str]]:

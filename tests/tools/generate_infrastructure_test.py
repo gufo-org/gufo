@@ -206,6 +206,12 @@ class GenerateInfrastructureTest(unittest.TestCase):
                 "# Models\n<!-- BEGIN GENERATED MODEL TABLE -->\n<!-- END GENERATED MODEL TABLE -->\n",
                 encoding="utf-8",
             )
+            readme_blocks = "".join(
+                f"<!-- BEGIN GENERATED README TABLE: {name} -->\n"
+                f"<!-- END GENERATED README TABLE: {name} -->\n"
+                for name in GEN.README_SECTIONS
+            )
+            (root / "README.md").write_text("# Gufo\n" + readme_blocks, encoding="utf-8")
             (root / "tools/ci").mkdir(parents=True)
             (root / "tools/ci/check-docs.py").write_text(
                 "    # BEGIN GENERATED MODEL DOCS\n    # END GENERATED MODEL DOCS\n",
@@ -284,6 +290,31 @@ class GenerateInfrastructureTest(unittest.TestCase):
         res = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("PASS:", res.stdout)
+
+
+class ReadmeCellTest(unittest.TestCase):
+    """Benchmark cells read the value shown in the marked table, without spread."""
+
+    def test_bench_value_strips_spread_and_rejects_missing_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "docs/models/m1").mkdir(parents=True)
+            (root / "docs/models/m1/BENCHMARKS.md").write_text(
+                "<!-- bench:tg -->\n"
+                "| Depth | Gufo tg (tok/s) |\n"
+                "| ---: | ---: |\n"
+                "| 0 | 116.93 ± 0.10 |\n"
+                "<!-- /bench -->\n",
+                encoding="utf-8",
+            )
+            guide = "docs/models/m1/README.md"
+            self.assertEqual(
+                GEN.read_bench_value(root, guide, "tg", "0", "Gufo tg (tok/s)"), "116.93"
+            )
+            with self.assertRaises(ValueError):
+                GEN.read_bench_value(root, guide, "tg", "8", "Gufo tg (tok/s)")
+            with self.assertRaises(ValueError):
+                GEN.read_bench_value(root, guide, "tg", "0", "Gufo pp (tok/s)")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
 # Qwen-Image-2.1
 
+<!-- BEGIN GENERATED WEIGHTS LICENSE -->
+Weights license: [Qwen Research (non-commercial)](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE).
+<!-- END GENERATED WEIGHTS LICENSE -->
+
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) · [ROCm migration](ROCM.md)
 
 Native HIP image generation and editing on AMD Strix Halo (`gfx1151`). Loads

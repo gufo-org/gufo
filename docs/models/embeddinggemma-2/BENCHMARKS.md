@@ -62,6 +62,7 @@ Image requests change by about 1 percent because the vision tower, which this PR
 
 Measured on 2026-10-24 on the node gpuworker01 with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors and the production `gufo` from one Nix container image that holds both builds.  Main is commit 194db882, which has the hipBLASLt GEMMs from #751, image inputs from #759, and matrix-core attention from #770.  This PR is commit 9a06aa43, which differs from the PR head only in documentation, a removed include, and a rewrite of the return path of `EmbedMultimodal` that does not change behavior.  The pod was the only GPU pod on the node.  Each build ran its nine EmbeddingGemma 2 GPU test binaries, then four HTTP passes in the order main, this PR, this PR, main, main, this PR, this PR, main, each with a new server and 60 requests per row.  The table shows the mean of the four passes' medians, and speedup is main's median divided by this PR's median.  The text rows use `http_bench.py` with the labels of the HTTP table above, including the new 16 × 1 × 16 row.  The image rows send one 320 × 180 PNG followed by a newline in the typed `content` format, which is 269 tokens, at 1, 4, and 16 clients.  The earlier tables predate cross-request batching, so in them concurrent requests take turns one batch at a time.  With this change, text requests that wait for the device share batches of up to 8,192 tokens, oldest first, and a lone request runs at once.
 
+<!-- bench:batching -->
 | Concurrency × inputs × words | Tokens/request | Main median | This PR median | Speedup | This PR tokens/s |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 1 × 1 × 16 | 40 | 6.63 ms | 6.59 ms | 1.01 | 5,900 |
@@ -78,6 +79,7 @@ Measured on 2026-10-24 on the node gpuworker01 with a Radeon 8060S GPU of archit
 | 1 × 1 image | 269 | 584.58 ms | 583.75 ms | 1.00 | 461 |
 | 4 × 1 image | 269 | 2,246.65 ms | 2,246.21 ms | 1.00 | 479 |
 | 16 × 1 image | 269 | 8,984.98 ms | 8,979.05 ms | 1.00 | 479 |
+<!-- /bench -->
 
 Sixteen clients that each send one 16-word input are 3.53 times faster, at 27.16 ms against 95.96 ms, because up to sixteen of those requests now share one device batch.  Sixteen clients of 128 words are 1.21 times faster and four clients are 1.05 times faster.  The concurrent rows of 8 inputs, which already fill a batch, are about 1.03 times faster.
 
@@ -147,12 +149,14 @@ Loopback HTTP C1 server durations below keep each request separately. The first
 audio request includes lazy tower/projector loading; subsequent requests reuse
 weights and bounded scratch. Text and vision were already resident.
 
+<!-- bench:audio -->
 | Input | First request (ms) | Second (ms) | Third (ms) |
 | --- | ---: | ---: | ---: |
 | Generated one-second tone, 29 expanded tokens | 146.9 | 28.3 | 27.8 |
 | Ten-second English speech, 254 tokens | 99.8 | 99.7 | 100.4 |
 | Two clips with text, 35 tokens | 46.8 | 47.2 | 47.1 |
 | Audio/image/text, 288 tokens | 511.4 | 498.6 | 498.1 |
+<!-- /bench -->
 
 An isolated native test measured **1,410,707,456 bytes (1.31 GiB)** less free
 device memory after constructing the audio runtime, including widened float32
