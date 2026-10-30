@@ -54,7 +54,8 @@ list(APPEND gufo_pr_tests
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
-  kernel_resources_parser_test check_docs_test check_pr_title_test)
+  kernel_resources_parser_test check_docs_test check_pr_title_test
+  check_extension_isolation_test extension_isolation_report)
 if (WIN32)
   # Linux-only hosted suites: RLIMIT_FSIZE and fork()-based tests, the
   # dup2/mmap/socket fixture tests, the permission-fault disk-store cases,
