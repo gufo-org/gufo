@@ -90,6 +90,17 @@ def main():
                ('repeat', [root/'short.mp4', root/'short.mp4'], '<|video|> then <|video|>', {}),
                ('mixed', [root/'short.mp4', root/'portrait.webm'],
                 'before <|video|> middle <|image|> <|audio|> after <|video|>', {})]
+    # Per-frame vision budgets (#763): every supported value besides the default.
+    probes += [('budget_70', [root/'fractional.mp4'], '<|video|>', {'max_soft_tokens': 70}),
+               ('budget_280', [root/'portrait.webm'], 'before <|video|> after', {'max_soft_tokens': 280}),
+               ('budget_560', [root/'short.mp4'], '<|video|>', {'max_soft_tokens': 560, 'max_frames': 2}),
+               ('budget_1120', [root/'boundary.mp4'], '<|video|>', {'max_soft_tokens': 1120, 'max_frames': 2,
+                                                                  'add_timestamps': True}),
+               # 64 frames, past one clip's 32-frame cap, at the smallest budget.
+               ('budget_70_frames', [root/'overflow.mp4', root/'overflow.mp4'], '<|video|> <|video|>',
+                {'max_soft_tokens': 70}),
+               ('budget_mixed', [root/'short.mp4', root/'portrait.webm'],
+                'before <|video|> middle <|image|> <|audio|> after <|video|>', {'max_soft_tokens': 560})]
     for name, paths, text, options in probes:
         if args.case and name not in args.case:
             continue
@@ -111,7 +122,8 @@ def main():
             videos.append(decoded)
             metadatas.append(VideoMetadata(total_num_frames=len(decoded), fps=fps,
                 duration=len(decoded)/fps, width=decoded.shape[2], height=decoded.shape[1], video_backend='pyav'))
-            encoded = processor.video_processor([frames], do_sample_frames=False, return_tensors='pt')
+            budget = {'max_soft_tokens': options['max_soft_tokens']} if 'max_soft_tokens' in options else {}
+            encoded = processor.video_processor([frames], do_sample_frames=False, return_tensors='pt', **budget)
             records.append({'path': 'video/' + path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
                             'indices': metadata.frames_indices.tolist(), 'fps': metadata.fps,
                             'rgb_sha256': [hashlib.sha256(frame.tobytes()).hexdigest() for frame in frames],
@@ -124,7 +136,7 @@ def main():
                                              'sha256': hashlib.sha256(raw).hexdigest()})
         # Pass encoded paths to exercise official decoding and its metadata.
         kwargs = {}
-        if name == 'mixed':
+        if name in ('mixed', 'budget_mixed'):
             from PIL import Image
             kwargs['images'] = [[Image.new('RGB', (32, 32), (255, 0, 0))]]
             kwargs['audio'] = [np.sin(np.arange(3200, dtype=np.float32)*0.07)*0.1]

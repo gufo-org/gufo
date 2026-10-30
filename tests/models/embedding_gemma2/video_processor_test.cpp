@@ -44,6 +44,8 @@ int main(int argc, char** argv) {
       options.max_frames = settings.member_size("max_frames", 32);
       options.truncate_overflow =
           settings.member_str("overflow_strategy") == "truncate";
+      options.max_soft_tokens = static_cast<std::uint32_t>(settings.member_size(
+          "max_soft_tokens", model::kDefaultVideoSoftTokens));
       for (const auto& video : probe.find("videos")->items()) {
         std::ifstream media(fixture / video.member_str("path"),
                             std::ios::binary);
@@ -72,6 +74,18 @@ int main(int argc, char** argv) {
         }
         Refused([&] { (void)model::ProcessVideo(bytes, options, {}, 0); },
                 "request frame budget");
+        std::size_t soft_tokens = 0;
+        for (const auto& frame : frames)
+          soft_tokens += frame.patches.soft_tokens();
+        Check(model::ProcessVideo(bytes, options, {}, 32, soft_tokens).size() ==
+                  frames.size(),
+              "exact request soft-token budget");
+        Refused(
+            [&] {
+              (void)model::ProcessVideo(bytes, options, {}, 32,
+                                        soft_tokens - 1);
+            },
+            "request soft-token budget");
         const auto framed = model::FrameVideo(frames, options);
         Check(!framed.empty() && framed.find("<|video|>") != std::string::npos,
               "video framing");
@@ -111,6 +125,15 @@ int main(int argc, char** argv) {
             "frame work limit");
     Refused([] { (void)model::SampleVideoFrames(301, 1); }, "duration limit");
     Refused([] { (void)model::ProcessVideo({}); }, "empty video");
+    {
+      std::ifstream media(fixture / "video" / "short.mp4", std::ios::binary);
+      const std::vector<std::uint8_t> bytes(
+          std::istreambuf_iterator<char>(media), {});
+      model::VideoOptions unsupported;
+      unsupported.max_soft_tokens = 100;
+      Refused([&] { (void)model::ProcessVideo(bytes, unsupported); },
+              "unsupported video max_soft_tokens");
+    }
     const std::vector<std::uint8_t> garbage{1, 2, 3, 4};
     Refused([&] { (void)model::ProcessVideo(garbage); }, "malformed video");
     const std::vector<std::uint8_t> oversized(20 * 1024 * 1024 + 1);

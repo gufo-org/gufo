@@ -168,6 +168,11 @@ def main():
             limited = {'content': [content(cases['overflow'])['content'][0]] * 3}
             status, body = post([limited])
             assert status == 400 and body['error']['code'] == 'invalid_video_input', body
+            # 32 frames at the 1120-token budget exceed the request's 8,960
+            # video soft tokens, though they are within the 64-frame cap.
+            status, body = post([content(cases['overflow'])],
+                                video_options={'max_soft_tokens': 1120})
+            assert status == 400 and body['error']['code'] == 'invalid_video_input', body
             too_long = content(cases['overflow'])
             too_long['content'].insert(0, {'type': 'text', 'text': 'hello '*8500})
             for truncate in (False, True):

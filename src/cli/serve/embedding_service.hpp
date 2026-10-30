@@ -106,6 +106,10 @@ public:
   static constexpr std::size_t kMaxAudio = 32;
   static constexpr std::size_t kMaxVideos = 32;
   static constexpr std::size_t kMaxVideoFrames = 64;
+  /// Video soft tokens per request: 64 frames at the default 140-token
+  /// budget, so a larger budget accepts proportionally fewer frames.
+  static constexpr std::size_t kMaxVideoSoftTokens =
+      kMaxVideoFrames * models::embedding_gemma2::kDefaultVideoSoftTokens;
 
   explicit EmbeddingService(EmbeddingServiceOptions options);
   ~EmbeddingService();
