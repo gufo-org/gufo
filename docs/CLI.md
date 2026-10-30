@@ -33,8 +33,10 @@ The supported model types are LLM, image, video, audio (TTS, ASR), and text embe
 - `context` — maximum context capacity; memory use depends on the model and
   the number of resident sessions.
 - `enableYarn` — Qwen3.8-Flash-Next only: allow a `context` above the native
-  262144 tokens through static YaRN, which applies to every request. Required
-  above 262144 and rejected at or below it.
+  262144 tokens through YaRN. A session keeps the native rotation while it
+  holds at most 262144 tokens, then takes the smallest whole factor covering
+  its positions, up to `context` / 262144. Required above 262144 and rejected
+  at or below it.
 - `prefillChunk` — prompt tokens processed between active decode steps in
   HTTP serving. Model runtimes choose their own internal prefill batch sizes.
 - `maxTokens` — maximum number of tokens a request may generate. In practice:

@@ -1004,8 +1004,21 @@ runs on the per-token attention kernel at about 350–375 tokens/s; a
 585,454-token prompt averaged 493 tokens/s overall, with decode at 36
 tokens/s.
 
-Gaps: short-text quality with YaRN on is not measured (Qwen's model card
-warns static YaRN can hurt short texts); there is no Transformers reference
+**Dynamic YaRN (October 30, 2026).** A session keeps the native rotation
+while it holds at most 262,144 tokens and takes the smallest whole factor
+covering its positions past that, so short requests with `--enable-yarn` are
+unchanged. Unsloth UD-Q4_K_XL target, shared Q8_0 MTP.
+
+| Check | Result |
+| --- | --- |
+| Short requests, `--context 409600` | Five greedy 384-token answers byte-identical to YaRN off; the fixed factor 1.5625 changed four of five |
+| Re-rotation of cached keys | Within one F16 ulp of each rotary pair against keys written directly at the new factor, positions 0 to 299,999, factors 1 to 2, 2 to 4 and 2 to 1 (`attention_ops_test`) |
+| Needle retrieval | Two codes planted before 262,144 tokens of a 309,326-token prompt both recalled after the session moved to factor 1.5625 (1,137 prompt tokens/s overall) |
+| Sessions at different factors | With the native length lowered to 8,192 in a local build, a 21,203-token session at factor 3 and a short native session decoding concurrently each produced their solo greedy output byte for byte |
+
+Gaps: short-text quality under a fixed factor was measured only by the
+first multiple-choice check (dynamic YaRN keeps short sessions native);
+there is no Transformers reference
 beyond the native context, so agreement above uses llama.cpp and the CPU
 oracle; and the fused WMMA kernel is not used for chunks whose visible
 context exceeds 262,144 tokens.

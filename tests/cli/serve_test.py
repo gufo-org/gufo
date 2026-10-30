@@ -86,7 +86,8 @@ def main():
     for value in ("OFF", "-1", "16G"):
         check(["serve", "llm", "--cache-ram-bytes", value], 2,
               "--cache-ram-bytes must be off or a byte count")
-    assert "it applies to every request" in help_text
+    assert ("each session stays native until it holds more than 262144 tokens"
+            in help_text)
     # The flag is a plain switch: it must not swallow the next argument.
     check(["serve", "llm", "--enable-yarn", "--model", "missing.gguf"], 1,
           "Error loading model 'missing.gguf'")

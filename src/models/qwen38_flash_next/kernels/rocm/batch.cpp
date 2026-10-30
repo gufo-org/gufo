@@ -314,6 +314,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
         session.mtp_.residual_valid = false;
         const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
         const auto capacity = session.index_capacity_;
+        UseYarn(session);
         if (!PrepareAttention(
                 base.qg + std::size_t{offsets[i]} * kv.rows, kv.rows, nullptr,
                 l.attn_k_norm.f32(), nullptr, nullptr, session.mtp_.k_cache,
@@ -372,6 +373,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
       const bool sparse = session.mtp_.position + n > c.indexer_top_k;
       const auto complete = (session.mtp_.position + n) / c.compress_ratio;
       const auto pool = sparse ? complete - session.mtp_.blocks : 0;
+      UseYarn(session);
       if (!Attention(l, attention, s_.mixed, s_.block_out, n,
                      &session.control_->mtp_position,
                      &session.control_->mtp_blocks, session.mtp_.position, pool,
@@ -1053,6 +1055,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           const auto pool = sparse[i] && complete[i] > session.blocks_
                                 ? complete[i] - session.blocks_
                                 : 0;
+          UseYarn(session);
           if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                          &session.control_->position, &session.control_->blocks,
                          session.position_, pool, session.max_context_,

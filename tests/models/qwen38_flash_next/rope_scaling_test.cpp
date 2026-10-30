@@ -199,17 +199,17 @@ void CheckContextDerivation() {
                "non-power-of-two, out-of-range and native == 0 requests\n";
 }
 
-// --enable-yarn: required above the native context (static YaRN changes
-// every request), rejected at or below it, and the factor still covers the
-// request exactly.
+// --enable-yarn: required above the native context (YaRN changes sessions
+// that grow past it), rejected at or below it, and the factor still covers
+// the request exactly.
 void CheckEnableYarnRule() {
   std::optional<qfn::RopeScaling> scaling = Yarn(9.0F);
   std::string error;
   Require(!qfn::ResolveRopeScaling(409600, 262144, false, &scaling, &error),
           "context above native must need --enable-yarn");
   Require(error ==
-              "context above the native 262144 tokens needs static YaRN, "
-              "which applies to every request; pass --enable-yarn "
+              "context above the native 262144 tokens needs YaRN, which "
+              "scales each session that grows past it; pass --enable-yarn "
               "(requested 409600)",
           "startup error must name the flag and the trade-off: " + error);
   Require(!scaling.has_value(), "a rejected request must not keep a scaling");

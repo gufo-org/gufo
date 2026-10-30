@@ -643,8 +643,9 @@ void PrintServeHelp(std::string_view program_name,
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
     parser.AddFlag("", "--enable-yarn",
-                   "Flash-Next: static YaRN, required for --context above the "
-                   "native 262144; it applies to every request",
+                   "Flash-Next: YaRN for --context above the native 262144; "
+                   "each session stays native until it holds more than "
+                   "262144 tokens",
                    "Model", &enable_yarn);
 
     // Sampling Defaults
@@ -1265,8 +1266,9 @@ int RunServe(std::span<const char* const> args) {
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
     llm_parser.AddFlag("", "--enable-yarn",
-                       "Flash-Next: static YaRN, required for --context above "
-                       "the native 262144; it applies to every request",
+                       "Flash-Next: YaRN for --context above the native "
+                       "262144; each session stays native until it holds more "
+                       "than 262144 tokens",
                        "Model", &enable_yarn);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",

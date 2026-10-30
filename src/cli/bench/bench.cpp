@@ -244,7 +244,7 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
       });
   RegisterSamplingOptions(parser, &opt.sampling, "Sampling", false);
   parser.AddFlag("", "--enable-yarn",
-                 "Flash-Next: static YaRN, required when depth + prompt or "
+                 "Flash-Next: YaRN, required when depth + prompt or "
                  "generation exceeds the native 262144",
                  "Model", &opt.enable_yarn);
   parser.AddFlag("-v", "--verbose",

@@ -86,15 +86,18 @@ Timings report
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)
 for explicit effort/thinking overrides. Native context is 262144. A larger
-context needs static YaRN and `--enable-yarn`: `gufo serve llm` refuses to
+context needs YaRN and `--enable-yarn`: `gufo serve llm` refuses to
 start with `--context` above 262144 without it, and `gufo bench` refuses a
 workload whose depth plus prompt or generation tokens exceeds 262144. With
-the flag, the factor is context / 262144 (`--context 409600` gives 1.5625).
-The flag is an error at or below 262144, where it would have no effect.
-Static YaRN applies to every request on that server, including short ones,
-and changes the output distribution more as the factor grows; in the first
-measurements, multiple-choice accuracy moved within noise at factors 1.5625
-to 3.875. See the
+the flag, the largest factor is context / 262144 (`--context 409600` gives
+1.5625). The flag is an error at or below 262144, where it would have no
+effect. A session keeps the native rotation while it holds at most 262144
+tokens, so short requests are unchanged by the flag; past that it takes the
+smallest whole factor covering its positions (2, 3, ...), capped at the
+largest, and its cached attention and indexer keys are re-rotated when the
+factor changes. The factor changes the output distribution more as it
+grows; in the first measurements of a fixed factor, multiple-choice accuracy
+moved within noise at factors 1.5625 to 3.875. See the
 [measurements](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323981940),
 the
 [opt-in proposal](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323982386)

@@ -2574,6 +2574,48 @@ __global__ void PoolBlocksKernel(
   }
 }
 
+// Dynamic YaRN: turns cached post-RoPE keys written under `from` into the keys
+// `to` would have written. Each pair recomputes both rounded angles exactly as
+// the writing kernels do (base frequency, YarnFrequency, sincosf of the rope
+// position, YarnScale), inverts the old scaled rotation and applies the new
+// one. Row r of the cache sits at rope position r * pos_stride.
+template<bool kFrom, bool kTo>
+__global__ void RerotateKeysKernel(__half* rows, std::uint32_t row_width,
+                                   std::uint32_t head_dim, std::uint32_t rotary,
+                                   std::uint32_t pos_stride, float theta,
+                                   const qwen::vision::DeviceRope* rope,
+                                   [[maybe_unused]] YarnRope from,
+                                   [[maybe_unused]] YarnRope to) {
+  const std::uint32_t r = blockIdx.x, h = blockIdx.y, p = threadIdx.x;
+  const std::uint32_t half = rotary / 2;
+  if (p >= half) {
+    return;
+  }
+  const float base =
+      powf(theta, -2.0f * static_cast<float>(p) / static_cast<float>(rotary));
+  const float position = qwen::vision::RopePosition(rope, r * pos_stride, p);
+  float fa = base, fb = base;
+  if constexpr (kFrom)
+    fa = YarnFrequency(base, p, from);
+  if constexpr (kTo)
+    fb = YarnFrequency(base, p, to);
+  float sa = 0.0f, ca = 0.0f, sb = 0.0f, cb = 0.0f;
+  sincosf(position * fa, &sa, &ca);
+  sincosf(position * fb, &sb, &cb);
+  if constexpr (kFrom)
+    YarnScale(sa, ca, from);
+  if constexpr (kTo)
+    YarnScale(sb, cb, to);
+  __half* x = rows + static_cast<std::size_t>(r) * row_width +
+              static_cast<std::size_t>(h) * head_dim;
+  const float lo = __half2float(x[p]), hi = __half2float(x[p + half]);
+  const float norm = ca * ca + sa * sa;
+  const float a = (lo * ca + hi * sa) / norm;
+  const float b = (hi * ca - lo * sa) / norm;
+  x[p] = __float2half_rn(__fmaf_rn(a, cb, -__fmul_rn(b, sb)));
+  x[p + half] = __float2half_rn(__fmaf_rn(a, sb, __fmul_rn(b, cb)));
+}
+
 // F16 WMMA fragments (wave32): sixteen halves per lane, eight F32
 // accumulators per lane.
 using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
@@ -7799,6 +7841,30 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        dim3(kThreads), 0, stream, raw_keys, gamma, blocks,
                        first_block, start_pos, n_tokens, ratio, dim, rotary_dim,
                        theta, eps, capacity, rope, yarn);
+}
+
+void RerotateKeys(__half* rows, std::uint32_t n_rows, std::uint32_t heads,
+                  std::uint32_t head_dim, std::uint32_t rotary,
+                  std::uint32_t pos_stride, float theta,
+                  const qwen::vision::DeviceRope* rope, const YarnRope& from,
+                  const YarnRope& to, hipStream_t stream) {
+  if (n_rows == 0 || heads == 0 || rotary == 0 || rotary / 2 > 32U) {
+    return;
+  }
+  const dim3 grid(n_rows, heads), block(32U);
+  const std::uint32_t width = heads * head_dim;
+  if (from.enabled != 0 && to.enabled != 0)
+    hipLaunchKernelGGL((RerotateKeysKernel<true, true>), grid, block, 0, stream,
+                       rows, width, head_dim, rotary, pos_stride, theta, rope,
+                       from, to);
+  else if (from.enabled != 0)
+    hipLaunchKernelGGL((RerotateKeysKernel<true, false>), grid, block, 0,
+                       stream, rows, width, head_dim, rotary, pos_stride, theta,
+                       rope, from, to);
+  else if (to.enabled != 0)
+    hipLaunchKernelGGL((RerotateKeysKernel<false, true>), grid, block, 0,
+                       stream, rows, width, head_dim, rotary, pos_stride, theta,
+                       rope, from, to);
 }
 
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,

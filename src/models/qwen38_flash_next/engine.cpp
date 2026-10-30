@@ -53,7 +53,8 @@ struct SessionSnapshotHeader {
   MtpLengthState draft_policy;
   std::uint32_t image_identity_bytes;
   std::uint32_t policy_concurrency;
-  std::uint32_t reserved{0};
+  /// Dynamic YaRN factor the saved keys are rotated with (0 or 1: native).
+  std::uint32_t yarn_factor{0};
   speculative::PromptLookup<>::State lookup;
 };
 static_assert(std::is_trivially_copyable_v<SessionSnapshotHeader>);
@@ -462,6 +463,8 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
       .draft_policy = draft_length_.State(),
       .image_identity_bytes = static_cast<std::uint32_t>(identity.size()),
       .policy_concurrency = model_->DecodeConcurrency(),
+      .yarn_factor =
+          static_cast<std::uint32_t>(model_->executor_->YarnFactor(state)),
       .lookup = lookup_.Save(),
   };
   std::memcpy(out, &header, sizeof(header));
@@ -598,6 +601,11 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
   draft_length_ = restored_policy;
   stats_ = {};
   valid_ = true;
+  // The restored keys keep the factor they were saved with; the next Feed or
+  // decode moves the session to the factor its positions need.
+  model_->executor_->AdoptYarnFactor(
+      *session_,
+      header.yarn_factor == 0 ? 1.0F : static_cast<float>(header.yarn_factor));
   return true;
 }
 
@@ -729,6 +737,11 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
       n = boundary - tokens_.size();
     }
     const auto chunk = tokens.subspan(off, n);
+    if (exec.DynamicYarn() &&
+        !exec.SetYarnFactor(*session_, exec.YarnLevelFor(tokens_.size() + n),
+                            error_msg)) {
+      return false;
+    }
     if (MtpEnabled() && !tokens_.empty() &&
         !DraftCatchUp(chunk[0], false, error_msg)) {
       return false;
@@ -994,6 +1007,11 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const std::size_t room = ContextSize() - tokens_.size();
   const std::size_t cap =
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
+  if (exec.DynamicYarn() &&
+      !exec.SetYarnFactor(
+          *session_, exec.YarnLevelFor(tokens_.size() + cap + 1), error_msg)) {
+    return false;
+  }
   // Head eligibility is MtpDraftSubsetAllowed. Sampled cohorts are never
   // jointly planned (DecodeBatchImpl), so a sampled request decides the same
   // way alone and in any batch. A greedy request decoding alone has no
