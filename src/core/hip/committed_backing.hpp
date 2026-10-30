@@ -78,6 +78,10 @@ struct BackingPoolConfig {
   // Asked before each on-demand segment with its bytes; false keeps the pool
   // at its current size, for example to leave host memory to the OS.
   std::function<bool(std::size_t)> admit_segment;
+  // Asked after each on-demand segment is registered, with its bytes and the
+  // device heap's free bytes before and after; false releases the segment
+  // and keeps the pool at its current size. A failed heap query refuses it.
+  std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
 };
 
 class CommittedBackingPool {

@@ -20,6 +20,7 @@ int main() {
   using gufo::hip::HeapFitsAboveReserve;
   using gufo::hip::kDispatchReserve;
   using gufo::hip::Placement;
+  using gufo::hip::RegistrationKeepsReserve;
   constexpr std::uint64_t kGiB = 1ull << 30;
 
   Expect(kDispatchReserve == 4 * kGiB, "dispatch reserve is 4 GiB");
@@ -31,6 +32,20 @@ int main() {
   Expect(!HeapFitsAboveReserve(kDispatchReserve - 1, 0),
          "free memory already under the reserve is rejected");
   Expect(!HeapFitsAboveReserve(10, 11), "a request above free is rejected");
+
+  // #781: 2.9 GiB of heap free, where registered pages are not charged.
+  constexpr std::uint64_t kTightHeap = 2912776192ull;
+  Expect(RegistrationKeepsReserve(kTightHeap, kTightHeap),
+         "a registration that takes nothing from a tight heap is kept");
+  Expect(!RegistrationKeepsReserve(kTightHeap, kTightHeap - 4096),
+         "a registration that takes from a tight heap is refused");
+  Expect(RegistrationKeepsReserve(kDispatchReserve + 100, kDispatchReserve),
+         "a charged registration leaving exactly the reserve is kept");
+  Expect(
+      !RegistrationKeepsReserve(kDispatchReserve + 100, kDispatchReserve - 1),
+      "a charged registration crossing the reserve is refused");
+  Expect(RegistrationKeepsReserve(kTightHeap, kTightHeap + 4096),
+         "heap freed concurrently does not refuse a registration");
 
   // Measured heaps on a 128 GiB Strix Halo: the stock ttm.pages_limit of
   // half RAM, and ttm.pages_limit=32505856 (124 GiB).

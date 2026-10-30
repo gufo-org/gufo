@@ -38,6 +38,10 @@ CommittedPages CommitPages(std::size_t bytes) {
   }
   return {data, pin};
 }
+bool HeapFree(std::size_t& free_bytes) {
+  std::size_t total_bytes = 0;
+  return hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
+}
 void ReleasePages(CommittedPages pages, std::size_t bytes) {
   (void)hipHostUnregister(pages.data);
   platform::UnpinHostPages(pages.pin);
@@ -59,6 +63,7 @@ struct BackingState {
       std::numeric_limits<std::size_t>::max()};
   cache::ResourceLedger* ledger{};
   std::function<bool(std::size_t)> admit_segment;
+  std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
   std::mutex growth;
   std::atomic<bool> growing_ahead{};
   std::byte* Address(std::size_t index) const {
@@ -94,10 +99,20 @@ struct BackingState {
     } catch (const std::bad_alloc&) {
       return false;
     }
+    std::size_t heap_before = 0, heap_after = 0;
+    if (keep_segment && !HeapFree(heap_before))
+      return false;
     auto& data = segments[first / segment_blocks];
     data = CommitPages(count * block_bytes);
     if (!data)
       return false;
+    if (keep_segment &&
+        !(HeapFree(heap_after) &&
+          keep_segment(count * block_bytes, heap_before, heap_after))) {
+      ReleasePages(data, count * block_bytes);
+      data = {};
+      return false;
+    }
     try {
       for (std::size_t i = 0; i < count; ++i)
         blocks[first + i] = reservations[i].Convert();
@@ -227,6 +242,7 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
       (count + state->segment_blocks - 1) / state->segment_blocks + 1);
   state->ledger = &ledger;
   state->admit_segment = std::move(config.admit_segment);
+  state->keep_segment = std::move(config.keep_segment);
   if (!config.segment_bytes && count) {
     std::vector<cache::ResourceReservation> reservations;
     reservations.reserve(count);

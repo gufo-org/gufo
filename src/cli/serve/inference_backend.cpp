@@ -921,45 +921,52 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
       std::chrono::steady_clock::time_point refused;
       bool active{};
     };
+    const auto limited = std::make_shared<Limited>();
+    // Pressure retries ask once per capture; recheck at most once a second
+    // while growth is refused. Call with the mutex held.
+    const auto refuse = [limited](const std::string& reason) {
+      if (!limited->active)
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=backing_limited "
+                     "reason=" +
+                         reason);
+      limited->active = true;
+      limited->refused = std::chrono::steady_clock::now();
+      return false;
+    };
     backing->pool = std::make_unique<hip::CommittedBackingPool>(
         ledger,
         hip::BackingPoolConfig{
             allocation.blocks * allocation.block_bytes +
                 allocation.metadata_bytes,
             allocation.block_bytes, allocation.metadata_bytes, segment,
-            [limited = std::make_shared<Limited>()](std::size_t bytes) {
+            [limited, refuse](std::size_t bytes) {
               const std::lock_guard lock(limited->mutex);
-              const auto now = std::chrono::steady_clock::now();
-              // Pressure retries ask once per capture; recheck at most
-              // once a second while the host is short.
               if (limited->active &&
-                  now - limited->refused < std::chrono::seconds(1))
+                  std::chrono::steady_clock::now() - limited->refused <
+                      std::chrono::seconds(1))
                 return false;
               const auto ceiling = HostSnapshotCeilingBytes();
-              // Pinned host pages come out of the same device heap that
-              // session and scratch allocations draw on; keep its dispatch
-              // reserve so they do not fall back to managed memory.
-              std::size_t heap_free = 0, heap_total = 0;
-              const bool heap_fits =
-                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
-                  hip::HeapFitsAboveReserve(heap_free, bytes);
-              if (ceiling >= bytes && heap_fits) {
+              if (ceiling >= bytes)
+                return true;
+              return refuse(
+                  "host_reserve segment_bytes=" + std::to_string(bytes) +
+                  " host_headroom_bytes=" + std::to_string(ceiling));
+            },
+            // Registered pages are charged to the device heap on some hosts
+            // only. Where they are, keep its dispatch reserve so session and
+            // scratch allocations do not fall back to managed memory.
+            [limited, refuse](std::size_t bytes, std::size_t heap_before,
+                              std::size_t heap_after) {
+              const std::lock_guard lock(limited->mutex);
+              if (hip::RegistrationKeepsReserve(heap_before, heap_after)) {
                 limited->active = false;
                 return true;
               }
-              if (!limited->active)
-                Logger::Warn(
-                    "cache",
-                    "schema=component-cache-v1 "
-                    "event=backing_limited reason=" +
-                        std::string(heap_fits ? "host_reserve "
-                                              : "device_heap_reserve ") +
-                        "segment_bytes=" + std::to_string(bytes) +
-                        " host_headroom_bytes=" + std::to_string(ceiling) +
-                        " device_heap_free_bytes=" + std::to_string(heap_free));
-              limited->active = true;
-              limited->refused = now;
-              return false;
+              return refuse(
+                  "device_heap_reserve segment_bytes=" + std::to_string(bytes) +
+                  " device_heap_free_bytes=" + std::to_string(heap_before) +
+                  " device_heap_after_bytes=" + std::to_string(heap_after));
             }});
     // Prepare a bounded reserve before readiness. The first shared-prefix
     // capture needs more than one segment; preparing 2 GiB avoids moving
