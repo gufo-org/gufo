@@ -198,12 +198,14 @@ at startup" and the rejected alternative above, for these measured reasons:
   outruns that thread. Before, steps 14 and 15 of a #573 run took 945 ms and
   1,752 ms on the capturing thread and delayed peers through
   `shared_prefix_wait_ms`.
-- Pinned host pages count against the device heap: 8 GiB of `hipHostMalloc`
-  lowered `hipMemGetInfo` free memory by 8.00 GiB, exactly as `hipMalloc`
-  did. Growth therefore also stops while a segment would leave the heap less
-  than #460's 4 GiB dispatch reserve (`reason=device_heap_reserve`), so it
-  cannot push later session and scratch allocations onto managed memory on a
-  host with the default half-RAM `ttm.pages_limit`.
+- Pinned host pages can count against the device heap: on one host, 8 GiB of
+  `hipHostMalloc` lowered `hipMemGetInfo` free memory by 8.00 GiB, exactly as
+  `hipMalloc` did. Growth therefore stops when registering a segment takes the
+  heap below #460's 4 GiB dispatch reserve (`reason=device_heap_reserve`), so
+  it cannot push later session and scratch allocations onto managed memory.
+  The pool measures `hipMemGetInfo` around each registration instead of
+  assuming a charge. On the hosts probed for #781, registration took nothing
+  from the heap, so a tight heap no longer keeps the cache off.
 - Growth stops early while the host would keep less than 4 GiB available
   (`event=backing_limited`). A capture that finds no room in a growing pool
   reads the ledger's free backing first, and skips a scan of every committed

@@ -7,6 +7,7 @@ if (ENGINE_ENABLE_HIP)
     -Wl,--wrap=madvise
     -Wl,--wrap=hipHostMalloc -Wl,--wrap=hipMalloc
     -Wl,--wrap=hipHostRegister -Wl,--wrap=hipMallocManaged
+    -Wl,--wrap=hipMemGetInfo
     -Wl,--wrap=hipStreamCreateWithFlags -Wl,--wrap=hipEventCreateWithFlags
     -Wl,--wrap=hipMemcpyAsync -Wl,--wrap=hipEventRecord
     -Wl,--wrap=hipEventQuery -Wl,--wrap=hipEventSynchronize
