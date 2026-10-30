@@ -209,6 +209,7 @@ struct FakeControl {
   bool batched_multi_token_decode{false};
   std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
+  std::size_t active_prefill_tokens{0};
   bool preview_first_token{false};
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
@@ -277,6 +278,7 @@ public:
                     control_->batched_multi_token_decode,
                 .batched_multi_token_decode_max_width = 4,
                 .prefix_reuse = control_->prefix_reuse,
+                .active_prefill_tokens = control_->active_prefill_tokens,
             },
         .persistence = std::nullopt,
     };
@@ -898,6 +900,25 @@ void TestIdlePrefillUsesBulkWorkUnit() {
              result.physical_execution_width == 1 &&
              result.execution_plan == "serial-c1",
          "C=1 telemetry reports immediate serial dispatch");
+}
+
+void TestModelChoosesActivePrefillBudget() {
+  const auto configured = [](std::size_t preferred, std::size_t policy) {
+    auto control = std::make_shared<FakeControl>();
+    control->active_prefill_tokens = preferred;
+    auto scheduler =
+        MakeScheduler(control, 1, {.decode_active_tokens = policy});
+    return scheduler->Submit({7, 70}, 1, 0.0F)
+        .Wait()
+        .configured_active_prefill_tokens;
+  };
+  // Zero, as `--prefill-chunk` leaves it, asks the model.
+  Expect(configured(4096, 0) == 4096,
+         "an unset active-decode prefill budget takes the model's");
+  Expect(configured(0, 0) == gufo::server::kDefaultDecodeActivePrefillTokens,
+         "without a model preference the budget stays 512");
+  Expect(configured(4096, 2) == 2,
+         "an explicit active-decode prefill budget overrides the model's");
 }
 
 void TestRunnerCanSkipUnusedFinalAdvance() {
@@ -3140,6 +3161,7 @@ int main() {
   TestSnapshotDoesNotBlockOtherRequests();
   TestFirstTokenPrecedesSnapshotAndPreservesBudget();
   TestIdlePrefillUsesBulkWorkUnit();
+  TestModelChoosesActivePrefillBudget();
   TestConcurrentSharedPrefixesPrefillOnce();
   TestLeaderCancelledBeforeFollowerIsAdmitted();
   TestParkedFollowerSurvivesLeaderCancellation();

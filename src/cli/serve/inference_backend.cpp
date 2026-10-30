@@ -2521,6 +2521,9 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
+                // Each pass reads every routed expert, so a short budget
+                // beside decoders repeats that read per few hundred tokens.
+                .active_prefill_tokens = model_->PrefillCapacity(),
             },
         .persistence = persistence_,
     };

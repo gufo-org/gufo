@@ -186,6 +186,9 @@ cost.
 
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
+Without it, the model chooses that limit as well, or it is 512 tokens. Qwen3.8
+Flash-Next takes its full prefill pass: each pass reads every routed expert, so
+512-token passes beside decoders repeat that read for every 512 prompt tokens.
 
 Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
 hash and exact encoded-byte comparison under the preprocessing version and
