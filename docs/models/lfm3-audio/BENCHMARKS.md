@@ -31,6 +31,29 @@ build/release/gufo speak --model $M --mmproj $P --mode chat --audio question.wav
 The interleaved reply starts with six text tokens, so its first audio follows
 the first text block.
 
+## Concurrent synthesis
+
+Concurrent requests share decoding steps (`SpeechBatch`). Same sentence,
+seeds 100 and up, Q8_0 backbone with the BF16 mmproj, after one warmup batch.
+`lfm3_audio_batch_bench` (gpu-test build) measures the batch directly; the
+HTTP rows are concurrent `/v1/audio/speech` PCM requests to `serve tts`
+(release build), second of two rounds.
+
+| Streams | Batch, aggregate | Per stream | Depth / backbone per step | HTTP, aggregate |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 6.5× | 6.5× | 3.5 / 8.5 ms | 6.4× |
+| 2 | 9.9× | 5.0× | 6.1 / 9.1 ms | 9.6× |
+| 4 | 13.9× | 3.5× | 10.8 / 10.6 ms | 13.2× |
+| 8 | **20.8×** | 2.6× | 13.6 / 13.8 ms | **19.9×** |
+
+The backbone's eight-row Q8_0 projections stay at the bandwidth floor of one
+row (8.5 ms); the rest of its step is per-row attention, RoPE and convolution
+launches. The depth decoder becomes compute bound: three passes over 96 rows
+are about 22 GFLOP of FP32 per step, which hipBLAS runs at about 2.7 TFLOPS on
+FP32 copies of its weights; codec work of eight streams overlaps on its own
+streams. Sixteen streams reach only 23.5× (24 ms backbone, 24 ms depth per
+step), so batches stop at eight.
+
 ## Realtime
 
 Same build with the realtime changes, `serve asr` and `transcribe --live`;
@@ -66,4 +89,4 @@ step cannot drop much below 6.6 ms. A single stream is therefore bounded near
 this memory system. Remaining measurable overheads are launch gaps in the
 backbone step (about 1 ms) and the depth decoder's 12-row projections, which
 reach about 80 GB/s (see [experiments](EXPERIMENTS.md)). Concurrent streams
-sharing backbone steps are not implemented.
+share steps instead; see below.

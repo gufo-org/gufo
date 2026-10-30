@@ -87,7 +87,12 @@ and `/v1/audio/voices` (`female`, `male`);
 `greedy: true` selects the most likely speech codes; otherwise the model
 card's speech sampling is used (temperature 1.0, top-k 128, repetition
 penalty 1.1 over 4096 frames) with the request `seed`. The Qwen-specific
-sampling fields do not apply to this model. `serve asr` exposes
+sampling fields do not apply to this model. Concurrent speech requests
+(up to eight) share decoding steps: every step runs one backbone pass and
+one depth-decoder pass for all of them, so their weights are read once (see
+[benchmarks](BENCHMARKS.md)); a lone request takes the single-stream path.
+Each request samples with its own seed; batched arithmetic may round
+differently from a lone request. `serve asr` exposes
 `/v1/audio/transcriptions` (JSON, text, verbose JSON, SSE), transcribing
 recordings in 30 s windows, and the realtime WebSockets below.
 
