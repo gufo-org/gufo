@@ -43,6 +43,20 @@ bool ExpandConvolution3(const std::uint16_t* input, std::uint16_t* output,
 void ReorderHeads(const std::uint16_t* input, std::uint16_t* output, int rows,
                   int heads, int kv_heads, int dim, bool inverse,
                   hipStream_t stream);
+/// Up to three head-major key/value buffers read as one key sequence:
+/// segment i holds rows [end[i-1], end[i]) at a per-head stride of stride[i]
+/// rows. Unused trailing segments repeat the previous end.
+struct KeySegments {
+  const std::uint16_t* keys[3]{};
+  const std::uint16_t* values[3]{};
+  int end[3]{};
+  int stride[3]{};
+};
+void FusedAttention128Segmented(const std::uint16_t* queries,
+                                const KeySegments& segments,
+                                std::uint16_t* output, int heads, int rows,
+                                int query_start, int query_count,
+                                hipStream_t stream, const int* limits);
 void FusedAttention128(const std::uint16_t* queries, const std::uint16_t* keys,
                        const std::uint16_t* values, std::uint16_t* output,
                        int heads, int rows, int count, int query_start,
@@ -102,6 +116,21 @@ public:
                    int kv_heads, int dim,
                    const std::vector<int>& key_limits = {});
   Matrix Concat(std::span<const Matrix> matrices);
+  /// 32-head, 128-dim head-major copy of a row-major K or V matrix.
+  Matrix HeadLayout(const Matrix& x);
+  /// Rows [0, rows) of head-major key/value buffers (per-head stride:
+  /// keys.rows).
+  struct HeadKeys {
+    Matrix keys, values;
+    int rows{0};
+  };
+  /// Attention of row-major queries over the concatenated segments without
+  /// copying them; limits as in Attention.
+  Matrix SegmentedAttention(const Matrix& q, std::span<const HeadKeys> segments,
+                            const std::vector<int>& key_limits = {});
+  std::size_t CachedBytes() const;
+  /// Bytes of a weight group that are not resident yet.
+  std::size_t MissingBytes(std::string_view prefix) const;
   Matrix Columns(const Matrix& x, int start, int count);
   Matrix Embed(const Matrix& weights, std::span<const std::uint32_t> ids);
   Matrix ReplaceRows(const Matrix& x, const Matrix& values,
@@ -113,6 +142,8 @@ public:
   Matrix UpShortcut(const Matrix& x, int height, int width, int out_channels,
                     int temporal);
   Matrix Euler(const Matrix& x, const Matrix& velocity, float dt);
+  Matrix Guidance(const Matrix& positive, const Matrix& negative, float scale);
+  Matrix NoiseMix(const Matrix& noise, const Matrix& image, float sigma);
   Matrix LatentScale(const Matrix& x, std::span<const float> mean,
                      std::span<const float> stddev, bool encode);
   Matrix VisionPosition(const Matrix& x, int height, int width);
@@ -120,6 +151,16 @@ public:
   void Observe(const Observer& observer, std::string_view name,
                const Matrix& matrix);
   void Synchronize();
+  /// Drop a resident weight component (e.g. the text encoder after the
+  /// prompts are encoded); it reloads on next use. Also trims the pool.
+  void Evict(std::string_view prefix);
+  /// Return cached pool blocks to HIP. Freed tensors otherwise stay cached
+  /// (up to 8 GB) and push the next phase into shared (host) memory.
+  void Trim();
+  /// Upper bound of freed blocks kept for reuse (default 8 GB).
+  void SetCacheLimit(std::size_t bytes);
+  /// Copy `source` into rows [row, row + source.rows) of `destination`.
+  void CopyRows(const Matrix& destination, int row, const Matrix& source);
   std::size_t WeightBytes() const { return weight_bytes_; }
   hipStream_t stream() const { return stream_; }
 

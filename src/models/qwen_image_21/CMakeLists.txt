@@ -5,7 +5,7 @@ target_link_libraries(gufo_qwen_image_21 PUBLIC gufo_core ICU::i18n)
 if(ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen_image_21 PRIVATE
     hip/kernels.hip hip/attention.hip hip/dense.hip hip/convolution.hip
-    hip/pipeline.cpp hip/blas.cpp)
+    hip/pipeline.cpp hip/blas.cpp hip/memory.cpp)
   target_link_libraries(gufo_qwen_image_21 PUBLIC hip::host roc::hipblas roc::hipblaslt)
   # Preserve BF16 operation boundaries and explicit FP32 arithmetic.
   target_compile_options(gufo_qwen_image_21 PRIVATE

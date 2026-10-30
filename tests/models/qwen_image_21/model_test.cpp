@@ -1,5 +1,6 @@
 #include "src/models/qwen_image_21/model.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -150,5 +151,98 @@ int main(int argc, char** argv) {
          calls == 3);
   http.body.resize(http.body.size() - 8);
   assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
+
+  // Image to image: the start image binds its own noise stream.
+  assert(InitialNoiseSeed(42, {}, &image) != 42);
+  assert(InitialNoiseSeed(42, {}, &image) != edit_seed);
+  assert(InitialNoiseSeed(42, references, &image) !=
+         InitialNoiseSeed(42, {}, &image));
+  // ComfyUI denoise: the last steps + 1 sigmas of int(steps / strength).
+  assert(DenoiseSigmas(40, 1.0, 4096) == schedule);
+  const auto full80 = DenoiseSigmas(80, 1.0, 4096);
+  const auto half = DenoiseSigmas(40, 0.5, 4096);
+  assert(half.size() == 41 && half.back() == 0);
+  assert(std::equal(half.begin(), half.end(), full80.end() - 41));
+  assert(DenoiseSigmas(25, 0.6, 1024).size() == 26);
+  assert(DenoiseSigmas(25, 0.6, 1024).front() ==
+         DenoiseSigmas(41, 1.0, 1024)[16]);
+  for (const auto invalid : {Request{.guidance = 21}, Request{.strength = 0.5},
+                             Request{.strength = 0}, Request{.guidance = -1}}) {
+    bool rejected = false;
+    try {
+      ValidateRequest(invalid);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+  ValidateRequest(Request{.init_image = image, .strength = 0.5});
+
+  Request seen;
+  gufo::server::ImageService extended(
+      {}, "image-test", [&](const Request& request, const CancellationCheck&) {
+        seen = request;
+        return Result{.image = image};
+      });
+  http.path = "/v1/images/generations";
+  http.headers = {{"Content-Type", "application/json"}};
+  // Defaults stay the unguided full-strength generation.
+  http.body = R"({"prompt":"a red cube","size":"256x256","seed":1})";
+  assert(gufo::server::HandleImageApiRequest(http, extended).status == 200);
+  assert(seen.guidance == 1 && seen.negative_prompt.empty() &&
+         seen.strength == 1 && !seen.init_image);
+  http.body =
+      R"({"prompt":"a red cube","size":"256x256","gufo":{"negative_prompt":"blurry","guidance":2.5}})";
+  assert(gufo::server::HandleImageApiRequest(http, extended).status == 200);
+  assert(seen.guidance == 2.5F && seen.negative_prompt == "blurry");
+  std::string encoded;
+  constexpr char kDigits[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (std::size_t i = 0; i < png.size(); i += 3) {
+    const std::uint32_t v = png[i] << 16 |
+                            (i + 1 < png.size() ? png[i + 1] << 8 : 0) |
+                            (i + 2 < png.size() ? png[i + 2] : 0);
+    const std::size_t digits = std::min<std::size_t>(png.size() - i, 3) + 1;
+    for (std::size_t k = 0; k < 4; ++k)
+      encoded += k < digits ? kDigits[(v >> (18 - 6 * k)) & 63] : '=';
+  }
+  http.body =
+      R"({"prompt":"a red cube","gufo":{"strength":0.5,"init_image":")" +
+      encoded + R"("}})";
+  assert(gufo::server::HandleImageApiRequest(http, extended).status == 200);
+  assert(seen.strength == 0.5 && seen.init_image &&
+         seen.init_image->rgba == image.rgba && seen.images.empty());
+  // A 2x2 start image rounds to the smallest 32-pixel canvas.
+  assert(seen.width == 32 && seen.height == 32);
+  for (const auto body :
+       {R"({"prompt":"a","gufo":{"guidance":"2"}})",
+        R"({"prompt":"a","gufo":{"strength":0.5}})",
+        R"({"prompt":"a","gufo":{"unknown":1}})",
+        R"({"prompt":"a","gufo":{"init_image":"https://example.com/x.png"}})",
+        R"({"prompt":"a","gufo":[]})"}) {
+    http.body = body;
+    assert(gufo::server::HandleImageApiRequest(http, extended).status == 400);
+  }
+  // Multipart: one "image" plus gufo.strength is the start image.
+  http.path = "/v1/images/edits";
+  http.headers = {
+      {"Content-Type", "multipart/form-data; boundary=\"boundary\""}};
+  http.body =
+      "--boundary\r\nContent-Disposition: form-data; name=\"image\"; "
+      "filename=\"x.png\"\r\n"
+      "Content-Type: image/png\r\n\r\n";
+  http.body.append(reinterpret_cast<const char*>(png.data()), png.size());
+  for (const auto& [name, value] : {std::pair{"prompt", "a red cube"},
+                                    {"size", "256x256"},
+                                    {"gufo.strength", "0.5"},
+                                    {"gufo.guidance", "3"},
+                                    {"gufo.negative_prompt", "blurry"}})
+    http.body += "\r\n--boundary\r\nContent-Disposition: form-data; name=\"" +
+                 std::string(name) + "\"\r\n\r\n" + value;
+  http.body += "\r\n--boundary--\r\n";
+  assert(gufo::server::HandleImageApiRequest(http, extended).status == 200);
+  assert(seen.strength == 0.5 && seen.init_image && seen.images.empty() &&
+         seen.guidance == 3 && seen.negative_prompt == "blurry" &&
+         seen.width == 256);
   std::cout << "Qwen-Image image and schedule contracts passed\n";
 }

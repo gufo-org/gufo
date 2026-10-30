@@ -5,7 +5,9 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -22,8 +24,14 @@ std::vector<std::uint8_t> EncodePng(const Image& image);
 Image ResizeImage(const Image& image, int width, int height);
 /// Keep edit noise independent of the noise that generated its references.
 /// Supply the canonical resized RGBA references; generation retains its seed.
+/// Image to image additionally binds the start image (already resized to the
+/// output size), so its noise never replays the noise that generated it.
 std::uint64_t InitialNoiseSeed(std::uint64_t seed,
-                               std::span<const Image> images);
+                               std::span<const Image> images,
+                               const Image* init_image = nullptr);
+
+/// ComfyUI KSampler treats denoise above this as a full schedule.
+inline constexpr double kFullStrength = 0.9999;
 
 struct Request {
   std::string prompt;
@@ -32,6 +40,20 @@ struct Request {
   int height{1024};
   int steps{40};
   std::uint64_t seed{0};
+  /// True classifier-free guidance (Diffusers `true_cfg_scale`, ComfyUI
+  /// KSampler `cfg`). Above 1 every step also evaluates `negative_prompt`
+  /// (with the same reference images; empty encodes like an empty prompt)
+  /// and combines `negative + guidance * (positive - negative)`. 1 keeps the
+  /// unguided single-pass path.
+  std::string negative_prompt;
+  float guidance{1};
+  /// Image to image (ComfyUI VAEEncode -> KSampler denoise). The image is
+  /// resized to width x height and VAE-encoded; `strength` below 1 runs
+  /// `steps` steps from the tail of an int(steps / strength) schedule,
+  /// starting at sigma * noise + (1 - sigma) * image. Ignored at full
+  /// strength.
+  std::optional<Image> init_image;
+  double strength{1};
 };
 
 struct Metrics {
@@ -40,6 +62,12 @@ struct Metrics {
   double vae_ms{0};
   double total_ms{0};
   std::size_t resident_weight_bytes{0};
+  /// DiT condition rows (text + reference tokens) of the positive prompt and
+  /// the negative prompt's own rows (references are shared).
+  int condition_rows{0};
+  int negative_condition_rows{0};
+  /// The text encoder left GPU memory for this request's caches.
+  bool released_text_encoder{false};
 };
 
 struct Result {
@@ -48,6 +76,13 @@ struct Result {
 };
 
 using CancellationCheck = std::function<bool()>;
+/// The request does not fit into free GPU memory (checked before the
+/// condition caches fill, and per step for large requests). The model stays
+/// usable; servers answer 503.
+class InsufficientMemory : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
 /// Development observer; tensors are FP32 views of the actual BF16 boundary.
 struct Observer {
   std::function<void(std::string_view, std::span<const float>, int, int)> write;
@@ -61,6 +96,9 @@ struct Observer {
 
 void ValidateRequest(const Request& request);
 std::vector<float> FlowSigmas(int steps, int image_tokens);
+/// `steps` + 1 sigmas: FlowSigmas for full strength, otherwise the last
+/// `steps` + 1 of FlowSigmas(int(steps / strength)) as in ComfyUI KSampler.
+std::vector<float> DenoiseSigmas(int steps, double strength, int image_tokens);
 
 class Model {
 public:
@@ -74,6 +112,11 @@ public:
                   const CancellationCheck& cancelled = {},
                   const Observer& observer = {});
   std::vector<std::uint32_t> Tokenize(std::string_view text) const;
+  /// True after a failed request left the HIP context unusable (a sticky
+  /// launch failure or a failed library call); only a new process recovers.
+  bool DeviceLost() const;
+  /// Diagnostic lines (memory per phase, memory checks).
+  void SetLog(std::function<void(const std::string&)> log);
 
 private:
   struct Impl;
