@@ -4,8 +4,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -1363,7 +1366,381 @@ void TestNewBranchPreservesSharedSourceUnderBytePressure() {
          "the oldest unrelated continuation yields to the shared branch point");
 }
 
+void TestReusedFrontierSurvivesLowerValueArrival(bool advance) {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{250000000}; },
+       .on_event = {}});
+  Tokens frontier(11251, 7);
+  auto first = cache.Acquire(frontier);
+  Expect(first.TryReserveSnapshot(231239868, frontier.size()),
+         "reserve live frontier");
+  first.Commit(frontier, std::make_unique<FakeSnapshot>(0, 231239868));
+  Tokens next = frontier;
+  next.push_back(8);
+  auto used = cache.Acquire(next);
+  Expect(used.cache_hit(), "frontier really reused before protection");
+  if (advance) {
+    Expect(used.TryReserveSnapshot(231260000, next.size(), false,
+                                   SnapshotPurpose::kContinuation, next),
+           "advance can replace its own earlier source");
+    used.Commit(next, std::make_unique<FakeSnapshot>(0, 231260000));
+    frontier = next;
+  } else
+    used.Invalidate();
+  Tokens volatile_prompt(483, 19);
+  auto arrival = cache.Acquire(volatile_prompt);
+  Expect(!arrival.TryReserveSnapshot(70704252, volatile_prompt.size()),
+         "one-use low-density prefix cannot evict a reused frontier");
+  arrival.Invalidate();
+  auto resumed = cache.Acquire(frontier);
+  Expect(resumed.cache_hit() && resumed.cached_tokens() == frontier.size(),
+         "reused frontier remains restorable after refusal");
+  resumed.Invalidate();
+}
+
+void TestDiskRestoredFrontierReceivesProtection() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{250000000}; },
+       .on_event = {}});
+  Tokens frontier(11251, 7);
+  auto restored = cache.Acquire(frontier);
+  Expect(!restored.cache_hit(), "empty RAM tier before lower-tier restore");
+  restored.AdoptRestoredPrefix(frontier.size(), 231239868, 1.0);
+  Expect(restored.TryReserveSnapshot(231239868, frontier.size()),
+         "publish disk-restored frontier");
+  restored.Commit(frontier, std::make_unique<FakeSnapshot>(0, 231239868));
+  auto arrival = cache.Acquire(Tokens(483, 99));
+  Expect(!arrival.TryReserveSnapshot(70704252, 483),
+         "disk-reused frontier receives bounded protection");
+  arrival.Invalidate();
+  auto check = cache.Acquire(frontier);
+  Expect(check.cache_hit(), "disk-restored frontier remains available in RAM");
+  check.Invalidate();
+}
+
+void TestActiveChildrenKeepTheirParent(bool prefix_identity) {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{16}; },
+       .on_event = {}});
+  const std::vector<std::uint8_t> identity{10};
+  auto backup = cache.Acquire(Tokens{90, 91});
+  Expect(backup.TryReserveSnapshot(8, 2), "seed other family");
+  backup.Commit({90, 91}, std::make_unique<FakeSnapshot>(0, 8));
+  auto parent = cache.Acquire(Tokens{1, 2, 3}, {}, identity);
+  Expect(parent.TryReserveSnapshot(8, 3), "seed parent");
+  parent.Commit({1, 2, 3}, std::make_unique<FakeSnapshot>(0, 8));
+  Tokens a{1, 2, 3, 4, 5}, b{1, 2, 3, 4, 6};
+  std::vector<std::uint8_t> ai =
+      prefix_identity ? std::vector<std::uint8_t>{11} : identity;
+  std::vector<std::uint8_t> bi =
+      prefix_identity ? std::vector<std::uint8_t>{12} : identity;
+  std::vector<ContinuationInputPrefix> prefixes =
+      prefix_identity ? std::vector<ContinuationInputPrefix>{{3, identity}}
+                      : std::vector<ContinuationInputPrefix>{};
+  auto first = cache.Acquire(a, {}, ai, {}, true, 0, prefixes);
+  auto second = cache.Acquire(b, {}, bi, {}, true, 0, prefixes);
+  Expect(first.cache_hit() && second.cache_hit(),
+         "both children use saved parent");
+  Expect(first.TryReserveSnapshot(8, a.size(), false,
+                                  SnapshotPurpose::kContinuation, a),
+         "first child advance");
+  first.Commit(a, std::make_unique<FakeSnapshot>(0, 8));
+  Expect(second.TryReserveSnapshot(8, b.size(), false,
+                                   SnapshotPurpose::kContinuation, b),
+         "second child advance");
+  second.Commit(b, std::make_unique<FakeSnapshot>(0, 8));
+  auto third = cache.Acquire(Tokens{1, 2, 3, 4, 7}, {}, identity);
+  Expect(third.cache_hit() && third.cached_tokens() == 3,
+         "third child still has shared parent");
+  third.Invalidate();
+  auto resumed = cache.Acquire(Tokens{1, 2, 3, 8}, {}, identity);
+  Expect(resumed.cache_hit() && resumed.cached_tokens() == 3,
+         "parent resume still has saved source");
+  resumed.Invalidate();
+}
+
+void TestNoPhantomActiveBranch(int mode) {
+  // mode0: different input identity, mode1: cancelled, mode2: failed restore,
+  // mode3: identical active prompt. None is evidence of a shared divergence.
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  bool fail = false;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [&](ContinuationState&, const ContinuationSnapshot&) {
+             if (fail)
+               throw std::runtime_error("expected restore fault");
+           },
+       .capacity_bytes = [] { return std::size_t{16}; },
+       .on_event = {}});
+  const std::vector<std::uint8_t> identity{10}, other{11};
+  auto backup = cache.Acquire(Tokens{90, 91});
+  Expect(backup.TryReserveSnapshot(8, 2), "negative seed other family");
+  backup.Commit({90, 91}, std::make_unique<FakeSnapshot>(0, 8));
+  auto parent = cache.Acquire(Tokens{1, 2, 3}, {}, identity);
+  Expect(parent.TryReserveSnapshot(8, 3), "negative seed parent");
+  parent.Commit({1, 2, 3}, std::make_unique<FakeSnapshot>(0, 8));
+  Tokens a{1, 2, 3, 4, 5}, b = mode == 3 ? a : Tokens{1, 2, 3, 4, 6};
+  std::optional<ContinuationCache::Lease> first;
+  if (mode == 2) {
+    fail = true;
+    bool caught = false;
+    try {
+      auto bad = cache.Acquire(a, {}, identity);
+    } catch (const std::runtime_error&) {
+      caught = true;
+    }
+    Expect(caught, "restore failure occurred");
+    fail = false;
+  } else {
+    first.emplace(cache.Acquire(a, {}, mode == 0 ? other : identity));
+    if (mode == 1) {
+      first->Invalidate();
+      first.reset();
+    }
+  }
+  auto second = cache.Acquire(b, {}, identity);
+  Expect(second.cache_hit(), "negative second child restores parent");
+  Expect(second.TryReserveSnapshot(8, b.size(), false,
+                                   SnapshotPurpose::kContinuation, b),
+         "unbranched parent remains replaceable");
+  second.Commit(b, std::make_unique<FakeSnapshot>(0, 8));
+  if (first)
+    first->Invalidate();
+  auto check = cache.Acquire(Tokens{1, 2, 3, 9}, {}, identity);
+  Expect(!check.cache_hit(),
+         "no false permanent branch from identity/cancel/failure/equal prompt");
+  check.Invalidate();
+}
+
+void TestObsoleteReusedFrontierCanBeReplaced() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{250000000}; },
+       .on_event = {}});
+  Tokens old(11251, 7);
+  auto first = cache.Acquire(old);
+  Expect(first.TryReserveSnapshot(231239868, old.size()), "seed long history");
+  first.Commit(old, std::make_unique<FakeSnapshot>(0, 231239868));
+  auto hit = cache.Acquire(old);
+  Expect(hit.cache_hit(), "actually reuse history");
+  hit.Invalidate();
+  unsigned admitted = 0;
+  for (unsigned i = 0; i < 32; ++i) {
+    Tokens replacement(483, i + 100);
+    auto request = cache.Acquire(replacement);
+    if (request.TryReserveSnapshot(70704252, replacement.size())) {
+      ++admitted;
+      request.Commit(replacement, std::make_unique<FakeSnapshot>(0, 70704252));
+    } else
+      request.Invalidate();
+  }
+  auto last = cache.Acquire(old);
+
+  Expect(admitted > 0,
+         "new demand eventually replaces an obsolete reused frontier");
+  Expect(!last.cache_hit(), "obsolete frontier was retired after turnover");
+}
+
+void TestSnapshotDemandAccountingBounds() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{250000000}; },
+       .on_event = {}});
+  Tokens old(11251, 7);
+  auto first = cache.Acquire(old);
+  Expect(first.TryReserveSnapshot(231239868, old.size()), "seed used frontier");
+  first.Commit(old, std::make_unique<FakeSnapshot>(0, 231239868));
+  auto reuse = cache.Acquire(old);
+  Expect(reuse.cache_hit(), "actually reuse");
+  reuse.Invalidate();
+  Tokens newcomer(483, 99);
+  auto request = cache.Acquire(newcomer);
+  for (int attempt = 0; attempt < 16; ++attempt)
+    Expect(!request.TryReserveSnapshot(70704252, newcomer.size()),
+           "repeated offers count only once");
+  Expect(!request.TryReserveSnapshot(std::numeric_limits<std::size_t>::max(),
+                                     newcomer.size()),
+         "impossible allocation cannot age the working set");
+  Expect(!request.TryReserveSnapshot(140000000, newcomer.size()),
+         "incremental maximum below one turnover");
+  Expect(!request.TryReserveSnapshot(210000000, newcomer.size()),
+         "still below one turnover");
+  Expect(request.TryReserveSnapshot(250000000, newcomer.size()),
+         "exact one-budget turnover expires protection");
+  request.Invalidate();
+}
+
+void TestWeightedSharedParentSurvivesAnotherFork() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  unsigned setup_removals = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{1073741824}; },
+       .on_event =
+           [&](const SnapshotEvent& e) {
+             if (e.action == SnapshotEventAction::kRemoved)
+               ++setup_removals;
+           }},
+      128);
+  for (int i = 0; i < 3; ++i) {
+    Tokens other(11330 + i, 90 + i);
+    auto request = cache.Acquire(other);
+    Expect(request.TryReserveSnapshot(232494588, other.size()),
+           "seed unrelated family");
+    request.Commit(other, std::make_unique<FakeSnapshot>(0, 232494588));
+  }
+  Tokens parent(11302, 1);
+  auto seed = cache.Acquire(parent);
+  Expect(seed.TryReserveSnapshot(231759496, parent.size()),
+         "weighted seed parent");
+  seed.Commit(parent, std::make_unique<FakeSnapshot>(0, 231759496));
+  Expect(setup_removals == 0,
+         "weighted fixture retains all four seeded families");
+  auto child = [&](std::size_t size, int branch) {
+    Tokens value = parent;
+    value.resize(size, 4);
+    value[11309] = branch;
+    return value;
+  };
+  Tokens a = child(11320, 5), b = child(11318, 6);
+  auto first = cache.Acquire(a);
+  auto second = cache.Acquire(b);
+  Expect(first.cache_hit() && second.cache_hit(),
+         "weighted simultaneous children");
+  Expect(first.TryReserveSnapshot(232271056, a.size(), false,
+                                  SnapshotPurpose::kContinuation, a),
+         "weighted first advance");
+  first.Commit(a, std::make_unique<FakeSnapshot>(0, 232271056));
+  Expect(second.TryReserveSnapshot(232250568, b.size(), false,
+                                   SnapshotPurpose::kContinuation, b),
+         "weighted second advance");
+  second.Commit(b, std::make_unique<FakeSnapshot>(0, 232250568));
+  Tokens c = child(11320, 7);
+  auto third = cache.Acquire(c);
+  Expect(third.cache_hit() && third.cached_tokens() == parent.size(),
+         "weighted third reuses parent");
+  if (third.TryReserveSnapshot(232312016, c.size(), false,
+                               SnapshotPurpose::kContinuation, c))
+    third.Commit(c, std::make_unique<FakeSnapshot>(0, 232312016));
+  else
+    third.Invalidate();
+  Tokens r = child(11317, 8);
+  auto resumed = cache.Acquire(r);
+  Expect(resumed.cache_hit() && resumed.cached_tokens() == parent.size(),
+         "weighted parent resume");
+  if (resumed.TryReserveSnapshot(232270532, r.size(), false,
+                                 SnapshotPurpose::kContinuation, r))
+    resumed.Commit(r, std::make_unique<FakeSnapshot>(0, 232270532));
+  else
+    resumed.Invalidate();
+  auto later = cache.Acquire(child(11320, 9));
+  Expect(later.cache_hit() && later.cached_tokens() == parent.size(),
+         "shared parent survives resume for future forks");
+  later.Invalidate();
+}
+
+void TestPartialHitTrafficAgesStaleSiblings() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  unsigned setup_removals = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return std::size_t{250}; },
+       .on_event =
+           [&](const SnapshotEvent& e) {
+             if (e.action == SnapshotEventAction::kRemoved)
+               ++setup_removals;
+           }},
+      128);
+  Tokens root{1, 2, 3};
+  auto seed = cache.Acquire(root);
+  Expect(seed.TryReserveSnapshot(8, root.size()), "partial seed root");
+  seed.Commit(root, std::make_unique<FakeSnapshot>(0, 8));
+  for (int branch = 4; branch < 7; ++branch) {
+    Tokens sibling = root;
+    sibling.resize(100, branch);
+    auto request = cache.Acquire(sibling);
+    Expect(request.cache_hit(), "seed siblings from common root");
+    Expect(request.TryReserveSnapshot(80, sibling.size(), true,
+                                      SnapshotPurpose::kContinuation, sibling),
+           "seed sibling");
+    request.Commit(sibling, std::make_unique<FakeSnapshot>(0, 80));
+    auto reused = cache.Acquire(sibling);
+    Expect(reused.cache_hit(), "actually reuse sibling");
+    reused.Invalidate();
+  }
+  Expect(setup_removals == 0,
+         "partial fixture retains root plus three siblings");
+  unsigned admitted = 0, partial_hits = 0;
+  for (unsigned i = 0; i < 32; ++i) {
+    Tokens prompt = root;
+    prompt.resize(10, 30 + i);
+    auto request = cache.Acquire(prompt);
+    Expect(request.cache_hit() && request.cached_tokens() == root.size(),
+           "new traffic has genuine partial hits");
+    ++partial_hits;
+    if (request.TryReserveSnapshot(80, prompt.size(), true,
+                                   SnapshotPurpose::kContinuation, prompt)) {
+      ++admitted;
+      request.Commit(prompt, std::make_unique<FakeSnapshot>(0, 80));
+    } else
+      request.Invalidate();
+  }
+  Expect(admitted > 0,
+         "partial-hit growth must eventually replace stale siblings");
+}
+
 int main() {
+  TestObsoleteReusedFrontierCanBeReplaced();
+  TestSnapshotDemandAccountingBounds();
+  TestWeightedSharedParentSurvivesAnotherFork();
+  TestPartialHitTrafficAgesStaleSiblings();
+  TestActiveChildrenKeepTheirParent(false);
+  TestActiveChildrenKeepTheirParent(true);
+  for (int mode = 0; mode < 4; ++mode)
+    TestNoPhantomActiveBranch(mode);
+  TestDiskRestoredFrontierReceivesProtection();
+  TestReusedFrontierSurvivesLowerValueArrival(false);
+  TestReusedFrontierSurvivesLowerValueArrival(true);
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();
