@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -47,6 +48,12 @@ struct TensorRef {
   std::uint64_t file_offset{0};  ///< Byte offset inside the owning shard.
   std::uint32_t shard{0};        ///< Mapped region index in the reader.
   std::string_view name;
+  /// Block-Hadamard sign vector over this tensor's reduction dimension
+  /// (`cols`) for the Gyro trellis formats, or null when the weights are
+  /// stored unrotated. Gyro stores each row as `T·w`; the reference dequantizer
+  /// undoes `T` so a plain dot product against an unrotated input reproduces
+  /// `w·x` (`T` is orthonormal).
+  const std::int8_t* hadamard_signs{nullptr};
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
   [[nodiscard]] std::uint64_t ElementCount() const noexcept {
@@ -125,6 +132,24 @@ struct LayerWeights {
   HcMixer nextn_head;       ///< Output mixer of the draft block.
 };
 
+/// +1/-1 sign vectors of the Gyro block-Hadamard rotation, one per reduction
+/// width: the hidden size for gate/up, the expert width for down.
+struct HadamardSigns {
+  /// The only block width the kernels implement.
+  static constexpr std::uint32_t kBlock = 128;
+  std::vector<std::int8_t> hidden;
+  std::vector<std::int8_t> expert;
+
+  /// The vector over `width` elements, or null when none was stored.
+  [[nodiscard]] const std::int8_t* For(std::uint64_t width) const noexcept {
+    if (!hidden.empty() && width == hidden.size())
+      return hidden.data();
+    if (!expert.empty() && width == expert.size())
+      return expert.data();
+    return nullptr;
+  }
+};
+
 struct ModelWeights {
   Config config;
   TensorRef token_embd;  ///< [hidden -> vocab]
@@ -132,6 +157,11 @@ struct ModelWeights {
   HcMixer hc_head;       ///< Final mixer, doubles as the output norm.
   TensorRef ple_table;   ///< [ple_head_dim, ple_rows], read from disk only.
   std::vector<LayerWeights> layers;
+
+  /// Gyro block-Hadamard sign vectors (`prism.hadamard.*`), null when no
+  /// tensor is stored rotated. Rotated TensorRefs borrow pointers into it;
+  /// copies of the weights share the same vectors.
+  std::shared_ptr<const HadamardSigns> hadamard;
 
   /// Binds and validates the trunk artifact. Tensor payloads stay mapped and
   /// untouched; only headers are read.

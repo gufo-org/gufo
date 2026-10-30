@@ -20,6 +20,10 @@ struct DeviceTensor {
   std::uint32_t cols{0};
   std::uint32_t rows{0};
   std::uint32_t experts{1};
+  /// Gyro rotation over `cols`: +1/-1 F32 signs. Rows hold T·w with
+  /// T = H_128·diag(signs); kernels apply T to their input instead. Null when
+  /// the tensor is stored unrotated.
+  const float* hadamard{nullptr};
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
   [[nodiscard]] const float* f32() const noexcept {
@@ -103,6 +107,11 @@ public:
   [[nodiscard]] bool has_mtp() const noexcept { return has_mtp_; }
   const DeviceLayer& mtp() const noexcept { return mtp_; }
   [[nodiscard]] std::size_t resident_bytes() const noexcept { return bytes_; }
+  /// The 2048-point Gyro trellis codebook as packed F16 pairs (point i =
+  /// lo | hi << 16), or null when no tensor is TQ2_T.
+  [[nodiscard]] const std::uint32_t* tq_codebook() const noexcept {
+    return tq_codebook_;
+  }
   /// Widest K among the BF16/F16 matrices (activation staging for hipBLAS).
   [[nodiscard]] std::size_t max_half_cols() const noexcept {
     return max_half_cols_;
@@ -126,6 +135,7 @@ private:
   DeviceLayer mtp_;
   bool has_mtp_{false};
   std::vector<void*> allocations_;
+  const std::uint32_t* tq_codebook_{nullptr};
   std::size_t bytes_{0};
   std::size_t max_half_cols_{1};
   std::size_t max_q8_cols_{32};

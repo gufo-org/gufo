@@ -45,6 +45,7 @@ enum class WeightType : std::uint32_t {
   kQ4_K = 12,
   kQ5_K = 13,
   kBF16 = 30,
+  kTQ2_T = 144,  ///< Gyro trellis; routed experts only (trellis.hpp)
 };
 
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).
@@ -284,14 +285,17 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
 /// or 64 for Q5_1/Q8_0.
-/// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
-/// and tile widths return false.
+/// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0, TQ2_T
+/// k % 128 == 0 and its `codebook` (DeviceModel::tq_codebook; x then holds
+/// the rotated rows, TrellisRotateRows); other types and tile widths return
+/// false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* tiles, std::uint32_t n_tiles,
                    std::uint32_t tile_rows, const std::int32_t* pad_bounds,
                    const std::int32_t* rows_in, const std::int32_t* rows_out,
                    const float* swiglu_gate, float* out, __half* out_half,
-                   std::size_t m, std::size_t k, hipStream_t stream);
+                   std::size_t m, std::size_t k, hipStream_t stream,
+                   const std::uint32_t* codebook = nullptr);
 
 /// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
 /// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two

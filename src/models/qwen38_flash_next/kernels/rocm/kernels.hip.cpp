@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <type_traits>
 
+#include "src/models/qwen38_flash_next/kernels/rocm/trellis_device.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
 // HIP kernels follow the layouts and operator formulas in reference.cpp.
@@ -5189,7 +5190,9 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
-                                      : (k / 32) * sizeof(Q8_0Block);
+         : kType == WeightType::kTQ2_T
+             ? (k / kTrellisBlock) * kTrellisBlockBytes
+             : (k / 32) * sizeof(Q8_0Block);
 }
 
 /// Bit `s` of each of the four bytes of `w`, packed into bits 0-3.
@@ -5231,7 +5234,8 @@ __launch_bounds__(256) __global__
                              const float* __restrict__ swiglu_gate,
                              float* __restrict__ out,
                              __half* __restrict__ out_half, std::size_t m,
-                             std::size_t k, const void* __restrict__ w_up) {
+                             std::size_t k, const void* __restrict__ w_up,
+                             const std::uint32_t* __restrict__ codebook) {
   static_assert(BM == 128 || BM == 256, "eight waves, 16-row tiles");
   static_assert(!kPair || BM == 128);
   static_assert(BN % 16 == 0 && BN / 16 <= 8);
@@ -5241,10 +5245,15 @@ __launch_bounds__(256) __global__
   constexpr bool kQ5 = kType == WeightType::kQ5_1;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
+  // TQ2_T: a stage (64 elements) is half a trellis block, whose 16 code
+  // bytes are one chunk; the scale and the code byte before them share the
+  // per-row scale word. Its codebook sits in LDS beside the stage.
+  constexpr bool kTQ = kType == WeightType::kTQ2_T;
+  static_assert(!kTQ || (!kPair && BK == 2));
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
-  constexpr int kChunks = kQ8 ? 2 * BK : BK;
+  constexpr int kChunks = kQ8 ? 2 * BK : kTQ ? 1 : BK;
 
   // Separate projections stage codes and affine parameters in LDS, with
   // nearby rows permuted across the bank groups. Paired waves keep them in
@@ -5260,7 +5269,7 @@ __launch_bounds__(256) __global__
                              : kQ5 ? BM * kQ5Bytes
                                    : BM * kChunks * 16;
   constexpr int kHighBytes = !kPair && kQ5K ? BK * BM * 4 : 0;
-  constexpr int kScaleBytes = kPair || kQ5 ? 0 : BK * BM * 4;
+  constexpr int kScaleBytes = kPair || kQ5 ? 0 : (kTQ ? 1 : BK) * BM * 4;
   // One slot of padding per activation quarter plane: the eight chunks of
   // a token then land on eight bank groups when they are written.
   constexpr int kActStride = BN + 1;
@@ -5271,7 +5280,10 @@ __launch_bounds__(256) __global__
   constexpr int kEpilogueBytes = kPair ? BN * (BM / 2 + 2) * 2 : 8 * 1024;
   constexpr int kLdsBytes =
       kStageBytes > kEpilogueBytes ? kStageBytes : kEpilogueBytes;
-  __shared__ __attribute__((aligned(16))) std::uint8_t lds[kLdsBytes];
+  constexpr int kLutBytes = kTQ ? kTrellisCodebookPoints * 4 : 0;
+  __shared__
+      __attribute__((aligned(16))) std::uint8_t lds[kLdsBytes + kLutBytes];
+  auto* s_lut = reinterpret_cast<std::uint32_t*>(lds + kLdsBytes);
   auto* s_codes = reinterpret_cast<uint4*>(lds);
   auto* s_high = reinterpret_cast<std::uint32_t*>(lds + kCodeBytes);
   auto* s_scale =
@@ -5382,6 +5394,9 @@ __launch_bounds__(256) __global__
   }
 
   const auto swizzle = [](int row, int c) {
+    if constexpr (kChunks == 1) {
+      return row;
+    }
     return (row * kChunks) +
            (c ^ (kChunks == 4 ? ((row >> 1) & 3) : ((row >> 2) & 1)));
   };
@@ -5397,7 +5412,19 @@ __launch_bounds__(256) __global__
     }
 #pragma unroll
     for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
-      if constexpr (kQ8) {
+      if constexpr (kTQ) {
+        // Half `part` of block kb0 / 4: code bytes 16 part.., and byte
+        // 16 part - 1 (mod 32), the first step's predecessor.
+        const int part = (kb0 >> 1) & 1;
+        const auto* blk = f_ptr[u] + ((kb0 >> 2) * kTrellisBlockBytes);
+        if (f_c == 0) {
+          __builtin_memcpy(&f_codes[u], blk + 2 + (16 * part), 16);
+        } else {
+          f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk) |
+                    (static_cast<std::uint32_t>(blk[2 + (16 * part + 31) % 32])
+                     << 16);
+        }
+      } else if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
@@ -5470,7 +5497,14 @@ __launch_bounds__(256) __global__
     for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
       const int row = (tid >> 1) + (u * 128);
       std::uint32_t scale_bias = 0;
-      if constexpr (kPair) {
+      if constexpr (kTQ) {
+        if (f_c == 0) {
+          s_codes[row] = f_codes[u];
+        } else {
+          s_scale[row] = f_live[u] ? f_dm[u] : 0U;
+        }
+        continue;
+      } else if constexpr (kPair) {
         own_codes[u] = f_codes[u];
         if constexpr (kQ5K)
           own_high[u] = f_high[u];
@@ -5538,7 +5572,7 @@ __launch_bounds__(256) __global__
       __floats2half2_rn(kQ8 ? -1152.0F : -1024.0F, kQ8 ? -1152.0F : -1024.0F);
   const auto compute_stage = [&]() {
     uint4 raw[kWaveRowTiles][BK];
-    if constexpr (!kQ8 && !kQ5 && !kPair) {
+    if constexpr (!kQ8 && !kQ5 && !kPair && !kTQ) {
 #pragma unroll
       for (int u = 0; u < kWaveRowTiles; ++u) {
         const int row = (wave_id * 16) + (u * 128) + sub_lane;
@@ -5595,6 +5629,45 @@ __launch_bounds__(256) __global__
             peer[i] = XorLane(packed[i], 16);
           a_lo[u] = __builtin_bit_cast(v16h, half_id == 0 ? packed : peer);
           a_hi[u] = __builtin_bit_cast(v16h, half_id == 1 ? packed : peer);
+        }
+      } else if constexpr (kTQ) {
+        // K block kb is steps 8 kb..8 kb + 7 of the staged half block: code
+        // words 2 kb and 2 kb + 1. Each wave half decodes one K16 fragment
+        // (one word: four steps, two codebook points each, scaled by d) and
+        // takes the other half's through permlanex16. Dead rows stage d = 0.
+        using v8u = __attribute__((__vector_size__(32))) std::uint32_t;
+#pragma unroll
+        for (int u = 0; u < kWaveRowTiles; ++u) {
+          const int row = (wave_id * 16) + (u * 128) + sub_lane;
+          const uint4 c = s_codes[row];
+          const std::uint32_t scale_prev = s_scale[row];
+          const std::uint32_t words[4] = {c.x, c.y, c.z, c.w};
+          const __half2 d2 = __half2half2(
+              __ushort_as_half(static_cast<unsigned short>(scale_prev)));
+          const std::uint32_t word =
+              half_id == 0 ? words[2 * kb] : words[(2 * kb) + 1];
+          const std::uint32_t lead =
+              kb == 0 ? scale_prev >> 16 : words[1] >> 24;
+          const std::uint32_t prev = half_id == 0 ? lead : words[2 * kb] >> 24;
+          std::uint32_t states[4];
+          trellis::LaneStates(word, prev, states);
+          __half2 h[8];
+#pragma unroll
+          for (int t = 0; t < 4; ++t) {
+            std::uint32_t a;
+            std::uint32_t b;
+            trellis::StepIndices(states[t], a, b);
+            h[2 * t] = __hmul2(__builtin_bit_cast(__half2, s_lut[a]), d2);
+            h[(2 * t) + 1] = __hmul2(__builtin_bit_cast(__half2, s_lut[b]), d2);
+          }
+          v8u own;
+          __builtin_memcpy(&own, &h[0], 32);
+          v8u peer;
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+            peer[i] = XorLane(own[i], 16);
+          a_lo[u] = __builtin_bit_cast(v16h, half_id == 0 ? own : peer);
+          a_hi[u] = __builtin_bit_cast(v16h, half_id == 1 ? own : peer);
         }
       } else {
 #pragma unroll
@@ -5670,7 +5743,7 @@ __launch_bounds__(256) __global__
       }
 #pragma unroll
       for (int j = 0; j < kTokTiles; ++j) {
-        if constexpr (kPair || ((kQ5 || kQ8) && BN >= 48)) {
+        if constexpr (kPair || ((kQ5 || kQ8 || kTQ) && BN >= 48)) {
           // Keep one token tile's LDS fragments live at a time. Hoisting
           // all eight tiles spills registers and defeats the wider tile's
           // reuse of each weight decode. This is a compiler barrier only.
@@ -5678,7 +5751,8 @@ __launch_bounds__(256) __global__
         }
         // A short expert bucket has no output in the remaining token
         // tiles, so omit their WMMA work.
-        if constexpr ((kPair || ((kQ5 || kQ8) && BN >= 48)) && kTokTiles > 1) {
+        if constexpr ((kPair || ((kQ5 || kQ8 || kTQ) && BN >= 48)) &&
+                      kTokTiles > 1) {
           if (j >= live_tok_tiles)
             continue;
         }
@@ -5711,6 +5785,10 @@ __launch_bounds__(256) __global__
     compute_stage();
     __syncthreads();
   };
+  if constexpr (kTQ) {
+    // The first stage's barrier publishes the codebook.
+    trellis::LoadCodebook(s_lut, codebook, tid, 256);
+  }
   fetch_stage(0, 0);
   if constexpr (kPair) {
     // K-quant launchers require complete 256-element blocks. Expose their
@@ -6420,7 +6498,8 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                      const std::int32_t* pad_bounds,
                      const std::int32_t* rows_in, const std::int32_t* rows_out,
                      const float* swiglu_gate, float* out, __half* out_half,
-                     std::size_t m, std::size_t k, hipStream_t stream) {
+                     std::size_t m, std::size_t k, hipStream_t stream,
+                     const std::uint32_t* codebook) {
   constexpr int kBM = 128;
   constexpr int kBK = 2;
   const dim3 grid(static_cast<unsigned int>((m + kBM - 1) / kBM), n_tiles);
@@ -6432,20 +6511,20 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
         hipLaunchKernelGGL(
             (RoutedF16GEMMKernel<WeightType::kQ4_K, kBM, BN, kBK>), grid,
             dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
-            rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+            rows_out, swiglu_gate, out, out_half, m, k, nullptr, nullptr);
         return true;
       }
     case WeightType::kQ5_1:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_1, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+                         out_half, m, k, nullptr, nullptr);
       return true;
     case WeightType::kQ8_0:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ8_0, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+                         out_half, m, k, nullptr, nullptr);
       return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {
@@ -6454,9 +6533,18 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
         hipLaunchKernelGGL(
             (RoutedF16GEMMKernel<WeightType::kQ5_K, kBM, BN, kBK>), grid,
             dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
-            rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+            rows_out, swiglu_gate, out, out_half, m, k, nullptr, nullptr);
         return true;
       }
+    case WeightType::kTQ2_T:
+      if (codebook == nullptr) {
+        return false;
+      }
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kTQ2_T, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in, rows_out,
+          swiglu_gate, out, out_half, m, k, nullptr, codebook);
+      return true;
     default:
       return false;
   }
@@ -6467,9 +6555,12 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    std::uint32_t tile_rows, const std::int32_t* pad_bounds,
                    const std::int32_t* rows_in, const std::int32_t* rows_out,
                    const float* swiglu_gate, float* out, __half* out_half,
-                   std::size_t m, std::size_t k, hipStream_t stream) {
+                   std::size_t m, std::size_t k, hipStream_t stream,
+                   const std::uint32_t* codebook) {
   const std::size_t block_elems =
-      (type == WeightType::kQ4_K || type == WeightType::kQ5_K) ? 256 : 64;
+      (type == WeightType::kQ4_K || type == WeightType::kQ5_K) ? 256
+      : type == WeightType::kTQ2_T                             ? kTrellisBlock
+                                                               : 64;
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
       (out_half == nullptr) == (out == nullptr)) {
     return false;
@@ -6478,15 +6569,15 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
     case 16:
       return LaunchRoutedF16<16>(w, type, x, tiles, n_tiles, pad_bounds,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
-                                 m, k, stream);
+                                 m, k, stream, codebook);
     case 48:
       return LaunchRoutedF16<48>(w, type, x, tiles, n_tiles, pad_bounds,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
-                                 m, k, stream);
+                                 m, k, stream, codebook);
     case 64:
       return LaunchRoutedF16<64>(w, type, x, tiles, n_tiles, pad_bounds,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
-                                 m, k, stream);
+                                 m, k, stream, codebook);
     default:
       return false;
   }
@@ -6510,13 +6601,13 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kQ4_K, 128, BN, 2, true>), grid,
           dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
-          rows_out, nullptr, nullptr, out, m, k, up);
+          rows_out, nullptr, nullptr, out, m, k, up, nullptr);
       return true;
     case WeightType::kQ5_K:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kQ5_K, 128, BN, 2, true>), grid,
           dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
-          rows_out, nullptr, nullptr, out, m, k, up);
+          rows_out, nullptr, nullptr, out, m, k, up, nullptr);
       return true;
     default:
       return false;

@@ -105,10 +105,13 @@ std::unique_ptr<GgufReader> GgufReader::OpenFile(
     return nullptr;
   }
 
+  // split.count is optional; when present it is the number of shards. Some
+  // writers (e.g. AgentionAI Gyro) emit split.count = 0 for a single-file
+  // model, which llama.cpp also reads as "not split". Treat 0/1 as a single
+  // file instead of rejecting it.
   const auto split_count = first->GetMetadataUint32("split.count").value_or(1U);
   if (first->FindMetadata("split.count") &&
-      (!first->GetMetadataUint32("split.count") || split_count == 0 ||
-       split_count > 65535)) {
+      (!first->GetMetadataUint32("split.count") || split_count > 65535)) {
     if (error_msg)
       *error_msg = "Invalid GGUF split count";
     return nullptr;

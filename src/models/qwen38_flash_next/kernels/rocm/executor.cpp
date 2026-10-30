@@ -22,6 +22,7 @@
 #include "src/core/platform/pages.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/trellis.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
@@ -1151,6 +1152,9 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.shexp_up = f32(T * c.shared_expert_ff);
   s.shexp_out = f32(T * hidden);
   s.shexp_half = Alloc<__half>(a, T * c.shared_expert_ff, error_msg);
+  if (model.tq_codebook() != nullptr) {
+    s.x_rot_half = Alloc<__half>(a, T * hidden, error_msg);
+  }
   s.logits =
       f32(static_cast<std::size_t>(e->options_.max_logit_rows) * c.vocab_size);
   {
@@ -2795,6 +2799,9 @@ bool Executor::JoinSide(std::string* error_msg) const {
 
 bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
   const Config& c = config();
+  if (l.ffn_gate_exps.type == GgmlType::kTQ2_T) {
+    return ExpertMatrixRows(n_tokens);
+  }
   return ExpertMatrixRows(n_tokens) &&
          (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
           l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
@@ -2817,7 +2824,11 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // into 16-row padded buckets, token rows narrowed to F16 once, then the
   // F16 matrix-core GEMM per (expert, row tile).
   const bool wmma_experts = WmmaExperts(l, n_tokens);
-  if (wmma_experts) {
+  if (l.ffn_gate_exps.type == GgmlType::kTQ2_T) {
+    if (!TrellisExperts(l, x, wmma_experts, n_tokens, error_msg)) {
+      return false;
+    }
+  } else if (wmma_experts) {
     RoutedCompact(s_.ids, s_.expert_counts, s_.routed_bounds, s_.routed_cursors,
                   s_.rows_token, s_.rows_slot, n_tokens, used, c.num_experts,
                   stream_);
@@ -2910,6 +2921,75 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   } else {
     MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
                 c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
+  }
+  return true;
+}
+
+bool Executor::TrellisExperts(const DeviceLayer& l, const float* x, bool wmma,
+                              std::uint32_t n_tokens,
+                              std::string* error_msg) const {
+  const Config& c = config();
+  const std::uint32_t used = c.num_experts_used;
+  const std::uint32_t slots = n_tokens * used;
+  const DeviceTensor& gate = l.ffn_gate_exps;
+  const DeviceTensor& up = l.ffn_up_exps;
+  const DeviceTensor& down = l.ffn_down_exps;
+  const std::uint32_t* codebook = model_->tq_codebook();
+  if (up.type != GgmlType::kTQ2_T || down.type != GgmlType::kTQ2_T ||
+      gate.hadamard != up.hadamard || codebook == nullptr) {
+    AssignError(error_msg, "trellis experts need TQ2_T gate, up and down");
+    return false;
+  }
+  if (!wmma) {
+    // Vector rows rotate their input in LDS: the SwiGLU rows land in
+    // s_.gate_e and the down projection in s_.down_e, as for other formats.
+    if (!TrellisGatedVec(gate.data, up.data, x, gate.hadamard, codebook, s_.ids,
+                         s_.gate_e, c.expert_ff, c.hidden_size, n_tokens, used,
+                         stream_) ||
+        !TrellisDownVec(down.data, s_.gate_e, down.hadamard, codebook, s_.ids,
+                        s_.down_e, c.hidden_size, c.expert_ff, n_tokens, used,
+                        stream_)) {
+      AssignError(error_msg, "trellis expert vector projection failed");
+      return false;
+    }
+    return true;
+  }
+  RoutedCompact(s_.ids, s_.expert_counts, s_.routed_bounds, s_.routed_cursors,
+                s_.rows_token, s_.rows_slot, n_tokens, used, c.num_experts,
+                stream_);
+  // The F16 WMMA GEMMs read rotated rows; the paired gate/up route has no
+  // trellis decoder, so prefill uses the 64-token tiles for all three.
+  // Rotate the F16 token rows the router read, as the other formats' GEMMs
+  // do: the fused mix of a 96+ row prefill pass writes only those, so its
+  // F32 rows (x) are stale here.
+  PrepareHalfInput(x, n_tokens, c.hidden_size);
+  TrellisRotateRows(nullptr, static_cast<const __half*>(s_.x_half),
+                    s_.x_rot_half, gate.hadamard, n_tokens, c.hidden_size,
+                    stream_);
+  const bool wide = routed_64_tiles_ != 0;
+  const std::uint32_t n_tiles = wide ? routed_64_tiles_ : routed_n_tiles_;
+  const std::uint32_t tile_rows = wide ? 64 : routed_tile_rows_;
+  auto* up_half = reinterpret_cast<__half*>(s_.up_e);
+  if (!RoutedF16Gemm(gate.data, WeightType::kTQ2_T, s_.x_rot_half,
+                     s_.routed_tiles, n_tiles, tile_rows, s_.routed_bounds,
+                     s_.rows_token, s_.rows_slot, nullptr, s_.gate_e, nullptr,
+                     c.expert_ff, c.hidden_size, stream_, codebook) ||
+      !RoutedF16Gemm(up.data, WeightType::kTQ2_T, s_.x_rot_half,
+                     s_.routed_tiles, n_tiles, tile_rows, s_.routed_bounds,
+                     s_.rows_token, s_.rows_slot, s_.gate_e, nullptr, up_half,
+                     c.expert_ff, c.hidden_size, stream_, codebook)) {
+    AssignError(error_msg, "trellis routed gate/up GEMM failed");
+    return false;
+  }
+  TrellisRotateRows(nullptr, up_half, up_half, down.hadamard, slots,
+                    c.expert_ff, stream_);
+  if (!RoutedF16Gemm(down.data, WeightType::kTQ2_T, up_half, s_.routed_tiles,
+                     n_tiles, tile_rows, s_.routed_bounds, s_.rows_slot,
+                     s_.rows_slot, nullptr, nullptr,
+                     reinterpret_cast<__half*>(s_.down_e), c.hidden_size,
+                     c.expert_ff, stream_, codebook)) {
+    AssignError(error_msg, "trellis routed down GEMM failed");
+    return false;
   }
   return true;
 }

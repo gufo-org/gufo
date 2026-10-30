@@ -9,6 +9,7 @@
 
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/quant/gyro/tq_ref.h"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -55,6 +56,8 @@ struct Uploader {
   bool ok{true};
   std::uint32_t shard_base{0};
   std::uint64_t requested{0};
+  /// Device copies of the host Gyro sign vectors, as (host, device) pairs.
+  std::span<const std::pair<const std::int8_t*, const float*>> signs;
 
   [[nodiscard]] bool Measuring() const noexcept { return weights == nullptr; }
 
@@ -102,6 +105,15 @@ struct Uploader {
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
+    for (const auto& [host, device] : signs) {
+      if (t.hadamard_signs != nullptr && t.hadamard_signs == host) {
+        d.hadamard = device;
+      }
+    }
+    if (t.hadamard_signs != nullptr && d.hadamard == nullptr) {
+      Fail("no device sign vector for " + std::string(t.name));
+      return d;
+    }
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
@@ -426,6 +438,51 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   }
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = w.config;
+  // Gyro trellis experts read the codebook and, when rotated, their input's
+  // sign vector. Both are a few KB; they stay outside the weight placement.
+  std::vector<std::pair<const std::int8_t*, const float*>> signs;
+  const auto small_upload = [&](const void* host, std::size_t bytes) {
+    void* device = nullptr;
+    if (hipMalloc(&device, bytes) != hipSuccess) {
+      return static_cast<void*>(nullptr);
+    }
+    m->allocations_.push_back(device);
+    m->bytes_ += bytes;
+    if (hipMemcpy(device, host, bytes, hipMemcpyHostToDevice) != hipSuccess) {
+      return static_cast<void*>(nullptr);
+    }
+    return device;
+  };
+  const auto trellis = [](const LayerWeights& l) {
+    return l.ffn_gate_exps.type == core::GgmlType::kTQ2_T ||
+           l.ffn_up_exps.type == core::GgmlType::kTQ2_T ||
+           l.ffn_down_exps.type == core::GgmlType::kTQ2_T;
+  };
+  if (std::any_of(w.layers.begin(), w.layers.end(), trellis) ||
+      (mtp != nullptr && trellis(mtp->block))) {
+    m->tq_codebook_ = static_cast<const std::uint32_t*>(
+        small_upload(tq_codebook_f16, sizeof(tq_codebook_f16)));
+    if (m->tq_codebook_ == nullptr) {
+      if (error_msg != nullptr)
+        *error_msg = "trellis codebook upload failed";
+      return nullptr;
+    }
+  }
+  if (w.hadamard != nullptr) {
+    for (const auto* host : {&w.hadamard->hidden, &w.hadamard->expert}) {
+      if (host->empty())
+        continue;
+      std::vector<float> values(host->begin(), host->end());
+      const auto* device = static_cast<const float*>(
+          small_upload(values.data(), values.size() * sizeof(float)));
+      if (device == nullptr) {
+        if (error_msg != nullptr)
+          *error_msg = "Hadamard sign upload failed";
+        return nullptr;
+      }
+      signs.emplace_back(host->data(), device);
+    }
+  }
   const auto regions = reader.GetMappedRegions();
   std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
   const auto shard_count = static_cast<std::uint32_t>(shards.size());
@@ -453,6 +510,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     std::size_t max_q8_cols = 32;
     Uploader measure{*stager, nullptr,       conversions, allocations,
                      bytes,   max_half_cols, max_q8_cols, error_msg};
+    measure.signs = signs;
     (void)measure.Model(w, mtp, shard_count);
     if (!measure.ok) {
       return nullptr;
@@ -463,6 +521,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   std::vector<Conversion> conversions;
   Uploader up{*stager,   &weights,          conversions,     m->allocations_,
               m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg};
+  up.signs = signs;
   Uploaded uploaded = up.Model(w, mtp, shard_count);
   if (!up.ok || !stager->Finish(error_msg)) {
     return nullptr;

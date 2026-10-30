@@ -554,6 +554,9 @@ private:
   /// Runs routed experts after the router and shared expert are ready.
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
+  /// MoeExperts for Gyro trellis (TQ2_T) experts, up to the epilogue.
+  bool TrellisExperts(const DeviceLayer& l, const float* x, bool wmma,
+                      std::uint32_t n_tokens, std::string* error_msg) const;
   bool MoeBatch(const DeviceLayer& l, const float* x, float* out,
                 std::uint32_t rows, std::string* error) const;
   /// Whether a draft of `session` requesting the small head gets it.
@@ -687,6 +690,9 @@ private:
     /// Shared-expert SwiGLU rows narrowed for the F16 down projection, so
     /// s_.x_half keeps the routed experts' token rows.
     __half* shexp_half;
+    /// Token rows rotated for Gyro trellis experts (F16 WMMA route only);
+    /// null for other models.
+    __half* x_rot_half;
     // head and hidden rows kept for the draft block
     float* logits;
     // mtp

@@ -106,6 +106,9 @@ Executor::Scratch Executor::RowScratch(const Scratch& b,
   s.shexp_up += r * c.shared_expert_ff;
   s.shexp_out += r * c.hidden_size;
   s.shexp_half += r * c.shared_expert_ff;
+  if (s.x_rot_half != nullptr) {
+    s.x_rot_half += r * c.hidden_size;
+  }
   if (has_mtp()) {
     s.mtp_h += r * c.HcDim();
     s.mtp_embd += r * c.hidden_size;

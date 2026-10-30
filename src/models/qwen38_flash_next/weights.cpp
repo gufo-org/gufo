@@ -1,8 +1,11 @@
 #include "src/models/qwen38_flash_next/weights.hpp"
 
+#include <algorithm>
 #include <initializer_list>
 #include <string>
+#include <unordered_set>
 #include <utility>
+#include <variant>
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
@@ -35,6 +38,8 @@ struct Format {
       return {256, 176};
     case GgmlType::kQ6_K:
       return {256, 210};
+    case GgmlType::kTQ2_T:
+      return {128, 34};
     default:
       return {0, 0};
   }
@@ -141,7 +146,7 @@ struct Binder {
     const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
                         GgmlType::kF32};
     const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
-                          GgmlType::kQ5_1, GgmlType::kQ8_0};
+                          GgmlType::kQ5_1, GgmlType::kQ8_0, GgmlType::kTQ2_T};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -228,6 +233,79 @@ struct Binder {
   }
 };
 
+/// Integer array metadata, signed or unsigned.
+std::vector<std::int64_t> IntArray(const core::GgufReader& reader,
+                                   std::string_view key) {
+  const auto* meta = reader.FindMetadata(key);
+  if (meta == nullptr) {
+    return {};
+  }
+  if (const auto* p = std::get_if<std::vector<std::int64_t>>(&meta->value)) {
+    return *p;
+  }
+  if (const auto* p = std::get_if<std::vector<std::uint64_t>>(&meta->value)) {
+    return {p->begin(), p->end()};
+  }
+  return {};
+}
+
+/// The Gyro rotation (format spec section 8), or null when the artifact
+/// stores no rotated tensor. Only the explicit-sign, 128-wide, normalized
+/// Sylvester-Walsh-Hadamard transform over the reduction axis is accepted.
+std::shared_ptr<const HadamardSigns> BindHadamard(
+    const core::GgufReader& reader, const Config& c, Binder& b) {
+  if (reader.FindMetadata("prism.hadamard.version") == nullptr) {
+    return nullptr;
+  }
+  const auto text = [&](std::string_view key) {
+    return reader.GetMetadataString(key).value_or("");
+  };
+  if (reader.GetMetadataUint32("prism.hadamard.version") != 1U ||
+      reader.GetMetadataUint32("prism.hadamard.block_size") !=
+          HadamardSigns::kBlock ||
+      text("prism.hadamard.transform") !=
+          "normalized-sylvester-walsh-hadamard" ||
+      text("prism.hadamard.axis") != "input-last-dimension" ||
+      text("prism.hadamard.sign_mode") != "explicit") {
+    b.Fail("unsupported prism.hadamard rotation");
+    return nullptr;
+  }
+  auto signs = std::make_shared<HadamardSigns>();
+  const auto widths = IntArray(reader, "prism.hadamard.sign_widths");
+  const auto values = IntArray(reader, "prism.hadamard.sign_values");
+  std::size_t offset = 0;
+  for (const std::int64_t width : widths) {
+    const auto len = static_cast<std::size_t>(std::max<std::int64_t>(width, 0));
+    if (len == 0 || len % HadamardSigns::kBlock != 0 ||
+        values.size() - offset < len) {
+      b.Fail("malformed prism.hadamard sign vectors");
+      return nullptr;
+    }
+    auto* dst = len == c.hidden_size ? &signs->hidden
+                : len == c.expert_ff ? &signs->expert
+                                     : nullptr;
+    if (dst == nullptr || !dst->empty()) {
+      b.Fail("unexpected prism.hadamard sign width " + std::to_string(len));
+      return nullptr;
+    }
+    dst->resize(len);
+    for (std::size_t j = 0; j < len; ++j) {
+      const std::int64_t v = values[offset + j];
+      if (v != 1 && v != -1) {
+        b.Fail("prism.hadamard signs must be +1 or -1");
+        return nullptr;
+      }
+      (*dst)[j] = static_cast<std::int8_t>(v);
+    }
+    offset += len;
+  }
+  if (offset != values.size()) {
+    b.Fail("malformed prism.hadamard sign vectors");
+    return nullptr;
+  }
+  return signs;
+}
+
 }  // namespace
 
 std::size_t TensorRef::RowBytes() const noexcept {
@@ -278,14 +356,47 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     if (rows < c.ple_rows) {
       b.Fail("per_layer_token_embd.weight is missing or too short");
     } else {
-      w.ple_table = b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows,
-                          1, {GgmlType::kIQ4_NL, GgmlType::kBF16});
+      w.ple_table =
+          b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows, 1,
+                {GgmlType::kIQ4_NL, GgmlType::kBF16, GgmlType::kQ8_0});
     }
   }
   w.layers.reserve(c.num_layers);
+  // Gyro trellis experts may be stored rotated (prism.hadamard.*): each
+  // listed row holds T·w, T = H_128·diag(s) over its reduction dimension.
+  w.hadamard = BindHadamard(reader, c, b);
+  std::unordered_set<std::string_view> rotated;
+  if (w.hadamard != nullptr) {
+    for (const auto name :
+         reader.GetMetadataStringArray("prism.hadamard.weight_names")) {
+      rotated.insert(name);
+    }
+  }
+  std::size_t rotated_bound = 0;
+  const auto rotation = [&](TensorRef& t) {
+    if (t.empty() || !rotated.contains(t.name)) {
+      return;
+    }
+    ++rotated_bound;
+    t.hadamard_signs = w.hadamard->For(t.cols);
+    if (t.type != GgmlType::kTQ2_T || t.hadamard_signs == nullptr) {
+      b.Fail("rotated tensor " + std::string(t.name) +
+             " has no matching TQ2_T kernel or sign vector");
+    }
+  };
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
-    w.layers.push_back(
-        b.Layer(c, il, c.IsLinearLayer(il), c.IsPleLayer(il), false));
+    LayerWeights l =
+        b.Layer(c, il, c.IsLinearLayer(il), c.IsPleLayer(il), false);
+    rotation(l.ffn_gate_exps);
+    rotation(l.ffn_up_exps);
+    rotation(l.ffn_down_exps);
+    w.layers.push_back(std::move(l));
+  }
+  // A listed tensor this runtime does not bind would run unrotated.
+  if (b.ok && rotated_bound != rotated.size()) {
+    b.Fail(
+        "prism.hadamard.weight_names lists tensors other than the routed "
+        "experts");
   }
   if (!b.ok) {
     return std::nullopt;
