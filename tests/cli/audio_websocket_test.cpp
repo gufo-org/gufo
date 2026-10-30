@@ -9,10 +9,12 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/audio_stream.hpp"
 #include "src/cli/serve/http_server.hpp"
+#include "src/cli/serve/realtime_audio.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
@@ -118,6 +120,90 @@ private:
   }
 };
 
+// Text of every pushed piece of nonzero audio; the transcript of a stream is
+// its pieces' text.
+class FakeLive final : public LiveTranscription {
+public:
+  bool Push(std::span<const float> samples, const Text& on_text,
+            std::string*) override {
+    assert(!samples.empty());
+    text_ += "a";
+    return on_text("a");
+  }
+  bool Finish(const Text& on_text, std::string*) override {
+    text_ += ".";
+    return on_text(".");
+  }
+  const std::string& text() const override { return text_; }
+
+private:
+  std::string text_;
+};
+// Replies "Hi" with three samples of speech; "call" asks for a tool and
+// "wait" runs until cancelled.
+class FakeVoice final : public VoiceConversation {
+public:
+  bool Configure(const Settings& settings, std::string*) override {
+    settings_ = settings;
+    return true;
+  }
+  bool AppendAudio(std::span<const float> samples, std::string*) override {
+    audio_ += samples.size();
+    return true;
+  }
+  bool CommitAudio(std::size_t* samples, std::string*) override {
+    *samples = audio_;
+    audio_ = 0;
+    last_ = "audio";
+    return *samples > 0;
+  }
+  bool ClearAudio(std::string*) override {
+    audio_ = 0;
+    return true;
+  }
+  bool audio_open() const override { return audio_ > 0; }
+  bool AddUserText(std::string_view text, std::string*) override {
+    last_ = text;
+    return true;
+  }
+  bool AddToolOutputs(std::span<const std::string> outputs,
+                      std::string*) override {
+    assert(outputs.size() == 1 && outputs[0] == "{\"ok\":true}");
+    last_ = "tool";
+    return true;
+  }
+  bool Respond(const Settings& settings, const Callbacks& callbacks,
+               Reply* reply, std::string*) override {
+    *reply = {};
+    if (last_ == "call") {
+      assert(settings_.tools.size() == 1 &&
+             settings_.tools[0] ==
+                 R"({"name":"set_volume","parameters":{"type":"object"}})");
+      reply->calls.push_back({"set_volume", "{\"volume\":30}"});
+      return true;
+    }
+    if (last_ == "wait") {
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (!callbacks.cancelled() &&
+             std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+      reply->cancelled = callbacks.cancelled();
+      return true;
+    }
+    const std::vector<float> speech{-.5F, 0, .5F};
+    reply->text = "Hi";
+    reply->audio_samples = speech.size();
+    return callbacks.on_text("Hi") &&
+           (!settings.audio_output || callbacks.on_audio(speech));
+  }
+
+private:
+  Settings settings_;
+  std::size_t audio_{0};
+  std::string last_;
+};
+
 // The server's receive timeout is an idle limit. A client that only listens
 // to streamed output must stay connected; a silent session closes cleanly.
 void ListeningClientIsNotIdle() {
@@ -148,6 +234,143 @@ void ListeningClientIsNotIdle() {
   }
   net::CloseSocket(fds[0]);
   net::CloseSocket(fds[1]);
+}
+// Live transcription and spoken conversations of a model that hears and
+// speaks, against fake streams.
+void RealtimeStreams() {
+  auto asr = std::make_shared<AsrService>(AsrServiceOptions{
+      .validate_model = false,
+      .model_id = "voice",
+      .runner = [](const auto&, const auto&, auto*, auto*) { return false; },
+      .live =
+          [](std::uint32_t rate, std::string*) {
+            assert(rate == 24000);
+            return std::unique_ptr<LiveTranscription>(new FakeLive);
+          },
+      .voice =
+          [](std::uint32_t rate, std::string*) {
+            assert(rate == 24000);
+            return std::unique_ptr<VoiceConversation>(new FakeVoice);
+          }});
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, asr,
+                    {.api_key = "test"});
+  std::string error;
+  assert(server.start(&error));
+  std::jthread worker([&] { server.run(); });
+  const auto append = [](std::size_t bytes) {
+    return R"({"type":"input_audio_buffer.append","audio":")" +
+           EncodeAudioBase64(std::string(bytes, '\1')) + "\"}";
+  };
+  {
+    // Text arrives while audio is appended, for the item commit creates.
+    Client client(server.port(), "/v1/realtime?intent=transcription");
+    client.Event("session.created");
+    client.Text(append(4800));
+    auto delta =
+        client.Event("conversation.item.input_audio_transcription.delta");
+    assert(delta.member_str("delta") == "a");
+    const auto item = delta.member_str("item_id");
+    client.Text(R"({"type":"input_audio_buffer.commit"})");
+    assert(client.Event("input_audio_buffer.committed").member_str("item_id") ==
+           item);
+    client.Event("conversation.item.created");
+    assert(client.Event("conversation.item.input_audio_transcription.delta")
+               .member_str("delta") == ".");
+    auto done =
+        client.Event("conversation.item.input_audio_transcription.completed");
+    assert(done.member_str("transcript") == "a." &&
+           done.member_str("item_id") == item);
+    // Cleared audio leaves no transcript behind.
+    client.Text(append(4800));
+    client.Event("conversation.item.input_audio_transcription.delta");
+    client.Text(R"({"type":"input_audio_buffer.clear"})");
+    client.Event("input_audio_buffer.cleared");
+    client.Text(append(4800));
+    client.Event("conversation.item.input_audio_transcription.delta");
+    client.Text(R"({"type":"input_audio_buffer.commit"})");
+    client.Event("input_audio_buffer.committed");
+    client.Event("conversation.item.created");
+    client.Event("conversation.item.input_audio_transcription.delta");
+    assert(client.Event("conversation.item.input_audio_transcription.completed")
+               .member_str("transcript") == "a.");
+  }
+  {
+    // Without an intent the session is a conversation.
+    Client client(server.port(), "/v1/realtime");
+    assert(client.Event("session.created")["session"].member_str("type") ==
+           "realtime");
+    client.Text(append(4800));
+    client.Text(R"({"type":"input_audio_buffer.commit"})");
+    client.Event("input_audio_buffer.committed");
+    auto user = client.Event("conversation.item.created");
+    assert(user["item"].member_str("role") == "user");
+    client.Text(R"({"type":"response.create"})");
+    auto created = client.Event("response.created");
+    const auto id = created["response"].member_str("id");
+    auto added = client.Event("response.output_item.added");
+    assert(added["item"].member_str("type") == "message");
+    client.Event("response.content_part.added");
+    assert(client.Event("response.output_audio_transcript.delta")
+               .member_str("delta") == "Hi");
+    assert(client.Event("response.output_audio.delta").member_str("delta") ==
+           EncodeAudioBase64(EncodePcm16(std::vector<float>{-.5F, 0, .5F})));
+    client.Event("response.output_audio.done");
+    assert(client.Event("response.output_audio_transcript.done")
+               .member_str("transcript") == "Hi");
+    client.Event("response.content_part.done");
+    client.Event("response.output_item.done");
+    auto done = client.Event("response.done");
+    assert(done["response"].member_str("id") == id &&
+           done["response"].member_str("status") == "completed");
+    // Text replies; tools are listed without their Realtime type.
+    client.Text(
+        R"({"type":"session.update","session":{"output_modalities":["text"],"tools":[{"type":"function","name":"set_volume","parameters":{"type":"object"}}]}})");
+    client.Event("session.updated");
+    client.Text(
+        R"({"type":"conversation.item.create","item":{"type":"message","role":"user","content":[{"type":"input_text","text":"call"}]}})");
+    client.Event("conversation.item.created");
+    client.Text(R"({"type":"response.create"})");
+    client.Event("response.created");
+    auto call = client.Event("response.output_item.added");
+    assert(call["item"].member_str("type") == "function_call" &&
+           call["item"].member_str("name") == "set_volume");
+    auto arguments = client.Event("response.function_call_arguments.done");
+    assert(arguments.member_str("arguments") == R"({"volume":30})");
+    client.Event("response.output_item.done");
+    done = client.Event("response.done");
+    assert(done["response"]["output"].items().size() == 1);
+    client.Text(
+        R"({"type":"conversation.item.create","item":{"type":"function_call_output","call_id":")" +
+        arguments.member_str("call_id") + R"(","output":"{\"ok\":true}"}})");
+    client.Event("conversation.item.created");
+    client.Text(R"({"type":"response.create"})");
+    client.Event("response.created");
+    client.Event("response.output_item.added");
+    client.Event("response.content_part.added");
+    assert(client.Event("response.output_text.delta").member_str("delta") ==
+           "Hi");
+    client.Event("response.output_text.done");
+    client.Event("response.content_part.done");
+    client.Event("response.output_item.done");
+    client.Event("response.done");
+    // response.cancel interrupts a running reply.
+    client.Text(
+        R"({"type":"conversation.item.create","item":{"type":"message","role":"user","content":[{"type":"input_text","text":"wait"}]}})");
+    client.Event("conversation.item.created");
+    client.Text(R"({"type":"response.create"})");
+    client.Event("response.created");
+    client.Text(R"({"type":"response.cancel"})");
+    assert(client.Event("response.done")["response"].member_str("status") ==
+           "cancelled");
+    client.Text(R"({"type":"response.cancel"})");
+    assert(client.Event("error")["error"].member_str("code") ==
+           "response_cancel_not_active");
+    client.Text(
+        R"({"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"server_vad"}}}}})");
+    client.Event("error");
+  }
+  server.stop();
+  worker.join();
 }
 }  // namespace
 
@@ -298,4 +521,5 @@ int main() {
   }
   server.stop();
   worker.join();
+  RealtimeStreams();
 }

@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 
+#include "src/cli/serve/realtime_audio.hpp"
 #include "src/models/qwen3_asr/transcription.hpp"
 
 namespace gufo::server {
@@ -22,6 +23,12 @@ struct AsrServiceOptions {
   bool validate_model{true};
   std::string model_id;
   Runner runner;
+  /// Optional realtime streams of models that support them; rate is the
+  /// input sample rate.
+  std::function<std::unique_ptr<LiveTranscription>(std::uint32_t, std::string*)>
+      live;
+  std::function<std::unique_ptr<VoiceConversation>(std::uint32_t, std::string*)>
+      voice;
 };
 
 /// Synchronous, bounded native HIP Qwen3-ASR-1.7B service.
@@ -45,6 +52,15 @@ public:
       const models::qwen3_asr::CancellationCheck& is_cancelled,
       models::qwen3_asr::TranscriptionResult* result,
       std::string* error = nullptr);
+
+  /// Live transcription while audio arrives, when the model supports it.
+  [[nodiscard]] bool supports_live() const noexcept;
+  [[nodiscard]] std::unique_ptr<LiveTranscription> CreateLiveTranscription(
+      std::uint32_t rate, std::string* error);
+  /// Spoken conversations, when the model hears and speaks.
+  [[nodiscard]] bool supports_voice() const noexcept;
+  [[nodiscard]] std::unique_ptr<VoiceConversation> CreateVoiceConversation(
+      std::uint32_t rate, std::string* error);
 
 private:
   struct Impl;

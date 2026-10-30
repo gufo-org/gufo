@@ -18,6 +18,7 @@
 #include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/cli/serve/lfm3_audio_runner.hpp"
+#include "src/models/lfm3_audio/model.hpp"
 #endif
 
 namespace gufo::cli {
@@ -79,6 +80,73 @@ json::Value TimingsJson(const qwen3_asr::TranscriptionTimings& timings,
   return result;
 }
 
+#if defined(ENGINE_ENABLE_HIP)
+// Live transcription of a recording fed as a microphone would deliver it,
+// as fast as the model decodes. A piece's time is the delay it adds after
+// its audio arrives.
+int RunLiveTranscription(Lfm3AudioRuntime& runtime,
+                         std::span<const std::byte> wav,
+                         const std::string& format, std::string* error) {
+  std::vector<float> pcm;
+  std::uint32_t rate = 0;
+  if (!models::lfm3_audio::DecodeWav(wav, &pcm, &rate, error)) {
+    std::cerr << "Error: " << *error << '\n';
+    return 1;
+  }
+  auto stream = runtime.CreateLiveTranscription(rate, error);
+  if (!stream) {
+    std::cerr << "Error: " << *error << '\n';
+    return 1;
+  }
+  const bool text = format == "text";
+  auto on_text = [&](std::string_view piece) {
+    if (text)
+      std::cout << piece << std::flush;
+    return g_cancel_requested == 0;
+  };
+  g_cancel_requested = 0;
+  const auto previous_interrupt = std::signal(SIGINT, HandleInterrupt);
+  using Clock = std::chrono::steady_clock;
+  const auto ms = [](Clock::time_point since) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - since)
+        .count();
+  };
+  const std::size_t piece = rate / 10;
+  double slowest = 0, total = 0;
+  bool ok = true;
+  const auto start = Clock::now();
+  for (std::size_t at = 0; ok && at < pcm.size(); at += piece) {
+    const auto t = Clock::now();
+    ok = stream->Push({pcm.data() + at, std::min(piece, pcm.size() - at)},
+                      on_text, error);
+    slowest = std::max(slowest, ms(t));
+  }
+  const auto t = Clock::now();
+  ok = ok && stream->Finish(on_text, error);
+  const double finish = ms(t);
+  total = ms(start);
+  (void)std::signal(SIGINT, previous_interrupt);
+  if (!ok) {
+    std::cerr << "Error transcribing audio: " << *error << '\n';
+    return 1;
+  }
+  if (text) {
+    std::cout << '\n';
+    return 0;
+  }
+  json::Value report = json::Value::object();
+  report["schema"] = "gufo.lfm3-audio.live-transcription.v1";
+  report["text"] = stream->text();
+  report["audio_seconds"] = double(pcm.size()) / rate;
+  json::Value timings = json::Value::object();
+  timings["slowest_piece_ms"] = slowest;
+  timings["finish_ms"] = finish;
+  timings["total_ms"] = total;
+  report["timings"] = std::move(timings);
+  std::cout << report.dump() << '\n';
+  return 0;
+}
+#endif
 }  // namespace
 
 void PrintTranscribeHelp(std::string_view program_name) {
@@ -92,6 +160,7 @@ void PrintTranscribeHelp(std::string_view program_name) {
   std::size_t capacity = 1024;
   std::size_t repeat = 1;
   std::size_t warmup = 0;
+  bool live = false;
   std::vector<std::string> positionals;
   ArgParser parser(
       std::string(program_name) + " transcribe [OPTIONS] [WAV]",
@@ -123,6 +192,10 @@ void PrintTranscribeHelp(std::string_view program_name) {
   parser.AddOption("", "--warmup", "N",
                    "Discarded warmup transcriptions (default: 0)", "Benchmark",
                    &warmup);
+  parser.AddFlag("", "--live",
+                 "LFM3-Audio live (English) transcription: feed the audio in "
+                 "100 ms pieces and print text as each 0.96 s chunk is decoded",
+                 "Input", &live);
   parser.AddOption("", "--format", "NAME",
                    "Output format: text or json (default: text)", "Output",
                    &format);
@@ -141,6 +214,7 @@ int RunTranscribe(std::span<const char* const> args) {
   std::size_t capacity = 1024;
   std::size_t repeat = 1;
   std::size_t warmup = 0;
+  bool live = false;
   std::vector<std::string> positionals;
 
   ArgParser parser(
@@ -173,6 +247,10 @@ int RunTranscribe(std::span<const char* const> args) {
   parser.AddOption("", "--warmup", "N",
                    "Discarded warmup transcriptions (default: 0)", "Benchmark",
                    &warmup);
+  parser.AddFlag("", "--live",
+                 "LFM3-Audio live (English) transcription: feed the audio in "
+                 "100 ms pieces and print text as each 0.96 s chunk is decoded",
+                 "Input", &live);
   parser.AddOption("", "--format", "NAME",
                    "Output format: text or json (default: text)", "Output",
                    &format);
@@ -232,12 +310,18 @@ int RunTranscribe(std::span<const char* const> args) {
       return 1;
     }
     backend = "lfm3-audio";
+    if (live)
+      return RunLiveTranscription(*lfm3, wav, format, &error);
     transcribe = [lfm3](const auto& request, const auto& cancelled,
                         auto* output, std::string* failure) {
       return lfm3->Transcribe(request, cancelled, output, failure);
     };
   }
 #endif
+  if (live) {
+    std::cerr << "Error: --live needs an LFM3-Audio model\n";
+    return 2;
+  }
   std::unique_ptr<qwen3_asr_hip::TranscriptionHipRuntime> runtime;
   if (!transcribe) {
     runtime = qwen3_asr_hip::TranscriptionHipRuntime::Create(model.string(),

@@ -1202,6 +1202,14 @@ int RunServe(std::span<const char* const> args) {
                           auto* result, std::string* error) {
                   return runtime->Transcribe(request, cancelled, result, error);
                 },
+            .live =
+                [runtime](std::uint32_t rate, std::string* error) {
+                  return runtime->CreateLiveTranscription(rate, error);
+                },
+            .voice =
+                [runtime](std::uint32_t rate, std::string* error) {
+                  return runtime->CreateVoiceConversation(rate, error);
+                },
         });
       }
       load_log.Complete(

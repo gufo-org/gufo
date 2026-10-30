@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cctype>
+#include <memory>
 #include <optional>
 
 #include "src/cli/serve/asr_service.hpp"
@@ -20,6 +23,26 @@ void Members(const json::Value& object,
       throw std::invalid_argument("unsupported transcription field: " + name);
   }
 }
+// Mono floats of little-endian PCM16 bytes.
+std::vector<float> Pcm16(std::string_view bytes) {
+  std::vector<float> samples(bytes.size() / 2);
+  for (std::size_t i = 0; i < samples.size(); ++i) {
+    const auto bits = static_cast<std::uint16_t>(
+        static_cast<unsigned char>(bytes[2 * i]) |
+        (static_cast<unsigned char>(bytes[2 * i + 1]) << 8));
+    samples[i] = static_cast<std::int16_t>(bits) / 32768.0F;
+  }
+  return samples;
+}
+// Live transcription models are English-only.
+bool English(const std::optional<std::string>& language) {
+  if (!language)
+    return true;
+  std::string lower = *language;
+  for (auto& c : lower)
+    c = char(std::tolower(static_cast<unsigned char>(c)));
+  return lower == "en" || lower == "english";
+}
 }  // namespace
 
 HttpResponse HandleAsrWebSocket(const HttpRequest& request,
@@ -33,12 +56,19 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
         .reason = "Bad Request",
         .body =
             R"({"error":{"message":"unsupported realtime model or intent","code":"invalid_model"}})"};
+  // Without an intent, models that hear and speak hold a conversation.
+  if (intent.empty() && service.supports_voice())
+    return HandleVoiceWebSocket(request, service);
   return UpgradeWebSocket(request, [&service, id = request.request_id](
                                        WebSocket& socket) {
     std::size_t sequence = 0;
     std::size_t item_sequence = 0;
     std::string previous_item;
     std::string audio_bytes;
+    // Live transcription decodes text while audio arrives; the deltas belong
+    // to the item the next commit creates. live_bytes counts its input.
+    std::unique_ptr<LiveTranscription> live;
+    std::size_t live_bytes = 0;
     std::optional<std::string> language;
     std::string prompt;
     constexpr std::size_t maximum_bytes = 120U * 24000 * 2;
@@ -80,7 +110,7 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
         const auto type = message.member_str("type");
         if (type == "session.update") {
           Members(message, {"type", "event_id", "session"});
-          if (!audio_bytes.empty())
+          if (!audio_bytes.empty() || live)
             throw std::invalid_argument(
                 "commit or clear audio before session.update");
           const auto* session = message.find("session");
@@ -152,22 +182,57 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
           const auto* audio = message.find("audio");
           std::string bytes;
           if (!audio || !audio->is_string() ||
-              !DecodeAudioBase64(audio->str(),
-                                 maximum_bytes - audio_bytes.size(), &bytes) ||
+              !DecodeAudioBase64(
+                  audio->str(), maximum_bytes - audio_bytes.size() - live_bytes,
+                  &bytes) ||
               bytes.size() % 2 != 0)
             throw std::invalid_argument(
                 "invalid PCM16 audio or 120-second input buffer exceeded");
-          audio_bytes.append(bytes);
+          if (!live && audio_bytes.empty() && service.supports_live() &&
+              prompt.empty() && English(language)) {
+            std::string failure;
+            live = service.CreateLiveTranscription(24000, &failure);
+            if (!live)
+              throw std::runtime_error(failure);
+          }
+          if (live) {
+            const auto item =
+                "item_" + id + "_" + std::to_string(item_sequence + 1);
+            live_bytes += bytes.size();
+            std::string failure;
+            bool sent = true;
+            if (!live->Push(
+                    Pcm16(bytes),
+                    [&](std::string_view text) {
+                      auto delta = json::Value::object();
+                      delta["type"] =
+                          "conversation.item.input_audio_transcription.delta";
+                      delta["item_id"] = item;
+                      delta["content_index"] = 0;
+                      delta["delta"] = std::string(text);
+                      return sent = send(std::move(delta));
+                    },
+                    &failure)) {
+              live.reset();
+              live_bytes = 0;
+              if (!sent)
+                return;
+              throw std::runtime_error("live transcription failed: " + failure);
+            }
+          } else
+            audio_bytes.append(bytes);
         } else if (type == "input_audio_buffer.clear") {
           Members(message, {"type", "event_id"});
           audio_bytes.clear();
+          live.reset();
+          live_bytes = 0;
           auto event = json::Value::object();
           event["type"] = "input_audio_buffer.cleared";
           if (!send(std::move(event)))
             return;
         } else if (type == "input_audio_buffer.commit") {
           Members(message, {"type", "event_id"});
-          if (audio_bytes.size() < 2400 * 2)
+          if (audio_bytes.size() + live_bytes < 2400 * 2)
             throw std::invalid_argument(
                 "commit requires at least 100 ms of audio");
           const auto item =
@@ -191,15 +256,51 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
           if (!send(std::move(created)))
             return;
           previous_item = item;
+          if (live) {
+            auto stream = std::move(live);
+            const auto samples = live_bytes / 2;
+            live_bytes = 0;
+            std::string failure;
+            bool sent = true;
+            const bool ok = stream->Finish(
+                [&](std::string_view text) {
+                  auto delta = json::Value::object();
+                  delta["type"] =
+                      "conversation.item.input_audio_transcription.delta";
+                  delta["item_id"] = item;
+                  delta["content_index"] = 0;
+                  delta["delta"] = std::string(text);
+                  return sent = send(std::move(delta));
+                },
+                &failure);
+            if (!sent || socket.cancelled())
+              return;
+            auto completed = json::Value::object();
+            completed["type"] =
+                ok ? "conversation.item.input_audio_transcription.completed"
+                   : "conversation.item.input_audio_transcription.failed";
+            completed["item_id"] = item;
+            completed["content_index"] = 0;
+            if (ok)
+              completed["transcript"] = stream->text();
+            else {
+              completed["error"] = json::Value::object();
+              completed["error"]["type"] = "server_error";
+              completed["error"]["code"] = "transcription_failed";
+              completed["error"]["message"] = failure;
+            }
+            if (!send(std::move(completed)))
+              return;
+            Logger::Info(
+                "asr",
+                "request=" + id + " event=transcription_complete item=" + item +
+                    " live=true audio_samples=" + std::to_string(samples) +
+                    " outcome=" + (ok ? "completed" : "failed"));
+            continue;
+          }
           models::qwen3_asr::AudioBuffer audio{.sample_rate = 24000,
                                                .channels = 1};
-          audio.samples.resize(audio_bytes.size() / 2);
-          for (std::size_t i = 0; i < audio.samples.size(); ++i) {
-            const auto bits = static_cast<std::uint16_t>(
-                static_cast<unsigned char>(audio_bytes[2 * i]) |
-                (static_cast<unsigned char>(audio_bytes[2 * i + 1]) << 8));
-            audio.samples[i] = static_cast<std::int16_t>(bits) / 32768.0F;
-          }
+          audio.samples = Pcm16(audio_bytes);
           audio_bytes.clear();
           const auto pcm = models::qwen3_asr::ResampleMono16k(audio);
           models::qwen3_asr::TranscriptionRequest transcription{

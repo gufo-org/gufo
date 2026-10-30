@@ -409,6 +409,7 @@ add_library(gufo_http STATIC
   src/cli/serve/http_server.cpp
   src/cli/serve/websocket.cpp
   src/cli/serve/asr_websocket.cpp
+  src/cli/serve/voice_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
   # The DeepSeek tool-call scanner lives with its model; its renderer stays in

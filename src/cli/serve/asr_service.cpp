@@ -96,4 +96,30 @@ bool AsrService::Transcribe(
   return impl_->options.runner(request, is_cancelled, result, error);
 }
 
+bool AsrService::supports_live() const noexcept {
+  return impl_->ready && bool(impl_->options.live);
+}
+
+std::unique_ptr<LiveTranscription> AsrService::CreateLiveTranscription(
+    std::uint32_t rate, std::string* error) {
+  if (!supports_live()) {
+    *error = "live transcription is not supported by this model";
+    return nullptr;
+  }
+  return impl_->options.live(rate, error);
+}
+
+bool AsrService::supports_voice() const noexcept {
+  return impl_->ready && bool(impl_->options.voice);
+}
+
+std::unique_ptr<VoiceConversation> AsrService::CreateVoiceConversation(
+    std::uint32_t rate, std::string* error) {
+  if (!supports_voice()) {
+    *error = "spoken conversations are not supported by this model";
+    return nullptr;
+  }
+  return impl_->options.voice(rate, error);
+}
+
 }  // namespace gufo::server

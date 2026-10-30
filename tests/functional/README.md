@@ -42,6 +42,22 @@ LFM3-Audio runs both suites from its GGUF pair: pass the backbone as `--model`
 with `--mmproj`, and `--variant custom --voice female` for TTS. Its silence
 transcript is recorded rather than required to be empty.
 
+`realtime_voice.py` drives the `/v1/realtime` WebSockets of an owned
+`serve asr` with an LFM3-Audio pair as a streaming client would: live
+transcription (deltas while audio is appended, clear, and the commit-time path
+selected by a transcription prompt), then one conversation session with a
+spoken question whose reply speech the server transcribes back, a typed
+follow-up answered in text, a spoken function call and its answer after the
+function output, cancellation within one second, a reasoning text reply and
+rejected options. It synthesizes its spoken prompts with `gufo speak` first.
+
+```sh
+nix develop -c python3 tests/functional/realtime_voice.py \
+  --binary build/release/gufo --model models/lfm3-audio/LFM3-Audio-2B-Q8_0.gguf \
+  --mmproj models/lfm3-audio/mmproj-LFM3-Audio-2B-BF16.gguf \
+  --output artifacts/model-services/lfm3-audio-realtime
+```
+
 | Suite | Required checks |
 | --- | --- |
 | Embedding | Text, image and audio HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, invalid inputs, cancellation and recovery |

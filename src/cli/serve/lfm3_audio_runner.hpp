@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "src/cli/serve/realtime_audio.hpp"
 #include "src/models/qwen3_asr/transcription.hpp"
 #include "src/models/qwen3_tts/synthesis.hpp"
 namespace gufo::cli {
@@ -30,6 +31,13 @@ public:
                   const models::qwen3_tts::CancellationCheck& cancelled,
                   models::qwen3_tts::SynthesisResult* result,
                   std::string* error);
+  // Realtime streams have their own backbone contexts; at most
+  // kRealtimeSessions exist at once. rate is the input sample rate.
+  static constexpr int kRealtimeSessions = 4;
+  std::unique_ptr<server::LiveTranscription> CreateLiveTranscription(
+      std::uint32_t rate, std::string* error);
+  std::unique_ptr<server::VoiceConversation> CreateVoiceConversation(
+      std::uint32_t rate, std::string* error);
 
 private:
   Lfm3AudioRuntime();
