@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -79,6 +80,17 @@ WeightType SmallType(GgmlType type) {
 // The tier's tiled kernels compute whole column tiles; below this width the
 // matrix-vector kernels read each weight once per row and win outright.
 constexpr std::uint32_t kVecBatch = 8;
+// Eager passes of at least this many rows wait for the GPU in WaitRelaxed:
+// a layer's shared expert alone keeps the GPU busy for longer than a poll.
+constexpr std::uint32_t kRelaxedWaitRows = 2048;
+constexpr auto kRelaxedWaitPoll = std::chrono::microseconds(100);
+// A predicted wait sleeps through most of it and then polls this often;
+// unpredicted waits poll at an eighth of the time waited, at most this often.
+constexpr auto kRelaxedWaitCoarsePoll = std::chrono::milliseconds(1);
+// Share of a predicted expert-count wait slept at once. Layer waits vary by
+// up to 4%; 0.95 overslept often enough to idle the GPU (16K prompt passes,
+// Strix Halo: 1,662-1,674 vs 1,709-1,711 tok/s at 0.92).
+constexpr double kCountsWaitShare = 0.92;
 // Keep prompt arithmetic independent of chunk width. A scoped, per-thread
 // policy also lets the output head retain its existing logits-row arithmetic.
 thread_local bool prefill_phase = false;
@@ -911,8 +923,9 @@ Executor::~Executor() {
   if (blas_ != nullptr) {
     (void)hipblasDestroy(blas_);
   }
-  if (counts_ready_ != nullptr) {
-    (void)hipEventDestroy(counts_ready_);
+  for (hipEvent_t event : {counts_ready_, pass_done_}) {
+    if (event != nullptr)
+      (void)hipEventDestroy(event);
   }
   for (hipEvent_t event : {side_start_, side_done_}) {
     if (event != nullptr)
@@ -954,6 +967,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   }
   if (!Check(hipEventCreateWithFlags(&e->counts_ready_, hipEventDisableTiming),
              "expert counts event", error_msg) ||
+      !Check(hipEventCreateWithFlags(&e->pass_done_, hipEventDisableTiming),
+             "pass event", error_msg) ||
       !Check(hipStreamCreate(&e->side_stream_), "side stream", error_msg) ||
       !Check(hipEventCreateWithFlags(&e->side_start_, hipEventDisableTiming),
              "side stream fork event", error_msg) ||
@@ -1796,7 +1811,32 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   if (!ExpertMatrixRows(n_tokens)) {
     return true;
   }
-  if (!Check(hipEventSynchronize(counts_ready_), "expert counts", error_msg)) {
+  if (n_tokens >= kRelaxedWaitRows) {
+    // A prompt pass waits once per layer for the counts (170-240 ms at 16K
+    // rows). Its layers repeat with the attention pattern and scale with the
+    // rows, so a measured layer predicts the next of its kind.
+    auto& cur = counts_wait_us_per_row_;
+    auto& prev = counts_wait_us_per_row_prev_;
+    if (cur.size() >= 4 * std::size_t{c.num_layers})
+      cur.clear();  // passes that never reached a pass-end wait
+    const std::size_t layer = cur.size();
+    const std::size_t period = c.full_attention_interval;
+    // The shorter of two predictions: the same layer in the previous pass,
+    // and the last layer of the same kind in this one.
+    double per_row = 0.0;
+    if (layer < prev.size())
+      per_row = prev[layer];
+    if (layer >= period && (per_row == 0.0 || cur[layer - period] < per_row))
+      per_row = cur[layer - period];
+    const double expect_us = kCountsWaitShare * per_row * n_tokens;
+    double waited_us = 0.0;
+    if (!WaitRelaxed(counts_ready_, "expert counts", error_msg, expect_us,
+                     &waited_us)) {
+      return false;
+    }
+    cur.push_back(waited_us / n_tokens);
+  } else if (!Check(hipEventSynchronize(counts_ready_), "expert counts",
+                    error_msg)) {
     return false;
   }
   // The F16 expert GEMM launches one block per (expert, row tile of its
@@ -2978,9 +3018,38 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
   return true;
 }
 
+bool Executor::WaitRelaxed(hipEvent_t event, const char* what,
+                           std::string* error_msg, double expect_us,
+                           double* waited_us) const {
+  using Clock = std::chrono::steady_clock;
+  const auto start = Clock::now();
+  const auto elapsed = [&] { return Clock::now() - start; };
+  hipError_t status = hipEventQuery(event);
+  if (status == hipErrorNotReady && expect_us > 0.0)
+    std::this_thread::sleep_for(
+        std::chrono::duration<double, std::micro>(expect_us));
+  for (; status == hipErrorNotReady; status = hipEventQuery(event)) {
+    // Past a prediction, or after waiting long, a coarse poll bounds both
+    // the wake-ups and the delay; short waits keep the fine poll.
+    const auto step = expect_us > 0.0 ? Clock::duration(kRelaxedWaitCoarsePoll)
+                                      : std::clamp<Clock::duration>(
+                                            elapsed() / 8, kRelaxedWaitPoll,
+                                            kRelaxedWaitCoarsePoll);
+    std::this_thread::sleep_for(step);
+  }
+  if (waited_us != nullptr)
+    *waited_us = std::chrono::duration<double, std::micro>(elapsed()).count();
+  // The end of a prompt pass: its layer waits predict the next pass.
+  if (event == pass_done_ && !counts_wait_us_per_row_.empty()) {
+    counts_wait_us_per_row_prev_.swap(counts_wait_us_per_row_);
+    counts_wait_us_per_row_.clear();
+  }
+  return Check(status, what, error_msg);
+}
+
 bool Executor::Run(Session& session, std::uint64_t key, bool graph,
                    const std::function<bool()>& body, std::string* error_msg,
-                   bool synchronize) const {
+                   bool synchronize, bool relaxed) const {
   // A batch shape runs eagerly once before it is captured: the first pass
   // grows the GEMM tier's arena, which capture forbids.
   if (graph && session.warmed_.contains(key)) {
@@ -3046,6 +3115,10 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
     }
     session.warmed_.insert(key);
   }
+  if (synchronize && relaxed && !graph)
+    return Check(hipEventRecord(pass_done_, stream_), "pass event",
+                 error_msg) &&
+           WaitRelaxed(pass_done_, "forward", error_msg);
   return !synchronize ||
          Check(hipStreamSynchronize(stream_), "forward", error_msg);
 }
@@ -3198,7 +3271,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   if (graph && ple_pending_ && !WaitPle(error_msg)) {
     return false;
   }
-  if (!Run(session, key, graph, body, error_msg)) {
+  if (!Run(session, key, graph, body, error_msg, true, n >= kRelaxedWaitRows)) {
     return false;
   }
   if (n_logits > 0 && logits != nullptr) {
@@ -4408,7 +4481,7 @@ bool Executor::MtpForward(Session& session,
                    graph ? graph_pool : pool, hidden_source, output.trace,
                    output.kv_only, subset);
   };
-  if (!Run(session, key, graph, body, error_msg)) {
+  if (!Run(session, key, graph, body, error_msg, true, n >= kRelaxedWaitRows)) {
     return false;
   }
   if (output.token != nullptr) {
