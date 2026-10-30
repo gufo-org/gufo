@@ -31,6 +31,29 @@ build/release/gufo speak --model $M --mmproj $P --mode chat --audio question.wav
 The interleaved reply starts with six text tokens, so its first audio follows
 the first text block.
 
+## Realtime
+
+Same build with the realtime changes, `serve asr` and `transcribe --live`;
+Q8_0 backbone with the BF16 mmproj. Client-side times include the loopback
+WebSocket and base64 framing; they are single observations of the
+[realtime suite](../../../tests/functional/README.md).
+
+| Measurement | Result |
+| --- | ---: |
+| Live ASR, 10 s clip in 100 ms pieces: slowest piece (a 0.96 s chunk decoded) | 66.6 ms |
+| Live ASR: flush after the last piece | 42.2 ms |
+| Live ASR over the WebSocket: commit to `completed` after the last append | 58.7 ms |
+| Conversation, spoken question: `response.create` to first transcript delta | 11.3 ms |
+| Conversation, spoken question: `response.create` to first audio delta | 82.8 ms |
+| Conversation, typed follow-up: `response.create` to first text delta | 11.9 ms |
+| `response.cancel` to `response.done` (cancelled) | 14.2 ms |
+
+The user's audio is prefilled while it arrives, so a reply starts from a
+context that already holds the turn: closing the turn and the assistant
+header cost one backbone step. Live ASR decodes each chunk in well under its
+0.96 s of audio; a word spoken at the end of a chunk can wait for the next
+one, because the model writes a word once audio after it has arrived.
+
 ## Ceiling
 
 Every speech frame needs one backbone step, then the depth decoder, strictly in
