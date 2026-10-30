@@ -587,10 +587,12 @@ bool Generator::Continue(const GenerateOptions& o,
         t = Clock::now();
         if (session.Position() >= impl.context)
           break;
+        if (!eos)
+          result->frame_positions.push_back(session.Position());
         ok(session.ForwardEmbeddings(
             {impl.frame_embedding, std::size_t(config.hidden)}, true, {},
             &failure));
-        // The frame embedding stays recorded for Erase.
+        // The frame embedding stays recorded for Replace.
         if (hipMemcpyAsync(frame_row.data(), impl.frame_embedding,
                            frame_row.size() * 4, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(session.DeviceStream())) !=

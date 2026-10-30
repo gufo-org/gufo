@@ -7,6 +7,7 @@
 #include "src/cli/serve/audio_stream.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/voice_activity.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen3_asr/audio.hpp"
@@ -71,6 +72,10 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
     std::size_t live_bytes = 0;
     std::optional<std::string> language;
     std::string prompt;
+    // Server turn detection: speech commits itself after its trailing
+    // silence; audio before speech waits in ring for the prefix padding.
+    std::optional<VoiceActivity> vad;
+    std::string ring;
     constexpr std::size_t maximum_bytes = 120U * 24000 * 2;
     auto config = json::parse(
         R"({"type":"transcription","audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":{},"turn_detection":null,"noise_reduction":null}}})");
@@ -96,6 +101,157 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
       if (!client_event.empty())
         event["error"]["event_id"] = std::move(client_event);
       return send(std::move(event));
+    };
+    // Text arrives while audio is pushed when the session transcribes live;
+    // otherwise the audio waits for the commit.
+    const auto push = [&](const std::string& bytes) -> bool {
+      if (bytes.empty())
+        return true;
+      if (!live && audio_bytes.empty() && service.supports_live() &&
+          prompt.empty() && English(language)) {
+        std::string failure;
+        live = service.CreateLiveTranscription(24000, &failure);
+        if (!live)
+          throw std::runtime_error(failure);
+      }
+      if (live) {
+        const auto item =
+            "item_" + id + "_" + std::to_string(item_sequence + 1);
+        live_bytes += bytes.size();
+        std::string failure;
+        bool sent = true;
+        if (!live->Push(
+                Pcm16(bytes),
+                [&](std::string_view text) {
+                  auto delta = json::Value::object();
+                  delta["type"] =
+                      "conversation.item.input_audio_transcription.delta";
+                  delta["item_id"] = item;
+                  delta["content_index"] = 0;
+                  delta["delta"] = std::string(text);
+                  return sent = send(std::move(delta));
+                },
+                &failure)) {
+          live.reset();
+          live_bytes = 0;
+          if (!sent)
+            return false;
+          throw std::runtime_error("live transcription failed: " + failure);
+        }
+      } else
+        audio_bytes.append(bytes);
+      return true;
+    };
+    // Closes the buffered utterance as the next item and transcribes it.
+    const auto commit = [&]() -> bool {
+      const auto item = "item_" + id + "_" + std::to_string(++item_sequence);
+      auto committed = json::Value::object();
+      committed["type"] = "input_audio_buffer.committed";
+      committed["item_id"] = item;
+      committed["previous_item_id"] =
+          previous_item.empty() ? json::Value{} : json::Value(previous_item);
+      if (!send(std::move(committed)))
+        return false;
+      auto created = json::Value::object();
+      created["type"] = "conversation.item.created";
+      created["previous_item_id"] =
+          previous_item.empty() ? json::Value{} : json::Value(previous_item);
+      created["item"] = json::parse(
+          R"({"type":"message","role":"user","status":"completed","content":[{"type":"input_audio","transcript":null}]})");
+      created["item"]["id"] = item;
+      if (!send(std::move(created)))
+        return false;
+      previous_item = item;
+      if (live) {
+        auto stream = std::move(live);
+        const auto samples = live_bytes / 2;
+        live_bytes = 0;
+        std::string failure;
+        bool sent = true;
+        const bool ok = stream->Finish(
+            [&](std::string_view text) {
+              auto delta = json::Value::object();
+              delta["type"] =
+                  "conversation.item.input_audio_transcription.delta";
+              delta["item_id"] = item;
+              delta["content_index"] = 0;
+              delta["delta"] = std::string(text);
+              return sent = send(std::move(delta));
+            },
+            &failure);
+        if (!sent || socket.cancelled())
+          return false;
+        auto completed = json::Value::object();
+        completed["type"] =
+            ok ? "conversation.item.input_audio_transcription.completed"
+               : "conversation.item.input_audio_transcription.failed";
+        completed["item_id"] = item;
+        completed["content_index"] = 0;
+        if (ok)
+          completed["transcript"] = stream->text();
+        else {
+          completed["error"] = json::Value::object();
+          completed["error"]["type"] = "server_error";
+          completed["error"]["code"] = "transcription_failed";
+          completed["error"]["message"] = failure;
+        }
+        if (!send(std::move(completed)))
+          return false;
+        Logger::Info("asr",
+                     "request=" + id +
+                         " event=transcription_complete item=" + item +
+                         " live=true audio_samples=" + std::to_string(samples) +
+                         " outcome=" + (ok ? "completed" : "failed"));
+        return true;
+      }
+      models::qwen3_asr::AudioBuffer audio{.sample_rate = 24000, .channels = 1};
+      audio.samples = Pcm16(audio_bytes);
+      audio_bytes.clear();
+      const auto pcm = models::qwen3_asr::ResampleMono16k(audio);
+      models::qwen3_asr::TranscriptionRequest transcription{
+          .context = prompt, .language = language, .pcm16k = pcm};
+      std::string published;
+      transcription.on_text = [&](std::string_view text) {
+        if (!text.starts_with(published))
+          return false;
+        if (text.size() == published.size())
+          return !socket.cancelled();
+        auto delta = json::Value::object();
+        delta["type"] = "conversation.item.input_audio_transcription.delta";
+        delta["item_id"] = item;
+        delta["content_index"] = 0;
+        delta["delta"] = std::string(text.substr(published.size()));
+        published = text;
+        return send(std::move(delta));
+      };
+      models::qwen3_asr::TranscriptionResult result;
+      std::string failure;
+      const bool ok = service.Transcribe(
+          transcription, [&] { return socket.cancelled(); }, &result, &failure);
+      if (socket.cancelled())
+        return false;
+      auto completed = json::Value::object();
+      completed["type"] =
+          ok ? "conversation.item.input_audio_transcription.completed"
+             : "conversation.item.input_audio_transcription.failed";
+      completed["item_id"] = item;
+      completed["content_index"] = 0;
+      if (ok)
+        completed["transcript"] = result.text;
+      else {
+        completed["error"] = json::Value::object();
+        completed["error"]["type"] = "server_error";
+        completed["error"]["code"] = "transcription_failed";
+        completed["error"]["message"] = failure;
+      }
+      if (!send(std::move(completed)))
+        return false;
+      Logger::Info("asr", "request=" + id +
+                              " event=transcription_complete item=" + item +
+                              " chunks=" + std::to_string(result.chunks) +
+                              " audio_samples=" + std::to_string(pcm.size()) +
+                              " outcome=" + (ok ? "completed" : "failed"));
+      return true;
     };
     if (!session_event("session.created"))
       return;
@@ -128,6 +284,8 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
           auto next = config;
           auto next_language = language;
           auto next_prompt = prompt;
+          std::optional<VadSettings> next_vad;
+          bool vad_changed = false;
           if (const auto* audio = session->find("audio")) {
             Members(*audio, {"input"});
             if (const auto* input = audio->find("input")) {
@@ -142,11 +300,15 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
                   throw std::invalid_argument(
                       "realtime input requires mono PCM16 at 24000 Hz");
               }
-              for (const auto name : {"turn_detection", "noise_reduction"})
-                if (const auto* option = input->find(name);
-                    option && !option->is_null())
-                  throw std::invalid_argument(std::string(name) +
-                                              " must be null");
+              if (const auto* option = input->find("noise_reduction");
+                  option && !option->is_null())
+                throw std::invalid_argument("noise_reduction must be null");
+              if (const auto* detection = input->find("turn_detection")) {
+                next_vad = ParseTurnDetection(*detection);
+                vad_changed = true;
+                next["audio"]["input"]["turn_detection"] =
+                    TurnDetectionJson(next_vad);
+              }
               if (const auto* transcription = input->find("transcription")) {
                 Members(*transcription, {"model", "language", "prompt"});
                 for (const auto& [name, value] : transcription->members()) {
@@ -175,6 +337,12 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
           config = std::move(next);
           prompt = std::move(next_prompt);
           language = std::move(next_language);
+          if (vad_changed) {
+            vad.reset();
+            ring.clear();
+            if (next_vad)
+              vad.emplace(*next_vad, 24000);
+          }
           if (!session_event("session.updated"))
             return;
         } else if (type == "input_audio_buffer.append") {
@@ -188,44 +356,59 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
               bytes.size() % 2 != 0)
             throw std::invalid_argument(
                 "invalid PCM16 audio or 120-second input buffer exceeded");
-          if (!live && audio_bytes.empty() && service.supports_live() &&
-              prompt.empty() && English(language)) {
-            std::string failure;
-            live = service.CreateLiveTranscription(24000, &failure);
-            if (!live)
-              throw std::runtime_error(failure);
+          if (!vad) {
+            if (!push(bytes))
+              return;
+            continue;
           }
-          if (live) {
-            const auto item =
+          const auto events = vad->Push(Pcm16(bytes));
+          std::size_t cursor = 0;
+          for (const auto& event : events) {
+            const auto at = std::min(bytes.size(), event.offset * 2);
+            auto out = json::Value::object();
+            out["item_id"] =
                 "item_" + id + "_" + std::to_string(item_sequence + 1);
-            live_bytes += bytes.size();
-            std::string failure;
-            bool sent = true;
-            if (!live->Push(
-                    Pcm16(bytes),
-                    [&](std::string_view text) {
-                      auto delta = json::Value::object();
-                      delta["type"] =
-                          "conversation.item.input_audio_transcription.delta";
-                      delta["item_id"] = item;
-                      delta["content_index"] = 0;
-                      delta["delta"] = std::string(text);
-                      return sent = send(std::move(delta));
-                    },
-                    &failure)) {
-              live.reset();
-              live_bytes = 0;
-              if (!sent)
+            if (event.start) {
+              out["type"] = "input_audio_buffer.speech_started";
+              out["audio_start_ms"] = std::int64_t(event.sample * 1000 / 24000);
+              if (!send(std::move(out)))
                 return;
-              throw std::runtime_error("live transcription failed: " + failure);
+              ring.append(bytes, cursor, at - cursor);
+              if (!push(ring))
+                return;
+              ring.clear();
+            } else {
+              if (!push(bytes.substr(cursor, at - cursor)))
+                return;
+              out["type"] = "input_audio_buffer.speech_stopped";
+              out["audio_end_ms"] = std::int64_t(event.sample * 1000 / 24000);
+              if (!send(std::move(out)))
+                return;
+              if (audio_bytes.size() + live_bytes >= 2400 * 2 && !commit())
+                return;
             }
-          } else
-            audio_bytes.append(bytes);
+            cursor = at;
+          }
+          if (vad->speaking()) {
+            if (!push(bytes.substr(cursor)))
+              return;
+          } else {
+            // Prefix padding plus the 60 ms that confirm a start.
+            ring.append(bytes, cursor);
+            const auto keep =
+                std::size_t(vad->settings().prefix_padding_ms + 60) * 24000 /
+                1000 * 2;
+            if (ring.size() > keep)
+              ring.erase(0, ring.size() - keep);
+          }
         } else if (type == "input_audio_buffer.clear") {
           Members(message, {"type", "event_id"});
           audio_bytes.clear();
           live.reset();
           live_bytes = 0;
+          ring.clear();
+          if (vad)
+            vad.emplace(vad->settings(), 24000);
           auto event = json::Value::object();
           event["type"] = "input_audio_buffer.cleared";
           if (!send(std::move(event)))
@@ -235,118 +418,8 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
           if (audio_bytes.size() + live_bytes < 2400 * 2)
             throw std::invalid_argument(
                 "commit requires at least 100 ms of audio");
-          const auto item =
-              "item_" + id + "_" + std::to_string(++item_sequence);
-          auto committed = json::Value::object();
-          committed["type"] = "input_audio_buffer.committed";
-          committed["item_id"] = item;
-          committed["previous_item_id"] = previous_item.empty()
-                                              ? json::Value{}
-                                              : json::Value(previous_item);
-          if (!send(std::move(committed)))
+          if (!commit())
             return;
-          auto created = json::Value::object();
-          created["type"] = "conversation.item.created";
-          created["previous_item_id"] = previous_item.empty()
-                                            ? json::Value{}
-                                            : json::Value(previous_item);
-          created["item"] = json::parse(
-              R"({"type":"message","role":"user","status":"completed","content":[{"type":"input_audio","transcript":null}]})");
-          created["item"]["id"] = item;
-          if (!send(std::move(created)))
-            return;
-          previous_item = item;
-          if (live) {
-            auto stream = std::move(live);
-            const auto samples = live_bytes / 2;
-            live_bytes = 0;
-            std::string failure;
-            bool sent = true;
-            const bool ok = stream->Finish(
-                [&](std::string_view text) {
-                  auto delta = json::Value::object();
-                  delta["type"] =
-                      "conversation.item.input_audio_transcription.delta";
-                  delta["item_id"] = item;
-                  delta["content_index"] = 0;
-                  delta["delta"] = std::string(text);
-                  return sent = send(std::move(delta));
-                },
-                &failure);
-            if (!sent || socket.cancelled())
-              return;
-            auto completed = json::Value::object();
-            completed["type"] =
-                ok ? "conversation.item.input_audio_transcription.completed"
-                   : "conversation.item.input_audio_transcription.failed";
-            completed["item_id"] = item;
-            completed["content_index"] = 0;
-            if (ok)
-              completed["transcript"] = stream->text();
-            else {
-              completed["error"] = json::Value::object();
-              completed["error"]["type"] = "server_error";
-              completed["error"]["code"] = "transcription_failed";
-              completed["error"]["message"] = failure;
-            }
-            if (!send(std::move(completed)))
-              return;
-            Logger::Info(
-                "asr",
-                "request=" + id + " event=transcription_complete item=" + item +
-                    " live=true audio_samples=" + std::to_string(samples) +
-                    " outcome=" + (ok ? "completed" : "failed"));
-            continue;
-          }
-          models::qwen3_asr::AudioBuffer audio{.sample_rate = 24000,
-                                               .channels = 1};
-          audio.samples = Pcm16(audio_bytes);
-          audio_bytes.clear();
-          const auto pcm = models::qwen3_asr::ResampleMono16k(audio);
-          models::qwen3_asr::TranscriptionRequest transcription{
-              .context = prompt, .language = language, .pcm16k = pcm};
-          std::string published;
-          transcription.on_text = [&](std::string_view text) {
-            if (!text.starts_with(published))
-              return false;
-            if (text.size() == published.size())
-              return !socket.cancelled();
-            auto delta = json::Value::object();
-            delta["type"] = "conversation.item.input_audio_transcription.delta";
-            delta["item_id"] = item;
-            delta["content_index"] = 0;
-            delta["delta"] = std::string(text.substr(published.size()));
-            published = text;
-            return send(std::move(delta));
-          };
-          models::qwen3_asr::TranscriptionResult result;
-          std::string failure;
-          const bool ok = service.Transcribe(
-              transcription, [&] { return socket.cancelled(); }, &result,
-              &failure);
-          if (socket.cancelled())
-            return;
-          auto completed = json::Value::object();
-          completed["type"] =
-              ok ? "conversation.item.input_audio_transcription.completed"
-                 : "conversation.item.input_audio_transcription.failed";
-          completed["item_id"] = item;
-          completed["content_index"] = 0;
-          if (ok)
-            completed["transcript"] = result.text;
-          else {
-            completed["error"] = json::Value::object();
-            completed["error"]["type"] = "server_error";
-            completed["error"]["code"] = "transcription_failed";
-            completed["error"]["message"] = failure;
-          }
-          if (!send(std::move(completed)))
-            return;
-          Logger::Info("asr",
-                       "request=" + id + " event=transcription_complete item=" +
-                           item + " chunks=" + std::to_string(result.chunks) +
-                           " audio_samples=" + std::to_string(pcm.size()) +
-                           " outcome=" + (ok ? "completed" : "failed"));
         } else {
           throw std::invalid_argument(
               "unsupported realtime transcription event");

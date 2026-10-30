@@ -99,6 +99,10 @@ struct GenerateResult {
   std::vector<std::uint32_t> tokens;
   std::vector<std::int32_t> codes;  // frame-major [frames][12]
   std::vector<float> samples;       // 24 kHz
+  // Context row of each frame fed back to the backbone, in order (a reply
+  // truncated to its first k frames keeps the context before row
+  // frame_positions[k]).
+  std::vector<std::uint32_t> frame_positions;
   std::size_t prompt_tokens{}, audio_tokens{}, frames{};
   // The reply ended with <|im_end|> or another stop (not by the slot budget,
   // the context or cancellation).

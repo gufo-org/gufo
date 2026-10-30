@@ -77,6 +77,9 @@ public:
                               std::string* error) = 0;
   virtual bool Respond(const Settings& settings, const Callbacks& callbacks,
                        Reply* reply, std::string* error) = 0;
+  /// Keeps only the first samples (24 kHz) of the last reply's speech in the
+  /// context, as far as the user heard it; the turn stays closed.
+  virtual bool TruncateReply(std::size_t samples, std::string* error) = 0;
 };
 
 }  // namespace gufo::server

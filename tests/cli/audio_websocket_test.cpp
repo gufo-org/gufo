@@ -6,6 +6,8 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <thread>
@@ -16,6 +18,7 @@
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/realtime_audio.hpp"
 #include "src/cli/serve/tts_service.hpp"
+#include "src/cli/serve/voice_activity.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
 #include "src/core/platform/net.hpp"
@@ -29,7 +32,8 @@ class Client {
 public:
   Client(int port, std::string_view path, std::string first = {},
          std::string_view key = "dGhlIHNhbXBsZSBub25jZQ==",
-         std::string_view authorization = "Bearer test") {
+         std::string_view authorization = "Bearer test",
+         std::string_view extra = {}) {
     fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
     assert(net::SetSocketTimeouts(fd, 3'000));
@@ -41,8 +45,11 @@ public:
          " HTTP/1.1\r\nHost: localhost\r\nUpgrade: other,\twebsocket\r\n"
          "Connection: keep-alive,\tUpgrade\r\nSec-WebSocket-Version: "
          "13\r\nSec-WebSocket-Key: " +
-         std::string(key) + "\r\nAuthorization: " + std::string(authorization) +
-         "\r\n\r\n" + first);
+         std::string(key) + "\r\n" +
+         (authorization.empty()
+              ? std::string()
+              : "Authorization: " + std::string(authorization) + "\r\n") +
+         std::string(extra) + "\r\n" + first);
     while (!headers.ends_with("\r\n\r\n")) {
       char c;
       Read(&c, 1);
@@ -99,10 +106,18 @@ public:
     Read(payload.data(), payload.size());
     return {head[0] & 15, std::move(payload)};
   }
+  std::string Next() {
+    auto [opcode, payload] = Receive();
+    assert(opcode == 1);
+    return json::parse(payload).member_str("type");
+  }
   json::Value Event(std::string_view type) {
     auto [opcode, payload] = Receive();
     assert(opcode == 1);
     auto event = json::parse(payload);
+    if (event.member_str("type") != type)
+      std::fprintf(stderr, "expected %s, got %s\n", std::string(type).c_str(),
+                   payload.c_str());
     assert(event.member_str("type") == type);
     return event;
   }
@@ -120,6 +135,26 @@ private:
   }
 };
 
+// The raw response to a plain GET.
+std::string HttpGet(int port, std::string_view path) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  assert(fd >= 0 && net::SetSocketTimeouts(fd, 3'000));
+  sockaddr_in address{.sin_family = AF_INET, .sin_port = htons(port)};
+  assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+  assert(::connect(fd, reinterpret_cast<sockaddr*>(&address),
+                   sizeof(address)) == 0);
+  const std::string request = "GET " + std::string(path) +
+                              " HTTP/1.1\r\nHost: localhost\r\nConnection: "
+                              "close\r\n\r\n";
+  assert(net::SendNoSignal(fd, request.data(), request.size()) ==
+         static_cast<long>(request.size()));
+  std::string response;
+  char buffer[4096];
+  for (ssize_t n; (n = ::recv(fd, buffer, sizeof(buffer), 0)) > 0;)
+    response.append(buffer, std::size_t(n));
+  net::CloseSocket(fd);
+  return response;
+}
 // Text of every pushed piece of nonzero audio; the transcript of a stream is
 // its pieces' text.
 class FakeLive final : public LiveTranscription {
@@ -162,6 +197,11 @@ public:
     return true;
   }
   bool audio_open() const override { return audio_ > 0; }
+  bool TruncateReply(std::size_t samples, std::string*) override {
+    truncated = samples;
+    return true;
+  }
+  std::size_t truncated{0};
   bool AddUserText(std::string_view text, std::string*) override {
     last_ = text;
     return true;
@@ -234,6 +274,53 @@ void ListeningClientIsNotIdle() {
   }
   net::CloseSocket(fds[0]);
   net::CloseSocket(fds[1]);
+}
+// 24 kHz PCM16 of silence (quiet noise) or a speech-loud tone.
+std::string Pcm(double seconds, bool loud) {
+  std::vector<float> samples(std::size_t(seconds * 24000));
+  std::uint32_t state = 7;
+  for (std::size_t i = 0; i < samples.size(); ++i) {
+    state = state * 1664525U + 1013904223U;
+    const float noise = (float(state >> 8) / float(1U << 24) - 0.5F) * 0.002F;
+    samples[i] = noise + (loud ? 0.3F * std::sin(0.11F * float(i)) : 0.0F);
+  }
+  return EncodePcm16(samples);
+}
+void VoiceActivityDetects() {
+  VoiceActivity vad({.threshold = 0.5, .silence_duration_ms = 300}, 24000);
+  auto samples = [](const std::string& pcm) {
+    std::vector<float> out(pcm.size() / 2);
+    for (std::size_t i = 0; i < out.size(); ++i)
+      out[i] = float(std::int16_t(std::uint16_t(
+                   static_cast<unsigned char>(pcm[2 * i]) |
+                   (static_cast<unsigned char>(pcm[2 * i + 1]) << 8)))) /
+               32768.0F;
+    return out;
+  };
+  assert(vad.Push(samples(Pcm(1.0, false))).empty());
+  const auto start = vad.Push(samples(Pcm(0.5, true)));
+  assert(start.size() == 1 && start[0].start);
+  // The first voiced frame, within one frame of the tone's onset.
+  assert(start[0].sample >= 24000 && start[0].sample <= 24000 + 480);
+  assert(vad.speaking());
+  const auto stop = vad.Push(samples(Pcm(0.5, false)));
+  assert(stop.size() == 1 && !stop[0].start);
+  assert(stop[0].sample >= 36000 + 7200 && stop[0].sample <= 36000 + 7680);
+  assert(!vad.speaking());
+  // Steady loud noise is the floor, not speech.
+  VoiceActivity steady({}, 24000);
+  bool started = false;
+  for (int i = 0; i < 20; ++i)
+    for (const auto& event : steady.Push(samples(Pcm(0.25, true))))
+      started = started || (event.start && event.sample > 24000 * 4);
+  assert(!started);
+  bool rejected = false;
+  try {
+    (void)ParseTurnDetection(json::parse(R"({"type":"semantic_vad"})"));
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
 }
 // Live transcription and spoken conversations of a model that hears and
 // speaks, against fake streams.
@@ -366,8 +453,105 @@ void RealtimeStreams() {
     assert(client.Event("error")["error"].member_str("code") ==
            "response_cancel_not_active");
     client.Text(
-        R"({"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"server_vad"}}}}})");
+        R"({"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"semantic_vad"}}}}})");
     client.Event("error");
+    // Server turn detection: speech commits itself and gets a reply.
+    client.Text(
+        R"({"type":"session.update","session":{"output_modalities":["audio"],"tools":[],"audio":{"input":{"turn_detection":{"type":"server_vad","silence_duration_ms":200}}}}})");
+    auto updated = client.Event("session.updated");
+    assert(updated["session"]["audio"]["input"]["turn_detection"].member_str(
+               "type") == "server_vad");
+    const auto speak = [&](const std::string& pcm) {
+      for (std::size_t at = 0; at < pcm.size(); at += 4800)
+        client.Text(R"({"type":"input_audio_buffer.append","audio":")" +
+                    EncodeAudioBase64(pcm.substr(at, 4800)) + "\"}");
+    };
+    speak(Pcm(0.5, false) + Pcm(0.6, true) + Pcm(0.4, false));
+    auto started = client.Event("input_audio_buffer.speech_started");
+    assert(started.find("audio_start_ms")->as_double() >= 480 &&
+           started.find("audio_start_ms")->as_double() <= 520);
+    const auto spoken = started.member_str("item_id");
+    client.Event("input_audio_buffer.speech_stopped");
+    assert(client.Event("input_audio_buffer.committed").member_str("item_id") ==
+           spoken);
+    client.Event("conversation.item.created");
+    client.Event("response.created");
+    auto message = client.Event("response.output_item.added");
+    const auto reply_item = message["item"].member_str("id");
+    for (const auto* type :
+         {"response.content_part.added",
+          "response.output_audio_transcript.delta",
+          "response.output_audio.delta", "response.output_audio.done",
+          "response.output_audio_transcript.done", "response.content_part.done",
+          "response.output_item.done"})
+      client.Event(type);
+    assert(client.Event("response.done")["response"].member_str("status") ==
+           "completed");
+    client.Text(R"({"type":"conversation.item.truncate","item_id":")" +
+                reply_item + R"(","content_index":0,"audio_end_ms":40})");
+    assert(client.Event("conversation.item.truncated")
+               .find("audio_end_ms")
+               ->as_double() == 40);
+    // Speech during a reply interrupts it.
+    client.Text(
+        R"({"type":"conversation.item.create","item":{"type":"message","role":"user","content":[{"type":"input_text","text":"wait"}]}})");
+    client.Event("conversation.item.created");
+    client.Text(R"({"type":"response.create"})");
+    client.Event("response.created");
+    speak(Pcm(0.6, true) + Pcm(0.4, false));
+    client.Event("input_audio_buffer.speech_started");
+    assert(client.Event("response.done")["response"].member_str("status") ==
+           "cancelled");
+    client.Event("input_audio_buffer.speech_stopped");
+    client.Event("input_audio_buffer.committed");
+    client.Event("conversation.item.created");
+    client.Event("response.created");
+  }
+  {
+    // Transcription with server turn detection commits by itself.
+    Client client(server.port(), "/v1/realtime?intent=transcription");
+    client.Event("session.created");
+    client.Text(
+        R"({"type":"session.update","session":{"type":"transcription","audio":{"input":{"turn_detection":{"type":"server_vad","silence_duration_ms":200}}}}})");
+    client.Event("session.updated");
+    const auto pcm = Pcm(0.3, false) + Pcm(0.6, true) + Pcm(0.4, false);
+    for (std::size_t at = 0; at < pcm.size(); at += 4800)
+      client.Text(R"({"type":"input_audio_buffer.append","audio":")" +
+                  EncodeAudioBase64(pcm.substr(at, 4800)) + "\"}");
+    const auto item =
+        client.Event("input_audio_buffer.speech_started").member_str("item_id");
+    std::string type;
+    while ((type = client.Next()) ==
+           "conversation.item.input_audio_transcription.delta") {
+    }
+    assert(type == "input_audio_buffer.speech_stopped");
+    assert(client.Event("input_audio_buffer.committed").member_str("item_id") ==
+           item);
+    client.Event("conversation.item.created");
+    while ((type = client.Next()) ==
+           "conversation.item.input_audio_transcription.delta") {
+    }
+    assert(type == "conversation.item.input_audio_transcription.completed");
+  }
+  {
+    // Browsers pass the key as a subprotocol; the page needs no key.
+    Client browser(server.port(), "/v1/realtime", {},
+                   "dGhlIHNhbXBsZSBub25jZQ==", "",
+                   "Sec-WebSocket-Protocol: realtime, "
+                   "openai-insecure-api-key.test\r\n");
+    assert(browser.headers.starts_with("HTTP/1.1 101"));
+    assert(browser.headers.find("Sec-WebSocket-Protocol: realtime") !=
+           std::string::npos);
+    browser.Event("session.created");
+    Client wrong(server.port(), "/v1/realtime", {},
+                 "dGhlIHNhbXBsZSBub25jZQ==", "",
+                 "Sec-WebSocket-Protocol: realtime, "
+                 "openai-insecure-api-key.nope\r\n");
+    assert(wrong.headers.starts_with("HTTP/1.1 401"));
+    const auto page = HttpGet(server.port(), "/voice");
+    assert(page.starts_with("HTTP/1.1 200") &&
+           page.find("text/html") != std::string::npos &&
+           page.find("/v1/realtime") != std::string::npos);
   }
   server.stop();
   worker.join();
@@ -376,6 +560,7 @@ void RealtimeStreams() {
 
 int main() {
   ListeningClientIsNotIdle();
+  VoiceActivityDetects();
   std::atomic<int> tts_calls{0}, asr_calls{0};
   std::atomic<bool> entered{false}, cancelled{false};
   auto tts = std::make_shared<TtsService>(TtsServiceOptions{
@@ -454,7 +639,7 @@ int main() {
               .member_str("transcript") == "Hello world.");
     }
     client.Text(
-        R"({"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"server_vad"}}}}})");
+        R"({"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"semantic_vad"}}}}})");
     client.Event("error");
     client.Text(R"({"type":"input_audio_buffer.commit"})");
     client.Event("error");

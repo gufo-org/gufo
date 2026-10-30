@@ -16,6 +16,7 @@
 #include "src/cli/serve/audio_stream.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/voice_activity.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
 
@@ -148,7 +149,16 @@ private:
         if (!message.is_object())
           throw std::invalid_argument("event must be an object");
         client_event = message.member_str("event_id");
-        if (message.member_str("type") == "response.cancel") {
+        const auto type = message.member_str("type");
+        if (type.starts_with("_"))
+          throw std::invalid_argument(
+              "unsupported realtime conversation "
+              "event: " +
+              type);
+        if (type == "input_audio_buffer.append" && Detect(message)) {
+          continue;
+        }
+        if (type == "response.cancel") {
           Members(message, {"type", "event_id", "response_id"}, "event");
           if (!responding_) {
             Error("no response is in progress", client_event,
@@ -158,18 +168,109 @@ private:
           cancel_ = true;
           continue;
         }
-        std::unique_lock lock(mutex_);
-        if (queued_bytes_ + raw.size() > kQueueBytes)
-          throw std::length_error("too many events queued during a response");
-        queued_bytes_ += raw.size();
-        queue_.emplace_back(std::move(message), raw.size());
-        lock.unlock();
-        ready_.notify_one();
+        Enqueue(std::move(message), raw.size());
       } catch (const std::exception& e) {
         if (!Error(e.what(), client_event))
           return;
       }
     }
+  }
+  void Enqueue(json::Value message, std::size_t bytes) {
+    std::unique_lock lock(mutex_);
+    if (queued_bytes_ + bytes > kQueueBytes)
+      throw std::length_error("too many events queued during a response");
+    queued_bytes_ += bytes;
+    queue_.emplace_back(std::move(message), bytes);
+    lock.unlock();
+    ready_.notify_one();
+  }
+  void EnqueueAudio(std::string_view pcm) {
+    if (pcm.empty())
+      return;
+    auto event = json::Value::object();
+    event["type"] = "_vad.audio";
+    event["audio"] = EncodeAudioBase64(pcm);
+    Enqueue(std::move(event), pcm.size() * 4 / 3);
+  }
+  // Server turn detection on the reader thread, so an interruption cancels
+  // the reply at once. Speech (with its prefix padding and trailing
+  // silence) goes to the worker as internal audio events, and the end of a
+  // turn as a commit. False when the session has no turn detection.
+  bool Detect(const json::Value& message) {
+    std::optional<VadSettings> settings;
+    {
+      const std::lock_guard lock(vad_mutex_);
+      settings = vad_settings_;
+      if (vad_generation_ != reader_generation_) {
+        reader_generation_ = vad_generation_;
+        vad_.reset();
+      }
+    }
+    if (!settings) {
+      vad_.reset();
+      speaking_ = false;
+      return false;
+    }
+    Members(message, {"type", "event_id", "audio"}, "event");
+    const auto* audio = message.find("audio");
+    std::string bytes;
+    if (!audio || !audio->is_string() ||
+        !DecodeAudioBase64(audio->str(), kTurnSamples * 2, &bytes) ||
+        bytes.size() % 2 != 0)
+      throw std::invalid_argument("audio must be base64 PCM16 (mono, 24 kHz)");
+    if (!vad_) {
+      vad_.emplace(*settings, kRate);
+      ring_.clear();
+    }
+    const auto events = vad_->Push(Pcm16(bytes));
+    std::size_t cursor = 0;
+    const auto ms = [](std::uint64_t sample) {
+      return std::int64_t(sample * 1000 / kRate);
+    };
+    for (const auto& event : events) {
+      const auto at = std::min(bytes.size(), event.offset * 2);
+      auto out = json::Value::object();
+      out["item_id"] = vad_item_;
+      if (event.start) {
+        vad_item_ = NextItem();
+        out["item_id"] = vad_item_;
+        out["type"] = "input_audio_buffer.speech_started";
+        out["audio_start_ms"] = ms(event.sample);
+        // The client hears of the speech before the reply it interrupts ends.
+        if (!Send(std::move(out)))
+          return true;
+        speaking_ = true;
+        interrupt_ = settings->interrupt_response;
+        ring_.append(bytes, cursor, at - cursor);
+        EnqueueAudio(ring_);
+        ring_.clear();
+      } else {
+        EnqueueAudio(std::string_view(bytes).substr(cursor, at - cursor));
+        speaking_ = false;
+        out["type"] = "input_audio_buffer.speech_stopped";
+        out["audio_end_ms"] = ms(event.sample);
+        if (!Send(std::move(out)))
+          return true;
+        auto commit = json::Value::object();
+        commit["type"] = "_vad.commit";
+        commit["item_id"] = vad_item_;
+        commit["respond"] = settings->create_response;
+        Enqueue(std::move(commit), 64);
+      }
+      cursor = at;
+    }
+    const auto rest = std::string_view(bytes).substr(cursor);
+    if (vad_->speaking())
+      EnqueueAudio(rest);
+    else {
+      // Prefix padding plus the 60 ms that confirm a start.
+      ring_.append(rest);
+      const auto keep =
+          std::size_t(settings->prefix_padding_ms + 60) * kRate / 1000 * 2;
+      if (ring_.size() > keep)
+        ring_.erase(0, ring_.size() - keep);
+    }
+    return true;
   }
   void Work() {
     while (true) {
@@ -195,6 +296,29 @@ private:
   }
   std::string NextItem() {
     return "item_" + id_ + "_" + std::to_string(++items_);
+  }
+  // Closes the user audio turn as item; false when nothing was committed.
+  bool Commit(const std::string& item, bool* sent) {
+    std::string failure;
+    std::size_t samples = 0;
+    *sent = true;
+    if (!conversation_->CommitAudio(&samples, &failure)) {
+      if (!failure.empty())
+        throw std::runtime_error(failure);
+      return false;
+    }
+    turn_samples_ = 0;
+    auto committed = json::Value::object();
+    committed["type"] = "input_audio_buffer.committed";
+    committed["item_id"] = item;
+    committed["previous_item_id"] = PreviousItem();
+    if (!Send(std::move(committed)))
+      return *sent = false;
+    auto created = json::parse(
+        R"({"type":"message","object":"realtime.item","role":"user","status":"completed","content":[{"type":"input_audio","transcript":null}]})");
+    created["id"] = item;
+    *sent = Created(std::move(created));
+    return true;
   }
   json::Value PreviousItem() const {
     return previous_item_.empty() ? json::Value{} : json::Value(previous_item_);
@@ -231,6 +355,8 @@ private:
               "session");
       auto next = config_;
       auto settings = settings_;
+      std::optional<VadSettings> vad;
+      bool vad_changed = false;
       for (const auto& [name, value] : session->members()) {
         if (name == "type") {
           if (!value.is_string() || value.str() != "realtime")
@@ -273,13 +399,15 @@ private:
                     "audio.input");
             if (const auto* format = input->find("format"))
               Format(*format);
-            for (const auto key :
-                 {"transcription", "turn_detection", "noise_reduction"})
+            for (const auto key : {"transcription", "noise_reduction"})
               if (const auto* option = input->find(key);
                   option && !option->is_null())
-                throw std::invalid_argument(
-                    std::string("audio.input.") + key +
-                    " must be null: the client detects turns and commits");
+                throw std::invalid_argument(std::string("audio.input.") + key +
+                                            " must be null");
+            if (const auto* detection = input->find("turn_detection")) {
+              vad = ParseTurnDetection(*detection);
+              vad_changed = true;
+            }
           }
           if (const auto* output = value.find("output")) {
             Members(*output, {"format"}, "audio.output");
@@ -299,11 +427,51 @@ private:
       if (!conversation_->Configure(settings, &failure))
         throw std::runtime_error(failure);
       settings_ = std::move(settings);
+      if (vad_changed) {
+        next["audio"]["input"]["turn_detection"] = TurnDetectionJson(vad);
+        const std::lock_guard lock(vad_mutex_);
+        vad_settings_ = vad;
+        ++vad_generation_;
+      }
       config_ = std::move(next);
       return Event("session.updated", "session", config_);
     }
-    if (type == "input_audio_buffer.append") {
-      Members(message, {"type", "event_id", "audio"}, "event");
+    if (type == "_vad.commit") {
+      bool sent = true;
+      if (!Commit(message.member_str("item_id"), &sent))
+        return true;  // nothing was heard: no turn
+      if (!sent)
+        return false;
+      // A user who already speaks again gets no reply to this turn.
+      if (message.find("respond") && message.find("respond")->as_bool() &&
+          !(speaking_ && interrupt_))
+        return Respond(settings_);
+      return true;
+    }
+    if (type == "conversation.item.truncate") {
+      Members(message,
+              {"type", "event_id", "item_id", "content_index", "audio_end_ms"},
+              "event");
+      const auto* end = message.find("audio_end_ms");
+      if (message.member_str("item_id").empty() ||
+          message.member_str("item_id") != last_reply_item_)
+        throw std::invalid_argument(
+            "only the latest assistant message can be truncated");
+      if (!end || !end->is_number() || end->as_double() < 0)
+        throw std::invalid_argument("audio_end_ms must be a number");
+      if (!conversation_->TruncateReply(
+              std::size_t(end->as_double() * kRate / 1000), &failure))
+        throw std::runtime_error(failure);
+      auto event = json::Value::object();
+      event["type"] = "conversation.item.truncated";
+      event["item_id"] = last_reply_item_;
+      event["content_index"] = 0;
+      event["audio_end_ms"] = std::int64_t(end->as_double());
+      return Send(std::move(event));
+    }
+    if (type == "input_audio_buffer.append" || type == "_vad.audio") {
+      if (type == "input_audio_buffer.append")
+        Members(message, {"type", "event_id", "audio"}, "event");
       const auto samples = DecodeAudio(message.find("audio"));
       if (turn_samples_ + samples.size() > kTurnSamples)
         throw std::length_error("a user turn holds at most 120 s of audio");
@@ -325,24 +493,10 @@ private:
       Members(message, {"type", "event_id"}, "event");
       if (turn_samples_ < kRate / 10)
         throw std::invalid_argument("commit requires at least 100 ms of audio");
-      std::size_t samples = 0;
-      if (!conversation_->CommitAudio(&samples, &failure)) {
-        if (!failure.empty())
-          throw std::runtime_error(failure);
+      bool sent = true;
+      if (!Commit(NextItem(), &sent))
         throw std::invalid_argument("the audio buffer is empty");
-      }
-      turn_samples_ = 0;
-      const auto item = NextItem();
-      auto committed = json::Value::object();
-      committed["type"] = "input_audio_buffer.committed";
-      committed["item_id"] = item;
-      committed["previous_item_id"] = PreviousItem();
-      if (!Send(std::move(committed)))
-        return false;
-      auto created = json::parse(
-          R"({"type":"message","object":"realtime.item","role":"user","status":"completed","content":[{"type":"input_audio","transcript":null}]})");
-      created["id"] = item;
-      return Created(std::move(created));
+      return sent;
     }
     if (type == "conversation.item.create") {
       Members(message, {"type", "event_id", "previous_item_id", "item"},
@@ -437,6 +591,7 @@ private:
   }
   bool Respond(const VoiceConversation::Settings& settings) {
     const auto response_id = "resp_" + id_ + "_" + std::to_string(++responses_);
+    last_reply_item_.clear();
     auto response = json::Value::object();
     response["id"] = response_id;
     response["object"] = "realtime.response";
@@ -487,7 +642,10 @@ private:
       return Send(std::move(event));
     };
     VoiceConversation::Callbacks callbacks;
-    callbacks.cancelled = [&] { return cancel_.load() || !sent; };
+    // Speech detected by the server interrupts the reply.
+    callbacks.cancelled = [&] {
+      return cancel_.load() || !sent || (speaking_.load() && interrupt_.load());
+    };
     callbacks.on_reasoning = [&](std::string_view text) {
       reasoning += text;
       return sent = open() &&
@@ -569,6 +727,7 @@ private:
       if (!Send(std::move(item_done)))
         return false;
       previous_item_ = item;
+      last_reply_item_ = item;
       output.push_back(std::move(message));
     }
     for (const auto& call : reply.calls) {
@@ -647,14 +806,26 @@ private:
   VoiceConversation::Settings settings_;
   std::atomic<std::size_t> sequence_{0};
   std::atomic<bool> cancel_{false}, responding_{false};
+  // The server hears the user speak (turn detection), and whether that
+  // interrupts a reply.
+  std::atomic<bool> speaking_{false}, interrupt_{false};
   std::mutex mutex_;
   std::condition_variable ready_;
   std::deque<std::pair<json::Value, std::size_t>> queue_;
   std::size_t queued_bytes_{0};
   bool closing_{false};
-  // Worker state.
-  std::size_t items_{0}, responses_{0}, turn_samples_{0};
-  std::string previous_item_;
+  // Turn detection: settings from session.update (worker) for the reader.
+  std::mutex vad_mutex_;
+  std::optional<VadSettings> vad_settings_;
+  std::size_t vad_generation_{0};
+  // Reader state.
+  std::size_t reader_generation_{0};
+  std::optional<VoiceActivity> vad_;
+  std::string ring_, vad_item_;
+  // Worker state; items are numbered by both threads.
+  std::atomic<std::size_t> items_{0};
+  std::size_t responses_{0}, turn_samples_{0};
+  std::string previous_item_, last_reply_item_;
   std::vector<std::string> outputs_;
 };
 }  // namespace

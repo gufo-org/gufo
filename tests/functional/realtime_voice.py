@@ -153,6 +153,19 @@ def stream(ws, pcm, pace=0.25):
     return time.perf_counter()
 
 
+def silence(seconds):
+    """PCM16 zeros."""
+    return bytes(2 * int(RATE * seconds))
+
+
+def seen(ws, kind, since, timeout=120):
+    """The first kind event received after since, waiting for it if needed."""
+    for event in ws.events:
+        if event['type'] == kind and event['_received'] >= since:
+            return event
+    return ws.until(kind, timeout)
+
+
 def words(text):
     return re.findall(r"[a-z0-9']+", text.lower())
 
@@ -213,6 +226,9 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--audio-root', type=Path, default=HERE / 'fixtures/audio')
     parser.add_argument('--startup-timeout', type=float, default=300)
+    parser.add_argument('--browser', type=Path,
+                        help='Chromium binary: also drive the /voice page headless with the spoken '
+                             'question as a fake microphone')
     args = parser.parse_args()
     for path in (args.binary, args.model, args.mmproj):
         if not path.is_file():
@@ -285,7 +301,7 @@ def main():
                 stream(ws, fixture[:RATE * 2], pace=0)
                 ws.send({'type': 'input_audio_buffer.clear'})
                 ws.until('input_audio_buffer.cleared')
-                stream(ws, question + bytes(RATE), pace=0)
+                stream(ws, question + silence(0.5), pace=0)
                 ws.send({'type': 'input_audio_buffer.commit'})
                 again = ws.until('conversation.item.input_audio_transcription.completed')
                 row['after_clear'] = again['transcript']
@@ -300,6 +316,107 @@ def main():
                 row['offline'] = offline['transcript']
                 assert words(offline['transcript']) == want, offline['transcript']
                 ws.close()
+
+            with evidence.case('transcription-turn-detection') as row:
+                ws = WebSocket(port, '/v1/realtime?intent=transcription')
+                ws.until('session.created')
+                ws.send({'type': 'session.update', 'session': {'type': 'transcription', 'audio': {
+                    'input': {'turn_detection': {'type': 'server_vad', 'silence_duration_ms': 800}}}}})
+                ws.until('session.updated')
+                stream(ws, silence(0.5) + fixture + silence(1.5), pace=0.25)
+                # Every turn the server ends is transcribed without a commit.
+                count = lambda kind: sum(e['type'] == kind for e in ws.events)
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline and (
+                        not count('input_audio_buffer.speech_stopped') or
+                        count('conversation.item.input_audio_transcription.completed') <
+                        count('input_audio_buffer.speech_stopped')):
+                    ws.receive(timeout=1)
+                done = [e['transcript'] for e in ws.events
+                        if e['type'] == 'conversation.item.input_audio_transcription.completed']
+                kinds = [e['type'] for e in ws.events]
+                row.update(turns=len(done), transcripts=done)
+                save_events(output, 'transcription-turn-detection', ws)
+                assert 'input_audio_buffer.speech_started' in kinds, kinds
+                assert 'input_audio_buffer.commit' not in kinds
+                heard = words(' '.join(done))
+                assert heard[:len(want)] == want and len(heard) <= len(want) + 2, (heard, want)
+                ws.close()
+
+            with evidence.case('hands-free-question') as row:
+                ws = WebSocket(port, '/v1/realtime')
+                ws.until('session.created')
+                ws.send({'type': 'session.update', 'session': {'audio': {'input': {
+                    'turn_detection': {'type': 'server_vad', 'silence_duration_ms': 500}}}}})
+                ws.until('session.updated')
+                last = stream(ws, silence(0.5) + question + silence(1.0), pace=1.0)
+                stopped = seen(ws, 'input_audio_buffer.speech_stopped', 0)
+                event = seen(ws, 'response.done', stopped['_received'])
+                deltas = [e for e in ws.events if e['_received'] >= stopped['_received']]
+                audio = [e for e in deltas if e['type'] == 'response.output_audio.delta']
+                transcript = ''.join(e['delta'] for e in deltas
+                                     if e['type'] == 'response.output_audio_transcript.delta')
+                row.update(transcript=transcript, speech_stopped_ms=stopped['audio_end_ms'],
+                           stop_to_first_audio_ms=(audio[0]['_received'] - stopped['_received']) * 1000
+                           if audio else None)
+                assert event['response']['status'] == 'completed', event['response']
+                assert 'paris' in words(transcript), transcript
+
+                # Barge-in: speaking over a reply stops it; the new question is
+                # answered and the interrupted reply keeps what was heard.
+                ws.send({'type': 'conversation.item.create', 'item': {
+                    'type': 'message', 'role': 'user', 'content': [{
+                        'type': 'input_text', 'text': 'Tell me a long story about a dragon.'}]}})
+                ws.until('conversation.item.created')
+                ws.send({'type': 'response.create'})
+                story = ws.until('response.output_item.added')['item']['id']
+                ws.until('response.output_audio.delta')
+                sent = time.perf_counter()
+                # The client truncates as soon as the server hears speech,
+                # while the user is still talking.
+                half = len(volume) // 2 // 2 * 2
+                stream(ws, volume[:half], pace=1.0)
+                started = seen(ws, 'input_audio_buffer.speech_started', sent)
+                ws.send({'type': 'conversation.item.truncate', 'item_id': story,
+                         'content_index': 0, 'audio_end_ms': 400})
+                stream(ws, volume[half:] + silence(1.0), pace=1.0)
+                cancelled = seen(ws, 'response.done', sent)
+                row['barge_in_cancel_ms'] = (cancelled['_received'] - started['_received']) * 1000
+                assert cancelled['response']['status'] == 'cancelled', cancelled['response']
+                seen(ws, 'conversation.item.truncated', sent)
+                answer = ws.until('response.done', timeout=120)
+                said = ''.join(e['delta'] for e in ws.events
+                               if e['type'] == 'response.output_audio_transcript.delta'
+                               and e['_received'] > cancelled['_received'])
+                row['after_barge_in'] = said
+                assert answer['response']['status'] == 'completed', answer['response']
+                assert said, 'no reply after the interruption'
+                save_events(output, 'hands-free', ws)
+                ws.close()
+
+            if args.browser:
+                with evidence.case('voice-page') as row:
+                    mic = output / 'page-microphone.wav'
+                    write_wav(mic, silence(1.0) + question + silence(4.0))
+                    profile = output / 'browser-profile'
+                    log = output / 'browser.log'
+                    with log.open('w') as stderr:
+                        try:
+                            subprocess.run(
+                                [str(args.browser), '--headless=new', '--no-sandbox',
+                                 f'--user-data-dir={profile}', '--use-fake-ui-for-media-stream',
+                                 '--use-fake-device-for-media-stream',
+                                 f'--use-file-for-fake-audio-capture={mic}',
+                                 '--autoplay-policy=no-user-gesture-required',
+                                 '--enable-logging=stderr', '--v=0', '--remote-debugging-port=0',
+                                 f'http://localhost:{port}/voice#connect'],
+                                stdout=subprocess.DEVNULL, stderr=stderr, timeout=25)
+                        except subprocess.TimeoutExpired:
+                            pass  # the page runs until the browser is stopped
+                    replies = re.findall(r'"reply (\w+): ([^"]*)', log.read_text(errors='replace'))
+                    row['replies'] = replies
+                    assert replies and replies[0][0] == 'completed', replies
+                    assert 'paris' in words(replies[0][1]), replies
 
             ws = WebSocket(port, '/v1/realtime')
             created = ws.until('session.created')
@@ -388,8 +505,9 @@ def main():
                 assert 'paris' in words(reply['text']), reply['text']
             with evidence.case('rejections') as row:
                 ws.send({'type': 'session.update', 'session': {
-                    'audio': {'input': {'turn_detection': {'type': 'server_vad'}}}}})
+                    'audio': {'input': {'turn_detection': {'type': 'semantic_vad'}}}}})
                 row['turn_detection'] = ws.until('error')['error']['message']
+                assert 'semantic_vad' in row['turn_detection'], row
                 ws.send({'type': 'response.cancel'})
                 row['idle_cancel'] = ws.until('error')['error']['code']
                 assert row['idle_cancel'] == 'response_cancel_not_active', row

@@ -355,6 +355,8 @@ public:
       Check(!open_, "commit or clear the audio buffer before a response");
       BeginTurn(false);
       Check(!turns_.empty(), "the conversation has no input");
+      last_reply_.reset();
+      last_frames_.clear();
       const auto begin = generator_->Position();
       // Model card prefills: <|mixed_start|> for speech, <think> or
       // <think></think> for text; with tools the model chooses.
@@ -404,6 +406,10 @@ public:
       // The reply stays in the context, closed like a template turn.
       Template("<|im_end|>\n");
       turns_.push_back({begin, generator_->Position()});
+      last_frames_.clear();
+      for (auto row : result.frame_positions)
+        last_frames_.push_back(row - begin);
+      last_reply_ = turns_.size() - 1;
       // Earlier reasoning leaves the context once the user speaks again, as
       // the template renders it.
       if (!parser.reasoning().empty() || prefix == "<think>") {
@@ -449,6 +455,30 @@ public:
                                   &ignored);
       }
       reply_begin_.reset();
+      return false;
+    }
+  }
+
+  bool TruncateReply(std::size_t samples, std::string* error) override {
+    try {
+      Check(last_reply_ && *last_reply_ < turns_.size(),
+            "no reply to truncate");
+      const auto keep = samples / audio::Model::kFrameSamples;
+      if (keep >= last_frames_.size())
+        return true;
+      // The reply ends after its kept frames; text and speech after them
+      // leave the context. Later turns (an interrupting user turn) stay.
+      const audio::PromptPiece close{
+          audio::PromptPiece::Kind::kTemplate, "<|im_end|>\n", {}};
+      const auto& reply = turns_[*last_reply_];
+      Replace(reply.begin + last_frames_[keep], reply.end, {&close, 1});
+      last_frames_.resize(keep);
+      // A rewrite of this turn would restore what was dropped.
+      std::erase_if(rewrites_,
+                    [&](const auto& r) { return r.turn == *last_reply_; });
+      return true;
+    } catch (const std::exception& e) {
+      *error = e.what();
       return false;
     }
   }
@@ -507,11 +537,13 @@ private:
     if (!generator_->Replace(begin, end, pieces, &failure))
       throw std::runtime_error(failure);
     const std::int64_t delta = std::int64_t(generator_->Position()) - before;
+    if (open_ && turn_begin_ >= end)
+      turn_begin_ = std::uint32_t(turn_begin_ + delta);
     for (auto& turn : turns_)
       if (turn.begin >= end) {
         turn.begin = std::uint32_t(turn.begin + delta);
         turn.end = std::uint32_t(turn.end + delta);
-      } else if (turn.begin >= begin && turn.end == end) {
+      } else if (turn.begin <= begin && turn.end == end) {
         turn.end = std::uint32_t(turn.end + delta);  // the replaced turn
       }
   }
@@ -547,6 +579,10 @@ private:
       rewrites_.clear();
       const auto begin = turns_.front().begin, end = turns_[drop - 1].end;
       turns_.erase(turns_.begin(), turns_.begin() + std::ptrdiff_t(drop));
+      if (last_reply_)
+        last_reply_ = *last_reply_ >= drop
+                          ? std::optional<std::size_t>(*last_reply_ - drop)
+                          : std::nullopt;
       Replace(begin, end, {});
     }
   }
@@ -564,6 +600,9 @@ private:
   std::optional<audio::Resampler> resampler_;
   std::vector<Turn> turns_;
   std::vector<Rewrite> rewrites_;
+  // Frames of the last reply in the context, for TruncateReply.
+  std::vector<std::uint32_t> last_frames_;
+  std::optional<std::size_t> last_reply_;
 };
 }  // namespace
 Lfm3AudioRuntime::Lfm3AudioRuntime() : impl_(std::make_unique<Impl>()) {}
