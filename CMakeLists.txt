@@ -393,9 +393,7 @@ if(ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
 endif()
 
-add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
-target_include_directories(gufo_logging PUBLIC ${PROJECT_SOURCE_DIR})
-target_compile_features(gufo_logging PUBLIC cxx_std_20)
+add_subdirectory(src/ext)
 
 # The imported DeepSeek V4 Flash runtime routes its informational messages
 # through the shared logger instead of writing to stderr directly, so it needs
@@ -529,6 +527,7 @@ if (BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   add_subdirectory(tests/cache)
+  add_subdirectory(tests/extensions)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or
   # production. No HIP headers are needed for these stable C ABI hooks.
@@ -642,12 +641,11 @@ if (BUILD_TESTING)
 
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
-    src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
     src/models/deepseek_v4_flash/chat_template.cpp
     src/models/deepseek_v4_flash/tool_calls.cpp
   )
-  target_link_libraries(openai_chat_test PRIVATE gufo_core)
+  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_logging)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")

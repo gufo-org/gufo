@@ -8,6 +8,10 @@ A report of a missing model, unavailable host or elapsed stability window is
 pending evidence, never a quality pass. API 1.0 stays pending until its actual
 time and feature criteria hold.
 
+Current execution milestone: complete cards 01–14 with the three-agent workflow,
+then stop. Cards 15–29 remain the documented later RFC scope and are not
+authorized for this run.
+
 Statuses: pending, implementing, reviewing, integrating, complete. The agent
 orchestrating this work records agent names, review findings, their disposition,
 commands and retained evidence in the execution record. Splitting a card further
@@ -84,7 +88,7 @@ acceptance. All rows use the three-agent workflow above.
 | 01 | 1; none | Maintain this complete ledger. Add report-only isolation inventory for cross-model/family/core/cache/CLI/test/tool includes and lexical symbols, model mentions in build/CI/Nix/registries including workflow assets, and Qwen direct/transitive header dependencies. Add meaningful fixtures and hosted registration. Run report and focused CPU checks. | complete |
 | 02 | 1b; 01 | Expose pre-migration identity functions without changing serialization; record independent exact compatibility-byte goldens for Qwen 27B, Flash-Next and DeepSeek persistence descriptors, including draft variants and process-local identity decisions. Run goldens, with DeepSeek locally; retain baseline bytes before moving writers. | complete |
 | 03 | 2; 01–02 | In a separate throwaway jj change/workspace, move Flash-Next behind a draft text interface. Measure correctness and matched timings; decide runner split, options, metadata and CLI-driver/session alternative. Preserve findings in a spike report and update agreed design decisions; do not merge throwaway implementation. | complete |
-| 04 | 3; 03 | Implement API 0.x metadata schema and pure-CMake validator, `GufoExtension.cmake`, deterministic per-executable registries/constants, provider information, runtime API version, minimal Host/logging extraction, HIP-less exclusion stubs and provider option parser. Validate required fields, names, missing/cyclic dependencies, versions, conditions, shared option types and forbidden core options. No production Python dependency. CPU tests cover every configure rejection and explicit registration. | pending |
+| 04 | 3; 03 | Implement API 0.x metadata schema and pure-CMake validator, `GufoExtension.cmake`, deterministic per-executable registries/constants, provider information, runtime API version, minimal Host/logging extraction, HIP-less exclusion stubs and provider option parser. Validate required fields, names, missing/cyclic dependencies, versions, conditions, shared option types and forbidden core options. No production Python dependency. CPU tests cover every configure rejection and explicit registration. | complete |
 | 05 | 3; 04 | Add discovery, `GUFO_EXTENSIONS`, lock mode and `extensions.lock`, excluded-key diagnostics, `diagnose` and `--version` provenance; respect `GUFO_PLATFORM_ONLY`. Add Nix source-filter admissions and release/default package distinction, unshipped/collision checks and CPU lock build. Amend `AGENTS.md`/`RELEASING.md` for extension API policy, ext-api label/change-log gate and compatibility scope. Schedule actual HIP lock-artifact gates, never claim default evidence covers them. | pending |
 | 06 | 4; 02, 05 | Move Qwen-specific speculative code out of core; neutralize draft tokenizer types and preserve rollback sampler/constraint state. Coordinate cache RFC and keep native snapshots. All four profiles plus long-context/cache (DeepSeek locally), identity goldens and matched timings. | pending |
 | 07 | 5; 06 | Extract acyclic Qwen family libraries (tokens with independent Python mirror, config/text/vision/kernels and any justified common layer), make GGUF config extraction CPU-only, extract Qwen 27B and relink CLI/kernel tools. Resolve header-graph unassigned pieces explicitly. Keep ModelConfig/TextModelPreset until text migration. Linux/Windows, unit, Qwen/Flash-Next functional/performance and moved-HIP ISA/resource gates. | pending |
@@ -320,3 +324,58 @@ acceptance. All rows use the three-agent workflow above.
   decisions and review integration; it does not qualify a production migration.
   No source was merged from the throwaway workspace, no threshold widened and
   no arithmetic/performance fix applied. All later production gates remain.
+
+### Card 04
+
+- Implementation agent: `/root/card04_implement`; independent review agent:
+  `/root/card04_review`; third integration agent: `/root/card04_integrate`.
+  Review findings are integrated and scoped checks pass. No commit/revision
+  switch was made; user-owned `RFC.md` remains unchanged.
+- Added API 0.1.0 metadata/registry, core-owned capability kinds, runtime version,
+  typed provider option parsing and a borrowed Host/logging handle. Moved the
+  existing logger/trace implementation to `src/core/logging/`, kept old headers
+  forwarding and the single shared state, and gave `gufo_logging` its explicit
+  platform dependency. No production model behavior or command parser changed.
+- Added the full metadata schema and pure-CMake helpers, validation and
+  deterministic per-executable registration/constants. Explicit unconditional
+  extension `registration_target`/`entry` plus per-provider `target`/`entry`
+  resolve the RFC example's implicit availability mapping: generated glue
+  references only available provider entries and otherwise registers metadata
+  stubs. Actual CPU binary symbol inspection proves unavailable HIP factory and
+  registration symbols are absent. No static registration or whole-archive.
+- Representation decisions and rationale (revision-floor version spelling,
+  target conjunctions/roles, option provider membership, explicit-only values,
+  defaults in code and the central core-owned option catalog) are in
+  [INFRASTRUCTURE.md](INFRASTRUCTURE.md). Schema accepts the broader optional
+  packaging/docs/CI fields needed by later cards. Full schema validation runs
+  in bounded hosted CPU checks with `jsonschema`; production configuration
+  uses only CMake 3.21 features and does not discover Python.
+- Independent review reproduced three P2 issues: CMake false-like metadata
+  bypassed owner/selection checks, C++ keywords produced invalid generated
+  identifiers, and JSON NUL silently truncated decoded metadata. Integration
+  uses property presence/explicit emptiness, a deterministic `extension_`
+  namespace prefix plus keyword rejection for entry symbols, and predecode
+  escape-aware NUL rejection aligned with the recursive schema. Compiled edge
+  fixtures cover valid false-like extension/provider/target/entry values,
+  keyword namespace names, selective provider options and literal escape help;
+  nested NUL and first-owner duplicate cases have configure regressions.
+- [Evidence/card04](evidence/card04/README.md) retains exact commands, 113
+  configure diagnostics plus three compile/run commands, final 8/8 focused
+  CTest output and actual linked
+  symbol probes/binary hashes. Tests exercise ordinary static archive
+  registration, dependency/deterministic ordering, every configure-validation
+  category, typed values/union/selected-provider errors, inert metadata strings,
+  disabled HIP metadata and optimized test assertions. Synthetic available
+  provider variant passes 2/2; platform-only platform/cache build and production
+  logging/runtime library targets pass. Required formatter passes 723 files.
+- Existing CPU cache initially mixed GCC 15.3 with new GLIBC 2.43 codec
+  dependencies; refreshed with `nix develop -c cmake --fresh --preset cpu-test`
+  under pinned GCC 16.2, then all focused targets/checks passed. No source
+  workaround was introduced. Production `include/` Nix source admission moved
+  forward from card 05 because this card's always-built runtime requires it;
+  hosted check/format/static-analysis inputs also admit the new public headers,
+  and hosted tests admit the schema.
+- Card 05 still owns discovery/selection, discovered-but-unselected diagnostics,
+  lock mode, CLI provenance and release policy. No production model migration,
+  timing/numerical gate, full GPU execution, Windows execution or lock-artifact
+  qualification is claimed or waived. The execution milestone remains card 14.

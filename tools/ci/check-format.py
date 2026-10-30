@@ -18,7 +18,7 @@ def main() -> int:
     )
     files = sorted(
         str(path.relative_to(root))
-        for directory in ("src", "tests")
+        for directory in ("include", "src", "tests")
         for path in (root / directory).rglob("*")
         if path.is_file()
         and path.suffix in {".cpp", ".h", ".hpp"}

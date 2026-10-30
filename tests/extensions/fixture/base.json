@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "base",
+  "kind": "library",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.0",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "targets": {
+    "extension_test_base": {
+      "requires": []
+    },
+    "extension_role_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    }
+  }
+}

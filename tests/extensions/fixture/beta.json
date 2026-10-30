@@ -1,0 +1,8 @@
+{
+  "schema": 1, "name": "beta", "version": "0.2.0", "api_version": ">= 0.1.0",
+  "entry": "beta_register", "registration_target": "beta_registration", "depends": [],
+  "platforms": ["linux", "windows"],
+  "providers": [{"id": "beta", "capability": "text_generation", "keys": ["gguf:beta"], "speculative": ["other"], "target": "beta_registration", "entry": "beta_provider_register"}],
+  "options": [{"name": "--draft-tokens", "type": "integer", "commands": ["prompt"]}],
+  "targets": {"beta_registration": {"requires": []}}
+}

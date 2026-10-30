@@ -46,6 +46,8 @@ let
       || lib.hasPrefix "licenses/" relativePath
       || relativePath == "cmake"
       || lib.hasPrefix "cmake/" relativePath
+      || relativePath == "include"
+      || lib.hasPrefix "include/" relativePath
       || relativePath == "src"
       || lib.hasPrefix "src/" relativePath
       || relativePath == "tests"

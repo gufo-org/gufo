@@ -1,4 +1,4 @@
-#include "src/cli/serve/trace.hpp"
+#include "src/core/logging/trace.hpp"
 
 #include <array>
 #include <atomic>
@@ -13,7 +13,7 @@
 #include <system_error>
 #include <utility>
 
-#include "src/cli/serve/logging.hpp"
+#include "src/core/logging/logging.hpp"
 #include "src/core/platform/fs.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "src/core/utf8.hpp"

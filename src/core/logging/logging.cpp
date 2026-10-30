@@ -1,4 +1,4 @@
-#include "src/cli/serve/logging.hpp"
+#include "src/core/logging/logging.hpp"
 
 #include <algorithm>
 #include <array>

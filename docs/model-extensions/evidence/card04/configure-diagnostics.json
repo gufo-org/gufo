@@ -1,0 +1,832 @@
+[
+  {
+    "test": "__main__.ConfigureTests.test_compile_edge_identifiers",
+    "command": [
+      "cmake",
+      "-S",
+      "/tmp/nix-shell.xsiBjk/gufo-extension-edges-z7k98q2b",
+      "-B",
+      "/tmp/nix-shell.xsiBjk/gufo-extension-edges-z7k98q2b/build"
+    ],
+    "returncode": 0,
+    "output": "-- The CXX compiler identification is GNU 16.2.0\n-- Detecting CXX compiler ABI info\n-- Detecting CXX compiler ABI info - done\n-- Check for working CXX compiler: /nix/store/r5ri78axx1qggkjq3vawywlzglg70b5w-gcc-wrapper-16.2.0/bin/g++ - skipped\n-- Detecting CXX compile features\n-- Detecting CXX compile features - done\n-- Performing Test CMAKE_HAVE_LIBC_PTHREAD\n-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success\n-- Found Threads: TRUE\n-- Configuring done (0.8s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-edges-z7k98q2b/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_compile_edge_identifiers",
+    "command": [
+      "cmake",
+      "--build",
+      "/tmp/nix-shell.xsiBjk/gufo-extension-edges-z7k98q2b/build",
+      "--config",
+      "Release",
+      "--parallel",
+      "4"
+    ],
+    "returncode": 0,
+    "output": "[  3%] Building CXX object platform/CMakeFiles/gufo_platform.dir/env.cpp.o\n[  6%] Building CXX object platform/CMakeFiles/gufo_platform.dir/mapped_file.cpp.o\n[ 12%] Building CXX object platform/CMakeFiles/gufo_platform.dir/net.cpp.o\n[ 12%] Building CXX object platform/CMakeFiles/gufo_platform.dir/library.cpp.o\n[ 15%] Building CXX object platform/CMakeFiles/gufo_platform.dir/shutdown_signal.cpp.o\n[ 18%] Building CXX object platform/CMakeFiles/gufo_platform.dir/publish.cpp.o\n[ 21%] Building CXX object platform/CMakeFiles/gufo_platform.dir/os_info.cpp.o\n[ 25%] Building CXX object platform/CMakeFiles/gufo_platform.dir/fs_posix.cpp.o\n[ 28%] Building CXX object platform/CMakeFiles/gufo_platform.dir/pages_posix.cpp.o\n[ 31%] Building CXX object platform/CMakeFiles/gufo_platform.dir/page_pin_linux.cpp.o\n[ 34%] Linking CXX static library libgufo_platform.a\n[ 34%] Built target gufo_platform\n[ 37%] Building CXX object runtime/CMakeFiles/gufo_logging.dir/home/mixer/gufo/src/core/logging/trace.cpp.o\n[ 40%] Building CXX object runtime/CMakeFiles/gufo_logging.dir/home/mixer/gufo/src/core/logging/logging.cpp.o\n[ 43%] Linking CXX static library libgufo_logging.a\n[ 43%] Built target gufo_logging\n[ 46%] Building CXX object runtime/CMakeFiles/gufo_ext_runtime.dir/runtime.cpp.o\n[ 50%] Building CXX object runtime/CMakeFiles/gufo_ext_runtime.dir/options.cpp.o\n[ 53%] Linking CXX static library libgufo_ext_runtime.a\n[ 53%] Built target gufo_ext_runtime\n[ 56%] Building CXX object CMakeFiles/no.dir/no.cpp.o\n[ 59%] Building CXX object CMakeFiles/off.dir/off.cpp.o\n[ 62%] Building CXX object CMakeFiles/ignore.dir/ignore.cpp.o\n[ 65%] Building CXX object CMakeFiles/false.dir/false.cpp.o\n[ 68%] Linking CXX static library libno.a\n[ 75%] Linking CXX static library libignore.a\n[ 75%] Linking CXX static library liboff.a\n[ 78%] Linking CXX static library libfalse.a\n[ 78%] Built target no\n[ 78%] Built target ignore\n[ 78%] Built target false\n[ 78%] Built target off\n[ 81%] Building CXX object CMakeFiles/notfound.dir/notfound.cpp.o\n[ 84%] Building CXX object CMakeFiles/namespace.dir/namespace.cpp.o\n[ 87%] Linking CXX static library libnotfound.a\n[ 90%] Linking CXX static library libnamespace.a\n[ 90%] Built target notfound\n[ 90%] Built target namespace\n[ 93%] Building CXX object CMakeFiles/edges.dir/extensions/edges/extension_registry.cpp.o\n[ 96%] Building CXX object CMakeFiles/edges.dir/main.cpp.o\n[100%] Linking CXX executable edges\n[100%] Built target edges\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_compile_edge_identifiers",
+    "command": [
+      "ctest",
+      "--test-dir",
+      "/tmp/nix-shell.xsiBjk/gufo-extension-edges-z7k98q2b/build",
+      "-C",
+      "Release",
+      "--output-on-failure"
+    ],
+    "returncode": 0,
+    "output": "Test project /tmp/nix-shell.xsiBjk/gufo-extension-edges-z7k98q2b/build\n    Start 1: edges\n1/1 Test #1: edges ............................   Passed    0.00 sec\n\n100% tests passed out of 1\n\nTotal Test time (real) =   0.00 sec\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-u34eurqg/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "missing dependency absent",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:357 (message):\n  extension metadata: missing dependency absent required by alpha\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:381 (_gufo_visit)\n  CMakeLists.txt:8 (gufo_extensions_validate)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "cyclic dependency",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:347 (message):\n  extension metadata: cyclic dependency at alpha\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:368 (_gufo_visit)\n  /home/mixer/gufo/cmake/GufoExtension.cmake:368 (_gufo_visit)\n  /home/mixer/gufo/cmake/GufoExtension.cmake:381 (_gufo_visit)\n  CMakeLists.txt:8 (gufo_extensions_validate)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "unsatisfiable dependency platforms",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:365 (message):\n  extension metadata: unsatisfiable dependency platforms: alpha needs base on\n  windows\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:381 (_gufo_visit)\n  CMakeLists.txt:8 (gufo_extensions_validate)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "API",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:141 (message):\n  extension metadata: incompatible API version/revision >= 0.2.0; runtime\n  0.1.0\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "API",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:141 (message):\n  extension metadata: incompatible API version/revision >= 0.1.1; runtime\n  0.1.0\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "api_version",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:138 (message):\n  extension metadata: api_version must be >= 0.MINOR.REVISION\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "api_version",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:138 (message):\n  extension metadata: api_version must be >= 0.MINOR.REVISION\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_dependencies_and_version",
+    "expected": "API",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:141 (message):\n  extension metadata: incompatible API version/revision >= 0.01.0; runtime\n  0.1.0\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-81vyhznh/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate target declaration",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:175 (message):\n  extension metadata: duplicate target declaration alpha_cpu (off, beta)\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate provider ID",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:240 (message):\n  extension metadata: duplicate provider ID alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-xklzlgy1/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate target declaration",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:175 (message):\n  extension metadata: duplicate target declaration alpha_cpu (no, beta)\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate provider ID",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:240 (message):\n  extension metadata: duplicate provider ID alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-xslah9q0/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate target declaration",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:175 (message):\n  extension metadata: duplicate target declaration alpha_cpu (false, beta)\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate provider ID",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:240 (message):\n  extension metadata: duplicate provider ID alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-jcubl52o/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate target declaration",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:175 (message):\n  extension metadata: duplicate target declaration alpha_cpu (ignore, beta)\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate provider ID",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:240 (message):\n  extension metadata: duplicate provider ID alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-x0dvevtg/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate target declaration",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:175 (message):\n  extension metadata: duplicate target declaration alpha_cpu (notfound, beta)\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_false_like_owners",
+    "expected": "duplicate provider ID",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:240 (message):\n  extension metadata: duplicate provider ID alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_library_restrictions",
+    "expected": "library cannot declare entry",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:276 (message):\n  extension metadata: library cannot declare entry\nCall Stack (most recent call first):\n  CMakeLists.txt:7 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_library_restrictions",
+    "expected": "library cannot declare providers",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:281 (message):\n  extension metadata: library cannot declare providers\nCall Stack (most recent call first):\n  CMakeLists.txt:7 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "invalid extension name",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:70 (message):\n  extension metadata: invalid extension name: Bad-name\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:131 (_gufo_identifier)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "duplicate extension name",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:134 (message):\n  extension metadata: duplicate extension name alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "duplicate provider ID",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:240 (message):\n  extension metadata: duplicate provider ID alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "invalid provider ID",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:70 (message):\n  extension metadata: invalid provider ID: bad/id\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:232 (_gufo_identifier)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "colliding generated provider identifier",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:267 (message):\n  extension metadata: colliding generated provider identifier alpha_hip\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "invalid entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:70 (message):\n  extension metadata: invalid entry symbol: unsafe::entry\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:209 (_gufo_identifier)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "duplicate registration symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:80 (message):\n  extension metadata: duplicate registration symbol alpha_register\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:234 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "duplicate target declaration",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:175 (message):\n  extension metadata: duplicate target declaration alpha_cpu (alpha, beta)\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "unsupported schema",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:128 (message):\n  extension metadata: unsupported schema 2\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "invalid extension version",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:70 (message):\n  extension metadata: invalid extension version: 1.2\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:144 (_gufo_identifier)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "unknown kind",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:160 (message):\n  extension metadata: unknown kind other\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "unknown capability",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:236 (message):\n  extension metadata: unknown capability new_core_kind\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "unsupported artifact key",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:256 (message):\n  extension metadata: unsupported artifact key arbitrary:key\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "keys cannot be empty",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:252 (message):\n  extension metadata: provider keys cannot be empty\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "duplicate value",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:61 (message):\n  extension metadata: duplicate value gguf:x\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:250 (_gufo_strings)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "providers cannot be empty",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:223 (message):\n  extension metadata: providers cannot be empty\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "targets cannot be empty",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:165 (message):\n  extension metadata: targets cannot be empty\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "platforms cannot be empty",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:151 (message):\n  extension metadata: platforms cannot be empty\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_names_and_collisions",
+    "expected": "unsupported platform",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:155 (message):\n  extension metadata: unsupported platform other\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": "U+0000 is not supported",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:20 (message):\n  extension metadata: U+0000 is not supported\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:125 (_gufo_reject_nul)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": "U+0000 is not supported",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:20 (message):\n  extension metadata: U+0000 is not supported\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:125 (_gufo_reject_nul)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": "U+0000 is not supported",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:20 (message):\n  extension metadata: U+0000 is not supported\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:125 (_gufo_reject_nul)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": "U+0000 is not supported",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:20 (message):\n  extension metadata: U+0000 is not supported\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:125 (_gufo_reject_nul)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": "U+0000 is not supported",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:20 (message):\n  extension metadata: U+0000 is not supported\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:125 (_gufo_reject_nul)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": "U+0000 is not supported",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:20 (message):\n  extension metadata: U+0000 is not supported\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:125 (_gufo_reject_nul)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": "U+0000 is not supported",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:20 (message):\n  extension metadata: U+0000 is not supported\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:125 (_gufo_reject_nul)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-zwaqav4t/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-75dwn5w_/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_nul_metadata",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-0_k3buuo/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "conflicting option types",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:313 (message):\n  extension metadata: conflicting option types for --draft-tokens in prompt\nCall Stack (most recent call first):\n  CMakeLists.txt:6 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "invalid option type",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:303 (message):\n  extension metadata: invalid option type other\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "invalid option name",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:70 (message):\n  extension metadata: invalid option name: -short\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:297 (_gufo_identifier)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "commands cannot be empty",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:307 (message):\n  extension metadata: option commands cannot be empty\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "missing provider",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:329 (message):\n  extension metadata: option references missing provider absent\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "providers cannot be empty",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:325 (message):\n  extension metadata: option providers cannot be empty\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "duplicate option declaration",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:316 (message):\n  extension metadata: duplicate option declaration --draft-tokens in prompt\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --context\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --provider\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --speculative\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --model\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --host\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --port\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --temperature\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --cache-disk\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": "core-owned option",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:299 (message):\n  extension metadata: core-owned option --seed\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_options",
+    "expected": null,
+    "extra": "",
+    "returncode": 0,
+    "output": "-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.xsiBjk/gufo-extension-metadata-1en58uao/build\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_registry_target_contracts",
+    "expected": "missing selected dependency",
+    "extra": "add_custom_target(dummy)\ngufo_target_extensions(dummy EXTENSIONS alpha)",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:546 (message):\n  registry: missing selected dependency base for alpha\nCall Stack (most recent call first):\n  CMakeLists.txt:10 (gufo_target_extensions)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_registry_target_contracts",
+    "expected": "was not defined by gufo_extension_target",
+    "extra": "add_custom_target(dummy)\ngufo_target_extensions(dummy EXTENSIONS alpha beta base)",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:565 (message):\n  registry: declared target extension_role_test was not defined by\n  gufo_extension_target\nCall Stack (most recent call first):\n  CMakeLists.txt:10 (gufo_target_extensions)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_registry_target_contracts",
+    "expected": "unknown extension",
+    "extra": "add_custom_target(dummy)\ngufo_target_extensions(dummy EXTENSIONS absent)",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:541 (message):\n  registry: unknown extension absent\nCall Stack (most recent call first):\n  CMakeLists.txt:10 (gufo_target_extensions)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "schema",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: schema must be NUMBER (member 'schema' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:126 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "name",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: name must be STRING (member 'name' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:130 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "version",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: version must be STRING (member 'version' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:143 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "api_version",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: api_version must be STRING (member 'api_version' not\n  found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:136 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "depends",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: depends must be ARRAY (member 'depends' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:49 (_gufo_json)\n  /home/mixer/gufo/cmake/GufoExtension.cmake:145 (_gufo_strings)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "platforms",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: platforms must be ARRAY (member 'platforms' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:49 (_gufo_json)\n  /home/mixer/gufo/cmake/GufoExtension.cmake:149 (_gufo_strings)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "targets",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: targets must be OBJECT (member 'targets' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:162 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "entry",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: entry must be STRING (member 'entry' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:208 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "registration_target",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: registration_target must be STRING (member\n  'registration_target' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:211 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "providers",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: providers must be ARRAY (member 'providers' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:220 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "id",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.id must be STRING (member '0 id' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:230 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "capability",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.capability must be STRING (member '0 capability' not\n  found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:230 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "keys",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.keys must be ARRAY (member '0 keys' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:49 (_gufo_json)\n  /home/mixer/gufo/cmake/GufoExtension.cmake:250 (_gufo_strings)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "target",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.target must be STRING (member '0 target' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:230 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "entry",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.entry must be STRING (member '0 entry' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:230 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "name",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.name must be STRING (member '0 name' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:296 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "type",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.type must be STRING (member '0 type' not found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:301 (_gufo_json)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_required_fields",
+    "expected": "commands",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:34 (message):\n  extension metadata: 0.commands must be ARRAY (member '0 commands' not\n  found)\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:49 (_gufo_json)\n  /home/mixer/gufo/cmake/GufoExtension.cmake:305 (_gufo_strings)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol delete\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:210 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol delete\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:234 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol namespace\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:210 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol namespace\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:234 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol false\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:210 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol false\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:234 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol co_await\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:210 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol co_await\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:234 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol requires\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:210 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_reserved_entries",
+    "expected": "reserved C++ entry symbol",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:76 (message):\n  extension metadata: reserved C++ entry symbol requires\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:234 (_gufo_entry_symbol)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "unknown target condition",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:104 (message):\n  extension metadata: unknown target condition unknown\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:183 (_gufo_target_enabled)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "unsatisfiable",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:108 (message):\n  extension metadata: unsatisfiable target conditions linux/windows\nCall Stack (most recent call first):\n  /home/mixer/gufo/cmake/GufoExtension.cmake:183 (_gufo_target_enabled)\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "unsatisfiable",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:187 (message):\n  extension metadata: unsatisfiable target/platform conditions for alpha_hip\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "unconditional",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:218 (message):\n  extension metadata: registration target must be an unconditional library\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "missing provider target",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:244 (message):\n  extension metadata: missing provider target absent\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "missing registration target",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:213 (message):\n  extension metadata: missing registration target absent\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "must be a library",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:248 (message):\n  extension metadata: provider target must be a library\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "invalid target role",
+    "extra": "",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:181 (message):\n  extension metadata: invalid target role other\nCall Stack (most recent call first):\n  CMakeLists.txt:5 (gufo_extension)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "undeclared target",
+    "extra": "gufo_extension_target(NAME undeclared SOURCES missing.cpp)",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:391 (message):\n  gufo_extension_target: undeclared target undeclared\nCall Stack (most recent call first):\n  CMakeLists.txt:9 (gufo_extension_target)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  },
+  {
+    "test": "__main__.ConfigureTests.test_target_conditions",
+    "expected": "duplicate target definition",
+    "extra": "set(ENGINE_ENABLE_HIP OFF)\ngufo_extension_target(NAME alpha_hip SOURCES missing.cpp)\ngufo_extension_target(NAME alpha_hip SOURCES missing.cpp)",
+    "returncode": 1,
+    "output": "CMake Error at /home/mixer/gufo/cmake/GufoExtension.cmake:395 (message):\n  gufo_extension_target: duplicate target definition alpha_hip\nCall Stack (most recent call first):\n  CMakeLists.txt:11 (gufo_extension_target)\n\n\n-- Configuring incomplete, errors occurred!\n"
+  }
+]

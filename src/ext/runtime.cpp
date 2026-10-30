@@ -1,0 +1,69 @@
+#include <algorithm>
+#include <stdexcept>
+#include <utility>
+
+#include "gufo/ext/host.hpp"
+#include "gufo/ext/registry.hpp"
+#include "gufo/ext/version.hpp"
+
+namespace gufo::ext {
+std::string_view RuntimeApiVersion() {
+  return kApiVersion;
+}
+void Host::Log(LogLevel level, std::string_view component,
+               std::string_view message) const {
+  if (log) {
+    log(context, level, component, message);
+  } else {
+    server::Logger::Log(level, component, message);
+  }
+}
+void Registry::BeginExtension(ExtensionInfo extension) {
+  if (extension.name.empty() ||
+      std::ranges::any_of(extensions_, [&](const auto& e) {
+        return e.name == extension.name;
+      })) {
+    throw std::invalid_argument("duplicate or empty extension name: " +
+                                extension.name);
+  }
+  current_extension_ = extension.name;
+  extensions_.push_back(std::move(extension));
+}
+void Registry::AddProvider(ProviderInfo provider) {
+  if (current_extension_.empty()) {
+    throw std::logic_error("BeginExtension must precede provider registration");
+  }
+  if (provider.id.empty() ||
+      std::ranges::any_of(providers_,
+                          [&](const auto& p) { return p.id == provider.id; })) {
+    throw std::invalid_argument("duplicate or empty provider ID: " +
+                                provider.id);
+  }
+  for (const auto& option : provider.options) {
+    if (IsCoreOption(option.name)) {
+      throw std::invalid_argument("core-owned option: " + option.name);
+    }
+    for (const auto& existing : providers_) {
+      for (const auto& other : existing.options) {
+        for (const auto& command : option.commands) {
+          if (option.name == other.name && option.type != other.type &&
+              std::ranges::find(other.commands, command) !=
+                  other.commands.end()) {
+            throw std::invalid_argument("conflicting option types: " +
+                                        option.name);
+          }
+        }
+      }
+    }
+  }
+  provider.extension = current_extension_;
+  providers_.push_back(std::move(provider));
+}
+const ProviderInfo& Registry::Provider(std::string_view id) const {
+  const auto found = std::ranges::find(providers_, id, &ProviderInfo::id);
+  if (found == providers_.end()) {
+    throw std::invalid_argument("unknown provider: " + std::string(id));
+  }
+  return *found;
+}
+}  // namespace gufo::ext

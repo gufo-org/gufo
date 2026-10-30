@@ -260,6 +260,7 @@
 
           formatSource = mkFilteredSource {
             directories = [
+              "include"
               "src"
               "tests"
             ];
@@ -271,6 +272,7 @@
 
           staticAnalysisSource = mkFilteredSource {
             directories = [
+              "include"
               "cmake"
               "src"
             ];
@@ -283,6 +285,8 @@
 
           testSource = mkFilteredSource {
             directories = [
+              "include"
+              "schemas"
               "cmake"
               "src"
               "tests"
@@ -475,7 +479,7 @@
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
-              (if full then pkgsSys.python3.withPackages (ps: [ ps.numpy ]) else pkgsSys.python3)
+              (pkgsSys.python3.withPackages (ps: [ ps.jsonschema ] ++ pkgsSys.lib.optionals full [ ps.numpy ]))
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
