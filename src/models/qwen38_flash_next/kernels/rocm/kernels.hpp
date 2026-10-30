@@ -355,7 +355,9 @@ struct GdnCheckpoint {
 /// ([n_tokens-1][(kernel-1)*channels]), when populated, receive the state after
 /// each proper prefix. The live state already holds the full batch.
 /// Scratch: `conv_scratch` ((n_tokens + kernel) * channels), `qn`/`kn`
-/// (n_tokens * k_heads * d), `raw` (n_tokens * v_heads * d).
+/// (n_tokens * k_heads * d), `raw` (n_tokens * v_heads * d). The `row_split`
+/// route for 128-wide heads without snapshots (prefill) runs as one fused
+/// launch and leaves `qn`, `kn` and `raw` untouched.
 /// `qkv` rows are `qkv_stride` floats apart and `z` rows `z_stride`, so a
 /// stacked [qkv|z] projection feeds both without unpacking. A non-null
 /// `out_q8` receives the rows quantized into the W8A8 tiled layout
