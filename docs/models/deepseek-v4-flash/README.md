@@ -1,5 +1,7 @@
 # DeepSeek V4 Flash
 
+Weights license: [MIT](https://spdx.org/licenses/MIT.html).
+
 Text generation on gfx1151 from the Flash 0731 mixed IQ2/Q2/Q8 GGUF.
 Target weights occupy **80.76 GiB**; use a 128 GiB system and leave room for
 request state. AR and optional DSpark support prompt, chat and HTTP serving.

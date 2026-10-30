@@ -1,5 +1,7 @@
 # Qwen3-ASR 1.7B
 
+Weights license: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html).
+
 Native BF16 safetensors speech recognition on gfx1151. The 1.7B checkpoint is
 supported; 0.6B, forced alignment and audio GGUFs are unsupported. Python runs
 only offline reference checks. Generation is deterministic greedy decoding.
