@@ -1,5 +1,33 @@
 # Qwen3.8 Flash-Next experiments
 
+## K/V rows that grow with the context (October 25, 2026)
+
+Quality evidence is in [QUALITY.md](QUALITY.md#kv-rows-that-grow-with-the-context-october-25-2026),
+memory and speed in [BENCHMARKS.md](BENCHMARKS.md#kv-memory-october-25-2026).
+Measured on a production fork of this model (mixed K-quant recipe + MTP,
+Strix Halo, ROCm 7.2.4) before the rebase onto main.
+
+| Experiment | Outcome |
+| --- | --- |
+| Growable K/V via HIP virtual memory management | Retained. `tools/bench/vmm_probe.hip` on gfx1151/ROCm 7.2.4: VMM supported, 4 KiB granularity, a graph captured over 4 chunks reads chunks mapped after capture and after unmap/remap, 0.088 ms per 2 MiB create/map/access, read bandwidth equal to `hipMalloc` (242 GB/s over 512 MiB). Each session reserves full-context virtual ranges for its 39 K, V and pooled-key buffers and maps 2 MiB chunks (or the whole buffer when smaller) before a forward, MTP step or restore writes; addresses never move, so captured graphs and borrowed views stay valid. `--kv-cache-bytes` bounds the mapped total; a growth past it first releases rows idle sessions no longer hold (after their borrowers were preserved, as an overwrite would) and otherwise fails the request with "K/V memory exhausted" before any state changes. Startup claims fixed state plus an equal share of the budget per session. |
+| Freeing each buffer's address range with `hipMemAddressFree` | Replaced: on ROCm 7.2.4 chunks mapped into a range that an earlier `hipMemAddressFree` or `hipFree` had released intermittently faulted on first access (a GPU page fault in `__amd_rocclr_fillBufferAligned`, the zero fill of freshly mapped chunks, in 4 of 5 `snapshot_test` runs; each time the range had held a destroyed session's buffers or a freed `hipMalloc` allocation). Draining the stream before growth, mapping every chunk up front, never unmapping and disabling SDMA did not help; never returning ranges did. `KvPool` now keeps every range it reserves and hands a released one to the next buffer of the same size: 10/10 `snapshot_test` runs pass. A minimal reproducer outside the model did not fault. |
+| Draining the stream before each growth | Rejected: cost each prefill pass its host/GPU overlap (128K prefill 1,633 → 1,546 tok/s in one round); mapping beside rows queued work uses needs no drain. |
+| Mapping the next prompt pass's rows while a pass runs | Retained: mapping between passes left the GPU idle for about 7 ms per pass in `gufo bench`, up to 70 ms behind a server. A long eager prompt pass (2,048+ rows) now leaves its work queued, maps the K/V rows of the next pass and of its own draft catch-up from what the budget has free, then waits; the passes themselves still reserve anything left. |
+
+## 8-bit K/V (October 25, 2026)
+
+Quality evidence is in [QUALITY.md](QUALITY.md#8-bit-kv-cache-october-25-2026).
+Measured on a production fork of this model (v3 recipe + MTP, Strix Halo,
+ROCm 7.2.4) before the rebase onto main.
+
+| Experiment | Outcome |
+| --- | --- |
+| 8-bit K/V with an F16 scale per 16 values (the "KV-Q8 b16" format of our Qwen3.6 port), replacing the F16 caches of the twelve attention layers and the draft layer | Retained. 576 instead of 1,024 bytes per row and K or V; 14,596 instead of 25,348 continuation bytes per target token. Writers round to F16 first, so the fused projection and `PrepareAttention` stay byte-identical; codes use an exact reciprocal-and-remainder rounding because fast-math division differs between kernels (a first `x / d` version mismatched the CPU format by one code). Readers see f16(scale × code), so FP64 checks apply to the dequantized cache. On Qwen3.6-35B, 32-value scale blocks measured −4/149 on an internal question set and 16-value blocks within noise; 16 here too. |
+| F32 dequantization (cvt, multiply, round to F16) | Replaced by a packed F16 form (sign-flipped byte under 0x64 is 1152 + code, one `v_pk_sub`, one `v_pk_mul`), byte-identical hashes in both attention benches: decode attention rows 8 at d32K 153.9 → 142.6 µs, prefill WMMA 4,096 tokens at d0/d32K/d118K 15.17/20.80/21.88 → 13.32/19.23/20.33 ms (F16 13.00/18.63/19.99). |
+| Quantizing in the fused QKV projection's GEMM epilogue | Rejected: tripled the kernel (727 → 2,108 ms over a 25.7K prefill, 8% of prefill). The epilogue again writes F16 rows to idle K/V scratch and two `StoreKv` launches quantize them (8 ms per 25.7K prefill); outputs byte-identical. |
+| Whole K scale blocks per thread in sparse WMMA attention | Retained: one 16-code load and one scale per thread instead of two of each; identical hashes; sparse call at d32K/d128K 40.2/70.5 → 39.1/68.9 ms in the model (F16 37.7/67.1). |
+| Widening the next tiles' rows before the phase barrier | Rejected: moving dequantization off the softmax phase made the sparse call slower (68.9 → 70.8 ms at d128K). |
+
 ## Confidence-gated MTP chains (October 29, 2026)
 
 Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.

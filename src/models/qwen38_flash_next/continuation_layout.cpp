@@ -4,6 +4,8 @@
 #include <map>
 #include <stdexcept>
 
+#include "src/models/qwen38_flash_next/kv_cache_format.hpp"
+
 namespace gufo::models::qwen38_flash_next {
 namespace {
 bool IsDraft(ContinuationPart part) {
@@ -57,10 +59,8 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
               sizeof(float),
           layer);
     } else {
-      add(ContinuationPart::kKey, std::size_t{c.AttentionKvDim()} * 2, 0,
-          layer);
-      add(ContinuationPart::kValue, std::size_t{c.AttentionKvDim()} * 2, 0,
-          layer);
+      add(ContinuationPart::kKey, KvRowBytes(c.AttentionKvDim()), 0, layer);
+      add(ContinuationPart::kValue, KvRowBytes(c.AttentionKvDim()), 0, layer);
       add(ContinuationPart::kPooledKeys, std::size_t{c.indexer_head_dim} * 2, 0,
           layer);
       add(ContinuationPart::kRawKeys, 0,
@@ -72,8 +72,8 @@ ContinuationLayout::ContinuationLayout(const Config& c, bool mtp,
     add(ContinuationPart::kPleHistory, 0,
         std::size_t{c.PleConvHistory()} * c.HcDim() * sizeof(float));
   if (mtp) {
-    add(ContinuationPart::kDraftKey, std::size_t{c.AttentionKvDim()} * 2, 0);
-    add(ContinuationPart::kDraftValue, std::size_t{c.AttentionKvDim()} * 2, 0);
+    add(ContinuationPart::kDraftKey, KvRowBytes(c.AttentionKvDim()), 0);
+    add(ContinuationPart::kDraftValue, KvRowBytes(c.AttentionKvDim()), 0);
     add(ContinuationPart::kDraftPooledKeys, std::size_t{c.indexer_head_dim} * 2,
         0);
     add(ContinuationPart::kDraftRawKeys, 0,

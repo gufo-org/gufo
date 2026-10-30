@@ -234,8 +234,8 @@ void CheckAttentionProjection(
     const gufo::models::qwen38_flash_next::YarnRope& yarn = {}) {
   constexpr std::uint32_t start = 131069;
   const std::size_t query_bytes = (std::size_t(batch) * 6144 + 16) * 4;
-  const std::size_t cache_bytes =
-      (std::size_t(start + batch) * 512 + 16) * sizeof(__half);
+  // 8-bit cache rows (512 codes and 32 F16 scales) after a 16-byte guard.
+  const std::size_t cache_bytes = std::size_t(start + batch) * 576 + 32;
   struct Buffers {
     std::vector<void*> pointers;
     ~Buffers() {
@@ -258,6 +258,10 @@ void CheckAttentionProjection(
     actual[i] = buffers.Make(bytes);
   }
   auto* position = static_cast<std::uint32_t*>(buffers.Make(4));
+  // F16 K/V staging rows the fused projection quantizes into the caches.
+  __half* rows[2] = {
+      static_cast<__half*>(buffers.Make(std::size_t(batch) * 512 * 2)),
+      static_cast<__half*>(buffers.Make(std::size_t(batch) * 512 * 2))};
   CheckHip(hipMemcpy(position, &start, 4, hipMemcpyHostToDevice),
            "attention position");
   std::vector<float> gamma(512);
@@ -271,10 +275,10 @@ void CheckAttentionProjection(
   if (!q::PrepareAttention(projected, 13312, device_gamma, device_gamma + 256,
                            static_cast<float*>(expected[0]) + 8,
                            static_cast<float*>(expected[1]) + 8,
-                           static_cast<__half*>(expected[2]) + 8,
-                           static_cast<__half*>(expected[3]) + 8, batch, 24, 2,
-                           256, 64, position, 1e7F, 1e-6F, nullptr, nullptr,
-                           false, yarn))
+                           static_cast<std::uint8_t*>(expected[2]) + 16,
+                           static_cast<std::uint8_t*>(expected[3]) + 16, batch,
+                           24, 2, 256, 64, position, 1e7F, 1e-6F, nullptr,
+                           nullptr, false, yarn))
     throw std::runtime_error("attention preparation rejected the model shape");
   hipStream_t stream = nullptr;
   hipGraph_t graph = nullptr;
@@ -291,9 +295,10 @@ void CheckAttentionProjection(
   if (!q::AttentionF16Gemm(weights, input, device_gamma, device_gamma + 256,
                            static_cast<float*>(actual[0]) + 8,
                            static_cast<float*>(actual[1]) + 8,
-                           static_cast<__half*>(actual[2]) + 8,
-                           static_cast<__half*>(actual[3]) + 8, batch, position,
-                           1e7F, 1e-6F, stream, vision.rope(), yarn))
+                           static_cast<std::uint8_t*>(actual[2]) + 16,
+                           static_cast<std::uint8_t*>(actual[3]) + 16, rows[0],
+                           rows[1], batch, position, 1e7F, 1e-6F, stream,
+                           vision.rope(), yarn))
     throw std::runtime_error("attention fusion rejected the model shape");
   CheckHip(hipStreamEndCapture(stream, &graph), "attention capture end");
   CheckHip(hipGraphInstantiate(&replay, graph, nullptr, nullptr, 0),
@@ -323,9 +328,10 @@ void CheckAttentionProjection(
   if (q::AttentionF16Gemm(weights, input, device_gamma, device_gamma + 256,
                           static_cast<float*>(actual[0]) + 8,
                           static_cast<float*>(actual[1]) + 8,
-                          static_cast<__half*>(actual[2]) + 8,
-                          static_cast<__half*>(actual[3]) + 8, 0, position,
-                          1e7F, 1e-6F, nullptr, nullptr, yarn))
+                          static_cast<std::uint8_t*>(actual[2]) + 16,
+                          static_cast<std::uint8_t*>(actual[3]) + 16, rows[0],
+                          rows[1], 0, position, 1e7F, 1e-6F, nullptr, nullptr,
+                          yarn))
     throw std::runtime_error("attention fusion accepted an empty batch");
   CheckHip(hipGraphExecDestroy(replay), "attention graph free");
   CheckHip(hipGraphDestroy(graph), "attention graph definition free");
