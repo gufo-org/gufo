@@ -391,26 +391,28 @@ std::shared_ptr<Model> Model::Load(const std::string& backbone,
       t.data = uploaded.at(t.data);
     });
     // Inverse real FFT with the periodic Hann synthesis window folded in.
-    const int N = int(impl.weights.n_fft), bins = N / 2 + 1;
-    impl.window.resize(N);
-    for (int n = 0; n < N; ++n)
-      impl.window[n] =
-          float(0.5 - 0.5 * std::cos(2 * std::numbers::pi * n / N));
-    std::vector<float> basis(std::size_t(N) * 2 * bins);
-    for (int n = 0; n < N; ++n)
-      for (int k = 0; k < bins; ++k) {
-        const double c = (k == 0 || k == N / 2) ? 1.0 : 2.0;
-        // Exact phase reduction keeps the angle small for large k * n.
-        const double angle =
-            2 * std::numbers::pi * double((std::int64_t(k) * n) % N) / N;
-        const double scale = c / N * impl.window[n];
-        basis[std::size_t(n) * 2 * bins + k] = float(scale * std::cos(angle));
-        basis[std::size_t(n) * 2 * bins + bins + k] =
-            float(-scale * std::sin(angle));
-      }
-    impl.istft_basis = Buffer(basis.size() * 4);
-    Check(hipMemcpy(impl.istft_basis.data, basis.data(), basis.size() * 4,
-                    hipMemcpyHostToDevice));
+    if (impl.weights.n_fft) {
+      const int N = int(impl.weights.n_fft), bins = N / 2 + 1;
+      impl.window.resize(N);
+      for (int n = 0; n < N; ++n)
+        impl.window[n] =
+            float(0.5 - 0.5 * std::cos(2 * std::numbers::pi * n / N));
+      std::vector<float> basis(std::size_t(N) * 2 * bins);
+      for (int n = 0; n < N; ++n)
+        for (int k = 0; k < bins; ++k) {
+          const double c = (k == 0 || k == N / 2) ? 1.0 : 2.0;
+          // Exact phase reduction keeps the angle small for large k * n.
+          const double angle =
+              2 * std::numbers::pi * double((std::int64_t(k) * n) % N) / N;
+          const double scale = c / N * impl.window[n];
+          basis[std::size_t(n) * 2 * bins + k] = float(scale * std::cos(angle));
+          basis[std::size_t(n) * 2 * bins + bins + k] =
+              float(-scale * std::sin(angle));
+        }
+      impl.istft_basis = Buffer(basis.size() * 4);
+      Check(hipMemcpy(impl.istft_basis.data, basis.data(), basis.size() * 4,
+                      hipMemcpyHostToDevice));
+    }
     {
       // Analysis tables: periodic Hann, DFT rows [cos | -sin], Slaney mel.
       std::vector<float> hann(kFft), dft(std::size_t(2) * kBins * kFft);
@@ -884,6 +886,8 @@ Voice::~Voice() {
 }
 std::unique_ptr<Voice> Model::CreateVoice(std::string* error) {
   try {
+    if (impl_->weights.depth.blocks.empty())
+      throw std::runtime_error("this mmproj only supports audio input");
     return std::unique_ptr<Voice>(new Voice(shared_from_this()));
   } catch (const std::exception& e) {
     if (error)

@@ -1,5 +1,7 @@
-#include "src/cli/serve/serve.hpp"
-
+#include "src/cli/serve/decision_service.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/models/d1/model.hpp"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -33,6 +35,7 @@
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/sampling_request.hpp"
+#include "src/cli/serve/serve.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
 #include "src/core/platform/shutdown_signal.hpp"
 
@@ -509,6 +512,20 @@ void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
       });
 }
 
+void AddDecisionOptions(ArgParser& parser, std::filesystem::path* model,
+                        std::filesystem::path* mmproj, std::string* name,
+                        unsigned* context) {
+  parser.AddOption("-m", "--model", "GGUF", "d1-Omni backbone GGUF", "Model",
+                   model);
+  parser.AddOption("", "--mmproj", "GGUF",
+                   "d1-Omni vision/audio projector GGUF", "Model", mmproj);
+  parser.AddOption("", "--served-model-name", "NAME", "Public API model ID",
+                   "Model", name);
+  parser.AddOption(
+      "-c", "--context", "N",
+      "Maximum complete decision prompt (default 8192, maximum 16384)", "Model",
+      context);
+}
 void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
                          std::string* served_model_name,
                          std::string* default_prompt_name) {
@@ -527,6 +544,19 @@ void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
 
 void PrintServeHelp(std::string_view program_name,
                     std::string_view subcommand) {
+  if (subcommand == "decision") {
+    std::filesystem::path model, mmproj;
+    std::string name = "d1-Omni-2B";
+    unsigned context = 8192;
+    ArgParser parser(
+        "gufo serve decision",
+        "Serve d1 text, image and audio decisions at /v1/systemone.");
+    AddDecisionOptions(parser, &model, &mmproj, &name, &context);
+    ServerOptionHelpTargets server_help;
+    AddServerOptionsForHelp(parser, &server_help);
+    parser.PrintHelp();
+    return;
+  }
   if (subcommand == "image") {
     std::filesystem::path model;
     std::string name = "Qwen-Image-2.1";
@@ -780,6 +810,7 @@ void PrintServeHelp(std::string_view program_name,
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
          "(/v1/audio/transcriptions)\n"
+      << "  decision  Serve d1 decisions (/v1/systemone)\n"
       << "  embedding Serve EmbeddingGemma 2 text, image and audio embeddings "
          "(/v1/embeddings)\n\n"
       << "Server:\n"
@@ -875,7 +906,7 @@ int RunServe(std::span<const char* const> args) {
       continue;
     }
     if (arg == "llm" || arg == "video" || (arg == "tts" || arg == "asr") ||
-        arg == "image" || arg == "embedding") {
+        arg == "image" || arg == "embedding" || arg == "decision") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
@@ -883,7 +914,7 @@ int RunServe(std::span<const char* const> args) {
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
           topic != "tts" && topic != "asr" && topic != "image" &&
-          topic != "embedding") {
+          topic != "embedding" && topic != "decision") {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -969,7 +1000,51 @@ int RunServe(std::span<const char* const> args) {
   std::shared_ptr<server::ImageService> images;
   std::shared_ptr<server::EmbeddingService> embeddings;
 
-  if (subcommand == "embedding") {
+  std::shared_ptr<server::DecisionService> decisions;
+  if (subcommand == "decision") {
+    std::filesystem::path model, mmproj;
+    std::string name = "d1-Omni-2B";
+    unsigned context = 8192;
+    ArgParser parser("gufo serve decision",
+                     "Serve d1 decisions at /v1/systemone.");
+    AddDecisionOptions(parser, &model, &mmproj, &name, &context);
+    add_server_options(parser, false);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
+      return 2;
+    }
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", "decision");
+      return 0;
+    }
+    if (!prepare_server_options())
+      return 2;
+    if (model.empty()) {
+      std::cerr << "Error: --model is required for decision server\n";
+      return 2;
+    }
+#if defined(ENGINE_ENABLE_HIP)
+    try {
+      ModelLoadLog load_log("d1-omni", model);
+      auto loaded = std::shared_ptr<models::d1::Model>(
+          models::d1::Model::Load(model.string(), mmproj.string(), context));
+      decisions = std::make_shared<server::DecisionService>();
+      decisions->model_id = name;
+      decisions->multimodal = !mmproj.empty();
+      decisions->decide = [loaded](const json::Value& request) {
+        return loaded->Decide(request);
+      };
+      load_log.Complete("model=" + name +
+                        " context_tokens=" + std::to_string(context));
+    } catch (const std::exception& e) {
+      std::cerr << "Error loading d1: " << e.what() << '\n';
+      return 1;
+    }
+#else
+    std::cerr << "Error: decision server requires a HIP build\n";
+    return 1;
+#endif
+  } else if (subcommand == "embedding") {
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
     std::string default_prompt_name;
@@ -1681,7 +1756,7 @@ int RunServe(std::span<const char* const> args) {
                 ShutdownAfterDeviceLoss();
               },
       },
-      images, embeddings);
+      images, embeddings, decisions);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

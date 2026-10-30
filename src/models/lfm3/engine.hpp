@@ -29,6 +29,12 @@ public:
   ~Session();
   // Advances all supplied tokens and optionally returns only the final logits.
   // State is session-owned; immutable device weights are shared by sessions.
+  // d1 single-question prompt: full attention is bidirectional, while
+  // convolution and sliding attention remain causal. Starts from empty state.
+  // Embeddings, when supplied, replace every input row (host floats).
+  bool ForwardDecision(std::span<const std::uint32_t> tokens,
+                       std::span<const float> embeddings,
+                       std::span<float> logits, std::string* error = nullptr);
   bool Forward(std::span<const std::uint32_t> tokens,
                std::span<float> logits = {}, std::string* error = nullptr);
   // One token per independent session, sharing dense projections across rows.

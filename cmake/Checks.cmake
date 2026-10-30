@@ -26,6 +26,7 @@ set(gufo_pr_targets
   bench_cli_test prompt_cli_test eval_http_client_test
   qwen_tokenizer_test qwen_chat_template_test
   qwen27b_continuation_layout_test
+  d1_contract_test
   lfm3_config_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test
@@ -40,12 +41,14 @@ set(gufo_pr_targets
   video_api_test minimax_h3_sampling_test minimax_h3_runtime_test)
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests
+  d1_contract_test
   lfm3_config_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test)
 list(APPEND gufo_pr_tests
+  "d1\\.contract"
   "lfm3\\.config"
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
   "qwen38_flash_next\\.rope_scaling" "qwen38_flash_next\\.continuation_layout"

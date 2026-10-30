@@ -152,8 +152,8 @@ __global__ void Convolution(const float* p, const float* w,
   y[std::size_t(row) * H + ch] = sum * p[std::size_t(row) * 3 * H + H + ch];
 }
 // Runs after Convolution: keeps the last L - 1 B*x products.
-__global__ void ConvolutionHistory(const float* p, float* history, int n,
-                                   int H, int L) {
+__global__ void ConvolutionHistory(const float* p, float* history, int n, int H,
+                                   int L) {
   int ch = blockIdx.x * blockDim.x + threadIdx.x;
   if (ch >= H)
     return;
@@ -273,7 +273,7 @@ __device__ __forceinline__ void Unroll(F f, std::integer_sequence<int, I...>) {
 // lane one key of the tile. Query values stay in registers and reach every
 // lane through DPP broadcasts, so K/V is read once per wave. Scores, the
 // online softmax and P*V accumulate in FP32.
-template<int D>
+template<int D, bool bidirectional = false>
 __launch_bounds__(256) __global__
     void TiledAttn(const float* __restrict__ q, const float* __restrict__ k,
                    const float* __restrict__ v, const float* __restrict__ gate,
@@ -285,7 +285,8 @@ __launch_bounds__(256) __global__
   static_assert(D == 128);
   __shared__ float4 sk[kKeys][D / 4 + 1], sv[kKeys][D / 4];
   const int group = heads / kh, queries = 64 / group;
-  const int g = blockIdx.z, split = blockIdx.y, q0 = blockIdx.x * queries, tid = threadIdx.x;
+  const int g = blockIdx.z, split = blockIdx.y, q0 = blockIdx.x * queries,
+            tid = threadIdx.x;
   const int lane = tid % 32, wave = tid / 32;
   const int h = g * group + wave * kRows / queries;
   const int wq0 = q0 + wave * kRows % queries;
@@ -295,10 +296,10 @@ __launch_bounds__(256) __global__
   for (int r = 0; r < kRows; ++r)
 #pragma unroll
     for (int m = 0; m < kSlices; ++m)
-      qreg[r][m] = wq0 + r < n
-                       ? q[(std::size_t(wq0 + r) * heads + h) * D + 16 * m +
-                           lane % 16]
-                       : 0;
+      qreg[r][m] =
+          wq0 + r < n
+              ? q[(std::size_t(wq0 + r) * heads + h) * D + 16 * m + lane % 16]
+              : 0;
   float4 acc[kRows];
   float maximum[kRows], denominator[kRows];
 #pragma unroll
@@ -310,11 +311,13 @@ __launch_bounds__(256) __global__
   const float scale = rsqrtf(float(D));
   // Long histories split their keys into spans of span keys, one per
   // blockIdx.y; blocks of one span run together and share its K/V in cache.
-  const int last_query = min(position + min(q0 + queries, n) - 1,
-                             (split + 1) * span - 1);
-  const int begin = max(window > 0 ? max(0, position + q0 + 1 - window) : 0,
-                        split * span);
-  const int wave_last = position + min(wq0 + kRows, n) - 1;
+  const int last_query =
+      min(bidirectional ? n - 1 : position + min(q0 + queries, n) - 1,
+          (split + 1) * span - 1);
+  const int begin =
+      max(window > 0 ? max(0, position + q0 + 1 - window) : 0, split * span);
+  const int wave_last =
+      bidirectional ? n - 1 : position + min(wq0 + kRows, n) - 1;
   const int wave_first = window > 0 ? max(0, position + wq0 + 1 - window) : 0;
   for (int base = begin; base <= last_query; base += kKeys) {
     __syncthreads();
@@ -358,8 +361,8 @@ __launch_bounds__(256) __global__
     for (int r = 0; r < kRows; ++r) {
       const int query = position + wq0 + r;
       const int first = window > 0 ? max(0, query + 1 - window) : 0;
-      const bool valid =
-          wq0 + r < n && t >= first && t <= query && t <= last_query;
+      const bool valid = wq0 + r < n && t >= first &&
+                         (bidirectional || t <= query) && t <= last_query;
       float s = valid ? score[r] * scale : -INFINITY, tile_max = s;
 #pragma unroll
       for (int offset = 16; offset; offset /= 2)
@@ -415,8 +418,7 @@ __launch_bounds__(256) __global__
     const float g_scale = 1 + expf(-gate[row * heads + h]);
     reinterpret_cast<float4*>(y + (std::size_t(row) * heads + h) * D)[lane] =
         make_float4((acc[r].x / total) / g_scale, (acc[r].y / total) / g_scale,
-                    (acc[r].z / total) / g_scale,
-                    (acc[r].w / total) / g_scale);
+                    (acc[r].z / total) / g_scale, (acc[r].w / total) / g_scale);
   }
 }
 // One decode query per head. A block owns one KV group and a span of keys,
@@ -428,8 +430,7 @@ constexpr int kDecodeKeys = 64, kMaxGroup = 8, kMaxDecodeSplits = 64;
 template<int D>
 __launch_bounds__(256) __global__
     void DecodeAttn(const float* __restrict__ q, const float* __restrict__ k,
-                    const float* __restrict__ v,
-                    const float* __restrict__ gate,
+                    const float* __restrict__ v, const float* __restrict__ gate,
                     const float* __restrict__ ck, const float* __restrict__ cv,
                     float* __restrict__ y, float* __restrict__ partial,
                     int heads, int kh, int position, int capacity, int window,
@@ -570,8 +571,7 @@ __global__ void PromptCombine(const float* __restrict__ partial,
   const int rh = blockIdx.x, d = threadIdx.x;
   float maximum = -INFINITY;
   for (int s = 0; s < splits; ++s)
-    maximum =
-        fmaxf(maximum, partial[(std::size_t(s) * rows + rh) * (D + 2)]);
+    maximum = fmaxf(maximum, partial[(std::size_t(s) * rows + rh) * (D + 2)]);
   float sum = 0, acc = 0;
   for (int s = 0; s < splits; ++s) {
     const float* part = partial + (std::size_t(s) * rows + rh) * (D + 2);
@@ -625,8 +625,8 @@ bool SplitPrompt(const Tensor& w, int n, DenseWorkspace workspace) {
   return n >= 32 && w.type == core::GgmlType::kQ8_0 && workspace.quantized;
 }
 template<bool kSwiGLU = false, bool kRaw = false>
-void LaunchSplit(std::span<const Output> outputs, SplitActivations split,
-                 int n, int K, hipStream_t s) {
+void LaunchSplit(std::span<const Output> outputs, SplitActivations split, int n,
+                 int K, hipStream_t s) {
   constexpr int BN = 64;
   Projections jobs{};
   jobs.count = int(outputs.size());
@@ -729,8 +729,7 @@ void ProjectFfn(const Tensor& gate, const Tensor& up, const Tensor& down,
     LaunchSplit<false, true>(second, raw, n, down.cols, s);
     return;
   }
-  ProjectSwiGLU(gate, up, x, hidden, up_scratch, n, s, workspace,
-                split_ready);
+  ProjectSwiGLU(gate, up, x, hidden, up_scratch, n, s, workspace, split_ready);
   Dense(down, hidden, out, n, s, workspace);
 }
 void Dense(const Tensor& w, const float* x, float* out, int n, hipStream_t s,
@@ -765,9 +764,10 @@ void RopeFrequencies(float* out, int d, float theta, hipStream_t s) {
 }
 void Rope(float* x, const float* frequencies, const float* f, int n, int h,
           int d, int p, hipStream_t s) {
-  const int threads = d / 2 * std::max(1, 256 / (d / 2)), rows = threads / (d / 2);
-  Rotary<<<(n * h + rows * kRopeRows - 1) / (rows * kRopeRows), threads, 0, s>>>(
-      x, frequencies, f, n, h, d, p);
+  const int threads = d / 2 * std::max(1, 256 / (d / 2)),
+            rows = threads / (d / 2);
+  Rotary<<<(n * h + rows * kRopeRows - 1) / (rows * kRopeRows), threads, 0,
+           s>>>(x, frequencies, f, n, h, d, p);
 }
 constexpr int kMinPromptSpan = 8192, kMaxPromptSplits = 16;
 int PromptSplits(int keys, int& span) {
@@ -780,8 +780,8 @@ std::size_t AttentionScratchBytes(int heads, int dim, int context, int rows) {
   const int prompt = PromptSplits(context, span);
   const std::size_t decode =
       std::min((context + kDecodeKeys - 1) / kDecodeKeys, kMaxDecodeSplits);
-  return std::max(decode, std::size_t(prompt > 1 ? prompt * rows : 0)) *
-         heads * (dim + 2) * sizeof(float);
+  return std::max(decode, std::size_t(prompt > 1 ? prompt * rows : 0)) * heads *
+         (dim + 2) * sizeof(float);
 }
 void Attention(const float* q, const float* k, const float* v, const float* g,
                const float* ck, const float* cv, float* out, int n, int h,
@@ -806,15 +806,22 @@ void Attention(const float* q, const float* k, const float* v, const float* g,
     const int splits = scratch && !win ? PromptSplits(p + n, span) : 1;
     if (splits == 1)
       span = p + n;
-    TiledAttn<128><<<dim3((n + 64 / group - 1) / (64 / group), splits, kh),
-                      256, 0, s>>>(q, k, v, g, ck, cv, out, scratch, n, h, kh,
-                                   p, cap, win, span);
+    TiledAttn<128>
+        <<<dim3((n + 64 / group - 1) / (64 / group), splits, kh), 256, 0, s>>>(
+            q, k, v, g, ck, cv, out, scratch, n, h, kh, p, cap, win, span);
     if (splits > 1)
       PromptCombine<128><<<n * h, 128, 0, s>>>(scratch, g, out, n * h, splits);
     return;
   }
   Attn<<<dim3(h, n), 32, 0, s>>>(q, k, v, g, ck, cv, out, h, kh, d, p, cap,
                                  win);
+}
+void BidirectionalAttention(const float* q, const float* k, const float* v,
+                            const float* g, float* out, int n, int h, int kh,
+                            hipStream_t s) {
+  const int queries = 64 / (h / kh);
+  TiledAttn<128, true><<<dim3((n + queries - 1) / queries, 1, kh), 256, 0, s>>>(
+      q, k, v, g, nullptr, nullptr, out, nullptr, n, h, kh, 0, n, 0, n);
 }
 void StoreKV(const float* k, const float* v, float* ck, float* cv, int n,
              int stride, int p, int cap, hipStream_t s) {

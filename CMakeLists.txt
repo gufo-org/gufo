@@ -165,6 +165,7 @@ endif()
 add_subdirectory(src/models/qwen38_flash_next)
 add_subdirectory(src/models/lfm3)
 add_subdirectory(src/models/lfm3_audio)
+add_subdirectory(src/models/d1)
 
 # Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
 add_subdirectory(src/models/qwen3_tts)
@@ -425,6 +426,7 @@ add_executable(gufo
   src/cli/eval/eval.cpp
   src/cli/transcribe/transcribe.cpp
   src/cli/speak/speak.cpp
+  src/cli/decide/decide.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
   src/cli/serve/continuation_cache.cpp
@@ -438,7 +440,7 @@ add_executable(gufo
 target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo PRIVATE src/cli/serve/lfm3_audio_runner.cpp)
-  target_link_libraries(gufo PRIVATE gufo_lfm3_audio)
+  target_link_libraries(gufo PRIVATE gufo_lfm3_audio gufo_d1)
 endif()
 gufo_stage_hip_runtime(gufo)
 target_compile_definitions(gufo PRIVATE
@@ -719,6 +721,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen38_flash_next)
   add_subdirectory(tests/models/lfm3)
   add_subdirectory(tests/models/lfm3_audio)
+  add_subdirectory(tests/models/d1)
 
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test

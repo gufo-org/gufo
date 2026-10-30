@@ -132,15 +132,18 @@ std::optional<AudioWeights> AudioWeights::Bind(const core::GgufReader& r,
                                                std::string* error) {
   try {
     if (r.GetMetadataString("general.architecture") != "clip" ||
-        r.GetMetadataString("clip.audio.projector_type") != "lfm3a" ||
-        r.GetMetadataString("clip.gen.audio.projector_type") != "lfm3a_gen")
+        r.GetMetadataString("clip.audio.projector_type") != "lfm3a")
       throw std::runtime_error(
           "expected an LFM3-Audio mmproj GGUF (lfm3a and lfm3a_gen)");
     const Binder b{r};
     AudioWeights w;
     w.projection_dim = b.U32("clip.audio.projection_dim");
+    const bool generation =
+        r.GetMetadataBool("clip.has_audio_generator")
+            .value_or(r.FindTensor("a.gen.code.proj_in.weight") != nullptr);
     if (w.projection_dim != backbone_hidden ||
-        b.U32("clip.gen.audio.projection_dim") != backbone_hidden)
+        (generation &&
+         b.U32("clip.gen.audio.projection_dim") != backbone_hidden))
       throw std::runtime_error("mmproj does not match the backbone width");
     if (b.U32("clip.audio.num_mel_bins") != kMelBins)
       throw std::runtime_error("unsupported mel bin count");
@@ -183,6 +186,12 @@ std::optional<AudioWeights> AudioWeights::Bind(const core::GgufReader& r,
     w.proj2 = b.Get("mm.a.mlp.3.weight", backbone_hidden, backbone_hidden);
     w.proj2_bias = b.F32("mm.a.mlp.3.bias", backbone_hidden);
 
+    if (!generation) {
+      if (e.hidden % 256 || !e.kv_heads || e.heads % e.kv_heads ||
+          e.head_dim > 128 || e.head_dim % 32 || e.conv_width > 32)
+        throw std::runtime_error("unsupported audio encoder geometry");
+      return w;
+    }
     // Depth decoder.
     auto& d = w.depth;
     d.hidden = b.U32("clip.gen.audio.embedding_length");

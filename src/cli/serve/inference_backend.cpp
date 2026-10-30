@@ -3103,6 +3103,12 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
 
   if (architecture == "lfm3") {
+    if (!reader->GetMetadataBool("lfm3.attention.causal").value_or(true)) {
+      SetError(
+          error,
+          "d1 decision models require gufo serve decision (/v1/systemone)");
+      return false;
+    }
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled ||
         !vision_model_path.empty()) {
       SetError(error, "LFM3 supports autoregressive text inference");

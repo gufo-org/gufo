@@ -947,3 +947,11 @@ decode and RAM/disk continuations use the common harness without relaxed
 assertions. Run `--suite all --tier full` with text inputs and sufficient context
 (the retained release run uses 32768 tokens). A failed full matrix is retained
 separately from passing focused checks; model output failures remain failures.
+
+## d1-Omni GGUF decision checks
+
+`d1.py` compares already running Gufo and llama.cpp `/v1/systemone` servers
+with explicit local PNG/WAV fixtures. It covers text, image, audio, mixed
+media, spoken instructions, Unicode/control spellings, long prompts, isolation
+and invalid requests. It retains each request and duration; missing inputs
+fail rather than skip. See [d1 quality and reproduction](../../docs/models/d1/QUALITY.md).

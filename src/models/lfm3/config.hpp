@@ -13,6 +13,7 @@ struct Config {
       head_dim{};
   std::uint32_t window{}, conv_width{};
   float eps{}, theta{}, theta_swa{};
+  bool decision{};
   std::vector<std::uint32_t> kv_heads;
   std::vector<LayerType> layers;
   static std::optional<Config> FromGguf(const core::GgufReader& reader,

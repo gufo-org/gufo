@@ -123,31 +123,31 @@ struct Session::Impl {
   };
   std::vector<State> states;
   Buffer quantized, row_max, attention_scratch, frequencies;
-  Impl(std::shared_ptr<Model> m, std::uint32_t ctx)
+  Impl(std::shared_ptr<Model> m, std::uint32_t ctx, std::size_t rows = kChunk)
       : model(std::move(m)),
         context(ctx),
-        ids(kChunk * sizeof(std::uint32_t)),
-        x(kChunk * model->config().hidden * 4),
-        z(kChunk * model->config().hidden * 4),
-        out(kChunk * model->config().hidden * 4),
-        p(kChunk * 3 * model->config().hidden * 4),
-        q(kChunk * model->config().heads * model->config().head_dim * 4),
-        k(kChunk * model->config().heads * model->config().head_dim * 4),
-        v(kChunk * model->config().heads * model->config().head_dim * 4),
-        gate(kChunk * model->config().heads * 4),
-        a(kChunk * model->config().heads * model->config().head_dim * 4),
-        ff_gate(kChunk * model->config().intermediate * 4),
-        ff_up(kChunk * model->config().intermediate * 4),
+        ids(rows * sizeof(std::uint32_t)),
+        x(rows * model->config().hidden * 4),
+        z(rows * model->config().hidden * 4),
+        out(rows * model->config().hidden * 4),
+        p(rows * 3 * model->config().hidden * 4),
+        q(rows * model->config().heads * model->config().head_dim * 4),
+        k(rows * model->config().heads * model->config().head_dim * 4),
+        v(rows * model->config().heads * model->config().head_dim * 4),
+        gate(rows * model->config().heads * 4),
+        a(rows * model->config().heads * model->config().head_dim * 4),
+        ff_gate(rows * model->config().intermediate * 4),
+        ff_up(rows * model->config().intermediate * 4),
         logits(kMaxBatch * model->config().vocab * 4),
         frontier(model->config().hidden * 4),
         inputs(kMaxBatch * model->config().hidden * 4) {
     const auto& c = model->config();
     const auto width =
         std::max({c.hidden * 3, c.intermediate, c.heads * c.head_dim});
-    quantized = Buffer(gpu::DenseWorkspaceBytes(kChunk, width));
-    row_max = Buffer(kChunk * sizeof(unsigned));
+    quantized = Buffer(gpu::DenseWorkspaceBytes(rows, width));
+    row_max = Buffer(rows * sizeof(unsigned));
     attention_scratch =
-        Buffer(gpu::AttentionScratchBytes(c.heads, c.head_dim, ctx, kChunk));
+        Buffer(gpu::AttentionScratchBytes(c.heads, c.head_dim, ctx, rows));
     // Global then sliding-window RoPE frequencies.
     frequencies = Buffer(std::size_t(c.head_dim) * 4);
     gpu::RopeFrequencies(frequencies.floats(), c.head_dim, c.theta,
@@ -280,12 +280,18 @@ struct Session::Impl {
                     owner.position, s);
           gpu::Rope(kr, table, factors, count, c.kv_heads[i], c.head_dim,
                     owner.position, s);
-          gpu::Attention(qr, kr, vr, gate.floats() + row * c.heads,
-                         state.k.floats(), state.v.floats(),
-                         a.floats() + row * c.heads * c.head_dim, count,
-                         c.heads, c.kv_heads[i], c.head_dim, owner.position,
-                         state.capacity, swa ? c.window : 0, s,
-                         owner.attention_scratch.floats());
+          if (c.decision && !swa)
+            gpu::BidirectionalAttention(qr, kr, vr,
+                                        gate.floats() + row * c.heads,
+                                        a.floats() + row * c.heads * c.head_dim,
+                                        count, c.heads, c.kv_heads[i], s);
+          else
+            gpu::Attention(qr, kr, vr, gate.floats() + row * c.heads,
+                           state.k.floats(), state.v.floats(),
+                           a.floats() + row * c.heads * c.head_dim, count,
+                           c.heads, c.kv_heads[i], c.head_dim, owner.position,
+                           state.capacity, swa ? c.window : 0, s,
+                           owner.attention_scratch.floats());
           gpu::StoreKV(kr, vr, state.k.floats(), state.v.floats(), count,
                        c.kv_heads[i] * c.head_dim, owner.position,
                        state.capacity, s);
@@ -361,10 +367,41 @@ std::unique_ptr<Session> Model::CreateSession(std::uint32_t context,
     return nullptr;
   }
 }
+bool Session::ForwardDecision(std::span<const std::uint32_t> tokens,
+                              std::span<const float> embeddings,
+                              std::span<float> logits, std::string* error) {
+  try {
+    const auto& c = impl_->model->config();
+    if (!c.decision || tokens.empty() || tokens.size() > impl_->context ||
+        logits.size() != c.vocab ||
+        (!embeddings.empty() && embeddings.size() != tokens.size() * c.hidden))
+      throw std::invalid_argument("invalid d1 prompt, embeddings or logits");
+    for (auto id : tokens)
+      if (id >= c.vocab)
+        throw std::invalid_argument("d1 token out of range");
+    auto state = std::make_unique<Impl>(impl_->model, impl_->context,
+                                        std::max(kPrefillChunk, tokens.size()));
+    impl_.swap(state);
+    if (!Reset(error))
+      return false;
+    impl_->Run(tokens, true, {},
+               embeddings.empty() ? nullptr : embeddings.data(),
+               embeddings.empty() ? 0 : tokens.size());
+    Check(hipMemcpy(logits.data(), impl_->logits.data, logits.size_bytes(),
+                    hipMemcpyDeviceToHost));
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
 bool Session::Forward(std::span<const std::uint32_t> tokens,
                       std::span<float> logits, std::string* error) {
   try {
     const auto& c = impl_->model->config();
+    if (c.decision)
+      throw std::invalid_argument("use the decision API for d1 models");
     if (impl_->poisoned)
       throw std::runtime_error(
           "LFM3 session requires Reset after a device error");
@@ -400,6 +437,8 @@ bool Session::ForwardEmbeddings(std::span<const float> rows, bool on_device,
                                 std::span<float> logits, std::string* error) {
   try {
     const auto& c = impl_->model->config();
+    if (c.decision)
+      throw std::invalid_argument("use the decision API for d1 models");
     if (impl_->poisoned)
       throw std::runtime_error(
           "LFM3 session requires Reset after a device error");
@@ -463,7 +502,8 @@ bool Session::ForwardBatch(std::span<Session* const> sessions,
                                 session) != sessions.begin() + i)
         throw std::invalid_argument("duplicate or null LFM3 batch session");
       auto* state = session->impl_.get();
-      if (state->poisoned || state->position >= state->context ||
+      if (state->model->config().decision || state->poisoned ||
+          state->position >= state->context ||
           tokens[i] >= state->model->config().vocab ||
           outputs[i].size() != state->model->config().vocab ||
           (!batch.empty() && state->model != batch.front()->model))
@@ -502,7 +542,8 @@ bool Session::ForwardBatchInputs(std::span<Session* const> sessions,
                                 session) != sessions.begin() + i)
         throw std::invalid_argument("duplicate or null LFM3 batch session");
       auto* state = session->impl_.get();
-      if (state->poisoned || state->position >= state->context ||
+      if (state->model->config().decision || state->poisoned ||
+          state->position >= state->context ||
           (!rows[i] && tokens[i] >= state->model->config().vocab) ||
           (!batch.empty() && state->model != batch.front()->model))
         throw std::invalid_argument("incompatible LFM3 batch session");

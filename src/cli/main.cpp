@@ -5,6 +5,7 @@
 
 #include "src/cli/banner.hpp"
 #include "src/cli/bench/bench.hpp"
+#include "src/cli/decide/decide.hpp"
 #include "src/cli/diagnose/diagnose.h"
 #include "src/cli/eval/eval.hpp"
 #include "src/cli/prompt/prompt.hpp"
@@ -45,6 +46,7 @@ void print_help(std::string_view program_name) {
       << "  transcribe     Transcribe WAV audio with Qwen3-ASR-1.7B or "
          "LFM3-Audio-2B\n"
       << "  speak          Synthesize speech or voice-chat with LFM3-Audio-2B\n"
+      << "  decide         Answer d1 text, image and audio decision questions\n"
       << "  diagnose       Inspect system hardware, memory, and drivers\n"
       << "  help           Print help for a specific command\n\n"
       << "Run '" << program_name << " help <COMMAND>' or '" << program_name
@@ -110,6 +112,8 @@ int run(std::span<const char* const> args) {
     if (sub == "transcribe") {
       return gufo::cli::RunTranscribe(help_flag);
     }
+    if (sub == "decide")
+      return gufo::cli::RunDecide(help_flag);
     if (sub == "speak") {
       return gufo::cli::RunSpeak(help_flag);
     }
@@ -157,6 +161,8 @@ int run(std::span<const char* const> args) {
     return gufo::cli::RunTranscribe(options.subspan(1));
   }
 
+  if (first_arg == "decide")
+    return gufo::cli::RunDecide(options.subspan(1));
   if (first_arg == "speak") {
     return gufo::cli::RunSpeak(options.subspan(1));
   }

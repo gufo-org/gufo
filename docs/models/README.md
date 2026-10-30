@@ -6,6 +6,7 @@ are downloaded separately and are not part of the runtime package.
 
 | Model | Weights / supported inputs | Guide |
 | --- | --- | --- |
+| d1-Omni 2B | GGUF + mmproj; text/image/audio decisions | [Usage and scope](d1/README.md) |
 | LFM3 1.7B | Q8_0/BF16/F16 GGUF; text | [Usage and precision](lfm3/README.md) |
 | LFM3-Audio 2B | Q8_0/BF16 GGUF + mmproj; speech to text, text to speech, voice chat | [Usage and precision](lfm3-audio/README.md) |
 | DeepSeek V4 Flash | Flash 0731 mixed IQ2/Q2/Q8 GGUF; text | [Usage and modes](deepseek-v4-flash/README.md) |

@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-30",
+  "hardware": "AMD Strix Halo gfx1151",
+  "compiler": "GCC 16.2 / ROCm 10.1 HIP Clang 24",
+  "weights_revision": "c53ae0b1f92b17065e9158d34019c9ca1ea5bcf8",
+  "reference_revision": "8642541b255bfb5dc39cd351a178be09013a55d6",
+  "backbone": "d1-Omni-2B-Q8_0.gguf",
+  "mmproj": "mmproj-d1-Omni-2B-BF16.gguf",
+  "candidate_context": 8192,
+  "reference_context": 16384,
+  "scope": "individual warm HTTP request wall time; encoding and all question forward passes included; no generated tokens",
+  "probability_gate": 0.02,
+  "errors": [],
+  "fixtures": {
+    "/tmp/d1-models/cats.png": "cf6f3c4befa148732c7453e0de5afab00f682427435fead2d88b07a9615cdac2",
+    "/tmp/d1-models/jfk.wav": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+  },
+  "requests": [
+    {
+      "workload": "text",
+      "input_tokens": 156,
+      "candidate_ms": 85.356,
+      "reference_ms": 55.213,
+      "max_probability_error": 0.002281051914804877
+    },
+    {
+      "workload": "image",
+      "input_tokens": 665,
+      "candidate_ms": 355.684,
+      "reference_ms": 265.031,
+      "max_probability_error": 0.001223724461352771
+    },
+    {
+      "workload": "audio",
+      "input_tokens": 352,
+      "candidate_ms": 128.569,
+      "reference_ms": 131.668,
+      "max_probability_error": 0.002788826154734081
+    },
+    {
+      "workload": "json-unicode",
+      "input_tokens": 57,
+      "candidate_ms": 29.447,
+      "reference_ms": 20.741,
+      "max_probability_error": 0.00015071959220169795
+    },
+    {
+      "workload": "literal-controls",
+      "input_tokens": 51,
+      "candidate_ms": 29.878,
+      "reference_ms": 18.729,
+      "max_probability_error": 0.0005921830378406989
+    },
+    {
+      "workload": "long-state",
+      "input_tokens": 734,
+      "candidate_ms": 163.448,
+      "reference_ms": 140.732,
+      "max_probability_error": 0.0005635307650748711
+    },
+    {
+      "workload": "mixed-media",
+      "input_tokens": 954,
+      "candidate_ms": 421.406,
+      "reference_ms": 365.05,
+      "max_probability_error": 0.0012712460294223016
+    },
+    {
+      "workload": "spoken-instructions",
+      "input_tokens": 171,
+      "candidate_ms": 71.609,
+      "reference_ms": 68.715,
+      "max_probability_error": 0.003212095714708485
+    }
+  ]
+}

@@ -8,8 +8,6 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& r,
   try {
     if (r.GetMetadataString("general.architecture") != "lfm3")
       throw std::runtime_error("GGUF architecture must be lfm3");
-    if (!r.GetMetadataBool("lfm3.attention.causal").value_or(true))
-      throw std::runtime_error("LFM3 decision models are not supported");
     auto u = [&](const char* suffix) {
       auto v = r.GetMetadataUint32(std::string("lfm3.") + suffix);
       if (!v || *v == 0)
@@ -23,6 +21,10 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& r,
       return *v;
     };
     Config c;
+    c.decision = !r.GetMetadataBool("lfm3.attention.causal").value_or(true);
+    if (c.decision &&
+        r.GetMetadataString("lfm3.decision.type") != "lfm3-d1-omni")
+      throw std::runtime_error("unsupported LFM3 decision model");
     const auto n = u("block_count");
     c.hidden = u("embedding_length");
     c.intermediate = u("feed_forward_length");
@@ -66,7 +68,8 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& r,
       throw std::runtime_error("LFM3 arrays must describe every layer");
     for (std::uint32_t i = 0; i < n; ++i) {
       auto h = at(*kv, i), s = at(*sw, i);
-      if (h > c.heads || (h && c.heads % h) || s > 1 || (h == 0 && s))
+      if (h > c.heads || (h && c.heads % h) || s > 1 || (h == 0 && s) ||
+          (c.decision && h && (c.heads / h > 8 || 64 % (c.heads / h))))
         throw std::runtime_error("invalid LFM3 layer heads/window");
       c.kv_heads.push_back(h);
       c.layers.push_back(!h  ? LayerType::kConvolution

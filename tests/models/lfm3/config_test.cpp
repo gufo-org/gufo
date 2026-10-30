@@ -123,7 +123,13 @@ int main() {
     Require(!Parse(bad), "sliding convolution accepted");
     bad = good;
     bad["lfm3.attention.causal"] = false;
-    Require(!Parse(bad), "decision model accepted");
+    Require(!Parse(bad), "unknown decision model accepted");
+    bad["lfm3.decision.type"] = std::string("lfm3-d1-omni");
+    auto decision = Parse(bad);
+    Require(decision && decision->decision,
+            "d1-Omni decision metadata rejected");
+    bad["lfm3.attention.head_count"] = 12U;
+    Require(!Parse(bad), "unsupported d1 attention grouping accepted");
     bad = good;
     bad["lfm3.rope.freq_base"] = 0.0F;
     Require(!Parse(bad), "zero theta accepted");
