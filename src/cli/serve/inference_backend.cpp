@@ -219,7 +219,7 @@ void PrepareVision(
 }
 
 constexpr std::string_view kDeepSeekStateAbi =
-    "deepseek-v4-flash-rdna35-state-v4";
+    "deepseek-v4-flash-gfx1151-state-v4";
 constexpr std::uint32_t kQwenComponentPayloadVersion = 2;
 constexpr std::size_t kQwenMaxResumeTokens = 9;
 
@@ -229,18 +229,18 @@ constexpr std::string_view QwenStateAbi(bool speculative,
   if (bf16_recurrent_state) {
     if (speculative) {
       return fp16_attention_kv
-                 ? "qwen-rdna35-dflash-state-v4-fp16-kv-bf16-recurrent"
-                 : "qwen-rdna35-dflash-state-v4-fp32-kv-bf16-recurrent";
+                 ? "qwen-gfx1151-dflash-state-v4-fp16-kv-bf16-recurrent"
+                 : "qwen-gfx1151-dflash-state-v4-fp32-kv-bf16-recurrent";
     }
-    return fp16_attention_kv ? "qwen-rdna35-state-v3-fp16-kv-bf16-recurrent"
-                             : "qwen-rdna35-state-v3-fp32-kv-bf16-recurrent";
+    return fp16_attention_kv ? "qwen-gfx1151-state-v3-fp16-kv-bf16-recurrent"
+                             : "qwen-gfx1151-state-v3-fp32-kv-bf16-recurrent";
   }
   if (speculative) {
-    return fp16_attention_kv ? "qwen-rdna35-dflash-state-v3-fp16-kv"
-                             : "qwen-rdna35-dflash-state-v3-fp32-kv";
+    return fp16_attention_kv ? "qwen-gfx1151-dflash-state-v3-fp16-kv"
+                             : "qwen-gfx1151-dflash-state-v3-fp32-kv";
   }
-  return fp16_attention_kv ? "qwen-rdna35-state-v2-fp16-kv"
-                           : "qwen-rdna35-state-v2-fp32-kv";
+  return fp16_attention_kv ? "qwen-gfx1151-state-v2-fp16-kv"
+                           : "qwen-gfx1151-state-v2-fp32-kv";
 }
 
 bool DiskCacheEnabled(const TextDiskCacheConfig& config) noexcept {
@@ -264,6 +264,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=deepseek4\n"
+           << "device_arch=" << gufo::hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=joyai-byte-bpe-v1\n"
@@ -303,6 +304,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen38-flash-next\n"
+           << "device_arch=" << gufo::hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=embedded-in-artifact\n"
@@ -346,10 +348,6 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen3.8\n"
-           // The two RDNA 3.5 parts share an instruction set but not a memory
-           // subsystem. Reductions split identically in source, yet nothing
-           // guarantees bit-identical accumulation across a 16-CU and a 40-CU
-           // part, so a snapshot must never cross architectures.
            << "device_arch=" << gufo::hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
@@ -380,7 +378,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "adapters=none\n";
   if (speculative) {
     identity
-        << "draft_backend=dflash2-rdna35-v1\n"
+        << "draft_backend=dflash2-gfx1151-v1\n"
         << "draft_artifact_id=" << core::kGgufIdentityScheme << ':'
         << draft_artifact_fingerprint << '\n'
         << "draft_state_layout=dflash-window-kv-and-frontier-v4\n"

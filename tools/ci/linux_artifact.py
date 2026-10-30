@@ -10,8 +10,8 @@ import re
 import shutil
 import subprocess
 
-STORE = Path('/nix/store')
 
+STORE = Path('/nix/store')
 # RDNA 3.5 parts Gufo supports, mirroring src/core/hip/arch.hpp. Tensile and
 # hipBLASLt libraries carry the target architecture in their file name, and the
 # ROCm closure also holds kernels for other GPUs (gfx942, gfx1030, gfx1101).
@@ -19,11 +19,14 @@ STORE = Path('/nix/store')
 # for gfx1150 must not lose its GEMM kernels just because it is not gfx1151.
 RDNA35_ARCHES = ('gfx1150', 'gfx1151')
 
+
 def output(*args):
     return subprocess.check_output(args, text=True).strip()
 
+
 def runtime_path(source, root):
     return root / 'runtime' / source.relative_to(STORE)
+
 
 def runtime_file(path):
     architectures = re.findall(r'gfx[0-9a-f]+', path.name)
@@ -31,6 +34,7 @@ def runtime_file(path):
         return False
     return ('.so' in path.name or 'rocblas/library' in path.as_posix()
             or 'hipblaslt/library' in path.as_posix())
+
 
 def copy_runtime(source, root):
     destination = runtime_path(source, root)

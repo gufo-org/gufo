@@ -26,7 +26,7 @@ if(ENGINE_ENABLE_HIP)
   target_link_libraries(ds4_markov_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.markov COMMAND ds4_markov_test)
   set_tests_properties(ds4.markov PROPERTIES
-    LABELS "gpu;hip;gfx1151;ds4;quality"
+    LABELS "gpu;hip;rdna35;ds4;quality"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
@@ -34,7 +34,7 @@ if(ENGINE_ENABLE_HIP)
   target_link_libraries(ds4_compressor_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.compressor COMMAND ds4_compressor_test)
   set_tests_properties(ds4.compressor PROPERTIES
-    LABELS "gpu;hip;gfx1151;ds4;quality"
+    LABELS "gpu;hip;rdna35;ds4;quality"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
@@ -42,7 +42,7 @@ if(ENGINE_ENABLE_HIP)
   target_link_libraries(ds4_router_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.router COMMAND ds4_router_test)
   set_tests_properties(ds4.router PROPERTIES
-    LABELS "gpu;hip;gfx1151;ds4;quality"
+    LABELS "gpu;hip;rdna35;ds4;quality"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
@@ -67,7 +67,7 @@ if(ENGINE_ENABLE_HIP)
   add_test(NAME ds4.target COMMAND ds4_quality_test)
   add_test(NAME ds4.dspark COMMAND ds4_quality_test --dspark)
   set_tests_properties(ds4.target ds4.dspark PROPERTIES
-    LABELS "gpu;hip;gfx1151;ds4;quality;external-model;slow"
+    LABELS "gpu;hip;rdna35;ds4;quality;external-model;slow"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
@@ -95,7 +95,7 @@ if(ENGINE_ENABLE_HIP)
   target_link_libraries(ds4_quantize_test PRIVATE gufo_deepseek_v4_flash_mmq)
   add_test(NAME ds4.quantization COMMAND ds4_quantize_test)
   set_tests_properties(ds4.quantization PROPERTIES
-    LABELS "gpu;hip;gfx1151;ds4;quality"
+    LABELS "gpu;hip;rdna35;ds4;quality"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
@@ -106,7 +106,7 @@ if(ENGINE_ENABLE_HIP)
   target_link_libraries(ds4_projection_test PRIVATE hip::host)
   add_test(NAME ds4.projections COMMAND ds4_projection_test)
   set_tests_properties(ds4.projections PROPERTIES
-    LABELS "gpu;hip;gfx1151;ds4;quality"
+    LABELS "gpu;hip;rdna35;ds4;quality"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
@@ -118,7 +118,7 @@ if(ENGINE_ENABLE_HIP)
   target_link_libraries(ds4_attention_test PRIVATE hip::host)
   add_test(NAME ds4.attention COMMAND ds4_attention_test)
   set_tests_properties(ds4.attention PROPERTIES
-    LABELS "gpu;hip;gfx1151;ds4;quality"
+    LABELS "gpu;hip;rdna35;ds4;quality"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 endif()

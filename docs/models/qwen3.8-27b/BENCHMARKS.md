@@ -310,7 +310,7 @@ weight per token, so the ceiling is `bandwidth / model_size`:
 | Strix Halo `gfx1151` | ~240 GB/s | 13.67 tok/s | 12.37 | 2.80× |
 
 The 2.80× generation gap tracks the 2.75× bandwidth gap, not the 2.5× CU gap.
-Prefill is compute-bound as well, so its gap is wider (4.58×).
+Prefill is compute-bound as well, so its gap is wider (4.43×).
 
 llama.cpp `llama-bench` has no speculative mode, so the DFlash2 rows have no
 reference counterpart. `Q4_0` does not load: gufo does not accept Q4_0 for
