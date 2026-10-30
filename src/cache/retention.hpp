@@ -37,8 +37,9 @@ struct CapturePlanRequest {
 [[nodiscard]] std::size_t GridLimit(std::size_t ram_bytes,
                                     std::size_t private_bytes);
 // Queries the adapter once. Required stable/prompt/reused boundaries remain
-// exact. Optional grids reuse a preceding pass end within 128 tokens; learned
-// points coalesce with a planned capture within the existing 64-token slack.
+// exact. Optional grids reuse a preceding pass end within 128 tokens and
+// never split a pass longer than 2,176 rows (they take its start or end);
+// learned points coalesce with a planned capture within the 64-token slack.
 [[nodiscard]] std::vector<CaptureCandidate> PlanCaptures(
     const Adapter&, const Slot&, const CapturePlanRequest&);
 
