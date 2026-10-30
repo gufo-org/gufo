@@ -1,12 +1,11 @@
 #ifndef GUFO_CORE_HIP_ARCH_HPP_
 #define GUFO_CORE_HIP_ARCH_HPP_
 
+#include <string>
 #include <string_view>
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
-
-#include <string>
 #endif
 
 namespace gufo::hip {
@@ -105,6 +104,27 @@ inline constexpr std::string_view kGfx1151 = "gfx1151";
     return std::string(properties.gcnArchName);
   }();
   return arch;
+}
+
+// Human-facing device line for the banner and the startup log: the exact part
+// when the driver answers, the family name when the query fails. Reuses the
+// marketing names above so the two can never drift. The two parts share an
+// instruction set but not a memory subsystem, and the cache identity keys on
+// the architecture, so a gfx1150 host and a gfx1151 host should not print the
+// same line.
+[[nodiscard]] inline std::string DeviceDescription() {
+  const std::string_view arch = CurrentDeviceArch();
+  if (!arch.empty()) {
+    if (IsRdna35(arch)) {
+      return std::string(Rdna35MarketingName(arch));
+    }
+    return std::string(arch);
+  }
+  return "AMD RDNA 3.5 APU";
+}
+#else
+[[nodiscard]] inline std::string DeviceDescription() {
+  return "AMD RDNA 3.5 APU";
 }
 #endif
 

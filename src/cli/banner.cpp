@@ -6,6 +6,7 @@
 #include <span>
 #include <string_view>
 
+#include "src/core/hip/arch.hpp"
 #include "src/core/platform/os_info.hpp"
 
 namespace gufo::cli {
@@ -60,7 +61,7 @@ void PrintStartupBanner(std::string_view version,
   std::clog << "  " << tint << ",___," << reset << "   " << bold << "gufo"
             << reset << ' ' << version << '\n'
             << "  " << tint << eyes << reset << "   Fast LLM & DiT inference"
-            << separator << "RDNA 3.5\n"
+            << separator << gufo::hip::DeviceDescription() << '\n'
             << std::flush;
 }
 
