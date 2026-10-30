@@ -1116,7 +1116,7 @@ std::optional<HttpResponse> ReadOpenAiResponseChat(
           {.stream = true, .response_controls = true})) {
     return error;
   }
-  if (const auto error = ParseResponsesLogprobs(body, &sampling_config))
+  if (const auto error = ParseResponsesLogprobs(body, sampling_config))
     return Err(400, "Bad Request", error->message.c_str(),
                "invalid_request_error", error->code.c_str());
 
