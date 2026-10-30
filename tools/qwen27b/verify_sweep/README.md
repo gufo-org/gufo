@@ -69,6 +69,22 @@ confirm greedy output is unchanged end to end and measure a real workload: a
 per-launch gain only matters in proportion to the projection's share of the
 cycle.
 
+`gen_table.py` applies that rule to two independent sweeps of the target and
+the draft, the raw `--out` logs of `sweep.py`, and prints the four `Launch*`
+functions of a table:
+
+```sh
+python3 tools/qwen27b/verify_sweep/gen_table.py \
+  --target target.gguf --draft draft.gguf \
+  --first target1.log draft1.log --second target2.log draft2.log
+```
+
+A shape is listed where the first sweep's best candidate saves at least
+`--min-gain` percent over `generic`, summed over target and draft weighted by
+their layer counts, and saves that much in the second sweep too. `--skip`
+leaves out a candidate that spills with your compiler. The Windows table was
+generated this way.
+
 ## Limits
 
 - Only the Qwen GPU path (`src/models/qwen/hip`: Qwen3.8-27B and the DFlash2
