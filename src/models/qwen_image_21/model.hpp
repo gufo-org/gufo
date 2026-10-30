@@ -30,7 +30,8 @@ struct Request {
   std::vector<Image> images;
   int width{1024};
   int height{1024};
-  int steps{40};
+  // Zero selects the checkpoint's default; HTTP clients cannot request zero.
+  int steps{0};
   std::uint64_t seed{0};
 };
 
@@ -62,6 +63,15 @@ struct Observer {
 void ValidateRequest(const Request& request);
 std::vector<float> FlowSigmas(int steps, int image_tokens);
 
+/// Base flow matching or the qualified checkpoint-supplied Turbo schedule.
+struct SamplingConfig {
+  std::vector<float> sample_sigmas;
+  bool IsTurbo() const { return !sample_sigmas.empty(); }
+  int DefaultSteps() const { return IsTurbo() ? 8 : 40; }
+  int ResolveSteps(int requested) const;
+  std::vector<float> Sigmas(int requested, int image_tokens) const;
+};
+
 class Model {
 public:
   explicit Model(const std::filesystem::path& root);
@@ -74,6 +84,7 @@ public:
                   const CancellationCheck& cancelled = {},
                   const Observer& observer = {});
   std::vector<std::uint32_t> Tokenize(std::string_view text) const;
+  const SamplingConfig& sampling() const;
 
 private:
   struct Impl;

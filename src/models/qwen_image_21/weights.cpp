@@ -52,6 +52,53 @@ void ArrayEqual(const json::Value& object, std::string_view key,
 
 }  // namespace
 
+SamplingConfig ReadSamplingConfig(const json::Value& index,
+                                  const json::Value& scheduler) {
+  SamplingConfig result;
+  if (const auto* values = index.find("sample_sigmas");
+      values && !values->is_null()) {
+    if (!values->is_array() || values->size() != 8)
+      throw std::runtime_error("Qwen-Image Turbo requires eight sample_sigmas");
+    for (const auto& value : values->items()) {
+      if (!value.is_number() || !std::isfinite(value.as_double()) ||
+          value.as_double() <= 0 || value.as_double() > 1)
+        throw std::runtime_error("invalid Qwen-Image Turbo sample_sigmas");
+      const float sigma = static_cast<float>(value.as_double());
+      if (sigma <= 0 ||
+          (!result.sample_sigmas.empty() &&
+           sigma >= result.sample_sigmas.back()) ||
+          (result.sample_sigmas.empty() && sigma != 1))
+        throw std::runtime_error(
+            "Qwen-Image Turbo sample_sigmas must decrease from one");
+      result.sample_sigmas.push_back(sigma);
+    }
+  }
+  if (scheduler.member_str("_class_name") != "FlowMatchEulerDiscreteScheduler")
+    throw std::runtime_error("unsupported Qwen-Image scheduler");
+  for (auto [key, value] : {std::pair{"base_image_seq_len", 256.0},
+                            {"max_image_seq_len", 8192.0},
+                            {"base_shift", 0.5},
+                            {"max_shift", 0.9},
+                            {"num_train_timesteps", 1000.0}})
+    Equal(scheduler, key, value);
+  if (scheduler.member_str("time_shift_type") != "exponential")
+    throw std::runtime_error("unsupported Qwen-Image flow schedule");
+  Boolean(scheduler, "use_dynamic_shifting", !result.IsTurbo());
+  if (result.IsTurbo()) {
+    const auto* terminal = scheduler.find("shift_terminal");
+    if (!terminal || !terminal->is_null())
+      throw std::runtime_error("Qwen-Image Turbo requires null shift_terminal");
+    Equal(scheduler, "shift", 1);
+  } else {
+    Equal(scheduler, "shift_terminal", 0.02);
+  }
+  for (const char* key :
+       {"invert_sigmas", "stochastic_sampling", "use_beta_sigmas",
+        "use_exponential_sigmas", "use_karras_sigmas"})
+    Boolean(scheduler, key, false);
+  return result;
+}
+
 json::Value ReadJson(const std::filesystem::path& path) {
   std::ifstream in(path, std::ios::binary | std::ios::ate);
   const auto size = in.tellg();
@@ -153,22 +200,19 @@ Weights::Weights(const std::filesystem::path& root) {
         throw std::runtime_error("invalid VAE latent normalization");
   }
   const auto scheduler = ReadJson(root / "scheduler/scheduler_config.json");
-  for (auto [key, value] : {std::pair{"base_image_seq_len", 256.0},
-                            {"max_image_seq_len", 8192.0},
-                            {"base_shift", 0.5},
-                            {"max_shift", 0.9},
-                            {"shift_terminal", 0.02},
-                            {"num_train_timesteps", 1000.0}})
-    Equal(scheduler, key, value);
-  if (scheduler.member_str("time_shift_type") != "exponential" ||
-      !scheduler.find("use_dynamic_shifting") ||
-      !scheduler.find("use_dynamic_shifting")->as_bool())
-    throw std::runtime_error("unsupported Qwen-Image flow schedule");
-  for (const char* key :
-       {"invert_sigmas", "stochastic_sampling", "use_beta_sigmas",
-        "use_exponential_sigmas", "use_karras_sigmas"})
-    Boolean(scheduler, key, false);
-  const auto processor = ReadJson(root / "processor/preprocessor_config.json");
+  sampling_ = ReadSamplingConfig(index, scheduler);
+  json::Value processor;
+  const auto legacy_processor = root / "processor/preprocessor_config.json";
+  if (std::filesystem::exists(legacy_processor)) {
+    processor = ReadJson(legacy_processor);
+  } else {
+    const auto combined = ReadJson(root / "processor/processor_config.json");
+    const auto* image_processor = combined.find("image_processor");
+    if (!image_processor || !image_processor->is_object())
+      throw std::runtime_error(
+          "missing Qwen-Image image processor configuration");
+    processor = *image_processor;
+  }
   for (auto [key, value] : {std::pair{"patch_size", 16},
                             {"temporal_patch_size", 2},
                             {"merge_size", 2}})
@@ -186,9 +230,15 @@ Weights::Weights(const std::filesystem::path& root) {
         throw std::runtime_error("unsupported vision normalization");
   }
   for (const auto& [component, filename] :
-       {std::pair{"text_encoder", "model.safetensors.index.json"},
-        {"transformer", "diffusion_pytorch_model.safetensors.index.json"}}) {
-    const auto manifest = ReadJson(root / component / filename);
+       {std::pair{"text_encoder", "model.safetensors"},
+        {"transformer", "diffusion_pytorch_model.safetensors"}}) {
+    const auto single = root / component / filename;
+    if (std::filesystem::exists(single)) {
+      Load(single, std::string(component) + ".");
+      continue;
+    }
+    const auto manifest =
+        ReadJson(root / component / (std::string(filename) + ".index.json"));
     const auto* weight_map = manifest.find("weight_map");
     if (!weight_map || !weight_map->is_object())
       throw std::runtime_error("missing safetensors weight map");

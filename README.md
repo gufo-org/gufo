@@ -1,5 +1,9 @@
 # Gufo: The ***Open Source*** Strix Halo AI engine 
 
+<!-- turbo-fork -->
+This fork adds **Qwen-Image-2.1-Turbo BF16 generation and editing** on Strix Halo. The paired full-HD benchmark on two desktops measured a 4.72–4.85× speedup over the 40-step base control. See [setup, API, numerical qualification and benchmarks](docs/models/qwen-image-2.1/TURBO.md). Turbo supports ordered references, RGBA and separate-mask editing with its fixed eight-step schedule.
+<!-- /turbo-fork -->
+
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>

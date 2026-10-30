@@ -3,6 +3,16 @@
 Native implementation of the BF16 inference graph. Python is used only for
 offline evaluation; production loads safetensors directly.
 
+The fork's Turbo generation and editing contract additionally pins
+`Qwen/Qwen-Image-2.1-Turbo` at `fc13ba1986fcb905854dc8de2f52eee395f49b5b` and
+Diffusers at `aaf57d03a3edfbd9de457d2872417a92f149a91d` for the independent
+Turbo oracle. Its saved eight-sigma schedule replaces base dynamic shifting;
+see [TURBO.md](../../../docs/models/qwen-image-2.1/TURBO.md). The existing base
+reference pins and numerical contracts below remain unchanged. Editing
+qualification covers a single RGBA reference with matched-input checks and an
+original-plus-mask pair with shared-noise full trajectories; see the
+[editing qualification](../../../docs/models/qwen-image-2.1/artifacts/turbo-editing-qualification.json).
+
 | Source | Pinned revision |
 | --- | --- |
 | [Qwen checkpoint](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | `b3179ad355be050328e483a9dfdd9e60cd62adfa` |

@@ -24,13 +24,18 @@ public:
 
   explicit ImageService(const std::filesystem::path& model_root,
                         std::string model_id = "Qwen-Image-2.1",
-                        Runner runner = {});
+                        Runner runner = {},
+                        models::qwen_image_21::SamplingConfig sampling = {});
   ~ImageService();
   const std::string& model_id() const { return model_id_; }
+  const models::qwen_image_21::SamplingConfig& sampling() const {
+    return sampling_;
+  }
   Result Generate(const Request& request, const CancellationCheck& cancelled);
 
 private:
   std::string model_id_;
+  models::qwen_image_21::SamplingConfig sampling_;
   Runner runner_;
   std::unique_ptr<models::qwen_image_21::Model> model_;
   std::timed_mutex gate_;

@@ -6,6 +6,9 @@ Native HIP image generation and editing on AMD Strix Halo (`gfx1151`). Loads
 BF16 safetensors directly; Python is not needed for inference. The checkpoint
 contains a diffusion transformer, Qwen3-VL prompt encoder and RGBA VAE.
 
+This fork also supports [Qwen-Image-2.1-Turbo generation and editing](TURBO.md), using its
+separate BF16 checkpoint and fixed eight-step schedule. Turbo supports the same ordered-reference editing path.
+
 Weights use the **non-commercial Qwen Research License**, separate from Gufo's
 MIT license. See the [pinned sources and model contract](../../../src/models/qwen_image_21/UPSTREAM.md).
 

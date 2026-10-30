@@ -258,13 +258,17 @@ std::string String(const json::Value& fields, const char* name,
 }  // namespace
 
 ImageService::ImageService(const std::filesystem::path& root,
-                           std::string model_id, Runner runner)
-    : model_id_(std::move(model_id)), runner_(std::move(runner)) {
+                           std::string model_id, Runner runner,
+                           image::SamplingConfig sampling)
+    : model_id_(std::move(model_id)),
+      sampling_(std::move(sampling)),
+      runner_(std::move(runner)) {
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
   if (!runner_) {
 #if defined(ENGINE_ENABLE_HIP)
     model_ = std::make_unique<image::Model>(root);
+    sampling_ = model_->sampling();
     runner_ = [this](const Request& request,
                      const CancellationCheck& cancelled) {
       return model_->Generate(request, cancelled);
@@ -329,7 +333,8 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     const auto quality = String(fields, "quality", "auto");
     if (quality != "auto" && quality != "standard" && quality != "high")
       throw std::invalid_argument(
-          "quality must be auto, standard or high (40 steps)");
+          "quality must be auto, standard or high; steps are "
+          "checkpoint-specific");
     if (const auto* stream = fields.find("stream");
         stream && (!stream->is_bool() || stream->as_bool()))
       throw std::invalid_argument("streaming image responses are unsupported");
@@ -369,7 +374,8 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
       generation.width = parse(std::string_view(size).substr(0, separator));
       generation.height = parse(std::string_view(size).substr(separator + 1));
     }
-    generation.steps = static_cast<int>(Number(fields, "steps", 40, 2, 100));
+    generation.steps = service.sampling().ResolveSteps(static_cast<int>(
+        Number(fields, "steps", service.sampling().DefaultSteps(), 2, 100)));
     std::random_device entropy;
     generation.seed =
         Number(fields, "seed",

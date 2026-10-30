@@ -12,6 +12,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
+#include "src/models/qwen_image_21/model.hpp"
 
 namespace gufo::models::qwen_image_21 {
 
@@ -26,6 +27,8 @@ struct Weight {
 };
 
 json::Value ReadJson(const std::filesystem::path& path);
+SamplingConfig ReadSamplingConfig(const json::Value& index,
+                                  const json::Value& scheduler);
 
 class Weights {
 public:
@@ -39,6 +42,7 @@ public:
   /// The mapped safetensors files with readable handles, for WeightUpload.
   std::span<const core::GgufMappedRegion> Files() const { return files_; }
   const json::Value& VaeConfig() const { return vae_config_; }
+  const SamplingConfig& Sampling() const { return sampling_; }
 
 private:
   void Load(const std::filesystem::path& file, const std::string& prefix);
@@ -47,6 +51,7 @@ private:
   std::vector<core::GgufMappedRegion> files_;
   std::map<std::string, Weight, std::less<>> weights_;
   json::Value vae_config_;
+  SamplingConfig sampling_;
 };
 
 }  // namespace gufo::models::qwen_image_21
