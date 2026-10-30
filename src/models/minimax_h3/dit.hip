@@ -87,7 +87,8 @@ bool ValidateTarget(int* device, std::string* error) {
     SetError(error, HipError("hipGetDeviceProperties", status));
     return false;
   }
-  if (!gufo::hip::IsRdna35(properties.gcnArchName) || properties.integrated == 0) {
+  if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
+      properties.integrated == 0) {
     SetError(error,
              "MiniMax H3 DiT supports only integrated RDNA 3.5 APUs (gfx1151 "
              "Strix Halo, gfx1150 Strix Point); detected " +
@@ -96,7 +97,8 @@ bool ValidateTarget(int* device, std::string* error) {
   }
   if (properties.sharedMemPerBlock <
       kMaximumScalarAttentionRows * sizeof(float)) {
-    SetError(error, "gfx1151 reports insufficient shared memory for H3 SDPA");
+    SetError(error,
+             "RDNA 3.5 APU reports insufficient shared memory for H3 SDPA");
     return false;
   }
   return true;

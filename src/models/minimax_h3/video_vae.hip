@@ -85,8 +85,8 @@ bool ValidateTarget(int* device, std::string* error) {
   if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
       properties.integrated == 0) {
     SetError(error,
-             "MiniMax H3 VisualVAE supports only integrated gfx1151 Gufo "
-             "Halo; detected " +
+             "MiniMax H3 VisualVAE supports only integrated RDNA 3.5 APUs "
+             "(gfx1151 Strix Halo, gfx1150 Strix Point); detected " +
                  std::string(properties.gcnArchName));
     return false;
   }
