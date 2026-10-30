@@ -1,6 +1,7 @@
 #include "src/models/lfm3_audio/model.hpp"
 
 #include <hip/hip_runtime.h>
+#include <hipblas/hipblas.h>
 
 #include <algorithm>
 #include <cmath>
@@ -92,6 +93,9 @@ struct StackState {
 struct Scratch {
   Buffer x, z, o, p, q, k, v, gate, a, ff_gate, ff_up, quantized, row_max,
       frequencies;
+  // FP32 copies of BF16 weights, multiplied by hipBLAS for wide batches.
+  hipblasHandle_t blas{};
+  const std::unordered_map<const void*, float*>* fp32{};
   // min_width bounds the input width of extra projections run with it.
   Scratch(const Stack& s, hipStream_t stream, std::size_t min_width = 0) {
     const std::size_t R = kRows, H = s.hidden;
@@ -115,9 +119,30 @@ struct Scratch {
                                stream);
   }
 };
+// Rows at which BF16 weights move from the small-batch kernel (one weight
+// read per 16 rows) to the tiled one (one read per 64 rows).
+constexpr int kTiledRows = 32;
 void Dense(const Tensor& w, const float* x, float* y, int n, hipStream_t s,
            Scratch& scratch) {
-  lfm3::gpu::Dense(w, x, y, n, s, {scratch.quantized.data});
+  if (scratch.fp32 && n >= kTiledRows)
+    if (auto it = scratch.fp32->find(w.data); it != scratch.fp32->end()) {
+      const float one = 1, zero = 0;
+      Check(hipblasSetStream(scratch.blas, s) == HIPBLAS_STATUS_SUCCESS
+                ? hipSuccess
+                : hipErrorUnknown);
+      Check(hipblasSgemm(scratch.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, int(w.rows),
+                         n, int(w.cols), &one, it->second, int(w.cols), x,
+                         int(w.cols), &zero, y,
+                         int(w.rows)) == HIPBLAS_STATUS_SUCCESS
+                ? hipSuccess
+                : hipErrorUnknown);
+      return;
+    }
+  if (w.type == core::GgmlType::kBF16 && n >= kTiledRows)
+    gpu::SgemmBf16(x, w.data, nullptr, y, n, int(w.rows), int(w.cols),
+                   Activation::kNone, s);
+  else
+    lfm3::gpu::Dense(w, x, y, n, s, {scratch.quantized.data});
 }
 void DenseBias(const Tensor& w, const Tensor& bias, const float* x, float* y,
                int n, Activation act, hipStream_t s, Scratch& scratch) {
@@ -130,8 +155,10 @@ const float* F(const Tensor& t) {
 // Runs n <= kRows rows of scratch.x through the stack and writes the
 // output-normed rows to scratch.z. Without state, attention is
 // bidirectional over the rows and convolutions are absent.
+// segment > 0 splits stateless rows into independent sequences of that
+// many rows (positions and attention restart at each).
 void RunStack(const Stack& st, StackState* state, int n, int window,
-              Scratch& sc, hipStream_t s) {
+              Scratch& sc, hipStream_t s, int segment = 0) {
   const int H = st.hidden;
   const int position = state ? state->position : 0;
   auto norm = [&](const float* in, const Tensor& w, float* out) {
@@ -152,17 +179,24 @@ void RunStack(const Stack& st, StackState* state, int n, int window,
       gufo::hip::LaunchBatchedPerHeadRMSNorm(sc.k.floats(), F(b.k_norm),
                                              sc.k.floats(), n, st.kv_heads,
                                              st.head_dim, st.eps, s);
-      lfm3::gpu::Rope(sc.q.floats(), sc.frequencies.floats(), nullptr, n,
-                      st.heads, st.head_dim, position, s);
-      lfm3::gpu::Rope(sc.k.floats(), sc.frequencies.floats(), nullptr, n,
-                      st.kv_heads, st.head_dim, position, s);
-      const float* ck = state ? state->k[i].floats() : nullptr;
-      const float* cv = state ? state->v[i].floats() : nullptr;
-      gpu::Attention(sc.q.floats(), sc.k.floats(), sc.v.floats(),
-                     b.attn_gate.data ? sc.gate.floats() : nullptr, ck, cv,
-                     sc.a.floats(), n, st.heads, st.kv_heads, st.head_dim,
-                     position, state ? int(state->capacity) : 1, window,
-                     state != nullptr, s);
+      const int rows = segment > 0 && !state ? segment : n;
+      for (int r = 0; r < n; r += rows) {
+        const auto qo = std::size_t(r) * st.heads * st.head_dim;
+        const auto ko = std::size_t(r) * st.kv_heads * st.head_dim;
+        lfm3::gpu::Rope(sc.q.floats() + qo, sc.frequencies.floats(), nullptr,
+                        rows, st.heads, st.head_dim, position, s);
+        lfm3::gpu::Rope(sc.k.floats() + ko, sc.frequencies.floats(), nullptr,
+                        rows, st.kv_heads, st.head_dim, position, s);
+        const float* ck = state ? state->k[i].floats() : nullptr;
+        const float* cv = state ? state->v[i].floats() : nullptr;
+        gpu::Attention(
+            sc.q.floats() + qo, sc.k.floats() + ko, sc.v.floats() + ko,
+            b.attn_gate.data ? sc.gate.floats() + std::size_t(r) * st.heads
+                             : nullptr,
+            ck, cv, sc.a.floats() + qo, rows, st.heads, st.kv_heads,
+            st.head_dim, position, state ? int(state->capacity) : 1, window,
+            state != nullptr, s);
+      }
       if (state)
         lfm3::gpu::StoreKV(sc.k.floats(), sc.v.floats(), state->k[i].floats(),
                            state->v[i].floats(), n, st.kv_heads * st.head_dim,
@@ -179,10 +213,17 @@ void RunStack(const Stack& st, StackState* state, int n, int window,
     gufo::hip::LaunchBatchedResidualAdd(sc.x.floats(), sc.o.floats(),
                                         sc.x.floats(), n, H, s);
     norm(sc.x.floats(), b.ffn_norm, sc.z.floats());
-    lfm3::gpu::ProjectFfn(
-        b.gate, b.up, b.down, sc.z.floats(), sc.ff_gate.floats(),
-        sc.ff_up.floats(), sc.o.floats(), n, s,
-        {sc.quantized.data, static_cast<unsigned*>(sc.row_max.data)});
+    if (b.gate.type == core::GgmlType::kBF16 && n >= kTiledRows) {
+      Dense(b.gate, sc.z.floats(), sc.ff_gate.floats(), n, s, sc);
+      Dense(b.up, sc.z.floats(), sc.ff_up.floats(), n, s, sc);
+      gpu::SwiGlu(sc.ff_gate.floats(), sc.ff_up.floats(), sc.ff_gate.floats(),
+                  std::size_t(n) * b.gate.rows, s);
+      Dense(b.down, sc.ff_gate.floats(), sc.o.floats(), n, s, sc);
+    } else
+      lfm3::gpu::ProjectFfn(
+          b.gate, b.up, b.down, sc.z.floats(), sc.ff_gate.floats(),
+          sc.ff_up.floats(), sc.o.floats(), n, s,
+          {sc.quantized.data, static_cast<unsigned*>(sc.row_max.data)});
     if (b.post_ffn_norm.data)
       norm(sc.o.floats(), b.post_ffn_norm, sc.o.floats());
     gufo::hip::LaunchBatchedResidualAdd(sc.x.floats(), sc.o.floats(),
@@ -208,6 +249,18 @@ struct Pinned {
 };
 }  // namespace
 
+// An instantiated graph, destroyed with its owner.
+struct GraphExec {
+  hipGraphExec_t value{};
+  GraphExec() = default;
+  GraphExec(const GraphExec&) = delete;
+  ~GraphExec() { Reset(); }
+  void Reset() {
+    if (value)
+      (void)hipGraphExecDestroy(value);
+    value = nullptr;
+  }
+};
 struct Model::Impl {
   std::shared_ptr<lfm3::Model> backbone;
   std::unique_ptr<core::GgufReader> reader;
@@ -222,6 +275,18 @@ struct Model::Impl {
   std::unique_ptr<Scratch> encoder_scratch, projector_scratch;
   Buffer samples, stft_frames, spectrum, mel, c1, c2, c3, flat, embeddings;
   Buffer stft_window, dft_basis, mel_filters, window_mel;
+  // Frames of several voices in one depth pass (Voice::SampleFrames),
+  // serialized by batch_mutex and created on first use.
+  std::mutex batch_mutex;
+  std::unique_ptr<Stream> batch_stream;
+  std::unique_ptr<Scratch> batch_depth;
+  Buffer batch_hidden, batch_base, batch_frames;
+  std::vector<Buffer> batch_weights;
+  std::unordered_map<const void*, float*> batch_fp32;
+  hipblasHandle_t batch_blas{};
+  GraphExec batch_graph;
+  std::vector<std::uintptr_t> batch_key;
+  bool batch_graph_failed{};
   // Computes impl.mel ([frames][128]) on the encoder stream.
   std::uint32_t ComputeMel(std::span<const float> pcm, Scratch& sc);
   // Encodes tokens [t0, t1) of a stream into host rows of backbone width.
@@ -712,13 +777,16 @@ struct Voice::Impl {
     Check(hipMemcpyAsync(host_frame.data, codes.data, K * 4,
                          hipMemcpyDeviceToHost, s));
   }
-  void Frame(const float* hidden, float* embedding, const Sampling& sampling,
-             std::mt19937_64& rng, bool ordered, std::span<std::int32_t> out) {
+  // Draws the frame's reveal order and uniforms and sizes the repetition
+  // ring; returns the device sampling settings.
+  gpu::FrameSampling Prepare(const Sampling& sampling, std::mt19937_64& rng,
+                             bool ordered) {
     if (sampling.repetition_window > window) {
       window = sampling.repetition_window;
       ring = Buffer(std::max<std::size_t>(window, 1) * K * 4);
       Check(hipMemsetAsync(position.data, 0, position.bytes, stream.value));
       Check(hipMemsetAsync(counts.data, 0, counts.bytes, stream.value));
+      Check(hipStreamSynchronize(stream.value));
       if (graph) {
         (void)hipGraphExecDestroy(graph);
         graph = nullptr;
@@ -734,9 +802,12 @@ struct Voice::Impl {
       host_randoms.ints()[i] = order[i];
       host_randoms.floats()[K + i] = uniform(rng);
     }
-    const gpu::FrameSampling fs{sampling.temperature,
-                                sampling.repetition_penalty, sampling.top_k,
-                                int(sampling.repetition_window)};
+    return {sampling.temperature, sampling.repetition_penalty, sampling.top_k,
+            int(sampling.repetition_window)};
+  }
+  void Frame(const float* hidden, float* embedding, const Sampling& sampling,
+             std::mt19937_64& rng, bool ordered, std::span<std::int32_t> out) {
+    const auto fs = Prepare(sampling, rng, ordered);
     if (!embedding)
       embedding = frame.floats();
     const auto s = stream.value;
@@ -822,6 +893,172 @@ std::unique_ptr<Voice> Model::CreateVoice(std::string* error) {
 }
 void Voice::Reset() {
   impl_->Reset();
+}
+bool Voice::SampleFrames(std::span<Voice* const> voices,
+                         std::span<const float* const> hiddens,
+                         std::span<const Sampling> sampling,
+                         std::span<std::mt19937_64* const> rngs,
+                         std::span<std::int32_t> codes,
+                         std::span<float* const> embeddings,
+                         std::string* error) {
+  try {
+    constexpr int K = Impl::K, V = Impl::V;
+    const auto B = voices.size();
+    if (!B || hiddens.size() != B || sampling.size() != B || rngs.size() != B ||
+        embeddings.size() != B || codes.size() != B * K ||
+        B * K > std::size_t(kRows))
+      throw std::invalid_argument("invalid LFM3-Audio frame batch");
+    std::vector<Impl*> v(B);
+    for (std::size_t i = 0; i < B; ++i) {
+      v[i] = voices[i]->impl_.get();
+      if (v[i]->model != v.front()->model || !embeddings[i] || !hiddens[i])
+        throw std::invalid_argument("invalid LFM3-Audio frame batch voice");
+    }
+    auto& m = *v.front()->model->impl_;
+    const auto& w = m.weights;
+    const std::lock_guard lock(m.batch_mutex);
+    const int Hd = int(w.depth.hidden);
+    const int H = int(m.backbone->config().hidden);
+    if (!m.batch_stream) {
+      m.batch_stream = std::make_unique<Stream>();
+      m.batch_depth = std::make_unique<Scratch>(w.depth, m.batch_stream->value,
+                                                std::size_t(H));
+      m.batch_hidden = Buffer(std::size_t(kRows / K) * H * 4);
+      m.batch_base = Buffer(std::size_t(kRows / K) * K * Hd * 4);
+      m.batch_frames = Buffer(std::size_t(kRows / K) * sizeof(gpu::VoiceFrame));
+      // FP32 copies of the depth decoder's BF16 projections for hipBLAS.
+      if (hipblasCreate(&m.batch_blas) != HIPBLAS_STATUS_SUCCESS)
+        throw std::runtime_error("cannot create hipBLAS handle");
+      std::vector<const Tensor*> wide{&w.depth_in};
+      for (const auto& b : w.depth.blocks)
+        for (const auto* t : {&b.q, &b.k, &b.v, &b.attn_gate, &b.attn_out,
+                              &b.gate, &b.up, &b.down})
+          wide.push_back(t);
+      std::vector<std::uint16_t> host;
+      std::vector<float> widened;
+      for (const auto* t : wide) {
+        if (!t->data || t->type != core::GgmlType::kBF16 ||
+            m.batch_fp32.contains(t->data))
+          continue;
+        const auto count = std::size_t(t->rows) * t->cols;
+        host.resize(count);
+        widened.resize(count);
+        Check(
+            hipMemcpy(host.data(), t->data, count * 2, hipMemcpyDeviceToHost));
+        for (std::size_t i = 0; i < count; ++i) {
+          const std::uint32_t bits = std::uint32_t(host[i]) << 16;
+          std::memcpy(&widened[i], &bits, 4);
+        }
+        m.batch_weights.emplace_back(count * 4);
+        Check(hipMemcpy(m.batch_weights.back().data, widened.data(), count * 4,
+                        hipMemcpyHostToDevice));
+        m.batch_fp32[t->data] = m.batch_weights.back().floats();
+      }
+      m.batch_depth->blas = m.batch_blas;
+      m.batch_depth->fp32 = &m.batch_fp32;
+    }
+    const auto s = m.batch_stream->value;
+    auto& bd = *m.batch_depth;
+    std::vector<gpu::FrameSampling> fs(B);
+    std::vector<std::uintptr_t> key;
+    for (std::size_t i = 0; i < B; ++i) {
+      fs[i] = v[i]->Prepare(sampling[i], *rngs[i], false);
+      std::uintptr_t
+          setting[sizeof(gpu::FrameSampling) / sizeof(std::uintptr_t) + 1]{};
+      std::memcpy(setting, &fs[i], sizeof(gpu::FrameSampling));
+      key.insert(key.end(),
+                 {std::uintptr_t(v[i]), std::uintptr_t(v[i]->ring.data),
+                  std::uintptr_t(hiddens[i]), std::uintptr_t(embeddings[i])});
+      key.insert(key.end(), std::begin(setting), std::end(setting));
+    }
+    const auto* frames =
+        static_cast<const gpu::VoiceFrame*>(m.batch_frames.data);
+    const int voices = int(B);
+    auto record = [&]() {
+      for (std::size_t i = 0; i < B; ++i) {
+        Check(hipMemcpyAsync(v[i]->randoms.data, v[i]->host_randoms.data,
+                             v[i]->randoms.bytes, hipMemcpyHostToDevice, s));
+        Check(hipMemcpyAsync(m.batch_hidden.floats() + i * H, hiddens[i],
+                             std::size_t(H) * 4, hipMemcpyDeviceToDevice, s));
+      }
+      // One depth input projection for every voice.
+      Dense(w.depth_in, m.batch_hidden.floats(), m.batch_base.floats(), voices,
+            s, bd);
+      gpu::BiasAct(m.batch_base.floats(), F(w.depth_in_bias), voices,
+                   w.depth_in.rows, Activation::kNone, s);
+      gpu::StartFrames(frames, voices, K, s);
+      for (int pass = 0; pass < K / gpu::kFramePass; ++pass) {
+        gpu::DepthInputsFrames(frames, voices, F(w.mask_embedding),
+                               w.code_embeddings, K, V, s);
+        RunStack(w.depth, nullptr, voices * K, 0, bd, s, K);
+        gpu::CodebookNormFrames(frames, voices, F(w.head_norms), pass, Hd,
+                                w.depth.eps, s);
+        gpu::CodebookLogitsFrames(frames, voices, w.code_embeddings, pass, V,
+                                  s);
+        gpu::SampleCodesFrames(frames, voices, pass, V, s);
+      }
+      gpu::FinishFrames(frames, voices, w.audio_out, K, V, AudioWeights::kCodes,
+                        s);
+      for (std::size_t i = 0; i < B; ++i)
+        Check(hipMemcpyAsync(v[i]->host_frame.data, v[i]->codes.data, K * 4,
+                             hipMemcpyDeviceToHost, s));
+    };
+    if (key != m.batch_key) {
+      // The voice table the frame kernels read.
+      std::vector<gpu::VoiceFrame> table(B);
+      for (std::size_t i = 0; i < B; ++i)
+        table[i] = {v[i]->State(),
+                    fs[i],
+                    m.batch_base.floats() + i * K * Hd,
+                    bd.x.floats() + i * K * Hd,
+                    bd.z.floats() + i * K * Hd,
+                    v[i]->head_inputs.floats(),
+                    v[i]->logits.floats(),
+                    v[i]->randoms.ints(),
+                    v[i]->randoms.floats() + K,
+                    embeddings[i]};
+      Check(hipMemcpyAsync(m.batch_frames.data, table.data(),
+                           table.size() * sizeof(gpu::VoiceFrame),
+                           hipMemcpyHostToDevice, s));
+      Check(hipStreamSynchronize(s));
+    }
+    if (key != m.batch_key && m.batch_graph_failed)
+      m.batch_key = key;
+    if (key != m.batch_key) {
+      m.batch_graph.Reset();
+      m.batch_key.clear();
+      hipGraph_t captured{};
+      bool ok = hipStreamBeginCapture(s, hipStreamCaptureModeThreadLocal) ==
+                hipSuccess;
+      if (ok) {
+        record();
+        ok = hipStreamEndCapture(s, &captured) == hipSuccess && captured;
+      }
+      ok = ok && hipGraphInstantiate(&m.batch_graph.value, captured, nullptr,
+                                     nullptr, 0) == hipSuccess;
+      if (captured)
+        (void)hipGraphDestroy(captured);
+      (void)hipGetLastError();
+      if (ok)
+        m.batch_key = key;
+      else {
+        m.batch_graph.Reset();
+        m.batch_graph_failed = true;
+      }
+    }
+    if (m.batch_graph.value)
+      Check(hipGraphLaunch(m.batch_graph.value, s));
+    else
+      record();
+    Check(hipStreamSynchronize(s));
+    for (std::size_t i = 0; i < B; ++i)
+      std::memcpy(codes.data() + i * K, v[i]->host_frame.data, K * 4);
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
 }
 bool Voice::SampleFrame(const float* hidden, const Sampling& sampling,
                         std::mt19937_64& rng, std::span<std::int32_t> codes,

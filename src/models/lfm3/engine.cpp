@@ -115,7 +115,8 @@ struct Session::Impl {
   Stream stream;
   std::uint32_t context, position{};
   bool poisoned{}, logits_ready{};
-  Buffer ids, x, z, out, p, q, k, v, gate, a, ff_gate, ff_up, logits, frontier;
+  Buffer ids, x, z, out, p, q, k, v, gate, a, ff_gate, ff_up, logits, frontier,
+      inputs;
   struct State {
     Buffer conv, k, v;
     std::uint32_t capacity{};
@@ -138,7 +139,8 @@ struct Session::Impl {
         ff_gate(kChunk * model->config().intermediate * 4),
         ff_up(kChunk * model->config().intermediate * 4),
         logits(kMaxBatch * model->config().vocab * 4),
-        frontier(model->config().hidden * 4) {
+        frontier(model->config().hidden * 4),
+        inputs(kMaxBatch * model->config().hidden * 4) {
     const auto& c = model->config();
     const auto width =
         std::max({c.hidden * 3, c.intermediate, c.heads * c.head_dim});
@@ -314,12 +316,13 @@ struct Session::Impl {
         dense(w.output, frontier.floats(), logits.floats(), 1, s);
     } else {
       norm(x.floats(), w.output_norm, z.floats(), n);
-      dense(w.output, z.floats(), logits.floats(), n, s);
+      if (output_logits)
+        dense(w.output, z.floats(), logits.floats(), n, s);
       for (std::size_t row = 0; row < batch.size(); ++row) {
         Check(hipMemcpyAsync(
             batch[row]->frontier.data, z.floats() + row * c.hidden,
             std::size_t(c.hidden) * 4, hipMemcpyDeviceToDevice, s));
-        if (row)
+        if (row && output_logits)
           Check(hipMemcpyAsync(
               batch[row]->logits.data, logits.floats() + row * c.vocab,
               std::size_t(c.vocab) * 4, hipMemcpyDeviceToDevice, s));
@@ -332,7 +335,7 @@ struct Session::Impl {
     else
       for (auto* row : batch) {
         ++row->position;
-        row->logits_ready = true;
+        row->logits_ready = output_logits;
       }
   }
 };
@@ -472,6 +475,58 @@ bool Session::ForwardBatch(std::span<Session* const> sessions,
       for (std::size_t i = 0; i < batch.size(); ++i)
         Check(hipMemcpy(outputs[i].data(), batch[i]->logits.data,
                         outputs[i].size_bytes(), hipMemcpyDeviceToHost));
+    } catch (...) {
+      for (auto* state : batch)
+        state->poisoned = true;
+      throw;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+bool Session::ForwardBatchInputs(std::span<Session* const> sessions,
+                                 std::span<const std::uint32_t> tokens,
+                                 std::span<const float* const> rows,
+                                 bool logits, std::string* error) {
+  try {
+    if (sessions.empty() || sessions.size() > kMaxBatch ||
+        tokens.size() != sessions.size() || rows.size() != sessions.size())
+      throw std::invalid_argument("invalid LFM3 decode batch shape");
+    std::vector<Impl*> batch;
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+      auto* session = sessions[i];
+      if (!session || std::find(sessions.begin(), sessions.begin() + i,
+                                session) != sessions.begin() + i)
+        throw std::invalid_argument("duplicate or null LFM3 batch session");
+      auto* state = session->impl_.get();
+      if (state->poisoned || state->position >= state->context ||
+          (!rows[i] && tokens[i] >= state->model->config().vocab) ||
+          (!batch.empty() && state->model != batch.front()->model))
+        throw std::invalid_argument("incompatible LFM3 batch session");
+      batch.push_back(state);
+    }
+    auto& front = *batch.front();
+    const auto& w = front.model->impl_->weights;
+    const auto H = w.config.hidden;
+    const auto s = front.stream.value;
+    try {
+      // The inputs gather into the front session's staging rows.
+      Check(hipMemcpyAsync(front.ids.data, tokens.data(), tokens.size_bytes(),
+                           hipMemcpyHostToDevice, s));
+      for (std::size_t i = 0; i < batch.size(); ++i) {
+        auto* row = front.inputs.floats() + i * H;
+        if (rows[i])
+          Check(hipMemcpyAsync(row, rows[i], std::size_t(H) * 4,
+                               hipMemcpyDeviceToDevice, s));
+        else
+          gpu::Embed(w.embedding,
+                     static_cast<const std::uint32_t*>(front.ids.data) + i, row,
+                     1, s);
+      }
+      front.Run({}, logits, batch, front.inputs.floats(), batch.size(), true);
     } catch (...) {
       for (auto* state : batch)
         state->poisoned = true;

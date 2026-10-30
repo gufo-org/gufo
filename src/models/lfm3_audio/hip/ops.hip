@@ -30,9 +30,17 @@ __device__ float Activate(float x, Activation act) {
   return x;
 }
 constexpr int kTile = 64, kDepth = 16;
-// 64x64 output tile per block, 256 threads, 4x4 outputs each.
+__device__ inline float Weight(const float* w, std::size_t i) {
+  return w[i];
+}
+__device__ inline float Weight(const std::uint16_t* w, std::size_t i) {
+  return __uint_as_float(std::uint32_t(w[i]) << 16);
+}
+// 64x64 output tile per block, 256 threads, 4x4 outputs each; weights are
+// FP32 or BF16 (widened exactly), accumulation FP32.
+template<class W>
 __global__ void SgemmKernel(const float* __restrict__ x,
-                            const float* __restrict__ w,
+                            const W* __restrict__ w,
                             const float* __restrict__ bias, float* y, int n,
                             int M, int K, Activation act) {
   __shared__ float xs[kDepth][kTile + 1], ws[kDepth][kTile + 1];
@@ -44,7 +52,7 @@ __global__ void SgemmKernel(const float* __restrict__ x,
       const int r = i / kDepth, kk = i % kDepth;
       const int gr = row0 + r, gc = col0 + r, gk = k0 + kk;
       xs[kk][r] = gr < n && gk < K ? x[std::size_t(gr) * K + gk] : 0.0F;
-      ws[kk][r] = gc < M && gk < K ? w[std::size_t(gc) * K + gk] : 0.0F;
+      ws[kk][r] = gc < M && gk < K ? Weight(w, std::size_t(gc) * K + gk) : 0.0F;
     }
     __syncthreads();
 #pragma unroll
@@ -75,6 +83,14 @@ __global__ void SgemmKernel(const float* __restrict__ x,
         y[std::size_t(r) * M + c] =
             Activate(acc[i][j] + (bias ? bias[c] : 0.0F), act);
     }
+  }
+}
+__global__ void SwiGluKernel(const float* gate, const float* up, float* out,
+                             std::size_t count) {
+  const auto i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    const float g = gate[i];
+    out[i] = g / (1.0F + expf(-g)) * up[i];
   }
 }
 __global__ void BiasActKernel(float* y, const float* bias, std::size_t count,
@@ -244,17 +260,23 @@ __global__ void AttentionKernel(const float* q, const float* k, const float* v,
     y[(std::size_t(row) * heads + h) * D + lane + p * 32] =
         acc[p] / denominator * g;
 }
-__global__ void DepthInputsKernel(const float* base, const float* mask,
-                                  Tensor table, const std::int32_t* codes,
-                                  const std::int32_t* masked, float* out,
-                                  int codebooks, int size) {
-  const int c = blockIdx.x, dim = table.cols;
+__device__ void DepthInputsBody(const float* base, const float* mask,
+                                Tensor table, const std::int32_t* codes,
+                                const std::int32_t* masked, float* out,
+                                int size, int c) {
+  const int dim = table.cols;
   for (int i = threadIdx.x; i < dim; i += blockDim.x) {
     const float add =
         masked[c] ? mask[i]
                   : Value(table, (std::size_t(c) * size + codes[c]) * dim + i);
     out[std::size_t(c) * dim + i] = base[std::size_t(c) * dim + i] + add;
   }
+}
+__global__ void DepthInputsKernel(const float* base, const float* mask,
+                                  Tensor table, const std::int32_t* codes,
+                                  const std::int32_t* masked, float* out,
+                                  int codebooks, int size) {
+  DepthInputsBody(base, mask, table, codes, masked, out, size, blockIdx.x);
 }
 __global__ void FrameEmbeddingsKernel(Tensor table, const std::int32_t* codes,
                                       float* out, int codebooks, int size) {
@@ -295,27 +317,32 @@ __global__ void PolarKernel(float* s, int n, int bins) {
   row[b] = magnitude * cs;
   row[bins + b] = magnitude * sn;
 }
-__global__ void CodebookNormKernel(const float* x, const float* norms,
-                                   const std::int32_t* which, float* out,
-                                   int dim, float eps) {
+__device__ void CodebookNormBody(const float* x, const float* norms,
+                                 const std::int32_t* which, float* out,
+                                 int dim, float eps, int slot) {
   __shared__ float scratch[32];
-  const int c = which[blockIdx.x];
+  const int c = which[slot];
   const float* row = x + std::size_t(c) * dim;
   float squares = 0;
   for (int i = threadIdx.x; i < dim; i += blockDim.x)
     squares = fmaf(row[i], row[i], squares);
   const float inv = rsqrtf(BlockSum(squares, scratch) / dim + eps);
   for (int i = threadIdx.x; i < dim; i += blockDim.x)
-    out[std::size_t(blockIdx.x) * dim + i] =
+    out[std::size_t(slot) * dim + i] =
         row[i] * inv * norms[std::size_t(c) * dim + i];
+}
+__global__ void CodebookNormKernel(const float* x, const float* norms,
+                                   const std::int32_t* which, float* out,
+                                   int dim, float eps) {
+  CodebookNormBody(x, norms, which, out, dim, eps, blockIdx.x);
 }
 
 // One wave per logits row; Q8_0 rows read whole blocks per lane.
 template<core::GgmlType kType>
-__global__ void CodebookLogitsKernel(Tensor table, const float* x,
-                                     const std::int32_t* which, float* logits,
-                                     int size) {
-  const int i = blockIdx.y, lane = threadIdx.x % 32;
+__device__ void CodebookLogitsBody(Tensor table, const float* x,
+                                   const std::int32_t* which, float* logits,
+                                   int size, int i) {
+  const int lane = threadIdx.x % 32;
   const int r = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
   if (r >= size)
     return;
@@ -353,6 +380,12 @@ __global__ void CodebookLogitsKernel(Tensor table, const float* x,
     sum += __shfl_down(sum, offset, 32);
   if (!lane)
     logits[std::size_t(i) * size + r] = sum;
+}
+template<core::GgmlType kType>
+__global__ void CodebookLogitsKernel(Tensor table, const float* x,
+                                     const std::int32_t* which, float* logits,
+                                     int size) {
+  CodebookLogitsBody<kType>(table, x, which, logits, size, blockIdx.y);
 }
 
 // One-row projection of a wide BF16 or Q8_0 matrix: a block owns four rows
@@ -422,13 +455,12 @@ __global__ void __launch_bounds__(256)
 constexpr int kSortSize = 2048;
 // One block per sampled codebook. Ties keep the lowest index, like argmax
 // and the top-k threshold of the reference sampler.
-__global__ void SampleCodesKernel(const float* logits,
-                                  const std::int32_t* which,
-                                  const float* uniforms, FrameState state,
-                                  FrameSampling sampling, int size) {
+__device__ void SampleCodesBody(const float* logits, const std::int32_t* which,
+                                const float* uniforms, FrameState state,
+                                FrameSampling sampling, int size, int i) {
   __shared__ float values[kSortSize];
   __shared__ int indices[kSortSize];
-  const int i = blockIdx.x, c = which[i], tid = threadIdx.x;
+  const int c = which[i], tid = threadIdx.x;
   const float* row = logits + std::size_t(i) * size;
   const std::int32_t* counts = state.counts + std::size_t(c) * size;
   for (int r = tid; r < kSortSize; r += blockDim.x) {
@@ -490,16 +522,26 @@ __global__ void SampleCodesKernel(const float* logits,
   state.codes[c] = pick;
   state.masked[c] = 0;
 }
-__global__ void StartFrameKernel(FrameState state, int codebooks) {
+__global__ void SampleCodesKernel(const float* logits,
+                                  const std::int32_t* which,
+                                  const float* uniforms, FrameState state,
+                                  FrameSampling sampling, int size) {
+  SampleCodesBody(logits, which, uniforms, state, sampling, size, blockIdx.x);
+}
+__device__ void StartFrameBody(FrameState state, int codebooks) {
   const int c = threadIdx.x;
   if (c < codebooks) {
     state.codes[c] = 0;
     state.masked[c] = 1;
   }
 }
-__global__ void FinishFrameKernel(Tensor table, FrameState state,
-                                  FrameSampling sampling, float* embedding,
-                                  int codebooks, int size, int end_code) {
+__global__ void StartFrameKernel(FrameState state, int codebooks) {
+  StartFrameBody(state, codebooks);
+}
+__device__ void FinishFrameBody(Tensor table, FrameState state,
+                                FrameSampling sampling, float* embedding,
+                                int codebooks, int size, int end_code,
+                                int block) {
   __shared__ int codes[32];
   __shared__ bool end;
   const int tid = threadIdx.x;
@@ -516,14 +558,14 @@ __global__ void FinishFrameKernel(Tensor table, FrameState state,
     codes[tid] = end_code;
   __syncthreads();
   const int dim = table.cols;
-  const int i = blockIdx.x * blockDim.x + tid;
+  const int i = block * blockDim.x + tid;
   if (i < dim) {
     float sum = 0;
     for (int c = 0; c < codebooks; ++c)
       sum += Value(table, (std::size_t(c) * size + codes[c]) * dim + i);
     embedding[i] = sum;
   }
-  if (blockIdx.x)
+  if (block)
     return;
   if (end && tid < codebooks)
     state.codes[tid] = end_code;
@@ -544,6 +586,49 @@ __global__ void FinishFrameKernel(Tensor table, FrameState state,
     state.position[1] = min(filled + 1, sampling.window);
   }
 }
+__global__ void FinishFrameKernel(Tensor table, FrameState state,
+                                  FrameSampling sampling, float* embedding,
+                                  int codebooks, int size, int end_code) {
+  FinishFrameBody(table, state, sampling, embedding, codebooks, size, end_code,
+                  blockIdx.x);
+}
+// Frames of several voices: blockIdx.y (z for logits) selects the voice.
+__global__ void StartFramesKernel(const VoiceFrame* frames, int codebooks) {
+  StartFrameBody(frames[blockIdx.y].state, codebooks);
+}
+__global__ void DepthInputsFramesKernel(const VoiceFrame* frames,
+                                        const float* mask, Tensor table,
+                                        int size) {
+  const auto& f = frames[blockIdx.y];
+  DepthInputsBody(f.base, mask, table, f.state.codes, f.state.masked, f.x,
+                  size, blockIdx.x);
+}
+__global__ void CodebookNormFramesKernel(const VoiceFrame* frames,
+                                         const float* norms, int pass,
+                                         int dim, float eps) {
+  const auto& f = frames[blockIdx.y];
+  CodebookNormBody(f.z, norms, f.order + pass * kFramePass, f.head_inputs,
+                   dim, eps, blockIdx.x);
+}
+template<core::GgmlType kType>
+__global__ void CodebookLogitsFramesKernel(const VoiceFrame* frames,
+                                           Tensor table, int pass, int size) {
+  const auto& f = frames[blockIdx.z];
+  CodebookLogitsBody<kType>(table, f.head_inputs, f.order + pass * kFramePass,
+                            f.logits, size, blockIdx.y);
+}
+__global__ void SampleCodesFramesKernel(const VoiceFrame* frames, int pass,
+                                        int size) {
+  const auto& f = frames[blockIdx.y];
+  SampleCodesBody(f.logits, f.order + pass * kFramePass, f.uniforms, f.state,
+                  f.sampling, size, blockIdx.x);
+}
+__global__ void FinishFramesKernel(const VoiceFrame* frames, Tensor table,
+                                   int codebooks, int size, int end_code) {
+  const auto& f = frames[blockIdx.y];
+  FinishFrameBody(table, f.state, f.sampling, f.embedding, codebooks, size,
+                  end_code, blockIdx.x);
+}
 unsigned Blocks(std::size_t count, int threads = 256) {
   return unsigned((count + threads - 1) / threads);
 }
@@ -552,6 +637,16 @@ void Sgemm(const float* x, const float* w, const float* bias, float* y, int n,
            int M, int K, Activation act, hipStream_t s) {
   SgemmKernel<<<dim3((n + kTile - 1) / kTile, (M + kTile - 1) / kTile), 256,
                 0, s>>>(x, w, bias, y, n, M, K, act);
+}
+void SgemmBf16(const float* x, const void* w, const float* bias, float* y,
+               int n, int M, int K, Activation act, hipStream_t s) {
+  SgemmKernel<<<dim3((n + kTile - 1) / kTile, (M + kTile - 1) / kTile), 256,
+                0, s>>>(x, static_cast<const std::uint16_t*>(w), bias, y, n, M,
+                        K, act);
+}
+void SwiGlu(const float* gate, const float* up, float* out, std::size_t count,
+            hipStream_t s) {
+  SwiGluKernel<<<Blocks(count), 256, 0, s>>>(gate, up, out, count);
 }
 void BiasAct(float* y, const float* bias, int n, int M, Activation act,
              hipStream_t s) {
@@ -676,6 +771,46 @@ void FinishFrame(const Tensor& audio_out, FrameState state,
                  int size, int end_code, hipStream_t s) {
   FinishFrameKernel<<<Blocks(audio_out.cols), 256, 0, s>>>(
       audio_out, state, sampling, embedding, codebooks, size, end_code);
+}
+void StartFrames(const VoiceFrame* frames, int voices, int codebooks,
+                 hipStream_t s) {
+  StartFramesKernel<<<dim3(1, voices), 32, 0, s>>>(frames, codebooks);
+}
+void DepthInputsFrames(const VoiceFrame* frames, int voices, const float* mask,
+                       const Tensor& table, int codebooks, int size,
+                       hipStream_t s) {
+  DepthInputsFramesKernel<<<dim3(codebooks, voices), 256, 0, s>>>(
+      frames, mask, table, size);
+}
+void CodebookNormFrames(const VoiceFrame* frames, int voices,
+                        const float* norms, int pass, int dim, float eps,
+                        hipStream_t s) {
+  CodebookNormFramesKernel<<<dim3(kFramePass, voices), 256, 0, s>>>(
+      frames, norms, pass, dim, eps);
+}
+void CodebookLogitsFrames(const VoiceFrame* frames, int voices,
+                          const Tensor& table, int pass, int size,
+                          hipStream_t s) {
+  const dim3 grid((size + 7) / 8, kFramePass, voices);
+  if (table.type == core::GgmlType::kQ8_0)
+    CodebookLogitsFramesKernel<core::GgmlType::kQ8_0>
+        <<<grid, 256, 0, s>>>(frames, table, pass, size);
+  else if (table.type == core::GgmlType::kBF16)
+    CodebookLogitsFramesKernel<core::GgmlType::kBF16>
+        <<<grid, 256, 0, s>>>(frames, table, pass, size);
+  else
+    CodebookLogitsFramesKernel<core::GgmlType::kF32>
+        <<<grid, 256, 0, s>>>(frames, table, pass, size);
+}
+void SampleCodesFrames(const VoiceFrame* frames, int voices, int pass,
+                       int size, hipStream_t s) {
+  SampleCodesFramesKernel<<<dim3(kFramePass, voices), 256, 0, s>>>(
+      frames, pass, size);
+}
+void FinishFrames(const VoiceFrame* frames, int voices, const Tensor& audio_out,
+                  int codebooks, int size, int end_code, hipStream_t s) {
+  FinishFramesKernel<<<dim3(Blocks(audio_out.cols), voices), 256, 0, s>>>(
+      frames, audio_out, codebooks, size, end_code);
 }
 bool WideGemv(const Tensor& w, const float* x, float* y, hipStream_t s) {
   const bool q8 = w.type == core::GgmlType::kQ8_0;

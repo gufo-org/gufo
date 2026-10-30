@@ -710,6 +710,257 @@ bool Generator::Continue(const GenerateOptions& o,
     return false;
   }
 }
+struct SpeechBatch::Impl {
+  struct Stream {
+    std::unique_ptr<Generator> generator;
+    bool active{};
+    GenerateOptions options;
+    GenerateCallbacks callbacks;
+    Done done;
+    GenerateResult result;
+    std::mt19937_64 rng;
+    std::vector<std::int32_t> unsent;
+    std::future<std::vector<float>> pending;
+    Clock::time_point start;
+    double decode_started{};
+    std::size_t steps{};
+    bool cancelled{};
+    std::array<std::int32_t, AudioWeights::kCodebooks> codes{};
+    Generator::Impl& g() { return *generator->impl_; }
+  };
+  std::shared_ptr<Model> model;
+  std::vector<Stream> streams;
+  // Joins the stream's codec work and emits its audio.
+  void Join(Stream& st) {
+    if (!st.pending.valid())
+      return;
+    auto samples = st.pending.get();
+    st.result.timings.codec_ms += Ms(st.start) - st.decode_started;
+    if (samples.empty())
+      return;
+    if (st.result.timings.first_audio_ms < 0)
+      st.result.timings.first_audio_ms = Ms(st.start);
+    st.result.samples.insert(st.result.samples.end(), samples.begin(),
+                             samples.end());
+    if (st.callbacks.on_audio && !st.callbacks.on_audio(samples))
+      st.cancelled = true;
+  }
+  void Decode(Stream& st, bool finalize) {
+    Join(st);
+    st.decode_started = Ms(st.start);
+    st.pending = std::async(
+        std::launch::async, [voice = st.g().voice.get(),
+                             frames = std::move(st.unsent), finalize]() {
+          std::vector<float> samples;
+          std::string error;
+          if (!voice->Decode(frames, finalize, &samples, &error))
+            throw std::runtime_error(error);
+          return samples;
+        });
+    st.unsent.clear();
+  }
+  void Finish(Stream& st, bool ok, std::string error) {
+    try {
+      if (ok && !st.cancelled && st.result.frames)
+        Decode(st, true);
+      Join(st);
+    } catch (const std::exception& e) {
+      if (ok)
+        error = e.what();
+      ok = false;
+    }
+    st.result.cancelled = st.cancelled;
+    st.result.timings.total_ms = Ms(st.start);
+    st.active = false;
+    auto done = std::move(st.done);
+    auto result = std::move(st.result);
+    st.callbacks = {};
+    if (done)
+      done(ok, std::move(result), std::move(error));
+  }
+};
+SpeechBatch::SpeechBatch() : impl_(std::make_unique<Impl>()) {}
+SpeechBatch::~SpeechBatch() {
+  if (!impl_)
+    return;
+  for (auto& st : impl_->streams)
+    if (st.active)
+      impl_->Finish(st, false, "speech batch closed");
+}
+std::size_t SpeechBatch::capacity() const {
+  return impl_->streams.size();
+}
+std::size_t SpeechBatch::active() const {
+  return std::size_t(std::count_if(impl_->streams.begin(), impl_->streams.end(),
+                                   [](const auto& st) { return st.active; }));
+}
+std::unique_ptr<SpeechBatch> SpeechBatch::Create(std::shared_ptr<Model> model,
+                                                 std::uint32_t context,
+                                                 std::size_t streams,
+                                                 std::string* error) {
+  if (!streams || streams > lfm3::Session::kMaxBatch) {
+    if (error)
+      *error = "invalid speech batch size";
+    return nullptr;
+  }
+  auto batch = std::unique_ptr<SpeechBatch>(new SpeechBatch);
+  batch->impl_->model = model;
+  batch->impl_->streams.resize(streams);
+  for (auto& st : batch->impl_->streams) {
+    st.generator = Generator::Create(model, context, error);
+    if (!st.generator)
+      return nullptr;
+  }
+  return batch;
+}
+bool SpeechBatch::Add(std::span<const PromptPiece> prompt,
+                      const GenerateOptions& options,
+                      GenerateCallbacks callbacks, Done done,
+                      std::string* error) {
+  auto& impl = *impl_;
+  auto it = std::find_if(impl.streams.begin(), impl.streams.end(),
+                         [](const auto& st) { return !st.active; });
+  if (it == impl.streams.end()) {
+    if (error)
+      *error = "speech batch is full";
+    return false;
+  }
+  auto& st = *it;
+  st.result = {};
+  st.start = Clock::now();
+  if (!st.generator->Reset(error) ||
+      !st.generator->Append(prompt, &st.result, error))
+    return false;
+  if (st.g().last_token != impl.model->tokens().audio_start) {
+    if (error)
+      *error = "batched speech prompts end in <|audio_start|>";
+    return false;
+  }
+  st.result.timings.prefill_ms = Ms(st.start);
+  st.g().voice->Reset();
+  st.options = options;
+  st.callbacks = std::move(callbacks);
+  st.done = std::move(done);
+  st.rng.seed(options.seed);
+  st.unsent.clear();
+  st.steps = 0;
+  st.cancelled = false;
+  st.active = true;
+  return true;
+}
+bool SpeechBatch::Step(std::string* error) {
+  auto& impl = *impl_;
+  std::vector<Impl::Stream*> live;
+  for (auto& st : impl.streams)
+    if (st.active) {
+      if (st.callbacks.cancelled && st.callbacks.cancelled())
+        st.cancelled = true;
+      if (st.cancelled)
+        impl.Finish(st, true, {});
+      else
+        live.push_back(&st);
+    }
+  if (live.empty())
+    return true;
+  const auto kCodes = std::int32_t(AudioWeights::kCodes);
+  const auto ids = impl.model->tokens();
+  try {
+    // Frames of every stream in one depth pass.
+    auto t = Clock::now();
+    std::string failure;
+    if (live.size() == 1) {
+      auto& g = live[0]->g();
+      if (!g.voice->SampleFrame(
+              g.session->DeviceHidden(), live[0]->options.audio, live[0]->rng,
+              live[0]->codes, g.frame_embedding, false, &failure))
+        throw std::runtime_error(failure);
+    } else {
+      std::vector<Voice*> voices;
+      std::vector<const float*> hiddens;
+      std::vector<Voice::Sampling> sampling;
+      std::vector<std::mt19937_64*> rngs;
+      std::vector<float*> embeddings;
+      std::vector<std::int32_t> codes(live.size() * AudioWeights::kCodebooks);
+      for (auto* st : live) {
+        voices.push_back(st->g().voice.get());
+        hiddens.push_back(st->g().session->DeviceHidden());
+        sampling.push_back(st->options.audio);
+        rngs.push_back(&st->rng);
+        embeddings.push_back(st->g().frame_embedding);
+      }
+      if (!Voice::SampleFrames(voices, hiddens, sampling, rngs, codes,
+                               embeddings, &failure))
+        throw std::runtime_error(failure);
+      for (std::size_t i = 0; i < live.size(); ++i)
+        std::copy_n(
+            codes.begin() + std::ptrdiff_t(i) * AudioWeights::kCodebooks,
+            AudioWeights::kCodebooks, live[i]->codes.begin());
+    }
+    const double depth_ms = Ms(t);
+    // Streams that continue take one shared backbone step.
+    std::vector<Impl::Stream*> next;
+    for (auto* st : live) {
+      st->result.timings.depth_ms += depth_ms;
+      const bool eos = std::any_of(st->codes.begin(), st->codes.end(),
+                                   [&](auto c) { return c == kCodes; });
+      if (eos) {
+        st->result.stopped = true;
+        impl.Finish(*st, true, {});
+        continue;
+      }
+      auto& r = st->result;
+      r.codes.insert(r.codes.end(), st->codes.begin(), st->codes.end());
+      st->unsent.insert(st->unsent.end(), st->codes.begin(), st->codes.end());
+      ++r.frames;
+      r.tokens.push_back(ids.audio_out);
+      const auto chunk = r.frames <= st->options.first_chunk_frames
+                             ? st->options.first_chunk_frames
+                             : st->options.chunk_frames;
+      if (st->unsent.size() >= chunk * AudioWeights::kCodebooks)
+        impl.Decode(*st, false);
+      if (++st->steps >= st->options.max_new_tokens ||
+          st->g().session->Position() >= st->g().context)
+        impl.Finish(*st, true, {});
+      else
+        next.push_back(st);
+    }
+    if (!next.empty()) {
+      t = Clock::now();
+      if (next.size() == 1) {
+        auto& g = next[0]->g();
+        if (!g.session->ForwardEmbeddings(
+                {g.frame_embedding, std::size_t(g.Hidden())}, true, {},
+                &failure))
+          throw std::runtime_error(failure);
+      } else {
+        std::vector<lfm3::Session*> sessions;
+        std::vector<std::uint32_t> tokens(next.size(), 0);
+        std::vector<const float*> rows;
+        for (auto* st : next) {
+          sessions.push_back(st->g().session.get());
+          rows.push_back(st->g().frame_embedding);
+        }
+        if (!lfm3::Session::ForwardBatchInputs(sessions, tokens, rows, false,
+                                               &failure))
+          throw std::runtime_error(failure);
+      }
+      const double backbone_ms = Ms(t);
+      for (auto* st : next) {
+        st->result.timings.backbone_ms += backbone_ms;
+        impl.Join(*st);
+      }
+    }
+    return true;
+  } catch (const std::exception& e) {
+    for (auto* st : live)
+      if (st->active)
+        impl.Finish(*st, false, e.what());
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+
 struct LiveTranscriber::Impl {
   static constexpr std::uint32_t kChunk = 12;  // audio tokens, 0.96 s
   // Audio tokens per language context: training chains samples of at most

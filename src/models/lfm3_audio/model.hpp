@@ -59,6 +59,18 @@ public:
                    std::mt19937_64& rng, std::span<std::int32_t> codes,
                    float* embedding = nullptr, bool ordered = false,
                    std::string* error = nullptr);
+  // Frames of several voices in one pass of the depth decoder, so its
+  // weights are read once: voice i samples from hiddens[i] with sampling[i]
+  // and *rngs[i] as SampleFrame would (codes [i * 12, i * 12 + 12)) and
+  // writes its next backbone input to embeddings[i] (device). Voices must be
+  // idle; at most 42 per call.
+  static bool SampleFrames(std::span<Voice* const> voices,
+                           std::span<const float* const> hiddens,
+                           std::span<const Sampling> sampling,
+                           std::span<std::mt19937_64* const> rngs,
+                           std::span<std::int32_t> codes,
+                           std::span<float* const> embeddings,
+                           std::string* error = nullptr);
   // Depth logits of all codebooks for a hidden state, codes and mask
   // (masked codebooks use the mask embedding), for tests: 12 x 2017.
   bool DepthLogits(std::span<const float> hidden,

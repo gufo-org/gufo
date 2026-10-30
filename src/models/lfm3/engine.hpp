@@ -36,6 +36,14 @@ public:
                            std::span<const std::uint32_t> tokens,
                            std::span<std::span<float>> logits,
                            std::string* error = nullptr);
+  // One row per independent session, sharing dense projections across rows:
+  // rows[i], when set, is session i's input embedding in device memory
+  // (ready before the call), otherwise tokens[i] is. Logits are computed
+  // only when requested; DeviceHidden of every session is updated.
+  static bool ForwardBatchInputs(std::span<Session* const> sessions,
+                                 std::span<const std::uint32_t> tokens,
+                                 std::span<const float* const> rows,
+                                 bool logits, std::string* error = nullptr);
   // Advances rows of input embeddings (hidden floats per row) instead of
   // token IDs. Rows live in host memory, or in device memory on this
   // session's stream when on_device is set.

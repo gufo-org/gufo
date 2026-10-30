@@ -148,7 +148,42 @@ public:
   Model& model() const;
 
 private:
+  friend class SpeechBatch;
   Generator();
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+// Speech synthesis of several prompts at once: each step advances every
+// stream by one frame, so the backbone and the depth decoder read their
+// weights once per step for all streams. Streams join between steps (their
+// prefill runs then) and leave when they end. Each stream samples with its
+// own seed exactly as Generator would; batched arithmetic may round
+// differently from a lone stream.
+class SpeechBatch {
+public:
+  // At most lfm3::Session::kMaxBatch streams of context slots each.
+  static std::unique_ptr<SpeechBatch> Create(std::shared_ptr<Model> model,
+                                             std::uint32_t context,
+                                             std::size_t streams,
+                                             std::string* error = nullptr);
+  ~SpeechBatch();
+  // Called once per stream, from Step or Add, when it ends.
+  using Done =
+      std::function<void(bool ok, GenerateResult result, std::string error)>;
+  // Starts a stream for a prompt ending in <|audio_start|>. False (error
+  // set) when the batch is full or the prompt fails; done is not called.
+  bool Add(std::span<const PromptPiece> prompt, const GenerateOptions& options,
+           GenerateCallbacks callbacks, Done done,
+           std::string* error = nullptr);
+  // Advances every stream by one frame. A device failure ends every stream
+  // with that error and returns false.
+  bool Step(std::string* error = nullptr);
+  std::size_t active() const;
+  std::size_t capacity() const;
+
+private:
+  SpeechBatch();
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

@@ -1190,6 +1190,7 @@ int RunServe(std::span<const char* const> args) {
                           auto* result, std::string* error) {
                   return runtime->Synthesize(request, cancelled, result, error);
                 },
+            .concurrent = true,
         });
       } else {
         asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{

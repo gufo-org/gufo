@@ -44,6 +44,9 @@ struct TtsServiceOptions {
   std::vector<std::string> voices;
   std::map<std::string, TtsVoicePreset> voice_presets;
   Runner runner;
+  /// The runner admits concurrent requests itself (for example by batching
+  /// them); requests then skip the service's one-at-a-time gate.
+  bool concurrent{false};
 };
 
 /// Synchronous, bounded native HIP Qwen3-TTS service. The official Python

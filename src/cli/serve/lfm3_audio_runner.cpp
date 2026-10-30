@@ -3,8 +3,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
+#include <deque>
+#include <future>
 #include <mutex>
 #include <random>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -81,10 +85,78 @@ std::filesystem::path FindLfm3AudioMmproj(const std::filesystem::path& model,
 struct Lfm3AudioRuntime::Impl {
   std::shared_ptr<audio::Model> model;
   std::unique_ptr<audio::Generator> generator;
+  std::uint32_t context{};
   std::mutex mutex;
   std::shared_ptr<std::atomic<int>> realtime =
       std::make_shared<std::atomic<int>>(0);
+  // Synthesis requests join one batch on the speaker thread, so concurrent
+  // requests share backbone and depth-decoder steps.
+  struct Job {
+    std::vector<audio::PromptPiece> prompt;
+    audio::GenerateOptions options;
+    audio::GenerateCallbacks callbacks;
+    std::promise<std::pair<std::string, audio::GenerateResult>> done;
+  };
+  std::mutex speech_mutex;
+  std::condition_variable speech_ready;
+  std::deque<std::shared_ptr<Job>> jobs;
+  bool stopping{false};
+  std::thread speaker;
+  void Speak();
+  ~Impl() {
+    {
+      const std::lock_guard lock(speech_mutex);
+      stopping = true;
+    }
+    speech_ready.notify_all();
+    if (speaker.joinable())
+      speaker.join();
+  }
 };
+void Lfm3AudioRuntime::Impl::Speak() {
+  std::string error;
+  auto batch = audio::SpeechBatch::Create(
+      model, context, models::lfm3::Session::kMaxBatch, &error);
+  const std::string unavailable = error;
+  while (true) {
+    std::vector<std::shared_ptr<Job>> admitted;
+    {
+      std::unique_lock lock(speech_mutex);
+      speech_ready.wait(lock, [&] {
+        return stopping || !jobs.empty() || (batch && batch->active());
+      });
+      if (stopping)
+        break;
+      while (!jobs.empty() && (!batch || admitted.size() + batch->active() <
+                                             batch->capacity())) {
+        admitted.push_back(std::move(jobs.front()));
+        jobs.pop_front();
+      }
+    }
+    for (auto& job : admitted) {
+      std::string failure = unavailable;
+      if (batch && batch->Add(
+                       job->prompt, job->options, job->callbacks,
+                       [job](bool ok, audio::GenerateResult result,
+                             std::string message) {
+                         job->done.set_value(
+                             {ok ? std::string() : message, std::move(result)});
+                       },
+                       &failure))
+        continue;
+      job->done.set_value({failure.empty() ? "speech batch failed" : failure,
+                           audio::GenerateResult{}});
+    }
+    if (batch && batch->active())
+      (void)batch->Step(&error);
+    error.clear();
+  }
+  batch.reset();  // ends active streams with an error
+  const std::lock_guard lock(speech_mutex);
+  for (auto& job : jobs)
+    job->done.set_value({"LFM3-Audio runtime stopped", {}});
+  jobs.clear();
+}
 namespace {
 // Holds one of the runtime's realtime slots for the life of a stream.
 class Slot {
@@ -508,6 +580,7 @@ std::shared_ptr<Lfm3AudioRuntime> Lfm3AudioRuntime::Create(
       audio::Generator::Create(runtime->impl_->model, context, error);
   if (!runtime->impl_->generator)
     return nullptr;
+  runtime->impl_->context = context;
   return runtime;
 }
 std::unique_ptr<server::LiveTranscription>
@@ -636,12 +709,23 @@ bool Lfm3AudioRuntime::Synthesize(
   callbacks.cancelled = [&] { return cancelled && cancelled(); };
   if (request.on_audio)
     callbacks.on_audio = request.on_audio;
-  audio::GenerateResult generated;
-  const std::lock_guard lock(impl_->mutex);
-  if (!impl_->generator->Generate(
-          audio::BuildPrompt(system, messages, "<|audio_start|>"), options,
-          callbacks, &generated, error))
+  auto job = std::make_shared<Impl::Job>();
+  job->prompt = audio::BuildPrompt(system, messages, "<|audio_start|>");
+  job->options = options;
+  job->callbacks = std::move(callbacks);
+  auto done = job->done.get_future();
+  {
+    const std::lock_guard lock(impl_->speech_mutex);
+    if (!impl_->speaker.joinable())
+      impl_->speaker = std::thread([impl = impl_.get()] { impl->Speak(); });
+    impl_->jobs.push_back(std::move(job));
+  }
+  impl_->speech_ready.notify_all();
+  auto [failure, generated] = done.get();
+  if (!failure.empty()) {
+    *error = failure;
     return false;
+  }
   if (generated.cancelled) {
     *error = "synthesis cancelled";
     return false;

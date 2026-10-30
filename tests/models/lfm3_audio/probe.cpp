@@ -406,6 +406,81 @@ int main(int argc, char** argv) {
             error);
       std::printf("tts round trip: \"%s\"\n", heard.text.c_str());
     }
+    // Batched synthesis: greedy streams match the lone generator's codes up
+    // to batched rounding; sampled streams report aggregate throughput.
+    {
+      std::string system;
+      Check(audio::TtsSystemPrompt("en", "female", &system, &error), error);
+      std::vector<audio::ChatMessage> messages(1);
+      messages[0].role = "user";
+      messages[0].parts.push_back(
+          {false,
+           "The quick brown fox jumps over the lazy dog. Then it runs back "
+           "home through the forest, happy and tired.",
+           {}});
+      const auto prompt =
+          audio::BuildPrompt(system, messages, "<|audio_start|>");
+      auto batch = audio::SpeechBatch::Create(model, 1024, 8, &error);
+      Check(bool(batch), error);
+      audio::GenerateOptions greedy;
+      greedy.max_new_tokens = 600;
+      greedy.audio.temperature = 0;
+      audio::GenerateResult lone;
+      Check(generator->Generate(prompt, greedy, {}, &lone, &error), error);
+      for (std::size_t streams : {1U, 2U, 4U, 8U}) {
+        for (bool sampled : {false, true}) {
+          std::vector<audio::GenerateResult> results(streams);
+          std::size_t done = 0;
+          const auto start = std::chrono::steady_clock::now();
+          for (std::size_t i = 0; i < streams; ++i) {
+            auto options = greedy;
+            if (sampled) {
+              options.audio = {};
+              options.seed = 100 + i;
+            }
+            Check(batch->Add(
+                      prompt, options, {},
+                      [&, i](bool ok, audio::GenerateResult result,
+                             std::string failure) {
+                        Check(ok, failure);
+                        results[i] = std::move(result);
+                        ++done;
+                      },
+                      &error),
+                  error);
+          }
+          while (done < streams)
+            Check(batch->Step(&error), error);
+          const double ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+          double seconds = 0;
+          std::size_t same = 0, frames = 0;
+          for (const auto& r : results) {
+            seconds += r.samples.size() / 24000.0;
+            if (!sampled) {
+              frames += lone.frames;
+              for (std::size_t f = 0; f < std::min(r.frames, lone.frames); ++f)
+                same += std::equal(r.codes.begin() + f * 12,
+                                   r.codes.begin() + f * 12 + 12,
+                                   lone.codes.begin() + f * 12);
+            }
+          }
+          if (sampled)
+            std::printf(
+                "batched tts x%zu: %.2f s audio in %.0f ms (%.1fx real time "
+                "aggregate); per step depth %.2f backbone %.2f ms\n",
+                streams, seconds, ms, seconds * 1000 / ms,
+                results[0].timings.depth_ms / results[0].frames,
+                results[0].timings.backbone_ms / results[0].frames);
+          else
+            std::printf(
+                "batched greedy x%zu: %zu/%zu frames as the lone "
+                "stream\n",
+                streams, same, frames);
+        }
+      }
+    }
     std::printf(failures ? "FAILED %d\n" : "PASSED\n", failures);
     return failures ? 1 : 0;
   } catch (const std::exception& e) {

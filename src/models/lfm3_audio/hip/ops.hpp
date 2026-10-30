@@ -11,6 +11,12 @@ enum class Activation { kNone, kSilu, kGelu };
 // y[n, M] = act(x[n, K] W[M, K]^T + bias), with an F32 weight.
 void Sgemm(const float* x, const float* w, const float* bias, float* y, int n,
            int M, int K, Activation act, hipStream_t stream);
+// The same with BF16 weights [M][K], read once per 64 rows of x.
+void SgemmBf16(const float* x, const void* w, const float* bias, float* y,
+               int n, int M, int K, Activation act, hipStream_t stream);
+// out = silu(gate) * up.
+void SwiGlu(const float* gate, const float* up, float* out, std::size_t count,
+            hipStream_t stream);
 // y = W x for one row of a BF16 or Q8_0 matrix whose columns are a
 // multiple of 128. Returns false (launching nothing) for other shapes.
 bool WideGemv(const Tensor& w, const float* x, float* y, hipStream_t stream);
@@ -101,5 +107,39 @@ void SampleCodes(const float* logits, const std::int32_t* which,
 void FinishFrame(const Tensor& audio_out, FrameState state, FrameSampling s,
                  float* embedding, int codebooks, int size, int end_code,
                  hipStream_t stream);
+// One voice's frame in a batch: its sampling state, its rows of the shared
+// depth buffers (base, x, z) and its per-pass buffers. order holds the
+// reveal order (kFramePass codebooks per pass), uniforms one value per
+// codebook.
+inline constexpr int kFramePass = 4;
+struct VoiceFrame {
+  FrameState state;
+  FrameSampling sampling;
+  const float* base;
+  float* x;
+  const float* z;
+  float* head_inputs;
+  float* logits;
+  const std::int32_t* order;
+  const float* uniforms;
+  float* embedding;
+};
+// The frame kernels above for several voices at once (frames in device
+// memory), pass by pass.
+void StartFrames(const VoiceFrame* frames, int voices, int codebooks,
+                 hipStream_t stream);
+void DepthInputsFrames(const VoiceFrame* frames, int voices, const float* mask,
+                       const Tensor& table, int codebooks, int size,
+                       hipStream_t stream);
+void CodebookNormFrames(const VoiceFrame* frames, int voices,
+                        const float* norms, int pass, int dim, float eps,
+                        hipStream_t stream);
+void CodebookLogitsFrames(const VoiceFrame* frames, int voices,
+                          const Tensor& table, int pass, int size,
+                          hipStream_t stream);
+void SampleCodesFrames(const VoiceFrame* frames, int voices, int pass, int size,
+                       hipStream_t stream);
+void FinishFrames(const VoiceFrame* frames, int voices, const Tensor& audio_out,
+                  int codebooks, int size, int end_code, hipStream_t stream);
 }  // namespace gufo::models::lfm3_audio::gpu
 #endif
