@@ -137,6 +137,15 @@ def main():
                 vec = body['data'][0]['embedding']
                 assert len(vec) == dimensions and abs(sum(v*v for v in vec)-1) < 1e-5
                 assert cosine(vec, cases['short']['embedding'][:dimensions]) >= 0.9999
+            # Matryoshka truncation at a non-default video budget.
+            budgeted = cases['budget_560']
+            for dimensions in (128, 256, 512):
+                status, body = post([content(budgeted)], dimensions=dimensions,
+                                    video_options=budgeted['options'])
+                assert status == 200, body
+                vec = body['data'][0]['embedding']
+                assert len(vec) == dimensions and abs(sum(v*v for v in vec)-1) < 1e-5
+                assert cosine(vec, budgeted['embedding'][:dimensions]) >= 0.9999
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 replies = list(pool.map(lambda _: post([content(cases['short'])]), range(2)))
             for status, body in replies:
