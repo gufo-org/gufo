@@ -67,6 +67,15 @@ struct ContinuationCache::Entry {
   std::shared_ptr<const ContinuationSnapshot> snapshot;
   std::vector<ContinuationToken> tokens;
   std::vector<std::uint8_t> input_identity;
+  // Active request metadata owns no GPU snapshot payload.
+  std::vector<ContinuationToken> active_tokens;
+  std::vector<std::uint8_t> active_identity;
+  std::vector<ContinuationInputPrefix> active_input_prefixes;
+  void ClearActive() noexcept {
+    active_tokens.clear();
+    active_identity.clear();
+    active_input_prefixes.clear();
+  }
   std::vector<ContinuationToken> live_tokens;
   std::vector<std::uint8_t> live_identity;
   std::size_t snapshot_bytes{0};
@@ -74,6 +83,10 @@ struct ContinuationCache::Entry {
   SnapshotPurpose purpose{SnapshotPurpose::kContinuation};
   std::uint64_t state_last_used{0};
   std::uint64_t snapshot_last_used{0};
+  std::size_t request_offered_bytes{0};
+  std::size_t reuse_protection_bytes{0};
+  bool request_reused{false};
+  bool snapshot_reused{false};
   bool available{true};
   bool valid{false};
   bool dirty{false};
@@ -140,7 +153,7 @@ struct ContinuationCache::Impl {
         entry.purpose != SnapshotPurpose::kContinuation)
       return false;
     const auto diverges = [&](const auto& tokens, const auto& identity) {
-      if (identity != entry.input_identity ||
+      if (!std::ranges::equal(identity, entry.input_identity) ||
           tokens.size() <= entry.tokens.size() ||
           !IsPrefix(entry.tokens, tokens))
         return false;
@@ -151,8 +164,35 @@ struct ContinuationCache::Impl {
     return std::ranges::any_of(entries, [&](const auto& peer) {
       return (peer->valid && peer->snapshot &&
               diverges(peer->tokens, peer->input_identity)) ||
-             diverges(peer->live_tokens, peer->live_identity);
+             diverges(peer->live_tokens, peer->live_identity) ||
+             (peer->state != nullptr && !peer->available &&
+              diverges(peer->active_tokens,
+                       PrefixInputIdentity(peer->active_identity,
+                                           peer->active_input_prefixes,
+                                           entry.tokens.size())));
     });
+  }
+
+  // Protect recently reused sole-family frontiers from lower-value arrivals.
+  // Existing redundancy and learned branch-point rules still win.
+  [[nodiscard]] int AdmissionPriority(
+      std::size_t candidate, std::size_t tokens, std::size_t bytes,
+      std::span<const ContinuationToken> incoming,
+      std::span<const std::uint8_t> identity) const {
+    // Recently reused branch points receive the same bounded protection as
+    // frontiers; otherwise protecting their children makes the parent weaker.
+    const int rank = RemovalPriority(candidate, incoming, identity);
+    const auto& entry = *entries[candidate];
+    if (rank != 3 || bytes == 0 || entry.snapshot_bytes == 0)
+      return rank;
+    const auto incoming_value =
+        static_cast<long double>(tokens) * entry.snapshot_bytes;
+    const auto retained_value =
+        static_cast<long double>(entry.tokens.size()) * bytes;
+    if (entry.snapshot_reused && entry.reuse_protection_bytes != 0 &&
+        incoming_value < retained_value)
+      return 4;  // A new lower-value prefix cannot evict a reused frontier.
+    return rank;
   }
 
   [[nodiscard]] int RemovalPriority(
@@ -288,6 +328,26 @@ bool ContinuationCache::Lease::TryReserveSnapshot(
   if (reserved_snapshot_bytes_ != 0) {
     throw std::logic_error(
         "continuation cache lease already has a snapshot reservation");
+  }
+  // Charge each request only for its largest offered snapshot, not
+  // repeatedly for every prefill boundary or retry. One cache-sized turnover
+  // of new demand expires old reuse protection, even if admission is refused.
+  // Partial hits still offer new snapshots: excluding them can freeze stale
+  // siblings forever when every request restores the same shared prefix.
+  // Impossible allocations must not age the usable working set.
+  {
+    const std::lock_guard<std::mutex> lock(cache_->impl_->mutex);
+    auto& request = *cache_->impl_->entries[index_];
+    // Lower-tier restoration updates the lease after RAM acquisition.
+    request.request_reused = request.request_reused || cache_hit_;
+    if (snapshot_bytes <= cache_->impl_->snapshot_capacity_bytes &&
+        snapshot_bytes > request.request_offered_bytes) {
+      const auto delta = snapshot_bytes - request.request_offered_bytes;
+      request.request_offered_bytes = snapshot_bytes;
+      for (auto& entry : cache_->impl_->entries)
+        entry->reuse_protection_bytes -=
+            std::min(delta, entry->reuse_protection_bytes);
+    }
   }
   if (!cache_->ReserveSnapshot(source_index_, snapshot_bytes, token_count,
                                preserve_source, purpose, replacement_prefix,
@@ -600,7 +660,17 @@ ContinuationCache::Lease ContinuationCache::Acquire(
 
     if (selected != no_entry) {
       auto& entry = *impl_->entries[selected];
+      if (impl_->snapshot_mode() && reuse_prompt) {
+        entry.active_tokens.assign(prompt.begin(), prompt.end());
+        entry.active_identity.assign(input_identity.begin(),
+                                     input_identity.end());
+        entry.active_input_prefixes.assign(input_prefixes.begin(),
+                                           input_prefixes.end());
+      } else
+        entry.ClearActive();
       entry.available = false;
+      entry.request_reused = cache_hit;
+      entry.request_offered_bytes = 0;
       const bool needs_invalidation = entry.dirty && !cache_hit;
       entry.dirty = true;
       entry.state_last_used = ++impl_->clock;
@@ -613,6 +683,8 @@ ContinuationCache::Lease ContinuationCache::Acquire(
           auto& source_entry = *impl_->entries[source];
           snapshot = source_entry.snapshot;
           source_entry.snapshot_last_used = ++impl_->clock;
+          source_entry.snapshot_reused = true;
+          source_entry.reuse_protection_bytes = impl_->snapshot_capacity_bytes;
           if (impl_->RestoreDiverges(source, prompt))
             source_entry.purpose = SnapshotPurpose::kBranchPoint;
         }
@@ -665,6 +737,7 @@ ContinuationCache::Lease ContinuationCache::Acquire(
         entry.state->Invalidate();
         {
           const std::lock_guard<std::mutex> failure_lock(impl_->mutex);
+          entry.ClearActive();
           entry.available = true;
           entry.dirty = false;
           entry.state_last_used = ++impl_->clock;
@@ -798,7 +871,8 @@ bool ContinuationCache::ReserveSnapshot(
                             ? replacement_prefix
                             : std::span<const ContinuationToken>{};
   const auto priority_for = [&](std::size_t candidate) {
-    return impl_->RemovalPriority(candidate, incoming, input_identity);
+    return impl_->AdmissionPriority(candidate, token_count, snapshot_bytes,
+                                    incoming, input_identity);
   };
   {
     const std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -979,15 +1053,16 @@ std::size_t ContinuationCache::Commit(
     std::size_t* published_index, std::size_t stable_prefix_tokens,
     SnapshotPurpose purpose) {
   const std::size_t token_count = tokens.size();
+  const std::size_t snapshot_bytes =
+      snapshot != nullptr ? snapshot->PayloadBytes() : 0;
   const int max_priority = MaxRemovalPriority(purpose);
   const auto incoming = IsContinuation(purpose)
                             ? std::span<const ContinuationToken>(tokens)
                             : std::span<const ContinuationToken>{};
   const auto priority_for = [&](std::size_t candidate) {
-    return impl_->RemovalPriority(candidate, incoming, input_identity);
+    return impl_->AdmissionPriority(candidate, token_count, snapshot_bytes,
+                                    incoming, input_identity);
   };
-  const std::size_t snapshot_bytes =
-      snapshot != nullptr ? snapshot->PayloadBytes() : 0;
   SnapshotEventReason skip_reason = SnapshotEventReason::kCaptureFailure;
   bool retain_snapshot = impl_->snapshot_mode() && snapshot != nullptr &&
                          !tokens.empty() && reservation_bytes != 0 &&
@@ -1129,6 +1204,14 @@ std::size_t ContinuationCache::Commit(
           auto& snapshot_entry = *impl_->entries[target];
           // Republishing the same prefix, as an uncached request for exactly
           // a learned branch point does, keeps the learned divergence.
+          const auto protection =
+              impl_->entries[index]->request_reused
+                  ? impl_->snapshot_capacity_bytes
+                  : (exact_replacement ? snapshot_entry.reuse_protection_bytes
+                                       : 0);
+          const bool reused =
+              impl_->entries[index]->request_reused ||
+              (exact_replacement && snapshot_entry.snapshot_reused);
           const bool learned =
               exact_replacement &&
               snapshot_entry.purpose == SnapshotPurpose::kBranchPoint;
@@ -1157,6 +1240,8 @@ std::size_t ContinuationCache::Commit(
             snapshot_entry.input_identity = std::move(input_identity);
             snapshot_entry.snapshot = std::move(retained_snapshot);
             snapshot_entry.snapshot_bytes = snapshot_bytes;
+            snapshot_entry.snapshot_reused = reused;
+            snapshot_entry.reuse_protection_bytes = protection;
             snapshot_entry.stable_prefix_tokens = stable_prefix_tokens;
             snapshot_entry.purpose =
                 learned ? SnapshotPurpose::kBranchPoint : purpose;
@@ -1184,6 +1269,7 @@ std::size_t ContinuationCache::Commit(
     }
     if (release_state) {
       state_entry.dirty = true;
+      state_entry.ClearActive();
       state_entry.available = true;
       state_entry.state_last_used = ++impl_->clock;
     }
@@ -1212,6 +1298,7 @@ void ContinuationCache::Invalidate(std::size_t index,
     entry.live_tokens.clear();
     entry.live_identity.clear();
     entry.dirty = false;
+    entry.ClearActive();
     entry.available = true;
     entry.state_last_used = ++impl_->clock;
   }
