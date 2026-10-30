@@ -1,4 +1,4 @@
-add_library(gufo_d1_prompt STATIC prompt.cpp image.cpp)
+add_library(gufo_d1_prompt STATIC prompt.cpp image.cpp packing.cpp boxes.cpp)
 target_include_directories(gufo_d1_prompt PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_d1_prompt PUBLIC gufo_lfm3)
 if (ENGINE_ENABLE_HIP)

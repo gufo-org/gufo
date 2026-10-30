@@ -4,6 +4,7 @@
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "src/models/d1/vision.hpp"
 #include "src/models/lfm3/engine.hpp"
@@ -148,9 +149,13 @@ json::Value Model::Decide(const Value& request) {
       qs->size() > 128)
     throw std::invalid_argument(
         "questions must be an object with 1..128 named questions");
-  if (request.contains("set_size") && request.member_size("set_size") != 1)
-    throw std::invalid_argument(
-        "this GGUF decision path reads one question per prompt (set_size=1)");
+  unsigned set_size = 16;  // d1-Omni-2B's recorded training set size.
+  if (const auto* size = request.find("set_size")) {
+    const double n = size->as_double(-1);
+    if (!size->is_number() || n < 1 || n > 128 || std::floor(n) != n)
+      throw std::invalid_argument("set_size must be a whole number in 1..128");
+    set_size = unsigned(n);
+  }
   std::vector<Question> questions;
   for (const auto& [name, value] : qs->members()) {
     auto q = ParseQuestion(m.tokenizer(), name, value);
@@ -184,7 +189,7 @@ json::Value Model::Decide(const Value& request) {
     }
   }
   if (const auto* images = request.find("images")) {
-    if (!images->is_array() || images->size() > 16)
+    if (!images->is_array() || images->size() + media.size() > 16)
       throw std::invalid_argument(
           "images must list at most 16 data/HTTPS URLs");
     for (const auto& image : images->items()) {
@@ -209,9 +214,15 @@ json::Value Model::Decide(const Value& request) {
   if (state && !state->is_null())
     prefix += plain(state->is_string() ? state->str() : Pretty(*state)) +
               "\n\n\nQUESTION:\n";
-  auto answers = Value::object();
-  std::size_t input_tokens = 0;
-  std::vector<float> logits(m.host.config.vocab);
+  const auto pictures = std::count_if(
+      media.begin(), media.end(),
+      [&](const Media& item) { return item.token == m.Token("<|image|>"); });
+  for (const auto& q : questions)
+    if (q.IsBox() && pictures != 1)
+      throw std::invalid_argument(
+          "a box or boxes question requires exactly one picture");
+  std::vector<std::string> suffixes;
+  std::vector<std::vector<Media>> voices;
   for (const auto& q : questions) {
     std::string body = plain(q.body);
     std::vector<Media> own;
@@ -222,16 +233,47 @@ json::Value Model::Decide(const Value& request) {
         throw std::runtime_error("missing spoken-question slot");
       body.replace(at, 3, own.back().markup);
     }
-    const std::string prompt =
-        prefix + body + std::string(tokenization::kImEnd) + "\n" +
-        std::string(tokenization::kImStart) + "assistant\n<think></think>";
-    auto ids = m.tokenizer().Encode(prompt);
+    suffixes.push_back(Suffix(m.tokenizer(), q, std::move(body)));
+    voices.push_back(std::move(own));
+  }
+  // A shared compact head projects only the vocabulary entries any answer
+  // slot can read. Remap the tables to those compact output columns.
+  std::vector<std::uint32_t> vocabulary;
+  std::unordered_map<std::uint32_t, std::uint32_t> columns;
+  auto remap = [&](auto& table) {
+    for (auto& forms : table)
+      for (auto& id : forms) {
+        auto [at, added] = columns.emplace(id, vocabulary.size());
+        if (added)
+          vocabulary.push_back(id);
+        id = at->second;
+      }
+  };
+  for (auto& q : questions) {
+    remap(q.readout);
+    remap(q.edges);
+  }
+  auto answers = Value::object();
+  std::size_t input_tokens = 0;
+  std::vector<float> full_logits;
+  const std::string header = state && !state->is_null() ? "QUESTION:\n" : "";
+  for (std::size_t first = 0; first < questions.size(); first += set_size) {
+    const auto count =
+        std::min<std::size_t>(set_size, questions.size() - first);
+    auto own_questions = std::span(questions).subspan(first, count);
+    auto prompt =
+        Pack(m.tokenizer(), prefix, header,
+             std::span(suffixes).subspan(first, count), own_questions);
+    const auto& ids = prompt.tokens;
     if (ids.size() > m.context)
       throw std::invalid_argument(
-          "decision prompt exceeds --context; prompts cannot be truncated or "
-          "chunked");
+          "packed decision prompt exceeds --context; use a smaller set_size or "
+          "larger context");
     std::vector<float> embeddings;
-    if (!media.empty() || !own.empty()) {
+    const bool has_voices =
+        std::any_of(voices.begin() + first, voices.begin() + first + count,
+                    [](const auto& v) { return !v.empty(); });
+    if (!media.empty() || has_voices) {
       embeddings.resize(ids.size() * m.host.config.hidden);
       for (std::size_t i = 0; i < ids.size(); ++i)
         lfm3::DecodeRow(
@@ -254,13 +296,31 @@ json::Value Model::Decide(const Value& request) {
       };
       for (const auto& item : media)
         place(item);
-      for (const auto& item : own)
-        place(item);
+      for (std::size_t q = first; q < first + count; ++q)
+        for (const auto& item : voices[q])
+          place(item);
     }
+    std::vector<float> logits(prompt.slots.size() * vocabulary.size());
     std::string error;
-    if (!m.session->ForwardDecision(ids, embeddings, logits, &error))
+    if (count == 1 && !own_questions[0].IsBox()) {
+      // set_size=1 primitives retain the established single-slot readout.
+      full_logits.resize(m.host.config.vocab);
+      if (!m.session->ForwardDecision(ids, embeddings, full_logits, &error))
+        throw std::runtime_error(error);
+      for (std::size_t i = 0; i < vocabulary.size(); ++i)
+        logits[i] = full_logits[vocabulary[i]];
+    } else if (!m.session->ForwardDecision(ids, embeddings, prompt.groups,
+                                           prompt.slots, vocabulary, logits,
+                                           &error))
       throw std::runtime_error(error);
-    answers[q.name] = ReadAnswer(q, logits);
+    std::size_t slot = 0;
+    for (const auto& q : own_questions) {
+      auto own_logits = std::span(logits).subspan(
+          slot * vocabulary.size(), q.Slots() * vocabulary.size());
+      answers[q.name] = q.IsBox() ? ReadBoxes(q, own_logits, vocabulary.size())
+                                  : ReadAnswer(q, own_logits);
+      slot += q.Slots();
+    }
     input_tokens += ids.size();
   }
   auto result = Value::object();

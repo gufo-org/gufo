@@ -67,7 +67,11 @@ std::size_t AttentionScratchBytes(int heads, int dim, int context, int rows);
 // Complete bidirectional prompt, without a persistent cache.
 void BidirectionalAttention(const float* q, const float* k, const float* v,
                             const float* gate, float* out, int n, int heads,
-                            int kv_heads, hipStream_t stream);
+                            int kv_heads, hipStream_t stream,
+                            const std::int32_t* groups = nullptr);
+// Packed row copies; preserves the tensor's encoded row bytes exactly.
+void SelectRows(const Tensor& source, const std::uint32_t* rows, void* out,
+                int count, hipStream_t stream);
 void StoreKV(const float* k, const float* v, float* cache_k, float* cache_v,
              int n, int stride, int position, int capacity, hipStream_t stream);
 }  // namespace gufo::models::lfm3::gpu

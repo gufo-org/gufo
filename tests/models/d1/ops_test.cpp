@@ -28,48 +28,82 @@ struct Device {
 };
 int main() {
   try {
-    for (int n : {1, 7, 15, 17, 33, 65}) {
-      constexpr int heads = 16, kh = 4, dim = 128;
-      std::vector<float> q(n * heads * dim), k(n * kh * dim), v(k.size()),
-          gate(n * heads);
-      for (std::size_t i = 0; i < q.size(); ++i)
-        q[i] = std::sin(i * .17) * .2;
-      for (std::size_t i = 0; i < k.size(); ++i) {
-        k[i] = std::cos(i * .13) * .3;
-        v[i] = std::sin(i * .09);
-      }
-      for (std::size_t i = 0; i < gate.size(); ++i)
-        gate[i] = std::cos(i * .07);
-      Device dq(q), dk(k), dv(v), dg(gate), out(q.size());
-      gufo::models::lfm3::gpu::BidirectionalAttention(
-          dq.p, dk.p, dv.p, dg.p, out.p, n, heads, kh, nullptr);
-      auto actual = out.Read(q.size());
-      double error = 0;
-      for (int row = 0; row < n; ++row)
-        for (int h = 0; h < heads; ++h) {
-          std::vector<double> scores(n);
-          double sum = 0;
-          for (int t = 0; t < n; ++t) {
-            double dot = 0;
-            for (int d = 0; d < dim; ++d)
-              dot += double(q[(row * heads + h) * dim + d]) *
-                     k[(t * kh + h / 4) * dim + d];
-            scores[t] = std::exp(dot / std::sqrt(dim));
-            sum += scores[t];
-          }
-          for (int d = 0; d < dim; ++d) {
-            double ref = 0;
-            for (int t = 0; t < n; ++t)
-              ref += scores[t] / sum * v[(t * kh + h / 4) * dim + d];
-            ref /= 1 + std::exp(-double(gate[row * heads + h]));
-            error = std::max(
-                error, std::abs(ref - actual[(row * heads + h) * dim + d]));
-          }
+    for (bool packed : {false, true})
+      for (int n : {1, 7, 15, 17, 33, 65}) {
+        constexpr int heads = 16, kh = 4, dim = 128;
+        std::vector<float> q(n * heads * dim), k(n * kh * dim), v(k.size()),
+            gate(n * heads);
+        for (std::size_t i = 0; i < q.size(); ++i)
+          q[i] = std::sin(i * .17) * .2;
+        for (std::size_t i = 0; i < k.size(); ++i) {
+          k[i] = std::cos(i * .13) * .3;
+          v[i] = std::sin(i * .09);
         }
-      if (error > 2e-6)
-        throw std::runtime_error(
-            "bidirectional attention differs from independent FP64 formula");
-      std::cout << "attention n=" << n << " max_error=" << error << '\n';
+        for (std::size_t i = 0; i < gate.size(); ++i)
+          gate[i] = std::cos(i * .07);
+        std::vector<std::int32_t> groups(n);
+        for (int i = 0; i < n; ++i)
+          groups[i] = i < 3 ? -1 : i < 8 ? 1 : i < 15 ? 2 : 3;
+        Device group_device(n);
+        Check(hipMemcpy(group_device.p, groups.data(), groups.size() * 4,
+                        hipMemcpyHostToDevice));
+        Device dq(q), dk(k), dv(v), dg(gate), out(q.size());
+        gufo::models::lfm3::gpu::BidirectionalAttention(
+            dq.p, dk.p, dv.p, dg.p, out.p, n, heads, kh, nullptr,
+            packed ? reinterpret_cast<const std::int32_t*>(group_device.p)
+                   : nullptr);
+        auto actual = out.Read(q.size());
+        double error = 0;
+        for (int row = 0; row < n; ++row)
+          for (int h = 0; h < heads; ++h) {
+            std::vector<double> scores(n);
+            double sum = 0;
+            for (int t = 0; t < n; ++t) {
+              double dot = 0;
+              for (int d = 0; d < dim; ++d)
+                dot += double(q[(row * heads + h) * dim + d]) *
+                       k[(t * kh + h / 4) * dim + d];
+              scores[t] = !packed || groups[row] < 0 || groups[t] < 0 ||
+                                  groups[row] == groups[t]
+                              ? std::exp(dot / std::sqrt(dim))
+                              : 0;
+              sum += scores[t];
+            }
+            for (int d = 0; d < dim; ++d) {
+              double ref = 0;
+              for (int t = 0; t < n; ++t)
+                ref += scores[t] / sum * v[(t * kh + h / 4) * dim + d];
+              ref /= 1 + std::exp(-double(gate[row * heads + h]));
+              error = std::max(
+                  error, std::abs(ref - actual[(row * heads + h) * dim + d]));
+            }
+          }
+        if (error > 2e-6)
+          throw std::runtime_error(
+              "bidirectional attention differs from independent FP64 formula");
+        std::cout << "attention packed=" << packed << " n=" << n
+                  << " max_error=" << error << '\n';
+      }
+    for (int columns : {17, 64}) {
+      std::vector<float> weights(19 * columns);
+      for (std::size_t i = 0; i < weights.size(); ++i)
+        weights[i] = std::sin(i * .11);
+      const std::uint32_t selected[] = {18, 0, 8, 3, 1};
+      Device source(weights), ids(5), copied(5 * columns);
+      Check(
+          hipMemcpy(ids.p, selected, sizeof(selected), hipMemcpyHostToDevice));
+      gufo::models::lfm3::Tensor tensor{source.p, gufo::core::GgmlType::kF32,
+                                        std::uint32_t(columns), 19,
+                                        weights.size() * 4};
+      gufo::models::lfm3::gpu::SelectRows(
+          tensor, reinterpret_cast<const std::uint32_t*>(ids.p), copied.p, 5,
+          nullptr);
+      const auto got = copied.Read(5 * columns);
+      for (std::size_t row = 0; row < 5; ++row)
+        for (int col = 0; col < columns; ++col)
+          if (got[row * columns + col] !=
+              weights[selected[row] * columns + col])
+            throw std::runtime_error("sparse row gather changed encoded bytes");
     }
     constexpr int h = 4, w = 6, hidden = 7;
     auto index = [](int y, int x) {

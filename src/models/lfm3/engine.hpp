@@ -27,14 +27,25 @@ public:
   static constexpr std::size_t kPrefillChunk = 512;
   static constexpr std::size_t kMaxBatch = 8;
   ~Session();
-  // Advances all supplied tokens and optionally returns only the final logits.
-  // State is session-owned; immutable device weights are shared by sessions.
-  // d1 single-question prompt: full attention is bidirectional, while
+  // d1 complete prompt: full attention is bidirectional, while
   // convolution and sliding attention remain causal. Starts from empty state.
   // Embeddings, when supplied, replace every input row (host floats).
   bool ForwardDecision(std::span<const std::uint32_t> tokens,
                        std::span<const float> embeddings,
                        std::span<float> logits, std::string* error = nullptr);
+  // Packed d1: -1 marks state rows; positive IDs mark question groups.
+  // Full-attention state rows see all rows; question rows see the state and
+  // their own group. Empty groups means one bidirectional prompt. Projects
+  // only positions through vocabulary (empty vocabulary means every token).
+  // logits is [positions.size()][vocabulary.size() or config.vocab].
+  bool ForwardDecision(std::span<const std::uint32_t> tokens,
+                       std::span<const float> embeddings,
+                       std::span<const std::int32_t> groups,
+                       std::span<const std::uint32_t> positions,
+                       std::span<const std::uint32_t> vocabulary,
+                       std::span<float> logits, std::string* error = nullptr);
+  // Advances text tokens and optionally returns the final logits.
+  // State is session-owned; device weights are shared by sessions.
   bool Forward(std::span<const std::uint32_t> tokens,
                std::span<float> logits = {}, std::string* error = nullptr);
   // One token per independent session, sharing dense projections across rows.

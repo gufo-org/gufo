@@ -35,9 +35,10 @@ Question ParseQuestion(const lfm3::Tokenizer& tok, const std::string& name,
   q.name = name;
   q.type = value.member_str("type");
   if (!value.is_object() ||
-      (q.type != "noul" && q.type != "choice" && q.type != "score"))
+      (q.type != "noul" && q.type != "choice" && q.type != "score" &&
+       q.type != "box" && q.type != "boxes"))
     throw std::invalid_argument(
-        "d1 GGUF questions support type noul, choice or score");
+        "d1 questions support type noul, choice, score, box or boxes");
   const auto* ins = value.find("instructions");
   const auto* criteria = value.find("criteria");
   if (!ins || (!ins->is_string() && !ins->is_object()) ||
@@ -63,6 +64,49 @@ Question ParseQuestion(const lfm3::Tokenizer& tok, const std::string& name,
           "tokenizer has no single-token decision code");
     return out;
   };
+  if (value.contains("max") && q.type != "boxes")
+    throw std::invalid_argument("max belongs to a boxes question");
+  if (q.IsBox()) {
+    if (q.type == "boxes") {
+      q.blocks = 16;
+      if (const auto* max = value.find("max")) {
+        const double n = max->as_double(-1);
+        if (!max->is_number() || n < 1 || n > 16 || std::floor(n) != n)
+          throw std::invalid_argument(
+              "boxes max must be a whole number in 1..16");
+        q.blocks = unsigned(n);
+      }
+    }
+    constexpr auto legend =
+        "Each edge is a number from 0 to 999, in thousandths of the picture: "
+        "top and bottom from its top edge, left and right from its left edge.";
+    if (q.type == "box")
+      q.body += std::string("\n\nPresence is yes or no. ") + legend +
+                " Reply with yes or no at present, then one number at top, "
+                "bottom, left and right.";
+    else
+      q.body +=
+          std::string(
+              "\n\nEvery one of them, 16 at most, in reading order (left edge, "
+              "then top). Present k is yes when there are at least k. ") +
+          legend +
+          " Reply with yes or no at each present, then its top, bottom, left "
+          "and right.";
+    q.readout = {ids({"yes", "Yes", "YES"}), ids({"no", "No", "NO"})};
+    for (int n = 0; n < 1000; ++n) {
+      const auto number = std::to_string(n);
+      if (tok.Encode(number, false).size() != 1)
+        throw std::invalid_argument(
+            "d1 box readout requires single-token numbers");
+      q.edges.push_back(ids({number, " " + number}));
+    }
+    for (unsigned k = 1; k <= q.blocks; ++k)
+      for (const auto* edge : {"present", "top", "bottom", "left", "right"})
+        q.slot_names.push_back(
+            std::string(edge) +
+            (q.type == "boxes" ? " " + std::to_string(k) : ""));
+    return q;
+  }
   if (q.type == "noul") {
     if (criteria && !criteria->is_null()) {
       if (!criteria->is_object())
@@ -162,18 +206,20 @@ Question ParseQuestion(const lfm3::Tokenizer& tok, const std::string& name,
   }
   return q;
 }
-json::Value ReadAnswer(const Question& q, std::span<const float> logits) {
-  if (!std::isfinite(q.temperature) || q.temperature <= 0 || q.readout.empty())
+std::vector<double> Probabilities(
+    std::span<const std::vector<std::uint32_t>> readout,
+    std::span<const float> logits, double temperature) {
+  if (!std::isfinite(temperature) || temperature <= 0 || readout.empty())
     throw std::invalid_argument("invalid decision temperature or readout");
   std::vector<double> scores;
-  for (const auto& group : q.readout) {
+  for (const auto& group : readout) {
     float best = -std::numeric_limits<float>::infinity();
     for (auto id : group) {
       if (id >= logits.size() || !std::isfinite(logits[id]))
         throw std::runtime_error("invalid decision logits");
       best = std::max(best, logits[id]);
     }
-    scores.push_back(best / double(q.temperature));
+    scores.push_back(best / double(temperature));
   }
   const double maximum = *std::max_element(scores.begin(), scores.end());
   double sum = 0;
@@ -183,6 +229,10 @@ json::Value ReadAnswer(const Question& q, std::span<const float> logits) {
   }
   for (auto& score : scores)
     score /= sum;
+  return scores;
+}
+json::Value ReadAnswer(const Question& q, std::span<const float> logits) {
+  auto scores = Probabilities(q.readout, logits, q.temperature);
   auto answer = json::Value::object();
   answer["type"] = q.type;
   if (q.type == "noul") {

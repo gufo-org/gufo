@@ -116,7 +116,7 @@ struct Session::Impl {
   std::uint32_t context, position{};
   bool poisoned{}, logits_ready{};
   Buffer ids, x, z, out, p, q, k, v, gate, a, ff_gate, ff_up, logits, frontier,
-      inputs;
+      inputs, decision_groups;
   struct State {
     Buffer conv, k, v;
     std::uint32_t capacity{};
@@ -175,7 +175,8 @@ struct Session::Impl {
   // holds n * hidden floats on the host, or on the device when on_device.
   void Run(std::span<const std::uint32_t> tokens, bool output_logits,
            std::span<Impl* const> batch = {}, const float* embeddings = nullptr,
-           std::size_t embedding_rows = 0, bool on_device = false) {
+           std::size_t embedding_rows = 0, bool on_device = false,
+           std::span<const std::int32_t> groups = {}) {
     const auto& w = model->impl_->weights;
     const auto& c = w.config;
     const auto s = stream.value;
@@ -189,6 +190,11 @@ struct Session::Impl {
                            hipMemcpyHostToDevice, s));
       gpu::Embed(w.embedding, static_cast<const std::uint32_t*>(ids.data),
                  x.floats(), n, s);
+    }
+    if (!groups.empty()) {
+      decision_groups = Buffer(groups.size_bytes());
+      Check(hipMemcpyAsync(decision_groups.data, groups.data(),
+                           groups.size_bytes(), hipMemcpyHostToDevice, s));
     }
     auto dense = [&](const Tensor& weight, const float* input, float* output,
                      int count, hipStream_t stream) {
@@ -281,10 +287,11 @@ struct Session::Impl {
           gpu::Rope(kr, table, factors, count, c.kv_heads[i], c.head_dim,
                     owner.position, s);
           if (c.decision && !swa)
-            gpu::BidirectionalAttention(qr, kr, vr,
-                                        gate.floats() + row * c.heads,
-                                        a.floats() + row * c.heads * c.head_dim,
-                                        count, c.heads, c.kv_heads[i], s);
+            gpu::BidirectionalAttention(
+                qr, kr, vr, gate.floats() + row * c.heads,
+                a.floats() + row * c.heads * c.head_dim, count, c.heads,
+                c.kv_heads[i], s,
+                static_cast<const std::int32_t*>(decision_groups.data));
           else
             gpu::Attention(qr, kr, vr, gate.floats() + row * c.heads,
                            state.k.floats(), state.v.floats(),
@@ -370,6 +377,8 @@ std::unique_ptr<Session> Model::CreateSession(std::uint32_t context,
 bool Session::ForwardDecision(std::span<const std::uint32_t> tokens,
                               std::span<const float> embeddings,
                               std::span<float> logits, std::string* error) {
+  // Preserve the original full-vocabulary single-slot path for callers
+  // requiring the existing d1 decision probabilities bit for bit.
   try {
     const auto& c = impl_->model->config();
     if (!c.decision || tokens.empty() || tokens.size() > impl_->context ||
@@ -389,6 +398,95 @@ bool Session::ForwardDecision(std::span<const std::uint32_t> tokens,
                embeddings.empty() ? 0 : tokens.size());
     Check(hipMemcpy(logits.data(), impl_->logits.data, logits.size_bytes(),
                     hipMemcpyDeviceToHost));
+    return true;
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return false;
+  }
+}
+bool Session::ForwardDecision(std::span<const std::uint32_t> tokens,
+                              std::span<const float> embeddings,
+                              std::span<const std::int32_t> groups,
+                              std::span<const std::uint32_t> positions,
+                              std::span<const std::uint32_t> vocabulary,
+                              std::span<float> logits, std::string* error) {
+  try {
+    const auto& c = impl_->model->config();
+    const auto columns = vocabulary.empty() ? c.vocab : vocabulary.size();
+    if (!c.decision || tokens.empty() || tokens.size() > impl_->context ||
+        positions.empty() || positions.size() > tokens.size() ||
+        logits.size() != positions.size() * columns ||
+        (!groups.empty() && groups.size() != tokens.size()) ||
+        (!embeddings.empty() && embeddings.size() != tokens.size() * c.hidden))
+      throw std::invalid_argument(
+          "invalid d1 prompt, groups, slots or readout");
+    for (auto id : tokens)
+      if (id >= c.vocab)
+        throw std::invalid_argument("d1 token out of range");
+    for (auto id : vocabulary)
+      if (id >= c.vocab)
+        throw std::invalid_argument("d1 vocabulary ID out of range");
+    for (std::size_t i = 0; i < positions.size(); ++i)
+      if (positions[i] >= tokens.size() ||
+          (i && positions[i - 1] >= positions[i]))
+        throw std::invalid_argument(
+            "d1 slots must be increasing prompt positions");
+    for (std::size_t i = 0; i < groups.size(); ++i)
+      if (groups[i] == 0 || groups[i] < -1 || groups[i] > 128 ||
+          (i && groups[i] < groups[i - 1]))
+        throw std::invalid_argument(
+            "d1 groups must be a state prefix and ordered positive question "
+            "IDs");
+    auto state = std::make_unique<Impl>(impl_->model, impl_->context,
+                                        std::max(kPrefillChunk, tokens.size()));
+    impl_.swap(state);
+    if (!Reset(error))
+      return false;
+    // A lone question sees the entire prompt. Keep its original unmasked
+    // specialization, including its FP32 arithmetic and scheduling.
+    const bool packed =
+        !groups.empty() &&
+        std::any_of(groups.begin(), groups.end(), [&](auto group) {
+          return group > 0 && group != groups.back();
+        });
+    impl_->Run(tokens, false, {},
+               embeddings.empty() ? nullptr : embeddings.data(),
+               embeddings.empty() ? 0 : tokens.size(), false,
+               packed ? groups : std::span<const std::int32_t>{});
+    const auto stream = impl_->stream.value;
+    const auto& w = impl_->model->impl_->weights;
+    Buffer indices(std::max(positions.size(), vocabulary.size()) *
+                   sizeof(std::uint32_t));
+    Buffer hidden(positions.size() * c.hidden * 4),
+        projected(logits.size_bytes());
+    Check(hipMemcpyAsync(indices.data, positions.data(), positions.size_bytes(),
+                         hipMemcpyHostToDevice, stream));
+    Tensor states{impl_->x.data, core::GgmlType::kF32, c.hidden,
+                  std::uint32_t(tokens.size()), tokens.size() * c.hidden * 4};
+    gpu::SelectRows(states, static_cast<const std::uint32_t*>(indices.data),
+                    hidden.data, positions.size(), stream);
+    gufo::hip::LaunchBatchedRMSNorm(
+        hidden.floats(), static_cast<const float*>(w.output_norm.data),
+        hidden.floats(), nullptr, positions.size(), c.hidden, c.eps, stream);
+    Tensor head = w.output;
+    Buffer selected;
+    if (!vocabulary.empty()) {
+      selected = Buffer(vocabulary.size() * (head.bytes / head.rows));
+      Check(hipMemcpyAsync(indices.data, vocabulary.data(),
+                           vocabulary.size_bytes(), hipMemcpyHostToDevice,
+                           stream));
+      gpu::SelectRows(head, static_cast<const std::uint32_t*>(indices.data),
+                      selected.data, vocabulary.size(), stream);
+      head = {selected.data, head.type, head.cols,
+              std::uint32_t(vocabulary.size()),
+              vocabulary.size() * (head.bytes / head.rows)};
+    }
+    gpu::Dense(head, hidden.floats(), projected.floats(), positions.size(),
+               stream, {impl_->quantized.data});
+    Check(hipMemcpyAsync(logits.data(), projected.data, logits.size_bytes(),
+                         hipMemcpyDeviceToHost, stream));
+    Check(hipStreamSynchronize(stream));
     return true;
   } catch (const std::exception& e) {
     if (error)

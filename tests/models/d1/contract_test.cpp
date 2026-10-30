@@ -86,6 +86,50 @@ int main() {
       rejected = true;
     }
     Require(rejected, "malformed RGB image accepted");
+    d::Question box;
+    box.type = "box";
+    std::vector<std::vector<double>> distributions(5);
+    distributions[0] = {1.0, 0.0};
+    const int bins[] = {100, 900, 200, 800};
+    for (int edge = 0; edge < 4; ++edge) {
+      distributions[edge + 1].resize(1000);
+      distributions[edge + 1][bins[edge]] = 1;
+    }
+    auto read = d::ReadBoxDistributions(box, distributions);
+    Require(read.find("box") &&
+                std::abs(read.find("box")->member_double("top") - .1) < 1e-12,
+            "box edge median differs");
+    Require(
+        std::abs(read.member_double("confidence") - 0.936923076923077) < 1e-12,
+        "box Halton confidence/calibration differs");
+    distributions[0] = {0.0, 1.0};
+    read = d::ReadBoxDistributions(box, distributions);
+    Require(
+        read.find("box")->is_null() && read.member_double("confidence") == 0,
+        "absent box must be null");
+    distributions[0] = {1.0, 0.0};
+    std::swap(distributions[1], distributions[2]);
+    read = d::ReadBoxDistributions(box, distributions);
+    Require(
+        std::abs(read.find("box")->member_double("top") - .4995) < 1e-12 &&
+            std::abs(read.find("box")->member_double("bottom") - .5005) < 1e-12,
+        "crossed edges must form a single thousandth bin");
+    box.type = "boxes";
+    box.blocks = 3;
+    auto many = distributions;
+    many.insert(many.end(), distributions.begin(), distributions.end());
+    many.insert(many.end(), distributions.begin(), distributions.end());
+    many[5] = {.01, .99};
+    read = d::ReadBoxDistributions(box, many);
+    Require(read.member_size("count") == 1 && !read.find("at_least")->as_bool(),
+            "boxes presence must stay decreasing");
+    Require(read.find("presence")->items()[2].as_double() ==
+                read.find("presence")->items()[1].as_double(),
+            "later presence cannot increase");
+    box.blocks = 1;
+    read = d::ReadBoxDistributions(box, distributions);
+    Require(read.member_size("count") == 1 && read.find("at_least")->as_bool(),
+            "partial boxes must report at_least");
     std::cout << "PASS d1 readout and image contracts\n";
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';

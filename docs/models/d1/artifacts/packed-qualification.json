@@ -1,0 +1,85 @@
+{
+  "date": "2026-10-30",
+  "hardware": "AMD Strix Halo gfx1151",
+  "baseline_revision": "431efcc7fff78e6ec6877debc5bd8a499ad915a6",
+  "weights_revision": "c53ae0b1f92b17065e9158d34019c9ca1ea5bcf8",
+  "reference_revision": "431f1d667de5afcc9b0c58b2d9c170a7b38b358b",
+  "reference_engine": "LiquidAI unmodified Python classes, dequantized GGUF weights, CPU FP32",
+  "reference_software": "transformers 5.19.0 / PyTorch 2.14.1 / gguf-py 8642541b255bfb5dc39cd351a178be09013a55d6",
+  "reference_cases": 11,
+  "physical_prompts": 15,
+  "max_selected_logit_error": 6.222724914550781e-05,
+  "logit_gate": 0.002,
+  "max_box_coordinate_error": 0.0,
+  "max_api_probability_error": 7.053228229803032e-07,
+  "probability_gate": 0.02,
+  "coordinate_gate": 0.002,
+  "reference_errors": [],
+  "http_checks": 26,
+  "http_errors": [],
+  "legacy_control_errors": [],
+  "legacy_controls": [
+    {
+      "request": "text",
+      "input_tokens": 150,
+      "baseline_ms": 90.44651297153905,
+      "candidate_ms": 90.18255997216329,
+      "exact_response": true
+    },
+    {
+      "request": "image",
+      "input_tokens": 665,
+      "baseline_ms": 344.9658119934611,
+      "candidate_ms": 351.7774539650418,
+      "exact_response": true
+    },
+    {
+      "request": "audio",
+      "input_tokens": 352,
+      "baseline_ms": 125.63341803615913,
+      "candidate_ms": 130.76171797001734,
+      "exact_response": true
+    },
+    {
+      "request": "long",
+      "input_tokens": 734,
+      "baseline_ms": 165.66607198910788,
+      "candidate_ms": 166.77478101337329,
+      "exact_response": true
+    }
+  ],
+  "packed_timings": [
+    {
+      "request": "text",
+      "input_tokens": 122,
+      "candidate_ms": 38.96149998763576
+    },
+    {
+      "request": "image",
+      "input_tokens": 359,
+      "candidate_ms": 270.84044204093516
+    },
+    {
+      "request": "audio",
+      "input_tokens": 208,
+      "candidate_ms": 81.53370901709422
+    }
+  ],
+  "box_timings": [
+    {
+      "request": "boxes-1",
+      "input_tokens": 422,
+      "candidate_ms": 281.2823840067722
+    },
+    {
+      "request": "boxes-4",
+      "input_tokens": 482,
+      "candidate_ms": 284.49571499368176
+    },
+    {
+      "request": "boxes-16",
+      "input_tokens": 722,
+      "candidate_ms": 341.9912190292962
+    }
+  ]
+}

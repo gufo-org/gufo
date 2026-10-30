@@ -955,3 +955,7 @@ with explicit local PNG/WAV fixtures. It covers text, image, audio, mixed
 media, spoken instructions, Unicode/control spellings, long prompts, isolation
 and invalid requests. It retains each request and duration; missing inputs
 fail rather than skip. See [d1 quality and reproduction](../../docs/models/d1/QUALITY.md).
+
+`d1_packed.py` adds packed-set and box checks, including 17-question partial
+tails, default set size, mixed audio/image/box requests and invalid limits.
+`tools/d1/reference.py` supplies the independent Python numerical teacher.

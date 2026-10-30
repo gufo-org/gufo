@@ -35,7 +35,7 @@ def main():
     errors = []
 
     def call(server, name, request, expected=200):
-        encoded = json.dumps(request, ensure_ascii=False).encode()
+        encoded = json.dumps({"set_size": 1, **request}, ensure_ascii=False).encode()
         start = time.perf_counter()
         try:
             with urllib.request.urlopen(urllib.request.Request(
