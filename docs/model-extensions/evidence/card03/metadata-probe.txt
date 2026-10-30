@@ -1,0 +1,5 @@
+artifact_key=qwen38-flash-next
+draft_option=--mtp-model
+draft_tokens_option=--draft-tokens
+speculative_value=mtp
+all typed option fields represented; factory signature checked

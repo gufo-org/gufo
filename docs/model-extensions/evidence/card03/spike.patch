@@ -1,0 +1,3600 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f557a4be82..393f4cd937 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -439,6 +439,7 @@
+   src/cli/serve/text_generation_scheduler.cpp
+   src/cli/serve/continuation_identity.cpp
+   src/cli/serve/inference_backend.cpp
++  src/models/qwen38_flash_next/text_provider.cpp
+   src/eval/http_client.cpp
+ )
+ target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+diff --git a/src/cache/continuation_types.hpp b/src/cache/continuation_types.hpp
+new file mode 100644
+index 0000000000..78989c9c6b
+--- /dev/null
++++ b/src/cache/continuation_types.hpp
+@@ -0,0 +1,66 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <span>
++#include <vector>
++namespace gufo::server {
++using ContinuationToken = std::uint32_t;
++
++/// Supplemental input identity for prefixes ending at or before token_count.
++/// Ordered boundaries allow a checkpoint before a new image to retain its
++/// original identity. The complete request identity applies after the last one.
++struct ContinuationInputPrefix {
++  std::size_t token_count{0};
++  std::vector<std::uint8_t> identity;
++};
++
++[[nodiscard]] inline std::span<const std::uint8_t> PrefixInputIdentity(
++    std::span<const std::uint8_t> complete,
++    std::span<const ContinuationInputPrefix> prefixes, std::size_t count) {
++  for (const auto& prefix : prefixes) {
++    if (count <= prefix.token_count)
++      return prefix.identity;
++  }
++  return complete;
++}
++
++/// Model-private continuation state retained by the common serving cache.
++///
++/// Implementations own all attention, recurrent, position, and graph-bound
++/// state. The cache deliberately cannot inspect or copy those bytes.
++class ContinuationState {
++public:
++  ContinuationState() = default;
++  virtual ~ContinuationState() = default;
++
++  ContinuationState(const ContinuationState&) = delete;
++  ContinuationState& operator=(const ContinuationState&) = delete;
++  ContinuationState(ContinuationState&&) = delete;
++  ContinuationState& operator=(ContinuationState&&) = delete;
++
++  /// Discards any partially or fully computed continuation.
++  virtual void Invalidate() noexcept = 0;
++};
++
++/// Immutable model-private continuation payload.
++class ContinuationSnapshot {
++public:
++  ContinuationSnapshot() = default;
++  virtual ~ContinuationSnapshot() = default;
++
++  ContinuationSnapshot(const ContinuationSnapshot&) = delete;
++  ContinuationSnapshot& operator=(const ContinuationSnapshot&) = delete;
++  ContinuationSnapshot(ContinuationSnapshot&&) = delete;
++  ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
++
++  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
++  /// Prefer an available state that still holds this snapshot's borrowed rows.
++  /// This is an allocation hint; every state must remain able to restore it.
++  [[nodiscard]] virtual bool PrefersState(
++      const ContinuationState&) const noexcept {
++    return false;
++  }
++};
++
++}  // namespace gufo::server
+diff --git a/src/cli/serve/continuation_cache.hpp b/src/cli/serve/continuation_cache.hpp
+index 1fc223851f..421d4a2440 100644
+--- a/src/cli/serve/continuation_cache.hpp
++++ b/src/cli/serve/continuation_cache.hpp
+@@ -9,66 +9,10 @@
+ #include <string_view>
+ #include <vector>
+ 
++#include "src/cache/continuation_types.hpp"
++
+ namespace gufo::server {
+ 
+-using ContinuationToken = std::uint32_t;
+-
+-/// Supplemental input identity for prefixes ending at or before token_count.
+-/// Ordered boundaries allow a checkpoint before a new image to retain its
+-/// original identity. The complete request identity applies after the last one.
+-struct ContinuationInputPrefix {
+-  std::size_t token_count{0};
+-  std::vector<std::uint8_t> identity;
+-};
+-
+-[[nodiscard]] inline std::span<const std::uint8_t> PrefixInputIdentity(
+-    std::span<const std::uint8_t> complete,
+-    std::span<const ContinuationInputPrefix> prefixes, std::size_t count) {
+-  for (const auto& prefix : prefixes) {
+-    if (count <= prefix.token_count)
+-      return prefix.identity;
+-  }
+-  return complete;
+-}
+-
+-/// Model-private continuation state retained by the common serving cache.
+-///
+-/// Implementations own all attention, recurrent, position, and graph-bound
+-/// state. The cache deliberately cannot inspect or copy those bytes.
+-class ContinuationState {
+-public:
+-  ContinuationState() = default;
+-  virtual ~ContinuationState() = default;
+-
+-  ContinuationState(const ContinuationState&) = delete;
+-  ContinuationState& operator=(const ContinuationState&) = delete;
+-  ContinuationState(ContinuationState&&) = delete;
+-  ContinuationState& operator=(ContinuationState&&) = delete;
+-
+-  /// Discards any partially or fully computed continuation.
+-  virtual void Invalidate() noexcept = 0;
+-};
+-
+-/// Immutable model-private continuation payload.
+-class ContinuationSnapshot {
+-public:
+-  ContinuationSnapshot() = default;
+-  virtual ~ContinuationSnapshot() = default;
+-
+-  ContinuationSnapshot(const ContinuationSnapshot&) = delete;
+-  ContinuationSnapshot& operator=(const ContinuationSnapshot&) = delete;
+-  ContinuationSnapshot(ContinuationSnapshot&&) = delete;
+-  ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
+-
+-  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
+-  /// Prefer an available state that still holds this snapshot's borrowed rows.
+-  /// This is an allocation hint; every state must remain able to restore it.
+-  [[nodiscard]] virtual bool PrefersState(
+-      const ContinuationState&) const noexcept {
+-    return false;
+-  }
+-};
+-
+ enum class SnapshotEventAction : std::uint8_t {
+   kRemoved,
+   kSkipped,
+diff --git a/src/cli/serve/inference_backend.cpp b/src/cli/serve/inference_backend.cpp
+index 06a07e6a9d..1328c1cf9a 100644
+--- a/src/cli/serve/inference_backend.cpp
++++ b/src/cli/serve/inference_backend.cpp
+@@ -36,6 +36,7 @@
+ #include "src/models/qwen/vision/image_cache.hpp"
+ 
+ #if defined(ENGINE_ENABLE_HIP)
++#include "src/cli/serve/text_host_hip.hpp"
+ #include "src/core/hip/committed_backing.hpp"
+ #include "src/core/hip/heap_placement.hpp"
+ #include "src/core/hip/hip_utils.hpp"
+@@ -47,8 +48,9 @@
+ #include "src/models/qwen/hip/detail/attention_policy.hpp"
+ #include "src/models/qwen/hip/dflash.hpp"
+ #include "src/models/qwen/hip/executor.hpp"
+-#include "src/models/qwen38_flash_next/continuation_adapter.hpp"
++#include "src/models/qwen/text_prompt_helpers.hpp"
+ #include "src/models/qwen38_flash_next/engine.hpp"
++#include "src/models/qwen38_flash_next/text_provider.hpp"
+ #endif
+ 
+ namespace gufo::server {
+@@ -64,6 +66,9 @@
+ namespace {
+ 
+ using Clock = std::chrono::steady_clock;
++#if defined(ENGINE_ENABLE_HIP)
++using namespace spike;
++#endif
+ 
+ void SetError(std::string* error, std::string message) {
+   if (error != nullptr) {
+@@ -73,119 +78,6 @@
+ 
+ #if defined(ENGINE_ENABLE_HIP)
+ 
+-struct QwenImageContext final : TextPromptContext {
+-  std::shared_ptr<const models::qwen::vision::Prompt> prompt;
+-};
+-
+-tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
+-                                                  std::uint32_t max_context) {
+-  auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
+-                                                      request.add_vision_id);
+-  // gufo #285: the rendered prompt may be as long as the context can hold.
+-  options.max_output_bytes =
+-      tokenization::RenderedPromptBoundBytes(max_context);
+-  return options;
+-}
+-
+-// The text before tokenization. An image renders as its one placeholder, not
+-// the visual tokens Prepare expands it into. Template errors are request
+-// errors, as in Prepare.
+-std::optional<std::string> RenderQwenPrompt(const ChatRequest& request,
+-                                            std::uint32_t max_context) {
+-  std::string error;
+-  auto rendered = tokenization::QwenChatTemplate::Render(
+-      request.messages,
+-      request.tool_choice == ChatRequest::ToolChoice::kNone
+-          ? std::span<const tokenization::ChatTool>{}
+-          : std::span<const tokenization::ChatTool>{request.tools},
+-      QwenChatOptions(request, max_context), &error);
+-  if (!rendered)
+-    throw std::invalid_argument(error);
+-  return rendered;
+-}
+-
+-std::optional<std::size_t> CountQwenPromptTokens(
+-    const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
+-    const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
+-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+-  const auto options = QwenChatOptions(request, max_context);
+-  const auto tools =
+-      request.tool_choice == ChatRequest::ToolChoice::kNone
+-          ? std::span<const tokenization::ChatTool>{}
+-          : std::span<const tokenization::ChatTool>{request.tools};
+-  if (std::ranges::none_of(request.messages,
+-                           [](const auto& m) { return !m.images.empty(); })) {
+-    const auto tokens = tokenization::QwenChatTemplate::RenderAndTokenize(
+-        tokenizer, request.messages, tools, options);
+-    if (!tokens)
+-      return std::nullopt;
+-    return tokens->size();
+-  }
+-  // Reuse generation's CPU image preparation, including resize, token
+-  // expansion and projector validation. Counting does not encode images on
+-  // the GPU or admit the prompt to an execution context. Keep only the shared
+-  // layout's signed position limit so oversized prompts can still be sized.
+-  return models::qwen::vision::Prepare(
+-             tokenizer, request.messages, tools, options,
+-             encoder ? encoder->identity() : std::string_view{},
+-             std::numeric_limits<std::int32_t>::max(),
+-             request.cache_prompt ? &image_cache : nullptr)
+-      .tokens.size();
+-}
+-
+-TextPreparedPrompt PrepareQwenPrompt(
+-    const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
+-    const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
+-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+-  const bool has_images = std::ranges::any_of(
+-      request.messages, [](const auto& m) { return !m.images.empty(); });
+-  const auto options = QwenChatOptions(request, max_context);
+-  auto prompt = std::make_shared<models::qwen::vision::Prompt>(
+-      models::qwen::vision::Prepare(
+-          tokenizer, request.messages,
+-          request.tool_choice == ChatRequest::ToolChoice::kNone
+-              ? std::span<const tokenization::ChatTool>{}
+-              : std::span<const tokenization::ChatTool>{request.tools},
+-          options,
+-          encoder && has_images ? encoder->identity() : std::string_view{},
+-          max_context, request.cache_prompt ? &image_cache : nullptr));
+-  if (has_images && Logger::Enabled(LogLevel::kDebug)) {
+-    const auto stats = image_cache.GetStats();
+-    Logger::LogFormatted(LogLevel::kDebug, "vision",
+-                         "event=image_cache enabled=%d entries=%zu "
+-                         "pixel_bytes=%zu encoded_bytes=%zu "
+-                         "hits=%zu misses=%zu evictions=%zu",
+-                         static_cast<int>(request.cache_prompt), stats.entries,
+-                         stats.pixel_bytes, stats.encoded_bytes, stats.hits,
+-                         stats.misses, stats.evictions);
+-  }
+-  const auto cache_prefix = prompt->stable_prefix_tokens;
+-  if (prompt->images.empty())
+-    return {std::move(prompt->tokens), {}, cache_prefix};
+-  if (!encoder)
+-    throw std::invalid_argument(
+-        "image input requires a matching --mmproj BF16 sidecar");
+-  auto context = std::make_shared<QwenImageContext>();
+-  context->cache_identity = prompt->cache_identity;
+-  for (const auto& image : prompt->images) {
+-    const auto identity = prompt->IdentityForPrefix(image.grid.offset);
+-    context->cache_prefixes.push_back(
+-        {image.grid.offset, {identity.begin(), identity.end()}});
+-  }
+-  context->prompt = prompt;
+-  return {prompt->tokens, std::move(context), cache_prefix};
+-}
+-
+-std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
+-    const std::shared_ptr<const TextPromptContext>& context) {
+-  if (!context)
+-    return {};
+-  const auto* image = dynamic_cast<const QwenImageContext*>(context.get());
+-  if (!image)
+-    throw std::invalid_argument("invalid Qwen prompt context");
+-  return image->prompt;
+-}
+-
+ // Hash the sidecar and upload its weights while the model loads, before the
+ // runner claims state capacity and the RAM cache is sized. Otherwise the first
+ // image request hashes the whole sidecar in its queue time and uploads the
+@@ -629,249 +521,6 @@
+   return *qwen;
+ }
+ 
+-// Owns a four-byte device buffer and a private stream from load, so probing
+-// a lost context needs no allocation. HIP context loss is sticky: after a GPU
+-// reset even this memset fails with a hard error. Only such an error marks the
+-// device lost; a memset still pending at the deadline may be queued behind
+-// long kernels on the shared hardware queues, so it counts as usable.
+-class HipTextModelRunner : public TextModelRunner {
+-public:
+-  HipTextModelRunner() {
+-    HIP_CHECK(hipStreamCreateWithFlags(&probe_stream_, hipStreamNonBlocking));
+-    if (const auto error = hipMalloc(&probe_buffer_, sizeof(std::uint32_t));
+-        error != hipSuccess) {
+-      hip::LogCleanupError(hipStreamDestroy(probe_stream_));
+-      throw std::runtime_error(std::string("device probe allocation: ") +
+-                               hipGetErrorString(error));
+-    }
+-  }
+-  ~HipTextModelRunner() override {
+-    hip::LogCleanupError(hipFree(probe_buffer_));
+-    hip::LogCleanupError(hipStreamDestroy(probe_stream_));
+-  }
+-  HipTextModelRunner(const HipTextModelRunner&) = delete;
+-  HipTextModelRunner& operator=(const HipTextModelRunner&) = delete;
+-  HipTextModelRunner(HipTextModelRunner&&) = delete;
+-  HipTextModelRunner& operator=(HipTextModelRunner&&) = delete;
+-
+-  [[nodiscard]] DeviceProbeStatus PollDevice() const override {
+-    if (!probe_pending_) {
+-      // Clear the failed work unit's thread-local error before probing.
+-      (void)hipGetLastError();
+-      if (hipMemsetAsync(probe_buffer_, 0, sizeof(std::uint32_t),
+-                         probe_stream_) != hipSuccess ||
+-          hipGetLastError() != hipSuccess)
+-        return DeviceProbeStatus::kLost;
+-      probe_pending_ = true;
+-    }
+-    const auto status = hipStreamQuery(probe_stream_);
+-    if (status == hipErrorNotReady)
+-      return DeviceProbeStatus::kPending;
+-    probe_pending_ = false;
+-    return status == hipSuccess ? DeviceProbeStatus::kUsable
+-                                : DeviceProbeStatus::kLost;
+-  }
+-
+-  [[nodiscard]] bool DeviceUsable() const override {
+-    constexpr auto kTimeout = std::chrono::seconds(5);
+-    const auto deadline = Clock::now() + kTimeout;
+-    for (;;) {
+-      const auto status = PollDevice();
+-      if (status == DeviceProbeStatus::kUsable)
+-        return true;
+-      if (status == DeviceProbeStatus::kLost)
+-        return false;
+-      if (Clock::now() >= deadline) {
+-        Logger::Warn("scheduler", "event=device_probe_timeout timeout_s=" +
+-                                      std::to_string(kTimeout.count()));
+-        return true;
+-      }
+-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+-    }
+-  }
+-
+-private:
+-  hipStream_t probe_stream_{};
+-  void* probe_buffer_{};
+-  mutable bool probe_pending_{false};
+-};
+-
+-template<typename AdapterType>
+-std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
+-    std::unique_ptr<AdapterType> adapter, cache::ResourceLedger& ledger) {
+-  struct Backing {
+-    hip::TransferPool streams{64};
+-    std::unique_ptr<hip::CommittedBackingPool> pool;
+-    std::map<std::uint32_t, std::size_t> component_classes;
+-  };
+-  auto result = std::make_unique<ComponentCacheResources>();
+-  result->adapter = std::move(adapter);
+-  auto backing = std::make_shared<Backing>();
+-  result->transfer_batch_size = 16;
+-  const auto rounded = [](std::size_t bytes) {
+-    return (bytes + 4095) / 4096 * 4096;
+-  };
+-  for (const auto& d : result->adapter->Components()) {
+-    const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
+-                                   ? d.state_bytes
+-                                   : d.row_bytes * d.rows_per_chunk);
+-    backing->component_classes.emplace(d.id.value, bytes);
+-  }
+-  // The remainder belongs to index, histories, disk catalog and queue
+-  // metadata. The pools charge their own per-block allocator headroom.
+-  result->commit_backing = [backing, &ledger, adapter = result->adapter.get()](
+-                               std::size_t budget) {
+-    const auto plan = static_cast<AdapterType*>(adapter)->BackingPlan(budget);
+-    if (plan.size() != 1)
+-      throw std::invalid_argument("insufficient component backing budget");
+-    const auto& allocation = plan.front();
+-    // Pages commit as captures need them. A payload cannot span segments,
+-    // so segments of about 128 MiB bound registration pauses and stranded
+-    // edge space, fitting at least two of the largest payloads. Prefill
+-    // chunks prepare backing before GPU work, after any fallback capture.
+-    // Growth stops when the host keeps less than its reserve.
+-    std::size_t largest = 0;
+-    for (const auto& [id, bytes] : backing->component_classes)
+-      largest = std::max(largest, bytes);
+-    const auto block = allocation.block_bytes;
+-    const auto target =
+-        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
+-    const auto parts =
+-        std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
+-    const auto segment = (allocation.blocks + parts - 1) / parts * block;
+-    struct Limited {
+-      std::mutex mutex;
+-      std::chrono::steady_clock::time_point refused;
+-      bool active{};
+-    };
+-    backing->pool = std::make_unique<hip::CommittedBackingPool>(
+-        ledger,
+-        hip::BackingPoolConfig{
+-            allocation.blocks * allocation.block_bytes +
+-                allocation.metadata_bytes,
+-            allocation.block_bytes, allocation.metadata_bytes, segment,
+-            [limited = std::make_shared<Limited>()](std::size_t bytes) {
+-              const std::lock_guard lock(limited->mutex);
+-              const auto now = std::chrono::steady_clock::now();
+-              // Pressure retries ask once per capture; recheck at most
+-              // once a second while the host is short.
+-              if (limited->active &&
+-                  now - limited->refused < std::chrono::seconds(1))
+-                return false;
+-              const auto ceiling = HostSnapshotCeilingBytes();
+-              // Pinned host pages come out of the same device heap that
+-              // session and scratch allocations draw on; keep its dispatch
+-              // reserve so they do not fall back to managed memory.
+-              std::size_t heap_free = 0, heap_total = 0;
+-              const bool heap_fits =
+-                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+-                  hip::HeapFitsAboveReserve(heap_free, bytes);
+-              if (ceiling >= bytes && heap_fits) {
+-                limited->active = false;
+-                return true;
+-              }
+-              if (!limited->active)
+-                Logger::Warn(
+-                    "cache",
+-                    "schema=component-cache-v1 "
+-                    "event=backing_limited reason=" +
+-                        std::string(heap_fits ? "host_reserve "
+-                                              : "device_heap_reserve ") +
+-                        "segment_bytes=" + std::to_string(bytes) +
+-                        " host_headroom_bytes=" + std::to_string(ceiling) +
+-                        " device_heap_free_bytes=" + std::to_string(heap_free));
+-              limited->active = true;
+-              limited->refused = now;
+-              return false;
+-            }});
+-    // Prepare a bounded reserve before readiness. The first shared-prefix
+-    // capture needs more than one segment; preparing 2 GiB avoids moving
+-    // registration onto that request's capture or decode path.
+-    backing->pool->GrowAhead(2ULL << 30);
+-    backing->pool->WaitForGrowth();
+-    Logger::Info(
+-        "cache",
+-        "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
+-            std::to_string(backing->pool->CommittedBytes()) +
+-            " long_term_pinned_bytes=" +
+-            std::to_string(backing->pool->LongTermPinnedBytes()));
+-  };
+-  result->prepare_prefill = [backing](std::size_t tokens) {
+-    // Prepare after any fallback capture, alongside actual prefill work.
+-    // Short turns need a smaller reserve for private states and row tails.
+-    backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
+-  };
+-  result->can_capture = [backing](auto payloads) {
+-    return backing->pool->CanFit(payloads);
+-  };
+-  result->owner = backing;
+-  result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
+-    return backing->streams.TryAcquire();
+-  };
+-  result->allocate = [backing](const cache::PayloadRequest& request) {
+-    // Bound the logical capture, then assign whole shared backing pages.
+-    const auto capacity =
+-        backing->component_classes.at(request.component.value);
+-    if (request.bytes > capacity)
+-      throw std::logic_error("component capture exceeds its backing class");
+-    const auto category =
+-        request.category == cache::ResourceCategory::kBackingAssigned
+-            ? cache::ResourceCategory::kBackingAssigned
+-            : request.category;
+-    const auto segments = backing->pool->PageCommitAllocations();
+-    const auto started = std::chrono::steady_clock::now();
+-    auto block = backing->pool->TryAcquire(category, request.bytes);
+-    if (backing->pool->PageCommitAllocations() != segments)
+-      Logger::Info(
+-          "cache",
+-          "schema=component-cache-v1 event=backing_grown committed_bytes=" +
+-              std::to_string(backing->pool->CommittedBytes()) + " segments=" +
+-              std::to_string(backing->pool->PageCommitAllocations()) +
+-              " long_term_pinned_bytes=" +
+-              std::to_string(backing->pool->LongTermPinnedBytes()) +
+-              " acquire_ms=" +
+-              std::to_string(std::chrono::duration<double, std::milli>(
+-                                 std::chrono::steady_clock::now() - started)
+-                                 .count()));
+-    if (!block)
+-      throw cache::ResourceExhausted();
+-    // Do not start registration between a capture's allocations and copies.
+-    // Each prefill chunk prepares its own reserve before GPU work.
+-    auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
+-    return ComponentCaptureBuffer{
+-        owner->Bytes(),
+-        [owner] {
+-          owner->Convert();
+-          return std::move(*owner).TakePayload();
+-        },
+-        backing->pool.get(),
+-        [owner, request](cache::SlotLease& lease, auto source) {
+-          return cache::Payload::Borrowed(
+-              std::move(*owner).Borrow(lease, request.component, request.first,
+-                                       request.end, request.bytes, source));
+-        }};
+-  };
+-  result->staging = [](std::size_t bytes) {
+-    auto allocation = std::make_shared<hip::HostAllocations>();
+-    void* data = nullptr;
+-    const auto status =
+-        allocation->Allocate(&data, bytes, hipHostMallocCoherent);
+-    if (status != hipSuccess)
+-      throw std::runtime_error(hipGetErrorString(status));
+-    auto owner = std::shared_ptr<void>(std::move(allocation), data);
+-    std::memset(data, 0, bytes);
+-    return cache::StagingAllocation{std::move(owner),
+-                                    {static_cast<std::uint8_t*>(data), bytes}};
+-  };
+-  result->copy_observed_rows = [](auto source, auto destination,
+-                                  cache::Stream& stream) {
+-    return dynamic_cast<hip::TransferStream&>(stream).Copy(
+-        destination.data(), source.data(), destination.size(),
+-        hip::CopyDirection::kDeviceToHost, destination.size());
+-  };
+-  return result;
+-}
+-
+ class QwenTextRunner final : public HipTextModelRunner {
+ public:
+   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+@@ -2176,605 +1825,7 @@
+ #if defined(ENGINE_ENABLE_HIP)
+ // Each Flash-Next request owns its recurrent/KV state and snapshots. Target
+ // projections share batches; sampling and rollback remain request-local.
+-constexpr std::string_view kQwenFlashNextStateAbi =
+-    "qwen38-flash-next-rocm-session-v1";
+-
+-using QwenFlashNextModel = models::qwen38_flash_next::Model;
+-using QwenFlashNextSession = models::qwen38_flash_next::Session;
+-
+-std::vector<std::int32_t> QwenFlashNextEngineTokens(
+-    std::span<const TextRunnerToken> tokens) {
+-  std::vector<std::int32_t> converted;
+-  converted.reserve(tokens.size());
+-  for (const TextRunnerToken token : tokens) {
+-    if (token > static_cast<TextRunnerToken>(
+-                    std::numeric_limits<std::int32_t>::max())) {
+-      throw std::invalid_argument(
+-          "Qwen3.8-Flash-Next token ID exceeds engine range");
+-    }
+-    converted.push_back(static_cast<std::int32_t>(token));
+-  }
+-  return converted;
+-}
+-
+-class QwenFlashNextTextRunnerState final : public TextRunnerState {
+-public:
+-  QwenFlashNextTextRunnerState(QwenFlashNextSession& session,
+-                               cache::Adapter& adapter, cache::Slot& slot)
+-      : session_(&session), adapter_(&adapter), slot_(&slot) {}
+-
+-  void Invalidate() noexcept override {
+-    session_->SetCancellationCheck({});
+-    (void)adapter_->Invalidate(*slot_);
+-    position_ = 0;
+-  }
+-  void SetCancellationCheck(const CancellationCheck& check) override {
+-    session_->SetCancellationCheck(check);
+-  }
+-  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+-      const noexcept override {
+-    return {.per_request_state_bytes = session_->AllocatedBytes(),
+-            .temporary_scratch_bytes = 0};
+-  }
+-
+-  [[nodiscard]] QwenFlashNextSession& session() const { return *session_; }
+-  [[nodiscard]] models::qwen38_flash_next::ContinuationAdapter& adapter()
+-      const {
+-    return dynamic_cast<models::qwen38_flash_next::ContinuationAdapter&>(
+-        *adapter_);
+-  }
+-  [[nodiscard]] cache::Slot& slot() const { return *slot_; }
+-  [[nodiscard]] std::size_t position() const noexcept { return position_; }
+-  void set_position(std::size_t position) noexcept { position_ = position; }
+-
+-private:
+-  QwenFlashNextSession* session_{};
+-  cache::Adapter* adapter_{};
+-  cache::Slot* slot_{};
+-  std::size_t position_{0};
+-};
+-
+-QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
+-    TextRunnerState& state) {
+-  auto* qfn = dynamic_cast<QwenFlashNextTextRunnerState*>(&state);
+-  if (qfn == nullptr) {
+-    throw std::logic_error("text runner state is not Qwen3.8-Flash-Next");
+-  }
+-  return *qfn;
+-}
+-
+-const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
+-    const TextRunnerState& state) {
+-  const auto* qfn = dynamic_cast<const QwenFlashNextTextRunnerState*>(&state);
+-  if (qfn == nullptr) {
+-    throw std::logic_error("text runner state is not Qwen3.8-Flash-Next");
+-  }
+-  return *qfn;
+-}
+-
+-class QwenFlashNextTextRunner final : public HipTextModelRunner {
+-public:
+-  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+-    return sampling::JsonConstraint::ToolFormat::kQwen;
+-  }
+-  QwenFlashNextTextRunner(std::shared_ptr<QwenFlashNextModel> model,
+-                          std::uint32_t max_context, bool use_mtp,
+-                          std::uint32_t max_draft_tokens,
+-                          std::string artifact_fingerprint = {},
+-                          std::string mtp_fingerprint = {})
+-      : model_(std::move(model)),
+-        max_context_(max_context),
+-        use_mtp_(use_mtp),
+-        max_draft_tokens_(max_draft_tokens) {
+-    // The typed in-process API owns an immutable loaded model but need not
+-    // supply file fingerprints when disk caching is disabled. Its model
+-    // lifetime is an exact process-local identity; durable caches still
+-    // require the validated full artifact fingerprints below.
+-    if (!artifact_fingerprint.empty()) {
+-      persistence_ = TextRunnerPersistenceDescriptor{
+-          .compatibility_identity = QwenFlashNextCompatibilityIdentity(
+-              artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
+-              use_mtp_, max_context_, max_draft_tokens_,
+-              model_->DecodeConcurrency(),
+-              models::qwen38_flash_next::RopePositionPolicy(
+-                  model_->config().rope_scaling)),
+-          .payload_version =
+-              models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
+-      };
+-      component_identity_ = persistence_->compatibility_identity;
+-    } else {
+-      component_identity_ = QwenFlashNextProcessIdentity(
+-          model_.get(), max_context_, use_mtp_, max_draft_tokens_,
+-          model_->DecodeConcurrency());
+-    }
+-  }
+-
+-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
+-  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
+-  CreateComponentCacheResources(cache::ResourceLedger& ledger,
+-                                std::size_t ram) const override {
+-    (void)ram;
+-    return CreateHipComponentCacheResources(
+-        std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
+-            model_,
+-            use_mtp_ ? core::SessionMode::kSpeculative
+-                     : core::SessionMode::kAutoregressive,
+-            max_context_, component_identity_),
+-        ledger);
+-  }
+-  [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
+-      cache::Adapter& adapter, cache::Slot& slot) const override {
+-    auto& flash =
+-        dynamic_cast<models::qwen38_flash_next::ContinuationAdapter&>(adapter);
+-    return std::make_unique<QwenFlashNextTextRunnerState>(
+-        flash.GetSession(slot), adapter, slot);
+-  }
+-  void ReconcileComponentState(TextRunnerState& state,
+-                               std::size_t position) const override {
+-    RequireQwenFlashNextState(state).set_position(position);
+-  }
+-
+-  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+-    return {
+-        .model_id = model_->ModelName(),
+-        .state_abi = std::string(kQwenFlashNextStateAbi),
+-        .max_context = max_context_,
+-        .capabilities =
+-            TextRunnerCapabilities{
+-                .incremental_prefill = true,
+-                .snapshot = true,
+-                .fork = true,
+-                .final_token_advance_required = false,
+-                .incremental_text_is_exact = true,
+-                .multi_token_decode = use_mtp_,
+-                .batched_multi_token_decode = use_mtp_,
+-                .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
+-                .prefix_reuse = true,
+-                .in_pass_checkpoint = true,
+-                .partial_prefill_retention = true,
+-            },
+-        .persistence = persistence_,
+-    };
+-  }
+-
+-  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+-    std::size_t free_bytes = 0;
+-    std::size_t total_bytes = 0;
+-    std::optional<std::size_t> capacity;
+-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+-      const auto deferred = model_->DeferredScratchBytes();
+-      capacity = free_bytes > deferred ? free_bytes - deferred : 0;
+-    }
+-    // Admission charges complete snapshot payloads. Flash-Next can retain
+-    // mutable state and protected K/V rows in private device storage.
+-    return {
+-        .resident_weights_bytes = model_->ResidentBytes(),
+-        .state_capacity_bytes = capacity,
+-        .per_request_state_bytes = model_->SessionBytes(
+-            use_mtp_ ? gufo::core::SessionMode::kSpeculative
+-                     : gufo::core::SessionMode::kAutoregressive,
+-            max_context_),
+-        // Runtime scratch is shared and already allocated at model load;
+-        // reserve its remaining lazy buffers once from aggregate capacity.
+-        .temporary_scratch_bytes = 0,
+-        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+-        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+-        .requires_device_runtime_lock = true,
+-    };
+-  }
+-
+-  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+-    std::vector<TextExecutionPlan> plans{
+-        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+-    for (std::size_t width = 2; width <= 8; ++width) {
+-      plans.push_back(
+-          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+-    }
+-    return plans;
+-  }
+-
+-  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+-  BuildConstraintVocabulary() const override {
+-    return std::make_shared<const sampling::ConstraintVocabulary>(
+-        model_->tokenizer().GetVocabSize(), [this](std::uint32_t id) {
+-          const auto& tokenizer = model_->tokenizer();
+-          return sampling::ConstraintVocabulary::Piece{
+-              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+-        });
+-  }
+-  [[nodiscard]] std::uint32_t VocabularySize() const override {
+-    return static_cast<std::uint32_t>(model_->tokenizer().GetVocabSize());
+-  }
+-
+-  // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
+-  // reasoning at a tool call.
+-  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
+-    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
+-  }
+-
+-  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+-      std::string_view text) const override {
+-    return model_->tokenizer().Encode(text);
+-  }
+-
+-  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+-      const ChatRequest& request) const override {
+-    return tokenization::QwenChatTemplate::RenderAndTokenize(
+-        model_->tokenizer(), request.messages,
+-        request.tool_choice == ChatRequest::ToolChoice::kNone
+-            ? std::span<const tokenization::ChatTool>{}
+-            : std::span<const tokenization::ChatTool>{request.tools},
+-        QwenChatOptions(request, max_context_));
+-  }
+-
+-  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+-      const ChatRequest& request) const override {
+-    return PrepareQwenPrompt(request, model_->tokenizer(),
+-                             model_->VisionEncoder(), max_context_,
+-                             image_cache_);
+-  }
+-
+-  [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
+-      const ChatRequest& request) const override {
+-    return CountQwenPromptTokens(request, model_->tokenizer(),
+-                                 model_->VisionEncoder(), max_context_,
+-                                 image_cache_);
+-  }
+-
+-  [[nodiscard]] std::optional<std::string> RenderPrompt(
+-      const ChatRequest& request) const override {
+-    return RenderQwenPrompt(request, max_context_);
+-  }
+-
+-  void SetPromptContext(
+-      TextRunnerState& state,
+-      std::shared_ptr<const TextPromptContext> context) const override {
+-    RequireQwenFlashNextState(state).session().ConfigureVision(
+-        QwenPrompt(context));
+-  }
+-
+-  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+-      const ChatRequest& request) const override {
+-    return QwenChatOptions(request, max_context_).enable_thinking
+-               ? TextGenerationBackend::InitialOutputState::kReasoning
+-               : TextGenerationBackend::InitialOutputState::kContent;
+-  }
+-
+-  [[nodiscard]] std::string Decode(
+-      std::span<const TextRunnerToken> tokens) const override {
+-    return model_->tokenizer().Decode(tokens);
+-  }
+-
+-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+-    throw std::logic_error(
+-        "Flash-Next execution slots are owned by the component cache");
+-  }
+-
+-  void PreparePrefixReuse(
+-      TextRunnerState& state,
+-      std::span<const TextRunnerToken> prefix) const override {
+-    const auto& qfn = RequireQwenFlashNextState(state);
+-    if (qfn.position() != prefix.size()) {
+-      throw std::logic_error(
+-          "Qwen3.8-Flash-Next reused prefix does not match checkpoint");
+-    }
+-    qfn.session().ResetDraftPolicy();
+-  }
+-
+-  [[nodiscard]] TextPrefillStep Prefill(
+-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+-      std::size_t offset, std::size_t max_input_tokens) const override {
+-    auto& qfn = RequireQwenFlashNextState(state);
+-    if (offset != qfn.position()) {
+-      throw std::logic_error(
+-          "Qwen3.8-Flash-Next prefill offset does not match retained state");
+-    }
+-    if (offset >= prompt.size()) {
+-      throw std::logic_error(
+-          "Qwen3.8-Flash-Next prefill has no remaining input");
+-    }
+-    const std::size_t remaining = prompt.size() - offset;
+-    const std::size_t consumed =
+-        std::min<std::size_t>({max_input_tokens, remaining,
+-                               remaining <= model_->PrefillThroughCapacity()
+-                                   ? model_->PrefillThroughCapacity()
+-                                   : model_->PrefillCapacity()});
+-    const std::size_t next_position = offset + consumed;
+-    const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
+-    // The next step most likely takes the same budget; its n-gram rows are
+-    // read during this one and used for the tokens it shares. A step ending
+-    // at a cache frontier continues into the pool's lookahead.
+-    const auto rest = next_position == prompt.size()
+-                          ? state.prefill_lookahead()
+-                          : prompt.subspan(next_position);
+-    const std::size_t after = rest.size();
+-    const auto next = QwenFlashNextEngineTokens(rest.subspan(
+-        0, std::min<std::size_t>({max_input_tokens, after,
+-                                  after <= model_->PrefillThroughCapacity()
+-                                      ? model_->PrefillThroughCapacity()
+-                                      : model_->PrefillCapacity()})));
+-    std::string error;
+-    if (!qfn.session().Sync(prefix, &error, next)) {
+-      qfn.set_position(0);
+-      throw std::runtime_error("Qwen3.8-Flash-Next prefill failed: " + error);
+-    }
+-    qfn.set_position(next_position);
+-    return {
+-        .consumed_tokens = consumed,
+-        .decode_ready = next_position == prompt.size(),
+-    };
+-  }
+-
+-  [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
+-      const TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+-      std::size_t offset, std::size_t budget,
+-      std::size_t boundary) const override {
+-    const auto& qfn = RequireQwenFlashNextState(state);
+-    const auto consumed = std::min<std::size_t>(
+-        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+-    if (boundary <= offset + 1 || boundary >= offset + consumed ||
+-        offset + consumed - boundary > 8)
+-      return std::nullopt;
+-    const auto bytes = qfn.session().PrefillCheckpointBytes(
+-        static_cast<std::uint32_t>(boundary));
+-    return bytes ? std::optional<std::size_t>(bytes) : std::nullopt;
+-  }
+-
+-  [[nodiscard]] TextPrefillStep PrefillThrough(
+-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+-      std::size_t offset, std::size_t budget, std::size_t boundary,
+-      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
+-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& capture)
+-      const override {
+-    auto& qfn = RequireQwenFlashNextState(state);
+-    if (!checkpoint || !capture || offset != qfn.position())
+-      throw std::logic_error("invalid component in-pass checkpoint request");
+-    const auto consumed = std::min<std::size_t>(
+-        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+-    const auto next_position = offset + consumed;
+-    const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
+-    double capture_ms = 0;
+-    try {
+-      qfn.adapter().PrefillThrough(
+-          qfn.slot(), prefix, static_cast<std::uint32_t>(boundary), [&] {
+-            const auto started = std::chrono::steady_clock::now();
+-            try {
+-              *checkpoint = capture();
+-            } catch (...) {
+-              // Optional retention may refuse; the complete live prefill is
+-              // valid.
+-              checkpoint->reset();
+-            }
+-            capture_ms += std::chrono::duration<double, std::milli>(
+-                              std::chrono::steady_clock::now() - started)
+-                              .count();
+-          });
+-    } catch (...) {
+-      qfn.set_position(0);
+-      throw;
+-    }
+-    qfn.set_position(next_position);
+-    return {.consumed_tokens = consumed,
+-            .decode_ready = next_position == prompt.size(),
+-            .checkpoint_ms = capture_ms};
+-  }
+-
+-  // The engine stops before committing EOS when the request enables it.
+-  // Every returned token is committed work and is emitted exactly once.
+-  void ResolveStepTokens(
+-      QwenFlashNextTextRunnerState&, bool engine_stopped,
+-      std::span<const std::int32_t> tokens, TextDecodeStep* step,
+-      const QwenFlashNextSession::DecodeResult& decoded) const {
+-    step->stop = engine_stopped;
+-    step->terminal_logprobs = decoded.terminal_logprobs;
+-    step->selections.reserve(tokens.size());
+-    for (const std::int32_t token : tokens) {
+-      step->selections.push_back({
+-          .stop = false,
+-          .token = static_cast<TextRunnerToken>(token),
+-          .piece = model_->TokenText(token),
+-          .logprobs =
+-              decoded.logprobs.empty()
+-                  ? std::nullopt
+-                  : std::optional(decoded.logprobs.at(step->selections.size())),
+-      });
+-    }
+-  }
+-
+-  [[nodiscard]] TextDecodeSelection SelectNext(
+-      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+-    auto& qfn = RequireQwenFlashNextState(state);
+-    if (qfn.position() >= max_context_) {
+-      return {.stop = true, .piece = {}};
+-    }
+-    const auto logits = qfn.session().Logits();
+-    if (logits.empty()) {
+-      throw std::runtime_error(
+-          "Qwen3.8-Flash-Next token selection has no logits");
+-    }
+-    const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
+-    const bool stop = EndsTurn(qfn, *model_, token);
+-    return {.stop = stop,
+-            .token = static_cast<TextRunnerToken>(token),
+-            .piece = stop ? std::string{} : model_->TokenText(token),
+-            .logprobs = sampling::CollectLogprobs(logits, token,
+-                                                  sampler.config().logprobs)};
+-  }
+-
+-  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+-    if (token > static_cast<TextRunnerToken>(
+-                    std::numeric_limits<std::int32_t>::max())) {
+-      throw std::invalid_argument(
+-          "Qwen3.8-Flash-Next token ID exceeds engine range");
+-    }
+-    auto& qfn = RequireQwenFlashNextState(state);
+-    std::string error;
+-    if (!qfn.session().Evaluate(static_cast<std::int32_t>(token), &error)) {
+-      throw std::runtime_error("Qwen3.8-Flash-Next decode failed: " + error);
+-    }
+-    qfn.set_position(qfn.position() + 1);
+-  }
+-
+-  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+-      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+-    return SelectNext(state, sampler);
+-  }
+-
+-  [[nodiscard]] TextDecodeStep DecodeStep(
+-      TextRunnerState& state, std::size_t max_tokens,
+-      sampling::SamplerState& sampler) const override {
+-    if (!use_mtp_ || max_tokens == 1) {
+-      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+-    }
+-    if (max_tokens == 0) {
+-      throw std::invalid_argument(
+-          "Qwen3.8-Flash-Next MTP decode budget must be at least one token");
+-    }
+-    auto& qfn = RequireQwenFlashNextState(state);
+-    if (qfn.position() >= max_context_) {
+-      return {.selections = {}, .stop = true};
+-    }
+-    const auto stats_before = qfn.session().Statistics();
+-    sampling::SamplerState working_sampler = sampler;
+-    QwenFlashNextSession::DecodeResult decoded;
+-    std::string error;
+-    // Use the same request policy as SelectNext and the batched MTP path.
+-    // The engine bounds the physical block and stops at EOS. Preserve the
+-    // remaining request budget so its policy can recognize a short tail.
+-    if (!qfn.session().DecodeStep(max_tokens, working_sampler, &decoded, &error,
+-                                  qfn.stop_at_eos())) {
+-      throw std::runtime_error("Qwen3.8-Flash-Next MTP decode failed: " +
+-                               error);
+-    }
+-    // The pool accepts the returned tokens once. Publish the RNG and residual
+-    // draw so the next batch retains the rejection-conditioned distribution.
+-    sampler.CopyDrawStateFrom(working_sampler);
+-    TextDecodeStep step;
+-    ResolveStepTokens(qfn, decoded.stop, decoded.tokens, &step, decoded);
+-    qfn.set_position(qfn.session().Position());
+-    const auto stats_after = qfn.session().Statistics();
+-    step.draft_rounds = stats_after.cycles - stats_before.cycles;
+-    step.draft_tokens = stats_after.drafted - stats_before.drafted;
+-    step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
+-    step.lookup_tokens = stats_after.lookup - stats_before.lookup;
+-    step.lookup_accepted_tokens =
+-        stats_after.lookup_accepted - stats_before.lookup_accepted;
+-    return step;
+-  }
+-
+-  void AdvanceBatch(
+-      std::span<const TextRunnerAdvance> advances) const override {
+-    if (advances.size() < 2) {
+-      return TextModelRunner::AdvanceBatch(advances);
+-    }
+-    std::vector<QwenFlashNextSession::BatchOutcome> outcomes(advances.size());
+-    std::vector<QwenFlashNextSession::AdvanceRequest> requests;
+-    for (const auto& advance : advances) {
+-      if (advance.token > static_cast<TextRunnerToken>(
+-                              std::numeric_limits<std::int32_t>::max())) {
+-        throw std::invalid_argument("Flash-Next token exceeds engine range");
+-      }
+-      requests.push_back(
+-          {&RequireQwenFlashNextState(advance.state.get()).session(),
+-           static_cast<std::int32_t>(advance.token),
+-           &outcomes[requests.size()]});
+-    }
+-    std::string error;
+-    (void)QwenFlashNextSession::EvaluateBatch(requests, &error);
+-    for (std::size_t i = 0; i < advances.size(); ++i) {
+-      const auto& advance = advances[i];
+-      if (!outcomes[i].completed) {
+-        auto failure = std::make_exception_ptr(std::runtime_error(
+-            "Flash-Next advance failed: " + outcomes[i].error));
+-        if (!advance.failure)
+-          std::rethrow_exception(failure);
+-        *advance.failure = failure;
+-        continue;
+-      }
+-      auto& state = RequireQwenFlashNextState(advance.state.get());
+-      state.set_position(state.session().Position());
+-    }
+-  }
+-
+-  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+-      std::span<const TextRunnerDecode> decodes) const override {
+-    if (decodes.size() < 2 || !use_mtp_) {
+-      return TextModelRunner::DecodeBatch(decodes);
+-    }
+-    const auto count = decodes.size();
+-    std::vector<sampling::SamplerState> samplers;
+-    std::vector<QwenFlashNextSession::DecodeResult> results(count);
+-    std::vector<QwenFlashNextSession::BatchOutcome> outcomes(count);
+-    std::vector<QwenFlashNextSession::SpeculativeStats> before;
+-    std::vector<QwenFlashNextSession::DecodeRequest> requests;
+-    samplers.reserve(count);
+-    before.reserve(count);
+-    requests.reserve(count);
+-    for (std::size_t i = 0; i < count; ++i) {
+-      auto& state = RequireQwenFlashNextState(decodes[i].state.get());
+-      auto& session = state.session();
+-      auto& sampler = samplers.emplace_back(decodes[i].sampler.get());
+-      before.push_back(session.Statistics());
+-      requests.push_back({&session, decodes[i].max_tokens, &sampler,
+-                          &results[i], state.stop_at_eos(), &outcomes[i]});
+-    }
+-    std::string error;
+-    (void)QwenFlashNextSession::DecodeBatch(requests, &error);
+-    const auto active_count = static_cast<std::size_t>(std::count_if(
+-        results.begin(), results.end(),
+-        [](const auto& result) { return !result.tokens.empty(); }));
+-    std::vector<TextDecodeStep> steps(count);
+-    for (std::size_t i = 0; i < count; ++i) {
+-      if (!outcomes[i].completed) {
+-        steps[i].failure = std::make_exception_ptr(
+-            std::runtime_error("Flash-Next MTP failed: " + outcomes[i].error));
+-        continue;
+-      }
+-      auto& state = RequireQwenFlashNextState(decodes[i].state.get());
+-      decodes[i].sampler.get().CopyDrawStateFrom(samplers[i]);
+-      state.set_position(state.session().Position());
+-      auto& step = steps[i];
+-      ResolveStepTokens(state, results[i].stop, results[i].tokens, &step,
+-                        results[i]);
+-      if (active_count > 1 && !results[i].tokens.empty()) {
+-        step.execution_plan = {.kind = TextExecutionPlanKind::kBatched,
+-                               .physical_width = active_count};
+-      }
+-      const auto stats = state.session().Statistics();
+-      step.draft_rounds = stats.cycles - before[i].cycles;
+-      step.draft_tokens = stats.drafted - before[i].drafted;
+-      step.draft_accepted_tokens = stats.accepted - before[i].accepted;
+-      // A request whose peers dropped out runs a single-session step,
+-      // which can use prompt lookup.
+-      step.lookup_tokens = stats.lookup - before[i].lookup;
+-      step.lookup_accepted_tokens =
+-          stats.lookup_accepted - before[i].lookup_accepted;
+-    }
+-    return steps;
+-  }
+-
+-  [[nodiscard]] std::size_t CheckpointPosition(
+-      const TextRunnerState& state) const override {
+-    return RequireQwenFlashNextState(state).position();
+-  }
+-
+-  [[nodiscard]] TextRunnerNgramRows NgramRows(
+-      const TextRunnerState& state) const override {
+-    const auto totals =
+-        RequireQwenFlashNextState(state).session().NgramRowTotals();
+-    return {totals.rows, totals.dedup_rows, totals.cache_hits,
+-            totals.disk_reads};
+-  }
+-
+-private:
+-  mutable models::qwen::vision::ImageCache image_cache_;
+-  std::shared_ptr<QwenFlashNextModel> model_;
+-  std::uint32_t max_context_;
+-  bool use_mtp_;
+-  std::uint32_t max_draft_tokens_;
+-  std::optional<TextRunnerPersistenceDescriptor> persistence_;
+-  cache::Identity component_identity_;
+-};
++
+ #endif
+ 
+ }  // namespace
+@@ -3424,12 +2475,14 @@
+     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
+     new_state->sampling_defaults.supplied = {};
+     new_state->supports_images = model->VisionEncoder() != nullptr;
+-    auto runner = std::make_shared<QwenFlashNextTextRunner>(
+-        std::move(model), max_context,
+-        speculative_config.backend == TextSpeculativeBackend::kMtp,
+-        speculative_config.max_draft_tokens,
+-        disk_cache_config.model_artifact_fingerprint,
+-        disk_cache_config.draft_model_artifact_fingerprint);
++    auto runner = CreateFlashNextTextProvider(
++        std::move(model),
++        {.max_context = max_context,
++         .use_mtp = speculative_config.backend == TextSpeculativeBackend::kMtp,
++         .max_draft_tokens = speculative_config.max_draft_tokens,
++         .artifact_fingerprint = disk_cache_config.model_artifact_fingerprint,
++         .mtp_fingerprint =
++             disk_cache_config.draft_model_artifact_fingerprint});
+     new_state->model_id = runner->Descriptor().model_id;
+     new_state->max_context = max_context;
+     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
+diff --git a/src/cli/serve/text_generation_backend.hpp b/src/cli/serve/text_generation_backend.hpp
+index c23406f1c2..9473a358f8 100644
+--- a/src/cli/serve/text_generation_backend.hpp
++++ b/src/cli/serve/text_generation_backend.hpp
+@@ -19,6 +19,7 @@
+ #include "src/cli/serve/logprobs.hpp"
+ #include "src/core/reasoning.hpp"
+ #include "src/core/sampling.hpp"
++#include "src/core/text_request.hpp"
+ #include "src/core/text_sampling_defaults.hpp"
+ #include "src/models/qwen/chat_template.hpp"
+ #include "src/models/qwen/tokenizer.hpp"
+@@ -94,41 +95,6 @@
+   TextGenerationErrorCode code_;
+ };
+ 
+-struct ChatRequest {
+-  enum class ToolChoice : std::uint8_t {
+-    kAuto,
+-    kNone,
+-    kRequired,
+-  };
+-
+-  ChatRequest() = default;
+-  explicit ChatRequest(std::vector<tokenization::ChatMessage> chat_messages)
+-      : messages(std::move(chat_messages)) {}
+-
+-  std::vector<tokenization::ChatMessage> messages;
+-  std::vector<tokenization::ChatTool> tools;
+-  std::string client_id{"anonymous"};
+-  ToolChoice tool_choice{ToolChoice::kAuto};
+-  std::string forced_tool_name;
+-  /// Responses namespace of each flattened function, echoed on its calls.
+-  std::map<std::string, std::string> tool_namespaces;
+-  bool constrained_tools{false};
+-  bool parallel_tool_calls{true};
+-  ReasoningOptions reasoning;
+-  bool add_vision_id{false};
+-  /// Bypass prompt reuse for this request; its completed state may be retained.
+-  bool cache_prompt{true};
+-  /// False keeps this request's checkpoints out of the disk cache; it may
+-  /// still read existing disk checkpoints and use the RAM cache.
+-  bool cache_persist{true};
+-  /// Optional streaming prompt progress; never changes prompt or cache
+-  /// identity.
+-  bool return_progress{false};
+-  std::vector<std::string> stop_sequences;
+-  std::shared_ptr<const sampling::JsonConstraint> response_format;
+-  std::string response_format_description;
+-};
+-
+ /// Model-agnostic text generation boundary used by the HTTP transport.
+ ///
+ /// Implementations retain ownership of tokenization, templates, complete
+@@ -172,11 +138,7 @@
+     kCancelled,
+   };
+ 
+-  enum class InitialOutputState : std::uint8_t {
+-    kAuto,
+-    kReasoning,
+-    kContent,
+-  };
++  using InitialOutputState = TextInitialOutputState;
+ 
+   struct SamplingDefaults {
+     /// Zero means generate until EOS or the remaining context is exhausted.
+diff --git a/src/cli/serve/text_host_hip.hpp b/src/cli/serve/text_host_hip.hpp
+new file mode 100644
+index 0000000000..71401d03c2
+--- /dev/null
++++ b/src/cli/serve/text_host_hip.hpp
+@@ -0,0 +1,258 @@
++#pragma once
++#include <cstring>
++#include <map>
++#include <thread>
++
++#include "src/cli/serve/component_text_cache.hpp"
++#include "src/cli/serve/logging.hpp"
++#include "src/cli/serve/text_model_runner.hpp"
++#include "src/core/hip/committed_backing.hpp"
++#include "src/core/hip/heap_placement.hpp"
++#include "src/core/hip/hip_utils.hpp"
++#include "src/core/hip/host_allocations.hpp"
++#include "src/core/hip/transfer_pool.hpp"
++namespace gufo::server::spike {
++// Owns a four-byte device buffer and a private stream from load, so probing
++// a lost context needs no allocation. HIP context loss is sticky: after a GPU
++// reset even this memset fails with a hard error. Only such an error marks the
++// device lost; a memset still pending at the deadline may be queued behind
++// long kernels on the shared hardware queues, so it counts as usable.
++class HipTextModelRunner : public TextModelRunner {
++public:
++  HipTextModelRunner() {
++    HIP_CHECK(hipStreamCreateWithFlags(&probe_stream_, hipStreamNonBlocking));
++    if (const auto error = hipMalloc(&probe_buffer_, sizeof(std::uint32_t));
++        error != hipSuccess) {
++      hip::LogCleanupError(hipStreamDestroy(probe_stream_));
++      throw std::runtime_error(std::string("device probe allocation: ") +
++                               hipGetErrorString(error));
++    }
++  }
++  ~HipTextModelRunner() override {
++    hip::LogCleanupError(hipFree(probe_buffer_));
++    hip::LogCleanupError(hipStreamDestroy(probe_stream_));
++  }
++  HipTextModelRunner(const HipTextModelRunner&) = delete;
++  HipTextModelRunner& operator=(const HipTextModelRunner&) = delete;
++  HipTextModelRunner(HipTextModelRunner&&) = delete;
++  HipTextModelRunner& operator=(HipTextModelRunner&&) = delete;
++
++  [[nodiscard]] DeviceProbeStatus PollDevice() const override {
++    if (!probe_pending_) {
++      // Clear the failed work unit's thread-local error before probing.
++      (void)hipGetLastError();
++      if (hipMemsetAsync(probe_buffer_, 0, sizeof(std::uint32_t),
++                         probe_stream_) != hipSuccess ||
++          hipGetLastError() != hipSuccess)
++        return DeviceProbeStatus::kLost;
++      probe_pending_ = true;
++    }
++    const auto status = hipStreamQuery(probe_stream_);
++    if (status == hipErrorNotReady)
++      return DeviceProbeStatus::kPending;
++    probe_pending_ = false;
++    return status == hipSuccess ? DeviceProbeStatus::kUsable
++                                : DeviceProbeStatus::kLost;
++  }
++
++  [[nodiscard]] bool DeviceUsable() const override {
++    constexpr auto kTimeout = std::chrono::seconds(5);
++    const auto deadline = std::chrono::steady_clock::now() + kTimeout;
++    for (;;) {
++      const auto status = PollDevice();
++      if (status == DeviceProbeStatus::kUsable)
++        return true;
++      if (status == DeviceProbeStatus::kLost)
++        return false;
++      if (std::chrono::steady_clock::now() >= deadline) {
++        Logger::Warn("scheduler", "event=device_probe_timeout timeout_s=" +
++                                      std::to_string(kTimeout.count()));
++        return true;
++      }
++      std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++  }
++
++private:
++  hipStream_t probe_stream_{};
++  void* probe_buffer_{};
++  mutable bool probe_pending_{false};
++};
++
++template<typename AdapterType>
++std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
++    std::unique_ptr<AdapterType> adapter, cache::ResourceLedger& ledger) {
++  struct Backing {
++    hip::TransferPool streams{64};
++    std::unique_ptr<hip::CommittedBackingPool> pool;
++    std::map<std::uint32_t, std::size_t> component_classes;
++  };
++  auto result = std::make_unique<ComponentCacheResources>();
++  result->adapter = std::move(adapter);
++  auto backing = std::make_shared<Backing>();
++  result->transfer_batch_size = 16;
++  const auto rounded = [](std::size_t bytes) {
++    return (bytes + 4095) / 4096 * 4096;
++  };
++  for (const auto& d : result->adapter->Components()) {
++    const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
++                                   ? d.state_bytes
++                                   : d.row_bytes * d.rows_per_chunk);
++    backing->component_classes.emplace(d.id.value, bytes);
++  }
++  // The remainder belongs to index, histories, disk catalog and queue
++  // metadata. The pools charge their own per-block allocator headroom.
++  result->commit_backing = [backing, &ledger, adapter = result->adapter.get()](
++                               std::size_t budget) {
++    const auto plan = static_cast<AdapterType*>(adapter)->BackingPlan(budget);
++    if (plan.size() != 1)
++      throw std::invalid_argument("insufficient component backing budget");
++    const auto& allocation = plan.front();
++    // Pages commit as captures need them. A payload cannot span segments,
++    // so segments of about 128 MiB bound registration pauses and stranded
++    // edge space, fitting at least two of the largest payloads. Prefill
++    // chunks prepare backing before GPU work, after any fallback capture.
++    // Growth stops when the host keeps less than its reserve.
++    std::size_t largest = 0;
++    for (const auto& [id, bytes] : backing->component_classes)
++      largest = std::max(largest, bytes);
++    const auto block = allocation.block_bytes;
++    const auto target =
++        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
++    const auto parts =
++        std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
++    const auto segment = (allocation.blocks + parts - 1) / parts * block;
++    struct Limited {
++      std::mutex mutex;
++      std::chrono::steady_clock::time_point refused;
++      bool active{};
++    };
++    backing->pool = std::make_unique<hip::CommittedBackingPool>(
++        ledger,
++        hip::BackingPoolConfig{
++            allocation.blocks * allocation.block_bytes +
++                allocation.metadata_bytes,
++            allocation.block_bytes, allocation.metadata_bytes, segment,
++            [limited = std::make_shared<Limited>()](std::size_t bytes) {
++              const std::lock_guard lock(limited->mutex);
++              const auto now = std::chrono::steady_clock::now();
++              // Pressure retries ask once per capture; recheck at most
++              // once a second while the host is short.
++              if (limited->active &&
++                  now - limited->refused < std::chrono::seconds(1))
++                return false;
++              const auto ceiling = HostSnapshotCeilingBytes();
++              // Pinned host pages come out of the same device heap that
++              // session and scratch allocations draw on; keep its dispatch
++              // reserve so they do not fall back to managed memory.
++              std::size_t heap_free = 0, heap_total = 0;
++              const bool heap_fits =
++                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
++                  hip::HeapFitsAboveReserve(heap_free, bytes);
++              if (ceiling >= bytes && heap_fits) {
++                limited->active = false;
++                return true;
++              }
++              if (!limited->active)
++                Logger::Warn(
++                    "cache",
++                    "schema=component-cache-v1 "
++                    "event=backing_limited reason=" +
++                        std::string(heap_fits ? "host_reserve "
++                                              : "device_heap_reserve ") +
++                        "segment_bytes=" + std::to_string(bytes) +
++                        " host_headroom_bytes=" + std::to_string(ceiling) +
++                        " device_heap_free_bytes=" + std::to_string(heap_free));
++              limited->active = true;
++              limited->refused = now;
++              return false;
++            }});
++    // Prepare a bounded reserve before readiness. The first shared-prefix
++    // capture needs more than one segment; preparing 2 GiB avoids moving
++    // registration onto that request's capture or decode path.
++    backing->pool->GrowAhead(2ULL << 30);
++    backing->pool->WaitForGrowth();
++    Logger::Info(
++        "cache",
++        "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
++            std::to_string(backing->pool->CommittedBytes()) +
++            " long_term_pinned_bytes=" +
++            std::to_string(backing->pool->LongTermPinnedBytes()));
++  };
++  result->prepare_prefill = [backing](std::size_t tokens) {
++    // Prepare after any fallback capture, alongside actual prefill work.
++    // Short turns need a smaller reserve for private states and row tails.
++    backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
++  };
++  result->can_capture = [backing](auto payloads) {
++    return backing->pool->CanFit(payloads);
++  };
++  result->owner = backing;
++  result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
++    return backing->streams.TryAcquire();
++  };
++  result->allocate = [backing](const cache::PayloadRequest& request) {
++    // Bound the logical capture, then assign whole shared backing pages.
++    const auto capacity =
++        backing->component_classes.at(request.component.value);
++    if (request.bytes > capacity)
++      throw std::logic_error("component capture exceeds its backing class");
++    const auto category =
++        request.category == cache::ResourceCategory::kBackingAssigned
++            ? cache::ResourceCategory::kBackingAssigned
++            : request.category;
++    const auto segments = backing->pool->PageCommitAllocations();
++    const auto started = std::chrono::steady_clock::now();
++    auto block = backing->pool->TryAcquire(category, request.bytes);
++    if (backing->pool->PageCommitAllocations() != segments)
++      Logger::Info(
++          "cache",
++          "schema=component-cache-v1 event=backing_grown committed_bytes=" +
++              std::to_string(backing->pool->CommittedBytes()) + " segments=" +
++              std::to_string(backing->pool->PageCommitAllocations()) +
++              " long_term_pinned_bytes=" +
++              std::to_string(backing->pool->LongTermPinnedBytes()) +
++              " acquire_ms=" +
++              std::to_string(std::chrono::duration<double, std::milli>(
++                                 std::chrono::steady_clock::now() - started)
++                                 .count()));
++    if (!block)
++      throw cache::ResourceExhausted();
++    // Do not start registration between a capture's allocations and copies.
++    // Each prefill chunk prepares its own reserve before GPU work.
++    auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
++    return ComponentCaptureBuffer{
++        owner->Bytes(),
++        [owner] {
++          owner->Convert();
++          return std::move(*owner).TakePayload();
++        },
++        backing->pool.get(),
++        [owner, request](cache::SlotLease& lease, auto source) {
++          return cache::Payload::Borrowed(
++              std::move(*owner).Borrow(lease, request.component, request.first,
++                                       request.end, request.bytes, source));
++        }};
++  };
++  result->staging = [](std::size_t bytes) {
++    auto allocation = std::make_shared<hip::HostAllocations>();
++    void* data = nullptr;
++    const auto status =
++        allocation->Allocate(&data, bytes, hipHostMallocCoherent);
++    if (status != hipSuccess)
++      throw std::runtime_error(hipGetErrorString(status));
++    auto owner = std::shared_ptr<void>(std::move(allocation), data);
++    std::memset(data, 0, bytes);
++    return cache::StagingAllocation{std::move(owner),
++                                    {static_cast<std::uint8_t*>(data), bytes}};
++  };
++  result->copy_observed_rows = [](auto source, auto destination,
++                                  cache::Stream& stream) {
++    return dynamic_cast<hip::TransferStream&>(stream).Copy(
++        destination.data(), source.data(), destination.size(),
++        hip::CopyDirection::kDeviceToHost, destination.size());
++  };
++  return result;
++}
++
++}  // namespace gufo::server::spike
+diff --git a/src/cli/serve/text_model_runner.hpp b/src/cli/serve/text_model_runner.hpp
+index 46ec8a9cea..cb905dd461 100644
+--- a/src/cli/serve/text_model_runner.hpp
++++ b/src/cli/serve/text_model_runner.hpp
+@@ -1,52 +1,10 @@
+ #ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
+ #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
+-
+-#include <cstddef>
+-#include <cstdint>
+-#include <exception>
+-#include <filesystem>
+-#include <functional>
+-#include <memory>
+-#include <mutex>
+-#include <optional>
+-#include <span>
+-#include <stdexcept>
+-#include <string>
+-#include <string_view>
+-#include <vector>
+-
+-#include "src/cache/adapter.hpp"
+-#include "src/cache/ledger.hpp"
+ #include "src/cli/serve/continuation_cache.hpp"
+ #include "src/cli/serve/text_generation_backend.hpp"
+ #include "src/cli/serve/text_publication_wait.hpp"
+-#include "src/core/sampling.hpp"
+-
++#include "src/cli/serve/text_runner_contract.hpp"
+ namespace gufo::server {
+-
+-struct ComponentCacheResources;
+-
+-using TextRunnerToken = ContinuationToken;
+-
+-/// Immutable model-owned input which travels with one scheduled request.
+-/// Cache identity supplements token IDs for inputs such as image embeddings.
+-struct TextPromptContext {
+-  virtual ~TextPromptContext() = default;
+-  std::vector<std::uint8_t> cache_identity;
+-  std::vector<ContinuationInputPrefix> cache_prefixes;
+-  [[nodiscard]] std::span<const std::uint8_t> CacheIdentity(
+-      std::size_t token_count) const {
+-    return PrefixInputIdentity(cache_identity, cache_prefixes, token_count);
+-  }
+-};
+-
+-struct TextPreparedPrompt {
+-  std::vector<TextRunnerToken> tokens;
+-  std::shared_ptr<const TextPromptContext> context;
+-  /// Snapshot before mutable assistant framing. Zero uses the complete prompt.
+-  std::size_t cache_prefix_tokens{0};
+-};
+-
+ struct TextRunnerRamCacheOptions {
+   static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
+   static constexpr std::size_t kMaxEntries = 128;
+@@ -107,441 +65,6 @@
+ /// kHostSnapshotHeadroomBytes.
+ [[nodiscard]] std::size_t HostSnapshotCeilingBytes();
+ 
+-enum class TextExecutionPlanKind : std::uint8_t {
+-  kSerial,
+-  kBatched,
+-};
+-
+-struct TextExecutionPlan {
+-  TextExecutionPlanKind kind{TextExecutionPlanKind::kSerial};
+-  std::size_t physical_width{1};
+-
+-  bool operator==(const TextExecutionPlan&) const = default;
+-};
+-
+-struct TextRunnerCapabilities {
+-  bool incremental_prefill{false};
+-  bool snapshot{false};
+-  bool fork{false};
+-  bool final_token_advance_required{true};
+-  bool incremental_text_is_exact{false};
+-  bool multi_token_decode{false};
+-  bool batched_multi_token_decode{false};
+-  /// Zero means no physical-width limit.
+-  std::size_t batched_multi_token_decode_max_width{0};
+-  bool prefix_reuse{true};
+-  bool in_pass_checkpoint{false};
+-  /// A completed prefill step leaves a consistent state, so a cancelled
+-  /// request can keep it as a live prefix for a superseding request.
+-  bool partial_prefill_retention{false};
+-  /// Interrupted prefill rolls back to its entry frontier without consuming
+-  /// input, so cancellation need not wait for the whole pass.
+-  bool prefill_rollback{false};
+-};
+-
+-/// Model-owned compatibility identity for restart-safe snapshots.
+-///
+-/// The bytes are canonical and opaque to serving code. They must cover every
+-/// model, tokenizer, template, layout, precision, context-policy, and adapter
+-/// property that can change restored continuation semantics. Executable
+-/// revisions are intentionally excluded when they retain the same state ABI.
+-struct TextRunnerPersistenceDescriptor {
+-  std::vector<std::uint8_t> compatibility_identity;
+-  std::uint32_t payload_version{0};
+-
+-  bool operator==(const TextRunnerPersistenceDescriptor&) const = default;
+-};
+-
+-struct TextRunnerDescriptor {
+-  std::string model_id;
+-  std::string state_abi;
+-  std::uint32_t max_context{0};
+-  TextRunnerCapabilities capabilities;
+-  std::optional<TextRunnerPersistenceDescriptor> persistence;
+-};
+-
+-/// Optional byte claims made before state allocation.
+-///
+-/// A missing value is an explicit "not yet measurable" claim. When both the
+-/// aggregate state capacity and per-request state are known, the common pool
+-/// validates the requested concurrency before creating model-private state.
+-struct TextRunnerResourceClaim {
+-  std::optional<std::size_t> resident_weights_bytes;
+-  std::optional<std::size_t> state_capacity_bytes;
+-  std::optional<std::size_t> per_request_state_bytes;
+-  std::optional<std::size_t> temporary_scratch_bytes;
+-  /// Aggregate bytes currently available for immutable retained snapshots.
+-  ///
+-  /// The pool queries this again after creating all mutable request states.
+-  std::optional<std::size_t> retained_snapshot_capacity_bytes;
+-  /// Most an explicit RAM-cache limit may claim. Missing means the automatic
+-  /// retained_snapshot_capacity_bytes is also the ceiling.
+-  std::optional<std::size_t> retained_snapshot_ceiling_bytes;
+-  bool requires_device_runtime_lock{false};
+-};
+-
+-struct TextRunnerMeasuredResources {
+-  std::optional<std::size_t> per_request_state_bytes;
+-  std::optional<std::size_t> temporary_scratch_bytes;
+-};
+-
+-struct TextPrefillStep {
+-  std::size_t consumed_tokens{0};
+-  bool decode_ready{false};
+-  double checkpoint_ms{0};
+-  bool interrupted{false};
+-};
+-
+-/// Hashed n-gram embedding rows a request gathered. Each row was copied from
+-/// a duplicate in the same gather, served by the row cache or read from disk.
+-struct TextRunnerNgramRows {
+-  std::uint64_t rows{0};
+-  std::uint64_t dedup_rows{0};
+-  std::uint64_t cache_hits{0};
+-  std::uint64_t disk_reads{0};
+-};
+-
+-struct TextDecodeSelection {
+-  bool stop{false};
+-  TextRunnerToken token{0};
+-  std::string piece;
+-  std::optional<sampling::TokenLogprobs> logprobs;
+-};
+-
+-struct TextDecodeStep {
+-  std::vector<TextDecodeSelection> selections;
+-  /// Number of speculative verification rounds actually executed.
+-  std::size_t draft_rounds{0};
+-  std::size_t draft_tokens{0};
+-  std::size_t draft_accepted_tokens{0};
+-  /// Of draft_tokens: proposals copied from the context (prompt lookup).
+-  std::size_t lookup_tokens{0};
+-  std::size_t lookup_accepted_tokens{0};
+-  bool stop{false};
+-  std::optional<sampling::TokenLogprobs> terminal_logprobs;
+-  /// Execution actually used for this request, including model-owned subgroup
+-  /// dispatch. A runner's advertised maximum is not evidence of batching.
+-  TextExecutionPlan execution_plan{};
+-  std::exception_ptr failure{};
+-};
+-
+-/// Model-private state driven only through TextModelRunner work units.
+-class TextRunnerState : public ContinuationState {
+-public:
+-  using CancellationCheck = std::function<bool()>;
+-
+-  void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
+-  [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
+-
+-  /// Prompt tokens past the next Prefill's frontier, up to the frontier
+-  /// planned after it. A runner may read their inputs ahead during that call
+-  /// but never consumes them. Empty outside a prefill step.
+-  void SetPrefillLookahead(std::span<const TextRunnerToken> tokens) noexcept {
+-    prefill_lookahead_ = tokens;
+-  }
+-  [[nodiscard]] std::span<const TextRunnerToken> prefill_lookahead()
+-      const noexcept {
+-    return prefill_lookahead_;
+-  }
+-
+-  /// Installs a request-scoped cancellation check for model calls that can
+-  /// yield internally. Implementations that only yield between work units may
+-  /// keep the default no-op behavior.
+-  virtual void SetCancellationCheck(const CancellationCheck&) {}
+-
+-  /// Actual request-owned allocations when the provider can measure them.
+-  [[nodiscard]] virtual TextRunnerMeasuredResources MeasuredResources()
+-      const noexcept {
+-    return {};
+-  }
+-
+-private:
+-  bool stop_at_eos_{true};
+-  std::span<const TextRunnerToken> prefill_lookahead_;
+-};
+-
+-/// Immutable model-owned continuation payload.
+-///
+-/// Common serving code may account for the payload but must not inspect or
+-/// reinterpret its bytes.
+-class TextRunnerSnapshot : public ContinuationSnapshot {
+-public:
+-  TextRunnerSnapshot() = default;
+-  ~TextRunnerSnapshot() override = default;
+-
+-  TextRunnerSnapshot(const TextRunnerSnapshot&) = delete;
+-  TextRunnerSnapshot& operator=(const TextRunnerSnapshot&) = delete;
+-  TextRunnerSnapshot(TextRunnerSnapshot&&) = delete;
+-  TextRunnerSnapshot& operator=(TextRunnerSnapshot&&) = delete;
+-};
+-
+-struct TextRunnerAdvance {
+-  std::reference_wrapper<TextRunnerState> state;
+-  TextRunnerToken token{0};
+-  std::exception_ptr* failure{nullptr};
+-};
+-
+-struct TextRunnerDecode {
+-  std::reference_wrapper<TextRunnerState> state;
+-  std::size_t max_tokens{0};
+-  std::reference_wrapper<sampling::SamplerState> sampler;
+-};
+-
+-/// Coarse text-model adapter used by cache, scheduling, and HTTP layers.
+-///
+-/// Prefill and Advance are the only model execution work units. SelectNext
+-/// exposes the already-computed frontier token separately so streaming does
+-/// not wait for the following decode forward pass.
+-class TextModelRunner {
+-public:
+-  TextModelRunner() = default;
+-  virtual ~TextModelRunner() = default;
+-
+-  TextModelRunner(const TextModelRunner&) = delete;
+-  TextModelRunner& operator=(const TextModelRunner&) = delete;
+-  TextModelRunner(TextModelRunner&&) = delete;
+-  TextModelRunner& operator=(TextModelRunner&&) = delete;
+-
+-  [[nodiscard]] virtual TextRunnerDescriptor Descriptor() const = 0;
+-  [[nodiscard]] virtual TextRunnerResourceClaim ResourceClaim() const = 0;
+-  [[nodiscard]] virtual std::vector<TextExecutionPlan> SupportedPlans()
+-      const = 0;
+-
+-  /// Prepared before serving and shared by all constrained requests.
+-  /// A null vocabulary means the runner does not support structured output.
+-  [[nodiscard]] virtual std::shared_ptr<const sampling::ConstraintVocabulary>
+-  BuildConstraintVocabulary() const {
+-    return nullptr;
+-  }
+-  [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
+-      const {
+-    return sampling::JsonConstraint::ToolFormat::kJson;
+-  }
+-  /// Reuse a compiled grammar bound to this runner's vocabulary.
+-  [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
+-      std::shared_ptr<const sampling::JsonConstraint> grammar) const;
+-  /// Builds the vocabulary BindConstraint uses now rather than in the first
+-  /// constrained request; later calls reuse it. Returns its token count.
+-  /// Returns zero when the runner has no structured output. Build failures
+-  /// propagate to the caller.
+-  std::size_t PrepareConstraintVocabulary() const;
+-
+-  /// Reasoning tags for a token budget, as llama.cpp's chat format for the
+-  /// model defines them: `forced_end` is emitted once the budget is spent and
+-  /// any of `ends` closes reasoning early.
+-  struct ReasoningTags {
+-    std::string_view start;
+-    std::string_view forced_end;
+-    std::vector<std::string_view> ends;
+-  };
+-  [[nodiscard]] virtual ReasoningTags ReasoningBudgetTags() const {
+-    return {"<think>", "</think>", {"</think>"}};
+-  }
+-  /// Zero when the vocabulary cannot be enumerated.
+-  [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
+-  /// A budget for a prompt that opens reasoning, or null when the tags are not
+-  /// single tokens in this vocabulary.
+-  [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
+-  BuildReasoningBudget(std::size_t tokens,
+-                       std::span<const TextRunnerToken> prompt) const;
+-
+-  [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
+-      std::string_view text) const = 0;
+-  /// Tokenizes control text such as `</think>` as the template renders it.
+-  [[nodiscard]] virtual std::vector<TextRunnerToken> TokenizeControl(
+-      std::string_view text) const {
+-    return Tokenize(text);
+-  }
+-  [[nodiscard]] virtual std::optional<std::vector<TextRunnerToken>>
+-  RenderAndTokenize(const ChatRequest& request) const = 0;
+-  [[nodiscard]] virtual std::optional<TextPreparedPrompt> PreparePrompt(
+-      const ChatRequest& request) const {
+-    for (const auto& message : request.messages) {
+-      if (!message.images.empty()) {
+-        throw std::invalid_argument("model does not support image input");
+-      }
+-    }
+-    auto tokens = RenderAndTokenize(request);
+-    if (!tokens)
+-      return std::nullopt;
+-    return TextPreparedPrompt{std::move(*tokens), {}};
+-  }
+-  /// Size a prompt without execution-context admission or inference. Image
+-  /// runners override this to include their model's visual token expansion.
+-  [[nodiscard]] virtual std::optional<std::size_t> CountPromptTokens(
+-      const ChatRequest& request) const {
+-    // Use the text-only preparation here, including its capability check,
+-    // without constructing a derived runner's cache metadata.
+-    const auto prompt = TextModelRunner::PreparePrompt(request);
+-    if (!prompt)
+-      return std::nullopt;
+-    return prompt->tokens.size();
+-  }
+-  /// The text RenderAndTokenize tokenizes, or empty when the runner cannot
+-  /// render its template as text.
+-  [[nodiscard]] virtual std::optional<std::string> RenderPrompt(
+-      const ChatRequest&) const {
+-    return std::nullopt;
+-  }
+-  /// Called before cache restoration, prefill or selection, including
+-  /// a complete prefix hit. Must replace, never inherit, the previous request.
+-  virtual void SetPromptContext(
+-      TextRunnerState&,
+-      std::shared_ptr<const TextPromptContext> context) const {
+-    if (context != nullptr) {
+-      throw std::invalid_argument("model does not support this prompt context");
+-    }
+-  }
+-  [[nodiscard]] virtual TextGenerationBackend::InitialOutputState
+-  InitialOutputState(const ChatRequest&) const {
+-    return TextGenerationBackend::InitialOutputState::kAuto;
+-  }
+-  [[nodiscard]] virtual std::string Decode(
+-      std::span<const TextRunnerToken> tokens) const = 0;
+-
+-  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
+-      const = 0;
+-
+-  [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
+-  [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
+-  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
+-  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
+-      cache::Adapter&, cache::Slot&) const;
+-  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
+-  /// Whether restored component state can select its next token. A boundary
+-  /// captured between prefill passes cannot, so it serves only longer prompts.
+-  [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
+-    return true;
+-  }
+-
+-  /// Optional first-token preview without advancing model state. The caller
+-  /// supplies a copy of the sampler; normal decoding must reproduce the token.
+-  /// This lets serving publish a token before capturing its prompt snapshot.
+-  [[nodiscard]] virtual std::optional<TextDecodeSelection> PreviewFirstToken(
+-      TextRunnerState&, sampling::SamplerState&) const {
+-    return std::nullopt;
+-  }
+-  /// Reconciles model-private metadata after an exact mutable or restored
+-  /// prefix is leased. The default runner state needs no additional work.
+-  virtual void PreparePrefixReuse(
+-      TextRunnerState& state, std::span<const TextRunnerToken> prefix) const {
+-    (void)state;
+-    (void)prefix;
+-  }
+-  /// Cumulative n-gram rows gathered through this state; models without an
+-  /// n-gram table report none.
+-  [[nodiscard]] virtual TextRunnerNgramRows NgramRows(
+-      const TextRunnerState& state) const {
+-    (void)state;
+-    return {};
+-  }
+-  /// Tells a request state that its next execution will use a multi-request
+-  /// batch. Runners with request-local speculative state may discard work that
+-  /// the batched path cannot consume.
+-  virtual void PrepareBatchExecution(TextRunnerState& state) const {
+-    (void)state;
+-  }
+-  /// Processes at most max_input_tokens, yielding after one model-owned
+-  /// chunk even when the scheduler grants the whole remaining prompt.
+-  [[nodiscard]] virtual TextPrefillStep Prefill(
+-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+-      std::size_t offset, std::size_t max_input_tokens) const = 0;
+-  /// Returns a claim only when this chunk can capture the boundary and keep
+-  /// prefilling beyond it. Admission happens before allocating checkpoint
+-  /// state.
+-  [[nodiscard]] virtual std::optional<std::size_t> PrefillCheckpointBytes(
+-      const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+-      std::size_t, std::size_t) const {
+-    return std::nullopt;
+-  }
+-  /// Component runners invoke the consumer synchronously while the coherent
+-  /// boundary is readable. It must drain captures before execution resumes.
+-  /// Native snapshot runners leave the consumer empty.
+-  [[nodiscard]] virtual TextPrefillStep PrefillThrough(
+-      TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+-      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
+-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
+-    throw std::logic_error("runner does not support in-pass checkpoints");
+-  }
+-  [[nodiscard]] virtual TextDecodeSelection SelectNext(
+-      TextRunnerState& state, sampling::SamplerState& sampler) const = 0;
+-  virtual void Advance(TextRunnerState& state, TextRunnerToken token) const = 0;
+-  [[nodiscard]] virtual TextDecodeStep DecodeStep(
+-      TextRunnerState& state, std::size_t max_tokens,
+-      sampling::SamplerState& sampler) const;
+-  [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
+-      std::span<const TextRunnerDecode> decodes) const;
+-  virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
+-  [[nodiscard]] virtual std::size_t CheckpointPosition(
+-      const TextRunnerState& state) const = 0;
+-  /// Retain a safe executed frontier when cancellation interrupts publication
+-  /// of a completed speculative block. Called with cancellation checks cleared.
+-  virtual void PrepareCancellation(TextRunnerState&) const {}
+-  enum class DeviceProbeStatus { kUsable, kPending, kLost };
+-  /// Submit or poll one private device probe without waiting. Called only by
+-  /// the scheduler between work units. Pending work is reused, never queued
+-  /// again.
+-  [[nodiscard]] virtual DeviceProbeStatus PollDevice() const {
+-    return DeviceProbeStatus::kUsable;
+-  }
+-  /// Bounded check, run only after a failed work unit, that the execution
+-  /// device still accepts work. False means the context is permanently lost;
+-  /// a probe that is still pending at its bound reports true.
+-  [[nodiscard]] virtual bool DeviceUsable() const { return true; }
+-
+-  /// Captures an immutable exact continuation at CheckpointPosition(state).
+-  ///
+-  /// The default implementations fail explicitly for runners that do not
+-  /// advertise the corresponding capabilities.
+-  [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
+-      const TextRunnerState& state) const;
+-  /// May run on a capture worker while this state is frozen. Must not mutate
+-  /// shared execution scratch; other sessions may execute concurrently.
+-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
+-      const TextRunnerState& state) const;
+-  /// Complete state before returning so export cannot introduce device copies
+-  /// while the session resumes prefill. Defaults to the ordinary snapshot.
+-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot>
+-  SnapshotForPersistence(const TextRunnerState& state) const;
+-
+-  virtual void RestoreOrFork(TextRunnerState& state,
+-                             const TextRunnerSnapshot& snapshot) const;
+-
+-  /// Returns the exact serialized bytes required by a persistent snapshot.
+-  ///
+-  /// Persistent serialization is separate from the in-memory snapshot layout:
+-  /// a provider may retain GPU-private state in RAM while exposing a compact,
+-  /// versioned disk representation.
+-  [[nodiscard]] virtual std::size_t PersistentSnapshotPayloadBytes(
+-      const TextRunnerSnapshot& snapshot) const;
+-
+-  /// Serializes one immutable snapshot into exactly-sized common-store staging.
+-  ///
+-  /// Returns the number of initialized bytes. It must equal
+-  /// PersistentSnapshotPayloadBytes(snapshot).
+-  [[nodiscard]] virtual std::size_t SerializePersistentSnapshot(
+-      const TextRunnerSnapshot& snapshot,
+-      std::span<std::uint8_t> destination) const;
+-
+-  using SnapshotSink = std::function<void(std::span<const std::uint8_t>)>;
+-  /// Reads only immutable snapshot storage. May run on the persistence worker.
+-  /// Host-backed providers stream directly without another payload allocation.
+-  virtual void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
+-                                        const SnapshotSink& sink) const;
+-
+-  /// Restores a version-compatible serialized payload into an existing state.
+-  virtual void RestorePersistentSnapshot(
+-      TextRunnerState& state, std::span<const std::uint8_t> payload) const;
+-
+-private:
+-  mutable std::mutex constraint_mutex_;
+-  mutable std::shared_ptr<const sampling::ConstraintVocabulary>
+-      constraint_vocabulary_;
+-  mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
+-      constraints_;
+-  mutable std::shared_ptr<const std::vector<bool>> partial_utf8_;
+-};
+-
+ /// Bounded pool of opaque runner states with exact-prefix continuation reuse.
+ class TextRunnerPool {
+ public:
+@@ -689,5 +212,4 @@
+     std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
+ 
+ }  // namespace gufo::server
+-
+-#endif  // GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
++#endif
+diff --git a/src/cli/serve/text_runner_contract.hpp b/src/cli/serve/text_runner_contract.hpp
+new file mode 100644
+index 0000000000..a58d582549
+--- /dev/null
++++ b/src/cli/serve/text_runner_contract.hpp
+@@ -0,0 +1,486 @@
++#ifndef GUFO_SPIKE_TEXT_RUNNER_CONTRACT_HPP_
++#define GUFO_SPIKE_TEXT_RUNNER_CONTRACT_HPP_
++
++#include <cstddef>
++#include <cstdint>
++#include <exception>
++#include <filesystem>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <optional>
++#include <span>
++#include <stdexcept>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "src/cache/adapter.hpp"
++#include "src/cache/continuation_types.hpp"
++#include "src/cache/ledger.hpp"
++#include "src/core/sampling.hpp"
++#include "src/core/text_request.hpp"
++
++namespace gufo::server {
++
++struct ComponentCacheResources;
++
++using TextRunnerToken = ContinuationToken;
++
++/// Immutable model-owned input which travels with one scheduled request.
++/// Cache identity supplements token IDs for inputs such as image embeddings.
++struct TextPromptContext {
++  virtual ~TextPromptContext() = default;
++  std::vector<std::uint8_t> cache_identity;
++  std::vector<ContinuationInputPrefix> cache_prefixes;
++  [[nodiscard]] std::span<const std::uint8_t> CacheIdentity(
++      std::size_t token_count) const {
++    return PrefixInputIdentity(cache_identity, cache_prefixes, token_count);
++  }
++};
++
++struct TextPreparedPrompt {
++  std::vector<TextRunnerToken> tokens;
++  std::shared_ptr<const TextPromptContext> context;
++  /// Snapshot before mutable assistant framing. Zero uses the complete prompt.
++  std::size_t cache_prefix_tokens{0};
++};
++
++enum class TextExecutionPlanKind : std::uint8_t {
++  kSerial,
++  kBatched,
++};
++
++struct TextExecutionPlan {
++  TextExecutionPlanKind kind{TextExecutionPlanKind::kSerial};
++  std::size_t physical_width{1};
++
++  bool operator==(const TextExecutionPlan&) const = default;
++};
++
++struct TextRunnerCapabilities {
++  bool incremental_prefill{false};
++  bool snapshot{false};
++  bool fork{false};
++  bool final_token_advance_required{true};
++  bool incremental_text_is_exact{false};
++  bool multi_token_decode{false};
++  bool batched_multi_token_decode{false};
++  /// Zero means no physical-width limit.
++  std::size_t batched_multi_token_decode_max_width{0};
++  bool prefix_reuse{true};
++  bool in_pass_checkpoint{false};
++  /// A completed prefill step leaves a consistent state, so a cancelled
++  /// request can keep it as a live prefix for a superseding request.
++  bool partial_prefill_retention{false};
++  /// Interrupted prefill rolls back to its entry frontier without consuming
++  /// input, so cancellation need not wait for the whole pass.
++  bool prefill_rollback{false};
++};
++
++/// Model-owned compatibility identity for restart-safe snapshots.
++///
++/// The bytes are canonical and opaque to serving code. They must cover every
++/// model, tokenizer, template, layout, precision, context-policy, and adapter
++/// property that can change restored continuation semantics. Executable
++/// revisions are intentionally excluded when they retain the same state ABI.
++struct TextRunnerPersistenceDescriptor {
++  std::vector<std::uint8_t> compatibility_identity;
++  std::uint32_t payload_version{0};
++
++  bool operator==(const TextRunnerPersistenceDescriptor&) const = default;
++};
++
++struct TextRunnerDescriptor {
++  std::string model_id;
++  std::string state_abi;
++  std::uint32_t max_context{0};
++  TextRunnerCapabilities capabilities;
++  std::optional<TextRunnerPersistenceDescriptor> persistence;
++};
++
++/// Optional byte claims made before state allocation.
++///
++/// A missing value is an explicit "not yet measurable" claim. When both the
++/// aggregate state capacity and per-request state are known, the common pool
++/// validates the requested concurrency before creating model-private state.
++struct TextRunnerResourceClaim {
++  std::optional<std::size_t> resident_weights_bytes;
++  std::optional<std::size_t> state_capacity_bytes;
++  std::optional<std::size_t> per_request_state_bytes;
++  std::optional<std::size_t> temporary_scratch_bytes;
++  /// Aggregate bytes currently available for immutable retained snapshots.
++  ///
++  /// The pool queries this again after creating all mutable request states.
++  std::optional<std::size_t> retained_snapshot_capacity_bytes;
++  /// Most an explicit RAM-cache limit may claim. Missing means the automatic
++  /// retained_snapshot_capacity_bytes is also the ceiling.
++  std::optional<std::size_t> retained_snapshot_ceiling_bytes;
++  bool requires_device_runtime_lock{false};
++};
++
++struct TextRunnerMeasuredResources {
++  std::optional<std::size_t> per_request_state_bytes;
++  std::optional<std::size_t> temporary_scratch_bytes;
++};
++
++struct TextPrefillStep {
++  std::size_t consumed_tokens{0};
++  bool decode_ready{false};
++  double checkpoint_ms{0};
++  bool interrupted{false};
++};
++
++/// Hashed n-gram embedding rows a request gathered. Each row was copied from
++/// a duplicate in the same gather, served by the row cache or read from disk.
++struct TextRunnerNgramRows {
++  std::uint64_t rows{0};
++  std::uint64_t dedup_rows{0};
++  std::uint64_t cache_hits{0};
++  std::uint64_t disk_reads{0};
++};
++
++struct TextDecodeSelection {
++  bool stop{false};
++  TextRunnerToken token{0};
++  std::string piece;
++  std::optional<sampling::TokenLogprobs> logprobs;
++};
++
++struct TextDecodeStep {
++  std::vector<TextDecodeSelection> selections;
++  /// Number of speculative verification rounds actually executed.
++  std::size_t draft_rounds{0};
++  std::size_t draft_tokens{0};
++  std::size_t draft_accepted_tokens{0};
++  /// Of draft_tokens: proposals copied from the context (prompt lookup).
++  std::size_t lookup_tokens{0};
++  std::size_t lookup_accepted_tokens{0};
++  bool stop{false};
++  std::optional<sampling::TokenLogprobs> terminal_logprobs;
++  /// Execution actually used for this request, including model-owned subgroup
++  /// dispatch. A runner's advertised maximum is not evidence of batching.
++  TextExecutionPlan execution_plan{};
++  std::exception_ptr failure{};
++};
++
++/// Model-private state driven only through TextModelRunner work units.
++class TextRunnerState : public ContinuationState {
++public:
++  using CancellationCheck = std::function<bool()>;
++
++  void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
++  [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
++
++  /// Prompt tokens past the next Prefill's frontier, up to the frontier
++  /// planned after it. A runner may read their inputs ahead during that call
++  /// but never consumes them. Empty outside a prefill step.
++  void SetPrefillLookahead(std::span<const TextRunnerToken> tokens) noexcept {
++    prefill_lookahead_ = tokens;
++  }
++  [[nodiscard]] std::span<const TextRunnerToken> prefill_lookahead()
++      const noexcept {
++    return prefill_lookahead_;
++  }
++
++  /// Installs a request-scoped cancellation check for model calls that can
++  /// yield internally. Implementations that only yield between work units may
++  /// keep the default no-op behavior.
++  virtual void SetCancellationCheck(const CancellationCheck&) {}
++
++  /// Actual request-owned allocations when the provider can measure them.
++  [[nodiscard]] virtual TextRunnerMeasuredResources MeasuredResources()
++      const noexcept {
++    return {};
++  }
++
++private:
++  bool stop_at_eos_{true};
++  std::span<const TextRunnerToken> prefill_lookahead_;
++};
++
++/// Immutable model-owned continuation payload.
++///
++/// Common serving code may account for the payload but must not inspect or
++/// reinterpret its bytes.
++class TextRunnerSnapshot : public ContinuationSnapshot {
++public:
++  TextRunnerSnapshot() = default;
++  ~TextRunnerSnapshot() override = default;
++
++  TextRunnerSnapshot(const TextRunnerSnapshot&) = delete;
++  TextRunnerSnapshot& operator=(const TextRunnerSnapshot&) = delete;
++  TextRunnerSnapshot(TextRunnerSnapshot&&) = delete;
++  TextRunnerSnapshot& operator=(TextRunnerSnapshot&&) = delete;
++};
++
++struct TextRunnerAdvance {
++  std::reference_wrapper<TextRunnerState> state;
++  TextRunnerToken token{0};
++  std::exception_ptr* failure{nullptr};
++};
++
++struct TextRunnerDecode {
++  std::reference_wrapper<TextRunnerState> state;
++  std::size_t max_tokens{0};
++  std::reference_wrapper<sampling::SamplerState> sampler;
++};
++
++/// Coarse text-model adapter used by cache, scheduling, and HTTP layers.
++///
++/// Prefill and Advance are the only model execution work units. SelectNext
++/// exposes the already-computed frontier token separately so streaming does
++/// not wait for the following decode forward pass.
++class TextModelRunner {
++public:
++  TextModelRunner() = default;
++  virtual ~TextModelRunner() = default;
++
++  TextModelRunner(const TextModelRunner&) = delete;
++  TextModelRunner& operator=(const TextModelRunner&) = delete;
++  TextModelRunner(TextModelRunner&&) = delete;
++  TextModelRunner& operator=(TextModelRunner&&) = delete;
++
++  [[nodiscard]] virtual TextRunnerDescriptor Descriptor() const = 0;
++  [[nodiscard]] virtual TextRunnerResourceClaim ResourceClaim() const = 0;
++  [[nodiscard]] virtual std::vector<TextExecutionPlan> SupportedPlans()
++      const = 0;
++
++  /// Prepared before serving and shared by all constrained requests.
++  /// A null vocabulary means the runner does not support structured output.
++  [[nodiscard]] virtual std::shared_ptr<const sampling::ConstraintVocabulary>
++  BuildConstraintVocabulary() const {
++    return nullptr;
++  }
++  [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
++      const {
++    return sampling::JsonConstraint::ToolFormat::kJson;
++  }
++  /// Reuse a compiled grammar bound to this runner's vocabulary.
++  [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
++      std::shared_ptr<const sampling::JsonConstraint> grammar) const;
++  /// Builds the vocabulary BindConstraint uses now rather than in the first
++  /// constrained request; later calls reuse it. Returns its token count.
++  /// Returns zero when the runner has no structured output. Build failures
++  /// propagate to the caller.
++  std::size_t PrepareConstraintVocabulary() const;
++
++  /// Reasoning tags for a token budget, as llama.cpp's chat format for the
++  /// model defines them: `forced_end` is emitted once the budget is spent and
++  /// any of `ends` closes reasoning early.
++  struct ReasoningTags {
++    std::string_view start;
++    std::string_view forced_end;
++    std::vector<std::string_view> ends;
++  };
++  [[nodiscard]] virtual ReasoningTags ReasoningBudgetTags() const {
++    return {"<think>", "</think>", {"</think>"}};
++  }
++  /// Zero when the vocabulary cannot be enumerated.
++  [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
++  /// A budget for a prompt that opens reasoning, or null when the tags are not
++  /// single tokens in this vocabulary.
++  [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
++  BuildReasoningBudget(std::size_t tokens,
++                       std::span<const TextRunnerToken> prompt) const;
++
++  [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
++      std::string_view text) const = 0;
++  /// Tokenizes control text such as `</think>` as the template renders it.
++  [[nodiscard]] virtual std::vector<TextRunnerToken> TokenizeControl(
++      std::string_view text) const {
++    return Tokenize(text);
++  }
++  [[nodiscard]] virtual std::optional<std::vector<TextRunnerToken>>
++  RenderAndTokenize(const ChatRequest& request) const = 0;
++  [[nodiscard]] virtual std::optional<TextPreparedPrompt> PreparePrompt(
++      const ChatRequest& request) const {
++    for (const auto& message : request.messages) {
++      if (!message.images.empty()) {
++        throw std::invalid_argument("model does not support image input");
++      }
++    }
++    auto tokens = RenderAndTokenize(request);
++    if (!tokens)
++      return std::nullopt;
++    return TextPreparedPrompt{std::move(*tokens), {}};
++  }
++  /// Size a prompt without execution-context admission or inference. Image
++  /// runners override this to include their model's visual token expansion.
++  [[nodiscard]] virtual std::optional<std::size_t> CountPromptTokens(
++      const ChatRequest& request) const {
++    // Use the text-only preparation here, including its capability check,
++    // without constructing a derived runner's cache metadata.
++    const auto prompt = TextModelRunner::PreparePrompt(request);
++    if (!prompt)
++      return std::nullopt;
++    return prompt->tokens.size();
++  }
++  /// The text RenderAndTokenize tokenizes, or empty when the runner cannot
++  /// render its template as text.
++  [[nodiscard]] virtual std::optional<std::string> RenderPrompt(
++      const ChatRequest&) const {
++    return std::nullopt;
++  }
++  /// Called before cache restoration, prefill or selection, including
++  /// a complete prefix hit. Must replace, never inherit, the previous request.
++  virtual void SetPromptContext(
++      TextRunnerState&,
++      std::shared_ptr<const TextPromptContext> context) const {
++    if (context != nullptr) {
++      throw std::invalid_argument("model does not support this prompt context");
++    }
++  }
++  [[nodiscard]] virtual TextInitialOutputState InitialOutputState(
++      const ChatRequest&) const {
++    return TextInitialOutputState::kAuto;
++  }
++  [[nodiscard]] virtual std::string Decode(
++      std::span<const TextRunnerToken> tokens) const = 0;
++
++  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
++      const = 0;
++
++  [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
++  [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
++  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
++  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
++      cache::Adapter&, cache::Slot&) const;
++  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
++  /// Whether restored component state can select its next token. A boundary
++  /// captured between prefill passes cannot, so it serves only longer prompts.
++  [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
++    return true;
++  }
++
++  /// Optional first-token preview without advancing model state. The caller
++  /// supplies a copy of the sampler; normal decoding must reproduce the token.
++  /// This lets serving publish a token before capturing its prompt snapshot.
++  [[nodiscard]] virtual std::optional<TextDecodeSelection> PreviewFirstToken(
++      TextRunnerState&, sampling::SamplerState&) const {
++    return std::nullopt;
++  }
++  /// Reconciles model-private metadata after an exact mutable or restored
++  /// prefix is leased. The default runner state needs no additional work.
++  virtual void PreparePrefixReuse(
++      TextRunnerState& state, std::span<const TextRunnerToken> prefix) const {
++    (void)state;
++    (void)prefix;
++  }
++  /// Cumulative n-gram rows gathered through this state; models without an
++  /// n-gram table report none.
++  [[nodiscard]] virtual TextRunnerNgramRows NgramRows(
++      const TextRunnerState& state) const {
++    (void)state;
++    return {};
++  }
++  /// Tells a request state that its next execution will use a multi-request
++  /// batch. Runners with request-local speculative state may discard work that
++  /// the batched path cannot consume.
++  virtual void PrepareBatchExecution(TextRunnerState& state) const {
++    (void)state;
++  }
++  /// Processes at most max_input_tokens, yielding after one model-owned
++  /// chunk even when the scheduler grants the whole remaining prompt.
++  [[nodiscard]] virtual TextPrefillStep Prefill(
++      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
++      std::size_t offset, std::size_t max_input_tokens) const = 0;
++  /// Returns a claim only when this chunk can capture the boundary and keep
++  /// prefilling beyond it. Admission happens before allocating checkpoint
++  /// state.
++  [[nodiscard]] virtual std::optional<std::size_t> PrefillCheckpointBytes(
++      const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
++      std::size_t, std::size_t) const {
++    return std::nullopt;
++  }
++  /// Component runners invoke the consumer synchronously while the coherent
++  /// boundary is readable. It must drain captures before execution resumes.
++  /// Native snapshot runners leave the consumer empty.
++  [[nodiscard]] virtual TextPrefillStep PrefillThrough(
++      TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
++      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
++      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
++    throw std::logic_error("runner does not support in-pass checkpoints");
++  }
++  [[nodiscard]] virtual TextDecodeSelection SelectNext(
++      TextRunnerState& state, sampling::SamplerState& sampler) const = 0;
++  virtual void Advance(TextRunnerState& state, TextRunnerToken token) const = 0;
++  [[nodiscard]] virtual TextDecodeStep DecodeStep(
++      TextRunnerState& state, std::size_t max_tokens,
++      sampling::SamplerState& sampler) const;
++  [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
++      std::span<const TextRunnerDecode> decodes) const;
++  virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
++  [[nodiscard]] virtual std::size_t CheckpointPosition(
++      const TextRunnerState& state) const = 0;
++  /// Retain a safe executed frontier when cancellation interrupts publication
++  /// of a completed speculative block. Called with cancellation checks cleared.
++  virtual void PrepareCancellation(TextRunnerState&) const {}
++  enum class DeviceProbeStatus { kUsable, kPending, kLost };
++  /// Submit or poll one private device probe without waiting. Called only by
++  /// the scheduler between work units. Pending work is reused, never queued
++  /// again.
++  [[nodiscard]] virtual DeviceProbeStatus PollDevice() const {
++    return DeviceProbeStatus::kUsable;
++  }
++  /// Bounded check, run only after a failed work unit, that the execution
++  /// device still accepts work. False means the context is permanently lost;
++  /// a probe that is still pending at its bound reports true.
++  [[nodiscard]] virtual bool DeviceUsable() const { return true; }
++
++  /// Captures an immutable exact continuation at CheckpointPosition(state).
++  ///
++  /// The default implementations fail explicitly for runners that do not
++  /// advertise the corresponding capabilities.
++  [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
++      const TextRunnerState& state) const;
++  /// May run on a capture worker while this state is frozen. Must not mutate
++  /// shared execution scratch; other sessions may execute concurrently.
++  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
++      const TextRunnerState& state) const;
++  /// Complete state before returning so export cannot introduce device copies
++  /// while the session resumes prefill. Defaults to the ordinary snapshot.
++  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot>
++  SnapshotForPersistence(const TextRunnerState& state) const;
++
++  virtual void RestoreOrFork(TextRunnerState& state,
++                             const TextRunnerSnapshot& snapshot) const;
++
++  /// Returns the exact serialized bytes required by a persistent snapshot.
++  ///
++  /// Persistent serialization is separate from the in-memory snapshot layout:
++  /// a provider may retain GPU-private state in RAM while exposing a compact,
++  /// versioned disk representation.
++  [[nodiscard]] virtual std::size_t PersistentSnapshotPayloadBytes(
++      const TextRunnerSnapshot& snapshot) const;
++
++  /// Serializes one immutable snapshot into exactly-sized common-store staging.
++  ///
++  /// Returns the number of initialized bytes. It must equal
++  /// PersistentSnapshotPayloadBytes(snapshot).
++  [[nodiscard]] virtual std::size_t SerializePersistentSnapshot(
++      const TextRunnerSnapshot& snapshot,
++      std::span<std::uint8_t> destination) const;
++
++  using SnapshotSink = std::function<void(std::span<const std::uint8_t>)>;
++  /// Reads only immutable snapshot storage. May run on the persistence worker.
++  /// Host-backed providers stream directly without another payload allocation.
++  virtual void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
++                                        const SnapshotSink& sink) const;
++
++  /// Restores a version-compatible serialized payload into an existing state.
++  virtual void RestorePersistentSnapshot(
++      TextRunnerState& state, std::span<const std::uint8_t> payload) const;
++
++private:
++  mutable std::mutex constraint_mutex_;
++  mutable std::shared_ptr<const sampling::ConstraintVocabulary>
++      constraint_vocabulary_;
++  mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
++      constraints_;
++  mutable std::shared_ptr<const std::vector<bool>> partial_utf8_;
++};
++
++}  // namespace gufo::server
++
++#endif  // GUFO_SPIKE_TEXT_RUNNER_CONTRACT_HPP_
+diff --git a/src/core/chat_types.hpp b/src/core/chat_types.hpp
+new file mode 100644
+index 0000000000..ad53a88a44
+--- /dev/null
++++ b/src/core/chat_types.hpp
+@@ -0,0 +1,88 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++namespace gufo::tokenization {
++/// Chat message roles supported by the Qwen chat template.
++enum class ChatRole : std::uint8_t {
++  kSystem = 0,
++  kDeveloper = 1,
++  kUser = 2,
++  kAssistant = 3,
++  kTool = 4,
++};
++
++[[nodiscard]] constexpr std::string_view ToString(ChatRole role) noexcept {
++  switch (role) {
++    case ChatRole::kSystem:
++    case ChatRole::kDeveloper:
++      return "system";
++    case ChatRole::kUser:
++      return "user";
++    case ChatRole::kAssistant:
++      return "assistant";
++    case ChatRole::kTool:
++      return "tool";
++  }
++  return "user";
++}
++
++/// A structured input message for chat formatting.
++struct ChatMessage {
++  ChatMessage() = default;
++  ChatMessage(ChatRole message_role, std::string message_content,
++              std::string message_name = {}, std::string message_thought = {})
++      : role(message_role),
++        content(std::move(message_content)),
++        name(std::move(message_name)),
++        thought(std::move(message_thought)) {}
++
++  ChatRole role{ChatRole::kUser};
++  std::string content;
++  /// Internal server-authored instructions following system/developer content.
++  /// These bytes are template framing, never supplied by the HTTP message API.
++  std::string framing_suffix;
++  std::string name;     ///< Optional function/tool name
++  std::string thought;  ///< Optional thinking/reasoning prefix
++  std::string tool_call_id;
++  /// `kLow` fits the resized image within 512 pixels per side unless the
++  /// model's minimum size is larger; the other OpenAI `image_url.detail`
++  /// values behave as `kAuto`.
++  enum class ImageDetail : std::uint8_t { kAuto, kLow };
++  struct ImagePart {
++    /// Insert an image before this byte of content. Equal offsets preserve
++    /// input order; image-only messages use offset zero.
++    std::size_t offset{0};
++    std::shared_ptr<const std::vector<std::uint8_t>> bytes;
++    ImageDetail detail{ImageDetail::kAuto};
++  };
++  std::vector<ImagePart> images;
++
++  struct ToolArgument {
++    std::string name;
++    std::string value;
++    bool is_string{true};
++  };
++
++  struct ToolCall {
++    std::string id;
++    std::string name;
++    std::vector<ToolArgument> arguments;
++  };
++
++  std::vector<ToolCall> tool_calls;
++};
++
++struct ChatTool {
++  std::string name;
++  std::string description;
++  std::string parameters_json{"{}"};
++  /// Complete validated HTTP tool object, preserving field order/extensions.
++  std::string definition_json;
++};
++
++}  // namespace gufo::tokenization
+diff --git a/src/core/text_request.hpp b/src/core/text_request.hpp
+new file mode 100644
+index 0000000000..3160d9998b
+--- /dev/null
++++ b/src/core/text_request.hpp
+@@ -0,0 +1,49 @@
++#pragma once
++#include <map>
++#include <memory>
++
++#include "src/core/chat_types.hpp"
++#include "src/core/reasoning.hpp"
++#include "src/core/sampling.hpp"
++namespace gufo::server {
++enum class TextInitialOutputState : std::uint8_t {
++  kAuto,
++  kReasoning,
++  kContent
++};
++struct ChatRequest {
++  enum class ToolChoice : std::uint8_t {
++    kAuto,
++    kNone,
++    kRequired,
++  };
++
++  ChatRequest() = default;
++  explicit ChatRequest(std::vector<tokenization::ChatMessage> chat_messages)
++      : messages(std::move(chat_messages)) {}
++
++  std::vector<tokenization::ChatMessage> messages;
++  std::vector<tokenization::ChatTool> tools;
++  std::string client_id{"anonymous"};
++  ToolChoice tool_choice{ToolChoice::kAuto};
++  std::string forced_tool_name;
++  /// Responses namespace of each flattened function, echoed on its calls.
++  std::map<std::string, std::string> tool_namespaces;
++  bool constrained_tools{false};
++  bool parallel_tool_calls{true};
++  ReasoningOptions reasoning;
++  bool add_vision_id{false};
++  /// Bypass prompt reuse for this request; its completed state may be retained.
++  bool cache_prompt{true};
++  /// False keeps this request's checkpoints out of the disk cache; it may
++  /// still read existing disk checkpoints and use the RAM cache.
++  bool cache_persist{true};
++  /// Optional streaming prompt progress; never changes prompt or cache
++  /// identity.
++  bool return_progress{false};
++  std::vector<std::string> stop_sequences;
++  std::shared_ptr<const sampling::JsonConstraint> response_format;
++  std::string response_format_description;
++};
++
++}  // namespace gufo::server
+diff --git a/src/models/qwen/chat_template.hpp b/src/models/qwen/chat_template.hpp
+index db53f31d97..4fc75096ce 100644
+--- a/src/models/qwen/chat_template.hpp
++++ b/src/models/qwen/chat_template.hpp
+@@ -11,90 +11,13 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "src/core/chat_types.hpp"
+ #include "src/core/gguf_reader.hpp"
+ #include "src/core/reasoning.hpp"
+ #include "src/models/qwen/tokenizer.hpp"
+ 
+ namespace gufo::tokenization {
+ 
+-/// Chat message roles supported by the Qwen chat template.
+-enum class ChatRole : std::uint8_t {
+-  kSystem = 0,
+-  kDeveloper = 1,
+-  kUser = 2,
+-  kAssistant = 3,
+-  kTool = 4,
+-};
+-
+-[[nodiscard]] constexpr std::string_view ToString(ChatRole role) noexcept {
+-  switch (role) {
+-    case ChatRole::kSystem:
+-    case ChatRole::kDeveloper:
+-      return "system";
+-    case ChatRole::kUser:
+-      return "user";
+-    case ChatRole::kAssistant:
+-      return "assistant";
+-    case ChatRole::kTool:
+-      return "tool";
+-  }
+-  return "user";
+-}
+-
+-/// A structured input message for chat formatting.
+-struct ChatMessage {
+-  ChatMessage() = default;
+-  ChatMessage(ChatRole message_role, std::string message_content,
+-              std::string message_name = {}, std::string message_thought = {})
+-      : role(message_role),
+-        content(std::move(message_content)),
+-        name(std::move(message_name)),
+-        thought(std::move(message_thought)) {}
+-
+-  ChatRole role{ChatRole::kUser};
+-  std::string content;
+-  /// Internal server-authored instructions following system/developer content.
+-  /// These bytes are template framing, never supplied by the HTTP message API.
+-  std::string framing_suffix;
+-  std::string name;     ///< Optional function/tool name
+-  std::string thought;  ///< Optional thinking/reasoning prefix
+-  std::string tool_call_id;
+-  /// `kLow` fits the resized image within 512 pixels per side unless the
+-  /// model's minimum size is larger; the other OpenAI `image_url.detail`
+-  /// values behave as `kAuto`.
+-  enum class ImageDetail : std::uint8_t { kAuto, kLow };
+-  struct ImagePart {
+-    /// Insert an image before this byte of content. Equal offsets preserve
+-    /// input order; image-only messages use offset zero.
+-    std::size_t offset{0};
+-    std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+-    ImageDetail detail{ImageDetail::kAuto};
+-  };
+-  std::vector<ImagePart> images;
+-
+-  struct ToolArgument {
+-    std::string name;
+-    std::string value;
+-    bool is_string{true};
+-  };
+-
+-  struct ToolCall {
+-    std::string id;
+-    std::string name;
+-    std::vector<ToolArgument> arguments;
+-  };
+-
+-  std::vector<ToolCall> tool_calls;
+-};
+-
+-struct ChatTool {
+-  std::string name;
+-  std::string description;
+-  std::string parameters_json{"{}"};
+-  /// Complete validated HTTP tool object, preserving field order/extensions.
+-  std::string definition_json;
+-};
+-
+ /// The literals that frame a native Qwen tool call. QwenChatTemplate renders
+ /// historical calls with these, and ScanQwenToolCall reads the same bytes
+ /// back, so the wire format cannot change in one direction only (#290).
+diff --git a/src/models/qwen/text_prompt_helpers.hpp b/src/models/qwen/text_prompt_helpers.hpp
+new file mode 100644
+index 0000000000..a719c25d37
+--- /dev/null
++++ b/src/models/qwen/text_prompt_helpers.hpp
+@@ -0,0 +1,125 @@
++#pragma once
++#include <algorithm>
++#include <limits>
++
++#include "src/cli/serve/logging.hpp"
++#include "src/cli/serve/text_model_runner.hpp"
++#include "src/models/qwen/chat_template.hpp"
++#include "src/models/qwen/vision/encoder.hpp"
++#include "src/models/qwen/vision/image_cache.hpp"
++#include "src/models/qwen/vision/prompt.hpp"
++namespace gufo::server::spike {
++struct QwenImageContext final : TextPromptContext {
++  std::shared_ptr<const models::qwen::vision::Prompt> prompt;
++};
++
++inline tokenization::ChatTemplateOptions QwenChatOptions(
++    const ChatRequest& request, std::uint32_t max_context) {
++  auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
++                                                      request.add_vision_id);
++  // gufo #285: the rendered prompt may be as long as the context can hold.
++  options.max_output_bytes =
++      tokenization::RenderedPromptBoundBytes(max_context);
++  return options;
++}
++
++// The text before tokenization. An image renders as its one placeholder, not
++// the visual tokens Prepare expands it into. Template errors are request
++// errors, as in Prepare.
++inline std::optional<std::string> RenderQwenPrompt(const ChatRequest& request,
++                                                   std::uint32_t max_context) {
++  std::string error;
++  auto rendered = tokenization::QwenChatTemplate::Render(
++      request.messages,
++      request.tool_choice == ChatRequest::ToolChoice::kNone
++          ? std::span<const tokenization::ChatTool>{}
++          : std::span<const tokenization::ChatTool>{request.tools},
++      QwenChatOptions(request, max_context), &error);
++  if (!rendered)
++    throw std::invalid_argument(error);
++  return rendered;
++}
++
++inline std::optional<std::size_t> CountQwenPromptTokens(
++    const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
++    const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
++    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
++  const auto options = QwenChatOptions(request, max_context);
++  const auto tools =
++      request.tool_choice == ChatRequest::ToolChoice::kNone
++          ? std::span<const tokenization::ChatTool>{}
++          : std::span<const tokenization::ChatTool>{request.tools};
++  if (std::ranges::none_of(request.messages,
++                           [](const auto& m) { return !m.images.empty(); })) {
++    const auto tokens = tokenization::QwenChatTemplate::RenderAndTokenize(
++        tokenizer, request.messages, tools, options);
++    if (!tokens)
++      return std::nullopt;
++    return tokens->size();
++  }
++  // Reuse generation's CPU image preparation, including resize, token
++  // expansion and projector validation. Counting does not encode images on
++  // the GPU or admit the prompt to an execution context. Keep only the shared
++  // layout's signed position limit so oversized prompts can still be sized.
++  return models::qwen::vision::Prepare(
++             tokenizer, request.messages, tools, options,
++             encoder ? encoder->identity() : std::string_view{},
++             std::numeric_limits<std::int32_t>::max(),
++             request.cache_prompt ? &image_cache : nullptr)
++      .tokens.size();
++}
++
++inline TextPreparedPrompt PrepareQwenPrompt(
++    const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
++    const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
++    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
++  const bool has_images = std::ranges::any_of(
++      request.messages, [](const auto& m) { return !m.images.empty(); });
++  const auto options = QwenChatOptions(request, max_context);
++  auto prompt = std::make_shared<models::qwen::vision::Prompt>(
++      models::qwen::vision::Prepare(
++          tokenizer, request.messages,
++          request.tool_choice == ChatRequest::ToolChoice::kNone
++              ? std::span<const tokenization::ChatTool>{}
++              : std::span<const tokenization::ChatTool>{request.tools},
++          options,
++          encoder && has_images ? encoder->identity() : std::string_view{},
++          max_context, request.cache_prompt ? &image_cache : nullptr));
++  if (has_images && Logger::Enabled(LogLevel::kDebug)) {
++    const auto stats = image_cache.GetStats();
++    Logger::LogFormatted(LogLevel::kDebug, "vision",
++                         "event=image_cache enabled=%d entries=%zu "
++                         "pixel_bytes=%zu encoded_bytes=%zu "
++                         "hits=%zu misses=%zu evictions=%zu",
++                         static_cast<int>(request.cache_prompt), stats.entries,
++                         stats.pixel_bytes, stats.encoded_bytes, stats.hits,
++                         stats.misses, stats.evictions);
++  }
++  const auto cache_prefix = prompt->stable_prefix_tokens;
++  if (prompt->images.empty())
++    return {std::move(prompt->tokens), {}, cache_prefix};
++  if (!encoder)
++    throw std::invalid_argument(
++        "image input requires a matching --mmproj BF16 sidecar");
++  auto context = std::make_shared<QwenImageContext>();
++  context->cache_identity = prompt->cache_identity;
++  for (const auto& image : prompt->images) {
++    const auto identity = prompt->IdentityForPrefix(image.grid.offset);
++    context->cache_prefixes.push_back(
++        {image.grid.offset, {identity.begin(), identity.end()}});
++  }
++  context->prompt = prompt;
++  return {prompt->tokens, std::move(context), cache_prefix};
++}
++
++inline std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
++    const std::shared_ptr<const TextPromptContext>& context) {
++  if (!context)
++    return {};
++  const auto* image = dynamic_cast<const QwenImageContext*>(context.get());
++  if (!image)
++    throw std::invalid_argument("invalid Qwen prompt context");
++  return image->prompt;
++}
++
++}  // namespace gufo::server::spike
+diff --git a/src/models/qwen38_flash_next/text_provider.cpp b/src/models/qwen38_flash_next/text_provider.cpp
+new file mode 100644
+index 0000000000..554bc470ec
+--- /dev/null
++++ b/src/models/qwen38_flash_next/text_provider.cpp
+@@ -0,0 +1,627 @@
++#include "src/models/qwen38_flash_next/text_provider.hpp"
++#if defined(ENGINE_ENABLE_HIP)
++#include <algorithm>
++#include <limits>
++
++#include "src/cli/serve/continuation_identity.hpp"
++#include "src/cli/serve/text_host_hip.hpp"
++#include "src/models/qwen/text_prompt_helpers.hpp"
++#include "src/models/qwen38_flash_next/continuation_adapter.hpp"
++#include "src/models/qwen38_flash_next/engine.hpp"
++namespace gufo::server {
++namespace {
++using namespace spike;
++template<typename State, typename Tokens>
++bool EndsTurn(const State& state, const Tokens& tokens, int token) {
++  return state.stop_at_eos() && tokens.IsStopToken(token);
++}
++constexpr std::string_view kQwenFlashNextStateAbi =
++    "qwen38-flash-next-rocm-session-v1";
++
++using QwenFlashNextModel = models::qwen38_flash_next::Model;
++using QwenFlashNextSession = models::qwen38_flash_next::Session;
++
++std::vector<std::int32_t> QwenFlashNextEngineTokens(
++    std::span<const TextRunnerToken> tokens) {
++  std::vector<std::int32_t> converted;
++  converted.reserve(tokens.size());
++  for (const TextRunnerToken token : tokens) {
++    if (token > static_cast<TextRunnerToken>(
++                    std::numeric_limits<std::int32_t>::max())) {
++      throw std::invalid_argument(
++          "Qwen3.8-Flash-Next token ID exceeds engine range");
++    }
++    converted.push_back(static_cast<std::int32_t>(token));
++  }
++  return converted;
++}
++
++class QwenFlashNextTextRunnerState final : public TextRunnerState {
++public:
++  QwenFlashNextTextRunnerState(QwenFlashNextSession& session,
++                               cache::Adapter& adapter, cache::Slot& slot)
++      : session_(&session), adapter_(&adapter), slot_(&slot) {}
++
++  void Invalidate() noexcept override {
++    session_->SetCancellationCheck({});
++    (void)adapter_->Invalidate(*slot_);
++    position_ = 0;
++  }
++  void SetCancellationCheck(const CancellationCheck& check) override {
++    session_->SetCancellationCheck(check);
++  }
++  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
++      const noexcept override {
++    return {.per_request_state_bytes = session_->AllocatedBytes(),
++            .temporary_scratch_bytes = 0};
++  }
++
++  [[nodiscard]] QwenFlashNextSession& session() const { return *session_; }
++  [[nodiscard]] models::qwen38_flash_next::ContinuationAdapter& adapter()
++      const {
++    return dynamic_cast<models::qwen38_flash_next::ContinuationAdapter&>(
++        *adapter_);
++  }
++  [[nodiscard]] cache::Slot& slot() const { return *slot_; }
++  [[nodiscard]] std::size_t position() const noexcept { return position_; }
++  void set_position(std::size_t position) noexcept { position_ = position; }
++
++private:
++  QwenFlashNextSession* session_{};
++  cache::Adapter* adapter_{};
++  cache::Slot* slot_{};
++  std::size_t position_{0};
++};
++
++QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
++    TextRunnerState& state) {
++  auto* qfn = dynamic_cast<QwenFlashNextTextRunnerState*>(&state);
++  if (qfn == nullptr) {
++    throw std::logic_error("text runner state is not Qwen3.8-Flash-Next");
++  }
++  return *qfn;
++}
++
++const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
++    const TextRunnerState& state) {
++  const auto* qfn = dynamic_cast<const QwenFlashNextTextRunnerState*>(&state);
++  if (qfn == nullptr) {
++    throw std::logic_error("text runner state is not Qwen3.8-Flash-Next");
++  }
++  return *qfn;
++}
++
++class QwenFlashNextTextRunner final : public HipTextModelRunner {
++public:
++  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
++    return sampling::JsonConstraint::ToolFormat::kQwen;
++  }
++  QwenFlashNextTextRunner(std::shared_ptr<QwenFlashNextModel> model,
++                          std::uint32_t max_context, bool use_mtp,
++                          std::uint32_t max_draft_tokens,
++                          std::string artifact_fingerprint = {},
++                          std::string mtp_fingerprint = {})
++      : model_(std::move(model)),
++        max_context_(max_context),
++        use_mtp_(use_mtp),
++        max_draft_tokens_(max_draft_tokens) {
++    // The typed in-process API owns an immutable loaded model but need not
++    // supply file fingerprints when disk caching is disabled. Its model
++    // lifetime is an exact process-local identity; durable caches still
++    // require the validated full artifact fingerprints below.
++    if (!artifact_fingerprint.empty()) {
++      persistence_ = TextRunnerPersistenceDescriptor{
++          .compatibility_identity = QwenFlashNextCompatibilityIdentity(
++              artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
++              use_mtp_, max_context_, max_draft_tokens_,
++              model_->DecodeConcurrency(),
++              models::qwen38_flash_next::RopePositionPolicy(
++                  model_->config().rope_scaling)),
++          .payload_version =
++              models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
++      };
++      component_identity_ = persistence_->compatibility_identity;
++    } else {
++      component_identity_ = QwenFlashNextProcessIdentity(
++          model_.get(), max_context_, use_mtp_, max_draft_tokens_,
++          model_->DecodeConcurrency());
++    }
++  }
++
++  [[nodiscard]] bool UsesComponentCache() const override { return true; }
++  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
++  CreateComponentCacheResources(cache::ResourceLedger& ledger,
++                                std::size_t ram) const override {
++    (void)ram;
++    return CreateHipComponentCacheResources(
++        std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
++            model_,
++            use_mtp_ ? core::SessionMode::kSpeculative
++                     : core::SessionMode::kAutoregressive,
++            max_context_, component_identity_),
++        ledger);
++  }
++  [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
++      cache::Adapter& adapter, cache::Slot& slot) const override {
++    auto& flash =
++        dynamic_cast<models::qwen38_flash_next::ContinuationAdapter&>(adapter);
++    return std::make_unique<QwenFlashNextTextRunnerState>(
++        flash.GetSession(slot), adapter, slot);
++  }
++  void ReconcileComponentState(TextRunnerState& state,
++                               std::size_t position) const override {
++    RequireQwenFlashNextState(state).set_position(position);
++  }
++
++  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
++    return {
++        .model_id = model_->ModelName(),
++        .state_abi = std::string(kQwenFlashNextStateAbi),
++        .max_context = max_context_,
++        .capabilities =
++            TextRunnerCapabilities{
++                .incremental_prefill = true,
++                .snapshot = true,
++                .fork = true,
++                .final_token_advance_required = false,
++                .incremental_text_is_exact = true,
++                .multi_token_decode = use_mtp_,
++                .batched_multi_token_decode = use_mtp_,
++                .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
++                .prefix_reuse = true,
++                .in_pass_checkpoint = true,
++                .partial_prefill_retention = true,
++            },
++        .persistence = persistence_,
++    };
++  }
++
++  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
++    std::size_t free_bytes = 0;
++    std::size_t total_bytes = 0;
++    std::optional<std::size_t> capacity;
++    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
++      const auto deferred = model_->DeferredScratchBytes();
++      capacity = free_bytes > deferred ? free_bytes - deferred : 0;
++    }
++    // Admission charges complete snapshot payloads. Flash-Next can retain
++    // mutable state and protected K/V rows in private device storage.
++    return {
++        .resident_weights_bytes = model_->ResidentBytes(),
++        .state_capacity_bytes = capacity,
++        .per_request_state_bytes = model_->SessionBytes(
++            use_mtp_ ? gufo::core::SessionMode::kSpeculative
++                     : gufo::core::SessionMode::kAutoregressive,
++            max_context_),
++        // Runtime scratch is shared and already allocated at model load;
++        // reserve its remaining lazy buffers once from aggregate capacity.
++        .temporary_scratch_bytes = 0,
++        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
++        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
++        .requires_device_runtime_lock = true,
++    };
++  }
++
++  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
++    std::vector<TextExecutionPlan> plans{
++        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
++    for (std::size_t width = 2; width <= 8; ++width) {
++      plans.push_back(
++          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
++    }
++    return plans;
++  }
++
++  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
++  BuildConstraintVocabulary() const override {
++    return std::make_shared<const sampling::ConstraintVocabulary>(
++        model_->tokenizer().GetVocabSize(), [this](std::uint32_t id) {
++          const auto& tokenizer = model_->tokenizer();
++          return sampling::ConstraintVocabulary::Piece{
++              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
++        });
++  }
++  [[nodiscard]] std::uint32_t VocabularySize() const override {
++    return static_cast<std::uint32_t>(model_->tokenizer().GetVocabSize());
++  }
++
++  // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
++  // reasoning at a tool call.
++  [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
++    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
++  }
++
++  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
++      std::string_view text) const override {
++    return model_->tokenizer().Encode(text);
++  }
++
++  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
++      const ChatRequest& request) const override {
++    return tokenization::QwenChatTemplate::RenderAndTokenize(
++        model_->tokenizer(), request.messages,
++        request.tool_choice == ChatRequest::ToolChoice::kNone
++            ? std::span<const tokenization::ChatTool>{}
++            : std::span<const tokenization::ChatTool>{request.tools},
++        QwenChatOptions(request, max_context_));
++  }
++
++  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
++      const ChatRequest& request) const override {
++    return PrepareQwenPrompt(request, model_->tokenizer(),
++                             model_->VisionEncoder(), max_context_,
++                             image_cache_);
++  }
++
++  [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
++      const ChatRequest& request) const override {
++    return CountQwenPromptTokens(request, model_->tokenizer(),
++                                 model_->VisionEncoder(), max_context_,
++                                 image_cache_);
++  }
++
++  [[nodiscard]] std::optional<std::string> RenderPrompt(
++      const ChatRequest& request) const override {
++    return RenderQwenPrompt(request, max_context_);
++  }
++
++  void SetPromptContext(
++      TextRunnerState& state,
++      std::shared_ptr<const TextPromptContext> context) const override {
++    RequireQwenFlashNextState(state).session().ConfigureVision(
++        QwenPrompt(context));
++  }
++
++  [[nodiscard]] TextInitialOutputState InitialOutputState(
++      const ChatRequest& request) const override {
++    return QwenChatOptions(request, max_context_).enable_thinking
++               ? TextInitialOutputState::kReasoning
++               : TextInitialOutputState::kContent;
++  }
++
++  [[nodiscard]] std::string Decode(
++      std::span<const TextRunnerToken> tokens) const override {
++    return model_->tokenizer().Decode(tokens);
++  }
++
++  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
++    throw std::logic_error(
++        "Flash-Next execution slots are owned by the component cache");
++  }
++
++  void PreparePrefixReuse(
++      TextRunnerState& state,
++      std::span<const TextRunnerToken> prefix) const override {
++    const auto& qfn = RequireQwenFlashNextState(state);
++    if (qfn.position() != prefix.size()) {
++      throw std::logic_error(
++          "Qwen3.8-Flash-Next reused prefix does not match checkpoint");
++    }
++    qfn.session().ResetDraftPolicy();
++  }
++
++  [[nodiscard]] TextPrefillStep Prefill(
++      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
++      std::size_t offset, std::size_t max_input_tokens) const override {
++    auto& qfn = RequireQwenFlashNextState(state);
++    if (offset != qfn.position()) {
++      throw std::logic_error(
++          "Qwen3.8-Flash-Next prefill offset does not match retained state");
++    }
++    if (offset >= prompt.size()) {
++      throw std::logic_error(
++          "Qwen3.8-Flash-Next prefill has no remaining input");
++    }
++    const std::size_t remaining = prompt.size() - offset;
++    const std::size_t consumed =
++        std::min<std::size_t>({max_input_tokens, remaining,
++                               remaining <= model_->PrefillThroughCapacity()
++                                   ? model_->PrefillThroughCapacity()
++                                   : model_->PrefillCapacity()});
++    const std::size_t next_position = offset + consumed;
++    const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
++    // The next step most likely takes the same budget; its n-gram rows are
++    // read during this one and used for the tokens it shares. A step ending
++    // at a cache frontier continues into the pool's lookahead.
++    const auto rest = next_position == prompt.size()
++                          ? state.prefill_lookahead()
++                          : prompt.subspan(next_position);
++    const std::size_t after = rest.size();
++    const auto next = QwenFlashNextEngineTokens(rest.subspan(
++        0, std::min<std::size_t>({max_input_tokens, after,
++                                  after <= model_->PrefillThroughCapacity()
++                                      ? model_->PrefillThroughCapacity()
++                                      : model_->PrefillCapacity()})));
++    std::string error;
++    if (!qfn.session().Sync(prefix, &error, next)) {
++      qfn.set_position(0);
++      throw std::runtime_error("Qwen3.8-Flash-Next prefill failed: " + error);
++    }
++    qfn.set_position(next_position);
++    return {
++        .consumed_tokens = consumed,
++        .decode_ready = next_position == prompt.size(),
++    };
++  }
++
++  [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
++      const TextRunnerState& state, std::span<const TextRunnerToken> prompt,
++      std::size_t offset, std::size_t budget,
++      std::size_t boundary) const override {
++    const auto& qfn = RequireQwenFlashNextState(state);
++    const auto consumed = std::min<std::size_t>(
++        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
++    if (boundary <= offset + 1 || boundary >= offset + consumed ||
++        offset + consumed - boundary > 8)
++      return std::nullopt;
++    const auto bytes = qfn.session().PrefillCheckpointBytes(
++        static_cast<std::uint32_t>(boundary));
++    return bytes ? std::optional<std::size_t>(bytes) : std::nullopt;
++  }
++
++  [[nodiscard]] TextPrefillStep PrefillThrough(
++      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
++      std::size_t offset, std::size_t budget, std::size_t boundary,
++      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
++      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& capture)
++      const override {
++    auto& qfn = RequireQwenFlashNextState(state);
++    if (!checkpoint || !capture || offset != qfn.position())
++      throw std::logic_error("invalid component in-pass checkpoint request");
++    const auto consumed = std::min<std::size_t>(
++        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
++    const auto next_position = offset + consumed;
++    const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
++    double capture_ms = 0;
++    try {
++      qfn.adapter().PrefillThrough(
++          qfn.slot(), prefix, static_cast<std::uint32_t>(boundary), [&] {
++            const auto started = std::chrono::steady_clock::now();
++            try {
++              *checkpoint = capture();
++            } catch (...) {
++              // Optional retention may refuse; the complete live prefill is
++              // valid.
++              checkpoint->reset();
++            }
++            capture_ms += std::chrono::duration<double, std::milli>(
++                              std::chrono::steady_clock::now() - started)
++                              .count();
++          });
++    } catch (...) {
++      qfn.set_position(0);
++      throw;
++    }
++    qfn.set_position(next_position);
++    return {.consumed_tokens = consumed,
++            .decode_ready = next_position == prompt.size(),
++            .checkpoint_ms = capture_ms};
++  }
++
++  // The engine stops before committing EOS when the request enables it.
++  // Every returned token is committed work and is emitted exactly once.
++  void ResolveStepTokens(
++      QwenFlashNextTextRunnerState&, bool engine_stopped,
++      std::span<const std::int32_t> tokens, TextDecodeStep* step,
++      const QwenFlashNextSession::DecodeResult& decoded) const {
++    step->stop = engine_stopped;
++    step->terminal_logprobs = decoded.terminal_logprobs;
++    step->selections.reserve(tokens.size());
++    for (const std::int32_t token : tokens) {
++      step->selections.push_back({
++          .stop = false,
++          .token = static_cast<TextRunnerToken>(token),
++          .piece = model_->TokenText(token),
++          .logprobs =
++              decoded.logprobs.empty()
++                  ? std::nullopt
++                  : std::optional(decoded.logprobs.at(step->selections.size())),
++      });
++    }
++  }
++
++  [[nodiscard]] TextDecodeSelection SelectNext(
++      TextRunnerState& state, sampling::SamplerState& sampler) const override {
++    auto& qfn = RequireQwenFlashNextState(state);
++    if (qfn.position() >= max_context_) {
++      return {.stop = true, .piece = {}};
++    }
++    const auto logits = qfn.session().Logits();
++    if (logits.empty()) {
++      throw std::runtime_error(
++          "Qwen3.8-Flash-Next token selection has no logits");
++    }
++    const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
++    const bool stop = EndsTurn(qfn, *model_, token);
++    return {.stop = stop,
++            .token = static_cast<TextRunnerToken>(token),
++            .piece = stop ? std::string{} : model_->TokenText(token),
++            .logprobs = sampling::CollectLogprobs(logits, token,
++                                                  sampler.config().logprobs)};
++  }
++
++  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
++    if (token > static_cast<TextRunnerToken>(
++                    std::numeric_limits<std::int32_t>::max())) {
++      throw std::invalid_argument(
++          "Qwen3.8-Flash-Next token ID exceeds engine range");
++    }
++    auto& qfn = RequireQwenFlashNextState(state);
++    std::string error;
++    if (!qfn.session().Evaluate(static_cast<std::int32_t>(token), &error)) {
++      throw std::runtime_error("Qwen3.8-Flash-Next decode failed: " + error);
++    }
++    qfn.set_position(qfn.position() + 1);
++  }
++
++  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
++      TextRunnerState& state, sampling::SamplerState& sampler) const override {
++    return SelectNext(state, sampler);
++  }
++
++  [[nodiscard]] TextDecodeStep DecodeStep(
++      TextRunnerState& state, std::size_t max_tokens,
++      sampling::SamplerState& sampler) const override {
++    if (!use_mtp_ || max_tokens == 1) {
++      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
++    }
++    if (max_tokens == 0) {
++      throw std::invalid_argument(
++          "Qwen3.8-Flash-Next MTP decode budget must be at least one token");
++    }
++    auto& qfn = RequireQwenFlashNextState(state);
++    if (qfn.position() >= max_context_) {
++      return {.selections = {}, .stop = true};
++    }
++    const auto stats_before = qfn.session().Statistics();
++    sampling::SamplerState working_sampler = sampler;
++    QwenFlashNextSession::DecodeResult decoded;
++    std::string error;
++    // Use the same request policy as SelectNext and the batched MTP path.
++    // The engine bounds the physical block and stops at EOS. Preserve the
++    // remaining request budget so its policy can recognize a short tail.
++    if (!qfn.session().DecodeStep(max_tokens, working_sampler, &decoded, &error,
++                                  qfn.stop_at_eos())) {
++      throw std::runtime_error("Qwen3.8-Flash-Next MTP decode failed: " +
++                               error);
++    }
++    // The pool accepts the returned tokens once. Publish the RNG and residual
++    // draw so the next batch retains the rejection-conditioned distribution.
++    sampler.CopyDrawStateFrom(working_sampler);
++    TextDecodeStep step;
++    ResolveStepTokens(qfn, decoded.stop, decoded.tokens, &step, decoded);
++    qfn.set_position(qfn.session().Position());
++    const auto stats_after = qfn.session().Statistics();
++    step.draft_rounds = stats_after.cycles - stats_before.cycles;
++    step.draft_tokens = stats_after.drafted - stats_before.drafted;
++    step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
++    step.lookup_tokens = stats_after.lookup - stats_before.lookup;
++    step.lookup_accepted_tokens =
++        stats_after.lookup_accepted - stats_before.lookup_accepted;
++    return step;
++  }
++
++  void AdvanceBatch(
++      std::span<const TextRunnerAdvance> advances) const override {
++    if (advances.size() < 2) {
++      return TextModelRunner::AdvanceBatch(advances);
++    }
++    std::vector<QwenFlashNextSession::BatchOutcome> outcomes(advances.size());
++    std::vector<QwenFlashNextSession::AdvanceRequest> requests;
++    for (const auto& advance : advances) {
++      if (advance.token > static_cast<TextRunnerToken>(
++                              std::numeric_limits<std::int32_t>::max())) {
++        throw std::invalid_argument("Flash-Next token exceeds engine range");
++      }
++      requests.push_back(
++          {&RequireQwenFlashNextState(advance.state.get()).session(),
++           static_cast<std::int32_t>(advance.token),
++           &outcomes[requests.size()]});
++    }
++    std::string error;
++    (void)QwenFlashNextSession::EvaluateBatch(requests, &error);
++    for (std::size_t i = 0; i < advances.size(); ++i) {
++      const auto& advance = advances[i];
++      if (!outcomes[i].completed) {
++        auto failure = std::make_exception_ptr(std::runtime_error(
++            "Flash-Next advance failed: " + outcomes[i].error));
++        if (!advance.failure)
++          std::rethrow_exception(failure);
++        *advance.failure = failure;
++        continue;
++      }
++      auto& state = RequireQwenFlashNextState(advance.state.get());
++      state.set_position(state.session().Position());
++    }
++  }
++
++  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
++      std::span<const TextRunnerDecode> decodes) const override {
++    if (decodes.size() < 2 || !use_mtp_) {
++      return TextModelRunner::DecodeBatch(decodes);
++    }
++    const auto count = decodes.size();
++    std::vector<sampling::SamplerState> samplers;
++    std::vector<QwenFlashNextSession::DecodeResult> results(count);
++    std::vector<QwenFlashNextSession::BatchOutcome> outcomes(count);
++    std::vector<QwenFlashNextSession::SpeculativeStats> before;
++    std::vector<QwenFlashNextSession::DecodeRequest> requests;
++    samplers.reserve(count);
++    before.reserve(count);
++    requests.reserve(count);
++    for (std::size_t i = 0; i < count; ++i) {
++      auto& state = RequireQwenFlashNextState(decodes[i].state.get());
++      auto& session = state.session();
++      auto& sampler = samplers.emplace_back(decodes[i].sampler.get());
++      before.push_back(session.Statistics());
++      requests.push_back({&session, decodes[i].max_tokens, &sampler,
++                          &results[i], state.stop_at_eos(), &outcomes[i]});
++    }
++    std::string error;
++    (void)QwenFlashNextSession::DecodeBatch(requests, &error);
++    const auto active_count = static_cast<std::size_t>(std::count_if(
++        results.begin(), results.end(),
++        [](const auto& result) { return !result.tokens.empty(); }));
++    std::vector<TextDecodeStep> steps(count);
++    for (std::size_t i = 0; i < count; ++i) {
++      if (!outcomes[i].completed) {
++        steps[i].failure = std::make_exception_ptr(
++            std::runtime_error("Flash-Next MTP failed: " + outcomes[i].error));
++        continue;
++      }
++      auto& state = RequireQwenFlashNextState(decodes[i].state.get());
++      decodes[i].sampler.get().CopyDrawStateFrom(samplers[i]);
++      state.set_position(state.session().Position());
++      auto& step = steps[i];
++      ResolveStepTokens(state, results[i].stop, results[i].tokens, &step,
++                        results[i]);
++      if (active_count > 1 && !results[i].tokens.empty()) {
++        step.execution_plan = {.kind = TextExecutionPlanKind::kBatched,
++                               .physical_width = active_count};
++      }
++      const auto stats = state.session().Statistics();
++      step.draft_rounds = stats.cycles - before[i].cycles;
++      step.draft_tokens = stats.drafted - before[i].drafted;
++      step.draft_accepted_tokens = stats.accepted - before[i].accepted;
++      // A request whose peers dropped out runs a single-session step,
++      // which can use prompt lookup.
++      step.lookup_tokens = stats.lookup - before[i].lookup;
++      step.lookup_accepted_tokens =
++          stats.lookup_accepted - before[i].lookup_accepted;
++    }
++    return steps;
++  }
++
++  [[nodiscard]] std::size_t CheckpointPosition(
++      const TextRunnerState& state) const override {
++    return RequireQwenFlashNextState(state).position();
++  }
++
++  [[nodiscard]] TextRunnerNgramRows NgramRows(
++      const TextRunnerState& state) const override {
++    const auto totals =
++        RequireQwenFlashNextState(state).session().NgramRowTotals();
++    return {totals.rows, totals.dedup_rows, totals.cache_hits,
++            totals.disk_reads};
++  }
++
++private:
++  mutable models::qwen::vision::ImageCache image_cache_;
++  std::shared_ptr<QwenFlashNextModel> model_;
++  std::uint32_t max_context_;
++  bool use_mtp_;
++  std::uint32_t max_draft_tokens_;
++  std::optional<TextRunnerPersistenceDescriptor> persistence_;
++  cache::Identity component_identity_;
++};
++}  // namespace
++std::shared_ptr<TextModelRunner> CreateFlashNextTextProvider(
++    std::shared_ptr<models::qwen38_flash_next::Model> model,
++    const FlashNextTextProviderOptions& options) {
++  return std::make_shared<QwenFlashNextTextRunner>(
++      std::move(model), options.max_context, options.use_mtp,
++      options.max_draft_tokens, options.artifact_fingerprint,
++      options.mtp_fingerprint);
++}
++}  // namespace gufo::server
++#endif
+diff --git a/src/models/qwen38_flash_next/text_provider.hpp b/src/models/qwen38_flash_next/text_provider.hpp
+new file mode 100644
+index 0000000000..3ea8565a3c
+--- /dev/null
++++ b/src/models/qwen38_flash_next/text_provider.hpp
+@@ -0,0 +1,25 @@
++#pragma once
++#include "src/cli/serve/text_runner_contract.hpp"
++namespace gufo::models::qwen38_flash_next {
++class Model;
++}
++namespace gufo::server {
++// Draft spike metadata: no model loading or HIP call is needed to inspect it.
++struct FlashNextProviderMetadata {
++  static constexpr std::string_view key = "qwen38-flash-next";
++  static constexpr std::string_view speculative_value = "mtp";
++  static constexpr std::string_view draft_option = "--mtp-model";
++  static constexpr std::string_view draft_tokens_option = "--draft-tokens";
++  static constexpr bool model_owned_cli_drivers = true;
++};
++struct FlashNextTextProviderOptions {
++  std::uint32_t max_context{0};
++  bool use_mtp{false};
++  std::uint32_t max_draft_tokens{0};
++  std::string artifact_fingerprint;
++  std::string mtp_fingerprint;
++};
++std::shared_ptr<TextModelRunner> CreateFlashNextTextProvider(
++    std::shared_ptr<models::qwen38_flash_next::Model> model,
++    const FlashNextTextProviderOptions& options);
++}  // namespace gufo::server
+diff --git a/tests/models/deepseek_v4_flash/CMakeLists.txt b/tests/models/deepseek_v4_flash/CMakeLists.txt
+index 387b3c684c..74ba99098c 100644
+--- a/tests/models/deepseek_v4_flash/CMakeLists.txt
++++ b/tests/models/deepseek_v4_flash/CMakeLists.txt
+@@ -88,7 +88,8 @@
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
+-    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
++    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp
++    ${PROJECT_SOURCE_DIR}/src/models/qwen38_flash_next/text_provider.cpp)
+   target_link_libraries(ds4_serving_test PRIVATE gufo_logging
+     gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_cache_hip hip::host)
+   add_test(NAME ds4.serving COMMAND ds4_serving_test)
+diff --git a/tests/models/qwen27b/CMakeLists.txt b/tests/models/qwen27b/CMakeLists.txt
+index 46709f5cdc..c0d356f8e1 100644
+--- a/tests/models/qwen27b/CMakeLists.txt
++++ b/tests/models/qwen27b/CMakeLists.txt
+@@ -63,7 +63,8 @@
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
+-    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
++    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp
++    ${PROJECT_SOURCE_DIR}/src/models/qwen38_flash_next/text_provider.cpp)
+   target_link_libraries(qwen_serving_test_support PUBLIC gufo_logging
+     gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_cache_hip hip::host)
+   add_executable(inference_backend_gpu_test serving_test.cpp)
+diff --git a/tests/models/qwen38_flash_next/CMakeLists.txt b/tests/models/qwen38_flash_next/CMakeLists.txt
+index c9ab75b11c..f91719870d 100644
+--- a/tests/models/qwen38_flash_next/CMakeLists.txt
++++ b/tests/models/qwen38_flash_next/CMakeLists.txt
+@@ -55,7 +55,8 @@
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
+     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
+-    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
++    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp
++    ${PROJECT_SOURCE_DIR}/src/models/qwen38_flash_next/text_provider.cpp)
+   target_link_libraries(qwen38_flash_next_session_test PRIVATE gufo_logging
+     gufo_qwen38_flash_next gufo_deepseek_v4_flash gufo_cache_hip hip::host)
+   add_executable(qwen38_flash_next_snapshot_test EXCLUDE_FROM_ALL snapshot_test.cpp

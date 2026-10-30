@@ -1,0 +1,36 @@
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+Test project /tmp/gufo-card03-spike/build/cpu-test
+    Start  41: text_model_runner_test
+1/6 Test  #41: text_model_runner_test .........................   Passed    0.07 sec
+    Start  44: text_generation_scheduler_test
+2/6 Test  #44: text_generation_scheduler_test .................   Passed    2.49 sec
+    Start 123: qwen27b_continuation_identity_test
+3/6 Test #123: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 137: deepseek_v4_flash_continuation_identity_test
+4/6 Test #137: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 143: qwen38_flash_next_continuation_identity_test
+5/6 Test #143: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+    Start 147: qwen38_flash_next.mtp_sampling
+6/6 Test #147: qwen38_flash_next.mtp_sampling .................   Passed    0.09 sec
+
+100% tests passed out of 6
+
+Label Time Summary:
+cache                =   0.07 sec*proc (4 tests)
+cancellation         =   2.49 sec*proc (1 test)
+correctness          =   0.00 sec*proc (3 tests)
+cpu                  =   2.66 sec*proc (6 tests)
+deepseek_v4_flash    =   0.00 sec*proc (1 test)
+lifecycle            =   2.56 sec*proc (2 tests)
+queue                =   2.49 sec*proc (1 test)
+qwen27b              =   0.00 sec*proc (1 test)
+qwen38_flash_next    =   0.09 sec*proc (2 tests)
+runner               =   0.07 sec*proc (1 test)
+scheduler            =   2.49 sec*proc (1 test)
+server               =   2.56 sec*proc (2 tests)
+state                =   2.56 sec*proc (2 tests)
+
+Total Test time (real) =   2.66 sec

@@ -1,0 +1,1929 @@
+{
+  "objects": [
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/core/hip/snapshot_copy.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "4f14411a7bdc7bd5c9ccfb8a89420845eaffe3ad7d0e7beb34196516cea2e99c",
+          "candidate_sha256": "4f14411a7bdc7bd5c9ccfb8a89420845eaffe3ad7d0e7beb34196516cea2e99c",
+          "baseline_bytes": 736,
+          "candidate_bytes": 736
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "46e13777448fbcac545de626dbe7e3f5249185f46cb3df3e09c6d2ba90af445d",
+          "candidate_sha256": "46e13777448fbcac545de626dbe7e3f5249185f46cb3df3e09c6d2ba90af445d",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "56a64b145b09a68babd3680115af7a95eb34db1dcf8d39b65e2dc95d9c8487af",
+          "candidate_sha256": "56a64b145b09a68babd3680115af7a95eb34db1dcf8d39b65e2dc95d9c8487af",
+          "baseline_bytes": 1384,
+          "candidate_bytes": 1384
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/attention.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "b7859cfdf4a006b1fcd9b67f32a064d5edad95ce7782632478a0223d3fd3a6e6",
+          "candidate_sha256": "b7859cfdf4a006b1fcd9b67f32a064d5edad95ce7782632478a0223d3fd3a6e6",
+          "baseline_bytes": 47644,
+          "candidate_bytes": 47644
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "901d12b4dcf9d88be91e1b7d8458ea551cab978e90e7186f02e3ce56888e72b6",
+          "candidate_sha256": "901d12b4dcf9d88be91e1b7d8458ea551cab978e90e7186f02e3ce56888e72b6",
+          "baseline_bytes": 256,
+          "candidate_bytes": 256
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "7add32ff6d6144a24d1fc1b96765c1599313287ed26247af679779d2297bbbd2",
+          "candidate_sha256": "7add32ff6d6144a24d1fc1b96765c1599313287ed26247af679779d2297bbbd2",
+          "baseline_bytes": 3296,
+          "candidate_bytes": 3296
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/audio_vae.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "aa57ecf454e097f06fc3b4bbe7f33b73fecd9184c84d1c7181277bb49ae410fa",
+          "candidate_sha256": "aa57ecf454e097f06fc3b4bbe7f33b73fecd9184c84d1c7181277bb49ae410fa",
+          "baseline_bytes": 28328,
+          "candidate_bytes": 28328
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "2aaa166359f8d9b76144eb135e29a708c6013417723048f8c811907067d34fb1",
+          "candidate_sha256": "2aaa166359f8d9b76144eb135e29a708c6013417723048f8c811907067d34fb1",
+          "baseline_bytes": 896,
+          "candidate_bytes": 896
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a0190ff41ae30ce5ef0af0304c7917eb2a03bf023f575c54dbfe8bfe3381ee70",
+          "candidate_sha256": "a0190ff41ae30ce5ef0af0304c7917eb2a03bf023f575c54dbfe8bfe3381ee70",
+          "baseline_bytes": 21064,
+          "candidate_bytes": 21064
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/denoiser.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "fe41b7218d0f9d1cf9e210df5dd52c905cf26963ecadea85c35f704f8de61843",
+          "candidate_sha256": "fe41b7218d0f9d1cf9e210df5dd52c905cf26963ecadea85c35f704f8de61843",
+          "baseline_bytes": 33908,
+          "candidate_bytes": 33908
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "964a06e8238128243a10f0c60dc2233394ece5b06f69b1ec0a7d3382bb417aaa",
+          "candidate_sha256": "964a06e8238128243a10f0c60dc2233394ece5b06f69b1ec0a7d3382bb417aaa",
+          "baseline_bytes": 2240,
+          "candidate_bytes": 2240
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "4e7aeb56d71a0a6e8c6dbd9cac23d1329af9985ea8859d11321a5cfea005abed",
+          "candidate_sha256": "4e7aeb56d71a0a6e8c6dbd9cac23d1329af9985ea8859d11321a5cfea005abed",
+          "baseline_bytes": 49848,
+          "candidate_bytes": 49848
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/dense.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "cf37501058d24ed43ede9873c50f192ad632318a531e0cb1c3c63fe4590d2611",
+          "candidate_sha256": "cf37501058d24ed43ede9873c50f192ad632318a531e0cb1c3c63fe4590d2611",
+          "baseline_bytes": 146452,
+          "candidate_bytes": 146452
+        },
+        ".rodata": {
+          "identical": false,
+          "baseline_sha256": "06cb355db0d69ba5583a486eafd67751d6b4bc207371454f00f2612937d852ec",
+          "candidate_sha256": "2a8b80950def0fbc8b7f574ae4c82cf1bddacc923fe540619581f45a4a3dcd53",
+          "baseline_bytes": 2816,
+          "candidate_bytes": 2816
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "7423b38ddefa5a6f1e1161ee324f601dd94305e45071b86559d43aaa9adc1931",
+          "candidate_sha256": "7423b38ddefa5a6f1e1161ee324f601dd94305e45071b86559d43aaa9adc1931",
+          "baseline_bytes": 60132,
+          "candidate_bytes": 60132
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/dit.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "fe41b7218d0f9d1cf9e210df5dd52c905cf26963ecadea85c35f704f8de61843",
+          "candidate_sha256": "fe41b7218d0f9d1cf9e210df5dd52c905cf26963ecadea85c35f704f8de61843",
+          "baseline_bytes": 33908,
+          "candidate_bytes": 33908
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "964a06e8238128243a10f0c60dc2233394ece5b06f69b1ec0a7d3382bb417aaa",
+          "candidate_sha256": "964a06e8238128243a10f0c60dc2233394ece5b06f69b1ec0a7d3382bb417aaa",
+          "baseline_bytes": 2240,
+          "candidate_bytes": 2240
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "4e7aeb56d71a0a6e8c6dbd9cac23d1329af9985ea8859d11321a5cfea005abed",
+          "candidate_sha256": "4e7aeb56d71a0a6e8c6dbd9cac23d1329af9985ea8859d11321a5cfea005abed",
+          "baseline_bytes": 49848,
+          "candidate_bytes": 49848
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/prompt_encoder.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "0b59ec14b2132818564de00566d6d16bb69fed39fcc0b325594c2a70acd9241e",
+          "candidate_sha256": "0b59ec14b2132818564de00566d6d16bb69fed39fcc0b325594c2a70acd9241e",
+          "baseline_bytes": 12944,
+          "candidate_bytes": 12944
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "47ef094612387612368fbe502531d13e06ed3edb8527b0e7f721d3ff119e4e4d",
+          "candidate_sha256": "47ef094612387612368fbe502531d13e06ed3edb8527b0e7f721d3ff119e4e4d",
+          "baseline_bytes": 576,
+          "candidate_bytes": 576
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "663dcce62f362a2c1e1ae7a697ba57de15681719cca41b1f996d0c26d5938f29",
+          "candidate_sha256": "663dcce62f362a2c1e1ae7a697ba57de15681719cca41b1f996d0c26d5938f29",
+          "baseline_bytes": 11852,
+          "candidate_bytes": 11852
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/sampling.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "52e2ab40684ab89085d925540ace5b569996e71ab4bca6a1c029c6376086dbec",
+          "candidate_sha256": "52e2ab40684ab89085d925540ace5b569996e71ab4bca6a1c029c6376086dbec",
+          "baseline_bytes": 516,
+          "candidate_bytes": 516
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "23cbcd55dfa653f829aa59ab37faef4cef950d8f2a15a057dd6e498c464320d0",
+          "candidate_sha256": "23cbcd55dfa653f829aa59ab37faef4cef950d8f2a15a057dd6e498c464320d0",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a6dfde77b6b2c95630bfad2db7d22815cd0107aae82b8f5e6859b34a5cf91d93",
+          "candidate_sha256": "a6dfde77b6b2c95630bfad2db7d22815cd0107aae82b8f5e6859b34a5cf91d93",
+          "baseline_bytes": 1628,
+          "candidate_bytes": 1628
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/video_vae.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "b04e8a23090a65ca60c14d9f18ba6d26aad80c0cd6e963f743dd3d4a19bf8ce9",
+          "candidate_sha256": "b04e8a23090a65ca60c14d9f18ba6d26aad80c0cd6e963f743dd3d4a19bf8ce9",
+          "baseline_bytes": 17756,
+          "candidate_bytes": 17756
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "dc5a299503d93df4075338121f2192f9d9953f5ee7b3fab2e2b9303a4e3ba767",
+          "candidate_sha256": "dc5a299503d93df4075338121f2192f9d9953f5ee7b3fab2e2b9303a4e3ba767",
+          "baseline_bytes": 856,
+          "candidate_bytes": 856
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "03a4ff547b1c36a577814067f853907bc8c67e5b40b42793998e190e0569a760",
+          "candidate_sha256": "03a4ff547b1c36a577814067f853907bc8c67e5b40b42793998e190e0569a760",
+          "baseline_bytes": 16872,
+          "candidate_bytes": 16872
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/batched_ssm.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "f7cdceee8936c0d0a9cfa11414136d28a96123dd382beb00170bd4a41eff53a2",
+          "candidate_sha256": "f7cdceee8936c0d0a9cfa11414136d28a96123dd382beb00170bd4a41eff53a2",
+          "baseline_bytes": 1280,
+          "candidate_bytes": 1280
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "258bbb80c15b44683197bd59bed37390904deb550bb8e2a7305e3516305c3b79",
+          "candidate_sha256": "258bbb80c15b44683197bd59bed37390904deb550bb8e2a7305e3516305c3b79",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a6a491cfb86498eab67a804750094b6b4897f185470a9a2d0c3d5daeabd5d196",
+          "candidate_sha256": "a6a491cfb86498eab67a804750094b6b4897f185470a9a2d0c3d5daeabd5d196",
+          "baseline_bytes": 1092,
+          "candidate_bytes": 1092
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_batched.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "adb3e47a6a9a4a0e486ba40a27a54baaeb43b3e55cb479b82a215e01a65a410f",
+          "candidate_sha256": "adb3e47a6a9a4a0e486ba40a27a54baaeb43b3e55cb479b82a215e01a65a410f",
+          "baseline_bytes": 8552,
+          "candidate_bytes": 8552
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "1b21de46da8c900b8abf9e5e034e6de5116b990607aa616ed9e542d355f60409",
+          "candidate_sha256": "1b21de46da8c900b8abf9e5e034e6de5116b990607aa616ed9e542d355f60409",
+          "baseline_bytes": 256,
+          "candidate_bytes": 256
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "de27a1a343c3d6e0434b387280620112a7a69a321a81aa83f294d1d57ed45796",
+          "candidate_sha256": "de27a1a343c3d6e0434b387280620112a7a69a321a81aa83f294d1d57ed45796",
+          "baseline_bytes": 6832,
+          "candidate_bytes": 6832
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_decode.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "931e1321cc4cc38b72028287f7f49e34336bfc322a0919d6f199f6f370304732",
+          "candidate_sha256": "931e1321cc4cc38b72028287f7f49e34336bfc322a0919d6f199f6f370304732",
+          "baseline_bytes": 27084,
+          "candidate_bytes": 27084
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "b972a4cf677bbc2a8281a2fc64cd32b8c155b445412f0c6030b2a829c616564e",
+          "candidate_sha256": "b972a4cf677bbc2a8281a2fc64cd32b8c155b445412f0c6030b2a829c616564e",
+          "baseline_bytes": 640,
+          "candidate_bytes": 640
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "ddc7f4ab2aace28efc6031bd009f356e887fc5730208fe9cd1519695efca85c5",
+          "candidate_sha256": "ddc7f4ab2aace28efc6031bd009f356e887fc5730208fe9cd1519695efca85c5",
+          "baseline_bytes": 12596,
+          "candidate_bytes": 12596
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_decode_graph.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "fe70bb35b3f07b64c3acb0a5707775fe34db18398c0c318150753dabbc9cc8b9",
+          "candidate_sha256": "fe70bb35b3f07b64c3acb0a5707775fe34db18398c0c318150753dabbc9cc8b9",
+          "baseline_bytes": 7576,
+          "candidate_bytes": 7576
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "4f36fada53ff78b2d0d49431759315f1bf8bf8e2e9a5ff9e40b08cbb0843394a",
+          "candidate_sha256": "4f36fada53ff78b2d0d49431759315f1bf8bf8e2e9a5ff9e40b08cbb0843394a",
+          "baseline_bytes": 192,
+          "candidate_bytes": 192
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "1cca20a8b6a93cfe70499b501cd55bd990949e1285c3db95be7fc4e6ff042b60",
+          "candidate_sha256": "1cca20a8b6a93cfe70499b501cd55bd990949e1285c3db95be7fc4e6ff042b60",
+          "baseline_bytes": 3776,
+          "candidate_bytes": 3776
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "14552e74e485b1694aee16d5842e07b962228a2c69cc39218b7805ea90450424",
+          "candidate_sha256": "14552e74e485b1694aee16d5842e07b962228a2c69cc39218b7805ea90450424",
+          "baseline_bytes": 2852,
+          "candidate_bytes": 2852
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "ad648d45b4c0fa8fe74f44a7e00e616838024f206cd51e7bf5e5f89e05ec62f5",
+          "candidate_sha256": "ad648d45b4c0fa8fe74f44a7e00e616838024f206cd51e7bf5e5f89e05ec62f5",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "b546a8eab0a21db4d8c9a7129268a78070317a0071672bd52ac714b18c12dae9",
+          "candidate_sha256": "b546a8eab0a21db4d8c9a7129268a78070317a0071672bd52ac714b18c12dae9",
+          "baseline_bytes": 1268,
+          "candidate_bytes": 1268
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_tile.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "5a0aea4add3342499489fb92a88abbcc34630fd28ed7c960b6a8cc9ee0826391",
+          "candidate_sha256": "5a0aea4add3342499489fb92a88abbcc34630fd28ed7c960b6a8cc9ee0826391",
+          "baseline_bytes": 30200,
+          "candidate_bytes": 30200
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "fc25c325a070cb12c141a9270b8eea318aed84af68e055944d245ad6729fc438",
+          "candidate_sha256": "fc25c325a070cb12c141a9270b8eea318aed84af68e055944d245ad6729fc438",
+          "baseline_bytes": 192,
+          "candidate_bytes": 192
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "2840e91760d70045d01c0761d23297136ad0dcc2aa3887595890b767eebdbe70",
+          "candidate_sha256": "2840e91760d70045d01c0761d23297136ad0dcc2aa3887595890b767eebdbe70",
+          "baseline_bytes": 4780,
+          "candidate_bytes": 4780
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_wmma.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "bc32c535d7ac1cee181d0102dc9600c2300a6239f3b634cd53ced17446fbca9f",
+          "candidate_sha256": "bc32c535d7ac1cee181d0102dc9600c2300a6239f3b634cd53ced17446fbca9f",
+          "baseline_bytes": 154080,
+          "candidate_bytes": 154080
+        },
+        ".rodata": {
+          "identical": false,
+          "baseline_sha256": "32538e96bf69b0b0d56843fa53f5952e929abc5b0681e252ba0f599a1b737e78",
+          "candidate_sha256": "d53b77b0ebfb64c0990a4a4291fc50cdad9da6f02b7b7b0150103212120dfd20",
+          "baseline_bytes": 192,
+          "candidate_bytes": 192
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "1b622ad702b634aab6529d02f84abf7cb39602c52d81cfbb0f7a67807976cecd",
+          "candidate_sha256": "1b622ad702b634aab6529d02f84abf7cb39602c52d81cfbb0f7a67807976cecd",
+          "baseline_bytes": 3288,
+          "candidate_bytes": 3288
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/dflash_kernels.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "6af903b3feb3168f1fa24a1d8a4efe48004722a951247e935c2fc9ebd488e684",
+          "candidate_sha256": "6af903b3feb3168f1fa24a1d8a4efe48004722a951247e935c2fc9ebd488e684",
+          "baseline_bytes": 42900,
+          "candidate_bytes": 42900
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "0ee96d4d843bf342051923f8b88d9b17099a276744a139119086962cd17080d1",
+          "candidate_sha256": "0ee96d4d843bf342051923f8b88d9b17099a276744a139119086962cd17080d1",
+          "baseline_bytes": 576,
+          "candidate_bytes": 576
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "c3b83802f11b3f409a814410bdf8bb74fc52ea89384fe677341b5907a7295962",
+          "candidate_sha256": "c3b83802f11b3f409a814410bdf8bb74fc52ea89384fe677341b5907a7295962",
+          "baseline_bytes": 16556,
+          "candidate_bytes": 16556
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/embed.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "511e7e02feeb9017dce38af4dc62fb9790914dcabb6bdc4ee7c43c05fab8e78f",
+          "candidate_sha256": "511e7e02feeb9017dce38af4dc62fb9790914dcabb6bdc4ee7c43c05fab8e78f",
+          "baseline_bytes": 12488,
+          "candidate_bytes": 12488
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "9ce0ca36f74b8f9a4bd7e2e4082ab3392fc289212b6e33f4cca54241f9479410",
+          "candidate_sha256": "9ce0ca36f74b8f9a4bd7e2e4082ab3392fc289212b6e33f4cca54241f9479410",
+          "baseline_bytes": 2176,
+          "candidate_bytes": 2176
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "7d32ce18421da53a9266b56a3d23d0b9a0146092d23430630aab5a971c476b4e",
+          "candidate_sha256": "7d32ce18421da53a9266b56a3d23d0b9a0146092d23430630aab5a971c476b4e",
+          "baseline_bytes": 3012,
+          "candidate_bytes": 3012
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/fused.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "90b0d34f74778869c853b7fbd153d0026ed883e23de1ecb93b67ca105ed71659",
+          "candidate_sha256": "90b0d34f74778869c853b7fbd153d0026ed883e23de1ecb93b67ca105ed71659",
+          "baseline_bytes": 11028,
+          "candidate_bytes": 11028
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "f067abb64bcc1fffc6b52d2c760f92bb33167432dfd68cab1c04de687ffa6256",
+          "candidate_sha256": "f067abb64bcc1fffc6b52d2c760f92bb33167432dfd68cab1c04de687ffa6256",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "715c1327b8e86d06a3b9bd43cf8b634328af1f985714e3dfdf76e49ea0be659b",
+          "candidate_sha256": "715c1327b8e86d06a3b9bd43cf8b634328af1f985714e3dfdf76e49ea0be659b",
+          "baseline_bytes": 2864,
+          "candidate_bytes": 2864
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/gemv.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "187e2ebbc13a0ba67f584e3d343b59039968195aa381b35f576a13c26d04f958",
+          "candidate_sha256": "187e2ebbc13a0ba67f584e3d343b59039968195aa381b35f576a13c26d04f958",
+          "baseline_bytes": 3324,
+          "candidate_bytes": 3324
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "82dfefab12a006e1314d38132e0db4e7f970e20c9ac058e7d373c5c0eb5776a3",
+          "candidate_sha256": "82dfefab12a006e1314d38132e0db4e7f970e20c9ac058e7d373c5c0eb5776a3",
+          "baseline_bytes": 128,
+          "candidate_bytes": 128
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "927caefb2b2ff891927a1a9d782324c4d56e1d350f0327f2a6e7c20d13746449",
+          "candidate_sha256": "927caefb2b2ff891927a1a9d782324c4d56e1d350f0327f2a6e7c20d13746449",
+          "baseline_bytes": 2452,
+          "candidate_bytes": 2452
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/gemv_quant.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "906fa5e6775a62da7b522e2d5072659df262afa24533e27685347bc231a69bf9",
+          "candidate_sha256": "906fa5e6775a62da7b522e2d5072659df262afa24533e27685347bc231a69bf9",
+          "baseline_bytes": 22228,
+          "candidate_bytes": 22228
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "2951343c5cf93d47b5adc32c282d3f5cbf50d347227d6d30cf2fe64279dc668e",
+          "candidate_sha256": "2951343c5cf93d47b5adc32c282d3f5cbf50d347227d6d30cf2fe64279dc668e",
+          "baseline_bytes": 2368,
+          "candidate_bytes": 2368
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "20bcde61ea0cf1bb326ce0d334b222dd9e44e6337cfa47e74fafba5e05b28f35",
+          "candidate_sha256": "20bcde61ea0cf1bb326ce0d334b222dd9e44e6337cfa47e74fafba5e05b28f35",
+          "baseline_bytes": 4516,
+          "candidate_bytes": 4516
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/norm.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "1f99e6bf1285b540baa2699f8dcc1b899585afbff8876bbbc43ef85b6f668d71",
+          "candidate_sha256": "1f99e6bf1285b540baa2699f8dcc1b899585afbff8876bbbc43ef85b6f668d71",
+          "baseline_bytes": 4664,
+          "candidate_bytes": 4664
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "b1ba1d1d4f479899e9eb87fd46ea44cd506816aa50fb72b9ef0b10d7db055fac",
+          "candidate_sha256": "b1ba1d1d4f479899e9eb87fd46ea44cd506816aa50fb72b9ef0b10d7db055fac",
+          "baseline_bytes": 192,
+          "candidate_bytes": 192
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "1d61a0547da3645ab407d9844dad0a93c0f139b53dcc8f249bbc13c1dc6995fe",
+          "candidate_sha256": "1d61a0547da3645ab407d9844dad0a93c0f139b53dcc8f249bbc13c1dc6995fe",
+          "baseline_bytes": 4480,
+          "candidate_bytes": 4480
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_embed.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "269e261a62caa6a3feaf8145fcbbb8eb750cafbbad97e8032e78fe3c256d73bb",
+          "candidate_sha256": "269e261a62caa6a3feaf8145fcbbb8eb750cafbbad97e8032e78fe3c256d73bb",
+          "baseline_bytes": 6412,
+          "candidate_bytes": 6412
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "e34313560f9897f6c0cac7fd97f8ce7607f46cdfe9b5581a59f6c70327ca4048",
+          "candidate_sha256": "e34313560f9897f6c0cac7fd97f8ce7607f46cdfe9b5581a59f6c70327ca4048",
+          "baseline_bytes": 2112,
+          "candidate_bytes": 2112
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "fb7500e15dd0fc2062fcecad30315dd71fd9c65d70a34e983776649be03c0302",
+          "candidate_sha256": "fb7500e15dd0fc2062fcecad30315dd71fd9c65d70a34e983776649be03c0302",
+          "baseline_bytes": 1640,
+          "candidate_bytes": 1640
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_fp16.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "343c28e43990dfc63467ee69c7e7ef52f213127bfae77159070fc12e57b6cf42",
+          "candidate_sha256": "343c28e43990dfc63467ee69c7e7ef52f213127bfae77159070fc12e57b6cf42",
+          "baseline_bytes": 924204,
+          "candidate_bytes": 924204
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "b73ad5f1b0211c6dcdf629d52e59a309d6d79c4529ed2fed09ad22b60adb08eb",
+          "candidate_sha256": "b73ad5f1b0211c6dcdf629d52e59a309d6d79c4529ed2fed09ad22b60adb08eb",
+          "baseline_bytes": 7296,
+          "candidate_bytes": 7296
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "ec8fccba787f2bc437345efa51f9a13557086d7c08be8697d7156e6de7767e80",
+          "candidate_sha256": "ec8fccba787f2bc437345efa51f9a13557086d7c08be8697d7156e6de7767e80",
+          "baseline_bytes": 149404,
+          "candidate_bytes": 149404
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_gemm.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "f3527c5b853f85d655f563f94f3840203958a7c085a12b047d9c2a249ee50997",
+          "candidate_sha256": "f3527c5b853f85d655f563f94f3840203958a7c085a12b047d9c2a249ee50997",
+          "baseline_bytes": 88576,
+          "candidate_bytes": 88576
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "8106b5819ea2b72f1899e33adfbcb0f74affb1159f7bbfa692d8d7ca121ed767",
+          "candidate_sha256": "8106b5819ea2b72f1899e33adfbcb0f74affb1159f7bbfa692d8d7ca121ed767",
+          "baseline_bytes": 1728,
+          "candidate_bytes": 1728
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "31eabc6fb94812b23775c6b0d9434d7d748ed79654d9ed8286d9432c09a7712b",
+          "candidate_sha256": "31eabc6fb94812b23775c6b0d9434d7d748ed79654d9ed8286d9432c09a7712b",
+          "baseline_bytes": 40488,
+          "candidate_bytes": 40488
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_norm.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "cd95bba6e9c60ce5287bc8078db1cd63924e644013a336a571a5c7933c903d1f",
+          "candidate_sha256": "cd95bba6e9c60ce5287bc8078db1cd63924e644013a336a571a5c7933c903d1f",
+          "baseline_bytes": 7988,
+          "candidate_bytes": 7988
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "0aa42f171ca87d3532129062735eb016e97a2bbd03b904f2502c6ae035d93fef",
+          "candidate_sha256": "0aa42f171ca87d3532129062735eb016e97a2bbd03b904f2502c6ae035d93fef",
+          "baseline_bytes": 192,
+          "candidate_bytes": 192
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "2cd6c35bb658f1641b347380169d945f3228c148cf9e8588479b86c9e08cd4d7",
+          "candidate_sha256": "2cd6c35bb658f1641b347380169d945f3228c148cf9e8588479b86c9e08cd4d7",
+          "baseline_bytes": 4884,
+          "candidate_bytes": 4884
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_quant_gemm.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "ee7b44e91a55c69f4731c37d8553dfa127ce8ca209bcf0f98d8ecf6346e560ea",
+          "candidate_sha256": "ee7b44e91a55c69f4731c37d8553dfa127ce8ca209bcf0f98d8ecf6346e560ea",
+          "baseline_bytes": 1691960,
+          "candidate_bytes": 1691960
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "bd7ceaa001f8b3bb4815bfb4749deec2a4153c5fac21e46f61aa89b989676ade",
+          "candidate_sha256": "bd7ceaa001f8b3bb4815bfb4749deec2a4153c5fac21e46f61aa89b989676ade",
+          "baseline_bytes": 15616,
+          "candidate_bytes": 15616
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "81421aea3e30dae76ca14167c138891ffb7d784490dd55e1cc42500e966b1f91",
+          "candidate_sha256": "81421aea3e30dae76ca14167c138891ffb7d784490dd55e1cc42500e966b1f91",
+          "baseline_bytes": 323316,
+          "candidate_bytes": 323316
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_quant_wave64.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "ce5789d2ff126fca97248d54e011bb1c049063f4211c9c9f4e59fe2b4efa2a99",
+          "candidate_sha256": "ce5789d2ff126fca97248d54e011bb1c049063f4211c9c9f4e59fe2b4efa2a99",
+          "baseline_bytes": 106168,
+          "candidate_bytes": 106168
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "91e9ad4f9ed57de6591f15af49fc3c80e6ead22385a3b474df124c790856552a",
+          "candidate_sha256": "91e9ad4f9ed57de6591f15af49fc3c80e6ead22385a3b474df124c790856552a",
+          "baseline_bytes": 320,
+          "candidate_bytes": 320
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "9c763e65f70aef897244e46efdafa63d7ac364a7298164ec087474291b498f70",
+          "candidate_sha256": "9c763e65f70aef897244e46efdafa63d7ac364a7298164ec087474291b498f70",
+          "baseline_bytes": 6224,
+          "candidate_bytes": 6224
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_residual.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "d452a06f44bc29b5adbafad7f7b5ae17dc390523385ad19c5874e80f5ef2b2dc",
+          "candidate_sha256": "d452a06f44bc29b5adbafad7f7b5ae17dc390523385ad19c5874e80f5ef2b2dc",
+          "baseline_bytes": 416,
+          "candidate_bytes": 416
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "03ef3d8ed2869fca250479904af15b57645156b4ac4ed6673f6ac29f2208895f",
+          "candidate_sha256": "03ef3d8ed2869fca250479904af15b57645156b4ac4ed6673f6ac29f2208895f",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "5c860da861d2bebbfbd7467c953a1d8455eeb512c74dec2ca7258d4a3b24edf4",
+          "candidate_sha256": "5c860da861d2bebbfbd7467c953a1d8455eeb512c74dec2ca7258d4a3b24edf4",
+          "baseline_bytes": 1516,
+          "candidate_bytes": 1516
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_rope.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "2f2e0f675c4da61d4649acaf282d9cbd7b36b0f0fcc608cfcd92f37bae234c57",
+          "candidate_sha256": "2f2e0f675c4da61d4649acaf282d9cbd7b36b0f0fcc608cfcd92f37bae234c57",
+          "baseline_bytes": 19248,
+          "candidate_bytes": 19248
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "a45a2176f584fd7d6ea277c89d3dc4ccbf1f98625887d3838c087d578f272747",
+          "candidate_sha256": "a45a2176f584fd7d6ea277c89d3dc4ccbf1f98625887d3838c087d578f272747",
+          "baseline_bytes": 128,
+          "candidate_bytes": 128
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "d7293e377ae974334aad76cf4727aee5dccb14f4c2cb57a935fc2b01b392ff5e",
+          "candidate_sha256": "d7293e377ae974334aad76cf4727aee5dccb14f4c2cb57a935fc2b01b392ff5e",
+          "baseline_bytes": 4464,
+          "candidate_bytes": 4464
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_ssm.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "f62cabb3fda61b14195fed2e455678c6a59dc094ed31dd27910847d0708c8c5e",
+          "candidate_sha256": "f62cabb3fda61b14195fed2e455678c6a59dc094ed31dd27910847d0708c8c5e",
+          "baseline_bytes": 2576,
+          "candidate_bytes": 2576
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "5bc34abb58d3690d42f1885e3a9bc0c9ff7f79e7b68d897a483ea07eb360cfdd",
+          "candidate_sha256": "5bc34abb58d3690d42f1885e3a9bc0c9ff7f79e7b68d897a483ea07eb360cfdd",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "e80e29f7546888ca7c6359acbbc10d4e792aa7d68a5bce1a58d58b7e5002dba6",
+          "candidate_sha256": "e80e29f7546888ca7c6359acbbc10d4e792aa7d68a5bce1a58d58b7e5002dba6",
+          "baseline_bytes": 2456,
+          "candidate_bytes": 2456
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_swiglu.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "efe1978ae6f158489f8be001d2be27891decb9f642b617ab068a0615cf169a09",
+          "candidate_sha256": "efe1978ae6f158489f8be001d2be27891decb9f642b617ab068a0615cf169a09",
+          "baseline_bytes": 836,
+          "candidate_bytes": 836
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "b7e526cb52124f1ab92ea9ce9e1dc433beacc37bfdeb7c6e520641c0a42782cb",
+          "candidate_sha256": "b7e526cb52124f1ab92ea9ce9e1dc433beacc37bfdeb7c6e520641c0a42782cb",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "31f2f0f038731fdcd74e0cf6f8b1dc925e0539d13589903a5f8946a442512ddc",
+          "candidate_sha256": "31f2f0f038731fdcd74e0cf6f8b1dc925e0539d13589903a5f8946a442512ddc",
+          "baseline_bytes": 1644,
+          "candidate_bytes": 1644
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_unpack.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "58a979c9a73b3f1f0265aedf47fcd20eb50e035de84df879bcedb65399dba208",
+          "candidate_sha256": "58a979c9a73b3f1f0265aedf47fcd20eb50e035de84df879bcedb65399dba208",
+          "baseline_bytes": 736,
+          "candidate_bytes": 736
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "85498765b1b42e62d92a580f833f4e5ec73e46381a0bb839daf9b892b7babaa1",
+          "candidate_sha256": "85498765b1b42e62d92a580f833f4e5ec73e46381a0bb839daf9b892b7babaa1",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "6ae6f9c12050454282e289cad28e68b6251083245f148094484b19c4949c2c90",
+          "candidate_sha256": "6ae6f9c12050454282e289cad28e68b6251083245f148094484b19c4949c2c90",
+          "baseline_bytes": 1588,
+          "candidate_bytes": 1588
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/qkv.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "0856c9c8ddf47088f5d5dba85209fb960d7bae085c49336d06bfef07a0dfe4ef",
+          "candidate_sha256": "0856c9c8ddf47088f5d5dba85209fb960d7bae085c49336d06bfef07a0dfe4ef",
+          "baseline_bytes": 15084,
+          "candidate_bytes": 15084
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "f53cdf7a136c4d75953fb4dfc5180f2e8fbfb429a62243c3db4ffe5f0dac80b2",
+          "candidate_sha256": "f53cdf7a136c4d75953fb4dfc5180f2e8fbfb429a62243c3db4ffe5f0dac80b2",
+          "baseline_bytes": 2176,
+          "candidate_bytes": 2176
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "1b93726edca0df874f694d5209fe64b9faa835c0299a8e7ab0ae736f37915cab",
+          "candidate_sha256": "1b93726edca0df874f694d5209fe64b9faa835c0299a8e7ab0ae736f37915cab",
+          "baseline_bytes": 3424,
+          "candidate_bytes": 3424
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/residual.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "d452a06f44bc29b5adbafad7f7b5ae17dc390523385ad19c5874e80f5ef2b2dc",
+          "candidate_sha256": "d452a06f44bc29b5adbafad7f7b5ae17dc390523385ad19c5874e80f5ef2b2dc",
+          "baseline_bytes": 416,
+          "candidate_bytes": 416
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "03ef3d8ed2869fca250479904af15b57645156b4ac4ed6673f6ac29f2208895f",
+          "candidate_sha256": "03ef3d8ed2869fca250479904af15b57645156b4ac4ed6673f6ac29f2208895f",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "995333129ffb34cce62166e03c76cedef3fb97be9c386811a7000c4bfd2d1475",
+          "candidate_sha256": "995333129ffb34cce62166e03c76cedef3fb97be9c386811a7000c4bfd2d1475",
+          "baseline_bytes": 1500,
+          "candidate_bytes": 1500
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/rope.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "3c176e820781464a7c076f75e20f07e263e19d270486e4afc4ba9ecde1b749ae",
+          "candidate_sha256": "3c176e820781464a7c076f75e20f07e263e19d270486e4afc4ba9ecde1b749ae",
+          "baseline_bytes": 16020,
+          "candidate_bytes": 16020
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "a31b1ad81ba91fb4556145907f05a3e78acea001f735817fed5465207421ebd0",
+          "candidate_sha256": "a31b1ad81ba91fb4556145907f05a3e78acea001f735817fed5465207421ebd0",
+          "baseline_bytes": 128,
+          "candidate_bytes": 128
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "574b4ebf37de0a328bc405b56ecdf9ae3fcab9408bfee7ae90d4a72a7228c7d8",
+          "candidate_sha256": "574b4ebf37de0a328bc405b56ecdf9ae3fcab9408bfee7ae90d4a72a7228c7d8",
+          "baseline_bytes": 3312,
+          "candidate_bytes": 3312
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/sample.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "9e5ec87e8d7ad5747ea4be72b337af4ba6aeb0e32918531c14b2a091224712ea",
+          "candidate_sha256": "9e5ec87e8d7ad5747ea4be72b337af4ba6aeb0e32918531c14b2a091224712ea",
+          "baseline_bytes": 107136,
+          "candidate_bytes": 107136
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "815548e409aa0cf0b918b7eea0603805d7ee20a534e72531d005a3c126d2414d",
+          "candidate_sha256": "815548e409aa0cf0b918b7eea0603805d7ee20a534e72531d005a3c126d2414d",
+          "baseline_bytes": 9344,
+          "candidate_bytes": 9344
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "eee4657358bd584583f122e43f06113cd6ff75d9447abea92b9104cfc299c4d1",
+          "candidate_sha256": "eee4657358bd584583f122e43f06113cd6ff75d9447abea92b9104cfc299c4d1",
+          "baseline_bytes": 212096,
+          "candidate_bytes": 212096
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "e03d065d30541dd6101aa66be847dd7859d599eb9ae4e533ec8ee4f65f32e2d9",
+          "candidate_sha256": "e03d065d30541dd6101aa66be847dd7859d599eb9ae4e533ec8ee4f65f32e2d9",
+          "baseline_bytes": 533924,
+          "candidate_bytes": 533924
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "614a0669938bc76ff1296b3c24f34923793ed668f490d84cce826566df946357",
+          "candidate_sha256": "614a0669938bc76ff1296b3c24f34923793ed668f490d84cce826566df946357",
+          "baseline_bytes": 1792,
+          "candidate_bytes": 1792
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "c6b707f4e4ec0a905d90dd19779455836c0a3cb3c4a4ad97fcc0cc71dc30e519",
+          "candidate_sha256": "c6b707f4e4ec0a905d90dd19779455836c0a3cb3c4a4ad97fcc0cc71dc30e519",
+          "baseline_bytes": 46980,
+          "candidate_bytes": 46980
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/small_batch_wave64.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "f85e60bb0b11244756498222e4aa18c4c1881c20e89347ebb1fbf1edbd8b5e6f",
+          "candidate_sha256": "f85e60bb0b11244756498222e4aa18c4c1881c20e89347ebb1fbf1edbd8b5e6f",
+          "baseline_bytes": 2381072,
+          "candidate_bytes": 2381072
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "5de68130f7a9c067ae5c987068cf7f5642e28fd8befcd23dfb175be6e2e86915",
+          "candidate_sha256": "5de68130f7a9c067ae5c987068cf7f5642e28fd8befcd23dfb175be6e2e86915",
+          "baseline_bytes": 10048,
+          "candidate_bytes": 10048
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "ccdd6c1f418dcba1b8f8656a7d322d2ea63fcc63349b2e3babf32be6a7c1bd77",
+          "candidate_sha256": "ccdd6c1f418dcba1b8f8656a7d322d2ea63fcc63349b2e3babf32be6a7c1bd77",
+          "baseline_bytes": 260080,
+          "candidate_bytes": 260080
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "a4d4b78c09ebf74aa70c3e908c30a2ebd33531c31f1b4e4cd81b4af231582ce7",
+          "candidate_sha256": "a4d4b78c09ebf74aa70c3e908c30a2ebd33531c31f1b4e4cd81b4af231582ce7",
+          "baseline_bytes": 15468,
+          "candidate_bytes": 15468
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "3c42c83f0ed90c0d6735085e9e32e14389de210fa16508138dd43443dc330699",
+          "candidate_sha256": "3c42c83f0ed90c0d6735085e9e32e14389de210fa16508138dd43443dc330699",
+          "baseline_bytes": 2176,
+          "candidate_bytes": 2176
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "575e6f7b6812a15b0b5e8fc68c2318ee4e64a6c137fb5eb3284100d994f8d0a1",
+          "candidate_sha256": "575e6f7b6812a15b0b5e8fc68c2318ee4e64a6c137fb5eb3284100d994f8d0a1",
+          "baseline_bytes": 3964,
+          "candidate_bytes": 3964
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm_decode_recurrence.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "5d68a008497f82d2668bc10be53710302cbc380d935e7fb421ea9068eee51115",
+          "candidate_sha256": "5d68a008497f82d2668bc10be53710302cbc380d935e7fb421ea9068eee51115",
+          "baseline_bytes": 147788,
+          "candidate_bytes": 147788
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "8b0b77f6b0c8021ad38c8c2202238ec86282138185f510305290df9dc50655dc",
+          "candidate_sha256": "8b0b77f6b0c8021ad38c8c2202238ec86282138185f510305290df9dc50655dc",
+          "baseline_bytes": 1409,
+          "candidate_bytes": 1409
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "abcc34a52b74d032ec105b31a6077b2c885e8275409661fc437cbed80b011089",
+          "candidate_sha256": "abcc34a52b74d032ec105b31a6077b2c885e8275409661fc437cbed80b011089",
+          "baseline_bytes": 52088,
+          "candidate_bytes": 52088
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm_recurrence.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "61cd2a264471cb67325c8e22ee16aa38af8f2ac79273c6642ec763fb39e16f63",
+          "candidate_sha256": "61cd2a264471cb67325c8e22ee16aa38af8f2ac79273c6642ec763fb39e16f63",
+          "baseline_bytes": 41500,
+          "candidate_bytes": 41500
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "8835e32a9f5e3e9ec3f25fabbcc0aaa8e873ffa9375b1ddf8189905a4f2f66f4",
+          "candidate_sha256": "8835e32a9f5e3e9ec3f25fabbcc0aaa8e873ffa9375b1ddf8189905a4f2f66f4",
+          "baseline_bytes": 320,
+          "candidate_bytes": 320
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a22eb07d88a9f850c366fa16887f0976988267823aed7ade4cd754c33f2aa40d",
+          "candidate_sha256": "a22eb07d88a9f850c366fa16887f0976988267823aed7ade4cd754c33f2aa40d",
+          "baseline_bytes": 11796,
+          "candidate_bytes": 11796
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm_row_split.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "fd045335ae3897a7397c969070c9a63a5d604d27a069e9ff48ba59d847991d6e",
+          "candidate_sha256": "fd045335ae3897a7397c969070c9a63a5d604d27a069e9ff48ba59d847991d6e",
+          "baseline_bytes": 47632,
+          "candidate_bytes": 47632
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "8411ff1f13c9b96151b792bd320083ac5a17ff83b96243e03bd82bc4f94ed435",
+          "candidate_sha256": "8411ff1f13c9b96151b792bd320083ac5a17ff83b96243e03bd82bc4f94ed435",
+          "baseline_bytes": 704,
+          "candidate_bytes": 704
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "cc5413679f28fb91b19cd8983d5f85142ca742c0d72c779a10ca1edc41064fd5",
+          "candidate_sha256": "cc5413679f28fb91b19cd8983d5f85142ca742c0d72c779a10ca1edc41064fd5",
+          "baseline_bytes": 14728,
+          "candidate_bytes": 14728
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/swiglu.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "aa9af1d7f94a85885bfdf4623ea1bf5b54eaf733c7ab963740e59f5e5fff351e",
+          "candidate_sha256": "aa9af1d7f94a85885bfdf4623ea1bf5b54eaf733c7ab963740e59f5e5fff351e",
+          "baseline_bytes": 62992,
+          "candidate_bytes": 62992
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "abfffa293f472b3104b520909a27725227995b62df99345e4e4ebd326925ebb4",
+          "candidate_sha256": "abfffa293f472b3104b520909a27725227995b62df99345e4e4ebd326925ebb4",
+          "baseline_bytes": 2816,
+          "candidate_bytes": 2816
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "0468a2767e8059c5f9fb3f920723f068a570936366894d1d5906c5a56f647c43",
+          "candidate_sha256": "0468a2767e8059c5f9fb3f920723f068a570936366894d1d5906c5a56f647c43",
+          "baseline_bytes": 13248,
+          "candidate_bytes": 13248
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/unpack.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "1edeff4ab829e033c933ca6ce48acf1d923b94784808ceab3269d6d1ce0f6257",
+          "candidate_sha256": "1edeff4ab829e033c933ca6ce48acf1d923b94784808ceab3269d6d1ce0f6257",
+          "baseline_bytes": 688,
+          "candidate_bytes": 688
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "1b6e5f70a10208b4d768aba84aad19b8a921be508ed69796b7e6aa9326259368",
+          "candidate_sha256": "1b6e5f70a10208b4d768aba84aad19b8a921be508ed69796b7e6aa9326259368",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a0bccd32a367806b1bf9a618af00ca091cec07610aac2c23a4f217f62cab7d05",
+          "candidate_sha256": "a0bccd32a367806b1bf9a618af00ca091cec07610aac2c23a4f217f62cab7d05",
+          "baseline_bytes": 1536,
+          "candidate_bytes": 1536
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/verify_gemm_27b.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "809a86715b12965e363e2c6795fda596c322827b33aae613c86483044cf4c0b2",
+          "candidate_sha256": "809a86715b12965e363e2c6795fda596c322827b33aae613c86483044cf4c0b2",
+          "baseline_bytes": 447052,
+          "candidate_bytes": 447052
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "16a87820c3db60f5933d64c9b9dfc88be025f4f71500fa184a7a856b98f56a42",
+          "candidate_sha256": "16a87820c3db60f5933d64c9b9dfc88be025f4f71500fa184a7a856b98f56a42",
+          "baseline_bytes": 3200,
+          "candidate_bytes": 3200
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "35bee0d2a81b1b4f51405f9a745872f3a642bebf9eb7592e11f7bf030083381b",
+          "candidate_sha256": "35bee0d2a81b1b4f51405f9a745872f3a642bebf9eb7592e11f7bf030083381b",
+          "baseline_bytes": 83716,
+          "candidate_bytes": 83716
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/vision/device_input.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "f03704722177149c2bc583d8b2ddb9405649f42252ffd71b42605c2cde30419b",
+          "candidate_sha256": "f03704722177149c2bc583d8b2ddb9405649f42252ffd71b42605c2cde30419b",
+          "baseline_bytes": 660,
+          "candidate_bytes": 660
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "9e9b8a26f2032f039b5a51170ed5ddb0cc4e2a3dc777c06f6fc5eec5a423084a",
+          "candidate_sha256": "9e9b8a26f2032f039b5a51170ed5ddb0cc4e2a3dc777c06f6fc5eec5a423084a",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "434d58a1004b780a53620474de9ab54e6e43eecfd8ab70fe240d3f49c4520428",
+          "candidate_sha256": "434d58a1004b780a53620474de9ab54e6e43eecfd8ab70fe240d3f49c4520428",
+          "baseline_bytes": 1476,
+          "candidate_bytes": 1476
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/vision/encoder.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "35e23b93ae5c9ae2207feb312fd7fb2d0946a53bf6e1195e00cbe99f0ee2b008",
+          "candidate_sha256": "35e23b93ae5c9ae2207feb312fd7fb2d0946a53bf6e1195e00cbe99f0ee2b008",
+          "baseline_bytes": 56676,
+          "candidate_bytes": 56676
+        },
+        ".rodata": {
+          "identical": false,
+          "baseline_sha256": "6889fc59675666a80f2c9b9e56a3293e06a576849ffc1deae382623b99ea6b86",
+          "candidate_sha256": "2f88c0d6a98e376753bbf4d0e6f6c15a4f4b6a97a90550ee0604d92d974ff764",
+          "baseline_bytes": 832,
+          "candidate_bytes": 832
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "5d51c8287727fa20121937007f107f140094c310a31e28352097c77522ecb603",
+          "candidate_sha256": "5d51c8287727fa20121937007f107f140094c310a31e28352097c77522ecb603",
+          "baseline_bytes": 14276,
+          "candidate_bytes": 14276
+        }
+      }
+    },
+    {
+      "object": "CMakeFiles/gufo_diagnostics.dir/src/core/hip/allocation_benchmark.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "dbb3cdf42eb0a7d1338143bf6e4481f4d538629facb8dea56aa55f1d96b806ab",
+          "candidate_sha256": "dbb3cdf42eb0a7d1338143bf6e4481f4d538629facb8dea56aa55f1d96b806ab",
+          "baseline_bytes": 1652,
+          "candidate_bytes": 1652
+        },
+        ".rodata": {
+          "identical": false,
+          "baseline_sha256": "220d1052242ce4aea960231c0df384af863aec52b8c023c72f092661100e5831",
+          "candidate_sha256": "d6d3cd88c2c89276c5311afcc50624f00a15a983783219c42a27fd63cf5ea65e",
+          "baseline_bytes": 128,
+          "candidate_bytes": 128
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a694ec55975e7c6f143835ac07c20fadb28f7715e0a17ea7a2f201966ee6c085",
+          "candidate_sha256": "a694ec55975e7c6f143835ac07c20fadb28f7715e0a17ea7a2f201966ee6c085",
+          "baseline_bytes": 2656,
+          "candidate_bytes": 2656
+        }
+      }
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash.dir/kernels/rocm/backend.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "dd824ac22d985567d6bbab3716bb0ef91e6242b6dda910e8d5cc3c8406c41f36",
+          "candidate_sha256": "dd824ac22d985567d6bbab3716bb0ef91e6242b6dda910e8d5cc3c8406c41f36",
+          "baseline_bytes": 1232856,
+          "candidate_bytes": 1232856
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "daf4112196d419cc23866d3d20a3266251a40867bd11185af2a47e2338440555",
+          "candidate_sha256": "daf4112196d419cc23866d3d20a3266251a40867bd11185af2a47e2338440555",
+          "baseline_bytes": 23168,
+          "candidate_bytes": 23168
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "bcdd5ed3415432636b0c444e3383360799dce6d707d8a3d3df446cbabfb3d8ee",
+          "candidate_sha256": "bcdd5ed3415432636b0c444e3383360799dce6d707d8a3d3df446cbabfb3d8ee",
+          "baseline_bytes": 455132,
+          "candidate_bytes": 455132
+        }
+      }
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/ds4_mmq.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": false,
+          "baseline_sha256": "64a93eee8af1d28c66731784c7850837dd76fdb65de013ba7fe67e8854c8dd55",
+          "candidate_sha256": "9f8083fafb0a2d3ac80255d647e44ec4ed203e6d3eba962eb42537ae7aaac1eb",
+          "baseline_bytes": 5123788,
+          "candidate_bytes": 5123788
+        },
+        ".rodata": {
+          "identical": false,
+          "baseline_sha256": "2618b7b39be7ef58b3ef71c3a09ab4fff4565f83b5b2c71d32de3f045cadc6d1",
+          "candidate_sha256": "a8af999881374aca247a09bb1e014977a92bf053370d937c5ac2a9bd8efb12de",
+          "baseline_bytes": 28656,
+          "candidate_bytes": 28656
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "f76cd2a10aebd18c8e57e0ada9c3322096f826620f80e86d53655f9ab1679ff6",
+          "candidate_sha256": "f76cd2a10aebd18c8e57e0ada9c3322096f826620f80e86d53655f9ab1679ff6",
+          "baseline_bytes": 977372,
+          "candidate_bytes": 977372
+        }
+      }
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/mmid.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "45ebf886d25c29f2a246030e35ab320cea79571b7d20973358906cd70d2e8e93",
+          "candidate_sha256": "45ebf886d25c29f2a246030e35ab320cea79571b7d20973358906cd70d2e8e93",
+          "baseline_bytes": 29320,
+          "candidate_bytes": 29320
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "f24038afe789e1430068f707bff08eaf4017aa7698955ab7084e86963b99d711",
+          "candidate_sha256": "f24038afe789e1430068f707bff08eaf4017aa7698955ab7084e86963b99d711",
+          "baseline_bytes": 1024,
+          "candidate_bytes": 1024
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "e5692211c0a9a4bb28df40ea3e440ad7663f68c5dcaf43c54ee3035249a42420",
+          "candidate_sha256": "e5692211c0a9a4bb28df40ea3e440ad7663f68c5dcaf43c54ee3035249a42420",
+          "baseline_bytes": 26852,
+          "candidate_bytes": 26852
+        }
+      }
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/mmvq.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "d6c6e566a12ee21de0ba5a1f929d7306553baf17d1d4d7cdd0fbb48accc53bb6",
+          "candidate_sha256": "d6c6e566a12ee21de0ba5a1f929d7306553baf17d1d4d7cdd0fbb48accc53bb6",
+          "baseline_bytes": 835352,
+          "candidate_bytes": 835352
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "4a22b9dc31119859259bc575daa085a880b5a488473ee17ab9df3c2a6463b0ec",
+          "candidate_sha256": "4a22b9dc31119859259bc575daa085a880b5a488473ee17ab9df3c2a6463b0ec",
+          "baseline_bytes": 42496,
+          "candidate_bytes": 42496
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "9d5c76d6972f5128fdc67790ab58311cc965aad0b31e334d4c32df67b2694507",
+          "candidate_sha256": "9d5c76d6972f5128fdc67790ab58311cc965aad0b31e334d4c32df67b2694507",
+          "baseline_bytes": 407092,
+          "candidate_bytes": 407092
+        }
+      }
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/quantize.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": false,
+          "baseline_sha256": "9b479e64ba7fc631c13459bc38cad6c38a730964cf53c4658fa98a8ad38e2f8e",
+          "candidate_sha256": "c9da5fff3f4455f7f5add584665bff6ae0fccf3d21793179de59953756b0ab55",
+          "baseline_bytes": 25808,
+          "candidate_bytes": 25808
+        },
+        ".rodata": {
+          "identical": false,
+          "baseline_sha256": "3cf1b3bdad6a39078b303d309ff52d2417fa385abad2207323c22e5bf34bbe6c",
+          "candidate_sha256": "7f4725f53521e30ae3f2de2c967ffe3221a0a752df863d963b886004ae2185cc",
+          "baseline_bytes": 560,
+          "candidate_bytes": 566
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "2cc6a65e6c83f9c8b9431076db55edc58b2c1238d45c810436e04b4a1b10296b",
+          "candidate_sha256": "2cc6a65e6c83f9c8b9431076db55edc58b2c1238d45c810436e04b4a1b10296b",
+          "baseline_bytes": 9964,
+          "candidate_bytes": 9964
+        }
+      }
+    },
+    {
+      "object": "src/models/embedding_gemma2/CMakeFiles/gufo_embedding_gemma2.dir/hip/audio_runtime.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "eb2e097d13be1aa3631b176020fc4ac6c45bb14f91c3f611d5c7177dd753eb50",
+          "candidate_sha256": "eb2e097d13be1aa3631b176020fc4ac6c45bb14f91c3f611d5c7177dd753eb50",
+          "baseline_bytes": 28896,
+          "candidate_bytes": 28896
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "9728ebbb87d7982b90067d90dbc71c0724d075e3d30ed36d9f2674b2e6bf1103",
+          "candidate_sha256": "9728ebbb87d7982b90067d90dbc71c0724d075e3d30ed36d9f2674b2e6bf1103",
+          "baseline_bytes": 576,
+          "candidate_bytes": 576
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "47e368d63c6b7738763a61fbbafc4dbf06d256bcb235ce0a0cfd3f773c880305",
+          "candidate_sha256": "47e368d63c6b7738763a61fbbafc4dbf06d256bcb235ce0a0cfd3f773c880305",
+          "baseline_bytes": 11356,
+          "candidate_bytes": 11356
+        }
+      }
+    },
+    {
+      "object": "src/models/embedding_gemma2/CMakeFiles/gufo_embedding_gemma2.dir/hip/ops.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "283bccb1090b738073cbc8cc72ad24aa66e7eaf2d9e099933471c8b999046b91",
+          "candidate_sha256": "283bccb1090b738073cbc8cc72ad24aa66e7eaf2d9e099933471c8b999046b91",
+          "baseline_bytes": 40560,
+          "candidate_bytes": 40560
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "1f21ec7e18def49629155a3066f4bd181411cea9c450396bb542639ad327f4f6",
+          "candidate_sha256": "1f21ec7e18def49629155a3066f4bd181411cea9c450396bb542639ad327f4f6",
+          "baseline_bytes": 832,
+          "candidate_bytes": 832
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "fa6d9829a5680556a8b8a24124441c36a43c8a049fa5dce2774a8a4b9edf4b68",
+          "candidate_sha256": "fa6d9829a5680556a8b8a24124441c36a43c8a049fa5dce2774a8a4b9edf4b68",
+          "baseline_bytes": 18520,
+          "candidate_bytes": 18520
+        }
+      }
+    },
+    {
+      "object": "src/models/embedding_gemma2/CMakeFiles/gufo_embedding_gemma2.dir/hip/vision_ops.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "20ad9b6c422039b94521c23af3f22e9924df7b5d6363bf8b809b73cf6020920e",
+          "candidate_sha256": "20ad9b6c422039b94521c23af3f22e9924df7b5d6363bf8b809b73cf6020920e",
+          "baseline_bytes": 13316,
+          "candidate_bytes": 13316
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "684703defec0192d30a838a187f743845318811554488e72aa39030ad650fa57",
+          "candidate_sha256": "684703defec0192d30a838a187f743845318811554488e72aa39030ad650fa57",
+          "baseline_bytes": 384,
+          "candidate_bytes": 384
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "f782945d82313a4726df335302aa4150cd7364a54a601f461d08b9f98681b0c0",
+          "candidate_sha256": "f782945d82313a4726df335302aa4150cd7364a54a601f461d08b9f98681b0c0",
+          "baseline_bytes": 6584,
+          "candidate_bytes": 6584
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next.dir/kernels/rocm/kernels.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "b059de8b0b03d2424f8e5c34cd6bb47d36376764d7b5739c14f4f7d6b56b592a",
+          "candidate_sha256": "b059de8b0b03d2424f8e5c34cd6bb47d36376764d7b5739c14f4f7d6b56b592a",
+          "baseline_bytes": 1292084,
+          "candidate_bytes": 1292084
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "abdf8e80bdecf33dc261baa532c2dfcfeef99055cf75113e062d52896cf44b02",
+          "candidate_sha256": "abdf8e80bdecf33dc261baa532c2dfcfeef99055cf75113e062d52896cf44b02",
+          "baseline_bytes": 11840,
+          "candidate_bytes": 11840
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a9975f26f1f646a320c6120277d630d6572a1422dbf569f98955a840c403eaba",
+          "candidate_sha256": "a9975f26f1f646a320c6120277d630d6572a1422dbf569f98955a840c403eaba",
+          "baseline_bytes": 286044,
+          "candidate_bytes": 286044
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next.dir/kernels/rocm/w8a8_wave64.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "5bf610c19a8a5538f6374beaf3ecd171d926a263b98e9981c470527f4318b0f5",
+          "candidate_sha256": "5bf610c19a8a5538f6374beaf3ecd171d926a263b98e9981c470527f4318b0f5",
+          "baseline_bytes": 19132,
+          "candidate_bytes": 19132
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "51cc5b65ffb5d0d8be988c87fc0e1123046bc3ec5e506062a30551933de10972",
+          "candidate_sha256": "51cc5b65ffb5d0d8be988c87fc0e1123046bc3ec5e506062a30551933de10972",
+          "baseline_bytes": 64,
+          "candidate_bytes": 64
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "baa37aa0afa57c3265f67ae0f0530b174aaf1893f6b2ae1b6e96d22d6629fab8",
+          "candidate_sha256": "baa37aa0afa57c3265f67ae0f0530b174aaf1893f6b2ae1b6e96d22d6629fab8",
+          "baseline_bytes": 1068,
+          "candidate_bytes": 1068
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/mmid.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "b71751cc4d460e80991008c4848a8733be485edd2350856f04be7ad0e0e4194b",
+          "candidate_sha256": "b71751cc4d460e80991008c4848a8733be485edd2350856f04be7ad0e0e4194b",
+          "baseline_bytes": 4532,
+          "candidate_bytes": 4532
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "5ed4aa16146fa569139e1d0e65d0ab780f5f98cecb6054707bad96b3dfa3bba2",
+          "candidate_sha256": "5ed4aa16146fa569139e1d0e65d0ab780f5f98cecb6054707bad96b3dfa3bba2",
+          "baseline_bytes": 192,
+          "candidate_bytes": 192
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "244933a91cfeb9ffb5aa3fcdfd0e2a25ebb0e8e2b8cc52eca599803c91a8b27d",
+          "candidate_sha256": "244933a91cfeb9ffb5aa3fcdfd0e2a25ebb0e8e2b8cc52eca599803c91a8b27d",
+          "baseline_bytes": 4296,
+          "candidate_bytes": 4296
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/mmvq.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "01a1fdee429118d95a83aaea827a891dc833574801a8bc88643d0858b1f378e8",
+          "candidate_sha256": "01a1fdee429118d95a83aaea827a891dc833574801a8bc88643d0858b1f378e8",
+          "baseline_bytes": 295048,
+          "candidate_bytes": 295048
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "3b8640b66073cf4662e31dc6007bb229b8f2e42a9c486fad6e2128cfcddb968f",
+          "candidate_sha256": "3b8640b66073cf4662e31dc6007bb229b8f2e42a9c486fad6e2128cfcddb968f",
+          "baseline_bytes": 5440,
+          "candidate_bytes": 5440
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "370a78e13024f281ce69eb6137cfcf3e3b35dd2909d6f59a04bc841234ff7a63",
+          "candidate_sha256": "370a78e13024f281ce69eb6137cfcf3e3b35dd2909d6f59a04bc841234ff7a63",
+          "baseline_bytes": 119568,
+          "candidate_bytes": 119568
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/moe_wave64.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "66bd3177d6211ee23d4dc4274bcbd2b840d8418c7237ca79330d3ffdba96371e",
+          "candidate_sha256": "66bd3177d6211ee23d4dc4274bcbd2b840d8418c7237ca79330d3ffdba96371e",
+          "baseline_bytes": 13660,
+          "candidate_bytes": 13660
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "e6db1f92f55c7bd1b51a1139f39fe400667c72d3e7d4f9dea6ea9c3441586bbb",
+          "candidate_sha256": "e6db1f92f55c7bd1b51a1139f39fe400667c72d3e7d4f9dea6ea9c3441586bbb",
+          "baseline_bytes": 128,
+          "candidate_bytes": 128
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "ee3a8a7f4816fab7dd291613d00085c8c6af57a4b096b8bae07a6dbd2664aac4",
+          "candidate_sha256": "ee3a8a7f4816fab7dd291613d00085c8c6af57a4b096b8bae07a6dbd2664aac4",
+          "baseline_bytes": 3620,
+          "candidate_bytes": 3620
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/qfn_mmq.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": false,
+          "baseline_sha256": "62859bbc4cba6eb9658de183f4c228439412f6bdb5d120c79ec0ce0cb369abc2",
+          "candidate_sha256": "3088c9b58c7569f7a88d0c1f47bd9c197707e924206d081debf5f819b47d5aeb",
+          "baseline_bytes": 3689356,
+          "candidate_bytes": 3689356
+        },
+        ".rodata": {
+          "identical": false,
+          "baseline_sha256": "11a7b3bdfa51c230239f165429b961b03796a1ea180bc9f06ce171049cb12531",
+          "candidate_sha256": "b9ba468aaa5ddf5434597d6fb9f88f365669384ecc84dc88e7b4982d69253805",
+          "baseline_bytes": 19238,
+          "candidate_bytes": 19244
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "b71727919ddf88f58f96a598d4ad5a6a5dbb8a356d8c67fc2c8b51b92d455d4d",
+          "candidate_sha256": "b71727919ddf88f58f96a598d4ad5a6a5dbb8a356d8c67fc2c8b51b92d455d4d",
+          "baseline_bytes": 750176,
+          "candidate_bytes": 750176
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/quantize.hip.cpp.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "cae8c25f0616e35cc3436434f2cf9c39f5639c218c5c0fb31fb23c1b2c541af9",
+          "candidate_sha256": "cae8c25f0616e35cc3436434f2cf9c39f5639c218c5c0fb31fb23c1b2c541af9",
+          "baseline_bytes": 6788,
+          "candidate_bytes": 6788
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "7d6f39ce87bbed33ce7ecf131daf40a47715a7fd8c0933d2078bd26f97804126",
+          "candidate_sha256": "7d6f39ce87bbed33ce7ecf131daf40a47715a7fd8c0933d2078bd26f97804126",
+          "baseline_bytes": 320,
+          "candidate_bytes": 320
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "e458b2c25231803de745ae7da5c05832430445282c95f58013a5b403f4a3c0d6",
+          "candidate_sha256": "e458b2c25231803de745ae7da5c05832430445282c95f58013a5b403f4a3c0d6",
+          "baseline_bytes": 8496,
+          "candidate_bytes": 8496
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen3_asr/CMakeFiles/gufo_qwen3_asr.dir/hip/audio_ops.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "4d0944c4e353ae53dd1d002d7db4b7dda888b950b25451c1f72096064129d1ad",
+          "candidate_sha256": "4d0944c4e353ae53dd1d002d7db4b7dda888b950b25451c1f72096064129d1ad",
+          "baseline_bytes": 17712,
+          "candidate_bytes": 17712
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "cf049e7143bb67e9c40e400646748d5025fcb53e78e97d5a6a328f783db28991",
+          "candidate_sha256": "cf049e7143bb67e9c40e400646748d5025fcb53e78e97d5a6a328f783db28991",
+          "baseline_bytes": 704,
+          "candidate_bytes": 704
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "8a58178cdd860543b9359914a68d4ddb2c18e9ee153a66286e7b974260d85263",
+          "candidate_sha256": "8a58178cdd860543b9359914a68d4ddb2c18e9ee153a66286e7b974260d85263",
+          "baseline_bytes": 16508,
+          "candidate_bytes": 16508
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen3_asr/CMakeFiles/gufo_qwen3_asr.dir/hip/convolution.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "12c384f2f7d3be2a1fb78f755a11d40b604064ade0489adbcbdc56382c253257",
+          "candidate_sha256": "12c384f2f7d3be2a1fb78f755a11d40b604064ade0489adbcbdc56382c253257",
+          "baseline_bytes": 32716,
+          "candidate_bytes": 32716
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "59d53974aeb7cff2037f7353148db076beddbb5dd29d707976c5862dee3b1b8c",
+          "candidate_sha256": "59d53974aeb7cff2037f7353148db076beddbb5dd29d707976c5862dee3b1b8c",
+          "baseline_bytes": 256,
+          "candidate_bytes": 256
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "5824053f850bb6ba3473cf85e71d4df38df43f766247fd10f071dee8a31d566b",
+          "candidate_sha256": "5824053f850bb6ba3473cf85e71d4df38df43f766247fd10f071dee8a31d566b",
+          "baseline_bytes": 3628,
+          "candidate_bytes": 3628
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen3_asr/CMakeFiles/gufo_qwen3_asr.dir/hip/text_ops.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "64705e4c4523c4077bcc36267f9cc87fad9a93596d35ffb662140f0c0b22fe25",
+          "candidate_sha256": "64705e4c4523c4077bcc36267f9cc87fad9a93596d35ffb662140f0c0b22fe25",
+          "baseline_bytes": 31384,
+          "candidate_bytes": 31384
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "05b563a61ea71259205340550ffa4ae60c39b3936e0d7fda5d107bb547e7434d",
+          "candidate_sha256": "05b563a61ea71259205340550ffa4ae60c39b3936e0d7fda5d107bb547e7434d",
+          "baseline_bytes": 832,
+          "candidate_bytes": 832
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "925890eacd22d354be6bb92bc2e11ba1e69b4d05cd6530c06ab233beaec02462",
+          "candidate_sha256": "925890eacd22d354be6bb92bc2e11ba1e69b4d05cd6530c06ab233beaec02462",
+          "baseline_bytes": 19916,
+          "candidate_bytes": 19916
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen3_tts/CMakeFiles/gufo_qwen3_tts.dir/hip/encoder_ops.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "693371dee42a3c868b01ff36ed703beed3298e6b8a19c45dcd3a4bcb554af8fa",
+          "candidate_sha256": "693371dee42a3c868b01ff36ed703beed3298e6b8a19c45dcd3a4bcb554af8fa",
+          "baseline_bytes": 16044,
+          "candidate_bytes": 16044
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "c790ecc12791230ca5cdcbde95c8c94be20011ceb6209562001358b6110223c7",
+          "candidate_sha256": "c790ecc12791230ca5cdcbde95c8c94be20011ceb6209562001358b6110223c7",
+          "baseline_bytes": 896,
+          "candidate_bytes": 896
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "dc2f740467595be328a47ae9b49b37c2e274809e9ae47b05e5609077658edd5d",
+          "candidate_sha256": "dc2f740467595be328a47ae9b49b37c2e274809e9ae47b05e5609077658edd5d",
+          "baseline_bytes": 19732,
+          "candidate_bytes": 19732
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen3_tts/CMakeFiles/gufo_qwen3_tts.dir/hip/speech_decoder_ops.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "31c3be27bd8de637d1697eae2cda3b663fb8fff1b5714f2d3d19026262e78031",
+          "candidate_sha256": "31c3be27bd8de637d1697eae2cda3b663fb8fff1b5714f2d3d19026262e78031",
+          "baseline_bytes": 24732,
+          "candidate_bytes": 24732
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "443f69ef60b76a3e3c97d07024b8084454650822294f371150bb7912c2059d86",
+          "candidate_sha256": "443f69ef60b76a3e3c97d07024b8084454650822294f371150bb7912c2059d86",
+          "baseline_bytes": 1024,
+          "candidate_bytes": 1024
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "aaa9d0490fcddedd24291e455ce05d7a0a7f9bd26e4a61a59ea241d839f5f6b4",
+          "candidate_sha256": "aaa9d0490fcddedd24291e455ce05d7a0a7f9bd26e4a61a59ea241d839f5f6b4",
+          "baseline_bytes": 23444,
+          "candidate_bytes": 23444
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen3_tts/CMakeFiles/gufo_qwen3_tts.dir/hip/talker_ops.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "10ed951d477f8c984082453550d939e78aca0e57e3863c51e357f6b1393af901",
+          "candidate_sha256": "10ed951d477f8c984082453550d939e78aca0e57e3863c51e357f6b1393af901",
+          "baseline_bytes": 65680,
+          "candidate_bytes": 65680
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "eef99999feabe24d30a594f414eb8130219e79d1fbf95a8e812331eb38556c0e",
+          "candidate_sha256": "eef99999feabe24d30a594f414eb8130219e79d1fbf95a8e812331eb38556c0e",
+          "baseline_bytes": 2432,
+          "candidate_bytes": 2432
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a70545eec788ef2ca92e7f073778914d2fc9d6f45d15fae3079b44eee901ca66",
+          "candidate_sha256": "a70545eec788ef2ca92e7f073778914d2fc9d6f45d15fae3079b44eee901ca66",
+          "baseline_bytes": 42348,
+          "candidate_bytes": 42348
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/attention.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "399ff363c6606b2c0c6eee73addb637b4abde6d6dae54f66960c3b9c3808e25b",
+          "candidate_sha256": "399ff363c6606b2c0c6eee73addb637b4abde6d6dae54f66960c3b9c3808e25b",
+          "baseline_bytes": 43104,
+          "candidate_bytes": 43104
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "f925a57b3d284f4a8135940755e9b2b3e9ef277ef6d6e8514b0aaec062f1f079",
+          "candidate_sha256": "f925a57b3d284f4a8135940755e9b2b3e9ef277ef6d6e8514b0aaec062f1f079",
+          "baseline_bytes": 128,
+          "candidate_bytes": 128
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "0355fd5d070952f044eef4ef7d3037c3a5de50ae6b7bf5d39f465a91e71df288",
+          "candidate_sha256": "0355fd5d070952f044eef4ef7d3037c3a5de50ae6b7bf5d39f465a91e71df288",
+          "baseline_bytes": 2272,
+          "candidate_bytes": 2272
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/convolution.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "d86802ff78e28a3fee7e754be22d99955bb58af997e934f3d05ec70b73700873",
+          "candidate_sha256": "d86802ff78e28a3fee7e754be22d99955bb58af997e934f3d05ec70b73700873",
+          "baseline_bytes": 451884,
+          "candidate_bytes": 451884
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "fd972614829d792a0d526f0fd57304de63c725174f9bdaa57a6493ef7ff77192",
+          "candidate_sha256": "fd972614829d792a0d526f0fd57304de63c725174f9bdaa57a6493ef7ff77192",
+          "baseline_bytes": 1728,
+          "candidate_bytes": 1728
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "7e858ec8b1545c28eece90b6c2098a51d2cbe4f65e8c56dc4882d33b1d708b5a",
+          "candidate_sha256": "7e858ec8b1545c28eece90b6c2098a51d2cbe4f65e8c56dc4882d33b1d708b5a",
+          "baseline_bytes": 30976,
+          "candidate_bytes": 30976
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/dense.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "7031b4528b1357ae5118336b3e34f3af8d859cb2db1bc1dce8e4ca808c78b8d0",
+          "candidate_sha256": "7031b4528b1357ae5118336b3e34f3af8d859cb2db1bc1dce8e4ca808c78b8d0",
+          "baseline_bytes": 82960,
+          "candidate_bytes": 82960
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "014d3a11f539f0a4de57e656929b13edda29ba21a6bd34787fc05fabbe1e8f52",
+          "candidate_sha256": "014d3a11f539f0a4de57e656929b13edda29ba21a6bd34787fc05fabbe1e8f52",
+          "baseline_bytes": 576,
+          "candidate_bytes": 576
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "605e458df026caf72ab865972cfa926a10eac3e8d285d320ba72fb74e19fc5a2",
+          "candidate_sha256": "605e458df026caf72ab865972cfa926a10eac3e8d285d320ba72fb74e19fc5a2",
+          "baseline_bytes": 8112,
+          "candidate_bytes": 8112
+        }
+      }
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/kernels.hip.o",
+      "sections": {
+        ".text": {
+          "identical": true,
+          "baseline_sha256": "54259f4bd5df4a44bf740034b880389b60784a4c031c3a3773c170c9e3e98c26",
+          "candidate_sha256": "54259f4bd5df4a44bf740034b880389b60784a4c031c3a3773c170c9e3e98c26",
+          "baseline_bytes": 79332,
+          "candidate_bytes": 79332
+        },
+        ".rodata": {
+          "identical": true,
+          "baseline_sha256": "921da4b1238ee024e29aa7c47223b192b35207e7e220978bf28b3840e053155c",
+          "candidate_sha256": "921da4b1238ee024e29aa7c47223b192b35207e7e220978bf28b3840e053155c",
+          "baseline_bytes": 1728,
+          "candidate_bytes": 1728
+        },
+        ".note": {
+          "identical": true,
+          "baseline_sha256": "a2efef1787383976d9344dad1237e0118ac48a34362d218e671aab5e22bac10e",
+          "candidate_sha256": "a2efef1787383976d9344dad1237e0118ac48a34362d218e671aab5e22bac10e",
+          "baseline_bytes": 35452,
+          "candidate_bytes": 35452
+        }
+      }
+    }
+  ],
+  "scope": "gfx1151 device .text ISA, .rodata constants and .note resource metadata; excludes debug sections and symbol/string tables whose path identifiers differ between source roots"
+}

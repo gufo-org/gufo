@@ -1,0 +1,9 @@
+Integration verification, 2026-10-31 Europe/Paris:
+run-speed.py: exit 0, all 11 sequential subprocesses exit 0; no concurrent build/test.
+analyze-speed.py: HTTP8 requests, invariants unchanged,70 passed phases,2 unavailable fields,0 flags; CLI6 phases passed, exact output hashes in both modes.
+metadata-probe.cpp.txt: nix develop -c c++ -std=c++20 -x c++ -I/tmp/gufo-card03-spike docs/model-extensions/evidence/card03/metadata-probe.cpp.txt -o /tmp/card03-metadata-probe ; compile exit0 (assertions enabled, no ENGINE_ENABLE_HIP); executable exit0.
+Local documentation links (CARDS.md,SPIKE.md,evidence/card03/README.md):30 checked,0 errors.
+python3 tests/tools/check_docs_test.py:11 passed.
+All retained evidence Python files: AST syntax passed.
+Archive manifests: functional560 files and speed39 files verified against archived contents.
+No live GPU/build/process session handles on handoff.

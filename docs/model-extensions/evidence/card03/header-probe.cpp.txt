@@ -1,0 +1,4 @@
+#include "src/models/qwen38_flash_next/text_provider.hpp"
+static_assert(gufo::server::FlashNextProviderMetadata::speculative_value == "mtp");
+static_assert(gufo::server::FlashNextProviderMetadata::model_owned_cli_drivers);
+int main() { gufo::server::FlashNextTextProviderOptions options; return options.use_mtp; }
