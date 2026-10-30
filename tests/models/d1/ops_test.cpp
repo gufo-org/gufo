@@ -1,4 +1,4 @@
-#include "src/models/d1/hip/ops.hpp"
+#include "src/models/lfm3_vl/hip/ops.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -115,8 +115,8 @@ int main() {
     for (std::size_t i = 0; i < weights.size(); ++i)
       weights[i] = std::cos(i * .17);
     Device dp(p), dw(weights), out(h * w * hidden);
-    gufo::models::d1::gpu::SpatialConv(dp.p, dw.p, out.p, h, w, hidden,
-                                       nullptr);
+    gufo::models::lfm3_vl::gpu::SpatialConv(dp.p, dw.p, out.p, h, w, hidden,
+                                            nullptr);
     auto actual = out.Read(h * w * hidden);
     for (int y = 0; y < h; ++y)
       for (int x = 0; x < w; ++x)
@@ -138,7 +138,7 @@ int main() {
     for (std::size_t i = 0; i < rope.size(); ++i)
       rope[i] = std::sin(i * .19);
     Device dr(rope);
-    gufo::models::d1::gpu::AxialRope(dr.p, h, w, 8, nullptr);
+    gufo::models::lfm3_vl::gpu::AxialRope(dr.p, h, w, 8, nullptr);
     actual = dr.Read(rope.size());
     for (int y = 0; y < h; ++y)
       for (int x = 0; x < w; ++x)

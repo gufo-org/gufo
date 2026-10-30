@@ -70,6 +70,13 @@ configured reply budget. Run it with the same `--binary`, `--model`, `--mmproj`
 and a fresh `--output` directory. Every case retains token usage and timings;
 this is a capacity/correctness check, not a speed comparison.
 
+`lfm3_vl.py` starts an owned LFM3-VL GGUF server with RAM and disk caching.
+It checks image/text generation, streaming, count tokens, interleaved images,
+changed-image isolation, low detail, JSON, reasoning budgets, tools,
+Responses/Messages, concurrency, cancellation and restart recovery. Pass
+`--binary`, `--model`, `--mmproj` and a fresh `--output` directory. Its PNGs
+are generated locally; no image download or hosted model inference runs.
+
 | Suite | Required checks |
 | --- | --- |
 | Embedding | Text, image and audio HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, invalid inputs, cancellation and recovery |

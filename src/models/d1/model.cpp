@@ -6,11 +6,13 @@
 #include <stdexcept>
 #include <unordered_map>
 
-#include "src/models/d1/vision.hpp"
 #include "src/models/lfm3/engine.hpp"
 #include "src/models/lfm3_audio/model.hpp"
+#include "src/models/lfm3_vl/vision.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 namespace gufo::models::d1 {
+using lfm3_vl::ProcessImage;
+using lfm3_vl::Vision;
 namespace {
 using json::Value;
 std::string Pretty(const Value& v, unsigned depth = 0) {
@@ -71,7 +73,8 @@ struct Model::Impl {
       if (url.empty())
         throw std::invalid_argument("image requires url or image_url");
       auto bytes = core::ReadImageUrl(url, budget);
-      out.rows = vision->Encode(ProcessImage(core::DecodeImage(bytes)));
+      out.rows =
+          vision->Encode(ProcessImage(core::DecodeImage(bytes), 1638400));
       out.token = Token("<|image|>");
     } else if (type == "audio" || type == "input_audio") {
       std::string url = item.member_str("url");

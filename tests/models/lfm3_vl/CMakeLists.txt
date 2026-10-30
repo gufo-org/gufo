@@ -1,0 +1,8 @@
+add_executable(lfm3_vl_contract_test contract_test.cpp)
+target_link_libraries(lfm3_vl_contract_test PRIVATE gufo_lfm3_vl_prompt)
+add_test(NAME lfm3_vl.contract COMMAND lfm3_vl_contract_test)
+set_tests_properties(lfm3_vl.contract PROPERTIES LABELS "lfm3_vl;cpu")
+if (ENGINE_ENABLE_HIP)
+  add_executable(lfm3_vl_probe EXCLUDE_FROM_ALL probe.cpp)
+  target_link_libraries(lfm3_vl_probe PRIVATE gufo_lfm3_vl)
+endif()

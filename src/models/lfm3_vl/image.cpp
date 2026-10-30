@@ -2,8 +2,8 @@
 #include <cmath>
 #include <stdexcept>
 
-#include "src/models/d1/vision.hpp"
-namespace gufo::models::d1 {
+#include "src/models/lfm3_vl/vision.hpp"
+namespace gufo::models::lfm3_vl {
 namespace {
 // Torchvision's uint8 antialiased bicubic path uses the Pillow filter
 // (a = -0.5), separable passes, signed fixed-point coefficients, and uint8
@@ -117,18 +117,21 @@ std::vector<std::uint8_t> Resize(const core::Image& image, int width,
 }
 
 }  // namespace
-Picture ProcessImage(const core::Image& image) {
+Picture ProcessImage(const core::Image& image, unsigned max_pixels) {
+  if (max_pixels < 65536 || max_pixels > 16777216)
+    throw std::invalid_argument("invalid LFM3 image pixel budget");
   if (!image.width || !image.height ||
       std::size_t(image.width) * image.height > core::kMaxImagePixels ||
       image.pixels.size() != std::size_t(image.width) * image.height * 3 ||
       double(std::max(image.width, image.height)) /
               std::min(image.width, image.height) >
           200)
-    throw std::invalid_argument("invalid d1 image");
+    throw std::invalid_argument("invalid LFM3 image");
   const double h = image.height, w = image.width;
   int height = int(std::nearbyint(h / 32)) * 32;
   int width = int(std::nearbyint(w / 32)) * 32;
-  constexpr double minimum = 65536, maximum = 1638400;
+  constexpr double minimum = 65536;
+  const double maximum = max_pixels;
   if (double(height) * width > maximum) {
     double scale = std::sqrt(h * w / maximum);
     height = std::max(32, int(std::floor(h / scale / 32)) * 32);
@@ -155,4 +158,4 @@ Picture ProcessImage(const core::Image& image) {
                                     0.5F);
   return p;
 }
-}  // namespace gufo::models::d1
+}  // namespace gufo::models::lfm3_vl

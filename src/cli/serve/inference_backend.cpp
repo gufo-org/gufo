@@ -3109,9 +3109,15 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
           "d1 decision models require gufo serve decision (/v1/systemone)");
       return false;
     }
-    if (speculative_config.backend != TextSpeculativeBackend::kDisabled ||
-        !vision_model_path.empty()) {
-      SetError(error, "LFM3 supports autoregressive text inference");
+    const bool vl = reader->GetMetadataString("general.basename") == "LFM3-VL";
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error,
+               "LFM3 supports autoregressive inference; disable speculation");
+      return false;
+    }
+    if (vl != !vision_model_path.empty()) {
+      SetError(error, vl ? "LFM3-VL requires its matching --mmproj GGUF"
+                         : "a vision projector requires an LFM3-VL backbone");
       return false;
     }
     if (DiskCacheEnabled(resolved_disk_cache_config) &&
@@ -3130,10 +3136,22 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         SetError(error, "invalid LFM3 context/session count");
         return false;
       }
+      std::shared_ptr<models::lfm3_vl::Vision> vision;
+      if (vl) {
+        auto projector =
+            core::GgufReader::OpenFile(vision_model_path, &load_error);
+        if (!projector ||
+            projector->GetMetadataString("general.basename") != "LFM3-VL")
+          throw std::invalid_argument(
+              "--mmproj does not match the LFM3-VL backbone");
+        vision = models::lfm3_vl::Vision::Load(vision_model_path);
+      }
       auto runner = CreateLfm3Runner(
           std::move(model), max_context,
-          resolved_disk_cache_config.model_artifact_fingerprint);
+          resolved_disk_cache_config.model_artifact_fingerprint,
+          std::move(vision));
       auto new_state = std::make_shared<Impl::State>();
+      new_state->supports_images = vl;
       new_state->sampling_defaults.model = sampling::TextModelPreset::kLfm3;
       new_state->sampling_defaults.supplied = {};
       new_state->model_id = runner->Descriptor().model_id;

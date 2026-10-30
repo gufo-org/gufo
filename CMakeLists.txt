@@ -165,6 +165,7 @@ endif()
 add_subdirectory(src/models/qwen38_flash_next)
 add_subdirectory(src/models/lfm3)
 add_subdirectory(src/models/lfm3_audio)
+add_subdirectory(src/models/lfm3_vl)
 add_subdirectory(src/models/d1)
 
 # Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
@@ -383,7 +384,7 @@ add_library(gufo_llm_cli STATIC
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next gufo_lfm3)
 if(ENGINE_ENABLE_HIP)
   target_sources(gufo_llm_cli PRIVATE src/cli/prompt/lfm3.cpp src/cli/serve/lfm3_runner.cpp)
-  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
+  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash gufo_lfm3_vl)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
@@ -721,6 +722,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen38_flash_next)
   add_subdirectory(tests/models/lfm3)
   add_subdirectory(tests/models/lfm3_audio)
+  add_subdirectory(tests/models/lfm3_vl)
   add_subdirectory(tests/models/d1)
 
   if(ENGINE_ENABLE_HIP)

@@ -1,17 +1,19 @@
-#include "src/models/d1/vision.hpp"
+#include "src/models/lfm3_vl/vision.hpp"
 
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
+#include "src/core/gguf_identity.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
-#include "src/models/d1/hip/ops.hpp"
 #include "src/models/lfm3/hip/ops.hpp"
 #include "src/models/lfm3_audio/hip/ops.hpp"
+#include "src/models/lfm3_vl/hip/ops.hpp"
 #include "src/models/qwen/hip/ops/norm_residual.hpp"
-namespace gufo::models::d1 {
+namespace gufo::models::lfm3_vl {
 namespace {
 using core::GgmlType;
 using lfm3::Tensor;
@@ -53,6 +55,8 @@ const float* F(const Tensor& t) {
 }
 }  // namespace
 struct Vision::Impl {
+  std::string identity;
+  std::once_flag identity_once;
   std::unique_ptr<core::GgufReader> reader;
   std::vector<Buffer> weights;
   std::vector<Block> blocks;
@@ -66,7 +70,7 @@ struct Vision::Impl {
     if (!t || count != std::size_t(cols) * rows ||
         (t->type != GgmlType::kF32 && t->type != GgmlType::kF16 &&
          t->type != GgmlType::kBF16 && t->type != GgmlType::kQ8_0))
-      throw std::runtime_error("invalid or unsupported d1 vision tensor: " +
+      throw std::runtime_error("invalid or unsupported LFM3 vision tensor: " +
                                name);
     const auto bytes = quant::EncodedSizeBytes(t->type, count);
     if (!bytes || bytes != t->size_bytes ||
@@ -102,7 +106,7 @@ std::unique_ptr<Vision> Vision::Load(const std::string& path) {
       r.GetMetadataUint32("clip.vision.patch_size") != 16 ||
       r.GetMetadataUint32("clip.vision.spatial_merge_size") != 2 ||
       r.GetMetadataUint32("clip.vision.projection_dim") != 2048)
-    throw std::runtime_error("unsupported d1 vision geometry");
+    throw std::runtime_error("unsupported LFM3 vision geometry");
   // Static images repeat their frame twice. Add the two temporal slices of
   // the patchifier in F32, retaining their exact stored F16 values.
   std::vector<float> patch(1024 * 768), row(768), second(768);
@@ -158,11 +162,17 @@ std::unique_ptr<Vision> Vision::Load(const std::string& path) {
   m.bias2 = m.Norm("mm.2.bias", 2048);
   return v;
 }
+const std::string& Vision::Identity() const {
+  std::call_once(impl_->identity_once, [&] {
+    impl_->identity = core::GgufIdentityHex(*impl_->reader);
+  });
+  return impl_->identity;
+}
 std::vector<float> Vision::Encode(const Picture& p) {
   if (p.height <= 0 || p.width <= 0 || p.height % 2 || p.width % 2 ||
-      std::size_t(p.height) * p.width > 8192 ||
+      std::size_t(p.height) * p.width > 65536 ||
       p.patches.size() != std::size_t(p.height) * p.width * 768)
-    throw std::invalid_argument("invalid d1 picture patches");
+    throw std::invalid_argument("invalid LFM3 picture patches");
   const int n = p.height * p.width;
   auto& m = *impl_;
   Stream stream;
@@ -233,4 +243,4 @@ std::vector<float> Vision::Encode(const Picture& p) {
   Check(hipStreamSynchronize(s));
   return out;
 }
-}  // namespace gufo::models::d1
+}  // namespace gufo::models::lfm3_vl

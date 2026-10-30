@@ -1,7 +1,7 @@
 #include <cstddef>
 
-#include "src/models/d1/hip/ops.hpp"
-namespace gufo::models::d1::gpu {
+#include "src/models/lfm3_vl/hip/ops.hpp"
+namespace gufo::models::lfm3_vl::gpu {
 namespace {
 __device__ int Index(int y, int x, int width) {
   return ((y / 2) * (width / 2) + x / 2) * 4 + (y % 2) * 2 + x % 2;
@@ -51,4 +51,4 @@ void AxialRope(float* x, int h, int w, int heads, hipStream_t s) {
   Rope<<<(std::size_t(h) * w * heads * 32 + 255) / 256, 256, 0, s>>>(x, h, w,
                                                                      heads);
 }
-}  // namespace gufo::models::d1::gpu
+}  // namespace gufo::models::lfm3_vl::gpu

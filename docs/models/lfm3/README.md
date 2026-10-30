@@ -13,8 +13,9 @@ norms. Embedding and vocabulary projection share weights.
 
 Use **Q8_0 for deployment** and **BF16 for numerical reference**. BF16 is the
 original checkpoint precision. F16 is accepted for compatibility; it offers no
-weight-memory advantage over BF16. Q4/Q5/Q6, multimodal and decision variants
-are not supported by this initial backend.
+weight-memory advantage over BF16. Q4/Q5/Q6 are unsupported. Separate backends cover
+[LFM3-VL images](../lfm3-vl/README.md), [audio](../lfm3-audio/README.md) and
+[d1 decisions](../d1/README.md).
 
 Weights stay packed on the GPU. Activations, accumulation, convolution history
 and KV caches remain FP32. Q8 prompt projections scale each activation row by a

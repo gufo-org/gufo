@@ -55,12 +55,13 @@ static void RegisterImageOptions(ArgParser& parser, PromptOptions& opt) {
   parser.AddFlag("", "--add-vision-id",
                  "Prefix image inputs with Picture N: in the chat template",
                  "Prompt", &opt.add_vision_id);
-  parser.AddOption("", "--mmproj", "PATH",
-                   "Qwen BF16 vision sidecar (auto-discovered beside model)",
-                   "Model", &opt.vision_model_path);
+  parser.AddOption(
+      "", "--mmproj", "PATH",
+      "Vision GGUF sidecar (required for LFM3-VL; auto-discovered for Qwen)",
+      "Model", &opt.vision_model_path);
   parser.AddCustomOption(
       "", "--image", "PATH",
-      "PNG/JPEG attached before text in the first user turn; repeat for "
+      "PNG/JPEG/WebP attached before text in the first user turn; repeat for "
       "multiple images",
       "Prompt",
       [&opt](std::string_view, std::string_view value, std::string* error) {

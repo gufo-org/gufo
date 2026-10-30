@@ -27,7 +27,7 @@ set(gufo_pr_targets
   qwen_tokenizer_test qwen_chat_template_test
   qwen27b_continuation_layout_test
   d1_contract_test
-  lfm3_config_test
+  lfm3_config_test lfm3_vl_contract_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
@@ -42,7 +42,7 @@ set(gufo_pr_targets
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests
   d1_contract_test
-  lfm3_config_test
+  lfm3_config_test lfm3_vl_contract_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
@@ -50,6 +50,7 @@ list(REMOVE_ITEM gufo_pr_tests
 list(APPEND gufo_pr_tests
   "d1\\.contract"
   "lfm3\\.config"
+  "lfm3_vl\\.contract"
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
   "qwen38_flash_next\\.rope_scaling" "qwen38_flash_next\\.continuation_layout"
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"

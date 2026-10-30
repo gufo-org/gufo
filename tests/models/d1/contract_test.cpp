@@ -3,7 +3,7 @@
 #include <stdexcept>
 
 #include "src/models/d1/model.hpp"
-#include "src/models/d1/vision.hpp"
+#include "src/models/lfm3_vl/vision.hpp"
 namespace d = gufo::models::d1;
 void Require(bool ok, const char* message) {
   if (!ok)
@@ -46,7 +46,7 @@ int main() {
       for (unsigned x = 0; x < 256; ++x)
         for (unsigned c = 0; c < 3; ++c)
           image.pixels[(y * 256 + x) * 3 + c] = (y / 16) * 8 + x / 16 + c;
-    auto patches = d::ProcessImage(image);
+    auto patches = gufo::models::lfm3_vl::ProcessImage(image, 1638400);
     Require(patches.height == 16 && patches.width == 16 &&
                 patches.patches.size() == 256 * 768,
             "wrong d1 image grid");
@@ -67,7 +67,7 @@ int main() {
         small.pixels[(y * 73 + x) * 3 + 1] = (x * 3 + y * 23) % 256;
         small.pixels[(y * 73 + x) * 3 + 2] = (x * 13 + y * 7) % 256;
       }
-    auto resized = d::ProcessImage(small);
+    auto resized = gufo::models::lfm3_vl::ProcessImage(small, 1638400);
     Require(resized.width == 16 && resized.height == 18,
             "wrong smart resize dimensions");
     std::uint64_t sum = 0, squares = 0;
@@ -81,7 +81,7 @@ int main() {
     image.pixels.pop_back();
     rejected = false;
     try {
-      (void)d::ProcessImage(image);
+      (void)gufo::models::lfm3_vl::ProcessImage(image, 1638400);
     } catch (const std::invalid_argument&) {
       rejected = true;
     }
