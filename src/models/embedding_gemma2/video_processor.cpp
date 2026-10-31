@@ -377,9 +377,13 @@ bool ValidateVideoProcessor(const std::string& model_dir, std::string* error) {
 std::vector<VideoFrame> ProcessVideo(std::span<const std::uint8_t> bytes,
                                      const VideoOptions& options,
                                      const std::function<bool()>& is_cancelled,
-                                     std::size_t frame_budget) {
+                                     std::size_t frame_budget,
+                                     std::size_t soft_token_budget) {
   if (bytes.empty() || bytes.size() > 20 * 1024 * 1024)
     throw std::invalid_argument("embedding video is empty or exceeds 20 MiB");
+  if (!SupportedImageSoftTokens(options.max_soft_tokens))
+    throw std::invalid_argument(
+        "video max_soft_tokens must be one of 70, 140, 280, 560, or 1120");
   Budget budget{is_cancelled};
   budget.Check();
   (void)FFmpeg();  // Finish loading before a Decoder can need cleanup.
@@ -403,6 +407,7 @@ std::vector<VideoFrame> ProcessVideo(std::span<const std::uint8_t> bytes,
   Decoder decoder{bytes, budget};
   decoder.Open();
   std::vector<VideoFrame> frames;
+  std::size_t soft_tokens = 0;
   decoder.Decode([&](std::size_t index, const AVFrame* frame) {
     if (frames.size() >= selected.size() || index != selected[frames.size()])
       return;
@@ -424,8 +429,14 @@ std::vector<VideoFrame> ProcessVideo(std::span<const std::uint8_t> bytes,
     if (FFmpeg().sws_scale(conversion.get(), frame->data, frame->linesize, 0,
                            frame->height, output, stride) != frame->height)
       throw std::invalid_argument("embedding video RGB conversion failed");
-    auto patches = ProcessImage(image, 140);
+    auto patches = ProcessImage(image, options.max_soft_tokens);
     do {
+      // Checked before each copy, so larger budgets cannot hold more host
+      // memory than the request's soft-token budget.
+      if (patches.soft_tokens() > soft_token_budget - soft_tokens)
+        throw std::invalid_argument(
+            "embedding request video soft-token budget exhausted");
+      soft_tokens += patches.soft_tokens();
       frames.push_back({index, index / fps, patches});
     } while (frames.size() < selected.size() &&
              selected[frames.size()] == index);

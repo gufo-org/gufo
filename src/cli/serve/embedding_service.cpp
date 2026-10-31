@@ -93,6 +93,7 @@ struct EmbeddingService::Impl {
     std::size_t audio_count = 0;
     std::size_t video_count = 0;
     std::size_t video_frames = 0;
+    std::size_t video_soft_tokens = 0;
     for (std::size_t index = 0; index < inputs.size(); ++index) {
       if (is_cancelled && is_cancelled())
         return EmbeddingStatus::kCancelled;
@@ -120,17 +121,20 @@ struct EmbeddingService::Impl {
               throw std::invalid_argument(
                   "embedding requests accept at most 32 videos");
             const auto bytes = core::ReadVideoUrl(part.value, budget);
-            auto frames =
-                ProcessVideo(bytes, request.video, is_cancelled,
-                             EmbeddingService::kMaxVideoFrames - video_frames);
+            auto frames = ProcessVideo(
+                bytes, request.video, is_cancelled,
+                EmbeddingService::kMaxVideoFrames - video_frames,
+                EmbeddingService::kMaxVideoSoftTokens - video_soft_tokens);
             video_frames += frames.size();
             if (video_frames > EmbeddingService::kMaxVideoFrames)
               throw std::invalid_argument(
                   "embedding requests accept at most 64 sampled video frames");
             text += FrameVideo(frames, request.video);
-            for (auto& frame : frames)
+            for (auto& frame : frames) {
+              video_soft_tokens += frame.patches.soft_tokens();
               sequence.images.push_back(
                   {0, std::move(frame.patches), kVideoTokenId});
+            }
           } catch (const platform::LibraryError& failure) {
             if (error)
               *error = failure.what();

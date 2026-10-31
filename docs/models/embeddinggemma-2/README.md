@@ -58,7 +58,8 @@ per image by default; the actual count depends on aspect ratio. A request can
 pick the processor's other budgets with
 `"mm_processor_kwargs": {"max_soft_tokens": N}`, where N is 70, 140, 280, 560
 or 1120, as in vLLM; one budget applies to every image of the request, including
-mixed batches. Video frames retain their separate 140-token budget. At 1120
+mixed batches. Video frames keep their separate budget
+(`video_options.max_soft_tokens`, default 140; see [Video](#video)). At 1120
 the 8,192-token limit fits at most seven images that use the whole budget. These tokens and their
 boundary markers count toward the 8,192-token input limit and reported usage.
 The 32-image request cap is a deliberate server resource limit, not a model
@@ -138,7 +139,8 @@ Typed `input_video` parts accept the llama.cpp `data`/`url` contract:
     {"type": "text", "text": " near the entrance"}
   ]}],
   "video_options": {"fps": 1, "max_frames": 32,
-                    "overflow_strategy": "uniform", "add_timestamps": false}
+                    "overflow_strategy": "uniform", "add_timestamps": false,
+                    "max_soft_tokens": 140}
 }
 ```
 
@@ -154,8 +156,10 @@ Defaults match the pinned processor: 1 FPS, at most 32 frames, uniform overflow,
 140 soft-token budget per frame, and timestamps disabled. `video_options` applies
 to every video in the request. `fps` is a finite number in `(0, 120]`,
 `max_frames` an integer in `[1, 32]`, `overflow_strategy` is `uniform` or
-`truncate`, and `add_timestamps` is boolean. Other processor controls, including
-vision budgets, remain tracked in #763.
+`truncate`, and `add_timestamps` is boolean. `max_soft_tokens` selects the
+per-frame vision budget, one of the image budgets 70, 140, 280, 560 or 1120;
+each frame is resized like an image at that budget. It is independent of
+`mm_processor_kwargs.max_soft_tokens`, which applies only to images.
 
 Sampling uses the decoded frame count and average source FPS: select
 `max(1, floor(duration * requested_fps))` indices by flooring source-frame
@@ -183,8 +187,11 @@ soundtrack and explicit text/video/image/audio interleaving.
 
 Limits per clip are 300 seconds, 4,096 decoded frames, 4 megapixels per frame,
 512 megapixels of decoded work across two passes, eight container streams and a
-15-second decode/processing deadline. A request accepts at most 32 clips and
-64 selected frames. Decoding first counts frames, then retains only the selected
+15-second decode/processing deadline. A request accepts at most 32 clips,
+64 selected frames and 8,960 video soft tokens (64 frames at the default
+budget), so a 1120-token budget admits at most eight full-budget frames per
+request. The soft-token limit is checked frame by frame, before a frame's
+patches are kept. Decoding first counts frames, then retains only the selected
 frames' unpadded patches; it never stores the entire decoded clip. Cancellation
 is checked during decoding, preprocessing and between GPU frame passes.
 Malformed or over-budget clips return 400 `invalid_video_input`.
