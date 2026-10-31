@@ -134,8 +134,11 @@ __device__ __forceinline__ WmmaQuantAccumulator<WaveSize> WmmaQuant(
 // Both wave sizes preserve every K32 accumulator update, including the affine
 // minimum correction and the separate Q6/Q3 half-block scales. Activation
 // staging uses 32-thread groups; the native WMMA wave determines C ownership.
+// kPinnedOrder writes the Q8_0 update as (dx * c), then one FMA with dw: the
+// order a caller's other W8A8 kernels pin, so its rows do not depend on which
+// kernel a pass width selects. Other instantiations keep fast-math's order.
 template<int BM, int BN, int BK, int WM, int WN, core::GgmlType WType,
-         int WaveSize = 32>
+         int WaveSize = 32, bool kPinnedOrder = false>
 __launch_bounds__(WM * WN * WaveSize, 1) __global__
     void WKQuantA8BlockedWmmaGEMMKernel(const void* __restrict__ w,
                                         const void* __restrict__ x_blocks,
@@ -476,7 +479,13 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
             c = WmmaQuant<WaveSize>(a1[i], b1, c);
 #pragma unroll
             for (int l = 0; l < kAccumulatorElements; ++l) {
-              acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
+              if constexpr (kPinnedOrder) {
+                acc[i][j][l] =
+                    __fmaf_rn(__fmul_rn(dx, static_cast<float>(c[l])),
+                              dw0[i][l], acc[i][j][l]);
+              } else {
+                acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
+              }
             }
           }
           if constexpr (HasOffset) {
