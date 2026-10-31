@@ -3645,12 +3645,18 @@ public:
       throw std::runtime_error("Gemma 4 token selection has no logits");
     }
     const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
+    auto logprobs =
+        sampling::CollectLogprobs(logits, token, sampler.config().logprobs);
     if (state.stop_at_eos() && model_->IsStopToken(token)) {
-      return {.stop = true, .token = 0, .piece = {}};
+      return {.stop = true,
+              .token = 0,
+              .piece = {},
+              .logprobs = std::move(logprobs)};
     }
     return {.stop = false,
             .token = static_cast<TextRunnerToken>(token),
-            .piece = model_->TokenText(token)};
+            .piece = model_->TokenText(token),
+            .logprobs = std::move(logprobs)};
   }
 
   void Advance(TextRunnerState& state, TextRunnerToken token) const override {
@@ -3664,6 +3670,28 @@ public:
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     return SelectNext(state, sampler);
+  }
+
+  // Emits decoded tokens up to a stop token, whose logprobs become the
+  // step's terminal entry.
+  void AppendGemma4Tokens(const Gemma4Session::DecodeResult& decoded,
+                          bool stop_at_eos, TextDecodeStep* step) const {
+    const auto logprobs = [&](std::size_t i) {
+      return decoded.logprobs.empty() ? std::nullopt
+                                      : std::optional(decoded.logprobs.at(i));
+    };
+    for (std::size_t i = 0; i < decoded.tokens.size(); ++i) {
+      const std::int32_t token = decoded.tokens[i];
+      if (stop_at_eos && model_->IsStopToken(token)) {
+        step->stop = true;
+        step->terminal_logprobs = logprobs(i);
+        break;
+      }
+      step->selections.push_back({.stop = false,
+                                  .token = static_cast<TextRunnerToken>(token),
+                                  .piece = model_->TokenText(token),
+                                  .logprobs = logprobs(i)});
+    }
   }
 
   [[nodiscard]] TextDecodeStep DecodeStep(
@@ -3689,15 +3717,7 @@ public:
     }
     sampler.CopyDrawStateFrom(working);
     TextDecodeStep step;
-    for (const std::int32_t token : decoded.tokens) {
-      if (state.stop_at_eos() && model_->IsStopToken(token)) {
-        step.stop = true;
-        break;
-      }
-      step.selections.push_back({.stop = false,
-                                 .token = static_cast<TextRunnerToken>(token),
-                                 .piece = model_->TokenText(token)});
-    }
+    AppendGemma4Tokens(decoded, state.stop_at_eos(), &step);
     const auto after = session.Statistics();
     step.draft_rounds = after.verified - before.verified;
     step.draft_tokens = after.drafted - before.drafted;
@@ -3783,16 +3803,7 @@ public:
         continue;
       }
       decodes[i].sampler.get().CopyDrawStateFrom(working[k]);
-      const bool stop_at_eos = batch[k].stop_at_eos;
-      for (const std::int32_t token : results[i].tokens) {
-        if (stop_at_eos && model_->IsStopToken(token)) {
-          step.stop = true;
-          break;
-        }
-        step.selections.push_back({.stop = false,
-                                   .token = static_cast<TextRunnerToken>(token),
-                                   .piece = model_->TokenText(token)});
-      }
+      AppendGemma4Tokens(results[i], batch[k].stop_at_eos, &step);
       const auto after = batch[k].session->Statistics();
       step.draft_rounds = after.verified - before[i].verified;
       step.draft_tokens = after.drafted - before[i].drafted;

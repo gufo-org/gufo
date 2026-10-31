@@ -279,6 +279,8 @@ public:
 
   struct DecodeResult {
     std::vector<TokenId> tokens;
+    /// One entry per token when the sampler requests logprobs.
+    std::vector<sampling::TokenLogprobs> logprobs;
     bool stop{false};
   };
   /// Emits the next tokens. With the MTP drafter one call drafts, verifies

@@ -1214,9 +1214,11 @@ bool Session::DecodeStep(std::size_t max_tokens,
     cycle.trace->forward = model_->forwards_++;
   }
   auto& executor = *model_->executor_;
-  const bool use_argmax =
-      !cycle.sampled && sampler.config().can_use_unmodified_argmax();
-  bool use_candidates = !use_argmax && !cycle.trace &&
+  // Logprobs need every emitted token's full row on the host.
+  const bool logprobs = sampler.config().logprobs.has_value();
+  const bool use_argmax = !cycle.sampled && !logprobs &&
+                          sampler.config().can_use_unmodified_argmax();
+  bool use_candidates = !use_argmax && !logprobs && !cycle.trace &&
                         executor.CanReadCandidates() &&
                         CandidateSampling(sampler);
   std::vector<std::uint32_t> extra;
@@ -1291,6 +1293,7 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
   auto& sampler = *cycle.sampler;
   auto* result = cycle.result;
   result->tokens.clear();
+  result->logprobs.clear();
   result->stop = false;
   cycle.done = true;
   cycle.trace.reset();
@@ -1307,6 +1310,10 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
     }
     EnsureLogits();
     const auto token = static_cast<TokenId>(sampler.Sample(logits_));
+    if (auto logprobs = sampling::CollectLogprobs(logits_, token,
+                                                  sampler.config().logprobs)) {
+      result->logprobs.push_back(std::move(*logprobs));
+    }
     sampler.Accept(static_cast<sampling::TokenId>(token));
     result->tokens.push_back(token);
     result->stop = cycle.stop_at_eos && model_->IsStopToken(token);
@@ -1560,13 +1567,6 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   auto& sampler = *cycle.sampler;
   auto* result = cycle.result;
   const auto& rows = cycle.rows;
-  const auto emit = [&](TokenId token) {
-    sampler.Accept(static_cast<sampling::TokenId>(token));
-    result->tokens.push_back(token);
-    if (cycle.stop_at_eos && model_->IsStopToken(token)) {
-      result->stop = true;
-    }
-  };
   // Row i predicts the token after rows[i]; drafts stay while the target's
   // own sample agrees with them. Sibling rows trail the chain.
   const std::size_t siblings = cycle.siblings.size();
@@ -1584,6 +1584,18 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
       logits = candidates->full();
     }
     return logits.subspan(r * vocab, vocab);
+  };
+  // Row r's distribution produced the token; logprobs read its full row.
+  const auto emit = [&](TokenId token, std::size_t r) {
+    if (sampler.config().logprobs) {
+      result->logprobs.push_back(*sampling::CollectLogprobs(
+          full_row(r), token, sampler.config().logprobs));
+    }
+    sampler.Accept(static_cast<sampling::TokenId>(token));
+    result->tokens.push_back(token);
+    if (cycle.stop_at_eos && model_->IsStopToken(token)) {
+      result->stop = true;
+    }
   };
   const auto candidate_row = [&](std::size_t r) {
     const std::size_t row = candidates->first + r;
@@ -1625,17 +1637,17 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
       if (beside) {
         const auto verified = VerifyWithSibling(
             target(row), cycle.proposals[row], cycle.siblings[row], sampler);
-        emit(static_cast<TokenId>(verified.token));
+        emit(static_cast<TokenId>(verified.token), row);
         agrees = verified.accepted;
         sibling = verified.sibling;
       } else {
         const auto verified = qwen38_flash_next::VerifyMtpTarget(
             vocab, cycle.proposals[row], sampler, [&] { return target(row); });
-        emit(static_cast<TokenId>(verified.token));
+        emit(static_cast<TokenId>(verified.token), row);
         agrees = verified.accepted;
       }
     } else {
-      emit(sample_row(row));
+      emit(sample_row(row), row);
       agrees = row + 1 < chain && result->tokens.back() == rows[row + 1];
       sibling =
           beside && !agrees && result->tokens.back() == cycle.siblings[row];
@@ -1657,7 +1669,7 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   std::size_t last = row;
   if (sibling && !result->stop && result->tokens.size() < cycle.max_tokens) {
     last = chain + row;
-    emit(sample_row(last));
+    emit(sample_row(last), last);
     tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
     tokens_.push_back(cycle.siblings[row]);
     model_->executor_->MoveKey(
@@ -1871,7 +1883,10 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   std::vector<std::uint32_t> extra;
   for (const std::size_t i : active) {
     const auto& sampler = *cycles[i].sampler;
-    if (!cycles[i].sampled && sampler.config().can_use_unmodified_argmax()) {
+    if (sampler.config().logprobs) {
+      full = true;
+    } else if (!cycles[i].sampled &&
+               sampler.config().can_use_unmodified_argmax()) {
       any_argmax = true;
     } else if (CandidateSampling(sampler)) {
       sample[i] = 1;
