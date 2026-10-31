@@ -170,6 +170,22 @@ server and client time passes the unchanged 5% and 10 ms margins. All vectors
 are byte-identical and work counts match. The two unchanged-main runs are
 retained as controls; the first inconclusive observations are not discarded.
 
+## Video budgets
+
+Measured on 2026-10-31 on Linux with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors and release builds with the ROCm 7.2.3 runtime, not the Nix image.  Each request sends one 1280 × 720, 6-second H.264 clip (6 frames at the default 1 FPS) at concurrency 1, with `video_options.max_soft_tokens` set to the budget, or left out for the default.  The default rows ran main 72dc1a09 and this change in the order main, change, change, main, 20 requests each; the other rows ran this change once with 10 requests each.  GTT growth is `mem_info_gtt_used` after each budget minus the value after budget 140, which equals the default value.
+
+| Budget | Tokens/request | Median | p95 | GTT growth |
+| --- | ---: | ---: | ---: | ---: |
+| default, main | 734 | 1,671.89 ms | 1,678.87 ms | — |
+| default, this change | 734 | 1,667.30 ms | 1,672.16 ms | — |
+| 70 | 410 | 1,132.11 ms | 1,136.33 ms | 0 MiB |
+| 140 | 734 | 1,668.10 ms | 1,673.27 ms | 0 MiB |
+| 280 | 1,598 | 3,927.88 ms | 3,936.21 ms | 0 MiB |
+| 560 | 3,176 | 11,347.89 ms | 11,379.62 ms | 86 MiB |
+| 1120 | 6,614 | 41,421.47 ms | 41,441.98 ms | 256 MiB |
+
+The default rows show the mean of the two passes.  Frames reuse the image vision scratch, so the growth matches the image table.
+
 ## Image budgets
 
 The following table is historical evidence from the original image-budget
