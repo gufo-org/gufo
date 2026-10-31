@@ -1,0 +1,89 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.7-200.fc44.x86_64",
+      "memoryTotalBytes": 133616873472,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-28",
+  "mode": "mtp",
+  "model": {
+    "id": "Gemma-4-31B-It-QAT",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "file cache reset before each launch with the supplied --drop-caches command",
+    "readiness = HTTP 200 on /health"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "default": {
+      "command": "llama-server -m gemma-4-31B-it-qat-UD-Q4_K_XL.gguf -c 262144 -np 1 --port 37511 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "ready_s": 6.458,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "-c",
+      "262144",
+      "-np",
+      "1",
+      "--port",
+      "37511",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-mtp",
+      "--spec-draft-model",
+      "mtp-gemma-4-31B-it.gguf",
+      "--spec-draft-ngl",
+      "999",
+      "--spec-draft-n-max",
+      "4"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "153b45e286436f31cc4fe93e32a37349bbdbf1b1"
+  },
+  "table": "loading",
+  "target": "reference"
+}

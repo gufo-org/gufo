@@ -1,0 +1,909 @@
+{
+ "schema": "gufo-gemma4-draft-calibration-study/1",
+ "metadata": {
+  "date": "2026-10-20",
+  "hardware": "AMD Ryzen AI MAX+ 395 / Radeon 8060S gfx1151, 128 GB unified memory",
+  "source": "Replay results: feat/gemma-mtp at d125cb52. Feature study: a re-collection with the proposal feature trace fields (committed with this artifact); same seeds, identical trajectories and cycle counts.",
+  "models": {
+   "31b": "gemma-4-31B-it-UD-Q4_K_XL + gemma-4-31B-it-assistant.Q8_0",
+   "26b": "gemma-4-26B-A4B-it-UD-Q4_K_XL + Unsloth mtp-gemma-4-26B-A4B-it"
+  },
+  "dataset": "One server per model with --draft-policy fixed --draft-tokens 15 --draft-trace, thinking off, context 40960, sessions 1. 46 requests per model: sampled at temperature 1, top-k 64, top-p 0.95, repeat penalty 1.0 (12 prose prompts x 256 tokens, 12 story seeds x 128, 6 code-write seeds x 384, 3 code-edit seeds x 384, 3 essay seeds x 400 over the ~31K-token document), and greedy (6 prose, code-write, code-edit, repetitive, essay). Workloads from tools/gemma4/draft_policy_bench.py. Complete chains (15 verified proposals, no copies): ~2,300 sampled and ~680 greedy per model. Requests alternate between development and held-out sets within each workload.",
+  "labels": "Each row: acceptance probability given the rows before it accepted (greedy 0/1, sampled min(1, p/q)); each runner-up: sibling hit probability (VerifyWithSibling second stage). Expected tokens of any stopping decision are exact given the labels; costs are the policy price tables.",
+  "replay": "gemma4_draft_replay simulate (production DraftCalibration/CalibratedChain via a replica checked against production on every chain), 16 replicas of online learning with outcomes drawn from the labels.",
+  "feature_study": "Python (numpy 2.5.2, scikit-learn 1.9.0): reach-weighted soft-label logistic models fitted on development rows, scored on held-out rows; each model then drives a copy of the stopping rule (no siblings) on held-out chains.",
+  "scripts_sha256": {
+   "collect.py": "550d373b406b84b648de02d677a12276fc09916a649875ba3338e97d326c1d6f",
+   "split.py": "ff03ae2a86bb44fd5a6c05757702c1a46f07ac25b875d8a566df66effacb3015",
+   "features.py": "5750ce033e8ffea1ff3259020cdb18fde0dc435065dcdea43d2f4d5c51e12add",
+   "features2.py": "58be9bb0d46cb0dccde3a954a0664520f3ec9a79a510d8daba300e4808ad6a24",
+   "lookahead.py": "027eb0c631e6e009189068eb173b9e7b027885741d942f9b39b26f94f6fc7612"
+  },
+  "raw_directory": "/tmp/opencode/mtp-calib"
+ },
+ "replay": {
+  "26b-greedy-all": {
+   "chains": 673,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 88.435,
+    "production_no_siblings": 88.274,
+    "production_frozen": 85.486,
+    "position_w4": 88.232,
+    "position_w8": 88.498,
+    "position_w16": 88.199,
+    "position_w32": 87.835,
+    "recency_h128": 87.796,
+    "position_w8_recency_h128": 87.064,
+    "recency_h512": 88.095,
+    "position_w8_recency_h512": 87.736,
+    "recency_h2048": 88.384,
+    "position_w8_recency_h2048": 88.515
+   },
+   "best_fixed": {
+    "drafts": 3,
+    "tokens_per_s": 83.599
+   },
+   "oracle_tokens_per_s": 116.319,
+   "production_reach_weighted_fit": {
+    "brier_vs_label": 0.1935383046041012,
+    "positions": [
+     {
+      "position": 0,
+      "mean_estimate": 0.7515737707733576,
+      "mean_label": 0.7800891530460624
+     },
+     {
+      "position": 1,
+      "mean_estimate": 0.6889425358481782,
+      "mean_label": 0.6537890044576523
+     },
+     {
+      "position": 2,
+      "mean_estimate": 0.6968973956968951,
+      "mean_label": 0.6329866270430906
+     },
+     {
+      "position": 3,
+      "mean_estimate": 0.6696756010069712,
+      "mean_label": 0.5898959881129272
+     },
+     {
+      "position": 4,
+      "mean_estimate": 0.6782482445107172,
+      "mean_label": 0.5958395245170877
+     },
+     {
+      "position": 5,
+      "mean_estimate": 0.632374721176557,
+      "mean_label": 0.5096582466567607
+     },
+     {
+      "position": 6,
+      "mean_estimate": 0.6840775667026883,
+      "mean_label": 0.5557206537890045
+     },
+     {
+      "position": 7,
+      "mean_estimate": 0.6445714276931616,
+      "mean_label": 0.4918276374442793
+     },
+     {
+      "position": 8,
+      "mean_estimate": 0.6366208019883636,
+      "mean_label": 0.4947994056463596
+     },
+     {
+      "position": 9,
+      "mean_estimate": 0.6204877270587663,
+      "mean_label": 0.46953937592867756
+     },
+     {
+      "position": 10,
+      "mean_estimate": 0.643780797919228,
+      "mean_label": 0.45170876671619614
+     },
+     {
+      "position": 11,
+      "mean_estimate": 0.6183179189377696,
+      "mean_label": 0.4101040118870728
+     },
+     {
+      "position": 12,
+      "mean_estimate": 0.6530617493444176,
+      "mean_label": 0.4769687964338782
+     },
+     {
+      "position": 13,
+      "mean_estimate": 0.6467688549946534,
+      "mean_label": 0.4472511144130758
+     },
+     {
+      "position": 14,
+      "mean_estimate": 0.6511680495995823,
+      "mean_label": 0.4427934621099554
+     }
+    ]
+   }
+  },
+  "26b-greedy-dev": {
+   "chains": 434,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 89.276,
+    "production_no_siblings": 89.094,
+    "production_frozen": 86.811,
+    "position_w4": 88.991,
+    "position_w8": 88.392,
+    "position_w16": 88.752,
+    "position_w32": 88.741,
+    "recency_h128": 88.723,
+    "position_w8_recency_h128": 87.809,
+    "recency_h512": 88.888,
+    "position_w8_recency_h512": 88.138,
+    "recency_h2048": 89.186,
+    "position_w8_recency_h2048": 88.39
+   },
+   "best_fixed": {
+    "drafts": 3,
+    "tokens_per_s": 83.85
+   },
+   "oracle_tokens_per_s": 118.869
+  },
+  "26b-greedy-held": {
+   "chains": 239,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 85.233,
+    "production_no_siblings": 85.191,
+    "production_frozen": 82.757,
+    "position_w4": 85.035,
+    "position_w8": 84.786,
+    "position_w16": 84.963,
+    "position_w32": 84.313,
+    "recency_h128": 85.038,
+    "position_w8_recency_h128": 85.215,
+    "recency_h512": 85.353,
+    "position_w8_recency_h512": 84.678,
+    "recency_h2048": 85.286,
+    "position_w8_recency_h2048": 84.7
+   },
+   "best_fixed": {
+    "drafts": 3,
+    "tokens_per_s": 83.124
+   },
+   "oracle_tokens_per_s": 111.182
+  },
+  "26b-sampled-all": {
+   "chains": 2361,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 86.144,
+    "production_no_siblings": 86.0,
+    "production_frozen": 83.667,
+    "position_w4": 86.086,
+    "position_w8": 86.245,
+    "position_w16": 86.219,
+    "position_w32": 86.092,
+    "recency_h128": 85.978,
+    "position_w8_recency_h128": 85.889,
+    "recency_h512": 86.236,
+    "position_w8_recency_h512": 86.109,
+    "recency_h2048": 86.137,
+    "position_w8_recency_h2048": 86.236
+   },
+   "best_fixed": {
+    "drafts": 3,
+    "tokens_per_s": 80.961
+   },
+   "oracle_tokens_per_s": 109.26,
+   "production_reach_weighted_fit": {
+    "reach_weighted_brier": 0.11605865271015343,
+    "bins": [
+     {
+      "bin": 0,
+      "weight": 0,
+      "mean_estimate": 0,
+      "mean_label": 0
+     },
+     {
+      "bin": 1,
+      "weight": 52.70805643871786,
+      "mean_estimate": 0.16668790212825038,
+      "mean_label": 0.06909744986949269
+     },
+     {
+      "bin": 2,
+      "weight": 346.9156776933099,
+      "mean_estimate": 0.21295687959440035,
+      "mean_label": 0.21480247356582519
+     },
+     {
+      "bin": 3,
+      "weight": 604.9332411791443,
+      "mean_estimate": 0.3540555609238419,
+      "mean_label": 0.3094627465586226
+     },
+     {
+      "bin": 4,
+      "weight": 836.9566683369886,
+      "mean_estimate": 0.4381116993284657,
+      "mean_label": 0.43267347461088135
+     },
+     {
+      "bin": 5,
+      "weight": 936.4177409243483,
+      "mean_estimate": 0.5058313605379425,
+      "mean_label": 0.5196344093702834
+     },
+     {
+      "bin": 6,
+      "weight": 805.3704767753794,
+      "mean_estimate": 0.636777617037517,
+      "mean_label": 0.5806033643415994
+     },
+     {
+      "bin": 7,
+      "weight": 4158.934200061436,
+      "mean_estimate": 0.9192006323654781,
+      "mean_label": 0.9165095011586684
+     }
+    ],
+    "positions": [
+     {
+      "position": 0,
+      "weight": 2361,
+      "mean_estimate": 0.7084333030148009,
+      "mean_label": 0.7335169529676444
+     },
+     {
+      "position": 1,
+      "weight": 1731.8335259566084,
+      "mean_estimate": 0.6815564717255165,
+      "mean_label": 0.6638582552657201
+     },
+     {
+      "position": 2,
+      "weight": 1149.6919829522342,
+      "mean_estimate": 0.6969506391166211,
+      "mean_label": 0.6847025917590619
+     },
+     {
+      "position": 3,
+      "weight": 787.1970804520099,
+      "mean_estimate": 0.7061344694591174,
+      "mean_label": 0.6724583920154333
+     },
+     {
+      "position": 4,
+      "weight": 529.3572829200023,
+      "mean_estimate": 0.7336859591557067,
+      "mean_label": 0.7265420933347131
+     },
+     {
+      "position": 5,
+      "weight": 384.6003484546744,
+      "mean_estimate": 0.7049825321520591,
+      "mean_label": 0.6254130739916052
+     },
+     {
+      "position": 6,
+      "weight": 240.53408618528044,
+      "mean_estimate": 0.7318448745894823,
+      "mean_label": 0.6471330871938523
+     },
+     {
+      "position": 7,
+      "weight": 155.65756576843268,
+      "mean_estimate": 0.764511609202069,
+      "mean_label": 0.7703197863339125
+     },
+     {
+      "position": 8,
+      "weight": 119.90610280399599,
+      "mean_estimate": 0.7269029501223887,
+      "mean_label": 0.766593396284363
+     },
+     {
+      "position": 9,
+      "weight": 91.91922658373727,
+      "mean_estimate": 0.8038902717959173,
+      "mean_label": 0.7129437125892529
+     },
+     {
+      "position": 10,
+      "weight": 65.5332346589424,
+      "mean_estimate": 0.7466525880893228,
+      "mean_label": 0.7989508059554601
+     },
+     {
+      "position": 11,
+      "weight": 52.35783064763032,
+      "mean_estimate": 0.7831937892470935,
+      "mean_label": 0.660325167004219
+     },
+     {
+      "position": 12,
+      "weight": 34.57319326637511,
+      "mean_estimate": 0.7648979138723971,
+      "mean_label": 0.6433061966928694
+     },
+     {
+      "position": 13,
+      "weight": 22.241149467719293,
+      "mean_estimate": 0.813925473852413,
+      "mean_label": 0.7118989652340357
+     },
+     {
+      "position": 14,
+      "weight": 15.833451291684888,
+      "mean_estimate": 0.804624466325232,
+      "mean_label": 0.7677369618178457
+     }
+    ]
+   }
+  },
+  "26b-sampled-dev": {
+   "chains": 1248,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 84.976,
+    "production_no_siblings": 84.897,
+    "production_frozen": 82.907,
+    "position_w4": 84.779,
+    "position_w8": 84.913,
+    "position_w16": 84.758,
+    "position_w32": 84.579,
+    "recency_h128": 84.762,
+    "position_w8_recency_h128": 84.741,
+    "recency_h512": 84.894,
+    "position_w8_recency_h512": 84.963,
+    "recency_h2048": 84.957,
+    "position_w8_recency_h2048": 84.965
+   },
+   "best_fixed": {
+    "drafts": 3,
+    "tokens_per_s": 79.957
+   },
+   "oracle_tokens_per_s": 107.542
+  },
+  "26b-sampled-held": {
+   "chains": 1113,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 87.024,
+    "production_no_siblings": 86.962,
+    "production_frozen": 84.523,
+    "position_w4": 87.066,
+    "position_w8": 86.998,
+    "position_w16": 86.989,
+    "position_w32": 86.792,
+    "recency_h128": 87.052,
+    "position_w8_recency_h128": 86.877,
+    "recency_h512": 87.114,
+    "position_w8_recency_h512": 87.089,
+    "recency_h2048": 87.122,
+    "position_w8_recency_h2048": 87.148
+   },
+   "best_fixed": {
+    "drafts": 3,
+    "tokens_per_s": 82.106
+   },
+   "oracle_tokens_per_s": 111.233
+  },
+  "31b-greedy-all": {
+   "chains": 679,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 26.045,
+    "production_no_siblings": 25.154,
+    "production_frozen": 25.18,
+    "position_w4": 25.745,
+    "position_w8": 25.832,
+    "position_w16": 25.78,
+    "position_w32": 25.779,
+    "recency_h128": 25.866,
+    "position_w8_recency_h128": 25.848,
+    "recency_h512": 25.993,
+    "position_w8_recency_h512": 25.92,
+    "recency_h2048": 26.054,
+    "position_w8_recency_h2048": 25.875
+   },
+   "best_fixed": {
+    "drafts": 6,
+    "tokens_per_s": 24.073
+   },
+   "oracle_tokens_per_s": 29.001,
+   "production_reach_weighted_fit": {
+    "reach_weighted_brier": 0.1510896078702483,
+    "bins": [
+     {
+      "bin": 0,
+      "weight": 0,
+      "mean_estimate": 0,
+      "mean_label": 0
+     },
+     {
+      "bin": 1,
+      "weight": 11,
+      "mean_estimate": 0.15694041143764148,
+      "mean_label": 0.09090909090909091
+     },
+     {
+      "bin": 2,
+      "weight": 66,
+      "mean_estimate": 0.2308456687764688,
+      "mean_label": 0.18181818181818182
+     },
+     {
+      "bin": 3,
+      "weight": 150,
+      "mean_estimate": 0.3375355327129364,
+      "mean_label": 0.32
+     },
+     {
+      "bin": 4,
+      "weight": 254,
+      "mean_estimate": 0.38124115096302486,
+      "mean_label": 0.3228346456692913
+     },
+     {
+      "bin": 5,
+      "weight": 271,
+      "mean_estimate": 0.5435714981212827,
+      "mean_label": 0.5129151291512916
+     },
+     {
+      "bin": 6,
+      "weight": 240,
+      "mean_estimate": 0.6007232489685218,
+      "mean_label": 0.6125
+     },
+     {
+      "bin": 7,
+      "weight": 1207,
+      "mean_estimate": 0.9075638801970557,
+      "mean_label": 0.9055509527754764
+     }
+    ],
+    "positions": [
+     {
+      "position": 0,
+      "weight": 679,
+      "mean_estimate": 0.72127073175865,
+      "mean_label": 0.7407952871870398
+     },
+     {
+      "position": 1,
+      "weight": 503,
+      "mean_estimate": 0.6742939640347574,
+      "mean_label": 0.6600397614314115
+     },
+     {
+      "position": 2,
+      "weight": 332,
+      "mean_estimate": 0.7097036518066763,
+      "mean_label": 0.6897590361445783
+     },
+     {
+      "position": 3,
+      "weight": 229,
+      "mean_estimate": 0.7104623779719573,
+      "mean_label": 0.6855895196506551
+     },
+     {
+      "position": 4,
+      "weight": 157,
+      "mean_estimate": 0.6942866188325699,
+      "mean_label": 0.6305732484076433
+     },
+     {
+      "position": 5,
+      "weight": 99,
+      "mean_estimate": 0.6926631436805533,
+      "mean_label": 0.6464646464646465
+     },
+     {
+      "position": 6,
+      "weight": 64,
+      "mean_estimate": 0.7156806653365493,
+      "mean_label": 0.609375
+     },
+     {
+      "position": 7,
+      "weight": 39,
+      "mean_estimate": 0.7321318216048754,
+      "mean_label": 0.8461538461538461
+     },
+     {
+      "position": 8,
+      "weight": 33,
+      "mean_estimate": 0.6595829964587183,
+      "mean_label": 0.6060606060606061
+     },
+     {
+      "position": 9,
+      "weight": 20,
+      "mean_estimate": 0.8212428689002991,
+      "mean_label": 0.7
+     },
+     {
+      "position": 10,
+      "weight": 14,
+      "mean_estimate": 0.8137045055627823,
+      "mean_label": 0.8571428571428571
+     },
+     {
+      "position": 11,
+      "weight": 12,
+      "mean_estimate": 0.7681201174855232,
+      "mean_label": 0.8333333333333334
+     },
+     {
+      "position": 12,
+      "weight": 10,
+      "mean_estimate": 0.7696770131587982,
+      "mean_label": 0.5
+     },
+     {
+      "position": 13,
+      "weight": 5,
+      "mean_estimate": 0.7396269857883453,
+      "mean_label": 0.6
+     },
+     {
+      "position": 14,
+      "weight": 3,
+      "mean_estimate": 0.6599841713905334,
+      "mean_label": 0.6666666666666666
+     }
+    ]
+   }
+  },
+  "31b-greedy-dev": {
+   "chains": 448,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 25.859,
+    "production_no_siblings": 25.063,
+    "production_frozen": 25.157,
+    "position_w4": 25.289,
+    "position_w8": 25.563,
+    "position_w16": 25.5,
+    "position_w32": 25.596,
+    "recency_h128": 25.783,
+    "position_w8_recency_h128": 25.645,
+    "recency_h512": 25.765,
+    "position_w8_recency_h512": 25.63,
+    "recency_h2048": 25.825,
+    "position_w8_recency_h2048": 25.589
+   },
+   "best_fixed": {
+    "drafts": 6,
+    "tokens_per_s": 23.723
+   },
+   "oracle_tokens_per_s": 29.323
+  },
+  "31b-greedy-held": {
+   "chains": 231,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 26.213,
+    "production_no_siblings": 25.158,
+    "production_frozen": 25.227,
+    "position_w4": 26.049,
+    "position_w8": 26.032,
+    "position_w16": 25.99,
+    "position_w32": 25.741,
+    "recency_h128": 26.039,
+    "position_w8_recency_h128": 25.972,
+    "recency_h512": 26.214,
+    "position_w8_recency_h512": 26.056,
+    "recency_h2048": 26.208,
+    "position_w8_recency_h2048": 26.026
+   },
+   "best_fixed": {
+    "drafts": 6,
+    "tokens_per_s": 24.798
+   },
+   "oracle_tokens_per_s": 28.349
+  },
+  "31b-sampled-all": {
+   "chains": 2263,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 26.513,
+    "production_no_siblings": 26.047,
+    "production_frozen": 26.152,
+    "position_w4": 26.422,
+    "position_w8": 26.397,
+    "position_w16": 26.415,
+    "position_w32": 26.382,
+    "recency_h128": 26.607,
+    "position_w8_recency_h128": 26.548,
+    "recency_h512": 26.581,
+    "position_w8_recency_h512": 26.584,
+    "recency_h2048": 26.543,
+    "position_w8_recency_h2048": 26.503
+   },
+   "best_fixed": {
+    "drafts": 6,
+    "tokens_per_s": 24.946
+   },
+   "oracle_tokens_per_s": 29.369,
+   "production_reach_weighted_fit": {
+    "reach_weighted_brier": 0.11832008397282195,
+    "bins": [
+     {
+      "bin": 0,
+      "weight": 0,
+      "mean_estimate": 0,
+      "mean_label": 0
+     },
+     {
+      "bin": 1,
+      "weight": 57.80903558782194,
+      "mean_estimate": 0.18900929797505533,
+      "mean_label": 0.14175246927486526
+     },
+     {
+      "bin": 2,
+      "weight": 241.97638023191476,
+      "mean_estimate": 0.18645336819590674,
+      "mean_label": 0.21429862833733224
+     },
+     {
+      "bin": 3,
+      "weight": 540.582414428518,
+      "mean_estimate": 0.3435923507103347,
+      "mean_label": 0.30263391305621107
+     },
+     {
+      "bin": 4,
+      "weight": 755.2276444092639,
+      "mean_estimate": 0.39075778187258176,
+      "mean_label": 0.3917928823015192
+     },
+     {
+      "bin": 5,
+      "weight": 828.1706596182021,
+      "mean_estimate": 0.5134018731979569,
+      "mean_label": 0.48375694994086077
+     },
+     {
+      "bin": 6,
+      "weight": 894.3263531018264,
+      "mean_estimate": 0.645711295855802,
+      "mean_label": 0.6193840693545648
+     },
+     {
+      "bin": 7,
+      "weight": 4298.463754666228,
+      "mean_estimate": 0.9030790820432354,
+      "mean_label": 0.9046330169368605
+     }
+    ],
+    "positions": [
+     {
+      "position": 0,
+      "weight": 2263,
+      "mean_estimate": 0.7204535264082309,
+      "mean_label": 0.7407196970622356
+     },
+     {
+      "position": 1,
+      "weight": 1676.2486744518392,
+      "mean_estimate": 0.7020089304727155,
+      "mean_label": 0.6980978359824758
+     },
+     {
+      "position": 2,
+      "weight": 1170.1855722033224,
+      "mean_estimate": 0.6988040331547694,
+      "mean_label": 0.6873423692761584
+     },
+     {
+      "position": 3,
+      "weight": 804.3181236910087,
+      "mean_estimate": 0.7119925391739703,
+      "mean_label": 0.681379809345952
+     },
+     {
+      "position": 4,
+      "weight": 548.0461297740734,
+      "mean_estimate": 0.6946716090195921,
+      "mean_label": 0.6546598342685106
+     },
+     {
+      "position": 5,
+      "weight": 358.78378848939354,
+      "mean_estimate": 0.7143814773136536,
+      "mean_label": 0.6793713632036192
+     },
+     {
+      "position": 6,
+      "weight": 243.74743148139828,
+      "mean_estimate": 0.7115750037909176,
+      "mean_label": 0.6933983025710452
+     },
+     {
+      "position": 7,
+      "weight": 169.0140552452537,
+      "mean_estimate": 0.7443985090013928,
+      "mean_label": 0.7407080717912843
+     },
+     {
+      "position": 8,
+      "weight": 125.19007496633746,
+      "mean_estimate": 0.7058659193385535,
+      "mean_label": 0.6512735108521254
+     },
+     {
+      "position": 9,
+      "weight": 81.53297964716737,
+      "mean_estimate": 0.7734249639935403,
+      "mean_label": 0.7404992726807086
+     },
+     {
+      "position": 10,
+      "weight": 60.375112128218454,
+      "mean_estimate": 0.7867327105798841,
+      "mean_label": 0.7783087548993838
+     },
+     {
+      "position": 11,
+      "weight": 46.99047834742439,
+      "mean_estimate": 0.7703696935338116,
+      "mean_label": 0.7041937972071601
+     },
+     {
+      "position": 12,
+      "weight": 33.09040338005362,
+      "mean_estimate": 0.7580161861292402,
+      "mean_label": 0.6219509343927841
+     },
+     {
+      "position": 13,
+      "weight": 20.580607301658493,
+      "mean_estimate": 0.739534420293262,
+      "mean_label": 0.7508432919459462
+     },
+     {
+      "position": 14,
+      "weight": 15.45281093662404,
+      "mean_estimate": 0.7877843223284416,
+      "mean_label": 0.5877226954399731
+     }
+    ]
+   }
+  },
+  "31b-sampled-dev": {
+   "chains": 1207,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 25.931,
+    "production_no_siblings": 25.526,
+    "production_frozen": 25.521,
+    "position_w4": 25.724,
+    "position_w8": 25.739,
+    "position_w16": 25.765,
+    "position_w32": 25.756,
+    "recency_h128": 25.985,
+    "position_w8_recency_h128": 25.992,
+    "recency_h512": 25.982,
+    "position_w8_recency_h512": 26.011,
+    "recency_h2048": 25.929,
+    "position_w8_recency_h2048": 25.828
+   },
+   "best_fixed": {
+    "drafts": 6,
+    "tokens_per_s": 24.452
+   },
+   "oracle_tokens_per_s": 28.747
+  },
+  "31b-sampled-held": {
+   "chains": 1056,
+   "replica_mismatches": 0,
+   "policies_tokens_per_s": {
+    "production": 27.112,
+    "production_no_siblings": 26.624,
+    "production_frozen": 26.882,
+    "position_w4": 27.092,
+    "position_w8": 27.074,
+    "position_w16": 27.015,
+    "position_w32": 27.01,
+    "recency_h128": 27.211,
+    "position_w8_recency_h128": 27.091,
+    "recency_h512": 27.173,
+    "position_w8_recency_h512": 27.104,
+    "recency_h2048": 27.127,
+    "position_w8_recency_h2048": 27.089
+   },
+   "best_fixed": {
+    "drafts": 6,
+    "tokens_per_s": 25.521
+   },
+   "oracle_tokens_per_s": 30.084
+  }
+ },
+ "feature_study_output": [
+  "== 31b sampled: dev rows 18105, held rows 15840",
+  "  M0 signal bins               logloss 0.4540 brier 0.1162  rule tok/s   26.71 (+0.0%)",
+  "  M1 signal                    logloss 0.4528 brier 0.1167  rule tok/s   26.69 (-0.1%)",
+  "  M2 +drafter shares           logloss 0.4405 brier 0.1136  rule tok/s   26.75 (+0.1%)",
+  "  M3 +position/chain           logloss 0.4399 brier 0.1134  rule tok/s   26.67 (-0.1%)",
+  "  M4 +previous cycle/target    logloss 0.4399 brier 0.1134  rule tok/s   26.70 (-0.0%)",
+  "  GB all features              logloss 0.4234 brier 0.1126  rule tok/s   26.71 (+0.0%)",
+  "  per-cycle oracle over lengths    tok/s   30.08 (+12.6%)",
+  "  true labels (perfect estimates) logloss 0.0000 brier 0.0000  rule tok/s   29.38 (+10.0%)",
+  "  standardized M4 coefficients: signal=+2.55 top=-1.87 margin=+0.58 q=+0.09 position=-0.30 mean_earlier=+0.00 min_earlier=+0.07 prev_accept=+0.04 pending_top=-0.01 pending_entropy=-0.08",
+  "== 31b greedy: dev rows 6720, held rows 3465",
+  "  M0 signal bins               logloss 0.4646 brier 0.1506  rule tok/s   25.40 (+0.0%)",
+  "  M1 signal                    logloss 0.4641 brier 0.1511  rule tok/s   25.41 (+0.0%)",
+  "  M2 +drafter shares           logloss 0.4567 brier 0.1495  rule tok/s   25.43 (+0.1%)",
+  "  M3 +position/chain           logloss 0.4525 brier 0.1480  rule tok/s   25.31 (-0.4%)",
+  "  M4 +previous cycle/target    logloss 0.4545 brier 0.1484  rule tok/s   25.26 (-0.6%)",
+  "  GB all features              logloss 0.4624 brier 0.1566  rule tok/s   25.36 (-0.2%)",
+  "  per-cycle oracle over lengths    tok/s   28.35 (+11.6%)",
+  "  true labels (perfect estimates) logloss 0.0000 brier 0.0000  rule tok/s   27.63 (+8.7%)",
+  "== 26b sampled: dev rows 18720, held rows 16695",
+  "  M0 signal bins               logloss 0.4555 brier 0.1165  rule tok/s   87.39 (+0.0%)",
+  "  M1 signal                    logloss 0.4561 brier 0.1177  rule tok/s   87.25 (-0.2%)",
+  "  M2 +drafter shares           logloss 0.4459 brier 0.1151  rule tok/s   87.35 (-0.0%)",
+  "  M3 +position/chain           logloss 0.4435 brier 0.1142  rule tok/s   87.14 (-0.3%)",
+  "  M4 +previous cycle/target    logloss 0.4432 brier 0.1142  rule tok/s   87.10 (-0.3%)",
+  "  GB all features              logloss 0.4209 brier 0.1091  rule tok/s   87.81 (+0.5%)",
+  "  per-cycle oracle over lengths    tok/s  111.23 (+27.3%)",
+  "  true labels (perfect estimates) logloss 0.0000 brier 0.0000  rule tok/s  102.12 (+16.9%)",
+  "  standardized M4 coefficients: signal=+2.51 top=-1.39 margin=+0.28 q=+0.01 position=-0.15 mean_earlier=-0.09 min_earlier=+0.11 prev_accept=-0.00 pending_top=-0.09 pending_entropy=-0.12",
+  "== 26b greedy: dev rows 6510, held rows 3585",
+  "  M0 signal bins               logloss 0.4310 brier 0.1382  rule tok/s   85.40 (+0.0%)",
+  "  M1 signal                    logloss 0.4316 brier 0.1384  rule tok/s   85.71 (+0.4%)",
+  "  M2 +drafter shares           logloss 0.4280 brier 0.1383  rule tok/s   85.17 (-0.3%)",
+  "  M3 +position/chain           logloss 0.4256 brier 0.1379  rule tok/s   85.22 (-0.2%)",
+  "  M4 +previous cycle/target    logloss 0.4254 brier 0.1378  rule tok/s   85.02 (-0.4%)",
+  "  GB all features              logloss 0.4298 brier 0.1434  rule tok/s   84.34 (-1.2%)",
+  "  per-cycle oracle over lengths    tok/s  111.18 (+30.2%)",
+  "  true labels (perfect estimates) logloss 0.0000 brier 0.0000  rule tok/s  102.34 (+19.8%)"
+ ],
+ "lookahead_output": [
+  "== 31b sampled: lookahead rules with signal-bin estimates (future acceptance assumed 0.70)",
+  "  marginal (production)            26.71",
+  "  lookahead 2 future=same as current    26.81 (+0.4%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 2 future=population mean    26.85 (+0.5%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 4 future=same as current    26.84 (+0.5%)   with perfect estimates -0.0% vs marginal-perfect",
+  "  lookahead 4 future=population mean    26.90 (+0.7%)   with perfect estimates -0.0% vs marginal-perfect",
+  "  lookahead 8 future=same as current    26.92 (+0.8%)   with perfect estimates -0.0% vs marginal-perfect",
+  "  lookahead 8 future=population mean    26.90 (+0.7%)   with perfect estimates -0.0% vs marginal-perfect",
+  "== 31b greedy: lookahead rules with signal-bin estimates (future acceptance assumed 0.70)",
+  "  marginal (production)            25.40",
+  "  lookahead 2 future=same as current    25.42 (+0.0%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 2 future=population mean    25.43 (+0.1%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 4 future=same as current    25.38 (-0.1%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 4 future=population mean    25.43 (+0.1%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 8 future=same as current    25.38 (-0.1%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 8 future=population mean    25.43 (+0.1%)   with perfect estimates +0.0% vs marginal-perfect",
+  "== 26b sampled: lookahead rules with signal-bin estimates (future acceptance assumed 0.70)",
+  "  marginal (production)            87.39",
+  "  lookahead 2 future=same as current    87.50 (+0.1%)   with perfect estimates +0.8% vs marginal-perfect",
+  "  lookahead 2 future=population mean    87.39 (+0.0%)   with perfect estimates +0.8% vs marginal-perfect",
+  "  lookahead 4 future=same as current    87.45 (+0.1%)   with perfect estimates +0.8% vs marginal-perfect",
+  "  lookahead 4 future=population mean    87.39 (+0.0%)   with perfect estimates +0.8% vs marginal-perfect",
+  "  lookahead 8 future=same as current    87.45 (+0.1%)   with perfect estimates +0.9% vs marginal-perfect",
+  "  lookahead 8 future=population mean    87.39 (+0.0%)   with perfect estimates +0.8% vs marginal-perfect",
+  "== 26b greedy: lookahead rules with signal-bin estimates (future acceptance assumed 0.72)",
+  "  marginal (production)            85.40",
+  "  lookahead 2 future=same as current    85.40 (+0.0%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 2 future=population mean    85.40 (+0.0%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 4 future=same as current    85.35 (-0.1%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 4 future=population mean    85.40 (+0.0%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 8 future=same as current    85.35 (-0.1%)   with perfect estimates +0.0% vs marginal-perfect",
+  "  lookahead 8 future=population mean    85.40 (+0.0%)   with perfect estimates +0.0% vs marginal-perfect"
+ ],
+ "findings": [
+  "Reach-weighted calibration of the production table is accurate: bins within 0.00-0.05 of the labels, positions within noise, Brier 0.12 sampled / 0.15 greedy. An unweighted per-position average (deep positions apparently overestimated) is an artefact of chains that never reach those positions.",
+  "Held-out replay vs production: no siblings -1.8/-4.0% (31B sampled/greedy), -0.1/0.0% (26B); frozen prior -0.8 to -3.8%; position-aware tables 0 to -1.8%; recency weighting -0.7 to +0.4%; best fixed length -2.5 to -5.9%; per-cycle oracle +8 to +30%.",
+  "Drafter top-1/margin/q, position, earlier signals, previous-cycle acceptance and the target pending-token confidence lower held-out log loss 3-7% but move rule throughput -0.6 to +0.4%. Lookahead stopping rules: -0.1 to +0.8%.",
+  "With perfect estimates the same rule gains +10% (31B sampled) of a +12.6% oracle; 26B +17% of +27%. The remaining headroom is information only verification provides."
+ ]
+}

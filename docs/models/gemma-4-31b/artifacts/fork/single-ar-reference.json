@@ -1,0 +1,227 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.7-200.fc44.x86_64",
+      "memoryTotalBytes": 133610647552,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "8b3d0a6355518b274a90b737c79631a4da9653721411bc60e4d6847f4605ebcb",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-26",
+  "mode": null,
+  "model": {
+    "id": "Gemma-4-31B-It",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: fork-llama-server version: 0.4.1-dev (build 11195, commit 8c1c282ec)",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.137 tokens/word, template overhead 13 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 1,
+          "completion_sha256": "dc9b74426d387db3e3480f6fd54728dfce4aecbf9327cbc0fd10f4344fb556b8",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        }
+      ],
+      "pp": 293.92,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.53,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 12259,
+          "completion_sha256": "f16aa4b54ee05750816dc311c50ee351ae96c3e1a12507e920611ee0751742d9",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2063
+        }
+      ],
+      "pp": 220.65,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 9.87,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 131279,
+          "completion_sha256": "e6c808f3ec37c65739915675adac29f6c3c88d379d45e2bf5e1c109c0f083e45",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2073
+        }
+      ],
+      "pp": 74.0,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 6.1,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 16387,
+          "completion_sha256": "bca32753f121c01ed488d8db69032fdd02a501cd693a78ab2e71929bc9cbd534",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2049
+        }
+      ],
+      "pp": 211.76,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 9.58,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 32804,
+          "completion_sha256": "1c5c6763ac1fa18cd5668f19c8421d4ffe8376fe213055e55308eb8a0ebfc2dc",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2048
+        }
+      ],
+      "pp": 164.54,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 8.93,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 4076,
+          "completion_sha256": "555c615f367386f3a0cdee724f32b20b9355ef722b26075c3640d9ea222ccb09",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2052
+        }
+      ],
+      "pp": 259.83,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.29,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 65645,
+          "completion_sha256": "f6499c7abfc4120f0abfbc033c5c24c8cce8ad3e6fe1e0e85f2fb732c803cfc7",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2075
+        }
+      ],
+      "pp": 117.97,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 7.74,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "8192": {
+      "command": "fork-llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 48077 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 8179,
+          "completion_sha256": "de0e9dd0e743a2327d41c5d197ae54a18240483c4b50377b1148b85e86f82b55",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2059
+        }
+      ],
+      "pp": 243.79,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.01,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "fork-llama-server",
+      "-m",
+      "gemma-4-31B-it-UD-Q4_K_XL.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "48077",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "2d9ed3ece2a41089d649033323d30a4ef727de87"
+  },
+  "table": "single-ar",
+  "target": "reference"
+}

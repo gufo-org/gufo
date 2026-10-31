@@ -1,0 +1,138 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.7-200.fc44.x86_64",
+      "memoryTotalBytes": 133610651648,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-04",
+  "mode": "mtp",
+  "model": {
+    "id": "Gemma-4-31B-It",
+    "variant": "q8"
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.145 tokens/word, template overhead 13 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 36.12,
+      "acceptance_sd": 3.81,
+      "accepted_per_step": 1.38,
+      "accepted_per_step_sd": 0.15,
+      "command": "llama-server -m gemma-4-31B-it-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 45905 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it-Q8_0.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 1,
+          "completion_sha256": "721f9eea444c1c7fd5c683203fd44b6a291d0178f6d7751abd75aeb60c2ac3ff",
+          "draft_n": 198,
+          "draft_n_accepted": 76,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "d89a2ed25cda81a2661bcc0aea1c535622a70d60feeb9dabaa04f22afe166f92",
+          "draft_n": 204,
+          "draft_n_accepted": 74,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "af8ec3921a43f6db801fa1ed9028c0cfae18c1e7bdf0e979616b7c9544e068de",
+          "draft_n": 204,
+          "draft_n_accepted": 75,
+          "predicted_n": 128,
+          "prompt_n": 2050
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "e901d51f59937a638e91d9de7181514a81df43e2f11984cb78f8a45c37263e3d",
+          "draft_n": 229,
+          "draft_n_accepted": 68,
+          "predicted_n": 128,
+          "prompt_n": 2034
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "8852aa1be004f2459b36ee8d1cd4cdd948fd0417a5f8ca67f1cc3a1a52a90232",
+          "draft_n": 195,
+          "draft_n_accepted": 77,
+          "predicted_n": 128,
+          "prompt_n": 2038
+        }
+      ],
+      "pp": 294.38,
+      "pp_sd": 2.39,
+      "samples": 5,
+      "tg": 12.28,
+      "tg_sd": 0.77,
+      "workload": "story"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "gemma-4-31B-it-UD-Q8_K_XL.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "45905",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-mtp",
+      "--spec-draft-model",
+      "mtp-gemma-4-31B-it-Q8_0.gguf",
+      "--spec-draft-ngl",
+      "999",
+      "--spec-draft-n-max",
+      "4"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "7b88d9439002c608cfcf69b63323e012f9c2b5d7"
+  },
+  "table": "single-mtp-sampled-q8",
+  "target": "reference"
+}

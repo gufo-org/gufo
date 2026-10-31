@@ -1,0 +1,7 @@
+[Model Load]: 3.64821 s
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+| Gemma-4-31B-It                   |  17.53 GiB | ROCm (HIP) |             pp2048 |        559.11 ± 0.00 |
+Gemma 4 tg depth=0 cycles=40 drafted=113 accepted=87 lookup_proposed=35 lookup_accepted=35 text= a own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own own
+| Gemma-4-31B-It                   |  17.53 GiB | ROCm (HIP) |              tg128 |         31.41 ± 0.00 |
+

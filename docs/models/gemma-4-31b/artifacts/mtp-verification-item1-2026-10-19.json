@@ -1,0 +1,281 @@
+{
+ "metadata": {
+  "date": "2026-10-19",
+  "baseline_revision": "eb17a526",
+  "hardware": "AMD Strix Halo gfx1151",
+  "compiler": "hipClang via nix develop, -O3 -fno-fast-math -ffp-contract=off --offload-arch=gfx1151",
+  "probe_method": "Load-only kernels in the GemvKernel launch shape (16 rows per wave, 8-wave blocks, production rotation and one-super-block prefetch), checksummed loads, rotating weight copies totaling >=128 MiB, median of nine timed samples of 64 launches. Full kernel: HEAD vs a slab-walk rewrite in one binary, five to seven alternating A/B rounds of four copy rotations; correctness gate gemma4.projection_ops (width invariance + FP64 oracle) on the rewritten tree; cold op-test medians of two runs (40 iterations each, 256-MiB rotation).",
+  "harness_note": "A two-arm one-binary A/B whose arms include copies of the same headers must give every copy a unique include guard: with the stock guard, the second arm's pack header is suppressed and its PackKernel compiles against the first arm's pack layout - output values silently change, timings do not. Root cause and evidence: include-guard collision confirmed by -save-temps inspection and HIP dispatch traces (the correct kernel names dispatch; the pack helper body is the base one).",
+  "work_directory": "/tmp/gemma-item1"
+ },
+ "load_only_probes_us_and_gbs": {
+  "note": "P1 production per-lane row loads; P2 cooperative 4x128B full lines; P3 16x32B uniform pairs; P4 8x64B runs; P6 gridDim.y k-splits (S); P9 AR-GEMV structure replica (4 rows/wave, contiguous slices); P11 shared-16-row contiguous slabs (S waves); P12 slabs + full-line phase loads; P8 linear stream control.",
+  "5376x16384": {
+   "P1": [
+    237.0,
+    209.1
+   ],
+   "P2": [
+    237.0,
+    209.1
+   ],
+   "P3": [
+    235.7,
+    210.2
+   ],
+   "P4": [
+    238.1,
+    208.1
+   ],
+   "P6-2": [
+    236.7,
+    209.4
+   ],
+   "P6-4": [
+    250.3,
+    197.9
+   ],
+   "P6-8": [
+    262.7,
+    188.6
+   ],
+   "P9": [
+    218.1,
+    227.2
+   ],
+   "P11-8": [
+    229.2,
+    216.2
+   ],
+   "P11-4": [
+    248.8,
+    199.2
+   ],
+   "P11-2": [
+    278.8,
+    177.7
+   ],
+   "P12": [
+    243.9,
+    203.1
+   ],
+   "P8": [
+    206.1,
+    240.4
+   ]
+  },
+  "8192x5376": {
+   "P1": [
+    117.0,
+    211.8
+   ],
+   "P2": [
+    116.5,
+    212.7
+   ],
+   "P3": [
+    116.7,
+    212.3
+   ],
+   "P4": [
+    116.5,
+    212.6
+   ],
+   "P6-2": [
+    119.6,
+    207.2
+   ],
+   "P6-4": [
+    121.0,
+    204.7
+   ],
+   "P6-8": [
+    119.5,
+    207.3
+   ],
+   "P9": [
+    110.3,
+    224.6
+   ],
+   "P11-8": [
+    115.6,
+    214.2
+   ],
+   "P11-4": [
+    118.3,
+    209.4
+   ],
+   "P11-2": [
+    119.5,
+    207.4
+   ],
+   "P8": [
+    106.5,
+    232.7
+   ]
+  },
+  "43008x5376": {
+   "P1": [
+    620.9,
+    209.5
+   ],
+   "P9": [
+    549.8,
+    236.5
+   ],
+   "P11-8": [
+    576.9,
+    225.4
+   ],
+   "P11-4": [
+    589.6,
+    220.6
+   ],
+   "P11-2": [
+    611.1,
+    212.8
+   ],
+   "P8": [
+    529.3,
+    245.7
+   ]
+  }
+ },
+ "slab_kernel_ab_delta_percent": {
+  "description": "16-row blocks x 8 waves, wave w reduces contiguous super-block slab w; per-lane loads unchanged; pack fragment-major so A fragments load contiguously across lanes; per-slab partials summed in slab order; projection_ops passes (37/37, FP64 <= 9.1e-8).",
+  "5376x16384": {
+   "1": -2.2,
+   "5": -1.0,
+   "8": -1.4,
+   "9": 7.0,
+   "16": 7.9
+  },
+  "8192x5376": {
+   "1": 17.7,
+   "5": 20.8,
+   "8": 21.0,
+   "9": 21.1,
+   "16": 22.9
+  },
+  "43008x5376": {
+   "1": 16.8,
+   "5": 20.4,
+   "8": 20.8,
+   "9": 35.5,
+   "16": 38.7
+  },
+  "5376x21504": {
+   "1": -0.5,
+   "5": 0.7,
+   "8": -0.6,
+   "9": 14.9,
+   "16": 12.8
+  },
+  "5376x8192": {
+   "1": 6.6,
+   "5": 8.4,
+   "8": 9.0,
+   "9": 18.7,
+   "16": 21.7
+  }
+ },
+ "op_test_cold_delta_percent_one_five_sixteen_rows": {
+  "note": "Medians of two full gemma4.projection_ops runs per arm, all 37 shapes; positive means the slab kernel is slower.",
+  "Q4_K 8192x5376": [
+   19.6,
+   23.3,
+   22.4
+  ],
+  "Q4_K 4096x5376": [
+   29.8,
+   37.0,
+   35.9
+  ],
+  "Q4_K 18432x5376": [
+   16.8,
+   20.3,
+   31.9
+  ],
+  "Q4_K 43008x5376": [
+   17.5,
+   21.3,
+   39.7
+  ],
+  "Q4_K 5376x8192": [
+   6.7,
+   10.3,
+   21.5
+  ],
+  "Q4_K 5376x16384": [
+   -2.4,
+   -0.8,
+   8.3
+  ],
+  "Q4_K 5376x21504": [
+   0.7,
+   0.8,
+   13.0
+  ],
+  "Q4_K 4100x5376": [
+   30.5,
+   36.6,
+   36.0
+  ],
+  "Q4_K 4100x21504": [
+   3.0,
+   4.2,
+   20.2
+  ],
+  "Q5_K 43008x5376": [
+   10.2,
+   13.4,
+   56.1
+  ],
+  "Q5_K 4100x21504": [
+   1.8,
+   2.3,
+   30.0
+  ],
+  "Q6_K 4096x5376": [
+   23.1,
+   23.8,
+   40.8
+  ],
+  "Q6_K 5376x21504": [
+   1.8,
+   1.2,
+   16.3
+  ],
+  "Q6_K 4100x5376": [
+   22.7,
+   24.8,
+   41.7
+  ],
+  "Q4_0 43008x5376": [
+   3.4,
+   5.3,
+   38.6
+  ],
+  "Q4_0 4100x21504": [
+   7.1,
+   7.1,
+   16.9
+  ],
+  "Q4_K 262144x2816": [
+   29.0,
+   32.3,
+   58.9
+  ],
+  "Q6_K 262144x2816": [
+   37.8,
+   43.1,
+   83.4
+  ],
+  "Q4_0 262144x2816": [
+   10.0,
+   10.2,
+   39.6
+  ]
+ },
+ "verdict": "Rejected. The walk-geometry gain (209 -> 216-225 GB/s load-side at eight contiguous slabs) cannot pay for the per-wave activation-tile reads (~3.5x the weight bytes through L2 versus one shared LDS staging). Only 5376x16384 at one to five rows improves (-0.8 to -2.4%). The load-pattern and occupancy levers for item 1 are now measured dead; what remains is structural to 16-row B tiles plus the ~7% math term."
+}

@@ -1,0 +1,78 @@
+[
+  {
+    "image": "chart-1296x1968.png",
+    "server": "gufo-1120",
+    "runs": [
+      {
+        "prompt_tokens": 1161,
+        "cold_ttft_s": 1.633494592999341,
+        "cold_prompt_ms": 1524.222164,
+        "decode_tok_s": 51.50085576276275,
+        "follow_ttft_s": 0.1511283039872069,
+        "follow_cached_tokens": 1154,
+        "answer": "A composite image titled \"Test Images\" at the top, containing a grid of 24 diverse photographs, followed by two color calibration charts labeled \"Grayscales\" and \"Primary Colors.\"\n\n### Top Section: Te"
+      },
+      {
+        "prompt_tokens": 1158,
+        "cold_ttft_s": 1.6250317490193993,
+        "cold_prompt_ms": 1516.784052,
+        "decode_tok_s": 51.518755442362824,
+        "follow_ttft_s": 0.150418728007935,
+        "follow_cached_tokens": 1151,
+        "answer": "A composite image titled \"Test Images\" at the top, containing a grid of 24 diverse photographs, followed by two color calibration charts labeled \"Grayscales\" and \"Primary Colors.\"\n\n### Top Section: Te"
+      },
+      {
+        "prompt_tokens": 1159,
+        "cold_ttft_s": 1.6272300919808913,
+        "cold_prompt_ms": 1520.9411249999998,
+        "decode_tok_s": 51.48994333102118,
+        "follow_ttft_s": 0.14959955599624664,
+        "follow_cached_tokens": 1152,
+        "answer": "A composite image titled \"Test Images\" at the top, containing a grid of 24 diverse photographs, followed by two color calibration charts labeled \"Grayscales\" and \"Primary Colors.\"\n\n### Top Section: Te"
+      }
+    ],
+    "cold_ttft_s": 1.6272300919808913,
+    "cold_prompt_ms": 1520.9411249999998,
+    "decode_tok_s": 51.50085576276275,
+    "follow_ttft_s": 0.150418728007935,
+    "prompt_tokens": 1161
+  },
+  {
+    "image": "logo-1584x1584.png",
+    "server": "gufo-1120",
+    "runs": [
+      {
+        "prompt_tokens": 1139,
+        "cold_ttft_s": 1.6208531049778685,
+        "cold_prompt_ms": 1501.4136449999999,
+        "decode_tok_s": 51.53923873221723,
+        "follow_ttft_s": 0.16386660700663924,
+        "follow_cached_tokens": 1132,
+        "answer": "A square, pixel-art digital illustration of an owl's head, centered against a dark green, textured background. The owl is depicted in a frontal view, with its large, orange eyes as the focal point. Th"
+      },
+      {
+        "prompt_tokens": 1142,
+        "cold_ttft_s": 1.6326881819986738,
+        "cold_prompt_ms": 1509.5665829999998,
+        "decode_tok_s": 51.39163228418582,
+        "follow_ttft_s": 0.16263864398933947,
+        "follow_cached_tokens": 1135,
+        "answer": "A square, pixel-art digital illustration of an owl's head, centered against a dark green, textured background. The owl is depicted in a frontal view, with its large, orange eyes as the focal point. Th"
+      },
+      {
+        "prompt_tokens": 1142,
+        "cold_ttft_s": 1.628568190993974,
+        "cold_prompt_ms": 1506.6314830000001,
+        "decode_tok_s": 51.53269300473086,
+        "follow_ttft_s": 0.1675946479954291,
+        "follow_cached_tokens": 1135,
+        "answer": "A square, pixel-art digital illustration of an owl's head, centered against a dark green, textured background. The owl is depicted in a frontal view, with its large, orange eyes as the focal point. Th"
+      }
+    ],
+    "cold_ttft_s": 1.628568190993974,
+    "cold_prompt_ms": 1506.6314830000001,
+    "decode_tok_s": 51.53269300473086,
+    "follow_ttft_s": 0.16386660700663924,
+    "prompt_tokens": 1139
+  }
+]

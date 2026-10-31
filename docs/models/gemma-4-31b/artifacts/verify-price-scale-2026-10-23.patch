@@ -1,0 +1,184 @@
+diff --git a/src/models/gemma4/draft_policy.cpp b/src/models/gemma4/draft_policy.cpp
+index 3174a2a1..c4ef0b74 100644
+--- a/src/models/gemma4/draft_policy.cpp
++++ b/src/models/gemma4/draft_policy.cpp
+@@ -21,6 +21,13 @@ namespace {
+ constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
+ constexpr std::array<float, 5> kDraftStepMs = {1.93F, 2.39F, 2.68F, 3.13F,
+                                                4.04F};
++// The ForwardBytes of the UD-Q4_K_XL the verification rows were measured
++// on. Other quantizations scale the depth-0 rows by their bytes over these:
++// measured 2026-10-23 with fixed-length drafts (--draft-trace, medians),
++// UD-Q8_K_XL verification takes 1.72-1.78x UD-Q4_K_XL's at 2-16 rows at d0
++// and 1.56-1.66x at 16K (attention does not grow), against 1.86x by bytes;
++// UD-Q4_K_XL itself 0.91-0.93 of its prices at every row and both depths.
++constexpr std::uint64_t kVerifyReferenceBytes = 18801807360;
+ // Verification rows 2-16 at 4K-64K lowered 2026-10-19 by the measured
+ // global split-attention savings (ten layers).
+ constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
+@@ -165,9 +172,29 @@ DraftCosts Interpolate(
+ 
+ }  // namespace
+ 
+-DraftCosts DraftCostsAt(std::uint32_t context, bool experts) noexcept {
+-  return experts ? Interpolate(context, kExpertDraftStepMs, kExpertVerifyMs)
+-                 : Interpolate(context, kDraftStepMs, kVerifyMs);
++DraftCosts DraftCostsAt(std::uint32_t context, bool experts,
++                        float verify_scale) noexcept {
++  if (experts) {
++    return Interpolate(context, kExpertDraftStepMs, kExpertVerifyMs);
++  }
++  DraftCosts costs = Interpolate(context, kDraftStepMs, kVerifyMs);
++  if (verify_scale != 1.0F) {
++    // The projections' share grows with the weight bytes; attention at
++    // depth does not.
++    const DraftCosts flat = Interpolate(0, kDraftStepMs, kVerifyMs);
++    for (std::size_t r = 0; r < costs.verify.size(); ++r) {
++      costs.verify[r] += (verify_scale - 1.0F) * flat.verify[r];
++    }
++  }
++  return costs;
++}
++
++float VerifyScale(std::uint64_t forward_bytes, bool experts) noexcept {
++  if (experts || forward_bytes == 0) {
++    return 1.0F;
++  }
++  return static_cast<float>(static_cast<double>(forward_bytes) /
++                            static_cast<double>(kVerifyReferenceBytes));
+ }
+ 
+ std::size_t DraftCalibration::Bin(float signal) noexcept {
+diff --git a/src/models/gemma4/draft_policy.hpp b/src/models/gemma4/draft_policy.hpp
+index 969742bc..d8c612a4 100644
+--- a/src/models/gemma4/draft_policy.hpp
++++ b/src/models/gemma4/draft_policy.hpp
+@@ -50,13 +50,21 @@ enum class DraftCalibrationScope : std::uint8_t {
+ /// gfx1151 costs of one cycle in milliseconds at a context depth:
+ /// `draft[n]` for n drafter steps and `verify[r]` for r verified rows, for
+ /// the dense 31B family or the mixture-of-experts 26B-A4B (`experts`).
++/// `verify_scale` scales the dense family's depth-0 verification (its
++/// projections) for a target of another quantization (VerifyScale).
+ struct DraftCosts {
+   std::array<float, 16> draft{};
+   /// Up to kSplitRows rows plus the next one a decision looks at.
+   std::array<float, 18> verify{};
+ };
+ [[nodiscard]] DraftCosts DraftCostsAt(std::uint32_t context,
+-                                      bool experts = false) noexcept;
++                                      bool experts = false,
++                                      float verify_scale = 1.0F) noexcept;
++/// The dense family's verify_scale for a target reading `forward_bytes`
++/// (ModelWeights::ForwardBytes) per forward; 1 for the 26B-A4B, whose
++/// verification grows with the experts each row routes to.
++[[nodiscard]] float VerifyScale(std::uint64_t forward_bytes,
++                                bool experts) noexcept;
+ 
+ /// Signal to acceptance probability, learned from verification: accepted
+ /// drafts and the first rejected one. Each bin starts at its midpoint with
+diff --git a/src/models/gemma4/engine.cpp b/src/models/gemma4/engine.cpp
+index 173421ae..f1df700a 100644
+--- a/src/models/gemma4/engine.cpp
++++ b/src/models/gemma4/engine.cpp
+@@ -238,6 +238,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
+     return nullptr;
+   }
+   m->weights_ = std::make_unique<ModelWeights>(std::move(*weights));
++  m->verify_scale_ = VerifyScale(m->weights_->ForwardBytes(),
++                                 m->weights_->config.HasExperts());
+   if (options.max_context > m->weights_->config.context_length) {
+     Fail(error_msg, "requested context exceeds the model's native " +
+                         std::to_string(m->weights_->config.context_length));
+@@ -1048,7 +1050,8 @@ struct Session::CycleDraft {
+   static DraftCosts SharedCosts(const Session& owner, const Cycle& c,
+                                 const DraftShare* batch_share) {
+     DraftCosts costs =
+-        DraftCostsAt(c.position, owner.model_->config().HasExperts());
++        DraftCostsAt(c.position, owner.model_->config().HasExperts(),
++                     owner.model_->verify_scale_);
+     if (batch_share != nullptr && batch_share->sessions > 1) {
+       for (float& ms : costs.draft) {
+         ms /= static_cast<float>(batch_share->sessions);
+diff --git a/src/models/gemma4/engine.hpp b/src/models/gemma4/engine.hpp
+index 2991a813..50d59aea 100644
+--- a/src/models/gemma4/engine.hpp
++++ b/src/models/gemma4/engine.hpp
+@@ -233,6 +233,8 @@ private:
+   /// forwards while tracing (guarded by mutex_).
+   std::unique_ptr<CycleTrace> trace_;
+   std::uint64_t forwards_{0};
++  /// DraftCostsAt's verify_scale for this target (VerifyScale).
++  float verify_scale_{1.0F};
+   std::shared_ptr<SnapshotMemory> snapshot_memory_;
+ 
+   friend class Session;
+diff --git a/src/models/gemma4/weights.cpp b/src/models/gemma4/weights.cpp
+index 4820b8b1..740c093c 100644
+--- a/src/models/gemma4/weights.cpp
++++ b/src/models/gemma4/weights.cpp
+@@ -253,6 +253,17 @@ std::size_t TensorRef::RowBytes() const noexcept {
+   return f.block == 0 ? 0 : static_cast<std::size_t>(cols / f.block) * f.bytes;
+ }
+ 
++std::uint64_t ModelWeights::ForwardBytes() const noexcept {
++  std::uint64_t bytes = output.SizeBytes();
++  for (const LayerWeights& l : layers) {
++    for (const TensorRef* t : {&l.attn_q, &l.attn_k, &l.attn_v, &l.attn_output,
++                               &l.ffn_gate, &l.ffn_up, &l.ffn_down}) {
++      bytes += t->SizeBytes();
++    }
++  }
++  return bytes;
++}
++
+ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
+                                                std::string* error_msg) {
+   auto config = Config::FromGguf(reader, error_msg);
+diff --git a/src/models/gemma4/weights.hpp b/src/models/gemma4/weights.hpp
+index f850080d..1ddd3319 100644
+--- a/src/models/gemma4/weights.hpp
++++ b/src/models/gemma4/weights.hpp
+@@ -81,6 +81,10 @@ struct ModelWeights {
+   [[nodiscard]] bool TiedOutput() const noexcept {
+     return output.data == token_embd.data;
+   }
++  /// Encoded bytes a forward reads once whatever its rows: the dense
++  /// attention and MLP projections and the vocabulary head (routed experts
++  /// excluded).
++  [[nodiscard]] std::uint64_t ForwardBytes() const noexcept;
+   /// Binds and validates the target. Payloads stay mapped; only headers and
+   /// the tiny F32 scalars are read.
+   [[nodiscard]] static std::optional<ModelWeights> Bind(
+diff --git a/tests/models/gemma4/draft_policy_test.cpp b/tests/models/gemma4/draft_policy_test.cpp
+index 39eac6cd..8a6b390b 100644
+--- a/tests/models/gemma4/draft_policy_test.cpp
++++ b/tests/models/gemma4/draft_policy_test.cpp
+@@ -98,6 +98,28 @@ void CheckCosts() {
+           "expert-model d0 costs");
+   Require(moe.verify[8] / moe.verify[1] > shallow.verify[8] / shallow.verify[1],
+           "expert-model rows are not relatively dearer");
++  // Other dense quantizations scale the depth-0 rows by their forward bytes
++  // (UD-Q8_K_XL's 34998878208 over the measured UD-Q4_K_XL's); attention at
++  // depth and the drafter steps keep their prices.
++  Require(g4::VerifyScale(18801807360, false) == 1.0F &&
++              g4::VerifyScale(34998878208, true) == 1.0F &&
++              g4::VerifyScale(0, false) == 1.0F,
++          "reference and expert verify scales");
++  const float q8 = g4::VerifyScale(34998878208, false);
++  Require(std::fabs(q8 - 1.8615F) < 1e-3F, "UD-Q8_K_XL verify scale");
++  const g4::DraftCosts scaled = g4::DraftCostsAt(0, false, q8);
++  const g4::DraftCosts scaled_deep = g4::DraftCostsAt(16384, false, q8);
++  const g4::DraftCosts plain_deep = g4::DraftCostsAt(16384);
++  for (std::size_t r = 0; r < scaled.verify.size(); ++r) {
++    Require(std::fabs(scaled.verify[r] - q8 * shallow.verify[r]) < 1e-3F,
++            "scaled d0 verification");
++    Require(std::fabs(scaled_deep.verify[r] - plain_deep.verify[r] -
++                      (q8 - 1.0F) * shallow.verify[r]) < 1e-3F,
++            "scaled verification at depth");
++  }
++  Require(scaled.draft == shallow.draft, "scaled drafter steps");
++  Require(g4::DraftCostsAt(0, true, q8).verify == moe.verify,
++          "expert-model costs scaled");
+ }
+ 
+ void CheckChain() {
