@@ -747,7 +747,10 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
       --fail-on-target-ownership)
-  set_tests_properties(check_extension_isolation_test extension_isolation_report
+  # The checker's own tests scan the tree many times: about 25 s on Linux.
+  set_tests_properties(check_extension_isolation_test PROPERTIES
+    LABELS "cpu;repository" TIMEOUT 180)
+  set_tests_properties(extension_isolation_report
     extension_core_model_includes_gate extension_family_graph_gate
     extension_serving_boundary_gate extension_target_ownership_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)

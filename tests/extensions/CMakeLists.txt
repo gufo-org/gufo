@@ -34,7 +34,10 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     set_tests_properties(extension_cli_provenance_test PROPERTIES LABELS "cpu;extensions")
     add_test(NAME extension_discovery_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/discovery_test.py)
-    set_tests_properties(extension_discovery_test PROPERTIES LABELS "cpu;extensions" TIMEOUT 180)
+    # Nested projects configure and build repeatedly; Windows needs the headroom.
+    # They use the build's own compiler instead of whichever one CMake finds.
+    set_tests_properties(extension_discovery_test PROPERTIES LABELS "cpu;extensions" TIMEOUT 900
+      ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}")
     add_test(NAME extension_api_policy_test COMMAND ${Python3_EXECUTABLE}
       ${PROJECT_SOURCE_DIR}/tests/tools/check_extension_api_test.py)
     add_test(NAME extension_api_surface COMMAND ${Python3_EXECUTABLE}
@@ -42,7 +45,8 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     set_tests_properties(extension_api_policy_test extension_api_surface PROPERTIES LABELS "cpu;extensions")
     add_test(NAME extension_metadata_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/metadata_test.py)
-    set_tests_properties(extension_metadata_test PROPERTIES LABELS "cpu;extensions" TIMEOUT 60)
+    set_tests_properties(extension_metadata_test PROPERTIES LABELS "cpu;extensions" TIMEOUT 300
+      ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}")
     if(NOT WIN32)
       add_test(NAME extension_schema_test COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_LIST_DIR}/metadata_test.py --schema)

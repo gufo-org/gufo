@@ -133,8 +133,8 @@ class ConfigureTests(unittest.TestCase):
             source = Path(temp)
             cmake = ["cmake_minimum_required(VERSION 3.21)", "project(extension_edges LANGUAGES CXX)",
                      f'set(PROJECT_SOURCE_DIR "{ROOT.as_posix()}")', "find_package(Threads REQUIRED)",
-                     f'add_subdirectory("{ROOT}/src/core/platform" platform)',
-                     f'add_subdirectory("{ROOT}/src/ext" runtime)', f'include("{MODULE}")']
+                     f'add_subdirectory("{ROOT.as_posix()}/src/core/platform" platform)',
+                     f'add_subdirectory("{ROOT.as_posix()}/src/ext" runtime)', f'include("{MODULE.as_posix()}")']
             names = ("off", "no", "false", "ignore", "notfound", "namespace")
             for name in names:
                 # C++ false is a keyword, so exercise it as metadata only.
