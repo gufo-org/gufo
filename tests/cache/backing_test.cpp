@@ -439,6 +439,14 @@ void OnDemandBacking() {
     assert(single && pool.BlockCount() == 4);
     assert(single->Bytes().data() == first->Bytes().data() + block_bytes ||
            first->Bytes().data() == single->Bytes().data() + block_bytes);
+    // Segments start on the 2 MiB blocks GPU registration tracks: unmapping
+    // a neighbour inside a segment's first or last block stalls the GPU.
+    const auto registration_aligned = [](const std::byte* data) {
+      return reinterpret_cast<std::uintptr_t>(data) % (2 << 20) == 0;
+    };
+    assert(registration_aligned(
+               std::min(first->Bytes().data(), single->Bytes().data())) &&
+           registration_aligned(pair->Bytes().data()));
     // A refused segment leaves the pool as it is; capture is declined.
     admit = false;
     assert(!pool.TryAcquire(Category::kPrivateTail));
@@ -455,6 +463,7 @@ void OnDemandBacking() {
     auto last = pool.TryAcquire(Category::kPrivateTail);
     assert(last && pool.BlockCount() == pages &&
            pool.PageCommitAllocations() == 3);
+    assert(registration_aligned(last->Bytes().data()));
     assert(pool.CommittedBytes() == pages * block_bytes);
     assert(!pool.TryAcquire(Category::kPrivateTail));
     assert(pool.PageCommitAllocations() == 3);

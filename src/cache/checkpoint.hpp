@@ -274,8 +274,14 @@ public:
   [[nodiscard]] std::size_t NewPayloadBytes(
       std::span<const ComponentPosition>) const;
   [[nodiscard]] static std::size_t ChunkMetadataBytes();
+  // This branch captured the checkpoint or was restored from it (among its
+  // latest kRecordedCheckpoints), so its slot computed or loaded exactly those
+  // rows; whether they remain is the adapter's ResidentRows.
+  [[nodiscard]] bool Contains(CheckpointId) const noexcept;
+  static constexpr std::size_t kRecordedCheckpoints = 32;
 
 private:
+  void Record(CheckpointId) noexcept;
   struct Entry {
     // Weak handles retain a control block, so keep its metadata charge too.
     ResourceCharge metadata;
@@ -304,6 +310,8 @@ private:
   // Ordered by component and first row. Restored and newly captured entries
   // are sorted before publication; pruning preserves the order.
   std::vector<Entry> entries_;
+  std::array<CheckpointId, kRecordedCheckpoints> recorded_{};
+  std::size_t recorded_count_{};
 };
 }  // namespace gufo::cache
 #endif

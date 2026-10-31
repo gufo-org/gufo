@@ -51,10 +51,13 @@ struct ComponentCacheResources {
   std::function<std::size_t()> pinned_bytes;
   cache::PersistenceSource::CopyRows copy_observed_rows;
   // At most this many transfers of one capture/restore are in flight before
-  // waiting (16 at most). When the shared pool is momentarily exhausted, the
+  // waiting (256 at most). When the shared pool is momentarily exhausted, the
   // batch settles its own leases and retries. One keeps generic providers
   // usable without a pool-capacity contract.
   std::size_t transfer_batch_size{1};
+  // The adapter's transfers do not run on the stream they are given: one
+  // lease then serves a whole batch, whose size the pool no longer bounds.
+  bool transfers_share_stream{false};
   std::size_t reassignment_batch_size{1};
 };
 

@@ -167,7 +167,8 @@ bool SameJob(const DiskManifest& a, const DiskManifest& b) {
         x.descriptor.kind != y.descriptor.kind ||
         x.descriptor.row_bytes != y.descriptor.row_bytes ||
         x.descriptor.rows_per_chunk != y.descriptor.rows_per_chunk ||
-        x.descriptor.state_bytes != y.descriptor.state_bytes)
+        x.descriptor.state_bytes != y.descriptor.state_bytes ||
+        x.descriptor.window_rows != y.descriptor.window_rows)
       return false;
   }
   return true;
@@ -479,7 +480,8 @@ bool StreamedStore::Restore(
           descriptor->row_bytes != c.descriptor.row_bytes ||
           descriptor->rows_per_chunk != c.descriptor.rows_per_chunk ||
           descriptor->state_bytes != c.descriptor.state_bytes ||
-          (descriptor->kind == ComponentKind::kAppendRows &&
+          descriptor->window_rows != c.descriptor.window_rows ||
+          (HasRows(descriptor->kind) &&
            descriptor->row_bytes > impl_->staging.bytes.size()))
         throw std::invalid_argument("checkpoint component layout mismatch");
       positions.push_back(c.position);
@@ -498,10 +500,10 @@ bool StreamedStore::Restore(
     Prefetcher prefetch(*impl_->disk, *snapshot, std::move(items));
     std::size_t reading{};
     for (const auto& c : manifest.components) {
-      Rows first{};
+      Rows first = FirstChunkRow(c.descriptor, c.position.valid_rows);
       std::size_t staged{};
       auto rows = impl_->staging.bytes;
-      if (c.descriptor.kind == ComponentKind::kAppendRows)
+      if (HasRows(c.descriptor.kind))
         rows = rows.first(rows.size() / c.descriptor.row_bytes *
                           c.descriptor.row_bytes);
       const auto flush = [&] {

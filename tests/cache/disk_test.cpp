@@ -701,6 +701,72 @@ void VerifiedDependencies() {
   assert(retire() == settled);
 }
 }  // namespace
+// A window manifest lists the chunks from its window's first row, uses the
+// window format version and size, and shares chunk files with other
+// manifests at different list positions. Window 3 rows, chunks of 2.
+DiskManifest Windowed(Rows rows, std::vector<unsigned> chunks, unsigned tail,
+                      unsigned checkpoint) {
+  DiskManifest m;
+  m.checkpoint = {checkpoint};
+  m.lineage = {3};
+  m.compatibility.fill(0x42);
+  m.tokens.assign(rows, 17);
+  DiskComponent window{{{1}, 4, ComponentKind::kWindowRows, 4, 2, 0, 3},
+                       {{1}, rows},
+                       {},
+                       {},
+                       {}};
+  for (auto id : chunks)
+    window.chunks.push_back({Id(id), 8, 90 + id});
+  if (tail)
+    window.tail = DiskPayload{Id(tail), 4, 90 + tail};
+  m.components.push_back(window);
+  m.components.push_back({{{2}, 5, ComponentKind::kPrivateState, 0, 0, 16},
+                          {{2}, rows},
+                          {},
+                          {},
+                          DiskPayload{Id(100 + checkpoint), 16, 101}});
+  return m;
+}
+void WindowFormat() {
+  const auto eight = Windowed(8, {1, 2}, 0, 7);  // Chunks [4, 6) and [6, 8).
+  auto encoded = EncodeManifest(eight);
+  assert(encoded[8] == kDiskWindowFormatVersion);
+  auto decoded = DecodeManifest(encoded);
+  assert(decoded.components[0].descriptor.window_rows == 3);
+  assert(decoded.components[0].chunks == eight.components[0].chunks);
+  assert(EncodeManifest(decoded) == encoded);
+  for (std::size_t i = 0; i < encoded.size(); ++i)
+    Reject([&] { (void)DecodeManifest(std::span(encoded).first(i)); });
+  // Window components need the window format version.
+  auto old = encoded;
+  old[8] = kDiskFormatVersion;
+  const auto checksum = DiskChecksum(std::span(old).first(old.size() - 8));
+  for (unsigned i = 0; i < 8; ++i)
+    old[old.size() - 8 + i] = (checksum >> (8 * i)) & 255;
+  Reject([&] { (void)DecodeManifest(old); });
+  // Chunks start at the window's first chunk, never at row 0.
+  Reject([&] { (void)EncodeManifest(Windowed(8, {1}, 0, 7)); });
+  Reject([&] { (void)EncodeManifest(Windowed(8, {9, 1, 2}, 0, 7)); });
+  auto unsized = eight;
+  unsized.components[0].descriptor.window_rows = 0;
+  Reject([&] { (void)EncodeManifest(unsized); });
+  // Chunk [6, 8) is second in one manifest and first in the other.
+  Directory d;
+  {
+    DiskStore init(ledger, d.path, UINT64_MAX);
+  }
+  const auto nine = Windowed(9, {2}, 3, 8);  // Chunk [6, 8) and row 8.
+  for (const auto* m : {&eight, &nine})
+    Payloads(d.path, *m);
+  Put(d.path, eight, 7);
+  Put(d.path, nine, 8);
+  {
+    DiskStore store(ledger, d.path, UINT64_MAX);
+    assert(store.Entries().size() == 2);
+    assert(store.Stats().rejected_manifests == 0);
+  }
+}
 int main() {
   Format();
   ChecksumReference();
@@ -716,6 +782,7 @@ int main() {
   RootSymlinks();
   ParentPathResolution();
   MetadataAdmission();
+  WindowFormat();
   assert(ledger.Snapshot().total_bytes == 0);
   std::cout << "disk format, ownership and metadata index passed\n";
 }

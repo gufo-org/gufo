@@ -16,7 +16,7 @@ namespace gufo::cache::testing {
 struct FakeTransfer;
 struct FakeStreamState;
 
-inline constexpr ComponentId kTarget{1}, kDraft{2}, kRecurrent{3};
+inline constexpr ComponentId kTarget{1}, kDraft{2}, kRecurrent{3}, kWindow{4};
 
 // Deterministic single-threaded FIFO stream. A delayed stream advances only
 // through Advance, Wait, Synchronize or completion destruction; no wall clock.
@@ -46,6 +46,12 @@ class FakeAdapter final : public Adapter {
 public:
   // Wider chunks need less capture metadata for the same row bytes.
   explicit FakeAdapter(Rows rows_per_chunk = 4);
+  // Opt in to a fourth, windowed component (kWindow) that mirrors the target
+  // tokens in a ring of ring_rows slots, like sliding-window attention: a
+  // continuation reads the last window_rows, and appending past the ring
+  // evicts the oldest rows. Requires ring_rows % 4 == 0 and room for a whole
+  // window plus a partial leading chunk.
+  FakeAdapter(Rows window_rows, Rows ring_rows);
   [[nodiscard]] Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const ComponentDescriptor> Components()
       const override;
@@ -60,6 +66,13 @@ public:
   [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
       const Slot&, Rows boundary) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
+  // Opt-in in-place restore: append rows stay while the slot holds them and
+  // window rows while their ring slots still hold them.
+  void SetInPlaceRestore(bool enabled) noexcept { in_place_ = enabled; }
+  [[nodiscard]] std::vector<ResidentRange> ResidentRows(
+      const Slot&, std::span<const ComponentPosition>) const override;
+  void BeginRestore(Slot&, std::span<const ComponentPosition>,
+                    std::span<const ResidentRange> kept) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
                                           Stream&) override;
@@ -95,6 +108,9 @@ public:
   void GuardRows(Slot&, ComponentId, Rows first, Rows end);
   void FailNextAllocation() noexcept;
   void FailNextTransfer() noexcept;
+  // Window rows a continuation reads, from the ring; throws if any of them
+  // were evicted or never loaded.
+  [[nodiscard]] std::vector<Token> WindowTokens(const Slot&) const;
   [[nodiscard]] std::size_t Invalidations() const noexcept {
     return invalidations_.load(std::memory_order_relaxed);
   }
@@ -104,7 +120,9 @@ private:
                                       std::function<TransferResult()>);
   [[nodiscard]] Completion SubmitLoad(Slot&, Stream&,
                                       std::function<TransferResult()>);
-  std::array<ComponentDescriptor, 3> components_;
+  std::vector<ComponentDescriptor> components_;
+  Rows ring_rows_{0};
+  bool in_place_{false};
   bool fail_allocation_{false};
   bool fail_transfer_{false};
   std::atomic<std::size_t> invalidations_{};

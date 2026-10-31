@@ -567,6 +567,27 @@ public:
   }
   bool Invalidate(Slot& s) noexcept override { return fake.Invalidate(s); }
 };
+// Registered ranges widen the fast-path hull; a mutation inside it that
+// touches no range must leave them valid, and one touching a range must not
+// be skipped, whether it lies below, between or above the registrations.
+void GuardHull() {
+  Fixture f;
+  const auto observe = [&](Rows first, Rows end) {
+    return f.lease.Observe(
+        kTarget, first, end,
+        f.adapter.BorrowRowsView(f.lease.Execution(), kTarget, first, end));
+  };
+  auto high = observe(4, 5);
+  auto low = observe(0, 1);
+  f.adapter.GuardRows(f.lease.Execution(), kTarget, 1, 4);
+  assert(high->IsValid() && low->IsValid());
+  f.adapter.GuardRows(f.lease.Execution(), kDraft, 0, 5);
+  assert(high->IsValid() && low->IsValid());
+  f.adapter.GuardRows(f.lease.Execution(), kTarget, 0, 1);
+  assert(high->IsValid() && !low->IsValid());
+  f.adapter.GuardRows(f.lease.Execution(), kTarget, 3, 5);
+  assert(!high->IsValid());
+}
 void MissedGuard() {
 #ifndef NDEBUG
   const auto child = fork();
@@ -637,6 +658,7 @@ int main() {
   CancellationSteps();
   TeardownAndCancelledAdmission();
   ConcurrentValidityDuringTeardown();
+  GuardHull();
   MissedGuard();
   std::cout << "slot leases and mutation checks passed\n";
 }

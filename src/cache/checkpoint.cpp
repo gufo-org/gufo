@@ -49,12 +49,13 @@ void ValidateDescriptors(std::span<const ComponentDescriptor> descriptors) {
     for (std::size_t j = 0; j < i; ++j)
       if (d.id == descriptors[j].id)
         throw std::invalid_argument("duplicate checkpoint component");
-    if (d.kind == ComponentKind::kAppendRows) {
-      if (!d.row_bytes || !d.rows_per_chunk || d.state_bytes)
+    if (HasRows(d.kind)) {
+      if (!d.row_bytes || !d.rows_per_chunk || d.state_bytes ||
+          (d.kind == ComponentKind::kWindowRows) != (d.window_rows != 0))
         throw std::invalid_argument("invalid append component geometry");
       (void)Bytes(d.rows_per_chunk, d.row_bytes);
     } else if (d.kind != ComponentKind::kPrivateState || !d.state_bytes ||
-               d.row_bytes || d.rows_per_chunk) {
+               d.row_bytes || d.rows_per_chunk || d.window_rows) {
       throw std::invalid_argument("invalid private component geometry");
     }
   }
@@ -418,6 +419,7 @@ ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
   if (entries_reservation)
     history.entries_metadata_ = entries_reservation.Convert();
   history.tokens_metadata_ = tokens_reservation.Convert();
+  history.Record(checkpoint.id_);
   return history;
 }
 std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
@@ -452,9 +454,13 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
     if (!positions_.empty() && p.valid_rows < positions_[i].valid_rows)
       throw std::invalid_argument(
           "checkpoint component rewound without restore");
-    if (d.kind == ComponentKind::kAppendRows) {
+    if (HasRows(d.kind)) {
       (void)Bytes(p.valid_rows, d.row_bytes);
-      chunk_count = Add(chunk_count, Bytes(p.valid_rows / d.rows_per_chunk, 1));
+      const auto full_end = p.valid_rows - p.valid_rows % d.rows_per_chunk;
+      chunk_count = Add(
+          chunk_count,
+          Bytes((full_end - FirstChunkRow(d, p.valid_rows)) / d.rows_per_chunk,
+                1));
     }
   }
   const auto input = request.input.At(request.tokens.size());
@@ -549,9 +555,12 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
       save(*component.private_state, r);
     } else {
       const auto full_end = end - end % d.rows_per_chunk;
-      component.chunks.reserve(end / d.rows_per_chunk);
+      // Window components keep only the chunks a continuation still reads.
+      const auto first_row = FirstChunkRow(d, end);
+      component.chunks.reserve((full_end - first_row) / d.rows_per_chunk);
       auto chunks = Chunks(d.id);
-      for (Rows first = 0; first < full_end; first += d.rows_per_chunk) {
+      for (Rows first = first_row; first < full_end;
+           first += d.rows_per_chunk) {
         // Every descriptor/range occurs once in this capture, so only the
         // published history can contain a shared predecessor.
         auto chunk = chunks.Find(first);
@@ -633,7 +642,17 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   if (!reuse_entries)
     entries_metadata_ = std::move(entries_metadata);
   tokens_metadata_ = std::move(tokens_metadata);
+  Record(checkpoint->id_);
   return checkpoint;
+}
+void ExecutionHistory::Record(CheckpointId id) noexcept {
+  recorded_[recorded_count_++ % kRecordedCheckpoints] = id;
+}
+bool ExecutionHistory::Contains(CheckpointId id) const noexcept {
+  const auto count = std::min(recorded_count_, kRecordedCheckpoints);
+  return id.value != 0 &&
+         std::find(recorded_.begin(), recorded_.begin() + count, id) !=
+             recorded_.begin() + count;
 }
 ExecutionHistory::ChunkCursor ExecutionHistory::Chunks(ComponentId id) const {
   return {std::ranges::lower_bound(entries_, std::pair{id.value, Rows{0}}, {},
@@ -669,7 +688,8 @@ std::size_t ExecutionHistory::NewPayloadBytes(
     (void)Bytes(p.valid_rows, d.row_bytes);
     bytes = Add(bytes, Bytes(p.valid_rows - full, d.row_bytes));
     auto chunks = Chunks(d.id);
-    for (Rows first = 0; first < full; first += d.rows_per_chunk) {
+    for (Rows first = FirstChunkRow(d, p.valid_rows); first < full;
+         first += d.rows_per_chunk) {
       const auto chunk = chunks.Find(first);
       if (chunk && !chunk->storage.IsValid())
         throw std::invalid_argument("cannot estimate retired rows");
