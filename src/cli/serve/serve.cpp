@@ -34,6 +34,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
+#include "src/core/hip/arch.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -936,6 +937,14 @@ int RunServe(std::span<const char* const> args) {
     if (plan.may_exceed_budget) {
       server::Logger::Warn("gpu", diagnostics::DescribeQueuePressure(plan));
     }
+    // Which part this process is actually driving. The queue plan above and
+    // the text cache identity below both key on the architecture, so the
+    // resolved device belongs in the boot log next to them, before any model
+    // opens. gfx1150 and gfx1151 share an instruction set but not a memory
+    // subsystem, and printing only the family would hide that distinction
+    // from the one record an operator reads when a run looks unexpectedly slow.
+    server::Logger::Info("gpu",
+                         "event=device arch=" + hip::DeviceDescription());
     // Deliberately emitted before the model opens: a load that fails or hangs
     // never reaches the INFO `event=listening` banner in HttpServer::run, so
     // this is the only record of the resolved options and the armed threshold.

@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 #include "src/models/minimax_h3/prompt_encoder_ops.hip.hpp"
 #include "src/models/minimax_h3/sha256.hpp"
@@ -265,8 +266,8 @@ bool CheckAnalytic() {
   hipDeviceProp_t properties{};
   if (hipGetDevice(&device) != hipSuccess ||
       hipGetDeviceProperties(&properties, device) != hipSuccess ||
-      !std::string_view(properties.gcnArchName).starts_with("gfx1151")) {
-    std::cout << "SKIP: gfx1151 is unavailable\n";
+      !gufo::hip::IsRdna35(properties.gcnArchName)) {
+    std::cout << "SKIP: RDNA 3.5 GPU is unavailable\n";
     return false;
   }
   CheckElementwiseKernels();

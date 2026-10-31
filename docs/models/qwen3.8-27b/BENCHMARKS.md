@@ -279,3 +279,39 @@ peaks at 39.14 GiB in both rows.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)
+
+## Strix Point (`gfx1150`) reference
+
+The tables above are Strix Halo (`gfx1151`, 40 CU, LPDDR5X 256-bit). This
+section records one Strix Point run for scale: Ryzen AI 9 HX 470, Radeon 890M
+(`gfx1150`, 16 CU), DDR5-5600 dual channel, 128-bit bus. Same Q4_K_XL target
+and Q4_K_M DFlash2 draft, greedy, thinking off, `-r 1`.
+
+| Qwen27B Q4, depth 0 | Gufo (tok/s) | llama.cpp `b11069` (tok/s) | Gain |
+| --- | ---: | ---: | ---: |
+| pp2048 | 143.17 ± 0.32 | 106.70 ± 1.19 | +34.2% |
+| tg128 AR | 4.41 ± 0.08 | 3.93 ± 0.00 | +12.2% |
+| pp2048 DFlash2 | 133.11 ± 0.17 | — | — |
+| tg128 DFlash2 | 8.23 ± 0.04 | — | — |
+
+DFlash2 gives 1.87× over autoregressive generation on this part (4.41 → 8.23
+tok/s), against +2.6% for AR on Strix Halo. On a memory-bound host the draft
+verifies several tokens per weight read, so speculative decoding is the
+dominant lever; kernel-level tuning is not.
+
+The absolute numbers are a hardware ceiling, not a kernel defect. A HIP
+read-bandwidth probe on the same host measures 87.3 GB/s against a DDR5-5600
+128-bit theoretical peak of 89.6 GB/s (97%). Token generation reads every
+weight per token, so the ceiling is `bandwidth / model_size`:
+
+| Host | Measured bandwidth | Ceiling `87.3/17.56` | Measured tg128 | Ratio to Strix Halo |
+| --- | ---: | ---: | ---: | ---: |
+| Strix Point `gfx1150` | 87.3 GB/s | 4.97 tok/s | 4.41 | 1.00× |
+| Strix Halo `gfx1151` | ~240 GB/s | 13.67 tok/s | 12.37 | 2.80× |
+
+The 2.80× generation gap tracks the 2.75× bandwidth gap, not the 2.5× CU gap.
+Prefill is compute-bound as well, so its gap is wider (4.43×).
+
+llama.cpp `llama-bench` has no speculative mode, so the DFlash2 rows have no
+reference counterpart. `Q4_0` does not load: gufo does not accept Q4_0 for
+`token_embd.weight`, which is an engine limitation unrelated to the GPU.

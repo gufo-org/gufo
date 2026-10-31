@@ -35,6 +35,7 @@
 #include "src/models/qwen/vision/image_cache.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
+#include "src/core/hip/arch.hpp"
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
@@ -263,6 +264,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=deepseek4\n"
+           << "device_arch=" << gufo::hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=joyai-byte-bpe-v1\n"
@@ -302,6 +304,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen38-flash-next\n"
+           << "device_arch=" << gufo::hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=embedded-in-artifact\n"
@@ -345,6 +348,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen3.8\n"
+           << "device_arch=" << gufo::hip::CurrentDeviceArch() << '\n'
            << "artifact_id=" << core::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=embedded-in-artifact\n"

@@ -24,19 +24,19 @@ struct MemoryInventory {
   std::uint64_t total_bytes{0};
   std::uint64_t available_bytes{0};
   std::uint64_t free_bytes{0};
-  std::string memory_type{"LPDDR5X (Unified)"};
+  std::string memory_type{"Unified"};
   bool is_unified{true};
   std::string source{"/proc/meminfo"};
 };
 
 struct GpuInventory {
-  std::string name{"AMD Radeon 8060S Graphics"};
-  std::string architecture{"gfx1151"};
+  std::string name;
+  std::string architecture;
   std::string raw_arch_name;
-  std::uint32_t compute_units{40};
+  std::uint32_t compute_units{0};
   std::uint64_t total_memory_bytes{0};
   std::string driver_name{"amdgpu"};
-  std::string pci_id{"1002:1586"};
+  std::string pci_id;
   std::string pci_slot;
   std::string power_mode{"auto"};
   std::string clock_state{"unavailable (sysfs unreadable or power-managed)"};

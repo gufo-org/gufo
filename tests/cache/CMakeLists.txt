@@ -15,7 +15,7 @@ if (ENGINE_ENABLE_HIP)
   add_test(NAME cache_backing_restricted_test
     COMMAND cache_backing_test --deny-long-term-pins)
   set_tests_properties(cache_backing_test cache_backing_restricted_test PROPERTIES
-    LABELS "hip;gpu;gfx1151;cache" TIMEOUT 60)
+    LABELS "hip;gpu;rdna35;cache" TIMEOUT 60)
 endif()
 target_link_libraries(gufo_cache_fake PUBLIC gufo_cache)
 add_executable(cache_adapter_lifecycle_test lifecycle_test.cpp)

@@ -1,6 +1,7 @@
 # Development
 
-Production targets Linux x86-64 on AMD Strix Halo (`gfx1151`). CMake owns the
+Production targets Linux x86-64 on an AMD RDNA 3.5 integrated GPU (`gfx1151`
+Strix Halo or `gfx1150` Strix Point). CMake owns the
 compiler flags, dependencies and installation for every build; Nix supplies the
 pinned toolchain. System dependencies and the qualified compiler/ROCm versions
 are listed in [the README](../README.md#build-from-source). Repository rules for
@@ -76,7 +77,7 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `ENGINE_ENABLE_HIP` | `ON` | Build the gfx1151 HIP backend; only `gfx1151` is accepted |
+| `ENGINE_ENABLE_HIP` | `ON` | Build the RDNA 3.5 HIP backend; `CMAKE_HIP_ARCHITECTURES` must be `gfx1151` or `gfx1150` |
 | `BUILD_TESTING` | `OFF` | Build correctness tests |
 | `GUFO_BUILD_TOOLS` | `OFF` | Build kernel benchmarks and tuning executables |
 | `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |
