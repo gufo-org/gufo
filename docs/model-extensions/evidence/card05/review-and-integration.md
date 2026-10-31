@@ -110,9 +110,46 @@ reference check above was re-run afterwards over the whole worktree.
 - The two-level family glob is unproven until Card 07 creates `src/families/`.
 - The hosted run's source snapshot already contained every code, test and
 documentation edit except the final numbers written into this file and into
-`hosted-pr-check.txt`; those additions introduce no new links, and the whole
-worktree documentation check was re-run afterwards (0 errors outside the
-untracked `hrx-system/` tree). A clean post-commit re-run of
-`nix build .#checks.x86_64-linux.pr` is still the CI authority.
+`hosted-pr-check.txt`; those additions introduce no new links. The gate was
+re-run after committing, on the committed tree, and passed (`check-docs` 150
+files / 904 links, `HOSTED_EXIT=0`); see the post-commit section of
+`hosted-pr-check.txt`. A routine post-commit CI run remains the external
+authority.
+
+## Orchestrator closure verification
+
+The orchestrator re-ran the decisive checks itself against the integrated tree
+(fresh logs under `/tmp/card05-own/`, not agent reports), after the integration
+agent handed off editing ownership:
+
+- `ctest --test-dir build/card05-int-cpu -R '^(extension_.*|gufo_version|strix_diagnose_help|strix_diagnose_json)$'`
+  → exit 0, 12/12, zero `Skipped`/`Not Run` lines (54.98 s).
+- `python3 tests/extensions/discovery_test.py -v` → `Ran 13 tests ... OK`.
+- `python3 tests/extensions/metadata_test.py` → `Ran 12 tests ... OK`;
+  `--schema` → `Ran 1 test ... OK`.
+- `python3 tests/tools/check_extension_api_test.py` → `Ran 4 tests ... OK`.
+- `python3 tests/tools/linux_artifact_test.py` → `Ran 6 tests ... OK`.
+- `python3 tools/ci/check-extension-api.py --base 3d2ce45a --labels '["ext-api"]'`
+  → exit 0, `PASS: extension API surface (6 paths)`; the same call with
+  `--labels '[]'` → exit 1 with `extension API changes require the ext-api PR
+  label`; the drift-only invocation → exit 0; `--write` produced no `SURFACE`
+  diff.
+- `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py`
+  → `PASS: Checked 725 C++ files`.
+- Post-commit `nix build .#checks.x86_64-linux.pr` → exit 0 (documented above).
+- `sha256sum docs/model-extensions/RFC.md` →
+  `2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448`, unchanged.
+
+Verification-harness gotcha worth keeping: detaching these commands from a
+sandboxed shell that exports a private `TMPDIR` makes every `nix develop` child
+fail with `FileNotFoundError` under that directory once the parent call returns.
+Re-running with an explicit `TMPDIR` outside the sandbox reproduced all results.
+
+Closure result: the review-integration paths were committed as a single Conventional
+Commit (`fix(extensions): tighten selection diagnostics and metadata key contract`)
+containing exactly the 19 task-owned files. `docs/model-extensions/RFC.md` is
+byte-identical to the recorded SHA-256 and was not touched by that commit; it
+already entered history in the implementation commit `381c1648`, made by the user
+before this phase.
 - Independent pinned external compatibility builds and API 1.0 criteria are
   later cards (28, 29).

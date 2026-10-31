@@ -85,7 +85,8 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 - The hosted gate itself now has executed evidence: `nix build
   .#checks.x86_64-linux.pr` exits 0 with `100% tests passed out of 89`, the
   mandatory lock-mode build reporting `Extension selection: lock`, `check-docs`
-  passing 150 markdown files / 903 links and `check-format` 725 C++ files
+  passing 150 markdown files (903 links pre-commit, 904 after) and
+  `check-format` 725 C++ files
   (`docs/model-extensions/evidence/card05/hosted-pr-check.txt`).
 - Evidence is now durable in-repository instead of `/tmp`-bound: the two raw
   reviews plus the integration record and both retained initial failures live
@@ -99,3 +100,13 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
   separate future requirements. Windows workflow wiring is not Windows
   execution evidence. The two-level `src/families/*/*/extension.json` glob is
   unproven until Card 07 creates `src/families/`.
+- Closure. The orchestrator re-ran the focused CTest (12/12, zero skipped), the
+  13 discovery cases, metadata (12 plus schema), policy (4), Linux artifact (6),
+  the extension-API gate in both directions (exit 0 with the `ext-api` label,
+  exit 1 without it), the drift inventory (6 paths, unchanged by `--write`) and
+  the formatter (725 files), then re-ran `nix build .#checks.x86_64-linux.pr`
+  on the committed tree (exit 0, documentation check clean). Details:
+  [review and integration](../evidence/card05/review-and-integration.md).
+  The 19 task-owned paths are committed as
+  `fix(extensions): tighten selection diagnostics and metadata key contract`.
+  `docs/model-extensions/RFC.md` is unchanged and was not part of that commit.

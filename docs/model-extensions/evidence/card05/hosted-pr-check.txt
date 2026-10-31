@@ -48,3 +48,23 @@ from the filtered Nix source, then executed):
 Extension selection: lock
 
 Exit status line retained verbatim: HOSTED_EXIT=0
+
+## Post-commit re-run on the committed tree (orchestrator closure)
+
+Run from /home/mixer/gufo after committing the Card 05 review-integration paths,
+so the Nix source snapshot contained every file the documentation refers to:
+`nix build .#checks.x86_64-linux.pr --no-link --print-build-logs`.
+
+    check-docs> [check-docs] PASSED: 150 markdown files and 904 local links/anchors
+                  verified with zero broken links or invalid JSON blocks.
+    check-pr> PASS: Formatting check clean
+    check-pr> PASS: Dependency inventory clean
+    check-pr> PASS: Documentation check clean
+    check-pr> PASS: Hosted CPU contract suite passed
+    check-pr> PASS: mkGufoServe CLI string check passed
+
+Only check-docs and check-pr rebuilt (the CPU compile outputs were already in the
+store), which is why this log is shorter than the attempts above. 904 links
+instead of 903 reflects the documents committed with this change.
+
+Exit status line retained verbatim: HOSTED_EXIT=0

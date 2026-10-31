@@ -10,8 +10,8 @@ review comments and finishing verification. Complete cards sequentially.
 - Workspace: `/home/mixer/gufo`; use `jj` and read `AGENTS.md`.
 - Cards 01–05 are complete through all three agents. Card 05's implementation
   parent is `381c1648`, `feat(extensions): add cmake discovery system`; its
-  review/integration follow-ups sit in the working copy `@`
-  ("feat(extensions): card 5 follow-ups") for the orchestrator to commit.
+  review/integration follow-ups are committed directly above it as
+  `fix(extensions): tighten selection diagnostics and metadata key contract`.
 - Card 05 used three distinct agents: implementation `/root/card05_implement`,
   independent review pi `reviewer` (static) plus pi `delegate` (execution pass),
   and integration pi `worker`. Findings, dispositions, exact commands and
@@ -22,17 +22,16 @@ review comments and finishing verification. Complete cards sequentially.
   it needs the affected text profiles plus `long-context` and `cache`, the
   Card 02 identity goldens, and matched per-request timings against a main
   control.
-- Editing ownership returns to the orchestrator when the Card 05 integration
-  agent finishes; start Card 06 only after that and after the commit. All
-  build/test jobs and the model download have finished; no old jobs need
-  restarting.
-- The current diff, except the original RFC, contains task-owned Card 05 work
-  plus this handoff and the documentation-only card split. Inspect `jj status` and the actual files before relying
-  on this checkpoint. Do not discard or reset pending changes.
-- User-owned `docs/model-extensions/RFC.md` was added before implementation.
-  Preserve it unchanged and uncommitted. Its SHA-256 is
-  `2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448`.
-  Commit only task-owned paths after review integration.
+- Card 05 is closed: no agent holds editing ownership, the post-commit hosted
+  check passed, and the working copy is clean. All build/test jobs and the model
+  download have finished; no old jobs need restarting.
+- Inspect `jj status` and the actual files before relying on this checkpoint.
+  Do not discard or reset pending changes.
+- User-owned `docs/model-extensions/RFC.md` must stay byte-identical; its
+  SHA-256 is `2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448`.
+  It entered history in the user's own implementation commit `381c1648` (the
+  committed documents link to it, so the documentation gate needs it tracked),
+  and no Card 05 or later agent may edit it.
 
 ## Read before continuing
 
