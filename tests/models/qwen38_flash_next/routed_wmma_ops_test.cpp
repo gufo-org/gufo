@@ -261,6 +261,33 @@ Experts MakeQ8_0(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+/// Random IQ4_NL blocks: an F16 scale plus 16 code bytes decoded through
+/// the nonlinear kValuesIq4Nl codebook (byte j pairs element j with
+/// element j + 16).
+Experts MakeIQ4_NL(std::size_t e, std::size_t m, std::size_t k,
+                   std::uint32_t seed) {
+  Experts w;
+  const std::size_t blocks = e * m * (k / 32);
+  w.packed.resize(blocks * 18);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    std::uint8_t* blk = w.packed.data() + b * 18;
+    const __half d = __float2half(Uniform(&seed, 0.02F) + 0.03F);
+    std::memcpy(blk, &d, 2);
+    const float df = __half2float(d);
+    for (int j = 0; j < 16; ++j) {
+      const std::uint8_t byte =
+          static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+      blk[2 + j] = byte;
+      w.values[b * 32 + j] =
+          df * static_cast<float>(gufo::quant::kValuesIq4Nl[byte & 0xF]);
+      w.values[b * 32 + 16 + j] =
+          df * static_cast<float>(gufo::quant::kValuesIq4Nl[byte >> 4]);
+    }
+  }
+  return w;
+}
+
 struct Result {
   double vs_mmq;
   double vs_ref;
@@ -274,7 +301,9 @@ const char* TypeName(q::WeightType type) {
   return type == q::WeightType::kQ4_K   ? "Q4_K"
          : type == q::WeightType::kQ5_K ? "Q5_K"
          : type == q::WeightType::kQ5_1 ? "Q5_1"
-                                        : "Q8_0";
+         : type == q::WeightType::kIQ4_NL
+             ? "IQ4_NL"
+             : "Q8_0";
 }
 
 /// Runs the MMQ tier and the F16 route over the same routing and reports
@@ -289,7 +318,9 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       type == q::WeightType::kQ4_K   ? MakeQ4K(experts, m, k, seed)
       : type == q::WeightType::kQ5_K ? MakeQ5K(experts, m, k, seed)
       : type == q::WeightType::kQ5_1 ? MakeQ5_1(experts, m, k, seed)
-                                     : MakeQ8_0(experts, m, k, seed);
+      : type == q::WeightType::kIQ4_NL
+          ? MakeIQ4_NL(experts, m, k, seed)
+          : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
   std::vector<std::int32_t> ids(slots);
@@ -332,14 +363,19 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   std::vector<float> zero_out(slots * m, 0.0F);
   float* d_mmq = Upload(zero_out);
 
+  // IQ4_NL has no MMQ counterpart: the vendored tier covers the original
+  // checkpoint's storages only, so the F64 reference is the oracle.
+  const bool has_mmq = type != q::WeightType::kIQ4_NL;
   const auto mmq_raw = type == q::WeightType::kQ4_K   ? qfn_mmq_q4_K_moe_raw
                        : type == q::WeightType::kQ5_K ? qfn_mmq_q5_K_moe_raw
                        : type == q::WeightType::kQ5_1 ? qfn_mmq_q5_1_moe_raw
                                                       : qfn_mmq_q8_0_moe_raw;
   const int rc =
-      mmq_raw(d_w, d_x, d_ids, d_mmq, static_cast<int>(m), static_cast<int>(k),
-              static_cast<int>(n_tokens), static_cast<int>(experts),
-              static_cast<int>(used), nullptr);
+      has_mmq
+          ? mmq_raw(d_w, d_x, d_ids, d_mmq, static_cast<int>(m),
+                    static_cast<int>(k), static_cast<int>(n_tokens),
+                    static_cast<int>(experts), static_cast<int>(used), nullptr)
+          : 0;
   if (rc != 0) {
     throw std::runtime_error("MMQ routed GEMM failed");
   }
@@ -547,12 +583,14 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       if (!std::isfinite(f)) {
         throw std::runtime_error("routed F16 output is not finite");
       }
-      const float v = mmq[s * m + row];
-      r.vs_mmq = std::max(r.vs_mmq, std::abs(static_cast<double>(v - f)));
+      const float v = has_mmq ? mmq[s * m + row] : 0.0F;
+      if (has_mmq) {
+        r.vs_mmq = std::max(r.vs_mmq, std::abs(static_cast<double>(v - f)));
+        r.mmq_vs_ref = std::max(r.mmq_vs_ref, std::abs(ref - v));
+        r.mmq_sq_error += (ref - v) * (ref - v);
+      }
       r.vs_ref = std::max(r.vs_ref, std::abs(ref - f));
-      r.mmq_vs_ref = std::max(r.mmq_vs_ref, std::abs(ref - v));
       r.scale = std::max(r.scale, std::abs(ref));
-      r.mmq_sq_error += (ref - v) * (ref - v);
       r.ref_sq += ref * ref;
     }
   }
@@ -1251,6 +1289,15 @@ int main() {
          ok;
     // Q5_K gate/up view (one layer).
     ok = Ok(Run(q::WeightType::kQ5_K, 300, 10, 64, 640, 2560, 0x5A5A0001U)) &&
+         ok;
+    // IQ4_NL: the pruned checkpoints' expert storage; the vendored MMQ tier
+    // has no IQ4_NL template, so the F64 reference is the oracle.
+    std::printf("== routed IQ4_NL (pruned-checkpoint experts; F64 oracle)\n");
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 300, 10, 64, 640, 2560, 0x19E4C0DEU)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x19E4C0DFU, 64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x19E4C0E0U, 64)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,

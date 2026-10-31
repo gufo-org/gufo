@@ -5410,11 +5410,17 @@ constexpr std::uint32_t kHalfMagic = 0x64646464U;  // 1024.0 high bytes
 /// fifth bit of element j of K block s), then the Q4_K nibble layout.
 constexpr std::size_t kQ5KBlockBytes = 176;
 
+/// block_iq4_nl: a half d and 16 nibble bytes, where the low nibble of byte
+/// j is element j and the high nibble is element j + 16, both mapped through
+/// the nonlinear kValuesIq4Nl codebook.
+constexpr std::size_t kIq4NlBlockBytes = 18;
+
 template<WeightType kType>
 __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
+         : kType == WeightType::kIQ4_NL ? (k / 32) * kIq4NlBlockBytes
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -5467,6 +5473,7 @@ __launch_bounds__(256) __global__
   constexpr bool kQ5 = kType == WeightType::kQ5_1;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
+  constexpr bool kIQ4 = kType == WeightType::kIQ4_NL;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
@@ -5497,13 +5504,19 @@ __launch_bounds__(256) __global__
   constexpr int kEpilogueBytes = kPair ? BN * (BM / 2 + 2) * 2 : 8 * 1024;
   constexpr int kLdsBytes =
       kStageBytes > kEpilogueBytes ? kStageBytes : kEpilogueBytes;
-  __shared__ __attribute__((aligned(16))) std::uint8_t lds[kLdsBytes];
+  // IQ4_NL resolves its codebook through a half2 table indexed by the byte
+  // pair that supplies a fragment word's two consecutive elements. It lives
+  // past the shared stage/epilogue region so tile reuse never touches it.
+  constexpr int kLutBytes = kIQ4 ? 1024 : 0;
+  __shared__ __attribute__((aligned(16)))
+      std::uint8_t lds[kLdsBytes + kLutBytes];
   auto* s_codes = reinterpret_cast<uint4*>(lds);
   auto* s_high = reinterpret_cast<std::uint32_t*>(lds + kCodeBytes);
   auto* s_scale =
       reinterpret_cast<std::uint32_t*>(lds + kCodeBytes + kHighBytes);
   auto* s_act =
       reinterpret_cast<uint4*>(lds + kCodeBytes + kHighBytes + kScaleBytes);
+  auto* s_lut = reinterpret_cast<std::uint32_t*>(lds + kLdsBytes);
 
   const std::int32_t tile = tiles[blockIdx.y];
   const int expert = tile & 0xFFFF;
@@ -5623,7 +5636,13 @@ __launch_bounds__(256) __global__
     }
 #pragma unroll
     for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
-      if constexpr (kQ8) {
+      if constexpr (kIQ4) {
+        // block_iq4_nl is 18 bytes: d followed by the 16 code bytes.
+        const auto* blk =
+            f_ptr[u] + ((kb0 + f_c) * kIq4NlBlockBytes);
+        f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
+        f_codes[u] = *reinterpret_cast<const uint4*>(blk + 2);
+      } else if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
@@ -5711,6 +5730,10 @@ __launch_bounds__(256) __global__
         s_high[(f_c * BM) + row] = f_high[u];
       }
       if constexpr (kQ8) {
+      } else if constexpr (kIQ4) {
+        // half2 (d, d): the codebook values carry the code itself, so only
+        // the block scale remains; the affine bias is unused.
+        scale_bias = f_live[u] ? (f_dm[u] | (f_dm[u] << 16)) : 0U;
       } else {
         const int sb32 = f_sb32[u];
         // The first four scale/min bytes live in y/z. Their remaining
@@ -5843,6 +5866,48 @@ __launch_bounds__(256) __global__
           const __half2 sb = __builtin_bit_cast(__half2, scale_bias);
           const __half2 scale2 = __low2half2(sb);
           const __half2 bias2 = __high2half2(sb);
+          if constexpr (kIQ4) {
+            // IQ4_NL: byte j of a block holds element j in its low nibble
+            // and element j + 16 in its high nibble. The code halves are
+            // built with the same permutes as the affine formats — so the
+            // fragment placement matches the proven paths exactly — then
+            // translated through the nonlinear codebook and scaled by the
+            // block's d (no bias: the codebook carries the sign).
+            __half2 h[16];
+            const std::uint32_t words[4] = {raw[u][kb].x, raw[u][kb].y,
+                                            raw[u][kb].z, raw[u][kb].w};
+            const auto* lut16 = reinterpret_cast<const __half*>(s_lut);
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+              const std::uint32_t lo_codes = words[i] & 0x0F0F0F0FU;
+              const std::uint32_t hi_codes = (words[i] >> 4U) & 0x0F0F0F0FU;
+              const std::uint32_t lo0 = __builtin_amdgcn_perm(
+                  lo_codes, kHalfMagic, 0x01050004U);
+              const std::uint32_t lo1 = __builtin_amdgcn_perm(
+                  lo_codes, kHalfMagic, 0x03070206U);
+              const std::uint32_t hi0 = __builtin_amdgcn_perm(
+                  hi_codes, kHalfMagic, 0x01050004U);
+              const std::uint32_t hi1 = __builtin_amdgcn_perm(
+                  hi_codes, kHalfMagic, 0x03070206U);
+              h[2 * i] = __hmul2(__halves2half2(lut16[lo0 & 0xFU],
+                                                lut16[(lo0 >> 16) & 0xFU]),
+                                 scale2);
+              h[2 * i + 1] =
+                  __hmul2(__halves2half2(lut16[lo1 & 0xFU],
+                                         lut16[(lo1 >> 16) & 0xFU]),
+                          scale2);
+              h[8 + 2 * i] =
+                  __hmul2(__halves2half2(lut16[hi0 & 0xFU],
+                                         lut16[(hi0 >> 16) & 0xFU]),
+                          scale2);
+              h[8 + 2 * i + 1] =
+                  __hmul2(__halves2half2(lut16[hi1 & 0xFU],
+                                         lut16[(hi1 >> 16) & 0xFU]),
+                          scale2);
+            }
+            __builtin_memcpy(&a_lo[u], &h[0], 32);
+            __builtin_memcpy(&a_hi[u], &h[8], 32);
+          } else {
           std::uint32_t nib[8];
           if constexpr (kQ8) {
             // Q8_0: the block's 32 signed bytes are chunks 2 kb and 2 kb + 1;
@@ -5892,6 +5957,7 @@ __launch_bounds__(256) __global__
           }
           __builtin_memcpy(&a_lo[u], &h[0], 32);
           __builtin_memcpy(&a_hi[u], &h[8], 32);
+          }
         }
       }
 #pragma unroll
@@ -5937,6 +6003,16 @@ __launch_bounds__(256) __global__
     compute_stage();
     __syncthreads();
   };
+  // IQ4_NL: the 16 codebook values as F16. One table entry per code
+  // index; the permute below already fixes the fragment placement, so the
+  // values only need an index. The single barrier below publishes it
+  // together with the first stage.
+  if constexpr (kIQ4) {
+    if (tid < 16) {
+      reinterpret_cast<__half*>(s_lut)[tid] =
+          __float2half_rn(static_cast<float>(quant::kValuesIq4Nl[tid]));
+    }
+  }
   fetch_stage(0, 0);
   if constexpr (kPair) {
     // K-quant launchers require complete 256-element blocks. Expose their
@@ -6723,6 +6799,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
             rows_out, swiglu_gate, out, out_half, m, k, nullptr);
         return true;
       }
+    case WeightType::kIQ4_NL:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kIQ4_NL, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
     case WeightType::kQ5_1:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_1, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,

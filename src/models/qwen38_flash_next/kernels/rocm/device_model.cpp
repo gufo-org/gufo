@@ -100,8 +100,16 @@ struct Uploader {
       return d;
     }
     // Formats without an on-device kernel are staged raw and converted to
-    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion).
-    const bool convert_q8 = NeedsQ8Conversion(t.type);
+    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion). Routed
+    // gate/up in a storage the F16 WMMA family runs natively keep their
+    // disk bytes — IQ4_NL today; see the Executor::WmmaExperts guard.
+    // The down projection has no WMMA dispatch (it runs through the MMQ
+    // vec/tiled family, which knows no IQ4_NL yet), so down keeps the
+    // Q8_0 conversion or every decode step fails its expert GEMM.
+    const bool convert_q8 =
+        NeedsQ8Conversion(t.type) &&
+        !(t.experts > 1 && t.type == core::GgmlType::kIQ4_NL &&
+          t.name.find("ffn_down_exps") == std::string_view::npos);
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
