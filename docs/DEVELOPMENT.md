@@ -130,9 +130,11 @@ model oracles stay out of the hosted set.
 **A model.** Create `src/models/<model>` with its own `CMakeLists.txt` exporting
 a `gufo_<model>` library, attach it with `add_subdirectory`, keep kernels under
 `kernels/` and the CPU reference behind `EXCLUDE_FROM_ALL`. Add tests under
-`tests/models/<model>`, a row in [the model index](models/README.md), and the
+`tests/models/<model>`, one row per quantization in each task table of
+[the project README](../README.md#models-and-benchmarks) the model serves, and the
 four required documents `README.md`, `BENCHMARKS.md`, `QUALITY.md` and
-`EXPERIMENTS.md` under `docs/models/<model>/`.
+`EXPERIMENTS.md` under `docs/models/<model>/`. Add the model to the list in
+`tools/ci/check-docs.py`, or its documents go unchecked.
 
 **A dependency.** Record it in `THIRD_PARTY_NOTICES.md`; `tools/ci/check-dependencies.py`
 validates that shipped and evaluation components carry license, version and

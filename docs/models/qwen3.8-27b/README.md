@@ -1,5 +1,7 @@
 # Qwen3.8 27B
 
+Weights license: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html).
+
 Dense text/image model on gfx1151. Production target GGUFs are **UD-Q4_K_XL**
 (16.35 GiB weights) and **UD-Q8_K_XL** (29.30 GiB); request state and an optional
 draft/projector need additional memory. BF16 targets are reference-only.
@@ -12,9 +14,12 @@ draft/projector need additional memory. BF16 targets are reference-only.
 ```sh
 nix develop -c hf download unsloth/Qwen3.8-27B-GGUF \
   Qwen3.8-27B-UD-Q4_K_XL.gguf mmproj-BF16.gguf \
+  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
   --local-dir models/qwen3.8-27b
 nix develop -c hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
-  Qwen3.8-27B-DFlash2-Q4_K_M.gguf --local-dir models/qwen3.8-27b
+  Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
+  --revision 2d9571f8ce46e151f61c6499c99dee6079e1d610 \
+  --local-dir models/qwen3.8-27b
 nix build
 MODEL=models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
 DRAFT=models/qwen3.8-27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf

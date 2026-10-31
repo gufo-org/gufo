@@ -1,5 +1,7 @@
 # MiniMax H3
 
+Weights license: [MiniMax H3 Community (not for the US, EU, UK or Korea)](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE).
+
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) · [ROCm migration](ROCM.md)
 
 Gufo runs the text-only FL2VA path on Linux gfx1151: prompt encoding, the

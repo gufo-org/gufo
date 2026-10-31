@@ -173,6 +173,8 @@ and the table says so.
    do not sum stage medians into a headline.
 6. Retained JSON goes to `docs/models/<model>/artifacts/`; raw samples,
    traces, audio, images and videos stay in the ignored top-level `artifacts/`.
+7. Update the model's rows in [README.md](../../../README.md#models-and-benchmarks)
+   so the headline numbers match the retained results.
 
 ## Results-card format
 
