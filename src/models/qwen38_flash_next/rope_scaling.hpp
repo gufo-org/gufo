@@ -50,13 +50,14 @@ struct YarnRope {
 [[nodiscard]] std::uint32_t ScaledContextLength(
     const RopeScaling& scaling, std::uint32_t native_context) noexcept;
 
-/// Derives a static YaRN scaling from a requested serving context (factor =
-/// requested / native, Qwen's own advice). Returns nullopt when `native ==
-/// 0` or `requested <= native` (YaRN stays off). Otherwise nudges the float
-/// factor up with `std::nextafter` when needed so `ScaledContextLength` of
-/// the result does not round below `requested`; only needed for a
-/// non-power-of-two native context. Bounded by `ScaledContextLength`'s own
-/// kMaxRopePositions clamp, so it always terminates.
+/// Derives the YaRN scaling for a requested serving context (factor =
+/// requested / native, Qwen's own advice; the largest factor a session takes).
+/// Returns nullopt when `native == 0` or `requested <= native` (YaRN stays
+/// off). Otherwise nudges the float factor up with `std::nextafter` when needed
+/// so `ScaledContextLength` of the result does not round below `requested`;
+/// only needed for a non-power-of-two native context. Bounded by
+/// `ScaledContextLength`'s own kMaxRopePositions clamp, so it always
+/// terminates.
 [[nodiscard]] std::optional<RopeScaling> RopeScalingForContext(
     std::uint32_t requested, std::uint32_t native) noexcept;
 

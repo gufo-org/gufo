@@ -211,7 +211,7 @@ bool HcDownF16Gemm(const void* w, const void* x_tiled, __half* out,
 /// Fixed geometry: 24 query heads, two KV heads, 256 dimensions, 64 rotary.
 /// Requires at least 1024 tokens; cache capacity must include position +
 /// tokens.
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 bool AttentionF16Gemm(const void* weights, const __half* input,
                       const float* q_gamma, const float* k_gamma, float* query,
                       float* gate, __half* keys, __half* values,
@@ -420,7 +420,7 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
 /// With zero query heads, packed contains only K/V and q/gate may be null.
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const float* q_gamma, const float* k_gamma, float* q,
                       float* gate, __half* k_cache, __half* v_cache,
@@ -435,7 +435,7 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
 /// Positions are read from device memory (`start_pos` points at the
 /// session's control block) so a captured decode graph replays at any
 /// position.
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t d, std::uint32_t rotary_dim,
           const std::uint32_t* start_pos, float theta, hipStream_t stream,
@@ -458,7 +458,7 @@ void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
 /// block start position, then round once to F16 for scoring.
 /// `grid_blocks` bounds how many blocks one launch
 /// can pool (a device-side bound is not available at launch time).
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        __half* blocks, const std::uint32_t* first_block,
                        const std::uint32_t* start_pos, std::uint32_t n_tokens,
@@ -467,6 +467,15 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        float eps, std::uint32_t capacity, hipStream_t stream,
                        const qwen::vision::DeviceRope* rope = nullptr,
                        const YarnRope& yarn = {});
+
+/// Dynamic YaRN: re-rotates `n_rows` cached post-RoPE key rows of `heads`
+/// heads (`head_dim` apart, first `rotary` dimensions rotated split-half)
+/// from the scaling `from` to `to`. Row r is at rope position r * pos_stride.
+void RerotateKeys(__half* rows, std::uint32_t n_rows, std::uint32_t heads,
+                  std::uint32_t head_dim, std::uint32_t rotary,
+                  std::uint32_t pos_stride, float theta,
+                  const qwen::vision::DeviceRope* rope, const YarnRope& from,
+                  const YarnRope& to, hipStream_t stream);
 
 /// Per query t (position *start_pos + first_token + t): scores every
 /// complete block below its own tail, keeps the `budget` highest, and

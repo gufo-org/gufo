@@ -297,6 +297,71 @@ void CheckYarnPhase(float factor, std::uint32_t position) {
             << ": HF angle and mscale\n";
 }
 
+// Dynamic YaRN: keys written under one factor and re-rotated to another must
+// match the keys written under the target factor at every position, past the
+// native context too. The cache holds F16 keys, so a re-rotation rounds once
+// more than a direct write: each value may differ by one F16 ulp of its
+// pair's magnitude. Dimensions past the rotary ones keep their bits.
+void CheckRerotation(float from_factor, float to_factor, std::uint32_t rows) {
+  const auto rope_for = [](float factor) {
+    return factor == 1.0F ? qfn::YarnRope{} : Yarn(factor);
+  };
+  const std::size_t count = std::size_t{rows} * kKvWidth;
+  HipBuffer<float> source(count), work(count);
+  HipBuffer<__half> rotated(count), expected(count);
+  HipBuffer<std::uint32_t> pos(1);
+  Upload(&source, MakeValues(count, 0xC0FFEE, 1.0F));
+  Upload(&pos, std::vector<std::uint32_t>{0});
+  const auto write = [&](float factor, HipBuffer<__half>* cache) {
+    CheckHip(hipMemcpy(work.get(), source.get(), source.bytes(),
+                       hipMemcpyDeviceToDevice),
+             "re-rotation input");
+    q::Rope(work.get(), rows, kKvHeads, kDim, 64, pos.get(), 1e7F, nullptr,
+            nullptr, rope_for(factor));
+    q::StoreKv(work.get(), cache->get(), rows, kKvWidth, pos.get(), nullptr);
+  };
+  write(from_factor, &rotated);
+  write(to_factor, &expected);
+  q::RerotateKeys(rotated.get(), rows, kKvHeads, kDim, 64, 1, 1e7F, nullptr,
+                  rope_for(from_factor), rope_for(to_factor), nullptr);
+  CheckHip(hipDeviceSynchronize(), "re-rotation");
+  std::vector<__half> got(count), want(count);
+  CheckHip(hipMemcpy(got.data(), rotated.get(), rotated.bytes(),
+                     hipMemcpyDeviceToHost),
+           "re-rotated keys");
+  CheckHip(hipMemcpy(want.data(), expected.get(), expected.bytes(),
+                     hipMemcpyDeviceToHost),
+           "directly written keys");
+  double worst = 0.0;
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::uint32_t dim = i % kDim;
+    if (dim >= 64) {
+      if (std::memcmp(&got[i], &want[i], sizeof(__half)) != 0)
+        throw std::runtime_error("re-rotation changed a non-rotary dimension");
+      continue;
+    }
+    const std::size_t lo = dim < 32 ? i : i - 32;
+    const float magnitude = std::hypot(static_cast<float>(want[lo]),
+                                       static_cast<float>(want[lo + 32]));
+    const float ulp = std::ldexp(
+        1.0F,
+        std::max(std::ilogb(std::max(magnitude, 6.1035156e-5F)) - 10, -24));
+    const double error =
+        std::fabs(static_cast<float>(got[i]) - static_cast<float>(want[i])) /
+        ulp;
+    worst = std::max(worst, error);
+    if (error > 1.0) {
+      throw std::runtime_error(
+          "re-rotated key differs from a direct write: position " +
+          std::to_string(i / kKvWidth) + " dim " + std::to_string(dim) + ", " +
+          std::to_string(error) + " ulp");
+    }
+  }
+  std::cout << "dynamic YaRN re-rotation " << from_factor << " -> " << to_factor
+            << " over " << rows << " positions: within " << worst
+            << " F16 ulp of each pair\n";
+}
+
 // mRoPE: pair i reads T, H or W exactly as qwen::vision::RopePosition does.
 void CheckYarnVisionPhase(float factor) {
   const std::vector<std::int32_t> thw{300000, 200000, 250000};
@@ -969,6 +1034,9 @@ int main() {
       for (const std::uint32_t position : {1000U, 300000U, 650000U})
         CheckYarnPhase(factor, position);
     CheckYarnVisionPhase(2.5F);
+    CheckRerotation(1.0F, 2.0F, 300000);
+    CheckRerotation(2.0F, 4.0F, 300000);
+    CheckRerotation(2.0F, 1.0F, 300000);
     CheckOracleRms();
     // Structured selections against the sparse path's 1024-block compaction
     // windows and 64-block key tiles. At 131069 the last 512 blocks sit in

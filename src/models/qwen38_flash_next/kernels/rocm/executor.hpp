@@ -190,6 +190,10 @@ private:
   bool mtp_enabled_{false};
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
+  /// Dynamic YaRN: the factor this session's cached keys are rotated with,
+  /// and the rope constants its rope launches use for it.
+  float yarn_factor_{1.0F};
+  YarnRope yarn_rope_{};
   ContinuationHooks* continuation_hooks_{nullptr};
   std::vector<LinearState> linear_;
   std::vector<AttentionState> attention_;
@@ -238,6 +242,19 @@ struct PrefillCheckpoint {
 /// sized once for `max_batch` tokens; longer prompts are fed in chunks.
 class Executor {
 public:
+  /// Dynamic YaRN (with a configured YaRN factor): a session runs unscaled
+  /// while it fits the native context and takes the smallest whole factor
+  /// covering its positions past it, up to the configured one; its cached
+  /// keys are re-rotated when the factor changes.
+  [[nodiscard]] bool DynamicYarn() const noexcept { return dynamic_yarn_; }
+  [[nodiscard]] float YarnLevelFor(std::size_t end_position) const noexcept;
+  [[nodiscard]] float YarnFactor(const Session& s) const noexcept {
+    return s.yarn_factor_;
+  }
+  bool SetYarnFactor(Session& s, float factor, std::string* error_msg);
+  /// After a snapshot restore: the session's keys are rotated with `factor`.
+  void AdoptYarnFactor(Session& s, float factor);
+
   struct Options {
     std::uint32_t max_batch{1};
     /// Rows of logits (and hidden states) a Forward call may return.
@@ -739,7 +756,16 @@ private:
   /// max(native context, Options::max_context).
   std::uint32_t context_capacity_{0};
   /// YaRN constants every rope launch receives (disabled: original path).
-  YarnRope yarn_{};
+  /// With dynamic YaRN they are the running session's (UseYarn).
+  mutable YarnRope yarn_{};
+  /// Dynamic YaRN: point the rope launches at `s`'s constants before a
+  /// per-session forward, so sessions at different factors never share them.
+  void UseYarn(const Session& s) const noexcept {
+    if (dynamic_yarn_)
+      yarn_ = s.yarn_rope_;
+  }
+  bool dynamic_yarn_{false};
+  RopeScaling yarn_max_{};  ///< configured static scaling (dynamic ceiling)
   /// Bounded score scratch, shared by sequential selector chunks.
   std::size_t select_score_floats_{0};
   std::vector<void*> allocations_;

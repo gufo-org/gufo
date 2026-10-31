@@ -973,6 +973,14 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   }
   e->context_capacity_ = std::max(c.context_length, options.max_context);
   e->yarn_ = MakeYarnRope(c.rope_scaling, c.rotary_dim, c.rope_theta);
+  // With YaRN configured, a session runs unscaled while it fits the native
+  // context and takes the smallest whole factor covering its positions past
+  // it, up to the configured one (SetYarnFactor re-rotates its cached keys).
+  if (c.rope_scaling.Enabled()) {
+    e->dynamic_yarn_ = true;
+    e->yarn_max_ = c.rope_scaling;
+    e->yarn_ = YarnRope{};  // every session starts unscaled
+  }
   const std::size_t T = e->options_.max_batch;
   e->blaslt_ = BlasLt::Create(e->stream_, error_msg);
   if (e->blaslt_ == nullptr) {
@@ -1590,6 +1598,83 @@ bool Executor::Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
   }
   q->data = slot;
   return true;
+}
+
+float Executor::YarnLevelFor(std::size_t end_position) const noexcept {
+  if (!dynamic_yarn_ || yarn_max_.original_context == 0) {
+    return 1.0F;
+  }
+  if (end_position <= yarn_max_.original_context) {
+    return 1.0F;
+  }
+  const std::size_t native = yarn_max_.original_context;
+  const float level = static_cast<float>((end_position + native - 1) / native);
+  return std::min(level, yarn_max_.factor);
+}
+
+bool Executor::SetYarnFactor(Session& s, float factor, std::string* error_msg) {
+  if (!dynamic_yarn_ || factor == s.yarn_factor_) {
+    return true;
+  }
+  const Config& c = config();
+  YarnRope to{};
+  if (factor != 1.0F) {
+    RopeScaling scaling = yarn_max_;
+    scaling.factor = factor;
+    to = MakeYarnRope(scaling, c.rotary_dim, c.rope_theta);
+  }
+  const YarnRope from = s.yarn_rope_;
+  // A prefill checkpoint over these rows is consumed before the next
+  // forward, which this precedes.
+  for (auto& a : s.attention_) {
+    if (a.k_cache != nullptr && s.position_ != 0)
+      RerotateKeys(a.k_cache, s.position_, c.num_kv_heads, c.head_dim,
+                   c.rotary_dim, 1, c.rope_theta, a.rope, from, to, stream_);
+    if (a.block_k != nullptr && s.blocks_ != 0 && c.compress_ratio != 0)
+      RerotateKeys(a.block_k, s.blocks_, 1, c.indexer_head_dim, c.rotary_dim,
+                   c.compress_ratio, c.rope_theta, a.rope, from, to, stream_);
+  }
+  const auto* mtp_rope = s.vision_input_.rope();
+  if (s.mtp_.k_cache != nullptr && s.mtp_.position != 0)
+    RerotateKeys(s.mtp_.k_cache, s.mtp_.position, c.num_kv_heads, c.head_dim,
+                 c.rotary_dim, 1, c.rope_theta, mtp_rope, from, to, stream_);
+  if (s.mtp_.block_k != nullptr && s.mtp_.blocks != 0 && c.compress_ratio != 0)
+    RerotateKeys(s.mtp_.block_k, s.mtp_.blocks, 1, c.indexer_head_dim,
+                 c.rotary_dim, c.compress_ratio, c.rope_theta, mtp_rope, from,
+                 to, stream_);
+  // Captured decode graphs carry the old constants by value.
+  for (auto& [key, exec] : s.graphs_)
+    (void)hipGraphExecDestroy(exec);
+  s.graphs_.clear();
+  if (hipStreamSynchronize(stream_) != hipSuccess ||
+      hipGetLastError() != hipSuccess) {
+    AssignError(error_msg, "dynamic YaRN re-rotation failed");
+    return false;
+  }
+  s.yarn_factor_ = factor;
+  s.yarn_rope_ = to;
+  UseYarn(s);
+  return true;
+}
+
+void Executor::AdoptYarnFactor(Session& s, float factor) {
+  if (!dynamic_yarn_)
+    return;
+  const Config& c = config();
+  YarnRope rope{};
+  if (factor != 1.0F) {
+    RopeScaling scaling = yarn_max_;
+    scaling.factor = factor;
+    rope = MakeYarnRope(scaling, c.rotary_dim, c.rope_theta);
+  }
+  if (factor != s.yarn_factor_) {
+    for (auto& [key, exec] : s.graphs_)
+      (void)hipGraphExecDestroy(exec);
+    s.graphs_.clear();
+  }
+  s.yarn_factor_ = factor;
+  s.yarn_rope_ = rope;
+  UseYarn(s);
 }
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
@@ -3231,6 +3316,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            std::string* error_msg,
                            PrefillCheckpoint* checkpoint,
                            bool embeddings_ready) const {
+  UseYarn(session);
   const Config& c = config();
   if (first_layer == 0) {
     if (!Check(hipMemcpyAsync(session.control_, control_host_,
@@ -4430,6 +4516,7 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
                        bool token, bool candidates, std::string* error_msg,
                        std::uint32_t pool_grid, const float* hidden_source,
                        MtpTrace* trace, bool kv_only, bool draft_subset) const {
+  UseYarn(session);
   const Config& c = config();
   const DeviceLayer& l = model_->mtp();
   const std::uint32_t hc_dim = c.HcDim();
