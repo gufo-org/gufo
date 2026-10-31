@@ -3010,6 +3010,10 @@ __global__ void CompactSelectionKernel(
 /// selected blocks are read from the ready-made list instead of being
 /// compacted from the mask. The tiles are the same 64-block tiles dealt to the
 /// splits in the same order, so the output is bitwise identical.
+/// A row seeing at most `dense_extent` keys (a query before the token
+/// budget) sweeps them densely even with a mask: the sparse walk attends the
+/// incomplete tail block in a tile of its own, so the same position would
+/// round differently alone and in a chain that crosses the budget.
 template<std::uint32_t kGroup>
 __global__ void AttentionKernel(
     const float* q, const __half* k_cache, const __half* v_cache,
@@ -3017,7 +3021,7 @@ __global__ void AttentionKernel(
     float* partials, const std::uint32_t* start_pos, std::uint32_t heads,
     std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
     const std::uint32_t* lists, const std::uint32_t* counts,
-    std::uint32_t capacity) {
+    std::uint32_t capacity, std::uint32_t dense_extent) {
   constexpr std::uint32_t kTile = 256;
   constexpr std::uint32_t kWindow = 1024;  // blocks compacted per pass
   const std::uint32_t split = blockIdx.z;
@@ -3042,8 +3046,9 @@ __global__ void AttentionKernel(
   const std::uint32_t n_kv = pos + 1;
   const std::uint32_t tail_start = (n_kv / ratio) * ratio;
   const std::uint32_t* words =
-      mask == nullptr ? nullptr
-                      : mask + static_cast<std::size_t>(t) * mask_words;
+      mask == nullptr || n_kv <= dense_extent
+          ? nullptr
+          : mask + static_cast<std::size_t>(t) * mask_words;
   const float scale = rsqrtf(static_cast<float>(d));
   const std::uint32_t i = threadIdx.x;
   const std::uint32_t lane = i & 31u;
@@ -7835,7 +7840,7 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                hipStream_t stream, std::uint32_t* lists, std::uint32_t* counts,
-               std::uint32_t list_capacity) {
+               std::uint32_t list_capacity, std::uint32_t dense_extent) {
   if (d != 256) {
     return;  // the kernel is written for the model's 256-wide heads
   }
@@ -7863,7 +7868,7 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
     hipLaunchKernelGGL(kernel, dim3(heads / group, n_tokens, z), dim3(kThreads),
                        0, stream, q, k_cache, v_cache, mask, mask_words, out,
                        partials, start_pos, heads, kv_heads, d, ratio, lists,
-                       counts, list_capacity);
+                       counts, list_capacity, dense_extent);
   };
   if (n_tokens <= 2) {
     launch(AttentionKernel<2>, 2);

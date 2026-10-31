@@ -1,5 +1,34 @@
 # Qwen3.8 Flash-Next quality
 
+## Decode rows at the sparse budget, October 28, 2026
+
+A verification chain that crosses the 2,048-token sparse-attention budget
+selects blocks for every row. Its rows before the budget then took the mask
+walk, which attends the incomplete tail block (keys 4k..pos) in a tile of its
+own on split 0, where the same row decoded alone sweeps those keys densely in
+its last tile. The online softmax rounds differently, so positions whose key
+count is not a multiple of four (2041, 2042, 2044, 2045, 2046) changed with
+the draft widths, and with them with batch timing. Rows that see at most
+`indexer_top_k` keys now sweep densely even with a mask
+(`AttentionKernel`'s `dense_extent`). Prefill and plain AR rows take the same
+route as before.
+
+- `attention_ops_test` checks chains of eight rows starting at 2040..2047
+  (one launch, eight splits, compact lists) bit for bit against each row
+  launched alone, and that the mask walk differs on some of them (it does
+  on 24 rows), so the check can tell the routes apart.
+- End to end on a downstream branch (v0.23 base with 8-bit K/V; greedy
+  decoding through the engine API with a frontier-logit hash per step):
+  one prompt decoded AR to position P and then with MTP from P first
+  differed from plain AR at position 2048 for every P = 2041..2046; with the
+  change every frontier of the 130 tokens equals plain AR, and plain AR is
+  unchanged. Eight IQ prompts decoded up to 3,000 tokens with eight-way
+  batched MTP, staggered joins and single-session MTP equal eight-way
+  batched AR at every common frontier. Two shuffled 149-question replays
+  through `gufo serve` (eight sessions, MTP) are byte-identical on all 149
+  answers (135,179 tokens each); before the change, answers diverged run to
+  run, every divergence starting past about 2,017 tokens.
+
 ## Sampled draft-head costs, October 23, 2026
 
 Based on main `41d93463`, including the expanded greedy-head eligibility.
