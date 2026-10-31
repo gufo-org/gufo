@@ -14,12 +14,15 @@ namespace gufo::hip {
 /// The DXGI engine node of the adapter behind a HIP device, from the device's
 /// luidDeviceNodeMask. One set bit names the node. TheRock 10.0.0 leaves the
 /// mask zero on Strix Halo, a single-node APU, so a zero mask means node 0
-/// there and on no other architecture. Several bits, or a zero mask on another
-/// architecture, leave no node to query.
+/// there and on no other architecture. The architecture is the part of
+/// `gcn_arch_name` before any feature flags, as in "gfx1151:xnack-", and must
+/// be gfx1151 exactly: pass the name alone, without the NUL padding that
+/// follows it in hipDeviceProp_t::gcnArchName. Several bits, or a zero mask on
+/// another architecture, leave no node to query.
 [[nodiscard]] inline std::optional<unsigned> DxgiNodeFromMask(
     unsigned node_mask, std::string_view gcn_arch_name) {
   if (node_mask == 0) {
-    if (gcn_arch_name.starts_with("gfx1151"))
+    if (gcn_arch_name.substr(0, gcn_arch_name.find(':')) == "gfx1151")
       return 0u;
     return std::nullopt;
   }

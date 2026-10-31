@@ -57,9 +57,11 @@ QueryDeviceLocalBudget() {
       !HipSucceeded(hipGetDeviceProperties(&properties, device))) {
     return std::nullopt;
   }
-  const auto node = DxgiNodeFromMask(
-      properties.luidDeviceNodeMask,
-      std::string_view(properties.gcnArchName, sizeof(properties.gcnArchName)));
+  const std::string_view gcn_arch_name(
+      properties.gcnArchName,
+      strnlen(properties.gcnArchName, sizeof(properties.gcnArchName)));
+  const auto node =
+      DxgiNodeFromMask(properties.luidDeviceNodeMask, gcn_arch_name);
   if (!node.has_value())
     return std::nullopt;
   std::array<std::uint8_t, 8> luid{};

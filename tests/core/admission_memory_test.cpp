@@ -110,6 +110,10 @@ int main() {
          "a zero mask on another arch names no node");
   Expect(!DxgiNodeFromMask(0, "gfx115").has_value(),
          "a zero mask on a shorter arch name names no node");
+  Expect(!DxgiNodeFromMask(0, "gfx11510").has_value(),
+         "a zero mask on a longer arch name names no node");
+  Expect(!DxgiNodeFromMask(0, "gfx11510:xnack-").has_value(),
+         "feature suffixes do not make a longer arch name match");
   Expect(!DxgiNodeFromMask(0, "").has_value(),
          "a zero mask with no arch name names no node");
 
