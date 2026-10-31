@@ -22,16 +22,20 @@ public:
   using Runner =
       std::function<Result(const Request&, const CancellationCheck&)>;
 
+  /// Without `editing`, the model generates from text only: edits and
+  /// transparent backgrounds are rejected before the runner is called.
   explicit ImageService(const std::filesystem::path& model_root,
                         std::string model_id = "Qwen-Image-2.1",
-                        Runner runner = {});
+                        Runner runner = {}, bool editing = true);
   ~ImageService();
   const std::string& model_id() const { return model_id_; }
+  bool editing() const { return editing_; }
   Result Generate(const Request& request, const CancellationCheck& cancelled);
 
 private:
   std::string model_id_;
   Runner runner_;
+  bool editing_;
   std::unique_ptr<models::qwen_image_21::Model> model_;
   std::timed_mutex gate_;
 };

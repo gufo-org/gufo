@@ -258,8 +258,10 @@ std::string String(const json::Value& fields, const char* name,
 }  // namespace
 
 ImageService::ImageService(const std::filesystem::path& root,
-                           std::string model_id, Runner runner)
-    : model_id_(std::move(model_id)), runner_(std::move(runner)) {
+                           std::string model_id, Runner runner, bool editing)
+    : model_id_(std::move(model_id)),
+      runner_(std::move(runner)),
+      editing_(editing) {
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
   if (!runner_) {
@@ -322,6 +324,9 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     if (model != service.model_id())
       return Error(404, "requested image model is not loaded",
                    "model_not_found");
+    if (edit && !service.editing())
+      throw std::invalid_argument(service.model_id() +
+                                  " does not support image edits");
     if (String(fields, "response_format", "b64_json") != "b64_json" ||
         String(fields, "output_format", "png") != "png")
       throw std::invalid_argument(
@@ -338,6 +343,9 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     if (background != "auto" && background != "transparent" &&
         background != "opaque")
       throw std::invalid_argument("invalid image background");
+    if (background == "transparent" && !service.editing())
+      throw std::invalid_argument(service.model_id() +
+                                  " does not support transparent backgrounds");
     image::Request generation;
     generation.prompt = String(fields, "prompt", "");
     if (background == "transparent")

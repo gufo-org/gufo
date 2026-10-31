@@ -349,6 +349,7 @@ target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
 
 add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
+add_subdirectory(src/models/moss_image)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -423,7 +424,7 @@ add_library(gufo_http STATIC
   # the engine library, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_moss_image gufo_embedding_gemma2)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -557,6 +558,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen27b)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
+  gufo_moss_image_register_tests()
 
   add_subdirectory(tests/models/embedding_gemma2)
 

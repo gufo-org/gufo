@@ -41,6 +41,14 @@ def main():
         check(["serve", modality, "--port", "65536"], 2, "--port must")
         check(["serve", modality, "--host", "bad.address"], 2, "--host must")
     check(["serve", "image"], 2, "--model <DIR> is required")
+    text = check(["serve", "image", "--help"], 0, "--text-encoder")
+    assert "MOSS-Image" in text and "--served-model-name" in text
+    # Only a MOSS-Image directory takes a separate text encoder; anything else
+    # is loaded as Qwen-Image-2.1.
+    check(["serve", "image", "--model", "/missing", "--text-encoder",
+           "encoder.gguf"], 2, "--text-encoder applies to MOSS-Image only")
+    check(["serve", "image", "--model", "/missing"], 1,
+          "Error loading Qwen-Image-2.1")
     check(["serve", "embedding"], 2, "--model <DIR> is required")
     text = check(["serve", "embedding", "--help"], 0, "--served-model-name")
     assert "--context" not in text and "--sessions" not in text

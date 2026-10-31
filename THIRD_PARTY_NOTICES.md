@@ -138,6 +138,20 @@ responsible for the terms governing their location and use.
   AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd.
   All Rights Reserved.”
 
+### MOSS-Image-SFT
+
+- **Artifact**: [OpenMOSS-Team/MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT),
+  revision `f972bd4b4b9e3852133cc5da954d87bc32cd8fb9`; separate BF16
+  safetensors, tokenizer, model configuration and the checkpoint's
+  `pipeline_moss_image.py`.
+- **License**: Apache-2.0 as declared in the model card metadata and the
+  checkpoint's `LICENSE`. Gufo neither ships nor automatically downloads these
+  weights; operators convert the text encoder to GGUF themselves.
+- **Reference implementation**: the checkpoint's pipeline code, Diffusers and
+  Transformers, all Apache-2.0. Native inference follows the
+  [pinned operator contract](src/models/moss_image/UPSTREAM.md); Python reference
+  dependencies are development-only.
+
 ### MiniMax H3 FL2VA
 
 - **Component Name**: MiniMax H3 Base FL2VA checkpoint
