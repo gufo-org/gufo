@@ -81,9 +81,15 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  if (runner.InitialOutputState(request) ==
-      TextGenerationBackend::InitialOutputState::kReasoning)
-    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  const auto initial = runner.InitialOutputState(request);
+  if (initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end);
+  else if (initial == TextGenerationBackend::InitialOutputState::kAuto)
+    // Output that may open reasoning itself keeps that choice.
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end,
+        runner.Markup().reasoning_start);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
