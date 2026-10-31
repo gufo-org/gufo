@@ -32,6 +32,15 @@ let
   versionLabel = if releaseVersion == null then "development" else releaseVersion;
   packageVersion =
     if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;
+  # The CI timing baseline builds an older revision with this definition.
+  # Revisions before model extensions have no extensions.lock, keep the eval
+  # fixture under the DeepSeek tests and report no extension selection.
+  hasExtensions = builtins.pathExists (sourceRoot + "/extensions.lock");
+  evalFixture =
+    if hasExtensions then
+      "tests/fixtures/eval/antirez-ds4.json"
+    else
+      "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json";
   productionSource = lib.cleanSourceWith {
     src = sourceRoot;
     filter =
@@ -56,10 +65,8 @@ let
       # `gufo eval` reads its default dataset at run time and that dataset is
       # core-owned, so exactly one test-tree file is admitted: the core eval
       # fixture. No model test file enters the production derivation.
-      || relativePath == "tests"
-      || relativePath == "tests/fixtures"
-      || relativePath == "tests/fixtures/eval"
-      || relativePath == "tests/fixtures/eval/antirez-ds4.json";
+      || relativePath == evalFixture
+      || lib.hasPrefix "${relativePath}/" evalFixture;
   };
 in
 assert lib.versions.majorMinor rocmPackages.clr.version == "10.1";
@@ -141,8 +148,10 @@ stdenv.mkDerivation {
     runHook preInstallCheck
 
     test "$($out/bin/gufo --version | head -n 1)" = "gufo version ${versionLabel} (${revision})"
+  '' + lib.optionalString hasExtensions ''
     $out/bin/gufo --version | grep -Fx "Extension selection: ${if extensionsFromLock then "lock" else "discovery"}"
     $out/bin/gufo diagnose --section extensions --json > extensions.json
+  '' + ''
     $out/bin/gufo --help >/dev/null
     test "$($out/bin/gufo-server --version | head -n 1)" = "gufo version ${versionLabel} (${revision})"
     $out/bin/gufo-server --help >/dev/null
