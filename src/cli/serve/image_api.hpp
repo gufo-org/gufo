@@ -28,6 +28,8 @@ public:
   ~ImageService();
   const std::string& model_id() const { return model_id_; }
   Result Generate(const Request& request, const CancellationCheck& cancelled);
+  /// The model's GPU context failed; the server must restart.
+  bool device_lost() const { return model_ && model_->DeviceLost(); }
 
 private:
   std::string model_id_;

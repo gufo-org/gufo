@@ -2282,7 +2282,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 
 bool HttpServer::device_lost() {
   const bool lost = (backend_ != nullptr && backend_->device_lost()) ||
-                    (embeddings_ != nullptr && embeddings_->device_lost());
+                    (embeddings_ != nullptr && embeddings_->device_lost()) ||
+                    (images_ != nullptr && images_->device_lost());
   if (!lost)
     return false;
   if (options_.on_device_lost &&

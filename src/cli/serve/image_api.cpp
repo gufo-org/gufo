@@ -1,11 +1,13 @@
 #include "src/cli/serve/image_api.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <ctime>
 #include <map>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -41,6 +43,7 @@ HttpResponse Error(int status, const std::string& message,
   return {.status = status,
           .reason = status == 400   ? "Bad Request"
                     : status == 404 ? "Not Found"
+                    : status == 503 ? "Service Unavailable"
                                     : "Internal Server Error",
           .body = body.dump(),
           .headers = {{"Content-Type", "application/json"}}};
@@ -124,7 +127,11 @@ std::string Parameter(std::string_view value, std::string_view key) {
 struct Parsed {
   json::Value fields = json::Value::object();
   std::vector<image::Image> images;
+  std::optional<image::Image> init_image;
 };
+
+constexpr std::array<std::string_view, 4> kExtensionFields{
+    "negative_prompt", "guidance", "strength", "init_image"};
 
 Parsed Multipart(const HttpRequest& request) {
   const auto content_type = request.header("content-type");
@@ -198,14 +205,19 @@ Parsed Multipart(const HttpRequest& request) {
     body.remove_prefix(end + delimiter.size());
     if (++fields > 32)
       throw std::invalid_argument("too many multipart fields");
-    if (name == "image" || name == "image[]") {
-      if (parsed.images.size() == 10 ||
+    if (name == "image" || name == "image[]" || name == "init_image") {
+      const bool init = name == "init_image";
+      if (init && parsed.init_image)
+        throw std::invalid_argument("duplicate field init_image");
+      if ((!init && parsed.images.size() == 10) ||
           data.size() > core::kMaxEncodedImageBytes - image_bytes)
         throw std::invalid_argument("image inputs exceed 10 images or 20 MiB");
       image_bytes += data.size();
-      parsed.images.push_back(image::DecodeImage(std::span(
-          reinterpret_cast<const std::uint8_t*>(data.data()), data.size())));
-      const auto& decoded = parsed.images.back();
+      auto decoded_image = image::DecodeImage(std::span(
+          reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
+      const auto& decoded =
+          init ? parsed.init_image.emplace(std::move(decoded_image))
+               : parsed.images.emplace_back(std::move(decoded_image));
       image_pixels += static_cast<std::size_t>(decoded.width) * decoded.height;
       if (image_pixels > core::kMaxImagePixels)
         throw std::invalid_argument(
@@ -218,17 +230,44 @@ Parsed Multipart(const HttpRequest& request) {
         throw std::invalid_argument("duplicate field " + name);
       if (data.size() > (64U << 10U))
         throw std::invalid_argument("multipart field too large");
-      if (name == "n" || name == "seed" || name == "steps" ||
-          name == "stream") {
+      if (name.starts_with("gufo.")) {
+        // Form fields "gufo.<name>" fill the same extension object as the
+        // JSON body's "gufo": {...}.
+        const auto key = name.substr(5);
+        if (!parsed.fields.contains("gufo"))
+          parsed.fields["gufo"] = json::Value::object();
+        auto& extension = parsed.fields["gufo"];
+        if (!extension.is_object() || extension.contains(key))
+          throw std::invalid_argument("duplicate field " + name);
+        extension[key] = key == "guidance" || key == "strength"
+                             ? ParseJson(data)
+                             : json::Value(std::string(data));
+      } else if (name == "gufo") {
+        if (parsed.fields.contains(name))
+          throw std::invalid_argument("duplicate field " + name);
+        parsed.fields[name] = ParseJson(data);
+      } else if (name == "n" || name == "seed" || name == "steps" ||
+                 name == "stream") {
         parsed.fields[name] = ParseJson(data);
       } else {
         parsed.fields[name] = std::string(data);
       }
     }
   }
-  if (parsed.images.empty())
+  if (parsed.images.empty() && !parsed.init_image)
     throw std::invalid_argument("image edit requires an image");
   return parsed;
+}
+
+double Real(const json::Value& fields, const char* name, double fallback,
+            double low, double high) {
+  const auto* value = fields.find(name);
+  if (!value)
+    return fallback;
+  if (!value->is_number() || !std::isfinite(value->as_double()) ||
+      value->as_double() < low || value->as_double() > high)
+    throw std::invalid_argument(std::string("invalid gufo.") + name);
+  return value->as_double();
 }
 
 std::uint64_t Number(const json::Value& fields, const char* name,
@@ -265,6 +304,8 @@ ImageService::ImageService(const std::filesystem::path& root,
   if (!runner_) {
 #if defined(ENGINE_ENABLE_HIP)
     model_ = std::make_unique<image::Model>(root);
+    model_->SetLog(
+        [](const std::string& line) { Logger::Info("image", line); });
     runner_ = [this](const Request& request,
                      const CancellationCheck& cancelled) {
       return model_->Generate(request, cancelled);
@@ -310,7 +351,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     const std::set<std::string> allowed{
         "prompt",        "model",   "n",          "size", "response_format",
         "output_format", "quality", "background", "user", "seed",
-        "steps",         "stream"};
+        "steps",         "stream",  "gufo"};
     for (const auto& [name, value] : fields.members()) {
       (void)value;
       if (!allowed.contains(name))
@@ -345,9 +386,55 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
           "This is an RGBA image with transparency. " + generation.prompt +
           " The image has alpha channel and the background is transparent.";
     generation.images = std::move(parsed.images);
+    // Extensions (JSON "gufo": {...} or form fields "gufo.<name>"):
+    // negative_prompt + guidance > 1 enable true CFG; strength < 1 with an
+    // input image is image to image (ComfyUI KSampler denoise).
+    const auto* extension = fields.find("gufo");
+    if (extension) {
+      if (!extension->is_object())
+        throw std::invalid_argument("gufo must be an object");
+      for (const auto& [name, value] : extension->members()) {
+        (void)value;
+        if (std::find(kExtensionFields.begin(), kExtensionFields.end(), name) ==
+            kExtensionFields.end())
+          throw std::invalid_argument("unsupported image parameter: gufo." +
+                                      name);
+      }
+      generation.negative_prompt = String(*extension, "negative_prompt", "");
+      generation.guidance =
+          static_cast<float>(Real(*extension, "guidance", 1, 0, 20));
+      generation.strength = Real(*extension, "strength", 1, 0.01, 1);
+      if (const auto* init = extension->find("init_image")) {
+        // Inline data only: base64 or a data URL, never a server-side fetch.
+        if (parsed.init_image || !init->is_string() ||
+            init->str().starts_with("http"))
+          throw std::invalid_argument(
+              "gufo.init_image must be base64 or a data URL, given once");
+        const auto& text = init->str();
+        const auto bytes = core::ReadImageUrl(
+            text.starts_with("data:") ? text : "data:image/png;base64," + text);
+        parsed.init_image = image::DecodeImage(bytes);
+      }
+    }
+    if (extension && extension->contains("strength") && !parsed.init_image) {
+      // A single uploaded "image" is the start image, not a reference.
+      if (generation.images.size() != 1)
+        throw std::invalid_argument(
+            "gufo.strength needs init_image or exactly one image");
+      parsed.init_image = std::move(generation.images.front());
+      generation.images.clear();
+    }
+    generation.init_image = std::move(parsed.init_image);
     const auto size = String(fields, "size", "auto");
     if (size == "auto") {
-      if (!generation.images.empty()) {
+      if (generation.init_image) {
+        // Keep the start image's canvas, rounded to the 32-pixel grid.
+        const auto grid = [](int v) {
+          return std::max(32, static_cast<int>(std::nearbyint(v / 32.0)) * 32);
+        };
+        generation.width = grid(generation.init_image->width);
+        generation.height = grid(generation.init_image->height);
+      } else if (!generation.images.empty()) {
         const auto& last = generation.images.back();
         const double ratio = static_cast<double>(last.width) / last.height;
         const double w = std::sqrt(1024.0 * 1024 * ratio);
@@ -401,10 +488,17 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
               << 'x' << generation.height
               << " references=" << generation.images.size()
               << " steps=" << generation.steps
+              << " guidance=" << generation.guidance
+              << " strength=" << generation.strength
+              << " init_image=" << (generation.init_image ? 1 : 0)
               << " prompt_ms=" << result.metrics.prompt_ms
               << " denoise_ms=" << result.metrics.denoise_ms
               << " vae_ms=" << result.metrics.vae_ms
               << " total_ms=" << result.metrics.total_ms
+              << " condition_rows=" << result.metrics.condition_rows
+              << " negative_rows=" << result.metrics.negative_condition_rows
+              << " released_text_encoder="
+              << (result.metrics.released_text_encoder ? 1 : 0)
               << " resident_weight_mib="
               << result.metrics.resident_weight_bytes / (1024 * 1024);
       Logger::Info("image", details.str());
@@ -417,6 +511,8 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
             .headers = {{"Content-Type", "application/json"}}};
   } catch (const std::invalid_argument& error) {
     return Error(400, error.what(), "invalid_request");
+  } catch (const image::InsufficientMemory& error) {
+    return Error(503, error.what(), "insufficient_gpu_memory");
   } catch (const std::exception& error) {
     return Error(500, error.what(), "image_generation_failed");
   }

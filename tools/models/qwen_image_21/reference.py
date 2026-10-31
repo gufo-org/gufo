@@ -6,6 +6,7 @@ UPSTREAM.md for the source and model revisions used for qualification.
 """
 
 import argparse
+import copy
 import hashlib
 from importlib.metadata import version
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusers import QwenImage21Pipeline
+from diffusers.pipelines.qwenimage21 import pipeline_qwenimage21 as pipeline_module
 from PIL import Image
 
 
@@ -30,7 +32,17 @@ def main():
                         help="Replay each official block with Gufo's saved block inputs")
     parser.add_argument("--skip-decode", action="store_true",
                         help="Compare denoising latents without running the VAE decoder")
+    parser.add_argument("--negative-prompt",
+                        help="True CFG: Diffusers negative_prompt (needs --guidance > 1)")
+    parser.add_argument("--guidance", type=float, default=1.0,
+                        help="Diffusers true_cfg_scale")
+    parser.add_argument("--init-image", type=Path,
+                        help="Image to image start image (already at the output size)")
+    parser.add_argument("--strength", type=float, default=1.0,
+                        help="ComfyUI KSampler denoise: last steps+1 sigmas of int(steps/strength)")
     args = parser.parse_args()
+    cfg = args.guidance > 1 and args.negative_prompt is not None
+    img2img = args.init_image is not None and args.strength <= 0.9999
     torch.set_num_threads(8)
     args.output.mkdir(parents=True, exist_ok=True)
     pipe = QwenImage21Pipeline.from_pretrained(
@@ -41,8 +53,14 @@ def main():
                              "diffusers": version("diffusers"),
                              "model_revision": Path(args.model).name,
                              "teacher_forced": args.teacher_force,
-                             "decoded": not args.skip_decode}}
+                             "decoded": not args.skip_decode,
+                             "guidance": args.guidance if cfg else 1.0,
+                             "negative_prompt": args.negative_prompt if cfg else None,
+                             "strength": args.strength if img2img else 1.0}}
     step = [0]
+    # Boundary names of the negative (unconditional) pass carry this prefix,
+    # as in Gufo's observer.
+    branch = [""]
 
     def replace(name, tensor, channel_first=False):
         path = args.native / f"{name}.f32"
@@ -62,10 +80,10 @@ def main():
 
     def input_hook(name, channel_first=False, compare_input=False):
         def hook(module, inputs, kwargs):
-            key = name()
+            key = branch[0] + name()
             value = inputs[0] if inputs else kwargs["hidden_states"]
             if compare_input:
-                compare(key, value, channel_first)
+                compare(key, value, channel_first, prefixed=False)
             value = replace(key, value, channel_first)
             if inputs:
                 return (value, *inputs[1:]), kwargs
@@ -74,7 +92,9 @@ def main():
             return inputs, kwargs
         return hook
 
-    def compare(name, value, channel_first=False):
+    def compare(name, value, channel_first=False, prefixed=True):
+        if prefixed and not name.startswith(("latent.", "sigmas", "init.", "noise")):
+            name = branch[0] + name
         source = args.native / f"{name}.f32"
         if not source.exists():
             return
@@ -120,6 +140,33 @@ def main():
         ), with_kwargs=True)
         block.register_forward_hook(lambda module, inputs, out, i=i: compare(f"vision.block.{i}", out))
     visual.merger.register_forward_hook(lambda module, inputs, out: compare("vision.output", out))
+    encode_prompt = pipe.encode_prompt
+    encodes = [0]
+
+    def encode_prompt_branch(*inputs, **kwargs):
+        branch[0] = "negative." if encodes[0] else ""
+        encodes[0] += 1
+        try:
+            return encode_prompt(*inputs, **kwargs)
+        finally:
+            branch[0] = ""
+
+    pipe.encode_prompt = encode_prompt_branch
+    transformer_calls = [0]
+
+    def transformer_branch(module, inputs, kwargs):
+        branch[0] = "negative." if cfg and transformer_calls[0] % 2 else ""
+        transformer_calls[0] += 1
+
+    pipe.transformer.register_forward_pre_hook(transformer_branch, with_kwargs=True)
+    scheduler_step = pipe.scheduler.step
+
+    def guided_step(model_output, *inputs, **kwargs):
+        if cfg:
+            compare(f"dit.{step[0]}.guided", model_output, prefixed=False)
+        return scheduler_step(model_output, *inputs, **kwargs)
+
+    pipe.scheduler.step = guided_step
     encode_vae_image = pipe._encode_vae_image
 
     def compare_encoded_image(*inputs, **kwargs):
@@ -135,8 +182,8 @@ def main():
             if i == 0:
                 compare(name, kwargs["hidden_states"])
                 compare(f"dit.{step[0]}.modulation", kwargs["modulation"])
-            kwargs["hidden_states"] = replace(name, kwargs["hidden_states"])
-            kwargs["modulation"] = replace(f"dit.{step[0]}.modulation", kwargs["modulation"])
+            kwargs["hidden_states"] = replace(branch[0] + name, kwargs["hidden_states"])
+            kwargs["modulation"] = replace(f"{branch[0]}dit.{step[0]}.modulation", kwargs["modulation"])
             return inputs, kwargs
         layer.register_forward_pre_hook(dit_input, with_kwargs=True)
         layer.register_forward_hook(
@@ -177,10 +224,48 @@ def main():
     kwargs = {}
     if args.image:
         kwargs["image"] = Image.open(args.image)
+    if cfg:
+        kwargs["negative_prompt"] = args.negative_prompt
+        kwargs["true_cfg_scale"] = args.guidance
+    schedule_steps = args.steps
+    if img2img:
+        # ComfyUI KSampler denoise: schedule int(steps / strength) sigmas and
+        # run the last `steps`; start at sigma * noise + (1 - sigma) * image.
+        schedule_steps = int(args.steps / args.strength)
+        retrieve_timesteps = pipeline_module.retrieve_timesteps
+
+        def truncated_timesteps(scheduler, *inputs, **kw):
+            timesteps, count = retrieve_timesteps(scheduler, *inputs, **kw)
+            skip = count - args.steps
+            scheduler.timesteps = scheduler.timesteps[skip:]
+            scheduler.sigmas = scheduler.sigmas[skip:]
+            return scheduler.timesteps, args.steps
+
+        pipeline_module.retrieve_timesteps = truncated_timesteps
+        probe = copy.deepcopy(pipe.scheduler)
+        mu = pipeline_module.calculate_shift(
+            target_rows, probe.config.get("base_image_seq_len", 256),
+            probe.config.get("max_image_seq_len", 4096),
+            probe.config.get("base_shift", 0.5), probe.config.get("max_shift", 1.15))
+        truncated_timesteps(probe, schedule_steps, "cuda",
+                            sigmas=np.linspace(1.0, 1 / schedule_steps, schedule_steps), mu=mu)
+        sigma = probe.sigmas[0].float()
+        with Image.open(args.init_image) as source:
+            start = source.convert("RGBA")
+        if start.size != (args.size, args.size):
+            start = start.resize((args.size, args.size), Image.LANCZOS)
+        pixels = pipe.image_processor.preprocess(start, width=args.size, height=args.size)
+        with torch.inference_mode():
+            encoded = encode_vae_image(pixels.unsqueeze(2).to("cuda", torch.bfloat16), None)
+        side = args.size // 16
+        packed = pipe._pack_latents(encoded, 1, encoded.shape[1], side, side)
+        compare("init.vae.encoded", packed)
+        latent = (sigma * latent.float() + (1 - sigma) * packed.float()).to(torch.bfloat16)
+        compare("init.latent", latent)
     with torch.inference_mode():
         result = pipe(
             prompt=args.prompt, width=args.size, height=args.size,
-            num_inference_steps=args.steps, latents=latent,
+            num_inference_steps=schedule_steps, latents=latent,
             output_type="latent" if args.skip_decode else "pil",
             callback_on_step_end=callback, **kwargs
         )
@@ -217,6 +302,9 @@ def main():
                    or (name.startswith("dit.") and name.endswith((".input", ".modulation"))))
         if args.teacher_force and matched and record.get("relative_l2", 0) > 0.01:
             failures.append(f"{name}: matched-block relative L2 exceeds 0.01")
+        # One guided denoiser step and the start latent must agree closely.
+        if (name == "dit.0.guided" or name.startswith("init.")) and record.get("cosine", 1) < 0.999:
+            failures.append(f"{name}: cosine below 0.999")
     if tokenizer_ids != native_ids:
         failures.append("tokenizer mismatch")
     if records.get("sigmas", {}).get("max_abs", 1) != 0:

@@ -255,6 +255,15 @@ __global__ void Elementwise(const B* x, const B* other, B* y, std::size_t n,
   // FP32 dt does not promote the BF16 tensor), then adds to the FP32 sample.
   if (op == 6)
     value = a + Round(scalar * float(other[i]));
+  // True CFG in BF16 tensor arithmetic: negative + scale * (positive -
+  // negative), each operation rounded as in the Diffusers pipeline.
+  if (op == 7) {
+    const float negative = float(other[i]);
+    value = negative + Round(scalar * Round(a - negative));
+  }
+  // Image to image start: sigma * noise + (1 - sigma) * image in FP32.
+  if (op == 8)
+    value = scalar * a + (1.0F - scalar) * float(other[i]);
   y[i] = Bf16(value);
 }
 
@@ -664,7 +673,7 @@ Matrix Matrix::Reshape(int r, int c) const {
 }
 
 struct Runtime::Pool {
-  static constexpr std::size_t kMaxCachedBytes = 8ULL << 30;
+  std::size_t max_cached_bytes = 8ULL << 30;
   std::multimap<std::size_t, void*> free;
   std::size_t cached_bytes{0};
   ~Pool() { Clear(); }
@@ -677,7 +686,8 @@ struct Runtime::Pool {
     cached_bytes = 0;
   }
   void Release(void* p, std::size_t bytes) noexcept {
-    if (bytes <= kMaxCachedBytes - cached_bytes) {
+    if (cached_bytes <= max_cached_bytes &&
+        bytes <= max_cached_bytes - cached_bytes) {
       try {
         free.emplace(bytes, p);
         cached_bytes += bytes;
@@ -926,6 +936,106 @@ Matrix Runtime::Store(std::string_view name, const qwen_image_21::Weight& w,
   weight_bytes_ += count * 2;
   device_weights_.emplace(std::string(name), m);
   return m;
+}
+
+void Runtime::Evict(std::string_view prefix) {
+  Synchronize();
+  for (auto it = device_weights_.begin(); it != device_weights_.end();) {
+    if (it->first.starts_with(prefix)) {
+      weight_bytes_ -= it->second.size() * 2;
+      it = device_weights_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  std::erase(prefetched_groups_, prefix);
+  Trim();
+}
+
+Matrix Runtime::HeadLayout(const Matrix& x) {
+  if (x.cols != 4096 || x.packed)
+    throw std::logic_error("Qwen-Image head layout shape mismatch");
+  auto out = New(x.rows, x.cols);
+  ReorderHeads(x.data, out.data, x.rows, 32, 32, 128, false, stream_);
+  Check(hipGetLastError());
+  return out;
+}
+
+Matrix Runtime::SegmentedAttention(const Matrix& q,
+                                   std::span<const HeadKeys> segments,
+                                   const std::vector<int>& key_limits) {
+  if (q.cols != 4096 || segments.empty() || segments.size() > 3 ||
+      (!key_limits.empty() &&
+       key_limits.size() != static_cast<std::size_t>(q.rows)))
+    throw std::logic_error("segmented attention shape mismatch");
+  KeySegments keys;
+  int count = 0;
+  for (std::size_t i = 0; i < 3; ++i) {
+    if (i < segments.size()) {
+      const auto& s = segments[i];
+      if (s.rows < 0 || s.rows > s.keys.rows || s.keys.rows != s.values.rows ||
+          s.keys.cols != 4096 || s.values.cols != 4096)
+        throw std::logic_error("segmented attention segment mismatch");
+      keys.keys[i] = s.keys.data;
+      keys.values[i] = s.values.data;
+      keys.stride[i] = s.keys.rows;
+      count += s.rows;
+    }
+    keys.end[i] = count;
+  }
+  if (count < 1)
+    throw std::logic_error("segmented attention without keys");
+  auto qh = New(q.rows, 4096);
+  auto out = New(q.rows, 4096);
+  ReorderHeads(q.data, qh.data, q.rows, 32, 32, 128, false, stream_);
+  Matrix limits;
+  if (!key_limits.empty()) {
+    for (int n : key_limits)
+      if (n < 1 || n > count)
+        throw std::logic_error("invalid attention key limit");
+    limits = Raw(key_limits.size() * 4);
+    Check(hipMemcpyAsync(limits.data, key_limits.data(), key_limits.size() * 4,
+                         hipMemcpyHostToDevice, stream_));
+    Synchronize();
+  }
+  FusedAttention128Segmented(qh.data, keys, out.data, 32, q.rows, 0, q.rows,
+                             stream_,
+                             reinterpret_cast<const int*>(limits.data));
+  Check(hipGetLastError());
+  return out;
+}
+
+std::size_t Runtime::CachedBytes() const {
+  return pool_->cached_bytes;
+}
+
+std::size_t Runtime::MissingBytes(std::string_view prefix) const {
+  std::size_t bytes = 0;
+  for (const auto& [name, w] : weights_.Group(prefix))
+    if (!device_weights_.contains(name))
+      bytes += w->bytes / (w->bf16 ? 1 : 2);
+  return bytes;
+}
+
+void Runtime::SetCacheLimit(std::size_t bytes) {
+  pool_->max_cached_bytes = bytes;
+}
+
+void Runtime::CopyRows(const Matrix& destination, int row,
+                       const Matrix& source) {
+  if (destination.packed || source.packed || destination.cols != source.cols ||
+      row < 0 || row > destination.rows - source.rows)
+    throw std::logic_error("Qwen-Image row copy shape mismatch");
+  Check(hipMemcpyAsync(
+      destination.data + static_cast<std::size_t>(row) * destination.cols,
+      source.data, source.size() * 2, hipMemcpyDeviceToDevice, stream_));
+}
+
+void Runtime::Trim() {
+  Synchronize();
+  packed_source_ = {};
+  packed_input_ = {};
+  pool_->Clear();
 }
 
 Matrix Runtime::PackedInput(const Matrix& x) {
@@ -1364,6 +1474,28 @@ Matrix Runtime::Euler(const Matrix& x, const Matrix& velocity, float dt) {
   auto out = New(x.rows, x.cols);
   Elementwise<<<Blocks(out.size()), 256, 0, stream_>>>(
       Ptr(x), Ptr(velocity), Ptr(out), out.size(), 6, dt);
+  Check(hipGetLastError());
+  return out;
+}
+
+Matrix Runtime::Guidance(const Matrix& positive, const Matrix& negative,
+                         float scale) {
+  if (positive.rows != negative.rows || positive.cols != negative.cols)
+    throw std::logic_error("Qwen-Image guidance shape mismatch");
+  auto out = New(positive.rows, positive.cols);
+  Elementwise<<<Blocks(out.size()), 256, 0, stream_>>>(
+      Ptr(positive), Ptr(negative), Ptr(out), out.size(), 7, scale);
+  Check(hipGetLastError());
+  return out;
+}
+
+Matrix Runtime::NoiseMix(const Matrix& noise, const Matrix& image,
+                         float sigma) {
+  if (noise.rows != image.rows || noise.cols != image.cols)
+    throw std::logic_error("Qwen-Image start latent shape mismatch");
+  auto out = New(noise.rows, noise.cols);
+  Elementwise<<<Blocks(out.size()), 256, 0, stream_>>>(
+      Ptr(noise), Ptr(image), Ptr(out), out.size(), 8, sigma);
   Check(hipGetLastError());
   return out;
 }
