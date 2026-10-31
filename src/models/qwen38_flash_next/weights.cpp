@@ -31,8 +31,10 @@ struct Format {
       return {32, 18};
     case GgmlType::kIQ4_XS:
       return {256, 136};
+    case GgmlType::kIQ3_S:
+      return {256, 110};
     case GgmlType::kIQ3_XXS:
-      return {256, 82};
+      return {256, 98};
     case GgmlType::kIQ2_S:
       return {256, 82};
     case GgmlType::kQ2_0:

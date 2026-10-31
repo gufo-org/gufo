@@ -440,10 +440,11 @@ void CheckConvertToQ8_0(q::WeightType type, std::size_t count,
       block_bytes = 18;
       break;
     case q::WeightType::kIQ4_XS:
-      block_bytes = 144;
+      block_bytes = 136;
+      elements_per_block = 256;
       break;
     case q::WeightType::kIQ3_XXS:
-      block_bytes = 82;
+      block_bytes = 98;
       elements_per_block = 256;
       break;
     case q::WeightType::kIQ2_S:
@@ -451,7 +452,7 @@ void CheckConvertToQ8_0(q::WeightType type, std::size_t count,
       elements_per_block = 256;
       break;
     case q::WeightType::kIQ3_S:
-      block_bytes = 112;
+      block_bytes = 110;
       elements_per_block = 256;
       break;
     default:  // kQ2_0

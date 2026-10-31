@@ -542,15 +542,12 @@ float Iq3XxsValue(const block_iq3_xxs& block, std::size_t index) noexcept {
   std::uint32_t aux32 = 0;
   std::memcpy(&aux32, block.scales_and_signs + 4 * ib32, sizeof(aux32));
   const float d = Fp16ToFloat(block.d);
-  const float db = d * (0.5f + (aux32 >> 28)) * 0.25f;
-  const std::uint8_t grid_low = block.qs[8 * ib32 + 2 * l];
-  const std::uint8_t grid_high = block.qs[8 * ib32 + 2 * l + 1];
+  const float db = d * (0.5f + static_cast<float>(aux32 >> 28)) * 0.5f;
+  const std::uint8_t grid_index = block.qs[8 * ib32 + 2 * l + (j >= 4 ? 1 : 0)];
+  const std::uint8_t magnitude =
+      static_cast<std::uint8_t>(kIq3xxsGrid[grid_index] >> (8 * (j % 4)));
   const std::uint8_t signs = kSignsIq2xs[(aux32 >> (7 * l)) & 127];
-  const std::uint8_t magnitudes0 =
-      static_cast<std::uint8_t>(kIq3xxsGrid[grid_low] >> (8 * j));
-  const std::uint8_t magnitudes1 =
-      static_cast<std::uint8_t>(kIq3xxsGrid[grid_high] >> (8 * j));
-  return db * static_cast<float>(magnitudes0 + 8 * magnitudes1) *
+  return db * static_cast<float>(magnitude) *
          ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
 }
 
@@ -576,7 +573,9 @@ float Iq2SValue(const block_iq2_s& block, std::size_t index) noexcept {
       ((static_cast<std::size_t>(bytes[66 + ib32]) << (8 - 2 * l)) & 0x300);
   const std::uint8_t magnitude = static_cast<std::uint8_t>(
       kIq2sGrid[grid_index] >> (8 * static_cast<std::size_t>(j)));
-  const std::uint8_t signs = kSignsIq2xs[bytes[64 + 4 * ib32 + l] & 127];
+  // Signs overlap qs at offset QK_K/8 (byte 34 of the block); one bit per
+  // element (1 = negative), no sign-table indirection.
+  const std::uint8_t signs = bytes[34 + 4 * ib32 + l];
   return db * static_cast<float>(magnitude) *
          ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
 }

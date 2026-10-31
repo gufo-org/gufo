@@ -1361,7 +1361,7 @@ struct DevBlockIq4Xs {
 struct DevBlockIq3Xxs {
   std::uint16_t d;
   std::uint8_t qs[64];
-  std::uint8_t scales_and_signs[16];
+  std::uint8_t scales_and_signs[32];
 };
 struct DevBlockIq3S {
   std::uint16_t d;
@@ -1411,13 +1411,12 @@ __device__ __forceinline__ float DevIq3XxsElement(const std::uint8_t* row,
   const std::uint32_t aux32 =
       *reinterpret_cast<const std::uint32_t*>(blk->scales_and_signs + 4 * ib32);
   const float db = __half2float(*reinterpret_cast<const __half*>(&blk->d)) *
-                   (0.5f + static_cast<float>(aux32 >> 28)) * 0.25f;
-  const std::uint8_t m0 = static_cast<std::uint8_t>(
-      quant::kIq3xxsGrid[blk->qs[8 * ib32 + 2 * l]] >> (8 * j));
-  const std::uint8_t m1 = static_cast<std::uint8_t>(
-      quant::kIq3xxsGrid[blk->qs[8 * ib32 + 2 * l + 1]] >> (8 * j));
+                   (0.5f + static_cast<float>(aux32 >> 28)) * 0.5f;
+  const std::uint8_t grid_index = blk->qs[8 * ib32 + 2 * l + (j >= 4 ? 1 : 0)];
+  const std::uint8_t magnitude = static_cast<std::uint8_t>(
+      quant::kIq3xxsGrid[grid_index] >> (8 * (j % 4)));
   const std::uint8_t signs = quant::kSignsIq2xs[(aux32 >> (7 * l)) & 127];
-  return db * static_cast<float>(m0 + 8 * m1) *
+  return db * static_cast<float>(magnitude) *
          ((signs & (1u << j)) != 0 ? -1.0f : 1.0f);
 }
 
@@ -1463,9 +1462,9 @@ __device__ __forceinline__ float DevIq2sElement(const std::uint8_t* row,
       ((static_cast<std::size_t>(blk->qh[ib32]) << (8 - 2 * l)) & 0x300);
   const std::uint8_t magnitude =
       static_cast<std::uint8_t>(quant::kIq2sGrid[grid_index] >> (8 * j));
-  // IQ2_S sign bytes physically overlap the qs payload at offset QK_K/8.
-  const std::uint8_t signs =
-      quant::kSignsIq2xs[blk->qs[64 + 4 * ib32 + l] & 127];
+  // IQ2_S sign bytes physically overlap the qs payload at offset QK_K/8;
+  // one bit per element (1 = negative), no sign-table indirection.
+  const std::uint8_t signs = blk->qs[32 + 4 * ib32 + l];
   return db * static_cast<float>(magnitude) *
          ((signs & (1u << j)) != 0 ? -1.0f : 1.0f);
 }
