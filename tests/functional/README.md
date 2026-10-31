@@ -378,7 +378,7 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
 correctness matrix on main. A baseline must match the revision, harness,
 toolchain, weights, settings and preceding cache history.
 
-Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
+Use `deepseek4` for DeepSeek and `gemma4` for Gemma 4. Pass the model's normal speculative options for
 DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 `--mmproj` enables image cases. Keep informational server logging enabled.
 
@@ -398,8 +398,11 @@ or timing margins; retain the original timeout failure when investigating it.
 | Qwen27B Q8_K_XL | `off`, `dflash2` | `--dflash-model` |
 | Flash-Next Q4_K_XL | `off`, `mtp` | `--mtp-model` |
 | DeepSeek Flash 0731 | `off`, `dspark` | `--dspark-model` |
+| Gemma 4 31B UD-Q4_K_XL | `off`, `mtp` | `--mtp-model` |
+| Gemma 4 26B-A4B UD-Q4_K_XL | `off`, `mtp` | `--mtp-model` |
 
 Keep the sidecar path in the `off` command to test the explicit override.
+Gemma 4 `mtp` needs `--draft-calibration request` for seeded replay checks.
 `report.json` checks the loaded mode and records observed draft counts; `off`
 must perform zero drafts. `state-edges` requires actual draft execution when
 enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal

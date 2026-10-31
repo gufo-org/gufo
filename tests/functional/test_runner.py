@@ -731,7 +731,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                 seen.add(label)
                 if not cold:
                     previous[key] = total
-            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
+            code = re.search(r"code word: (\w+)$", messages[-1]["content"])
             return {"text": code[1] if code else "Z", "reasoning": "", "tools": [], "finish": "stop",
                     "usage": {"prompt_tokens": total, "cached_tokens": cached,
                               "completion_tokens": 2,
@@ -767,7 +767,7 @@ class FunctionalRunnerTest(unittest.TestCase):
         tasks = [body["messages"][-1]["content"] for body in requests
                  if body["messages"][0]["content"].startswith("cache_concurrency_fanout\n")
                  and not body.get("extra_body", {}).get("cache_prompt") is False]
-        self.assertEqual(tasks, [f"Task {index}. Reply with only the code {code}."
+        self.assertEqual(tasks, [f"Task {index}. Reply with only the code word: {code}"
                                  for index, code in enumerate(("ALPHA", "BETA", "GAMMA", "DELTA"))])
 
     def test_cache_concurrency_rejects_followers_that_prefill_everything(self):
@@ -800,7 +800,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                     cached = 2048
                 elif count >= 2:
                     cached = 2048 if regress else tokens(messages[:1])
-            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
+            code = re.search(r"code word: (\w+)$", messages[-1]["content"])
             return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
                     "finish": "stop",
                     "usage": {"prompt_tokens": total, "cached_tokens": cached,
