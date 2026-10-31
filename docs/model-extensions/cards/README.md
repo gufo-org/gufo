@@ -33,7 +33,19 @@ gates are the deferred functional/performance half, Windows execution, the probe
 HIP branch and asset-heavy serving rows, lock-mode runtime qualification, and the
 exempt ASR in-tree test edge until Card 12 — none of which it claims. See its
 [execution record](09-serving-runtime-boundary.md#execution-record).
-Cards 10–29 are pending.
+Card 10 is complete for its in-card gates: published 44 forwarding headers
+(7 platform, 14 experimental, 23 stable); generated and verified the reproducible
+transitive `SURFACE` closure (97 paths, 4,235 LoC, 31,365 tokens) with zero serving
+leaks and zero model include leaks; bumped the extension API version to `0.1.2` in
+`include/gufo/ext/version.hpp` and `cmake/GufoExtension.cmake`; updated `include/gufo/ext/CHANGES.md`;
+extended diff/policy tests in `tests/tools/check_extension_api_test.py` with negative
+rejection proof; compiled representative HIP-less and HIP public consumers; and
+passed all bounded CPU/GPU CTests including continuation identity goldens. Its
+unresolved gates — none of which it claims — are the deferred functional/performance
+half, Windows execution, model include migration (deferred to Card 11), and the
+exempt ASR in-tree test edge until Card 12. See its
+[execution record](10-public-api-surface.md#execution-record).
+Cards 11–29 are pending.
 The authorized implementation milestone ends after Card 14 is
 verified and committed; cards 15–29 document later scope only. This split is
 documentation work and does not itself advance any implementation status.

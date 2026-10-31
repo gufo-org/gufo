@@ -1,3 +1,13 @@
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/cache.hpp>
+#include <gufo/ext/host.hpp>
+#include <gufo/ext/json.hpp>
+#include <gufo/ext/options.hpp>
+#include <gufo/ext/platform/fs.hpp>
+#include <gufo/ext/platform/os_info.hpp>
+#include <gufo/ext/registry.hpp>
+#include <gufo/ext/version.hpp>
+
 #include "gufo/ext/generated/alpha_constants.hpp"
 
 extern int ExtensionTestBase();

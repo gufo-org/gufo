@@ -34,7 +34,7 @@ ParsedOptions Parse(const Registry& registry,
 }
 void TestRegistryAndParser() {
   Registry registry;
-  Require(RuntimeApiVersion() == "0.1.1", "runtime/header API version");
+  Require(RuntimeApiVersion() == "0.1.2", "runtime/header API version");
   RegisterBuiltExtensions(registry);
   Require(registry.Extensions().size() == 3,
           "built family provenance retained");

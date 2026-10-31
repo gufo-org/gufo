@@ -115,7 +115,7 @@ the current implementation milestone stops after Card 14.
 | 07 | 5; 06 | [Extract acyclic Qwen family libraries](cards/07-qwen-family-libraries.md) | complete |
 | 08 | 5; 07 | [Extract H3, evaluation and model-dependent targets](cards/08-h3-eval-and-test-targets.md) | complete |
 | 09 | 6; 08 | [Separate serving policy from extension execution](cards/09-serving-runtime-boundary.md) | complete |
-| 10 | 7; 09 | [Publish and measure the public extension API](cards/10-public-api-surface.md) | pending |
+| 10 | 7; 09 | [Publish and measure the public extension API](cards/10-public-api-surface.md) | complete |
 | 11 | 7; 10 | [Migrate models to public extension headers](cards/11-public-header-migrations.md) | pending |
 | 12 | 7b; 11 | [Add in-tree model API test support](cards/12-model-api-test-support.md) | pending |
 | 13 | 8 embeddings; 12 | [Migrate the EmbeddingGemma pilot](cards/13-embeddinggemma-pilot.md) | pending |
@@ -140,7 +140,7 @@ the current implementation milestone stops after Card 14.
 
 Card-specific records now live with their plans. Completed records describe
 historical evidence and limitations; they are not instructions to redo completed
-work. Cards 01–05 have now been through implementation, independent review and
+work. Cards 01–10 have now been through implementation, independent review and
 review integration. See the
 [three-agent workflow](cards/README.md#card-by-card-workflow) before continuing.
 
@@ -207,3 +207,19 @@ which it claims — are the deferred functional/performance half, Windows execut
 the probe's HIP branch and asset-heavy serving rows, the low-memory budget branch,
 per-model extension exclusion until `extension.json` exists, lock-mode runtime
 qualification beyond `diagnose`, and the exempt ASR in-tree test edge until Card 12.
+
+### Card 10
+
+See [Card 10: execution record](cards/10-public-api-surface.md#execution-record).
+It classified every model-used core/cache header into stable (`include/gufo/ext/`),
+platform (`include/gufo/ext/platform/`), experimental (`include/gufo/ext/experimental/`),
+host wrapper or private (the 2 test-only ASR edges to be removed in Card 12); published
+44 forwarding headers; generated and verified the reproducible transitive `SURFACE`
+closure (97 paths, 4,235 LoC, 31,365 tokens) with zero serving leaks and zero model
+include leaks; bumped the extension API version to `0.1.2` (`kApiRevision = 2`, `kApiVersion = "0.1.2"`)
+in `version.hpp` and `GufoExtension.cmake`; updated `CHANGES.md`; extended diff/policy tests
+in `check_extension_api_test.py` and enforced rejection on missing `ext-api` label;
+compiled representative HIP-less and HIP consumers; and passed all bounded CPU/GPU CTests
+including continuation identity goldens. Its unresolved gates — none of which it claims —
+are the deferred functional/performance half, Windows execution, model include migration
+(deferred to Card 11), and the exempt ASR in-tree test edge until Card 12.

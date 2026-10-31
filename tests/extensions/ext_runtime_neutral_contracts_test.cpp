@@ -12,17 +12,46 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/cache.hpp>
+#include <gufo/ext/cancellable_gate.hpp>
+#include <gufo/ext/continuation.hpp>
+#include <gufo/ext/crypto.hpp>
+#include <gufo/ext/device_probe.hpp>
+#include <gufo/ext/draft_backend.hpp>
+#include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/host.hpp>
+#include <gufo/ext/host_budget.hpp>
+#include <gufo/ext/image.hpp>
+#include <gufo/ext/json.hpp>
+#include <gufo/ext/ledger.hpp>
+#include <gufo/ext/mapped_prefetch.hpp>
+#include <gufo/ext/model_config.hpp>
+#include <gufo/ext/options.hpp>
+#include <gufo/ext/platform/fs.hpp>
+#include <gufo/ext/platform/library.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
+#include <gufo/ext/platform/os_info.hpp>
+#include <gufo/ext/platform/pages.hpp>
+#include <gufo/ext/platform/prefault.hpp>
+#include <gufo/ext/platform/publish.hpp>
+#include <gufo/ext/prompt_lookup.hpp>
+#include <gufo/ext/reasoning.hpp>
+#include <gufo/ext/registry.hpp>
+#include <gufo/ext/sampling.hpp>
+#include <gufo/ext/session_mode.hpp>
+#include <gufo/ext/sha256.hpp>
+#include <gufo/ext/speculative_verifier.hpp>
+#include <gufo/ext/text_contracts.hpp>
+#include <gufo/ext/types.hpp>
+#include <gufo/ext/utf8.hpp>
+#include <gufo/ext/version.hpp>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include "src/ext/continuation.hpp"
-#include "src/ext/device_probe.hpp"
-#include "src/ext/host_budget.hpp"
-#include "src/ext/text_contracts.hpp"
 
 namespace {
 
@@ -144,6 +173,23 @@ void CheckDeviceProbe() {
          "pending work still counts as usable at the bound");
 }
 
+void CheckExtensionApiVersion() {
+  Expect(gufo::ext::kApiMajor == 0 && gufo::ext::kApiMinor == 1 &&
+             gufo::ext::kApiRevision == 2,
+         "API numeric constants match 0.1.2");
+  Expect(gufo::ext::kApiVersion == "0.1.2",
+         "API version literal matches 0.1.2");
+  Expect(gufo::ext::RuntimeApiVersion() == "0.1.2",
+         "Runtime API version matches 0.1.2");
+}
+
+void CheckPlatformLeaves() {
+  Expect(gufo::platform::PageSizeBytes() > 0,
+         "platform os_info page size is positive");
+  Expect(gufo::platform::AvailableMemoryBytes() > 0,
+         "platform os_info available memory query is positive");
+}
+
 }  // namespace
 
 int main() {
@@ -151,5 +197,7 @@ int main() {
   CheckHostBudgets();
   CheckReasoningTags();
   CheckDeviceProbe();
+  CheckExtensionApiVersion();
+  CheckPlatformLeaves();
   return failures == 0 ? 0 : 1;
 }
