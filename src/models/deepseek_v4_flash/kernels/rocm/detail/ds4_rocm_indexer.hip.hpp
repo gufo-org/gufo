@@ -10,19 +10,16 @@ static hipError_t ds4_hip_set_dynamic_shared_memory(Kernel kernel,
                                bytes);
 }
 
-__global__ static void indexer_hadamard_fp4_kernel(float *x, uint32_t n_rows, uint32_t head_dim) {
-    uint32_t row = blockIdx.x;
-    uint32_t tid = threadIdx.x;
-    if (row >= n_rows || head_dim != 128u || tid >= 128u) return;
-
-    __shared__ float vals[128];
-    __shared__ float absbuf[128];
-    float *xr = x + (uint64_t)row * head_dim;
-    vals[tid] = xr[tid];
+/* Hadamard transform and FP4 (E2M1) round trip of one 128-value indexer row.
+ * Every thread of the block calls it (barriers); threads 0..127 own a value.
+ * `vals` and `absbuf` are 128 shared floats each. */
+__device__ static void indexer_hadamard_fp4_row(float *xr, uint32_t tid, float *vals, float *absbuf) {
+    const bool own = tid < 128u;
+    if (own) vals[tid] = xr[tid];
     __syncthreads();
 
     for (uint32_t stride = 1u; stride < 128u; stride <<= 1u) {
-        if ((tid & stride) == 0u) {
+        if (own && (tid & stride) == 0u) {
             uint32_t base = (tid & ~(2u * stride - 1u)) + (tid & (stride - 1u));
             float a = vals[base];
             float b = vals[base + stride];
@@ -32,24 +29,45 @@ __global__ static void indexer_hadamard_fp4_kernel(float *x, uint32_t n_rows, ui
         __syncthreads();
     }
 
-    float v = vals[tid] * 0.08838834764831845f;
+    float v = own ? vals[tid] * 0.08838834764831845f : 0.0f;
     uint32_t fp4_block = tid >> 5u;
     uint32_t lane = tid & 31u;
     uint32_t block_base = fp4_block * 32u;
-    absbuf[tid] = fabsf(v);
+    if (own) absbuf[tid] = fabsf(v);
     __syncthreads();
 
     for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
-        if (lane < stride) {
+        if (own && lane < stride) {
             absbuf[block_base + lane] = fmaxf(absbuf[block_base + lane],
                                               absbuf[block_base + lane + stride]);
         }
         __syncthreads();
     }
 
+    if (!own) return;
     float amax = fmaxf(absbuf[block_base], 7.052966104933725e-38f);
     float scale = exp2f(ceilf(log2f(amax / 6.0f)));
     xr[tid] = dsv4_e2m1fn_dequant_dev(fminf(6.0f, fmaxf(-6.0f, v / scale))) * scale;
+}
+
+/* kRope first rotates each row's RoPE tail at `pos`, one pair per thread as
+ * rope_tail_kernel does, then reads the rotated row back. */
+template <bool kRope>
+__global__ static void indexer_hadamard_fp4_kernel(float *x, uint32_t n_rows, uint32_t head_dim,
+                                                   uint32_t pos, ds4_rope_tail_args rope) {
+    uint32_t row = blockIdx.x;
+    uint32_t tid = threadIdx.x;
+    if (row >= n_rows || head_dim != 128u || tid >= 128u) return;
+
+    if (kRope) {
+        if (tid < rope.n_rot / 2u) {
+            rope_tail_rotate_pair(x + (uint64_t)row * head_dim + head_dim - rope.n_rot, tid, pos, rope);
+        }
+        __syncthreads();
+    }
+    __shared__ float vals[128];
+    __shared__ float absbuf[128];
+    indexer_hadamard_fp4_row(x + (uint64_t)row * head_dim, tid, vals, absbuf);
 }
 
 __global__ static void indexer_scores_kernel(
@@ -337,7 +355,9 @@ static int indexer_scores_launch(
     return 0;
   if ((n_tokens == 1u || ds4_rocm_verifier_batch_mode()) && head_dim == 128u &&
       n_head == 64u) {
-    indexer_score_one_direct_kernel<<<dim3(n_comp, n_tokens), 128>>>(
+    const uint32_t tiles =
+        (n_comp + indexer_score_direct_keys - 1u) / indexer_score_direct_keys;
+    indexer_score_one_direct_kernel<<<dim3(tiles, n_tokens), 128>>>(
         (float*)scores->ptr, (const float*)q->ptr, (const float*)weights->ptr,
         (const float*)index_comp->ptr, n_comp, pos0, ratio, scale,
         causal ? 1 : 0);
@@ -584,8 +604,21 @@ extern "C" int ds4_gpu_dsv4_indexer_qat_tensor(ds4_gpu_tensor *x, uint32_t n_row
         x->bytes < (uint64_t)n_rows * head_dim * sizeof(float)) {
         return 0;
     }
-    indexer_hadamard_fp4_kernel<<<n_rows, 128>>>((float *)x->ptr, n_rows, head_dim);
+    indexer_hadamard_fp4_kernel<false><<<n_rows, 128>>>((float *)x->ptr, n_rows, head_dim, 0u,
+                                                         ds4_rope_tail_args{});
     return hip_ok(hipGetLastError(), "indexer_hadamard_fp4 launch");
+}
+
+extern "C" int ds4_gpu_dsv4_indexer_rope_qat_tensor(ds4_gpu_tensor *x, uint32_t n_rows, uint32_t head_dim, uint32_t n_rot, uint32_t pos, uint32_t n_ctx_orig, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow) {
+    if (!x || n_rows == 0 || head_dim != 128u || n_rot > head_dim || (n_rot & 1u) ||
+        x->bytes < (uint64_t)n_rows * head_dim * sizeof(float)) {
+        return 0;
+    }
+    indexer_hadamard_fp4_kernel<true><<<n_rows, 128>>>(
+            (float *)x->ptr, n_rows, head_dim, pos,
+            ds4_rope_tail_args{n_rot, n_ctx_orig, 0, freq_base, freq_scale, ext_factor,
+                               attn_factor, beta_fast, beta_slow});
+    return hip_ok(hipGetLastError(), "indexer rope hadamard_fp4 launch");
 }
 
 /* Decode the packed (value, index) key produced by the Markov argmax reduce. */

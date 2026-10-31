@@ -5,61 +5,101 @@
 #include <cstdint>
 #include <rocwmma/rocwmma.hpp>
 
-// DS4 Flash indexer: 64 heads of width 128, one 128-thread block per score.
-__global__ static void indexer_score_one_direct_kernel(
+// DS4 Flash indexer: 64 heads of width 128. Each 128-thread block scores
+// indexer_score_direct_keys keys; each wave keeps 16 query heads in
+// registers. Every score keeps the qualified arithmetic: per-lane FMA chains,
+// the offset-16..1 lane sum, then a sequential head sum.
+constexpr uint32_t indexer_score_direct_keys = 32;
+
+template<uint32_t Mask>
+__device__ static float indexer_score_xor_lane(float value) {
+  const int bits = __builtin_bit_cast(int, value);
+  if constexpr (Mask == 16u)
+    return __builtin_bit_cast(
+        float, __builtin_amdgcn_permlanex16(bits, bits, 0x76543210, 0xfedcba98,
+                                            false, false));
+  else
+    return __builtin_bit_cast(
+        float,
+        __builtin_amdgcn_update_dpp(0, bits, 0x160 | Mask, 0xf, 0xf, false));
+}
+
+// Register i holds head i ^ (lane / 2). Each step of the lane sum then keeps
+// the low registers and sends the high ones: partner lanes add the same two
+// partials the shuffle-down tree added, and lanes 2p and 2p + 1 finish with
+// head p.
+__device__ static float indexer_score_heads(const float4 (&qv)[16], float4 kv) {
+#pragma clang fp reassociate(off)
+  float dot[16];
+  for (uint32_t i = 0; i < 16u; ++i)
+    dot[i] = __builtin_fmaf(
+        qv[i].w, kv.w,
+        __builtin_fmaf(qv[i].z, kv.z,
+                       __builtin_fmaf(qv[i].y, kv.y, qv[i].x * kv.x)));
+  for (uint32_t j = 0; j < 8u; ++j)
+    dot[j] += indexer_score_xor_lane<16u>(dot[j + 8u]);
+  for (uint32_t j = 0; j < 4u; ++j)
+    dot[j] += indexer_score_xor_lane<8u>(dot[j + 4u]);
+  for (uint32_t j = 0; j < 2u; ++j)
+    dot[j] += indexer_score_xor_lane<4u>(dot[j + 2u]);
+  dot[0] += indexer_score_xor_lane<2u>(dot[1]);
+  return dot[0] + indexer_score_xor_lane<1u>(dot[0]);
+}
+
+__global__ __launch_bounds__(128) static void indexer_score_one_direct_kernel(
     float* scores, const float* q, const float* weights,
     const float* index_comp, uint32_t n_comp, uint32_t pos0, uint32_t ratio,
     float scale, int causal) {
+#pragma clang fp reassociate(off)
+  constexpr uint32_t prefetch = 4;
   const uint32_t token = blockIdx.y;
   scores += (uint64_t)token * n_comp;
   q += (uint64_t)token * 64u * 128u;
   weights += (uint64_t)token * 64u;
   pos0 += token;
-  const uint32_t c = blockIdx.x;
+  const uint32_t first = blockIdx.x * indexer_score_direct_keys;
   const uint32_t tid = threadIdx.x;
   const uint32_t lane = tid & 31u;
   const uint32_t warp = tid >> 5u;
-  if (c >= n_comp || tid >= 128u)
+  const uint32_t end = min(n_comp, first + indexer_score_direct_keys);
+  const uint32_t visible =
+      causal && ratio ? min(end, (pos0 + 1u) / ratio) : end;
+  if (first + tid < end && first + tid >= visible)
+    scores[first + tid] = -INFINITY;
+  if (first >= visible)
     return;
-  if (causal) {
-    const uint32_t visible = ratio ? (pos0 + 1u) / ratio : n_comp;
-    if (c >= visible) {
-      if (tid == 0)
-        scores[c] = -INFINITY;
-      return;
+
+  const uint32_t pair = lane >> 1u;
+  float4 qv[16];
+  for (uint32_t i = 0; i < 16u; ++i)
+    qv[i] =
+        ((const float4*)(q + (uint64_t)(warp * 16u + (i ^ pair)) * 128u))[lane];
+  const uint32_t head = warp * 16u + pair;
+  const float weight = weights[head];
+  const float4* keys = (const float4*)index_comp + lane;
+  __shared__ float partial[64][indexer_score_direct_keys + 1];
+  float4 kv[prefetch];
+  for (uint32_t p = 0; p < prefetch; ++p)
+    kv[p] = keys[(uint64_t)min(first + p, visible - 1u) * 32u];
+  for (uint32_t c0 = first; c0 < visible; c0 += prefetch) {
+#pragma unroll
+    for (uint32_t p = 0; p < prefetch; ++p) {
+      const uint32_t c = c0 + p;
+      if (c < visible) {
+        const float dot = indexer_score_heads(qv, kv[p]);
+        // Scale before weighting, as the qualified build did.
+        if (!(lane & 1u))
+          partial[head][c - first] = fmaxf(dot, 0.0f) * scale * weight;
+      }
+      kv[p] = keys[(uint64_t)min(c + prefetch, visible - 1u) * 32u];
     }
   }
-
-  __shared__ float krow[128];
-  // Each head owns its slot: no inter-warp synchronization inside the loop.
-  __shared__ float partial[64];
-  if (tid < 128u)
-    krow[tid] = index_comp[(uint64_t)c * 128u + tid];
   __syncthreads();
-
-  for (uint32_t h0 = 0; h0 < 64u; h0 += 4u) {
-    const uint32_t h = h0 + warp;
-    const float4 qv = ((const float4*)(q + (uint64_t)h * 128u))[lane];
-    const float4 kv = ((const float4*)krow)[lane];
-    float dot = qv.x * kv.x + qv.y * kv.y + qv.z * kv.z + qv.w * kv.w;
-    for (int offset = 16; offset > 0; offset >>= 1)
-      dot += __shfl_down(dot, offset, 32);
-    if (lane == 0)
-      partial[h] = fmaxf(dot, 0.0f) * weights[h] * scale;
-  }
-  __syncthreads();
-  if (tid == 0) {
-#pragma clang fp reassociate(off)
-    float total = 0.0f;
-    // Preserve the qualified compiler's sequential head accumulation.
-    // Fast-math must not regroup four heads before adding the running sum.
-    for (uint32_t h = 0; h < 64u; h += 4u) {
-      total += partial[h];
-      total += partial[h + 1];
-      total += partial[h + 2];
-      total += partial[h + 3];
-    }
-    scores[c] = total;
+  if (first + tid < visible) {
+    float total = partial[0][tid];
+    for (uint32_t h = 1; h < 64u; ++h)
+      total += partial[h][tid];
+    scores[first + tid] = total;
   }
 }
 

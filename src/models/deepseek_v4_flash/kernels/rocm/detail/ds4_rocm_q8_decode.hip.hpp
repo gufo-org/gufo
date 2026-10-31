@@ -62,27 +62,9 @@ __global__ static void quantize_q8_0_f32_kernel(int8_t* xq, float* xscale,
   uint64_t i0 = b * 32;
   uint64_t bn = in_dim - i0 < 32 ? in_dim - i0 : 32;
   const float* xr = x + tok * in_dim + i0;
-
-  float a = 0.0f;
-  if (threadIdx.x < bn)
-    a = fabsf(xr[threadIdx.x]);
-  a = warp_max_f32(a);
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-  const float d = __shfl(a, 0, 32) / 127.0f;
-#else
-  const float d = __shfl_sync(FULL_WARP_MASK, a, 0, 32) / 127.0f;
-#endif
-  const float id = d != 0.0f ? 1.0f / d : 0.0f;
-  if (threadIdx.x == 0)
-    xscale[tok * blocks + b] = d;
-  int8_t* dst = xq + (tok * blocks + b) * 32;
-  if (threadIdx.x < bn) {
-    int v = (int)lrintf(xr[threadIdx.x] * id);
-    v = v > 127 ? 127 : (v < -128 ? -128 : v);
-    dst[threadIdx.x] = (int8_t)v;
-  } else {
-    dst[threadIdx.x] = 0;
-  }
+  const float v = threadIdx.x < bn ? xr[threadIdx.x] : 0.0f;
+  quantize_q8_0_block32(v, threadIdx.x, (uint32_t)bn,
+                        xq + (tok * blocks + b) * 32, xscale + tok * blocks + b);
 }
 
 __global__ static void matmul_q8_0_preq_kernel(
@@ -552,10 +534,13 @@ __global__ static void matmul_q8_0_preq_batch_warp8_kernel(
     out[tok * out_dim + row] = acc;
 }
 
+/* kQ8Out also writes low's Q8_0 form: launched with 32 rows per block over a
+ * multiple of 32 rows, each block holds exactly one Q8_0 block of outputs. */
+template <bool kQ8Out>
 __global__ static void grouped_q8_0_a_preq_warp8_kernel(
     float* low, const unsigned char* w, const int8_t* xq, const float* xscale,
     uint64_t group_dim, uint64_t rank, uint32_t n_groups, uint32_t n_tokens,
-    uint64_t blocks, int use_dp4a) {
+    uint64_t blocks, int use_dp4a, int8_t* low_q8, float* low_q8_scale) {
   const uint32_t rows_per_block = blockDim.x >> 5u;
   const uint64_t row =
       (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
@@ -585,6 +570,17 @@ __global__ static void grouped_q8_0_a_preq_warp8_kernel(
   acc = warp_sum_f32(acc);
   if (lane == 0)
     low[tok * low_dim + row] = acc;
+  if (!kQ8Out)
+    return;
+  __shared__ float block_out[32];
+  if (lane == 0)
+    block_out[threadIdx.x >> 5u] = acc;
+  __syncthreads();
+  if (threadIdx.x < 32u) {
+    const uint64_t i0 = tok * low_dim + (uint64_t)blockIdx.x * 32u;
+    quantize_q8_0_block32(block_out[threadIdx.x], threadIdx.x, 32u, low_q8 + i0,
+                          low_q8_scale + i0 / 32u);
+  }
 }
 
 /*
