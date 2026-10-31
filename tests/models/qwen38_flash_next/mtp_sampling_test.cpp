@@ -406,6 +406,43 @@ void CheckSampledOutputFrequencies() {
   }
 }
 
+// Gemma 4 draws proposals from the request sampler without top-p, so q may
+// put mass on tokens the target's top-p removes; verification must still
+// reproduce the target's frequencies, and the copy keeps every other
+// setting.
+void CheckUnfilteredProposalFrequencies() {
+  const std::array<float, 5> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
+  qfn::MtpCandidateLogits candidates;
+  candidates.size = 4;
+  candidates.ids = {3, 1, 4, 2};
+  candidates.logits = {1.2F, 0.1F, -0.7F, 0.9F};
+  constexpr unsigned trials = 100000;
+  for (const float top_p : {0.6F, 0.9F}) {
+    sampling::SamplingConfig config;
+    config.temperature = 1.0F;
+    config.top_k = 4;
+    config.top_p = top_p;
+    config.seed = 41;
+    sampling::SamplerState sampler(config);
+    const auto proposals = sampler.WithoutTopP();
+    Require(proposals.config().top_p == 1.0F && proposals.config().top_k == 4 &&
+                proposals.config().temperature == 1.0F,
+            "WithoutTopP changed another setting");
+    const auto p = sampler.Distribution(logits);
+    std::array<unsigned, 5> counts{};
+    for (unsigned trial = 0; trial < trials; ++trial) {
+      auto draft_rng = sampling::NextRandom(sampler.mutable_rng_state());
+      const auto q = qfn::SampleMtpProposal(candidates, proposals, &draft_rng);
+      ++counts[qfn::VerifyMtpProposal(logits, q, sampler).token];
+    }
+    for (unsigned token = 0; token < counts.size(); ++token) {
+      Require(std::abs(double(counts[token]) / trials - p.probability(token)) <
+                  0.008,
+              "unfiltered proposals distort target frequencies");
+    }
+  }
+}
+
 // Prompt lookup proposes copied tokens as point masses. Whatever token is
 // copied, verification must reproduce the target frequencies: accept with
 // p(token), else resample from p without it.
@@ -493,6 +530,7 @@ int main() {
     CheckBatchProfitability();
     CheckCompactProposals();
     CheckSampledOutputFrequencies();
+    CheckUnfilteredProposalFrequencies();
     CheckPointMassFrequencies();
     const std::array<float, 5> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F};
     const std::array<sampling::TokenId, 4> history{2, 3, 2, 0};
