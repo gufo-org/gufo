@@ -72,10 +72,12 @@ struct QwenGemmFormatCapabilities {
     // (src/models/qwen/hip/quant_ops.hpp DecodeQuantSub16) and is therefore
     // direct on the CPU and on both GPU paths. opt-q4kxl added Q3_K, Q4_K,
     // IQ4_NL, IQ4_XS and IQ3_S to this set so the mixed low-bit UD-Q4_K_XL
-    // shard runs packed instead of being pre-expanded to BF16.
+    // shard runs packed instead of being pre-expanded to BF16; Q4_0 serves
+    // the Gemma 4 QAT checkpoint.
     case core::GgmlType::kQ8_0:
     case core::GgmlType::kQ3_K:
     case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ4_0:
     case core::GgmlType::kIQ4_NL:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
@@ -87,7 +89,6 @@ struct QwenGemmFormatCapabilities {
               .cpu_direct = true,
               .hip_decode_direct = true,
               .hip_prefill_direct = true};
-    case core::GgmlType::kQ4_0:
     case core::GgmlType::kQ4_1:
     case core::GgmlType::kQ5_0:
     case core::GgmlType::kQ5_1:

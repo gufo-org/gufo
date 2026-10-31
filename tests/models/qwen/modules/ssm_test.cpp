@@ -227,7 +227,7 @@ void TestMalformedSsmParametersRejectBeforeStateMutation() {
                              "truncated SSM tensor must zero-fill output");
 
   QwenSsmParameters unsupported = valid;
-  unsupported.qkv.type = gufo::core::GgmlType::kQ4_0;
+  unsupported.qkv.type = gufo::core::GgmlType::kQ4_1;
   CheckRejectedSsmParameters(config, unsupported,
                              "unsupported SSM projection format must reject");
 
