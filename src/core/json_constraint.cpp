@@ -1682,9 +1682,14 @@ private:
     return Seq({Byte('{'), ws_, suffix[0], ws_, Byte('}')});
   }
   std::uint32_t Array(const json::Value& schema, std::size_t depth) {
+    // Best effort reads a missing items schema as any value, like `items: {}`:
+    // one untyped array must not drop the rest of a tool's arguments.
+    static const json::Value kAnyItem = json::Value::object();
     const auto* items = schema.find("items");
-    if (!items)
+    if (!items && !ignore_unknown_keys_)
       Invalid("arrays require an items schema");
+    if (!items)
+      items = &kAnyItem;
     auto bound = [&](const char* name, std::size_t fallback) {
       const auto* value = schema.find(name);
       if (!value)
