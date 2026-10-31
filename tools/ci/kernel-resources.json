@@ -447,6 +447,9 @@
   "_ZN4gufo3hip30FusedSSMInputProjectionsKernelEPKvNS_4core8GgmlTypeES2_S4_S2_S4_S2_S4_PKfPfS7_S7_S7_mmmm": {
    "max_scratch": 8
   },
+  "_ZN4gufo3hip35SmallBatchKQuantExactFp32GEMMKernelILj16ELm8ELm3ELNS_4core8GgmlTypeE2ELm1ELj12ELm1ELb0ELm8ELj32ELj32ELb0ELb0ELb0EEEvPKvPKfPfmmm": {
+   "max_scratch": 16
+  },
   "_ZN4gufo3hip36Wave32FusedQKVProjectionsKernel_1RowILj4EEEvPKvNS_4core8GgmlTypeES3_S5_S3_S5_PKfPfS8_S8_mmm": {
    "max_scratch": 8
   },
@@ -522,6 +525,9 @@
   "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_121GeGluPackedHalfKernelEPK6__halfPS4_jm": {
    "max_scratch": 8
   },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_121RepackQ8_0AsQ4KKernelEPKhPhj": {
+   "max_scratch": 36
+  },
   "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi112ELb1ELb0ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
    "max_scratch": 8
   },
@@ -593,6 +599,12 @@
   },
   "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
    "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_126WmmaPrefillAttentionKernelILj256ELj2ELj4ELb0EEEvNS2_13AttentionArgsE": {
+   "max_scratch": 28
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_126WmmaPrefillAttentionKernelILj512ELj4ELj1ELb1EEEvNS2_13AttentionArgsE": {
+   "max_scratch": 20
   },
   "_ZN4gufo6models9qwen3_asr3hip12_GLOBAL__N_120TextQkNormRoPEKernelILj128EEEvPfS5_S5_PKfS7_mjjjjffS5_S5_jj": {
    "max_scratch": 8
