@@ -77,6 +77,7 @@ find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(PNG REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(JPEG REQUIRED)
 if (WIN32)
   # Windows has no system pkg-config; locate the pkgconf tool vcpkg installs.
@@ -623,6 +624,13 @@ if (BUILD_TESTING)
   target_link_libraries(json_test PRIVATE gufo_core)
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
+
+  add_executable(png_decode_test
+    tests/core/png_decode_test.cpp
+    tests/core/png_reference.cpp)
+  target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
+  add_test(NAME png_decode_test COMMAND png_decode_test)
+  set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
 
   add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)
