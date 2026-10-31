@@ -532,6 +532,13 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   m->config_ = w.config;
   const auto regions = reader.GetMappedRegions();
   std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
+  // Bind-time Q8_0 conversions (dense K-quant payloads, see
+  // ModelWeights::converted) are addressed as synthetic shards appended
+  // here; the shard indices Bind assigned already point past the mapped
+  // regions, and MTP tensors are based off this same count.
+  for (const auto& region : w.ConversionRegions()) {
+    shards.push_back(region);
+  }
   const auto shard_count = static_cast<std::uint32_t>(shards.size());
   if (mtp != nullptr) {
     if (mtp_reader == nullptr) {

@@ -133,6 +133,20 @@ struct ModelWeights {
   TensorRef ple_table;   ///< [ple_head_dim, ple_rows], read from disk only.
   std::vector<LayerWeights> layers;
 
+  /// Owned Q8_0 payloads for dense (experts==1) K-quant tensors converted at
+  /// bind time: GSQ-RCO files quantize attention/SSM/output with K-quants,
+  /// which the dense kernel family does not execute natively. Experts keep
+  /// their native K-quant path untouched. Bind exposes these buffers to the
+  /// upload stager as extra shard regions (see ConversionRegions), so the
+  /// disk pipeline streams them exactly like mmap-payload tensors. Baseline
+  /// files bind zero such tensors and never touch this storage.
+  std::vector<std::vector<std::uint8_t>> converted;
+
+  /// Byte regions backing `converted`, in arena slot order. The device
+  /// layer appends them after the trunk's mapped regions; TensorRef shard
+  /// indices assigned during Bind already address them.
+  [[nodiscard]] std::vector<core::GgufMappedRegion> ConversionRegions() const;
+
   /// Binds and validates the trunk artifact. Tensor payloads stay mapped and
   /// untouched; only headers are read.
   [[nodiscard]] static std::optional<ModelWeights> Bind(
