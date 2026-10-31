@@ -2521,6 +2521,10 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
+                // Sparse prefill tiles group four queries from each pass
+                // start: one selection block (compress ratio).
+                .prefill_alignment =
+                    std::max<std::size_t>(1, model_->config().compress_ratio),
             },
         .persistence = persistence_,
     };
