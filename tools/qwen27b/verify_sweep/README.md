@@ -6,9 +6,10 @@ projection then runs `SmallBatchKQuantExactFp32GEMMKernel`, and how its work
 is split over waves (waves per block, rows per wave, 16- or 32-lane groups,
 staging tiles) decides how close the GPU gets to its memory bandwidth.
 `src/models/qwen/hip/kernels/verify_gemm_27b.hip` holds the shapes measured
-faster on gfx1151 for Qwen3.8-27B UD-Q4_K_XL and its Q4_K_M DFlash2 draft; any
-projection it does not list keeps the generic `LaunchBatchedQuantGEMMFp32`
-dispatch.
+faster on gfx1151 for Qwen3.8-27B UD-Q4_K_XL and its Q4_K_M DFlash2 draft, one
+table for Linux (ROCm 10.1) and one for Windows (`_WIN32`, TheRock 10.0.0); any
+projection the build's table does not list keeps the generic
+`LaunchBatchedQuantGEMMFp32` dispatch.
 
 A different GGUF, quantization mix, draft setting, GPU or toolchain changes
 which projections and row counts matter, so the shapes have to be measured
@@ -57,14 +58,32 @@ the absolute file offset of the tensor and the GGUF type id (12 Q4_K, 13 Q5_K,
 
 ## Taking a result over
 
-Add the shape to `verify_gemm_27b.hip` under its format and projection,
-keyed by type, `m`, `k` and row count, only where it beats `generic` by the
-`--min-gain` margin. The target and the DFlash2 draft share some projection
-shapes (the Q4_K FFN and attention matrices), and one entry serves both, so
-sweep both GGUFs and judge a shared shape on both results. Then rebuild,
-rerun the sweep to confirm no listed shape loses to `generic`, confirm greedy
-output is unchanged end to end and measure a real workload: a per-launch gain
-only matters in proportion to the projection's share of the cycle.
+Add the shape to the table of the platform you measured on in
+`verify_gemm_27b.hip` (the `_WIN32` block for Windows) under its format and
+projection, keyed by type, `m`, `k` and row count, only where it beats
+`generic` by the `--min-gain` margin. The target and the DFlash2 draft share
+some projection shapes (the Q4_K FFN and attention matrices), and one entry
+serves both, so sweep both GGUFs and judge a shared shape on both results.
+Then rebuild, rerun the sweep to confirm no listed shape loses to `generic`,
+confirm greedy output is unchanged end to end and measure a real workload: a
+per-launch gain only matters in proportion to the projection's share of the
+cycle.
+
+`gen_table.py` applies that rule to two independent sweeps of the target and
+the draft, the raw `--out` logs of `sweep.py`, and prints the four `Launch*`
+functions of a table:
+
+```sh
+python3 tools/qwen27b/verify_sweep/gen_table.py \
+  --target target.gguf --draft draft.gguf \
+  --first target1.log draft1.log --second target2.log draft2.log
+```
+
+A shape is listed where the first sweep's best candidate saves at least
+`--min-gain` percent over `generic`, summed over target and draft weighted by
+their layer counts, and saves that much in the second sweep too. `--skip`
+leaves out a candidate that spills with your compiler. The Windows table was
+generated this way.
 
 ## Limits
 
@@ -72,7 +91,9 @@ only matters in proportion to the projection's share of the cycle.
   drafts) and the formats Q4_K, Q5_K, Q6_K and IQ4_XS.
 - The candidate set is the neighbourhood of shapes picked so far, not an
   exhaustive search.
-- The current shapes were measured on gfx1151 under Linux with ROCm 10.1.
-  Shapes picked under Windows with TheRock ROCm 10.0.0 were up to 29% slower
-  than `generic` there (16-lane groups at six to eight rows), so a new
-  toolchain needs a new sweep.
+- The Linux shapes were measured on gfx1151 with ROCm 10.1, the Windows
+  shapes on gfx1151 with TheRock 10.0.0. The two toolchains favour different
+  shapes: shapes picked under Windows were up to 29% slower than `generic` on
+  Linux (16-lane groups at six to eight rows), and Linux shapes up to 14%
+  slower than `generic` on Windows (IQ4_XS FFN projections at five rows). A
+  new toolchain needs a new sweep.
