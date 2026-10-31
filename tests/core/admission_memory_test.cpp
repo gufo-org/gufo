@@ -24,8 +24,11 @@ int main() {
   using gufo::platform::GpuLocalBudget;
   constexpr std::uint64_t kGiB = 1ull << 30;
   constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
-  // The 4 GiB the snapshot cache leaves the OS, plus 2.5 GiB.
-  constexpr std::uint64_t kMargin = 6 * kGiB + kGiB / 2;
+  // The admission margin: 5.5 GiB of host RAM. It exceeds the snapshot
+  // guard's, so a session admitted at the limit can commit a checkpoint.
+  constexpr std::uint64_t kMargin = gufo::hip::kAdmissionHostMarginBytes;
+  static_assert(kMargin == 5 * kGiB + kGiB / 2);
+  static_assert(kMargin > gufo::hip::kSnapshotHostMarginBytes);
   // 23 GiB of budget left, as measured when a 262144-token Flash-Next
   // session was refused on a Strix Halo.
   constexpr GpuLocalBudget kRoomy{.budget_bytes = 104 * kGiB,
@@ -60,7 +63,7 @@ int main() {
          "no RAM at all adds nothing");
 
   // A model whose weights fit the HIP heap: HIP's larger figure is kept,
-  // 72 GiB against 69 - 6.5 GiB of RAM.
+  // 72 GiB against 69 - 5.5 GiB of RAM.
   Expect(AdmissionFreeBytes(72 * kGiB,
                             GpuLocalBudget{.budget_bytes = 107 * kGiB,
                                            .usage_bytes = 17 * kGiB},

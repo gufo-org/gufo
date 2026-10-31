@@ -54,6 +54,20 @@ namespace gufo::hip {
   return std::max(hip_free, std::min(budget_left, host_left));
 }
 
+/// Host RAM an integrated GPU's snapshot storage leaves the OS when the OS
+/// video-memory budget sets its headroom: as much as an explicit host cache
+/// limit leaves (kHostSnapshotHeadroomBytes in src/cli/serve).
+inline constexpr std::uint64_t kSnapshotHostMarginBytes = std::uint64_t{4}
+                                                          << 30;
+
+/// Host RAM kept out of the state capacity on such a GPU: the snapshot margin
+/// plus 1.5 GiB, so that a session admitted at the limit can still commit its
+/// first checkpoint. The snapshot guard also keeps the lazy scratch and
+/// 512 MiB of slack free, and a Flash-Next session on a Strix Halo under
+/// Windows used up to 0.6 GiB more than its state and lazy scratch.
+inline constexpr std::uint64_t kAdmissionHostMarginBytes =
+    kSnapshotHostMarginBytes + (std::uint64_t{3} << 30) / 2;
+
 }  // namespace gufo::hip
 
 #endif  // GUFO_CORE_HIP_ADMISSION_MEMORY_HPP_

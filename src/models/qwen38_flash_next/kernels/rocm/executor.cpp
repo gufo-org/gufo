@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "qfn_mmq.h"
+#include "src/core/hip/admission_query.hpp"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/core/platform/pages.hpp"
@@ -232,12 +233,17 @@ public:
   /// Whether committing `bytes` keeps the reserve free. The snapshot budget
   /// counts host payloads, but on an APU the device limit can be lower than
   /// host RAM. ROCm 7.2's VM pool corrupts its heap when a page commit
-  /// fails, so storage is never requested beyond the device headroom.
+  /// fails, so storage is never requested beyond the device headroom. The
+  /// headroom is read as state admission reads it: hipMemGetInfo's figure,
+  /// or on a Windows iGPU the OS video-memory budget left, bounded by the
+  /// host RAM above kSnapshotHostMarginBytes, a smaller margin than the one
+  /// admission keeps.
   [[nodiscard]] bool Fits(std::uint64_t bytes) const {
-    std::size_t free = 0;
-    std::size_t total = 0;
-    if (hipMemGetInfo(&free, &total) != hipSuccess)
+    const auto memory =
+        gufo::hip::QueryAdmissionMemory(gufo::hip::kSnapshotHostMarginBytes);
+    if (!memory.has_value())
       return false;
+    const std::uint64_t free = memory->free_bytes;
     return free >= bytes && free - bytes >= reserve_;
   }
   /// A transfer on a stream of its own, reused across transfers: creating a

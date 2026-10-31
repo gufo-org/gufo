@@ -808,12 +808,9 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
   return *qwen;
 }
 
-// Host RAM kept out of the state capacity when the OS video-memory budget
-// raises it on an integrated GPU: the headroom the snapshot cache already
-// leaves the OS, plus 2.5 GiB for the gap measured between what a session
-// uses and what it reserves (about 2.3 GiB on a Strix Halo under Windows).
-constexpr std::uint64_t kAdmissionHostMarginBytes =
-    kHostSnapshotHeadroomBytes + (std::uint64_t{5} << 30) / 2;
+// On an integrated GPU, snapshot storage leaves the OS as much host RAM as an
+// explicit snapshot cache limit does.
+static_assert(hip::kSnapshotHostMarginBytes == kHostSnapshotHeadroomBytes);
 
 // Owns a four-byte device buffer and a private stream from load, so probing
 // a lost context needs no allocation. HIP context loss is sticky: after a GPU
@@ -1216,7 +1213,8 @@ public:
       resident_weights += dflash_model_->GetPackedWeightBytes();
     }
     std::optional<std::size_t> capacity;
-    const auto memory = hip::QueryAdmissionMemory(kAdmissionHostMarginBytes);
+    const auto memory =
+        hip::QueryAdmissionMemory(hip::kAdmissionHostMarginBytes);
     // Snapshot buffers are device allocations, but on a unified-memory APU
     // they are carved from the same RAM as every host allocation, and HIP's
     // free figure does not see host pressure. Cap them by the host budget too.
@@ -1755,7 +1753,8 @@ public:
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
     std::optional<std::size_t> capacity;
-    const auto memory = hip::QueryAdmissionMemory(kAdmissionHostMarginBytes);
+    const auto memory =
+        hip::QueryAdmissionMemory(hip::kAdmissionHostMarginBytes);
     if (memory.has_value()) {
       capacity = memory->free_bytes;
       LogStateCapacity(*memory, *capacity, 0, 0);
@@ -2579,7 +2578,8 @@ public:
                  : gufo::core::SessionMode::kAutoregressive,
         max_context_);
     std::optional<std::size_t> capacity;
-    const auto memory = hip::QueryAdmissionMemory(kAdmissionHostMarginBytes);
+    const auto memory =
+        hip::QueryAdmissionMemory(hip::kAdmissionHostMarginBytes);
     if (memory.has_value()) {
       const auto deferred = model_->DeferredScratchBytes();
       capacity =
