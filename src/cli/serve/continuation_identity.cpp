@@ -10,9 +10,9 @@
 
 #include "src/core/gguf_identity.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
+#include "src/families/qwen/hip_common/attention_policy.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
-#include "src/models/qwen/chat_template.hpp"
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 namespace gufo::server {
 bool IsSha256Hex(std::string_view value) noexcept {

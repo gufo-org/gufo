@@ -20,7 +20,7 @@
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"

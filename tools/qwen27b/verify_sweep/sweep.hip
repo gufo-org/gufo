@@ -27,9 +27,9 @@
 #include <string>
 #include <vector>
 
-#include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
-#include "src/models/qwen/hip/kernels/verify_gemm_27b.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/families/qwen/kernels/small_batch_gemm.hpp"
+#include "src/families/qwen/kernels/verify_gemm_27b.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
 
 using gufo::core::GgmlType;
 

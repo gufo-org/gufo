@@ -1,4 +1,4 @@
-"""Qwen control tokens, mirrored from ``src/models/qwen/control_tokens.hpp``.
+"""Qwen control tokens, mirrored from ``src/families/qwen/control_tokens/control_tokens.hpp``.
 
 Keep shared names and values identical to the C++ catalogue. Validate changes
 against pinned model metadata and independent reference fixtures; centralizing

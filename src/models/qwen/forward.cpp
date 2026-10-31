@@ -11,7 +11,7 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/quant/ggml_gemm.hpp"
-#include "src/models/qwen/gemm_route.hpp"
+#include "src/families/qwen/hip_common/gemm_route.hpp"
 #include "src/models/qwen/modules/attention.hpp"
 #include "src/models/qwen/modules/embed.hpp"
 #include "src/models/qwen/modules/ffn.hpp"

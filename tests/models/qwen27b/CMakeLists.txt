@@ -14,7 +14,7 @@ set_tests_properties(qwen27b.tools PROPERTIES LABELS "cpu;qwen27b;tools")
 
 function(add_qwen27b_test target source labels)
   add_executable(${target} ${CMAKE_CURRENT_SOURCE_DIR}/${source})
-  target_link_libraries(${target} PRIVATE gufo_core)
+  target_link_libraries(${target} PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
   add_test(NAME ${target} COMMAND ${target})
   set_tests_properties(${target} PROPERTIES LABELS "qwen27b;${labels}"
     SKIP_RETURN_CODE 77)
@@ -29,7 +29,8 @@ add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen27b_continuation_adapter_test EXCLUDE_FROM_ALL
     continuation_adapter_test.cpp continuation_fault.cpp)
-  target_link_libraries(qwen27b_continuation_adapter_test PRIVATE gufo_core ${CMAKE_DL_LIBS})
+  target_link_libraries(qwen27b_continuation_adapter_test PRIVATE
+    gufo_core ${GUFO_QWEN_LIBRARIES} ${CMAKE_DL_LIBS})
   add_qwen27b_test(qwen_sampling_hip_test sampling_test.hip
     "hip;gpu;sampling;correctness")
   target_link_libraries(qwen_sampling_hip_test PRIVATE hip::host)
@@ -65,7 +66,8 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(qwen_serving_test_support PUBLIC gufo_logging
-    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_cache_hip hip::host)
+    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next
+    ${GUFO_QWEN_LIBRARIES} gufo_qwen_vision gufo_cache_hip hip::host)
   add_executable(inference_backend_gpu_test serving_test.cpp)
   target_link_libraries(inference_backend_gpu_test PRIVATE qwen_serving_test_support)
   add_executable(qwen_vision_serving_test ../qwen/vision_serving_test.cpp)

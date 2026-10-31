@@ -1,0 +1,61 @@
+# Card 07 — orchestrator closure gates (2026-10-31, pinned `nix develop`, TMPDIR=/tmp)
+
+Run by the orchestrator once, after all integration edits, on working copy `@`
+(parent `kppqwqnv 11af44f9`, Card 06). Host: gfx1151, 125 GiB RAM, 113 GiB available
+before the GPU step; llama-swap services untouched; one GPU test at a time.
+
+| Gate | Command (verbatim) | Result |
+| --- | --- | --- |
+| Formatting | `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py` | `PASS: Checked 730 C++ files`, exit 0 |
+| Extension API | `python3 tools/ci/check-extension-api.py --write` then `python3 tools/ci/check-extension-api.py` | `PASS: extension API surface (6 paths)` both, exit 0/0 (SURFACE unchanged → no ext-api label) |
+| Docs | `python3 tools/ci/check-docs.py` | `PASSED: 260 markdown files and 1467 local links/anchors … zero broken links`, exit 0 |
+| Isolation | `python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-family-graph` | `PASS: core boundary` + `PASS: family graph (6 libraries, 7 declared edges, acyclic)`, exit 0 |
+| Identity goldens | `nix develop -c ctest --test-dir build/card07-gpu -R '^(qwen27b_continuation_identity_test\|qwen38_flash_next_continuation_identity_test\|deepseek_v4_flash_continuation_identity_test)$' --output-on-failure` | `100% tests passed out of 3`, exit 0, exact bytes |
+| Affected units | `nix develop -c ctest --test-dir build/card07-gpu -R '^(qwen_.*\|qwen27b.*\|qwen38_flash_next.*\|qwen_config_test\|gguf_reader_test\|check_docs_test\|check_extension_isolation_test\|extension_isolation_report\|extension_core_model_includes_gate\|extension_family_graph_gate\|extension_metadata_test)$' --output-on-failure` | `100% tests passed out of 82` in 201.03 s, exit 0; the 8 `Skipped` rows are the asset-gated ones listed in `unit-affected-tests.txt` (PENDING, not passes) |
+| **F1** 27B target unit | `GUFO_QWEN27B_MODEL=$PWD/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf GUFO_QWEN27B_DFLASH_MODEL=$PWD/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf nix develop -c ctest --test-dir build/card07-gpu -R '^qwen27b_target_test$' --output-on-failure` | `100% tests passed out of 1` in 91.67 s, exit 0 → **F1 RESOLVED** (the earlier 0.06 s FAIL was the relative asset path) |
+| **F8** CPU-only fresh build | `touch src/families/qwen/config/qwen_config.cpp src/families/qwen/text/tokenizer.cpp src/families/qwen/text/chat_template.cpp` then `nix develop -c cmake --build build/card07-cpu --target gufo_qwen_config gufo_qwen_text qwen_config_test` | Real compiles + links (7 steps, `qwen_config.cpp.o`, `tokenizer.cpp.o`, `chat_template.cpp.o`, both archives, `qwen_config_test`), exit 0 → **F8 RESOLVED** |
+| F8 CPU tests | `nix develop -c ctest --test-dir build/card07-cpu -R '^(qwen_config_test\|qwen_tokenizer_test\|qwen_chat_template_test)$' --output-on-failure` | `100% tests passed out of 3`, exit 0 (`ENGINE_ENABLE_HIP=OFF` cache) |
+| Kernel resources | `nix develop -c python3 tools/ci/check-kernel-resources.py build/card07-release/gufo --compare build/card06-release/gufo` | `0 worse, 0 better, 2692 same, 0 one side only; scratch increased in 0`, exit 0 |
+| Pre-existing baseline (owner decision input) | `nix develop -c python3 tools/ci/check-kernel-resources.py build/card0{6,7}-release/gufo --baseline tools/ci/kernel-resources.json` | Both exit 1 with `2692 kernels checked, 246 use scratch, 30 over budget`; the 30 FAIL rows are identical by scratch bytes, vgpr, spill **and** kernel name (`diff` of the sorted lists is empty) → the registered `kernel_resources_test` failure is pre-existing and untouched by this card |
+| Compile flags (G6) | `python3 tools/prof/card07_parity.py --before build/card06-release/compile_commands.json --after build/card07-release/compile_commands.json --mode flags --scratch …` | `flags: compared=84 failures=0`, exit 0 |
+| Device ISA (G7) | `nix develop -c python3 tools/prof/card07_parity.py … --mode device --scratch …` | `device: compared=39 failures=0`, 117 `.text`/`.rodata`/`.note` device sections byte-identical, exit 0 |
+| Host ISA (G7) | `nix develop -c python3 tools/prof/card07_host_parity.py --root $PWD --before build/card06-release/compile_commands.json --after build/card07-release/compile_commands.json` | `host-parity: sources=84 unexplained-code-differences=0 flag-or-path-failures=0`, exit 0 |
+
+## Orchestrator code fixes made during closure (both in the new Card 07 tools)
+
+1. `tools/prof/card07_parity.py` resolved `--bundler` as plain `clang-offload-bundler`,
+   which in the pinned dev shell rejects the zstd-compressed ROCm bundle
+   (`zlib error: Z_DATA_ERROR`) and fails with a bare traceback. It now resolves the HIP
+   toolchain bundler the same way `tools/ci/check-kernel-resources.py` does
+   (`HIP_CLANG` → `hipconfig -l` → `PATH`), keeps `--bundler` as the override, and prints
+   the failing source plus the `llvm-objcopy` PATH hint. Verified: the device gate now
+   reproduces with no PATH manipulation (the row above).
+2. `tools/prof/card07_host_parity.py` reported per-source counts but always exited 0, so a
+   host code change could not fail it. It now compares mnemonic sequences per function and
+   classifies the two move artifacts explicitly — the per-TU `__hip_cuid_*` identifier
+   (including as a call target inside functions such as `__clang_call_terminate`) and
+   `.L`-local string-pool offsets — and exits non-zero on any other difference, on
+   `FLAG-DIFF`, or on a missing/stale mapping. First strengthened run surfaced 8 such
+   call-target rows, which the CU-id mask now covers; the retained rerun above is clean.
+
+Deferred/hosted work after these edits: `nix build .#checks.x86_64-linux.pr` (run last) and
+the mandated `codex exec review`; functional/performance rows stay PENDING in
+`pending-commands.md` for the single post-Card-14 qualification window.
+
+## Closure checks after every edit (orchestrator, last two gates)
+
+Hosted: `nix build .#checks.x86_64-linux.pr` -> HOSTED_EXIT=0. Freshly built derivations, not cache hits:
+  - check-format.drv
+  - check-pr-tests.drv
+  - check-pr.drv
+Docs (re-run after the ledger edits): `[check-docs] PASSED: 260 markdown files and 1469 local links/anchors verified with zero broken links or invalid JSON blocks.`
+
+Mandated review: `codex exec review --dangerously-bypass-approvals-and-sandbox 'review the diff of current jj revision, you can use jj diff to see changes'`
+  CODEX_EXIT=0; verdict: "No actionable regressions were identified in the library extraction,
+  include updates, or configuration migration. The extension API check and focused
+  Python checks passed; C++ build validation was unavailable because CMake was not on PATH."
+  No critical or major finding to fix; its C++ build gap is covered by the pinned re-runs above.
+  Raw log retained as `codex-review.txt` (verdict excerpt).
+
+Card 05 snapshot caveat retained: the Nix source snapshot comes from tracked paths while the
+jj working copy is dirty.

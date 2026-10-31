@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "control_tokens",
+  "target": "gufo_qwen_control_tokens",
+  "kind": "interface",
+  "purpose": "Header-only shared Qwen control-token spellings in gufo::tokenization, mirrored by tools/gufo/control_tokens.py.",
+  "depends": []
+}

@@ -263,8 +263,10 @@
       "priority": 20,
       "paths": [
         "src/models/qwen/**",
+        "src/families/qwen/**",
         "tests/models/qwen/**",
-        "tests/models/qwen27b/**"
+        "tests/models/qwen27b/**",
+        "tests/families/qwen/**"
       ],
       "owners": [
         "qwen27-q4"
@@ -368,10 +370,10 @@
       "id": "shared-qwen",
       "priority": 30,
       "paths": [
-        "src/models/qwen/chat_template.*",
-        "src/models/qwen/tokenizer.*",
-        "src/models/qwen/control_tokens.hpp",
-        "src/models/qwen/vision/**"
+        "src/families/qwen/text/chat_template.*",
+        "src/families/qwen/text/tokenizer.*",
+        "src/families/qwen/control_tokens/control_tokens.hpp",
+        "src/families/qwen/vision/**"
       ],
       "owners": [
         "llm"

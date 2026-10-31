@@ -1,0 +1,73 @@
+G4 affected unit selection (build/card07-gpu), run after the final rebuild.
+Exact command:
+  nix develop -c ctest --test-dir build/card07-gpu -R '^(qwen_.*|qwen27b.*|qwen38_flash_next.*|qwen_config_test|gguf_reader_test|check_docs_test|check_extension_isolation_test|extension_isolation_report|extension_core_model_includes_gate|extension_family_graph_gate|extension_metadata_test)$'
+Verdict: 100% tests passed out of 82  (8 skipped in this initial selection; subsequent individual failures are retained below)
+Names discovered with `ctest --test-dir build/card07-gpu -N` (257 tests total).
+
+Skips inside the selection (each is PENDING evidence, not a pass):
+  qwen_mtp_reference_test       needs GUFO_QWEN27B_MTP_MODEL  (no 27B MTP asset under ./models)
+  qwen27b.cli                   needs GUFO_QWEN27B_{MODEL,DFLASH_MODEL,MTP_MODEL} (scope all)
+  qwen27b_target_test           needs GUFO_QWEN27B_MODEL      -> initial individual FAIL, integration rerun PENDING (Nix denial)
+  qwen_dflash_gpu_test          needs model+draft             -> run separately, PASS
+  qwen_dflash_upload_lifetime_test needs model+draft          -> run separately, PASS
+  qwen_vision_serving_test      needs MODEL DRAFT IMAGES mode -> NOT run (see pending-commands.md)
+  qwen_vision_prepare_test      needs MMPROJ argv             -> run separately, PASS
+  qwen_mtp_gpu_test             needs GUFO_QWEN27B_MODEL + GUFO_QWEN27B_MTP_MODEL; later probe FAIL: missing token_embd.weight
+
+G4b model-backed GPU unit runs, one test at a time, `free -g` checked first
+(112-113 GiB available; llama-swap services untouched).
+27B = models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf
+DRAFT = models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
+MMPROJ = .../4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-BF16.gguf
+  1/3 Test #189: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+  2/3 Test #220: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+  3/3 Test #237: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+  100% tests passed out of 3
+  51/82 Test #193: qwen_mtp_reference_test ........................***Skipped   0.06 sec
+  54/82 Test #196: qwen27b.cli ....................................***Skipped   5.19 sec
+  55/82 Test #197: qwen27b_target_test ............................***Skipped   0.06 sec
+  56/82 Test #198: qwen_mtp_gpu_test ..............................***Skipped   0.06 sec
+  57/82 Test #199: qwen_dflash_gpu_test ...........................***Skipped   0.06 sec
+  58/82 Test #200: qwen_dflash_upload_lifetime_test ...............***Skipped   0.06 sec
+  60/82 Test #202: qwen_vision_serving_test .......................***Skipped   0.06 sec
+  61/82 Test #203: qwen_vision_prepare_test .......................***Skipped   0.06 sec
+  100% tests passed out of 82
+  1/1 Test #197: qwen27b_target_test ..............***Failed    0.06 sec
+  0% tests passed, 1 tests failed out of 1
+  (the G3/G4 lines above are from the post-rebuild run; G4b lines follow)
+  === dflash gpu (27B + DFlash2 Q4_K_M) ===
+  1/1 Test #199: qwen_dflash_gpu_test .............   Passed    7.33 sec
+  100% tests passed out of 1
+  === dflash upload lifetime ===
+  1/1 Test #200: qwen_dflash_upload_lifetime_test ...   Passed    3.17 sec
+  100% tests passed out of 1
+  === vision prepare (mmproj) ===
+  vision prepare resident_bytes=927587264 upload_free_delta=1322442752 encode_free_delta=9093120
+  VISION_PREPARE_EXIT=0
+  === mtp gpu (asset probe) ===
+  1/1 Test #198: qwen_mtp_gpu_test ................***Failed    0.09 sec
+  qwen_mtp_gpu_test failed: Missing Qwen MTP tensor: token_embd.weight
+  0% tests passed, 1 tests failed out of 1
+  === 27B cli options+behaviour (model present) ===
+  1/2 Test #195: qwen27b.cli-options ..............   Passed    5.15 sec
+  2/2 Test #196: qwen27b.cli ......................***Skipped   5.18 sec
+  100% tests passed out of 2
+  qwen27b.cli --scope sampling (48 CLI generations: AR/fixed/adaptive x 16 configs,
+  prompt + two chat turns, real 27B + DFlash2, --draft-policy fixed/adaptive):
+    CLI_SAMPLING_EXIT=0  -> PASS (qwen27b.cli full scope still PENDING: needs a 27B MTP asset)
+
+Integration target rerun (absolute paths verified, free=60 GiB, available=112 GiB):
+warning: Git tree '/home/mixer/gufo' is dirty
+error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation not permitted
+EXIT=1
+
+Orchestrator closure rerun (F1 RESOLVED, absolute assets, available=113 GiB):
+  GUFO_QWEN27B_MODEL=$PWD/models/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf \
+  GUFO_QWEN27B_DFLASH_MODEL=$PWD/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
+    nix develop -c ctest --test-dir build/card07-gpu -R '^qwen27b_target_test$' --output-on-failure
+  1/1 Test #197: qwen27b_target_test ..............   Passed   91.67 sec
+  100% tests passed out of 1     EXIT=0
+The earlier 0.06 s FAIL was the relative asset path from the aborted gate loop, not a model
+failure. Orchestrator also re-ran the whole 82-test selection: 100% passed, 201.03 s, exit 0.
+
+Asset-pending rerun commands: see pending-commands.md §7. For each skipped CTest row use nix develop -c ctest --test-dir build/card07-gpu -R '^NAME$' --output-on-failure with its listed assets; vision serving/prepare require direct argv as documented there. MTP probe remains FAIL/PENDING asset, not a pass.

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "src/models/qwen/hip/kernels/prefill_quant_gemm.hip"
+#include "src/families/qwen/kernels/prefill_quant_gemm.hip"
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {

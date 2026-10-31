@@ -12,9 +12,9 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/state.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 namespace gufo::models {
 

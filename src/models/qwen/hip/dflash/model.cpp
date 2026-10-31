@@ -12,8 +12,8 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/mapped_prefetch.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/families/qwen/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
-#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
 namespace gufo::hip {

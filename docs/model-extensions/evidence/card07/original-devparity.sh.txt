@@ -1,0 +1,10 @@
+set -e
+cd /tmp/card07-work
+NEWO=/home/mixer/gufo/build/card07-release/src/families/qwen/kernels/CMakeFiles/gufo_qwen_kernels.dir/attention_batched.hip.o
+OLDO=/home/mixer/gufo/build/card06-release/CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_batched.hip.o
+objcopy --dump-section .hip_fatbin=ab-new.fb "$NEWO"
+objcopy --dump-section .hip_fatbin=ab-old.fb "$OLDO"
+OUT=ab-new
+clang-offload-bundler --unbundle --input=ab-new.fb --output="${OUT}.bin" --targets=hipv-amdgcn-amd-amdhsa--gfx1151 --type=bin
+echo "UNBUNDLE_EXIT=$?"
+ls -l ab-new* | awk '{print $5, $9}'

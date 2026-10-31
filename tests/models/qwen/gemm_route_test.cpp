@@ -1,4 +1,4 @@
-#include "src/models/qwen/gemm_route.hpp"
+#include "src/families/qwen/hip_common/gemm_route.hpp"
 
 #include <array>
 #include <cstdint>

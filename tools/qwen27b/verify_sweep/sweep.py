@@ -7,7 +7,7 @@ Lists every distinct (type, m, k) projection of the transformer layers, runs
 qwen27b_verify_sweep on one example tensor of each at every requested row
 count, and prints the fastest exact candidate per projection and row count.
 Gains of at least --min-gain percent are also printed in the Launch<> syntax
-of src/models/qwen/hip/kernels/verify_gemm_27b.hip. Gate/up pairs of one
+of src/families/qwen/kernels/verify_gemm_27b.hip. Gate/up pairs of one
 format stored back to back are measured as the joined (2 * m) x k matrix the
 decode multiplies. The GPU must be idle for the timings to mean anything.
 """

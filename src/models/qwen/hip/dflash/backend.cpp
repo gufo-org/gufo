@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "src/core/sampling.hpp"
-#include "src/models/qwen/control_tokens.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 
 namespace gufo::hip {

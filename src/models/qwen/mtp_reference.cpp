@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/families/qwen/config/qwen_config.hpp"
 #include "src/models/qwen/forward.hpp"
 
 namespace gufo::speculative {
@@ -77,7 +78,7 @@ const void* OutputRow(const models::QwenTensorRef& output, std::size_t token_id,
 
 std::optional<QwenMtpWeights> QwenMtpWeights::LoadFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
-  const auto config = reader.ExtractModelConfig(error_msg);
+  const auto config = models::qwen::ExtractQwenConfig(reader, error_msg);
   if (!config.has_value()) {
     return std::nullopt;
   }

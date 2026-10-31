@@ -1,7 +1,7 @@
 // Batch-one BF16 GEMV ablation for the Qwen3-ASR text decoder.
 //
 // The retained decode route (Wave32GEMVKernel_1Row in
-// src/models/qwen/hip/kernels/gemv.hip) reaches roughly half of the gfx1151
+// src/families/qwen/kernels/gemv.hip) reaches roughly half of the gfx1151
 // DRAM read ceiling on the ASR decoder shapes, and it is 79% of request GPU
 // time.
 //

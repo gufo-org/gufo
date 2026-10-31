@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "kernels",
+  "target": "gufo_qwen_kernels",
+  "kind": "static",
+  "purpose": "Shared Qwen HIP operators: the narrow launcher interfaces under ops/ and the kernel translation units, used by Qwen 27B, Flash-Next and Qwen3-TTS.",
+  "depends": ["hip_common"]
+}

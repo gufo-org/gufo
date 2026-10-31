@@ -5,7 +5,7 @@ time, and the DFlash2 draft runs its block at the same widths. Each K-quant
 projection then runs `SmallBatchKQuantExactFp32GEMMKernel`, and how its work
 is split over waves (waves per block, rows per wave, 16- or 32-lane groups,
 staging tiles) decides how close the GPU gets to its memory bandwidth.
-`src/models/qwen/hip/kernels/verify_gemm_27b.hip` holds the shapes measured
+`src/families/qwen/kernels/verify_gemm_27b.hip` holds the shapes measured
 faster on gfx1151 for Qwen3.8-27B UD-Q4_K_XL and its Q4_K_M DFlash2 draft; any
 projection it does not list keeps the generic `LaunchBatchedQuantGEMMFp32`
 dispatch.

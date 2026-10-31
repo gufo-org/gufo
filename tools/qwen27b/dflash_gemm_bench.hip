@@ -21,12 +21,12 @@
 #include <string>
 #include <vector>
 
-#include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/families/qwen/kernels/small_batch_gemm.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
 // Embed the scalar implementation so ablations use its actual templates and
 // arithmetic without linking the complete model runtime.
-#include "src/models/qwen/hip/kernels/gemv_quant.hip"
-#include "src/models/qwen/hip/kernels/swiglu.hip"
+#include "src/families/qwen/kernels/gemv_quant.hip"
+#include "src/families/qwen/kernels/swiglu.hip"
 
 namespace {
 

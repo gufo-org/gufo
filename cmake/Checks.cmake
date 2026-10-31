@@ -14,7 +14,8 @@ set(gufo_pr_targets
   cache_tiered_test
   cache_retention_test
   extension_runtime_test extension_role_test
-  arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
+  arg_parser_test json_test json_constraint_test gguf_reader_test qwen_config_test
+  gguf_identity_test
   heap_placement_test
   platform_publish_test platform_prefault_test platform_mapped_file_test
   platform_fs_test platform_library_test
@@ -58,7 +59,8 @@ list(APPEND gufo_pr_tests
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
   kernel_resources_parser_test check_docs_test check_pr_title_test
-  check_extension_isolation_test extension_isolation_report extension_metadata_test
+  check_extension_isolation_test extension_isolation_report
+  extension_family_graph_gate extension_metadata_test
   extension_discovery_test extension_api_policy_test extension_api_surface
   extension_cli_provenance_test)
 if (WIN32)

@@ -43,7 +43,7 @@ constexpr std::uint32_t kAttnWidth = kQueryHeads * kHeadDim;
 constexpr std::uint32_t kKvWidth = kKvHeads * kHeadDim;
 
 // ---------------------------------------------------------------------------
-// Baseline: the production tiled kernel (src/models/qwen/hip/kernels/
+// Baseline: the production tiled kernel (src/families/qwen/kernels/
 // attention_tile.hip), copied verbatim apart from the constants it pulls from
 // the policy header.
 // ---------------------------------------------------------------------------

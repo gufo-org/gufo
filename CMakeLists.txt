@@ -349,11 +349,21 @@ target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
   Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
+# Family libraries come before the model that needs them; they may depend on
+# gufo_core and on each other, never on a model directory.
+add_subdirectory(src/families/qwen)
 add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
 
-target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
+# Qwen family consumers name the family libraries they include. Flash-Next uses
+# the shared tokenizer/chat template, kernels and vision stack; Qwen3-TTS the
+# shared HIP operators; Qwen-Image-2.1 the tokenizer.
+target_link_libraries(gufo_qwen_image_21 PUBLIC gufo_qwen_text)
+target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core gufo_qwen_control_tokens)
 if (ENGINE_ENABLE_HIP)
+  target_link_libraries(gufo_qwen3_tts PUBLIC gufo_qwen_kernels)
+  target_link_libraries(gufo_qwen38_flash_next PUBLIC
+    gufo_qwen_text gufo_qwen_vision)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_core)
 endif()
 
@@ -390,7 +400,11 @@ endif()
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
+# The interim edges the RFC allows between steps 5 and 6: prompt/bench still
+# reach the Qwen executor and generators directly, so the CLI library links the
+# Qwen model and family libraries instead of getting them through gufo_core.
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next
+  gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
 if(ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
 endif()
@@ -423,7 +437,8 @@ add_library(gufo_http STATIC
   # the engine library, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2
+  gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -491,10 +506,13 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
     gufo_kernel_bench_support
     gufo_diagnostics
     gufo_core
+    ${GUFO_QWEN_LIBRARIES}
+    gufo_qwen_kernels
     ${ROCTX_LIBRARY})
 
   add_executable(tune_hipblaslt tools/bench/tune_hipblaslt.cpp)
-  target_link_libraries(tune_hipblaslt PRIVATE gufo_core hip::host)
+  target_link_libraries(tune_hipblaslt PRIVATE gufo_core gufo_qwen_kernels
+    hip::host)
 
   add_executable(wmma_layout_test tools/bench/wmma_layout_test.hip)
   target_link_libraries(wmma_layout_test PRIVATE gufo_core hip::device)
@@ -559,6 +577,7 @@ if (BUILD_TESTING)
     endforeach()
   endif()
 
+  add_subdirectory(tests/families/qwen)
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
   gufo_qwen3_asr_register_tests()
@@ -651,7 +670,8 @@ if (BUILD_TESTING)
     src/models/deepseek_v4_flash/chat_template.cpp
     src/models/deepseek_v4_flash/tool_calls.cpp
   )
-  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_logging)
+  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_logging
+    ${GUFO_QWEN_LIBRARIES})
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
@@ -709,8 +729,12 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
       --fail-on-core-model-includes)
+  add_test(NAME extension_family_graph_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-family-graph)
   set_tests_properties(check_extension_isolation_test extension_isolation_report
-    extension_core_model_includes_gate
+    extension_core_model_includes_gate extension_family_graph_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
   add_test(NAME check_docs_test
@@ -746,7 +770,8 @@ if (BUILD_TESTING)
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test
       tests/models/chat_template_hf_token_golden_test.cpp)
-    target_link_libraries(chat_template_hf_token_golden_test PRIVATE gufo_core)
+    target_link_libraries(chat_template_hf_token_golden_test PRIVATE gufo_core
+      gufo_qwen_text)
     target_compile_definitions(chat_template_hf_token_golden_test PRIVATE
       GUFO_CHAT_TEMPLATE_HF_GOLDENS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
     add_test(NAME chat_template_hf_token_golden_test
@@ -780,7 +805,8 @@ if (BUILD_TESTING)
     src/cli/serve/continuation_disk_store.cpp
     src/cli/serve/component_text_cache.cpp
   src/cli/serve/text_model_runner.cpp)
-  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core gufo_cache)
+  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core
+    gufo_cache ${GUFO_QWEN_LIBRARIES})
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
@@ -1087,7 +1113,7 @@ if (BUILD_TESTING)
   set_tests_properties(ggml_gemm_parity_test PROPERTIES LABELS "cpu;core;quant")
 
   add_executable(exact_token_test tests/quality/exact_token_test.cpp)
-  target_link_libraries(exact_token_test PRIVATE gufo_core)
+  target_link_libraries(exact_token_test PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
   add_test(NAME exact_token_test COMMAND exact_token_test)
   set_tests_properties(exact_token_test PROPERTIES LABELS "cpu;quality;tokens")
 
@@ -1345,7 +1371,7 @@ if (BUILD_TESTING)
     add_executable(hipblaslt_runtime_cache_test
       tests/kernels/hipblaslt_runtime_cache_test.cpp)
     target_link_libraries(hipblaslt_runtime_cache_test PRIVATE
-      gufo_core hip::host)
+      gufo_core ${GUFO_QWEN_LIBRARIES} hip::host)
     add_test(NAME hipblaslt_runtime_cache_test
       COMMAND hipblaslt_runtime_cache_test)
     set_tests_properties(hipblaslt_runtime_cache_test PROPERTIES
@@ -1353,7 +1379,8 @@ if (BUILD_TESTING)
 
     add_executable(persistent_deltanet_test
       tests/kernels/persistent_deltanet_test.cpp)
-    target_link_libraries(persistent_deltanet_test PRIVATE gufo_core hip::host)
+    target_link_libraries(persistent_deltanet_test PRIVATE gufo_core
+      ${GUFO_QWEN_LIBRARIES} hip::host)
     add_test(NAME persistent_deltanet_test COMMAND persistent_deltanet_test)
     set_tests_properties(persistent_deltanet_test PROPERTIES
       LABELS "hip;gpu;kernels;deltanet;speculative")

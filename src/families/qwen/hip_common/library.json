@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "hip_common",
+  "target": "gufo_qwen_hip_common",
+  "kind": "interface",
+  "purpose": "Header-only layer below qwen_kernels and qwen_vision: execution policy, attention policy, recurrent-state layout, GEMM routing, quantization helpers, the shared RoPE layout and the continuation-hook interface.",
+  "depends": []
+}

@@ -10,7 +10,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/image.hpp"
-#include "src/models/qwen/vision/encoder.hpp"
+#include "src/families/qwen/vision/encoder.hpp"
 
 namespace {
 bool observe_upload{};

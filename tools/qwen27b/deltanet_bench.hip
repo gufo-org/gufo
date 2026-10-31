@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-#include "src/models/qwen/hip/kernels/deltanet_decode.hpp"
+#include "src/families/qwen/kernels/deltanet_decode.hpp"
 
 namespace {
 void Check(hipError_t error) {

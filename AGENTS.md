@@ -85,7 +85,7 @@ quality; successful optimizations become the default, without extra switches.
 
 - Keep model code, tests, tools and numerical contracts with their model.
 - Use the shared Qwen control-token constants for framing; see
-  [src/models/qwen/AGENTS.md](src/models/qwen/AGENTS.md). Inspect their definitions
+  [src/families/qwen/AGENTS.md](src/families/qwen/AGENTS.md). Inspect their definitions
   when reviewing or changing behavior, and keep reference fixtures independent.
 - Put Windows-specific code in `src/core/platform/`: one leaf per OS facility
   (files, pages, sockets), whose sources may branch on `_WIN32` or split into

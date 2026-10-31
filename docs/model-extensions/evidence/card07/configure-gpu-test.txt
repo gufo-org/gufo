@@ -1,0 +1,14 @@
+G1 gpu-test configure (build/card07-gpu). Exit 0; first configure ran at 11:22
+(/tmp/card07-work/configure-gpu.log), re-run implicitly by ninja during later builds
+(-- Configuring done / -- Build files have been written to: build/card07-gpu).
+  BUILD_TESTING:BOOL=ON
+  CMAKE_BUILD_TYPE:STRING=RelWithDebInfo
+  CMAKE_CXX_FLAGS:STRING=
+  CMAKE_HIP_ARCHITECTURES:STRING=gfx1151
+  ENGINE_ENABLE_HIP:BOOL=ON
+  GUFO_ENABLE_SANITIZERS:BOOL=OFF
+  GUFO_EXTENSIONS_FROM_LOCK:BOOL=OFF
+  -- gufo: extension mode=discovery; included=[]; excluded=[]
+  cpu build (build/card07-cpu): ENGINE_ENABLE_HIP:BOOL=OFF, BUILD_TESTING:BOOL=ON, RelWithDebInfo.
+  production build (build/card07-release): ENGINE_ENABLE_HIP:BOOL=ON, BUILD_TESTING:BOOL=OFF
+    (=> NDEBUG production code objects), RelWithDebInfo, extension mode=discovery.

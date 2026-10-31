@@ -13,9 +13,9 @@
 #include "src/core/hip/weight_upload.hpp"
 #include "src/core/platform/pages.hpp"
 #include "src/core/platform/prefault.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace gufo::hip {
 namespace {

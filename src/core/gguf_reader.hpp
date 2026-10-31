@@ -211,11 +211,6 @@ public:
     return tensors_;
   }
 
-  /// Extracts and validates model configuration from embedded config or
-  /// standard keys.
-  [[nodiscard]] std::optional<ModelConfig> ExtractModelConfig(
-      std::string* error_msg = nullptr) const;
-
   /// Names the weight format this file was produced in, for benchmark and
   /// diagnostic output. Prefers the `general.file_type` the quantizer recorded
   /// (llama.cpp's ftype, so the label matches `llama-bench` on the same

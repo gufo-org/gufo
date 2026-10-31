@@ -3942,7 +3942,7 @@ __device__ __forceinline__ __attribute__((convergent)) void SyncLds() {
 }
 
 // Masked prefill attention on the WMMA matrix cores, ported from the Qwen
-// 27B route (src/models/qwen/hip/kernels/attention_wmma.hip) to this
+// 27B route (src/families/qwen/kernels/attention_wmma.hip) to this
 // model's 24 x 256 query heads over two KV heads. Wave32 fragment layout: A
 // holds row L%16 and 16 contiguous k, B holds column L%16 and 16 contiguous
 // k, and C element i is row 2i + L/16, column L%16. Every block owns 32
@@ -4739,7 +4739,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 }
 
 // W8A8 int8 WMMA GEMM over the GGUF Q8_0 weights, ported from the Qwen 27B
-// route (src/models/qwen/hip/kernels/prefill_quant_gemm.hip,
+// route (src/families/qwen/kernels/prefill_quant_gemm.hip,
 // opt-c163-blocked-w8a8 with the opt-c179 addressing). Weights stay in their
 // row-major 34-byte block_q8_0 layout; activations are quantized per 32-wide
 // block into WMMA B-fragment order:

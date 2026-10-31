@@ -62,15 +62,15 @@ for t in "${targets[@]}"; do
   native_sources=()
   if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ||
         "$src" -ef tools/qwen27b/prefill_gemm_bench.hip ]]; then
-    native_sources+=(src/models/qwen/hip/kernels/small_batch_wave64.hip)
-    native_sources+=(src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip)
+    native_sources+=(src/families/qwen/kernels/small_batch_wave64.hip)
+    native_sources+=(src/families/qwen/kernels/small_batch_quant16_wave64.hip)
   fi
   if [[ "$src" -ef tools/qwen27b/prefill_gemm_bench.hip ]]; then
-    native_sources+=(src/models/qwen/hip/kernels/prefill_quant_wave64.hip)
+    native_sources+=(src/families/qwen/kernels/prefill_quant_wave64.hip)
   fi
   if [[ "$src" -ef tools/qwen27b/attention_bench.hip ]]; then
     native_sources+=(
-      src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip)
+      src/families/qwen/kernels/attention_decode_verify_wave64.hip)
   fi
   if ((${#native_sources[@]})); then
     # HIP helpers and their callers must share the native wave size.
@@ -82,7 +82,7 @@ for t in "${targets[@]}"; do
       for unit in "${native_sources[@]}"; do
         object="$objects/$(basename "$unit").o"
         native_extra=()
-        if [[ "$unit" == src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip ]]; then
+        if [[ "$unit" == src/families/qwen/kernels/small_batch_quant16_wave64.hip ]]; then
           native_extra+=(-Xarch_device -mllvm=-amdgpu-sched-strategy=iterative-ilp)
         fi
         "${compile[@]}" -DENGINE_ENABLE_HIP=1 -mwavefrontsize64 \

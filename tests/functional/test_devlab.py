@@ -47,7 +47,7 @@ class PlanTest(unittest.TestCase):
 
     def test_shared_llm_uses_only_flash_next(self):
         for path in ('src/core/sampling.cpp', 'src/cache/cache.cpp',
-                     'src/models/qwen/tokenizer.cpp', 'src/models/qwen/vision/encoder.hip',
+                     'src/families/qwen/text/tokenizer.cpp', 'src/families/qwen/vision/encoder.hip',
                      'src/cli/serve/text_model_runner.cpp'):
             with self.subTest(path=path):
                 self.assertEqual(self.models(path), {'flash-next-q4'})

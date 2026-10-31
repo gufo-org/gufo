@@ -1,0 +1,658 @@
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/families/qwen/kernels/small_batch_gemm.hpp"
+#include "src/families/qwen/kernels/small_batch_quant16_wave64.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/swiglu.hpp"
+
+namespace gufo::hip::detail {
+namespace {
+
+template<core::GgmlType Type>
+void LaunchWideFfn(const void* w, const float* x, float* y, std::size_t batch,
+                   std::size_t groups, hipStream_t stream) {
+  static_assert(Type == core::GgmlType::kQ3_K ||
+                Type == core::GgmlType::kIQ4_NL);
+  const auto launch = [&]<std::size_t Batch, std::size_t Groups>() {
+    constexpr unsigned kLanes = Type == core::GgmlType::kIQ4_NL ? 16 : 32;
+    constexpr unsigned kRows = Type == core::GgmlType::kIQ4_NL ? 4 : 6;
+    constexpr unsigned kRowsPerBlock = 8 * kRows * (32 / kLanes);
+    SmallBatchKQuantExactFp32GEMMKernel<8, Batch, kRows, Type, 1, 4, Groups,
+                                        true, 1, 64, kLanes>
+        <<<((17408 + kRowsPerBlock - 1) / kRowsPerBlock) * Groups, 256, 0,
+           stream>>>(w, x, y, 17408, 5120);
+  };
+  const auto grouped = [&]<std::size_t Batch>() {
+    switch (groups) {
+      case 1:
+        launch.template operator()<Batch, 1>();
+        break;
+      case 2:
+        launch.template operator()<Batch, 2>();
+        break;
+      case 3:
+        launch.template operator()<Batch, 3>();
+        break;
+      case 4:
+        launch.template operator()<Batch, 4>();
+        break;
+    }
+  };
+  if (batch == 14)
+    grouped.template operator()<14>();
+  else
+    grouped.template operator()<16>();
+}
+
+// A nonzero valid_rows runs one sixteen-row group masked to its first
+// valid_rows tokens.
+template<core::GgmlType Type, std::size_t Batch, std::size_t Groups = 1>
+void Launch(const void* w, const float* x, float* y, std::size_t m,
+            std::size_t k, hipStream_t stream, std::size_t valid_rows = 0) {
+  const auto launch =
+      [&]<std::uint32_t Waves, std::size_t Rows, std::size_t Tiles,
+          std::uint32_t MinWaves, std::size_t Step = Batch, bool Narrow = true,
+          std::uint32_t LogicalLanes = 32>() {
+        if constexpr (Batch == 16 && (Type == core::GgmlType::kQ4_K ||
+                                      Type == core::GgmlType::kQ5_K)) {
+          static_assert(Waves == 8 && Rows == 6 && Tiles == 1 &&
+                        MinWaves == 4 && Step == 1 && Narrow &&
+                        LogicalLanes == 32);
+          LaunchKQuantSixteenWave64(Type, w, x, y, m, k, stream, Groups,
+                                    valid_rows);
+        } else {
+          constexpr std::size_t kRowsPerBlock =
+              Waves * Rows * (32 / LogicalLanes);
+          const dim3 grid(static_cast<unsigned>(
+              ((m + kRowsPerBlock - 1) / kRowsPerBlock) * Groups));
+          if constexpr (Batch == 16 && Groups == 1) {
+            if (valid_rows != 0) {
+              SmallBatchKQuantExactFp32GEMMKernel<
+                  Waves, Batch, Rows, Type, Tiles, MinWaves, Groups, Narrow,
+                  Step, 64, LogicalLanes,
+                  kKQuantDistributedOutput<Batch, Type, 64>, false, true>
+                  <<<grid, Waves * 32, 0, stream>>>(w, x, y, m, k, valid_rows);
+              return;
+            }
+          }
+          SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, Rows, Type, Tiles,
+                                              MinWaves, Groups, Narrow, Step,
+                                              64, LogicalLanes>
+              <<<grid, Waves * 32, 0, stream>>>(w, x, y, m, k);
+        }
+      };
+  const bool down = m == 5120 && k == 17408;
+  if constexpr (Type == core::GgmlType::kIQ4_XS && Batch == 5) {
+    // Keep the scalar partials and use the eight-column reduction for five
+    // live tokens. Empty columns stay zero and never write output.
+    constexpr std::size_t kRowsPerBlock = 16 * 4 * 2;
+    SmallBatchKQuantExactFp32GEMMKernel<16, 5, 4, Type, 1, 4, Groups, true, 1,
+                                        64, 16, true>
+        <<<((m + kRowsPerBlock - 1) / kRowsPerBlock) * Groups, 512, 0,
+           stream>>>(w, x, y, m, k);
+    return;
+  }
+  if constexpr (Batch > 8) {
+    if constexpr (Batch == 14 && Type != core::GgmlType::kQ6_K) {
+      if (m == 17408 && k == 5120) {
+        launch.template operator()<8, 6, 1, 4, 2>();
+        return;
+      }
+    }
+    if constexpr (Type == core::GgmlType::kIQ4_XS && Batch == 16) {
+      if (down) {
+        launch.template operator()<8, 4, 1, 4, Groups == 1 ? 2 : 1, true, 16>();
+        return;
+      }
+      if (k == 5120 && (m == 17408 || m == 34816)) {
+        launch.template operator()<8, 4, 1, 4, 1, true, 16>();
+        return;
+      }
+    }
+    if constexpr (Type == core::GgmlType::kIQ4_XS &&
+                  (Batch == 12 || Batch == 14)) {
+      if ((m == 34816 && k == 5120) || (Batch == 14 && Groups > 1 && down)) {
+        constexpr std::size_t kRows = Batch == 12 ? 3 : 4;
+        launch.template operator()<8, kRows, 1, 4, 1, true, 16>();
+        return;
+      }
+    }
+    if constexpr (Type == core::GgmlType::kQ6_K) {
+      constexpr std::size_t kRows = Batch == 9 || Batch >= 13 ? 6 : 4;
+      constexpr std::size_t kStep = Batch == 10 ? 2 : 1;
+      launch.template operator()<8, kRows, 1, 4, kStep>();
+    } else {
+      constexpr std::size_t kStep =
+          Type == core::GgmlType::kIQ4_XS                ? (Batch % 2 == 0 ? 2
+                                                            : Batch == 11  ? 1
+                                                            : Batch == 13  ? 13
+                                                                           : 3)
+          : Type == core::GgmlType::kQ4_K && Batch == 12 ? 2
+                                                         : 1;
+      constexpr std::size_t kRows =
+          Type != core::GgmlType::kIQ4_XS &&
+                  (Batch == 13 || Batch == 14 || Batch == 16 ||
+                   (Batch == 15 && Type == core::GgmlType::kQ5_K))
+              ? 6
+              : 4;
+      launch.template operator()<8, kRows, 1, 4, kStep>();
+    }
+  } else if constexpr (Type == core::GgmlType::kQ4_K) {
+    if constexpr (Batch == 4) {
+      if (down) {
+        launch.template operator()<8, 4, 2, 4, 1>();
+        return;
+      }
+    }
+    if constexpr (Batch >= 5) {
+      if (k == 5120 && (m == 6144 || m == 10240 || m == 12288)) {
+        constexpr std::uint32_t kMinWaves = Batch == 6 ? 8 : 12;
+        launch.template operator()<16, 3, 1, kMinWaves>();
+        return;
+      }
+    }
+    if constexpr (Batch == 5 || Batch == 6) {
+      if (!down) {
+        launch.template operator()<16, 3, 2, 12>();
+        return;
+      }
+    }
+    constexpr std::size_t kTiles = Batch == 5 ? 1 : 2;
+    launch.template operator()<16, 4, kTiles, 4>();
+  } else if constexpr (Type == core::GgmlType::kQ5_K) {
+    if constexpr (Batch == 4) {
+      launch.template operator()<16, 4, 1, 4, 2>();
+    } else if constexpr (Batch == 5 || Batch == 6) {
+      launch.template operator()<16, 4, 2, 4>();
+    } else if constexpr (Batch == 8) {
+      if (down) {
+        launch.template operator()<16, 4, 1, 4, 1>();
+      } else {
+        launch.template operator()<8, 4, 1, 4, 1>();
+      }
+    } else {
+      launch.template operator()<8, 4, 1, 4>();
+    }
+  } else if constexpr (Type == core::GgmlType::kIQ4_XS) {
+    if constexpr (Batch == 4) {
+      launch.template operator()<16, 4, 2, 4, 1>();
+    } else if constexpr (Batch == 6) {
+      launch.template operator()<16, 3, 2, 12>();
+    } else if constexpr (Batch == 7) {
+      launch.template operator()<16, 4, 2, 4>();
+    } else {
+      if constexpr (Batch == 8) {
+        if (m == 34816 && k == 5120) {
+          launch.template operator()<8, 4, 1, 4, 1>();
+          return;
+        }
+      }
+      launch.template operator()<8, 4, 1, 4>();
+    }
+  } else {
+    static_assert(Type == core::GgmlType::kQ6_K);
+    if constexpr (Batch == 8) {
+      if (m == 248320 && k == 5120) {
+        launch.template operator()<8, 6, 1, 4, 1>();
+        return;
+      }
+    }
+    if constexpr (Batch >= 7) {
+      if (m == 5120 && k == 6144) {
+        launch.template operator()<16, 4, 1, 4>();
+        return;
+      }
+    }
+    launch.template operator()<16, 3, 2, 1>();
+  }
+}
+
+template<core::GgmlType Type>
+void LaunchBatch(const void* w, const float* x, float* y, std::size_t batch,
+                 std::size_t m, std::size_t k, hipStream_t stream,
+                 std::size_t groups, std::size_t valid_rows = 0) {
+  // Adjacent workgroups reuse the same weight rows. Fourteen-row groups cover
+  // paired seven-row verification blocks without a separate tail.
+  if (groups > 1) {
+    if constexpr (Type == core::GgmlType::kIQ4_XS ||
+                  Type == core::GgmlType::kQ4_K) {
+      if (batch == 14) {
+        if (groups == 2)
+          Launch<Type, 14, 2>(w, x, y, m, k, stream);
+        else
+          Launch<Type, 14, 3>(w, x, y, m, k, stream);
+        return;
+      }
+    }
+    const auto launch_groups = [&]<std::size_t Batch>() {
+      switch (groups) {
+        case 2:
+          Launch<Type, Batch, 2>(w, x, y, m, k, stream);
+          break;
+        case 3:
+          Launch<Type, Batch, 3>(w, x, y, m, k, stream);
+          break;
+        case 4:
+          Launch<Type, Batch, 4>(w, x, y, m, k, stream);
+          break;
+      }
+    };
+    if constexpr (Type == core::GgmlType::kQ6_K ||
+                  Type == core::GgmlType::kQ5_K) {
+      if (batch == 14) {
+        launch_groups.template operator()<14>();
+        return;
+      }
+    }
+    launch_groups.template operator()<16>();
+    return;
+  }
+  switch (batch) {
+    case 4:
+      if constexpr (Type != core::GgmlType::kQ6_K) {
+        Launch<Type, 4>(w, x, y, m, k, stream);
+      }
+      return;
+    case 5:
+      Launch<Type, 5>(w, x, y, m, k, stream);
+      return;
+    case 6:
+      if constexpr (Type != core::GgmlType::kQ6_K) {
+        Launch<Type, 6>(w, x, y, m, k, stream);
+      }
+      return;
+    case 7:
+      Launch<Type, 7>(w, x, y, m, k, stream);
+      return;
+    case 8:
+      Launch<Type, 8>(w, x, y, m, k, stream);
+      return;
+    case 9:
+      Launch<Type, 9>(w, x, y, m, k, stream);
+      return;
+    case 10:
+      Launch<Type, 10>(w, x, y, m, k, stream);
+      return;
+    case 11:
+      Launch<Type, 11>(w, x, y, m, k, stream);
+      return;
+    case 12:
+      Launch<Type, 12>(w, x, y, m, k, stream);
+      return;
+    case 13:
+      Launch<Type, 13>(w, x, y, m, k, stream);
+      return;
+    case 14:
+      Launch<Type, 14>(w, x, y, m, k, stream);
+      return;
+    case 15:
+      Launch<Type, 15>(w, x, y, m, k, stream);
+      return;
+    case 16:
+      Launch<Type, 16>(w, x, y, m, k, stream, valid_rows);
+      return;
+    default:
+      return;
+  }
+}
+
+}  // namespace
+
+bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x, float* y,
+                                 std::size_t batch, std::size_t m,
+                                 std::size_t k, hipStream_t stream,
+                                 std::size_t groups) {
+  const bool up = k == 5120 && (m == 17408 || m == 34816);
+  const bool down = m == 5120 && k == 17408;
+  const bool medium =
+      (k == 5120 && (m == 6144 || m == 10240)) || (m == 5120 && k == 6144);
+  const bool grouped_projection = (k == 5120 && (m == 34816 || m == 10240)) ||
+                                  (m == 5120 && (k == 17408 || k == 6144));
+  if (groups == 1 && batch > 16 && batch <= 36 && grouped_projection) {
+    // Mask only the final group's loads/stores. Keeping adjacent groups in
+    // one launch reuses weights instead of rereading them for a short tail.
+    const auto launch = [&]<std::size_t Width, std::size_t Groups,
+                            std::size_t Rows, std::size_t Step = Width,
+                            bool Distributed = false>() {
+      SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Width, Rows, true, true, 64,
+                                           Groups, Step, Distributed, true>
+          <<<((m + 16 * Rows - 1) / (16 * Rows)) * Groups, 512, 0, stream>>>(
+              w, x, y, m, k, batch);
+    };
+    if (batch <= 24) {
+      launch.template operator()<12, 2, 4>();
+    } else if (batch <= 32) {
+      if (k == 5120)
+        launch.template operator()<16, 2, 3, 1, true>();
+      else if (k == 17408)
+        launch.template operator()<16, 2, 3, 1, false>();
+      else
+        launch.template operator()<16, 2, 3, 16, true>();
+    } else {
+      launch.template operator()<12, 3, 4>();
+    }
+    return true;
+  }
+  if (batch == 16 && groups >= 1 && groups <= 4 && (up || down || medium)) {
+    const auto launch = [&]<std::size_t Groups>() {
+      const auto launch_shape = [&]<std::size_t Step, bool Distributed>() {
+        SmallBatchQ8_0ExactFp32VecGEMMKernel<16, 16, 3, true, true, 64, Groups,
+                                             Step, Distributed>
+            <<<((m + 47) / 48) * Groups, 512, 0, stream>>>(w, x, y, m, k);
+      };
+      if constexpr (Groups == 1) {
+        if (up || (m == 10240 && k == 5120))
+          launch_shape.template operator()<1, true>();
+        else
+          launch_shape.template operator()<1, false>();
+      } else {
+        if (up)
+          launch_shape.template operator()<1, true>();
+        else if (down)
+          launch_shape.template operator()<1, false>();
+        else
+          launch_shape.template operator()<16, true>();
+      }
+    };
+    switch (groups) {
+      case 1:
+        launch.template operator()<1>();
+        break;
+      case 2:
+        launch.template operator()<2>();
+        break;
+      case 3:
+        launch.template operator()<3>();
+        break;
+      case 4:
+        launch.template operator()<4>();
+        break;
+    }
+    return true;
+  }
+  if (groups != 1)
+    return false;
+  if (batch == 12 && grouped_projection) {
+    SmallBatchQ8_0ExactFp32VecGEMMKernel<16, 12, 4, true, true, 64>
+        <<<(m + 63) / 64, 512, 0, stream>>>(w, x, y, m, k);
+    return true;
+  }
+  if (batch == 6 && m == 5120 && k == 17408) {
+    SmallBatchQ8_0ExactFp32VecGEMMKernel<8, 6, 4, true, false, 64>
+        <<<(m + 31) / 32, 256, 0, stream>>>(w, x, y, m, k);
+    return true;
+  }
+  return false;
+}
+
+bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x, float* y,
+                                   std::size_t batch, std::size_t m,
+                                   std::size_t k, hipStream_t stream,
+                                   std::size_t groups) {
+  if (groups > 1) {
+    const bool up =
+        k == 5120 && (m == 1024 || m == 12288 || m == 17408 || m == 248320);
+    const bool down = m == 5120 && k == 6144;
+    if (batch != 16 || !(up || down))
+      return false;
+    if (groups > 4) {
+      // Bounded groups reuse cached weight rows while retaining a small enough
+      // activation working set. Every dot product keeps decode's FP32 order.
+      const auto launch = [&]<std::size_t Rows>() {
+        BatchedExactBf16GEMMFp32VecKernel<16, 16, Rows, false, 64, 1, true>
+            <<<dim3(groups, (m + 16 * Rows - 1) / (16 * Rows)), 512, 0,
+               stream>>>(static_cast<const hip_bfloat16*>(w), x, y, m, k);
+      };
+      launch.template operator()<3>();
+      return true;
+    }
+    const auto launch = [&]<std::size_t Groups, std::size_t Rows>() {
+      // Neighboring token groups reuse the same weight rows through cache.
+      BatchedExactBf16GEMMFp32VecKernel<16, 16, Rows, false, 64, Groups>
+          <<<((m + 16 * Rows - 1) / (16 * Rows)) * Groups, 512, 0, stream>>>(
+              static_cast<const hip_bfloat16*>(w), x, y, m, k);
+    };
+    const auto launch_shape = [&]<std::size_t Groups>() {
+      if (down)
+        launch.template operator()<Groups, 2>();
+      else
+        launch.template operator()<Groups, 3>();
+    };
+    switch (groups) {
+      case 2:
+        launch_shape.template operator()<2>();
+        break;
+      case 3:
+        launch_shape.template operator()<3>();
+        break;
+      case 4:
+        launch_shape.template operator()<4>();
+        break;
+    }
+    return true;
+  }
+  if (m == 0 || k == 0 || groups == 0 ||
+      !((batch >= 9 && batch <= 15 && batch != 12) || batch == 24))
+    return false;
+  const auto launch = [&]<std::size_t Batch, unsigned Waves = 16,
+                          std::size_t Rows = 2>() {
+    BatchedExactBf16GEMMFp32VecKernel<Waves, Batch, Rows, true, 64>
+        <<<(m + Waves * Rows - 1) / (Waves * Rows), Waves * 32, 0, stream>>>(
+            static_cast<const hip_bfloat16*>(w), x, y, m, k);
+  };
+  const auto launch_shape = [&]<std::size_t Batch>() {
+    if constexpr (Batch <= 11) {
+      launch.template operator()<Batch, 8>();
+    } else if constexpr (Batch == 13 || Batch == 14) {
+      if (m == 248320 && k == 5120)
+        launch.template operator()<Batch, 8, 3>();
+      else
+        launch.template operator()<Batch>();
+    } else {
+      launch.template operator()<Batch>();
+    }
+  };
+  switch (batch) {
+    case 9:
+      launch_shape.template operator()<9>();
+      break;
+    case 10:
+      launch_shape.template operator()<10>();
+      break;
+    case 11:
+      launch_shape.template operator()<11>();
+      break;
+    case 13:
+      launch_shape.template operator()<13>();
+      break;
+    case 14:
+      launch_shape.template operator()<14>();
+      break;
+    case 15:
+      launch_shape.template operator()<15>();
+      break;
+    case 24:
+      launch_shape.template operator()<24>();
+      break;
+    default:
+      return false;
+  }
+  return true;
+}
+
+bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
+                                     const float* x, float* y,
+                                     std::size_t batch, std::size_t m,
+                                     std::size_t k, hipStream_t stream,
+                                     std::size_t groups,
+                                     std::size_t valid_rows) {
+  // A masked sixteen-row group replaces a split of nine to fifteen rows.
+  if (valid_rows != 0 &&
+      (batch != 16 || groups != 1 || valid_rows < 9 || valid_rows > 15))
+    return false;
+  // These FFNs otherwise split concurrent verification into scalar-sized
+  // batches. Keep each token's original FP32 partials in wider native groups.
+  // LaunchWideFfn does not mask; masked Q3_K and IQ4_NL groups return false.
+  if (m == 17408 && k == 5120 && (batch == 14 || batch == 16) && groups >= 1 &&
+      groups <= 4 && valid_rows == 0) {
+    if (type == core::GgmlType::kQ3_K) {
+      LaunchWideFfn<core::GgmlType::kQ3_K>(w, x, y, batch, groups, stream);
+      return true;
+    }
+    if (type == core::GgmlType::kIQ4_NL) {
+      LaunchWideFfn<core::GgmlType::kIQ4_NL>(w, x, y, batch, groups, stream);
+      return true;
+    }
+  }
+  const bool individual_up14 =
+      batch == 14 && groups <= 3 && m == 17408 && k == 5120 &&
+      (type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
+       type == core::GgmlType::kIQ4_XS);
+  if (batch < 4 || batch > 16 || groups == 0 || groups > 4 ||
+      (groups > 1 && batch != 16 &&
+       !((type == core::GgmlType::kQ6_K || type == core::GgmlType::kQ5_K) &&
+         batch == 14) &&
+       !(type == core::GgmlType::kIQ4_XS && batch == 14 &&
+         (groups == 2 || groups == 3)) &&
+       !individual_up14)) {
+    return false;
+  }
+  // These bounded dimensions also satisfy the kernel's 32-bit index limits.
+  // A packed gate/up pair has twice the rows of an individual FFN projection.
+  const bool up = k == 5120 && (m == 17408 || m == 34816);
+  const bool down = m == 5120 && k == 17408;
+  const bool medium_up = k == 5120 && (m == 6144 || m == 10240 || m == 12288);
+  const bool medium_down = m == 5120 && k == 6144;
+  if (batch > 8) {
+    // Preserve scalar accumulation while reusing each weight row across more
+    // verification tokens on the native 64-lane wave.
+    if (type == core::GgmlType::kQ6_K) {
+      const bool head = m == 248320 && k == 5120;
+      const bool projection = up || down || medium_down;
+      if (!head && !((batch == 14 || batch == 16) && projection))
+        return false;
+    } else if (batch != 12 && batch != 16) {
+      if (!((m == 34816 && k == 5120) || down || individual_up14 ||
+            (type == core::GgmlType::kQ5_K && batch == 14 && medium_down)))
+        return false;
+    } else if (!(up || down || medium_up ||
+                 (medium_down &&
+                  (type != core::GgmlType::kQ5_K || batch == 16)))) {
+      return false;
+    }
+    switch (type) {
+      case core::GgmlType::kQ4_K:
+        LaunchBatch<core::GgmlType::kQ4_K>(w, x, y, batch, m, k, stream, groups,
+                                           valid_rows);
+        return true;
+      case core::GgmlType::kQ5_K:
+        LaunchBatch<core::GgmlType::kQ5_K>(w, x, y, batch, m, k, stream, groups,
+                                           valid_rows);
+        return true;
+      case core::GgmlType::kIQ4_XS:
+        LaunchBatch<core::GgmlType::kIQ4_XS>(w, x, y, batch, m, k, stream,
+                                             groups, valid_rows);
+        return true;
+      case core::GgmlType::kQ6_K:
+        LaunchBatch<core::GgmlType::kQ6_K>(w, x, y, batch, m, k, stream, groups,
+                                           valid_rows);
+        return true;
+      default:
+        return false;
+    }
+  }
+  switch (type) {
+    case core::GgmlType::kQ4_K:
+      if (!(up || down || (medium_up && batch >= 5))) {
+        return false;
+      }
+      LaunchBatch<core::GgmlType::kQ4_K>(w, x, y, batch, m, k, stream, groups);
+      return true;
+    case core::GgmlType::kQ5_K:
+      if (!((up && batch >= 5 && batch != 6) ||
+            (down && (batch == 4 || batch >= 6)) ||
+            (medium_up && batch >= 6 && !(batch == 8 && m == 6144)) ||
+            (medium_down && batch >= 7))) {
+        return false;
+      }
+      LaunchBatch<core::GgmlType::kQ5_K>(w, x, y, batch, m, k, stream, groups);
+      return true;
+    case core::GgmlType::kIQ4_XS:
+      if (!((batch == 4 && down) || (batch >= 5 && (up || down)))) {
+        return false;
+      }
+      LaunchBatch<core::GgmlType::kIQ4_XS>(w, x, y, batch, m, k, stream,
+                                           groups);
+      return true;
+    case core::GgmlType::kQ6_K:
+      if (!((batch == 5 && down) ||
+            (batch >= 7 &&
+             (down || up || medium_down || (m == 248320 && k == 5120))))) {
+        return false;
+      }
+      LaunchBatch<core::GgmlType::kQ6_K>(w, x, y, batch, m, k, stream, groups);
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace gufo::hip::detail
+
+namespace gufo::hip {
+
+bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType type, const void* gate_up,
+                                    const float* input, float* output,
+                                    std::size_t batch_size,
+                                    std::size_t intermediate_size,
+                                    std::size_t hidden_size,
+                                    hipStream_t stream) {
+  if (intermediate_size != 17408 || hidden_size != 5120 ||
+      !(batch_size == 14 ||
+        (batch_size >= 16 && batch_size <= 64 && batch_size % 16 == 0)) ||
+      !(type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
+        type == core::GgmlType::kIQ4_XS))
+    return false;
+
+  if (batch_size != 14 && type != core::GgmlType::kIQ4_XS) {
+    detail::LaunchPackedSwiGLUSixteenWave64(type, gate_up, input, output,
+                                            batch_size / 16, stream);
+    return true;
+  }
+  const auto launch =
+      [&]<core::GgmlType Type, std::size_t Batch, std::size_t Groups>() {
+        constexpr unsigned kLanes = Type == core::GgmlType::kIQ4_XS ? 16 : 32;
+        constexpr std::size_t kRows = Type == core::GgmlType::kIQ4_XS ? 4 : 6;
+        constexpr std::size_t kRowsPerBlock = 8 * kRows * (32 / kLanes);
+        SmallBatchKQuantExactFp32GEMMKernel<8, Batch, kRows, Type, 1, 4, Groups,
+                                            true, 1, 64, kLanes, true, true>
+            <<<((34816 + kRowsPerBlock - 1) / kRowsPerBlock) * Groups, 256, 0,
+               stream>>>(gate_up, input, output, 34816, 5120);
+      };
+  if (type == core::GgmlType::kQ4_K) {
+    launch.template operator()<core::GgmlType::kQ4_K, 14, 1>();
+  } else if (type == core::GgmlType::kQ5_K) {
+    launch.template operator()<core::GgmlType::kQ5_K, 14, 1>();
+  } else {
+    switch (batch_size) {
+      case 14:
+        launch.template operator()<core::GgmlType::kIQ4_XS, 14, 1>();
+        break;
+      case 16:
+        launch.template operator()<core::GgmlType::kIQ4_XS, 16, 1>();
+        break;
+      case 32:
+        launch.template operator()<core::GgmlType::kIQ4_XS, 16, 2>();
+        break;
+      case 48:
+        launch.template operator()<core::GgmlType::kIQ4_XS, 16, 3>();
+        break;
+      case 64:
+        launch.template operator()<core::GgmlType::kIQ4_XS, 16, 4>();
+        break;
+    }
+  }
+  return true;
+}
+
+}  // namespace gufo::hip
+#endif  // defined(ENGINE_ENABLE_HIP)

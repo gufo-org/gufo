@@ -6,7 +6,7 @@
 
 #include "src/cache/types.hpp"
 #include "src/core/model_config.hpp"
-#include "src/models/qwen/hip/execution_policy.hpp"
+#include "src/families/qwen/hip_common/execution_policy.hpp"
 
 namespace gufo::models::qwen {
 

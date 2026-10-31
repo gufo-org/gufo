@@ -89,8 +89,11 @@ if(ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
+  # It compiles src/cli/serve/inference_backend.cpp, which still reaches the
+  # Qwen 27B model and vision stack until the serving split (step 6) removes it.
   target_link_libraries(ds4_serving_test PRIVATE gufo_logging
-    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_cache_hip hip::host)
+    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next
+    ${GUFO_QWEN_LIBRARIES} gufo_qwen_vision gufo_cache_hip hip::host)
   add_test(NAME ds4.serving COMMAND ds4_serving_test)
   set_tests_properties(ds4.serving PROPERTIES
     LABELS "gpu;hip;ds4;server;external-model;slow"

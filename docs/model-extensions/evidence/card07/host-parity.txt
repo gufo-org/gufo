@@ -1,0 +1,110 @@
+python3 tools/prof/card07_host_parity.py --root /home/mixer/gufo --before build/card06-release/compile_commands.json --after build/card07-release/compile_commands.json
+=== per-source parity (old card06-release -> new card07-release) ===
+  ('IDENTICAL', 'SYMBOL-DIFF'): 42
+  ('IDENTICAL', 'SYMBOLS-IDENTICAL'): 42
+  total compiled sources compared: 84
+
+=== non-clean rows ===
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/attention.hip -> src/models/qwen/hip/attention.hip
+       0/0 functions disassembly-equal (old 0, new 0) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/batched_ssm.hip -> src/models/qwen/hip/batched_ssm.hip
+       3/3 functions disassembly-equal (old 3, new 3) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/attention_batched.hip -> src/families/qwen/kernels/attention_batched.hip
+       14/14 functions disassembly-equal (old 14, new 14) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/attention_decode.hip -> src/families/qwen/kernels/attention_decode.hip
+       18/18 functions disassembly-equal (old 18, new 18) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/attention_decode_graph.hip -> src/families/qwen/kernels/attention_decode_graph.hip
+       9/9 functions disassembly-equal (old 9, new 9) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip -> src/families/qwen/kernels/attention_decode_verify_wave64.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/attention_tile.hip -> src/families/qwen/kernels/attention_tile.hip
+       6/6 functions disassembly-equal (old 6, new 6) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/attention_wmma.hip -> src/families/qwen/kernels/attention_wmma.hip
+       6/6 functions disassembly-equal (old 6, new 6) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/dflash_kernels.hip -> src/families/qwen/kernels/dflash_kernels.hip
+       20/20 functions disassembly-equal (old 20, new 20) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/embed.hip -> src/families/qwen/kernels/embed.hip
+       6/6 functions disassembly-equal (old 6, new 6) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/fused.hip -> src/families/qwen/kernels/fused.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/gemv.hip -> src/families/qwen/kernels/gemv.hip
+       10/10 functions disassembly-equal (old 10, new 10) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/gemv_quant.hip -> src/families/qwen/kernels/gemv_quant.hip
+       8/8 functions disassembly-equal (old 8, new 8) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/hipblas_gemm.hip -> src/families/qwen/kernels/hipblas_gemm.hip
+       8/8 functions disassembly-equal (old 8, new 8) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/hipblaslt_gemm.hip -> src/families/qwen/kernels/hipblaslt_gemm.hip
+       47/47 functions disassembly-equal (old 47, new 47) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/norm.hip -> src/families/qwen/kernels/norm.hip
+       7/7 functions disassembly-equal (old 7, new 7) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_embed.hip -> src/families/qwen/kernels/prefill_embed.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_fp16.hip -> src/families/qwen/kernels/prefill_fp16.hip
+       96/96 functions disassembly-equal (old 96, new 96) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_gemm.hip -> src/families/qwen/kernels/prefill_gemm.hip
+       42/42 functions disassembly-equal (old 42, new 42) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_norm.hip -> src/families/qwen/kernels/prefill_norm.hip
+       7/7 functions disassembly-equal (old 7, new 7) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_quant_gemm.hip -> src/families/qwen/kernels/prefill_quant_gemm.hip
+       337/337 functions disassembly-equal (old 337, new 337) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_quant_wave64.hip -> src/families/qwen/kernels/prefill_quant_wave64.hip
+       8/8 functions disassembly-equal (old 8, new 8) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_residual.hip -> src/families/qwen/kernels/prefill_residual.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_rope.hip -> src/families/qwen/kernels/prefill_rope.hip
+       6/6 functions disassembly-equal (old 6, new 6) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_ssm.hip -> src/families/qwen/kernels/prefill_ssm.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_swiglu.hip -> src/families/qwen/kernels/prefill_swiglu.hip
+       5/5 functions disassembly-equal (old 5, new 5) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/prefill_unpack.hip -> src/families/qwen/kernels/prefill_unpack.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/qkv.hip -> src/families/qwen/kernels/qkv.hip
+       5/5 functions disassembly-equal (old 5, new 5) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/residual.hip -> src/families/qwen/kernels/residual.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/rope.hip -> src/families/qwen/kernels/rope.hip
+       6/6 functions disassembly-equal (old 6, new 6) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/sample.hip -> src/families/qwen/kernels/sample.hip
+       230/230 functions disassembly-equal (old 230, new 230) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip -> src/families/qwen/kernels/small_batch_quant16_wave64.hip
+       32/32 functions disassembly-equal (old 32, new 32) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/small_batch_wave64.hip -> src/families/qwen/kernels/small_batch_wave64.hip
+       181/181 functions disassembly-equal (old 181, new 181) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/ssm.hip -> src/families/qwen/kernels/ssm.hip
+       5/5 functions disassembly-equal (old 5, new 5) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/ssm_decode_recurrence.hip -> src/families/qwen/kernels/ssm_decode_recurrence.hip
+       30/30 functions disassembly-equal (old 30, new 30) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/ssm_recurrence.hip -> src/families/qwen/kernels/ssm_recurrence.hip
+       8/8 functions disassembly-equal (old 8, new 8) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/ssm_row_split.hip -> src/families/qwen/kernels/ssm_row_split.hip
+       15/15 functions disassembly-equal (old 15, new 15) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/swiglu.hip -> src/families/qwen/kernels/swiglu.hip
+       17/17 functions disassembly-equal (old 17, new 17) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/unpack.hip -> src/families/qwen/kernels/unpack.hip
+       4/4 functions disassembly-equal (old 4, new 4) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/hip/kernels/verify_gemm_27b.hip -> src/families/qwen/kernels/verify_gemm_27b.hip
+       72/72 functions disassembly-equal (old 72, new 72) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/vision/device_input.hip -> src/families/qwen/vision/device_input.hip
+       13/13 functions disassembly-equal (old 13, new 13) -[] +[]
+  IDENTICAL/SYMBOL-DIFF | src/models/qwen/vision/encoder.hip -> src/families/qwen/vision/encoder.hip
+       67/67 functions disassembly-equal (old 67, new 67) -[] +[]
+EXIT=0
+
+## Orchestrator closure: the host comparator is now a gate, not a report
+
+The salvaged tool printed counts but always exited 0, so a host code change could not fail
+it. It now requires identical instruction counts and identical mnemonic sequences per
+function and allows exactly two move artifacts: the per-TU `__hip_cuid_*` identifier (also as
+a call target inside functions such as `__clang_call_terminate`) and `.L`-local
+string-pool operand offsets. Anything else, a `FLAG-DIFF`, or a missing/stale path mapping
+exits non-zero.
+
+First strengthened run: 8 `UNEXPLAINED` rows, all of them `__hip_cuid_*` call targets inside
+unchanged functions (mnemonics identical), which the CU-id mask now covers.
+Retained rerun after that fix:
+  nix develop -c python3 tools/prof/card07_host_parity.py --root $PWD \
+    --before build/card06-release/compile_commands.json \
+    --after build/card07-release/compile_commands.json
+  host-parity: sources=84 unexplained-code-differences=0 flag-or-path-failures=0
+EXIT=0

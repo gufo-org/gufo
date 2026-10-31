@@ -18,11 +18,12 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/image.hpp"
+#include "src/families/qwen/config/qwen_config.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
-#include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/generator.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -300,7 +301,7 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
     preset = sampling::TextModelPreset::kQwen38;
-  } else if (const auto config = reader.ExtractModelConfig()) {
+  } else if (const auto config = models::qwen::ExtractQwenConfig(reader)) {
     preset = sampling::TextPreset(*config);
   }
   opt->sampling = sampling::ResolveTextSampling(

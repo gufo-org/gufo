@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
 
 namespace {
 

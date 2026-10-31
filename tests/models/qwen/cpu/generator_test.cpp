@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "src/models/qwen/control_tokens.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
 
 using gufo::tokenization::kImEnd;
 

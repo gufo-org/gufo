@@ -1,0 +1,25 @@
+G5 CPU-only build and CPU tests (build/card07-cpu, ENGINE_ENABLE_HIP=OFF).
+  cmake --build build/card07-cpu --target gufo_qwen_config gufo_qwen_text qwen_config_test -> ninja: no work to do (built clean earlier, EXIT=0)
+  cache: ENGINE_ENABLE_HIP:BOOL=OFF  BUILD_TESTING:BOOL=ON  CMAKE_BUILD_TYPE:STRING=RelWithDebInfo
+  HIP-free proof (compile_commands.json of the CPU build):
+    src/families/qwen/config/qwen_config.cpp  hip tokens: /home/mixer/gufo/src/core/hip/libstdcxx_noinline.hpp
+      -> the tree-wide forced C++ include only; no hip/roc library, no -I HIP dir,
+         no --offload-arch, no -DENGINE_ENABLE_HIP on any config/text compile line.
+    ldd build/card07-cpu/tests/families/qwen/qwen_config_test | grep -ciE 'hip|roc' = 0
+  ctest (CPU build), exact regex:
+    ^(qwen_config_test|qwen_tokenizer_test|qwen_chat_template_test|qwen_vision_cache_test|qwen_cpu_oracles_test|qwen_forward_test|qwen_generator_test|qwen_ssm_test|qwen_oracle_test|qwen_l1_norm_module_test|qwen_l1_ffn_module_test|qwen_l1_ssm_module_test|qwen_fusion_route_test|qwen_attention_policy_test|qwen_gemm_route_test|gguf_reader_test)$
+    100% tests passed out of 16
+
+F8 integration correction: historical no-work exit is not a fresh compilation proof. Fresh build + 16-test gate PENDING. Attempted nix develop -c cmake --build build/card07-cpu --target gufo_qwen_config gufo_qwen_text qwen_config_test:
+warning: Git tree '/home/mixer/gufo' is dirty
+error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation not permitted
+EXIT=1
+Orchestrator: touch src/families/qwen/config/qwen_config.cpp src/families/qwen/text/{tokenizer,chat_template}.cpp; nix develop -c cmake --build build/card07-cpu --target gufo_qwen_config gufo_qwen_text qwen_config_test; then run the exact 16-test regex above.
+
+F8 RESOLVED by the orchestrator (2026-10-31, pinned nix develop):
+  build: [1/7] qwen_config.cpp.o [2/7] tokenizer.cpp.o [3/7] chat_template.cpp.o
+         [4/7] libgufo_qwen_config.a [5/7] libgufo_qwen_text.a [6/7] qwen_config_test  EXIT=0
+  ctest --test-dir build/card07-cpu -R '^(qwen_config_test|qwen_tokenizer_test|qwen_chat_template_test)$'
+         -> 100% tests passed out of 3, EXIT=0  (cache: ENGINE_ENABLE_HIP=OFF, BUILD_TESTING=ON)
+So the CPU-only libraries really compile and pass from source in the pinned environment; the
+earlier `ninja: no work to do` line stays as the insufficient historical artifact it was.

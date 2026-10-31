@@ -36,7 +36,7 @@
 #include <hip/hip_runtime.h>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
 namespace {

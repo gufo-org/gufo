@@ -1,4 +1,4 @@
-#include "src/models/qwen/tokenizer.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen/control_tokens.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
 
 using gufo::tokenization::kEndOfText;
 using gufo::tokenization::kImagePad;

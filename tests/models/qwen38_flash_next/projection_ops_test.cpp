@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "src/models/qwen/vision/device_input.hpp"
+#include "src/families/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"

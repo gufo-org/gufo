@@ -6,11 +6,15 @@ implementation plan, definition of done, validation criteria and execution recor
 The [original RFC](../RFC.md) remains the specification; these plans do not amend
 its requirements or waive existing quality gates.
 
-Current checkpoint: cards 01–05 are complete. Card 05 closed with two read-only
-reviewers and a third integration agent; its unresolved gates are the real
-lock-mode HIP artifacts and Windows execution, which it never claims.
-Cards 06–29 are pending, with Card 06 (moving model-specific speculation out of
-core) next. The authorized implementation milestone ends after Card 14 is
+Current checkpoint: cards 01–07 are complete. Card 07 extracted the acyclic Qwen family
+libraries (`src/families/qwen/{control_tokens,hip_common,config,text,kernels,vision}` with
+`library.json` manifests and the enforced `extension_family_graph_gate`), moved Qwen 27B into
+`gufo_qwen27b`, took Qwen config extraction out of `GgufReader` into CPU-only
+`ExtractQwenConfig`, and relinked the CLI, kernel tools and tests; its unresolved gates are
+the deferred functional/performance half, Windows execution, the shipped lock-mode artifact
+and the pre-existing `kernel_resources_test` baseline drift, none of which it claims.
+Cards 08–29 are pending, with Card 08 (H3, evaluation and model-dependent targets) next.
+The authorized implementation milestone ends after Card 14 is
 verified and committed; cards 15–29 document later scope only. This split is
 documentation work and does not itself advance any implementation status.
 

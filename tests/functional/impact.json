@@ -188,7 +188,8 @@
     {
       "id": "qwen27-runtime",
       "paths": [
-        "src/models/qwen/**"
+        "src/models/qwen/**",
+        "src/families/qwen/**"
       ],
       "priority": 10,
       "profiles": [
@@ -238,9 +239,9 @@
     {
       "id": "shared-qwen-framing",
       "paths": [
-        "src/models/qwen/chat_template.*",
-        "src/models/qwen/tokenizer.*",
-        "src/models/qwen/control_tokens.hpp"
+        "src/families/qwen/text/chat_template.*",
+        "src/families/qwen/text/tokenizer.*",
+        "src/families/qwen/control_tokens/control_tokens.hpp"
       ],
       "priority": 20,
       "profiles": [
@@ -262,7 +263,7 @@
     {
       "id": "shared-qwen-vision",
       "paths": [
-        "src/models/qwen/vision/**"
+        "src/families/qwen/vision/**"
       ],
       "priority": 20,
       "profiles": [
@@ -285,7 +286,7 @@
         "src/models/qwen/hip/dflash/**",
         "src/models/qwen/hip/dflash.hpp",
         "src/models/qwen/dflash_*",
-        "src/models/qwen/hip/kernels/dflash_kernels.*"
+        "src/families/qwen/kernels/dflash_kernels.*"
       ],
       "priority": 20,
       "profiles": [

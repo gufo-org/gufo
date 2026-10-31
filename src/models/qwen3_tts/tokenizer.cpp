@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "src/core/json.hpp"
-#include "src/models/qwen/control_tokens.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
 
 namespace gufo::models::qwen3_tts {
 namespace {

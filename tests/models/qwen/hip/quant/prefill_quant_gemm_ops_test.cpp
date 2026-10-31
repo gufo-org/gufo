@@ -22,7 +22,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 

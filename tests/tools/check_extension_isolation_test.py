@@ -2,6 +2,7 @@
 """Regression coverage for extension coupling inventory and header closure."""
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -163,6 +164,161 @@ qwen::Real real;
             "src/core/speculative/near.cpp:1: ../../families/qwen/speculation.hpp",
             "src/core/speculative/verifier.cpp:1: src/models/qwen/verifier.hpp",
         ])
+
+    @staticmethod
+    def inventory(files):
+        """Build a scratch tree and return its inventory."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            return ISOLATION.inventory(root)
+
+    @staticmethod
+    def manifest(name, target, kind, depends):
+        return json.dumps({"name": name, "target": target, "kind": kind,
+                           "purpose": f"Card 07 fixture library {name}",
+                           "depends": depends})
+
+    def family_fixture(self):
+        """A minimal acyclic family tree whose manifests match every include."""
+        return {
+            "src/families/qwen/control_tokens/library.json": self.manifest(
+                "control_tokens", "gufo_qwen_control_tokens", "interface", []),
+            "src/families/qwen/control_tokens/control_tokens.hpp":
+                "inline constexpr unsigned kImStart = 1;\n",
+            "src/families/qwen/hip_common/library.json": self.manifest(
+                "hip_common", "gufo_qwen_hip_common", "interface", ["control_tokens"]),
+            "src/families/qwen/hip_common/rope.hpp":
+                '#include "src/families/qwen/control_tokens/control_tokens.hpp"\n',
+            "src/families/qwen/text/library.json": self.manifest(
+                "text", "gufo_qwen_text", "static", ["control_tokens"]),
+            "src/families/qwen/text/tokenizer.hpp":
+                '#include "src/families/qwen/control_tokens/control_tokens.hpp"\n',
+            "src/families/qwen/kernels/library.json": self.manifest(
+                "kernels", "gufo_qwen_kernels", "static", ["hip_common", "text"]),
+            "src/families/qwen/kernels/kernel.hpp":
+                '#include "src/families/qwen/hip_common/rope.hpp"\n'
+                '#include "src/families/qwen/text/tokenizer.hpp"\n',
+            "src/models/qwen/executor.hpp": "struct Executor {};\n",
+            "src/models/other/run.cpp":
+                '#include "src/families/qwen/kernels/kernel.hpp"\n',
+        }
+
+    def test_clean_family_graph_is_declared_and_violation_free(self):
+        report = self.inventory(self.family_fixture())
+        self.assertEqual(report["family_violations"], [])
+        self.assertEqual(sorted(report["family_libraries"]), [
+            "qwen/control_tokens", "qwen/hip_common", "qwen/kernels", "qwen/text"])
+        self.assertEqual(report["family_edges"], [
+            "qwen/hip_common -> qwen/control_tokens",
+            "qwen/kernels -> qwen/hip_common",
+            "qwen/kernels -> qwen/text",
+            "qwen/text -> qwen/control_tokens"])
+
+    def test_undeclared_and_unused_family_dependencies_fail(self):
+        undeclared = self.family_fixture()
+        undeclared["src/families/qwen/kernels/library.json"] = self.manifest(
+            "kernels", "gufo_qwen_kernels", "static", ["hip_common"])
+        self.assertIn(
+            "src/families/qwen/kernels/library.json: undeclared dependency "
+            "qwen/text (headers include it)",
+            self.inventory(undeclared)["family_violations"])
+        unused = self.family_fixture()
+        unused["src/families/qwen/kernels/kernel.hpp"] = \
+            '#include "src/families/qwen/hip_common/rope.hpp"\n'
+        self.assertIn(
+            "src/families/qwen/kernels/library.json: declared dependency qwen/text "
+            "is not used by any header",
+            self.inventory(unused)["family_violations"])
+        unknown = self.family_fixture()
+        unknown["src/families/qwen/text/library.json"] = self.manifest(
+            "text", "gufo_qwen_text", "static", ["nonexistent"])
+        violations = self.inventory(unknown)["family_violations"]
+        self.assertIn("src/families/qwen/text/library.json: unknown dependency "
+                      "nonexistent", violations)
+        self.assertIn("src/families/qwen/text/library.json: declared dependency "
+                      "qwen/nonexistent is not used by any header", violations)
+        self.assertIn("src/families/qwen/text/library.json: undeclared dependency "
+                      "qwen/control_tokens (headers include it)", violations)
+
+    def test_family_dependency_cycle_fails(self):
+        cyclic = self.family_fixture()
+        cyclic["src/families/qwen/hip_common/library.json"] = self.manifest(
+            "hip_common", "gufo_qwen_hip_common", "interface",
+            ["control_tokens", "kernels"])
+        cyclic["src/families/qwen/hip_common/rope.hpp"] += \
+            '#include "src/families/qwen/kernels/kernel.hpp"\n'
+        violations = self.inventory(cyclic)["family_violations"]
+        self.assertIn("family dependency cycle: qwen/hip_common -> qwen/kernels -> qwen/hip_common", violations)
+        self_recursive = self.family_fixture()
+        self_recursive["src/families/qwen/text/library.json"] = self.manifest(
+            "text", "gufo_qwen_text", "static", ["text"])
+        self.assertIn("src/families/qwen/text/library.json: library depends on itself",
+                      self.inventory(self_recursive)["family_violations"])
+
+    def test_family_code_reaching_a_model_header_fails(self):
+        leaking = self.family_fixture()
+        leaking["src/families/qwen/kernels/kernel.hpp"] += \
+            '#include "src/models/qwen/executor.hpp"\n'
+        self.assertEqual(
+            self.inventory(leaking)["family_violations"],
+            ["src/families/qwen/kernels/kernel.hpp: family code includes model header "
+             "src/models/qwen/executor.hpp"])
+
+    def test_family_files_need_a_manifest_describing_their_library(self):
+        stray = self.family_fixture()
+        stray["src/families/qwen/foo.hpp"] = "struct RootPiece {};\n"
+        stray["src/families/qwen/unassigned/pieces.hpp"] = "struct Piece {};\n"
+        stray["src/families/qwen/text/library.json"] = self.manifest(
+            "tokenz", "gufo_qwen_text", "static", ["control_tokens"])
+        violations = self.inventory(stray)["family_violations"]
+        self.assertIn("src/families/qwen/unassigned/pieces.hpp: file in src/families is "
+                      "not inside a library with a library.json manifest", violations)
+        self.assertIn("src/families/qwen/text/library.json: manifest name 'tokenz' != "
+                      "directory qwen/text", violations)
+        self.assertIn("src/families/qwen/foo.hpp: file in src/families is "
+                      "not inside a library with a library.json manifest", violations)
+        undocumented = self.family_fixture()
+        undocumented["src/families/qwen/text/library.json"] = json.dumps(
+            {"name": "text", "target": "", "kind": "header", "depends": ["control_tokens"]})
+        violations = self.inventory(undocumented)["family_violations"]
+        self.assertIn("src/families/qwen/text/library.json: manifest needs a non-empty "
+                      "CMake target", violations)
+        self.assertIn("src/families/qwen/text/library.json: kind must be interface or "
+                      "static, got 'header'", violations)
+        self.assertIn("src/families/qwen/text/library.json: manifest needs a purpose",
+                      violations)
+
+    def test_repository_satisfies_the_family_graph(self):
+        # Card 07 split the Qwen family into libraries under src/families/qwen/.
+        # If this fails, a family header moved or started including a model without
+        # updating the owning library.json manifest, or the family graph became cyclic.
+        self.assertEqual(ISOLATION.inventory(ROOT)["family_violations"], [])
+
+    def test_repository_inventories_both_qwen_trees(self):
+        # The RFC step-1 header analysis moved with the shared code: it must keep
+        # covering the family libraries and the Qwen 27B model directory.
+        report = ISOLATION.inventory(ROOT)
+        headers = report["qwen_headers"]
+        self.assertIn("src/families/qwen/control_tokens/control_tokens.hpp", headers)
+        self.assertIn("src/families/qwen/hip_common/rope.hpp", headers)
+        self.assertIn("src/models/qwen/hip/executor.hpp", headers)
+        self.assertEqual(
+            [h for h in headers if not h.startswith(("src/models/qwen/",
+                                                    "src/families/qwen/"))], [])
+
+    def test_repository_control_token_mirror_matches_the_header(self):
+        # tools/gufo/control_tokens.py mirrors src/families/qwen/control_tokens
+        # independently; a renamed or retargeted header breaks the mirror link.
+        header = (ROOT / "src/families/qwen/control_tokens/control_tokens.hpp").read_text()
+        mirror = (ROOT / "tools/gufo/control_tokens.py").read_text()
+        for constant in ("kEndOfText", "kImStart", "kImEnd", "kVisionPad", "kImagePad",
+                         "kVideoPad"):
+            self.assertIn(constant, header)
+            self.assertIn(constant, mirror)
 
     def test_repository_satisfies_the_core_boundary(self):
         # Card 06 moved Qwen-specific speculation out of src/core/speculative/.

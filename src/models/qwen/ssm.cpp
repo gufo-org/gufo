@@ -9,8 +9,8 @@
 #include <span>
 #include <vector>
 
+#include "src/families/qwen/hip_common/gemm_route.hpp"
 #include "src/models/qwen/forward.hpp"
-#include "src/models/qwen/gemm_route.hpp"
 
 namespace gufo::models {
 

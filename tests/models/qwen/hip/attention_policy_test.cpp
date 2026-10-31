@@ -1,4 +1,4 @@
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include "src/families/qwen/hip_common/attention_policy.hpp"
 
 #include <cstdint>
 #include <iostream>

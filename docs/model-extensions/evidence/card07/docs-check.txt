@@ -1,0 +1,14 @@
+G10b documentation check: $ python3 tools/ci/check-docs.py (final run over the whole tree)
+  First run FAILED with 2 errors, both introduced by this card:
+    src/models/qwen/AGENTS.md:9  Broken local link to '../families/qwen/README.md'
+    src/models/qwen/AGENTS.md:11 Broken local link to '../families/qwen/AGENTS.md'
+  Fixed to '../../families/qwen/...' and re-run:
+  [check-docs] PASSED: 260 markdown files and 1467 local links/anchors verified with zero broken links or invalid JSON blocks.
+  EXIT=0 (final run after this directory's own markdown was added).
+  Note: the 164-error hrx-system baseline quoted by Card 06 does not reproduce on this tree.
+
+G8 formatting final sweep: PASS: Checked 730 C++ files
+
+Integration: hrx-system absent: ls: cannot access 'hrx-system': No such file or directory. The untracked baseline tree is gone; scanner scope was not narrowed.
+[check-docs] PASSED: 260 markdown files and 1467 local links/anchors verified with zero broken links or invalid JSON blocks.
+EXIT=0

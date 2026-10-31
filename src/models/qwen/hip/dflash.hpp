@@ -14,10 +14,10 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/speculative/draft_backend.hpp"
 #include "src/core/speculative/prompt_lookup.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/dflash_policy.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>

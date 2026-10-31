@@ -30,7 +30,7 @@
 
 #include "src/core/hip/weight_upload.hpp"
 #include "src/core/mapped_prefetch.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
 #include "src/models/qwen3_tts/hip/talker_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 

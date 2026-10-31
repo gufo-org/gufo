@@ -112,7 +112,7 @@ the current implementation milestone stops after Card 14.
 | 04 | 3; 03 | [Extension runtime, schema and explicit registration](cards/04-runtime-and-registration.md) | complete |
 | 05 | 3; 04 | [Discovery, lock selection and provenance](cards/05-discovery-and-provenance.md) | complete |
 | 06 | 4; 02, 05 | [Move model-specific speculation out of core](cards/06-model-owned-speculation.md) | pending |
-| 07 | 5; 06 | [Extract acyclic Qwen family libraries](cards/07-qwen-family-libraries.md) | pending |
+| 07 | 5; 06 | [Extract acyclic Qwen family libraries](cards/07-qwen-family-libraries.md) | complete |
 | 08 | 5; 07 | [Extract H3, evaluation and model-dependent targets](cards/08-h3-eval-and-test-targets.md) | pending |
 | 09 | 6; 08 | [Separate serving policy from extension execution](cards/09-serving-runtime-boundary.md) | pending |
 | 10 | 7; 09 | [Publish and measure the public extension API](cards/10-public-api-surface.md) | pending |
@@ -163,4 +163,12 @@ See [Card 04: execution record](cards/04-runtime-and-registration.md#execution-r
 ### Card 05
 
 See [Card 05: execution record](cards/05-discovery-and-provenance.md#execution-record).
+
+### Card 06
+
+See [Card 06: execution record](cards/06-model-owned-speculation.md#execution-record).
+
+### Card 07
+
+See [Card 07: execution record](cards/07-qwen-family-libraries.md#execution-record).
 

@@ -1,0 +1,12 @@
+G2 gpu-test build (build/card07-gpu), all targets.
+  11:31 full build: EXIT=0  (/tmp/card07-work/build-gpu.log, tail:)
+    [812/815] cd /home/mixer/gufo/build/card07-gpu && /nix/store/rlpcs1h48m058z811xxkn5672v77p5qj-cmake-4.4.4/bin/cmake -E create_symlink gufo /home/mixer/gufo/build/card07-gpu/gufo-server
+    EXIT=0
+  12:0x incremental rebuild after clang-format --fix: RELEASE_EXIT=0 GPU_EXIT=0 CPU_EXIT=0
+    RELEASE_EXIT=0
+    GPU_EXIT=0
+    CPU_EXIT=0
+  production release configure+build: CONFIGURE_EXIT=0 EXIT=0 (tail:)
+    --
+    [309/310] cd /home/mixer/gufo/build/card07-release && /nix/store/rlpcs1h48m058z811xxkn5672v77p5qj-cmake-4.4.4/bin/cmake -E create_symlink gufo /home/mixer/gufo/build/card07-release/gufo-server
+    EXIT=0

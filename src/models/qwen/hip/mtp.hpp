@@ -9,9 +9,9 @@
 #include <vector>
 
 #include "src/core/speculative/draft_backend.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/mtp_reference.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>

@@ -1,0 +1,113 @@
+G7 production (NDEBUG, gfx1151) ISA parity for every moved Qwen source.
+Baseline: build/card06-release (parent revision 11af44f9 = Card 06, production release
+configure, BUILD_TESTING=OFF). Provenance: every baseline object predates the first
+Card 07 edit (11:06); Card 06's own record states its integration made documentation-
+only changes after that release build.
+Candidate: build/card07-release (this working copy, same preset and dev shell).
+
+Compiled Qwen sources compared: 84 (44 moved out of src/models/qwen,
+40 stayed with the gufo_qwen27b library in place).
+Flag comparison (only the source path and output path normalized):
+  identical apart from gufo_core's two PRIVATE minimax media defines
+  (-DGUFO_FFMPEG_EXECUTABLE/-DGUFO_FFPROBE_EXECUTABLE, unused by Qwen code):
+  84/84 sources OK, nothing added anywhere.
+Host .text functions compared: byte-equal 2438/2461.
+Differing host functions: 23; classification (instruction counts equal):
+    8  cuid-reference (same length: True)
+   15  local-string-offset (same length: True)
+  Both classes are label-relative references only: moved paths made the __FILE__
+  literal longer inside shared diagnostic template instantiations (.L.str offsets),
+  and every HIP TU carries a new per-TU __hip_cuid_/__hip_gpubin_handle_ id.
+  No opcode, operand or control-flow difference was found.
+Symbol-set differences confined to __hip_cuid_*/__hip_gpubin_handle_*: 42/42 TU(s) with symbol-set deltas.
+
+Per-source table: source(old) -> target(new) | flags | host-functions-equal | symbols
+  src/models/qwen/chat_template.cpp  ->  src/families/qwen/text/chat_template.cpp  | OK | 69/69 | cuid-only
+  src/models/qwen/continuation_adapter.cpp  ->  src/models/qwen/continuation_adapter.cpp  | OK | 135/135 | cuid-only
+  src/models/qwen/continuation_layout.cpp  ->  src/models/qwen/continuation_layout.cpp  | OK | 11/11 | cuid-only
+  src/models/qwen/dflash_weights.cpp  ->  src/models/qwen/dflash_weights.cpp  | OK | 21/21 | cuid-only
+  src/models/qwen/forward.cpp  ->  src/models/qwen/forward.cpp  | OK | 16/16 | cuid-only
+  src/models/qwen/generator.cpp  ->  src/models/qwen/generator.cpp  | OK | 17/17 | cuid-only
+  src/models/qwen/hip/arena.cpp  ->  src/models/qwen/hip/arena.cpp  | OK | 60/60 | cuid-only
+  src/models/qwen/hip/attention.hip  ->  src/models/qwen/hip/attention.hip  | OK | 0/0 | symbols: cuid-only
+  src/models/qwen/hip/batched_decode.cpp  ->  src/models/qwen/hip/batched_decode.cpp  | OK | 15/15 | cuid-only
+  src/models/qwen/hip/batched_ssm.hip  ->  src/models/qwen/hip/batched_ssm.hip  | OK | 3/3 | symbols: OTHER
+  src/models/qwen/hip/decode.cpp  ->  src/models/qwen/hip/decode.cpp  | OK | 14/14 | cuid-only
+  src/models/qwen/hip/decode_step.cpp  ->  src/models/qwen/hip/decode_step.cpp  | OK | 7/7 | cuid-only
+  src/models/qwen/hip/dflash/backend.cpp  ->  src/models/qwen/hip/dflash/backend.cpp  | OK | 83/83 | cuid-only
+  src/models/qwen/hip/dflash/batch.cpp  ->  src/models/qwen/hip/dflash/batch.cpp  | OK | 22/22 | cuid-only
+  src/models/qwen/hip/dflash/executor.cpp  ->  src/models/qwen/hip/dflash/executor.cpp  | OK | 64/64 | cuid-only
+  src/models/qwen/hip/dflash/model.cpp  ->  src/models/qwen/hip/dflash/model.cpp  | OK | 44/44 | cuid-only
+  src/models/qwen/hip/executor.cpp  ->  src/models/qwen/hip/executor.cpp  | OK | 61/61 | cuid-only
+  src/models/qwen/hip/kernels/attention_batched.hip  ->  src/families/qwen/kernels/attention_batched.hip  | OK | 11/14 | symbols: OTHER
+  src/models/qwen/hip/kernels/attention_decode.hip  ->  src/families/qwen/kernels/attention_decode.hip  | OK | 18/18 | symbols: OTHER
+  src/models/qwen/hip/kernels/attention_decode_graph.hip  ->  src/families/qwen/kernels/attention_decode_graph.hip  | OK | 9/9 | symbols: OTHER
+  src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip  ->  src/families/qwen/kernels/attention_decode_verify_wave64.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/attention_tile.hip  ->  src/families/qwen/kernels/attention_tile.hip  | OK | 6/6 | symbols: OTHER
+  src/models/qwen/hip/kernels/attention_wmma.hip  ->  src/families/qwen/kernels/attention_wmma.hip  | OK | 6/6 | symbols: OTHER
+  src/models/qwen/hip/kernels/dflash_kernels.hip  ->  src/families/qwen/kernels/dflash_kernels.hip  | OK | 20/20 | symbols: OTHER
+  src/models/qwen/hip/kernels/embed.hip  ->  src/families/qwen/kernels/embed.hip  | OK | 6/6 | symbols: OTHER
+  src/models/qwen/hip/kernels/fused.hip  ->  src/families/qwen/kernels/fused.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/gemv.hip  ->  src/families/qwen/kernels/gemv.hip  | OK | 10/10 | symbols: OTHER
+  src/models/qwen/hip/kernels/gemv_quant.hip  ->  src/families/qwen/kernels/gemv_quant.hip  | OK | 8/8 | symbols: OTHER
+  src/models/qwen/hip/kernels/hipblas_gemm.hip  ->  src/families/qwen/kernels/hipblas_gemm.hip  | OK | 6/8 | symbols: cuid-only
+  src/models/qwen/hip/kernels/hipblaslt_gemm.hip  ->  src/families/qwen/kernels/hipblaslt_gemm.hip  | OK | 47/47 | symbols: cuid-only
+  src/models/qwen/hip/kernels/norm.hip  ->  src/families/qwen/kernels/norm.hip  | OK | 7/7 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_embed.hip  ->  src/families/qwen/kernels/prefill_embed.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_fp16.hip  ->  src/families/qwen/kernels/prefill_fp16.hip  | OK | 96/96 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_gemm.hip  ->  src/families/qwen/kernels/prefill_gemm.hip  | OK | 42/42 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_norm.hip  ->  src/families/qwen/kernels/prefill_norm.hip  | OK | 7/7 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_quant_gemm.hip  ->  src/families/qwen/kernels/prefill_quant_gemm.hip  | OK | 332/337 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_quant_wave64.hip  ->  src/families/qwen/kernels/prefill_quant_wave64.hip  | OK | 8/8 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_residual.hip  ->  src/families/qwen/kernels/prefill_residual.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_rope.hip  ->  src/families/qwen/kernels/prefill_rope.hip  | OK | 6/6 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_ssm.hip  ->  src/families/qwen/kernels/prefill_ssm.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_swiglu.hip  ->  src/families/qwen/kernels/prefill_swiglu.hip  | OK | 5/5 | symbols: OTHER
+  src/models/qwen/hip/kernels/prefill_unpack.hip  ->  src/families/qwen/kernels/prefill_unpack.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/qkv.hip  ->  src/families/qwen/kernels/qkv.hip  | OK | 5/5 | symbols: OTHER
+  src/models/qwen/hip/kernels/residual.hip  ->  src/families/qwen/kernels/residual.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/rope.hip  ->  src/families/qwen/kernels/rope.hip  | OK | 6/6 | symbols: OTHER
+  src/models/qwen/hip/kernels/sample.hip  ->  src/families/qwen/kernels/sample.hip  | OK | 223/230 | symbols: OTHER
+  src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip  ->  src/families/qwen/kernels/small_batch_quant16_wave64.hip  | OK | 32/32 | symbols: OTHER
+  src/models/qwen/hip/kernels/small_batch_wave64.hip  ->  src/families/qwen/kernels/small_batch_wave64.hip  | OK | 181/181 | symbols: OTHER
+  src/models/qwen/hip/kernels/ssm.hip  ->  src/families/qwen/kernels/ssm.hip  | OK | 5/5 | symbols: OTHER
+  src/models/qwen/hip/kernels/ssm_decode_recurrence.hip  ->  src/families/qwen/kernels/ssm_decode_recurrence.hip  | OK | 30/30 | symbols: OTHER
+  src/models/qwen/hip/kernels/ssm_recurrence.hip  ->  src/families/qwen/kernels/ssm_recurrence.hip  | OK | 8/8 | symbols: OTHER
+  src/models/qwen/hip/kernels/ssm_row_split.hip  ->  src/families/qwen/kernels/ssm_row_split.hip  | OK | 15/15 | symbols: OTHER
+  src/models/qwen/hip/kernels/swiglu.hip  ->  src/families/qwen/kernels/swiglu.hip  | OK | 17/17 | symbols: OTHER
+  src/models/qwen/hip/kernels/unpack.hip  ->  src/families/qwen/kernels/unpack.hip  | OK | 4/4 | symbols: OTHER
+  src/models/qwen/hip/kernels/verify_gemm_27b.hip  ->  src/families/qwen/kernels/verify_gemm_27b.hip  | OK | 72/72 | symbols: OTHER
+  src/models/qwen/hip/model_loader.cpp  ->  src/models/qwen/hip/model_loader.cpp  | OK | 46/46 | cuid-only
+  src/models/qwen/hip/mtp/backend.cpp  ->  src/models/qwen/hip/mtp/backend.cpp  | OK | 43/43 | cuid-only
+  src/models/qwen/hip/mtp/executor.cpp  ->  src/models/qwen/hip/mtp/executor.cpp  | OK | 29/29 | cuid-only
+  src/models/qwen/hip/mtp/model.cpp  ->  src/models/qwen/hip/mtp/model.cpp  | OK | 25/25 | cuid-only
+  src/models/qwen/hip/prefill.cpp  ->  src/models/qwen/hip/prefill.cpp  | OK | 11/11 | cuid-only
+  src/models/qwen/hip/prefill_chunk.cpp  ->  src/models/qwen/hip/prefill_chunk.cpp  | OK | 21/21 | cuid-only
+  src/models/qwen/hip/prompt_hidden_buffer.cpp  ->  src/models/qwen/hip/prompt_hidden_buffer.cpp  | OK | 15/15 | cuid-only
+  src/models/qwen/hip/qwen_speculative_verifier.cpp  ->  src/models/qwen/hip/qwen_speculative_verifier.cpp  | OK | 43/43 | cuid-only
+  src/models/qwen/hip/ssm_replay.cpp  ->  src/models/qwen/hip/ssm_replay.cpp  | OK | 29/29 | cuid-only
+  src/models/qwen/modules/attention.cpp  ->  src/models/qwen/modules/attention.cpp  | OK | 1/1 | cuid-only
+  src/models/qwen/modules/embed.cpp  ->  src/models/qwen/modules/embed.cpp  | OK | 1/1 | cuid-only
+  src/models/qwen/modules/ffn.cpp  ->  src/models/qwen/modules/ffn.cpp  | OK | 2/2 | cuid-only
+  src/models/qwen/modules/norm.cpp  ->  src/models/qwen/modules/norm.cpp  | OK | 5/5 | cuid-only
+  src/models/qwen/modules/quant_gemm.cpp  ->  src/models/qwen/modules/quant_gemm.cpp  | OK | 4/4 | cuid-only
+  src/models/qwen/modules/residual.cpp  ->  src/models/qwen/modules/residual.cpp  | OK | 2/2 | cuid-only
+  src/models/qwen/modules/rope.cpp  ->  src/models/qwen/modules/rope.cpp  | OK | 1/1 | cuid-only
+  src/models/qwen/modules/sample.cpp  ->  src/models/qwen/modules/sample.cpp  | OK | 1/1 | cuid-only
+  src/models/qwen/modules/ssm.cpp  ->  src/models/qwen/modules/ssm.cpp  | OK | 1/1 | cuid-only
+  src/models/qwen/modules/unembed.cpp  ->  src/models/qwen/modules/unembed.cpp  | OK | 1/1 | cuid-only
+  src/models/qwen/mtp_reference.cpp  ->  src/models/qwen/mtp_reference.cpp  | OK | 21/21 | cuid-only
+  src/models/qwen/oracles.cpp  ->  src/models/qwen/oracles.cpp  | OK | 5/5 | cuid-only
+  src/models/qwen/ssm.cpp  ->  src/models/qwen/ssm.cpp  | OK | 18/18 | cuid-only
+  src/models/qwen/state.cpp  ->  src/models/qwen/state.cpp  | OK | 9/9 | cuid-only
+  src/models/qwen/tokenizer.cpp  ->  src/families/qwen/text/tokenizer.cpp  | OK | 53/53 | cuid-only
+  src/models/qwen/vision/device_input.hip  ->  src/families/qwen/vision/device_input.hip  | OK | 12/13 | symbols: OTHER
+  src/models/qwen/vision/encoder.hip  ->  src/families/qwen/vision/encoder.hip  | OK | 62/67 | symbols: OTHER
+  src/models/qwen/vision/image_cache.cpp  ->  src/families/qwen/vision/image_cache.cpp  | OK | 14/14 | cuid-only
+  src/models/qwen/vision/prompt.cpp  ->  src/families/qwen/vision/prompt.cpp  | OK | 31/31 | cuid-only
+  src/models/qwen/weights.cpp  ->  src/models/qwen/weights.cpp  | OK | 14/14 | cuid-only
+
+INTEGRATION SUPERSEDES DEVICE GAP: python3 tools/prof/card07_parity.py --before build/card06-release/compile_commands.json --after build/card07-release/compile_commands.json --mode device --scratch /tmp/card07-int-device
+EXIT=0: 39 device objects; all 117 .text/.rodata/.note sections byte-identical, encompassing every device instruction, constant, SGPR/VGPR/spill/LDS descriptor and amdhsa metadata. Host wrappers explicitly listed, never counted as device passes. See device-isa.txt for SHA256 table. Extraction uses hip (not hipv), type=o, Card03 precedent. Original host comparator source retained in original-audit_parity.py.txt; historical host result not rerun.
+
+Reproducible host comparator: python3 tools/prof/card07_host_parity.py --root /home/mixer/gufo --before build/card06-release/compile_commands.json --after build/card07-release/compile_commands.json -> EXIT=0; host-parity.txt retains symbol/disassembly comparison (not byte parity).

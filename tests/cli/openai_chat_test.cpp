@@ -18,8 +18,8 @@
 
 #include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
-#include "src/models/qwen/control_tokens.hpp"
 
 using gufo::tokenization::kImEnd;
 
