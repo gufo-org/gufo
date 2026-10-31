@@ -645,6 +645,7 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                         prefill_first=prefill_first,
                         pin_slots=prefill_first and session.target == "reference" and session.reference_kind != "ds4",
                         preparation_tokens=0 if session.target == "reference" and session.reference_kind == "ds4" else 1,
+                        replay_tokens=int(spec.get("replay_tokens", 4)),
                         reference=reference,
                         notes=[note for note in (
                             session.reference_version(mode), " ".join(public_command(server.command)),
