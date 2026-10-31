@@ -601,7 +601,29 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     for (std::size_t i = begin; i < end; ++i) {
       const auto& c = conversions[i];
       if (c.destination == nullptr) {
-        UpcastBf16(c.source, static_cast<float*>(c.source), c.count, nullptr);
+        // In-place BF16->F32 is unsafe on-device: writing element i at byte
+        // 4i destroys the 2-byte source of elements 2i and 2i+1, and no
+        // thread ordering exists on the GPU to consume them first. Bounce
+        // the source (router matrices are a few MiB) so read and write
+        // regions are disjoint.
+        void* scratch = nullptr;
+        hipError_t scratchStatus = hipMalloc(&scratch, c.count * 2);
+        if (scratchStatus == hipSuccess) {
+          scratchStatus = hipMemcpy(scratch, c.source, c.count * 2,
+                                    hipMemcpyDeviceToDevice);
+        }
+        if (scratchStatus == hipSuccess) {
+          UpcastBf16(scratch, static_cast<float*>(c.source), c.count,
+                     nullptr);
+        }
+        (void)hipFree(scratch);
+        if (scratchStatus != hipSuccess) {
+          if (error_msg != nullptr) {
+            *error_msg = "router BF16 upconvert failed: " +
+                         std::string(hipGetErrorString(scratchStatus));
+          }
+          return nullptr;
+        }
       } else if (c.converted_from == WeightType::kF16) {
         UpcastF16(c.source, static_cast<float*>(c.destination), c.count,
                   nullptr);

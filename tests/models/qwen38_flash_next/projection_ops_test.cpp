@@ -463,6 +463,18 @@ void CheckConvertToQ8_0(q::WeightType type, std::size_t count,
   std::vector<std::uint8_t> src((count / elements_per_block) * block_bytes);
   for (auto& b : src)
     b = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+  // Every format carries an F16 block scale in the first two bytes. Fully
+  // random bytes make it NaN/Inf half the time; overwrite with a valid scale
+  // in [2^-10, 2^-4] so the codebook decode is exercised on finite values.
+  for (std::size_t b = 0; b < src.size(); b += block_bytes) {
+    const std::uint16_t field =
+        static_cast<std::uint16_t>(5U + NextRandom(&seed) % 7U);
+    const std::uint16_t mant = static_cast<std::uint16_t>(NextRandom(&seed) &
+                                                          0x3FFU);
+    const std::uint16_t h = static_cast<std::uint16_t>((field << 10) | mant);
+    src[b] = static_cast<std::uint8_t>(h & 0xFFU);
+    src[b + 1] = static_cast<std::uint8_t>(h >> 8);
+  }
   std::vector<float> ref(count);
   switch (type) {
     case q::WeightType::kIQ4_NL:
@@ -498,11 +510,28 @@ void CheckConvertToQ8_0(q::WeightType type, std::size_t count,
            "convert download");
   std::vector<float> ref_q8(count);
   qg::DequantizeQ8_0(got.data(), ref_q8.data(), count);
+  // The device kernel requantizes the dequantized stream to Q8_0, which is
+  // lossy by construction: the worst-case error is half an LSB of the block
+  // scale (d/2, d = amax/127) plus the F16 storage rounding of d itself
+  // (~2^-11 relative). Expressed against the block amax: <= 0.5/127 +
+  // 127*2^-11/127 = ~0.0044 * amax. Anything beyond that is a decode bug.
   for (std::size_t i = 0; i < count; ++i) {
-    const float tol = 1e-4f + 1e-3f * std::fabs(ref[i]);
+    const std::size_t block = i / 32;
+    float amax = 0.0f;
+    for (std::size_t j = block * 32; j < (block + 1) * 32 && j < count; ++j) {
+      amax = std::max(amax, std::fabs(ref[j]));
+    }
+    const float tol = 1e-6f + amax * 0.005f;
     if (std::fabs(ref_q8[i] - ref[i]) > tol) {
-      throw std::runtime_error("converted Q8_0 value differs at " +
-                               std::to_string(i));
+      char buf[256];
+      std::snprintf(buf, sizeof(buf),
+                    "converted Q8_0 differs at %zu (block %zu): ref=%.9g "
+                    "got=%.9g delta=%.3g amax=%.9g tol=%.3g",
+                    i, block, static_cast<double>(ref[i]),
+                    static_cast<double>(ref_q8[i]),
+                    static_cast<double>(ref_q8[i] - ref[i]),
+                    static_cast<double>(amax), static_cast<double>(tol));
+      throw std::runtime_error(buf);
     }
   }
   for (std::size_t i = q8_bytes; i < got.size(); ++i) {
