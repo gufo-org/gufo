@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <linux/io_uring.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -31,6 +32,8 @@ int PinHostPages(void* data, std::size_t bytes) noexcept {
   const int ring = syscall(SYS_io_uring_setup, 1, &parameters);
   if (ring < 0)
     return -1;
+  // Keep the fork's close-on-exec behavior for every long-term pin.
+  (void)fcntl(ring, F_SETFD, FD_CLOEXEC);
   if (syscall(SYS_io_uring_register, ring, IORING_REGISTER_BUFFERS,
               ranges.data(), ranges.size()) == 0)
     return ring;
