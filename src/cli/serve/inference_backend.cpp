@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +36,7 @@
 #include "src/models/qwen/vision/image_cache.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
+#include "src/core/hip/admission_query.hpp"
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
@@ -806,6 +808,13 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
   return *qwen;
 }
 
+// Host RAM kept out of the state capacity when the OS video-memory budget
+// raises it on an integrated GPU: the headroom the snapshot cache already
+// leaves the OS, plus 2.5 GiB for the gap measured between what a session
+// uses and what it reserves (about 2.3 GiB on a Strix Halo under Windows).
+constexpr std::uint64_t kAdmissionHostMarginBytes =
+    kHostSnapshotHeadroomBytes + (std::uint64_t{5} << 30) / 2;
+
 // Owns a four-byte device buffer and a private stream from load, so probing
 // a lost context needs no allocation. HIP context loss is sticky: after a GPU
 // reset even this memset fails with a hard error. Only such an error marks the
@@ -867,10 +876,44 @@ public:
     }
   }
 
+protected:
+  /// Writes event=state_capacity for one ResourceClaim and numbers this
+  /// runner's calls. Silent unless DXGI answered, so Linux and discrete GPUs
+  /// log nothing. Nothing escapes: the caller's handler swallows exceptions
+  /// and would zero the snapshot capacity.
+  void LogStateCapacity(const hip::AdmissionMemory& memory,
+                        std::uint64_t capacity, std::uint64_t per_request,
+                        std::uint64_t deferred_scratch) const noexcept {
+    const auto call =
+        state_capacity_calls_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!memory.local.has_value())
+      return;
+    try {
+      Logger::Info(
+          "loader",
+          "event=state_capacity call=" + std::to_string(call) +
+              " hip_free_bytes=" + std::to_string(memory.hip_free_bytes) +
+              " dxgi_budget_bytes=" +
+              std::to_string(memory.local->budget_bytes) +
+              " dxgi_usage_bytes=" + std::to_string(memory.local->usage_bytes) +
+              " host_available_bytes=" +
+              (memory.host_available_bytes.has_value()
+                   ? std::to_string(*memory.host_available_bytes)
+                   : std::string("unknown")) +
+              " host_margin_bytes=" + std::to_string(memory.host_margin_bytes) +
+              " admission_free_bytes=" + std::to_string(memory.free_bytes) +
+              " capacity_bytes=" + std::to_string(capacity) +
+              " per_request_bytes=" + std::to_string(per_request) +
+              " deferred_scratch_bytes=" + std::to_string(deferred_scratch));
+    } catch (...) {
+    }
+  }
+
 private:
   hipStream_t probe_stream_{};
   void* probe_buffer_{};
   mutable bool probe_pending_{false};
+  mutable std::atomic<std::uint64_t> state_capacity_calls_{0};
 };
 
 template<typename AdapterType>
@@ -1172,20 +1215,24 @@ public:
       usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
       resident_weights += dflash_model_->GetPackedWeightBytes();
     }
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      capacity = free_bytes;
-    }
+    const auto memory = hip::QueryAdmissionMemory(kAdmissionHostMarginBytes);
     // Snapshot buffers are device allocations, but on a unified-memory APU
     // they are carved from the same RAM as every host allocation, and HIP's
     // free figure does not see host pressure. Cap them by the host budget too.
+    // They keep HIP's own free figure: only the state capacity check reads the
+    // OS video-memory budget.
     std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
     std::size_t snapshot_ceiling = HostSnapshotCeilingBytes();
-    if (capacity.has_value()) {
-      snapshot_capacity = std::min(snapshot_capacity, *capacity);
-      snapshot_ceiling = std::min(snapshot_ceiling, *capacity);
+    if (memory.has_value()) {
+      capacity = memory->free_bytes;
+      snapshot_capacity =
+          std::min<std::size_t>(snapshot_capacity, memory->hip_free_bytes);
+      snapshot_ceiling =
+          std::min<std::size_t>(snapshot_ceiling, memory->hip_free_bytes);
+      LogStateCapacity(
+          *memory, *capacity,
+          usage.request_state_bytes + usage.temporary_scratch_bytes, 0);
     }
     return {
         .resident_weights_bytes = resident_weights,
@@ -1707,11 +1754,11 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      capacity = free_bytes;
+    const auto memory = hip::QueryAdmissionMemory(kAdmissionHostMarginBytes);
+    if (memory.has_value()) {
+      capacity = memory->free_bytes;
+      LogStateCapacity(*memory, *capacity, 0, 0);
     }
     return {
         .resident_weights_bytes = std::nullopt,
@@ -2527,22 +2574,24 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
+    const auto session_bytes = model_->SessionBytes(
+        use_mtp_ ? gufo::core::SessionMode::kSpeculative
+                 : gufo::core::SessionMode::kAutoregressive,
+        max_context_);
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    const auto memory = hip::QueryAdmissionMemory(kAdmissionHostMarginBytes);
+    if (memory.has_value()) {
       const auto deferred = model_->DeferredScratchBytes();
-      capacity = free_bytes > deferred ? free_bytes - deferred : 0;
+      capacity =
+          memory->free_bytes > deferred ? memory->free_bytes - deferred : 0;
+      LogStateCapacity(*memory, *capacity, session_bytes, deferred);
     }
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
-        .per_request_state_bytes = model_->SessionBytes(
-            use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                     : gufo::core::SessionMode::kAutoregressive,
-            max_context_),
+        .per_request_state_bytes = session_bytes,
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
         .temporary_scratch_bytes = 0,

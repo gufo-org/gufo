@@ -232,8 +232,8 @@ endif()
 
 if (WIN32)
   # Platform layer: WinSock (net), process memory counters (logging), BCrypt
-  # and the registry (os_info).
-  set(GUFO_PLATFORM_LIBS ws2_32 iphlpapi bcrypt advapi32)
+  # and the registry (os_info), DXGI (gpu_budget).
+  set(GUFO_PLATFORM_LIBS ws2_32 iphlpapi bcrypt advapi32 dxgi)
 endif()
 
 add_subdirectory(src/cache)
@@ -628,6 +628,11 @@ if (BUILD_TESTING)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)
   add_test(NAME heap_placement_test COMMAND heap_placement_test)
   set_tests_properties(heap_placement_test PROPERTIES LABELS "cpu;hip;core")
+
+  add_executable(admission_memory_test tests/core/admission_memory_test.cpp)
+  target_link_libraries(admission_memory_test PRIVATE gufo_core)
+  add_test(NAME admission_memory_test COMMAND admission_memory_test)
+  set_tests_properties(admission_memory_test PROPERTIES LABELS "cpu;hip;core")
 
   add_executable(sampling_test tests/core/sampling_test.cpp)
   target_link_libraries(sampling_test PRIVATE gufo_core)
