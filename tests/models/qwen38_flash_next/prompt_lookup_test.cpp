@@ -68,6 +68,68 @@ void CheckLongestWins() {
           "the longest-matching occurrence was not chosen");
 }
 
+// Candidates matching about as long but continuing differently agree only
+// on their common prefix, gated or not; a much shorter one does not count.
+void CheckAgreement() {
+  const auto shared = Range(300, 14);  // e.g. a common line prefix
+  std::vector<std::int32_t> committed = {1};
+  committed.insert(committed.end(), shared.begin(), shared.end());
+  committed.insert(committed.end(), {10, 11, 12, 13, 2});
+  committed.insert(committed.end(), shared.begin(), shared.end());
+  committed.insert(committed.end(), {10, 11, 50, 51, 3});
+  // The context ends with the shared prefix after yet another history.
+  committed.push_back(4);
+  committed.insert(committed.end(), shared.begin(), shared.end() - 1);
+  Lookup lookup;
+  lookup.Extend(committed);
+  const std::vector<std::int32_t> tail = {shared.back()};
+  std::size_t agreed = 0;
+  const auto match =
+      lookup.Find(committed, tail, Lookup::kMinMatch, false, &agreed);
+  Require(match.length == 14, "the shared prefix was not matched");
+  Require(agreed == 2, "tied candidates must agree on their common prefix");
+  Require(lookup.Find(committed, tail).start == match.start,
+          "agreement changed the chosen match");
+
+  // A 40-token match beside a 14-token one (less than half): the long
+  // match's continuation stands, up to the indexed end.
+  auto history = Range(600, 26);
+  history.insert(history.end(), shared.begin(), shared.end());
+  committed.assign(history.begin(), history.end());
+  committed.insert(committed.end(), {20, 21, 22, 5});
+  committed.insert(committed.end(), shared.begin(), shared.end());
+  committed.insert(committed.end(), {30, 31, 6});
+  committed.insert(committed.end(), history.begin(), history.end() - 1);
+  lookup.Clear();
+  lookup.Extend(committed);
+  const std::vector<std::int32_t> long_tail = {shared.back()};
+  const auto unique =
+      lookup.Find(committed, long_tail, Lookup::kMinMatch, false, &agreed);
+  Require(unique.length == Lookup::kMinMatch * 3 + 4 &&
+              committed[unique.start] == 20,
+          "the longest match was not chosen");
+  Require(agreed == lookup.IndexedTokens() - unique.start,
+          "a much shorter competitor limited the copy");
+
+  // An 8-token occurrence below the gate still competes with a 12-token
+  // match: the context is ambiguous from the first copied token.
+  const auto line = Range(400, 12);
+  committed = {7};
+  committed.insert(committed.end(), line.begin(), line.end());
+  committed.insert(committed.end(), {60, 61, 8});
+  committed.insert(committed.end(), line.begin() + 4, line.end());
+  committed.insert(committed.end(), {70, 71, 9});
+  committed.insert(committed.end(), line.begin(), line.end() - 1);
+  lookup.Clear();
+  lookup.Extend(committed);
+  const std::vector<std::int32_t> line_tail = {line.back()};
+  const auto gated =
+      lookup.Find(committed, line_tail, Lookup::kMinMatch, false, &agreed);
+  Require(gated.length == 12 && committed[gated.start] == 60,
+          "the gated 12-token match was not chosen");
+  Require(agreed == 0, "an ungated competitor did not limit the copy");
+}
+
 // The nearest repeated passage ends at a message boundary. Rejecting that
 // source must find an earlier complete continuation, without changing the
 // default lookup policy used by Flash-Next.
@@ -401,6 +463,7 @@ int main() {
   try {
     CheckCopy();
     CheckLongestWins();
+    CheckAgreement();
     CheckFilteredContinuation();
     CheckIncremental();
     CheckRewrite();
