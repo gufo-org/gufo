@@ -139,6 +139,11 @@ def main():
     assert "--prepare-structured-output" not in help_text
     check(["serve", "llm", "--model", "missing.gguf",
            "--prepare-structured-output"], 2, "Unknown option")
+    check(["serve", "llm", "--help"], 0, "--reasoning-budget-fraction")
+    for bad in ("1", "1.5", "-0.25", "nan"):
+        check(["serve", "llm", "--model", "missing.gguf",
+               "--reasoning-budget-fraction=" + bad], 2,
+              "--reasoning-budget-fraction must be in [0, 1)")
     for bad in ("trace", "Debug", "", "info,debug"):
         check(["serve", "llm", "--log-level", bad, "--model", "missing.gguf"],
               2, "--log-level must be error, warn, info or debug")

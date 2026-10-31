@@ -72,6 +72,33 @@ void SetError(std::string* error, std::string message) {
 
 #if defined(ENGINE_ENABLE_HIP)
 
+// Qwen's documented early exit for a thinking budget: the model answers from
+// its reasoning so far instead of stopping mid-thought.
+constexpr std::string_view kQwenReasoningWrapUp =
+    "\n\nConsidering the limited time by the user, I have to give the "
+    "solution based on the thinking directly now.";
+
+struct ResolvedReasoningBudget {
+  std::size_t tokens;
+  bool wrap_up;
+};
+
+// A request or --reasoning-budget keeps llama.cpp's semantics. Otherwise the
+// configured share of max_tokens leaves room for an answer, which thinking
+// that would run to max_tokens never gets.
+std::optional<ResolvedReasoningBudget> ResolveReasoningBudget(
+    const ReasoningOptions& request, const ReasoningOptions& defaults,
+    std::size_t max_tokens) {
+  if (request.budget_tokens)
+    return ResolvedReasoningBudget{*request.budget_tokens, false};
+  if (defaults.budget_fraction <= 0.0F)
+    return std::nullopt;
+  return ResolvedReasoningBudget{
+      static_cast<std::size_t>(static_cast<double>(defaults.budget_fraction) *
+                               static_cast<double>(max_tokens)),
+      true};
+}
+
 struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
 };
@@ -1232,7 +1259,10 @@ public:
   // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
   // reasoning at a tool call.
   [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
-    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
+    return {"<think>",
+            "\n</think>",
+            {"</think>", "<tool_call>"},
+            kQwenReasoningWrapUp};
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -2578,7 +2608,10 @@ public:
   // llama.cpp's Qwen3-Coder format forces "\n</think>" and also ends
   // reasoning at a tool call.
   [[nodiscard]] ReasoningTags ReasoningBudgetTags() const override {
-    return {"<think>", "\n</think>", {"</think>", "<tool_call>"}};
+    return {"<think>",
+            "\n</think>",
+            {"</think>", "<tool_call>"},
+            kQwenReasoningWrapUp};
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -3889,11 +3922,13 @@ InferenceBackend::Result InferenceBackend::chat(
   }
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
-  if (request.reasoning.budget_tokens &&
+  if (const auto budget = ResolveReasoningBudget(
+          request.reasoning, state->reasoning_defaults, max_tokens);
+      budget &&
       initial == TextGenerationBackend::InitialOutputState::kReasoning)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            budget->tokens, prompt->tokens, budget->wrap_up);
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
@@ -3978,11 +4013,13 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
-  if (request.reasoning.budget_tokens &&
+  if (const auto budget = ResolveReasoningBudget(
+          request.reasoning, state->reasoning_defaults, max_tokens);
+      budget &&
       initial == TextGenerationBackend::InitialOutputState::kReasoning)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            budget->tokens, prompt->tokens, budget->wrap_up);
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(

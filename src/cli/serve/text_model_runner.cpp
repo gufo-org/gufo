@@ -773,11 +773,15 @@ std::size_t TextModelRunner::PrepareConstraintVocabulary() const {
 }
 
 std::shared_ptr<const sampling::ReasoningBudget>
-TextModelRunner::BuildReasoningBudget(
-    std::size_t tokens, std::span<const TextRunnerToken> prompt) const {
+TextModelRunner::BuildReasoningBudget(std::size_t tokens,
+                                      std::span<const TextRunnerToken> prompt,
+                                      bool wrap_up) const {
   const auto tags = ReasoningBudgetTags();
   const auto start = TokenizeControl(tags.start);
-  auto forced = TokenizeControl(tags.forced_end);
+  // One tokenization keeps the wrap-up and end as the template would join them.
+  auto forced = TokenizeControl(wrap_up ? std::string(tags.wrap_up) +
+                                              std::string(tags.forced_end)
+                                        : std::string(tags.forced_end));
   if (start.size() != 1 || forced.empty())
     return nullptr;
   auto budget = std::make_shared<sampling::ReasoningBudget>();

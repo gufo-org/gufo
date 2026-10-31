@@ -328,22 +328,26 @@ public:
 
   /// Reasoning tags for a token budget, as llama.cpp's chat format for the
   /// model defines them: `forced_end` is emitted once the budget is spent and
-  /// any of `ends` closes reasoning early.
+  /// any of `ends` closes reasoning early. A wrap-up budget first emits
+  /// `wrap_up`, the model's own instruction to answer from its thinking.
   struct ReasoningTags {
     std::string_view start;
     std::string_view forced_end;
     std::vector<std::string_view> ends;
+    std::string_view wrap_up;
   };
   [[nodiscard]] virtual ReasoningTags ReasoningBudgetTags() const {
-    return {"<think>", "</think>", {"</think>"}};
+    return {"<think>", "</think>", {"</think>"}, {}};
   }
   /// Zero when the vocabulary cannot be enumerated.
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
   /// A budget for a prompt that opens reasoning, or null when the tags are not
-  /// single tokens in this vocabulary.
+  /// single tokens in this vocabulary. `wrap_up` prepends the tags' wrap-up
+  /// text to the forced end.
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,
-                       std::span<const TextRunnerToken> prompt) const;
+                       std::span<const TextRunnerToken> prompt,
+                       bool wrap_up = false) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;

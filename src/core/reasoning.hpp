@@ -25,6 +25,10 @@ struct ReasoningOptions {
   std::optional<bool> preserve_thinking;
   /// Reasoning tokens before the end of thinking is forced (#266).
   std::optional<std::size_t> budget_tokens;
+  /// Server default only: without budget_tokens, the share of a request's
+  /// max_tokens reasoning may use before the model is told to answer and the
+  /// end of thinking is forced. Zero disables it.
+  float budget_fraction{0.0F};
 };
 
 }  // namespace gufo
