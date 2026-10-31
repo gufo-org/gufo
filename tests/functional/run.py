@@ -44,6 +44,14 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
+# Suites check that an identical retry reuses its whole prompt. Once earlier
+# suites' conversations fill the RAM cache's snapshot records, the cache
+# deliberately keeps another conversation's last checkpoint instead of a new
+# exact-retry copy, so a retry recomputes its few reply-framing tokens. The
+# runner restarts the server before a suite once its cache logged that pressure,
+# and always for these suites, which alone make dozens of cached requests.
+FRESH_SERVER_SUITES = ("sampling-defaults", "progress", "cache-edits", "cache-growth")
+CACHE_PRESSURE = "reason=entry_capacity"
 COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout", "tier",
                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
                      "expected_input_modalities")
@@ -128,9 +136,7 @@ def write_json(path, value):
 
 def execution_coverage(directory, requested):
     """Verify the loaded mode and actual draft work, including after restart."""
-    logs = [directory / "server.log"]
-    if (directory / "server-restarted.log").is_file():
-        logs.append(directory / "server-restarted.log")
+    logs = [directory / "server.log", *sorted(directory.glob("server-*.log"))]
     for path in logs:
         modes = [match.group(1) for line in path.read_text().splitlines()
                  if "event=load_completed" in line and "kind=text" in line
@@ -330,9 +336,11 @@ def main():
         port = reserve.getsockname()[1]
     command = [command[0], "serve", "--host", "127.0.0.1", "--port", str(port),
                *command[2:]]
+    # The metrics suite sends sessions + 1 requests at once; when they arrive
+    # within the scheduler's first pop, all of them are pending together.
     for flag, default in (("--sessions", "4"), ("--context", "8192"),
                           ("--served-model-name", "functional-test"),
-                          ("--max-pending-per-client", str(max(4, sessions)))):
+                          ("--max-pending-per-client", str(max(4, sessions + 1)))):
         if option(command, flag) is None:
             command += [flag, default]
     if disk_enabled:
@@ -356,15 +364,18 @@ def main():
               "vision": vision, "speculative": speculative,
               "suites": {}, "through_case": args.through_case,
               "allow_missing_progress": args.allow_missing_progress,
-              "started_ns": time.time_ns(), "status": "running"}
+              "started_ns": time.time_ns(), "status": "running", "server_logs": {}}
     report["expected_input_modalities"] = args.expected_input_modalities
     report_path = output / "report.json"
     write_json(report_path, report)
+
+    current_log = output / "server.log"
 
     def run(label, script, arguments):
         started = time.monotonic()
         row = {"status": "running", "report": label + ".json"}
         report["suites"][label] = row
+        report["server_logs"][label] = current_log.name
         write_json(report_path, report)
         try:
             with (output / (label + ".log")).open("w") as log:
@@ -418,14 +429,50 @@ def main():
                                       "--reasoning-effort", "low",
                                       "--image", str(output / "red.png")]),
         ]
+    def sdk_arguments(suite):
+        arguments = ["--base-url", base_url + "/v1", "--model", model,
+                     "--suite", suite, "--output", str(output / (suite + ".json")),
+                     "--sampling-preset", args.sampling_preset,
+                     "--sampling-overrides", json.dumps(overrides),
+                     "--request-timeout", str(args.request_timeout),
+                     "--concurrency", str(sessions), "--speculative", speculative,
+                     "--context", option(command, "--context"),
+                     "--server-log", str(current_log)]
+        if vision:
+            arguments += ["--vision"]
+        if args.expected_input_modalities is not None:
+            arguments += ["--expected-input-modalities", args.expected_input_modalities]
+        if option(command, "--think") is not None:
+            arguments += ["--server-thinking", option(command, "--think")]
+        if suite in ("cache-bridge", "cache-pressure") and configured:
+            arguments += ["--snapshot-capacity-bytes", configured[1]]
+        if suite == through_suite:
+            arguments += ["--through-case", through_case]
+        if args.allow_missing_progress:
+            arguments += ["--allow-missing-progress"]
+        return arguments
+
     ready_to_restore = []
     spacing = False
+    segment = contextlib.ExitStack()
+
+    def ensure_fresh_cache(label, always=False):
+        """Restart before a suite if this server's cache was already used/full."""
+        nonlocal current_log
+        pressure = current_log.exists() and CACHE_PRESSURE in current_log.read_text()
+        if not report["suites"] or not (always or pressure):
+            return
+        segment.close()
+        current_log = output / f"server-{label}.log"
+        segment.enter_context(server(command, current_log, args.startup_timeout))
+
     try:
         if "cache-rotation" in selected:
             from cache_rotation import check_snapshot_budget, host_available_bytes
             available_before_load = host_available_bytes(Path("/proc/meminfo").read_text())
         startup_started = time.monotonic()
-        with server(command, output / "server.log", args.startup_timeout):
+        with segment:
+            segment.enter_context(server(command, current_log, args.startup_timeout))
             report["startup_ms"] = (time.monotonic() - startup_started) * 1000
             if "cache-rotation" in selected:
                 report["snapshot_budget"] = check_snapshot_budget(
@@ -437,29 +484,11 @@ def main():
             for suite in selected:
                 if suite == "cache":
                     continue
-                sdk_args = ["--base-url", base_url + "/v1", "--model", model,
-                            "--suite", suite, "--output", str(output / (suite + ".json")),
-                            "--sampling-preset", args.sampling_preset,
-                            "--sampling-overrides", json.dumps(overrides),
-                            "--request-timeout", str(args.request_timeout),
-                            "--concurrency", str(sessions), "--speculative", speculative,
-                            "--context", option(command, "--context"),
-                            "--server-log", str(output / "server.log")]
-                if vision:
-                    sdk_args += ["--vision"]
-                if args.expected_input_modalities is not None:
-                    sdk_args += ["--expected-input-modalities", args.expected_input_modalities]
-                if option(command, "--think") is not None:
-                    sdk_args += ["--server-thinking", option(command, "--think")]
-                if suite in ("cache-bridge", "cache-pressure") and configured:
-                    sdk_args += ["--snapshot-capacity-bytes", configured[1]]
-                if suite == through_suite:
-                    sdk_args += ["--through-case", through_case]
-                if args.allow_missing_progress:
-                    sdk_args += ["--allow-missing-progress"]
-                run(suite, "openai_sdk.py", sdk_args)
+                ensure_fresh_cache(suite, suite in FRESH_SERVER_SUITES)
+                run(suite, "openai_sdk.py", sdk_arguments(suite))
             if "image-count" in selected and not through_case:
                 label = "image-count-cancel"
+                ensure_fresh_cache(label)
                 if run(label, "continuation.py", [
                         "--url", base_url, "--model", model,
                         "--prefix-repetitions", "2",
@@ -468,19 +497,22 @@ def main():
                         "--output", str(output / (label + ".json"))]):
                     ready_to_restore.append(label)
             if "cache" in selected:
+                ensure_fresh_cache("cache")
                 for label, extra in cache_cases:
                     if run(label, "continuation.py", [
                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
                             "--output", str(output / (label + ".json")), *extra]):
                         ready_to_restore.append(label)
                 # Retain the window; checkpoint IDs identify fixture-owned writes.
-                spacing_offset = (output / "server.log").stat().st_size
+                spacing_log = current_log
+                spacing_offset = spacing_log.stat().st_size
                 spacing = run("disk-spacing", "cache_disk_spacing.py", [
                     "--url", base_url, "--model", model,
                     "--output", str(output / "disk-spacing.json")])
         if ready_to_restore or spacing:
             startup_started = time.monotonic()
-            with server(command, output / "server-restarted.log", args.startup_timeout):
+            current_log = output / "server-restarted.log"
+            with server(command, current_log, args.startup_timeout):
                 report["restart_ms"] = (time.monotonic() - startup_started) * 1000
                 for label in ready_to_restore:
                     run(label + "-disk", "continuation.py", [
@@ -494,7 +526,7 @@ def main():
                         "--output", str(output / "disk-spacing-disk.json")])
         if spacing:
             from cache_disk_spacing import check_disk_spacing
-            with (output / "server.log").open() as log:
+            with spacing_log.open() as log:
                 log.seek(spacing_offset)
                 grown_log = log.read()
             report["disk_spacing"] = check_disk_spacing(

@@ -71,20 +71,25 @@ class CheckResults(dict):
         super().__init__()
         self.report, self.output = report, output
         self.recorder = recorder
+        # Concurrent cases record checks from several threads: each save
+        # serializes this report and renames the same temporary file.
+        self.lock = threading.RLock()
 
     def save(self):
         if self.output:
-            self.output.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.output.with_suffix(".tmp")
-            temporary.write_text(json.dumps(self.report, indent=2) + "\n")
-            temporary.replace(self.output)
+            with self.lock:
+                self.output.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self.output.with_suffix(".tmp")
+                temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+                temporary.replace(self.output)
 
     def __setitem__(self, name, value):
-        if name in self:
-            raise AssertionError(f"duplicate functional check: {name}")
-        super().__setitem__(name, value)
-        self.recorder.mark(name)
-        self.save()
+        with self.lock:
+            if name in self:
+                raise AssertionError(f"duplicate functional check: {name}")
+            super().__setitem__(name, value)
+            self.recorder.mark(name)
+            self.save()
 
 
 def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
@@ -1589,8 +1594,15 @@ def check_native_tools(client, model, checks, vision=False):
         final = events[-1].response
         assert final.status == "incomplete", final
         assert final.incomplete_details.reason == "max_output_tokens", final
-        assert all(item.status == "incomplete" for item in final.output
-                   if item.type == "function_call"), final
+        # An interrupted call may be reported, but never as executable.
+        for item in final.output:
+            if item.type == "function_call":
+                assert item.status == "incomplete", final
+                try:
+                    json.loads(item.arguments)
+                except json.JSONDecodeError:
+                    continue
+                raise AssertionError(("interrupted tool was made executable", final))
         record(f"responses_tool_limit_{limit}", final.to_dict())
 
     def isolated(index):
