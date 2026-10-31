@@ -232,12 +232,6 @@ if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   endif()
 endif()
 
-if (WIN32)
-  # Platform layer: WinSock (net), process memory counters (logging), BCrypt
-  # and the registry (os_info).
-  set(GUFO_PLATFORM_LIBS ws2_32 iphlpapi bcrypt advapi32)
-endif()
-
 add_subdirectory(src/cache)
 
 if (ENGINE_ENABLE_HIP)
