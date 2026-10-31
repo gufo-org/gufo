@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "name": "minimax_h3",
+  "target": "gufo_minimax_h3",
+  "kind": "static",
+  "purpose": "MiniMax H3 generation adapter: prompt encoding, DiT and denoiser, audio and video VAEs, tokenizer, sampling and the ffmpeg media plumbing. The ROCm sources join this target when ENGINE_ENABLE_HIP is ON.",
+  "consumers": [
+    "gufo",
+    "gufo_http"
+  ],
+  "checks": [
+    "minimax_h3_audio_vae_hip_test",
+    "minimax_h3_denoiser_hip_test",
+    "minimax_h3_dit_hip_test",
+    "minimax_h3_generation_test",
+    "minimax_h3_media_test",
+    "minimax_h3_prompt_encoder_hip_test",
+    "minimax_h3_runtime_hip_test",
+    "minimax_h3_runtime_test",
+    "minimax_h3_sampling_hip_test",
+    "minimax_h3_sampling_test",
+    "minimax_h3_tokenizer_test",
+    "minimax_h3_video_vae_hip_test",
+    "minimax_h3_video_vae_test",
+    "video_api_test",
+    "video_cli_test",
+    "video_jobs_test"
+  ]
+}

@@ -113,7 +113,7 @@ the current implementation milestone stops after Card 14.
 | 05 | 3; 04 | [Discovery, lock selection and provenance](cards/05-discovery-and-provenance.md) | complete |
 | 06 | 4; 02, 05 | [Move model-specific speculation out of core](cards/06-model-owned-speculation.md) | pending |
 | 07 | 5; 06 | [Extract acyclic Qwen family libraries](cards/07-qwen-family-libraries.md) | complete |
-| 08 | 5; 07 | [Extract H3, evaluation and model-dependent targets](cards/08-h3-eval-and-test-targets.md) | pending |
+| 08 | 5; 07 | [Extract H3, evaluation and model-dependent targets](cards/08-h3-eval-and-test-targets.md) | complete |
 | 09 | 6; 08 | [Separate serving policy from extension execution](cards/09-serving-runtime-boundary.md) | pending |
 | 10 | 7; 09 | [Publish and measure the public extension API](cards/10-public-api-surface.md) | pending |
 | 11 | 7; 10 | [Migrate models to public extension headers](cards/11-public-header-migrations.md) | pending |
@@ -171,4 +171,16 @@ See [Card 06: execution record](cards/06-model-owned-speculation.md#execution-re
 ### Card 07
 
 See [Card 07: execution record](cards/07-qwen-family-libraries.md#execution-record).
+
+### Card 08
+
+See [Card 08: execution record](cards/08-h3-eval-and-test-targets.md#execution-record).
+The extracted tiers are `gufo_minimax_h3`, `gufo_compare`, `gufo_eval` and the CPU-only
+`gufo_deepseek_v4_flash_text`; the eval dataset is the core fixture
+`tests/fixtures/eval/antirez-ds4.json`; the new
+[`target-ownership.md`](target-ownership.md) contract and its
+`extension_target_ownership_gate` own every model-dependent core test/tool. Its
+unresolved gates are the deferred functional/performance half, Windows execution, the
+asset-blocked H3/DeepSeek oracle rows, per-model extension exclusion (no
+`extension.json` yet) and the shipped lock-mode artifact — none of which it claims.
 

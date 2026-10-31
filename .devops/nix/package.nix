@@ -53,11 +53,13 @@ let
       || lib.hasPrefix "include/" relativePath
       || relativePath == "src"
       || lib.hasPrefix "src/" relativePath
+      # `gufo eval` reads its default dataset at run time and that dataset is
+      # core-owned, so exactly one test-tree file is admitted: the core eval
+      # fixture. No model test file enters the production derivation.
       || relativePath == "tests"
-      || relativePath == "tests/models"
-      || relativePath == "tests/models/deepseek_v4_flash"
-      || relativePath == "tests/models/deepseek_v4_flash/fixtures"
-      || relativePath == "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json";
+      || relativePath == "tests/fixtures"
+      || relativePath == "tests/fixtures/eval"
+      || relativePath == "tests/fixtures/eval/antirez-ds4.json";
   };
 in
 assert lib.versions.majorMinor rocmPackages.clr.version == "10.1";

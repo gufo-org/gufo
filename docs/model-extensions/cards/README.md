@@ -6,14 +6,22 @@ implementation plan, definition of done, validation criteria and execution recor
 The [original RFC](../RFC.md) remains the specification; these plans do not amend
 its requirements or waive existing quality gates.
 
-Current checkpoint: cards 01–07 are complete. Card 07 extracted the acyclic Qwen family
+Current checkpoint: cards 01–08 are complete. Card 07 extracted the acyclic Qwen family
 libraries (`src/families/qwen/{control_tokens,hip_common,config,text,kernels,vision}` with
 `library.json` manifests and the enforced `extension_family_graph_gate`), moved Qwen 27B into
 `gufo_qwen27b`, took Qwen config extraction out of `GgufReader` into CPU-only
 `ExtractQwenConfig`, and relinked the CLI, kernel tools and tests; its unresolved gates are
 the deferred functional/performance half, Windows execution, the shipped lock-mode artifact
 and the pre-existing `kernel_resources_test` baseline drift, none of which it claims.
-Cards 08–29 are pending, with Card 08 (H3, evaluation and model-dependent targets) next.
+Card 08 moved MiniMax H3, the comparison helper, the eval tier and the DeepSeek CPU text
+sources out of `gufo_core`/`gufo_deepseek_v4_flash` into owned targets, made the eval
+dataset a core fixture with a single Nix source admission, and gated every
+model-dependent core test/tool with `extension_target_ownership_gate`; its unresolved
+gates are the deferred functional/performance half, Windows execution, the asset-blocked
+H3/DeepSeek oracle rows, per-model extension exclusion until `extension.json` exists, the
+shipped lock-mode artifact and the still-unbuilt production Nix derivation. See
+[target ownership](../target-ownership.md) for the manifest/claim contract later cards
+must satisfy. Cards 09–29 are pending.
 The authorized implementation milestone ends after Card 14 is
 verified and committed; cards 15–29 document later scope only. This split is
 documentation work and does not itself advance any implementation status.

@@ -46,6 +46,8 @@ if (ENGINE_ENABLE_HIP)
   endif()
   add_qwen27b_test(qwen27b_target_test target_test.cpp
     "gpu;hip;target;external-model")
+  # target_test.cpp reports its logits through the shared comparison support.
+  target_link_libraries(qwen27b_target_test PRIVATE gufo_compare)
   add_qwen27b_test(qwen_mtp_gpu_test mtp_test.cpp "gpu;hip;mtp;external-model")
   add_qwen27b_test(qwen_dflash_gpu_test dflash_test.cpp
     "gpu;hip;dflash;dflash2;external-model")

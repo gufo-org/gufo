@@ -320,31 +320,11 @@ add_library(gufo_core STATIC
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
   src/core/sampling.cpp
-  src/models/minimax_h3/audio_vae.cpp
-  src/models/minimax_h3/denoiser.cpp
-  src/models/minimax_h3/dit.cpp
-  src/models/minimax_h3/generation.cpp
-  src/models/minimax_h3/json.cpp
-  "$<$<PLATFORM_ID:Windows>:src/models/minimax_h3/media_windows.cpp>"
-  "$<$<NOT:$<PLATFORM_ID:Windows>>:src/models/minimax_h3/media_posix.cpp>"
-  src/models/minimax_h3/prompt_encoder.cpp
-  src/models/minimax_h3/runtime.cpp
-  src/models/minimax_h3/sampling.cpp
-  src/models/minimax_h3/sha256.cpp
-  src/models/minimax_h3/tokenizer.cpp
-  src/models/minimax_h3/video_vae.cpp
-  src/testing/compare/logit_comparator.cpp
-  src/eval/dataset.cpp
-  src/eval/extract.cpp
-  src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
-target_compile_definitions(gufo_core PRIVATE
-  GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
-  GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
   Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
@@ -373,18 +353,7 @@ if (OpenMP_CXX_FOUND)
 endif()
 
 if (ENGINE_ENABLE_HIP)
-  set_property(SOURCE src/models/minimax_h3/dit.hip
-    APPEND PROPERTY COMPILE_OPTIONS -O2)
   target_sources(gufo_core PRIVATE
-    src/models/minimax_h3/audio_vae.hip
-    src/models/minimax_h3/denoiser.hip
-    src/models/minimax_h3/dit.hip
-    src/models/minimax_h3/dense.hip
-    src/models/minimax_h3/runtime_hip.cpp
-    src/models/minimax_h3/prompt_encoder.hip
-    src/models/minimax_h3/sampling.hip
-    src/models/minimax_h3/video_vae.hip
-    src/models/minimax_h3/attention.hip
     src/core/hip/snapshot_copy.hip
     src/core/hip/weight_upload.cpp
     src/core/speculative/speculative_verifier.cpp
@@ -397,13 +366,26 @@ if (ENGINE_ENABLE_HIP)
     roc::hipblaslt roc::rocblas)
 endif()
 
+# Card 08 (RFC step 5): the model, comparison and eval tiers that used to be
+# object files of gufo_core are separate targets now. They are added here,
+# after the warning/sanitizer block, so their sources keep the compile
+# environment they had inside gufo_core.
+add_subdirectory(src/models/minimax_h3)
+add_subdirectory(src/testing/compare)
+add_subdirectory(src/eval)
+# The CPU-only DeepSeek text tier is registered next to them because it must
+# keep that warning/sanitizer environment; the model directory itself is added
+# above, before the block, and links this library instead of compiling the two
+# text sources again.
+add_subdirectory(src/models/deepseek_v4_flash/text)
+
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
 # The interim edges the RFC allows between steps 5 and 6: prompt/bench still
 # reach the Qwen executor and generators directly, so the CLI library links the
 # Qwen model and family libraries instead of getting them through gufo_core.
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_qwen38_flash_next
   gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
 if(ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
@@ -437,7 +419,8 @@ add_library(gufo_http STATIC
   # the engine library, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_minimax_h3 gufo_qwen3_tts gufo_qwen3_asr
+  gufo_qwen_image_21 gufo_embedding_gemma2
   gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
 
 add_executable(gufo
@@ -457,7 +440,8 @@ add_executable(gufo
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_eval
+  gufo_llm_cli gufo_http CURL::libcurl)
 gufo_build_discovered_extensions()
 get_property(gufo_selected_extensions GLOBAL PROPERTY GUFO_SELECTED_EXTENSIONS)
 gufo_target_extensions(gufo EXTENSIONS ${gufo_selected_extensions})
@@ -465,7 +449,7 @@ gufo_stage_hip_runtime(gufo)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"
-  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
+  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/eval/antirez-ds4.json"
   GUFO_EVAL_INSTALLED_DATA="${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json"
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
@@ -523,7 +507,7 @@ install(FILES
   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
   DESTINATION share/gufo/models/minimax_h3)
 install(FILES
-  tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json
+  tests/fixtures/eval/antirez-ds4.json
   DESTINATION share/gufo/eval)
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
@@ -664,14 +648,14 @@ if (BUILD_TESTING)
   add_test(NAME logprobs_test COMMAND logprobs_test)
   set_tests_properties(logprobs_test PROPERTIES LABELS "cpu;server;api;openai")
 
+  # openai_chat.cpp and the DeepSeek tool-call scanner come from gufo_http, and
+  # the chat template from the CPU-only DeepSeek text target: this test no
+  # longer compiles a second copy of any of them.
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
-    src/cli/serve/openai_chat.cpp
-    src/models/deepseek_v4_flash/chat_template.cpp
-    src/models/deepseek_v4_flash/tool_calls.cpp
   )
-  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_logging
-    ${GUFO_QWEN_LIBRARIES})
+  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_logging gufo_http
+    gufo_deepseek_v4_flash_text ${GUFO_QWEN_LIBRARIES})
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
@@ -733,8 +717,13 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
       --fail-on-family-graph)
+  add_test(NAME extension_target_ownership_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-target-ownership)
   set_tests_properties(check_extension_isolation_test extension_isolation_report
     extension_core_model_includes_gate extension_family_graph_gate
+    extension_target_ownership_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
   add_test(NAME check_docs_test
@@ -865,7 +854,7 @@ if (BUILD_TESTING)
     tests/cli/video_test.cpp
     src/cli/video/video.cpp
   )
-  target_link_libraries(video_cli_test PRIVATE gufo_core)
+  target_link_libraries(video_cli_test PRIVATE gufo_core gufo_minimax_h3)
   add_test(NAME video_cli_test COMMAND video_cli_test)
   set_tests_properties(video_cli_test PROPERTIES
     LABELS "cpu;server;cli;minimax-h3;quality")
@@ -874,7 +863,8 @@ if (BUILD_TESTING)
     tests/cli/video_jobs_test.cpp
     src/cli/serve/video_jobs.cpp
   )
-  target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core gufo_cache)
+  target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core
+    gufo_minimax_h3 gufo_cache)
   add_test(NAME video_jobs_test COMMAND video_jobs_test)
   set_tests_properties(video_jobs_test PROPERTIES
     LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality")
@@ -884,7 +874,8 @@ if (BUILD_TESTING)
     src/cli/serve/video_api.cpp
     src/cli/serve/video_jobs.cpp
   )
-  target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core gufo_cache)
+  target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core
+    gufo_minimax_h3 gufo_cache)
   add_test(NAME video_api_test COMMAND video_api_test)
   set_tests_properties(video_api_test PROPERTIES
     LABELS "cpu;server;api;video;minimax-h3;quality")
@@ -1001,7 +992,7 @@ if (BUILD_TESTING)
 
   add_executable(minimax_h3_runtime_test
     tests/models/minimax_h3_runtime_test.cpp)
-  target_link_libraries(minimax_h3_runtime_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_runtime_test PRIVATE gufo_core gufo_minimax_h3)
   add_test(NAME minimax_h3_runtime_test COMMAND minimax_h3_runtime_test)
   set_tests_properties(minimax_h3_runtime_test PROPERTIES
     LABELS "cpu;models;minimax-h3;safetensors;residency;failure-injection")
@@ -1064,21 +1055,21 @@ if (BUILD_TESTING)
 
   add_executable(minimax_h3_tokenizer_test
     tests/models/minimax_h3_tokenizer_test.cpp)
-  target_link_libraries(minimax_h3_tokenizer_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_tokenizer_test PRIVATE gufo_core gufo_minimax_h3)
   add_test(NAME minimax_h3_tokenizer_test COMMAND minimax_h3_tokenizer_test)
   set_tests_properties(minimax_h3_tokenizer_test PROPERTIES
     LABELS "cpu;models;minimax-h3;tokenizer;quality")
 
   add_executable(minimax_h3_sampling_test
     tests/models/minimax_h3_sampling_test.cpp)
-  target_link_libraries(minimax_h3_sampling_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_sampling_test PRIVATE gufo_core gufo_minimax_h3)
   add_test(NAME minimax_h3_sampling_test COMMAND minimax_h3_sampling_test)
   set_tests_properties(minimax_h3_sampling_test PROPERTIES
     LABELS "cpu;models;minimax-h3;layout;schedule;rng;quality")
 
   add_executable(minimax_h3_generation_test
     tests/models/minimax_h3_generation_test.cpp)
-  target_link_libraries(minimax_h3_generation_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_generation_test PRIVATE gufo_core gufo_minimax_h3)
   add_test(NAME minimax_h3_generation_test
     COMMAND minimax_h3_generation_test)
   set_tests_properties(minimax_h3_generation_test PROPERTIES
@@ -1086,7 +1077,7 @@ if (BUILD_TESTING)
 
   add_executable(minimax_h3_video_vae_test
     tests/models/minimax_h3_video_vae_test.cpp)
-  target_link_libraries(minimax_h3_video_vae_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_video_vae_test PRIVATE gufo_core gufo_minimax_h3)
   add_test(NAME minimax_h3_video_vae_plan
     COMMAND minimax_h3_video_vae_test)
   set_tests_properties(minimax_h3_video_vae_plan PROPERTIES
@@ -1094,7 +1085,7 @@ if (BUILD_TESTING)
 
   add_executable(minimax_h3_media_test
     tests/models/minimax_h3_media_test.cpp)
-  target_link_libraries(minimax_h3_media_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_media_test PRIVATE gufo_core gufo_minimax_h3)
   add_test(NAME minimax_h3_media_test COMMAND minimax_h3_media_test)
   set_tests_properties(minimax_h3_media_test PROPERTIES
     LABELS "cpu;models;minimax-h3;video;audio;ffmpeg;mux;quality"
@@ -1118,7 +1109,7 @@ if (BUILD_TESTING)
   set_tests_properties(exact_token_test PROPERTIES LABELS "cpu;quality;tokens")
 
   add_executable(eval_regrade_test tests/quality/eval_regrade_test.cpp)
-  target_link_libraries(eval_regrade_test PRIVATE gufo_core)
+  target_link_libraries(eval_regrade_test PRIVATE gufo_core gufo_eval)
   add_test(NAME eval_regrade_test COMMAND eval_regrade_test)
   set_tests_properties(eval_regrade_test PROPERTIES LABELS "cpu;quality;eval")
 
@@ -1126,7 +1117,7 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_http.py
       --gufo $<TARGET_FILE:gufo>
-      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json)
+      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/eval/antirez-ds4.json)
   set_tests_properties(eval_http_test PROPERTIES
     LABELS "cpu;quality;eval;http;cli;server")
 
@@ -1243,7 +1234,7 @@ if (BUILD_TESTING)
     add_executable(minimax_h3_runtime_hip_test
       tests/models/minimax_h3_runtime_hip_test.cpp)
     target_link_libraries(minimax_h3_runtime_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 hip::host)
     add_test(NAME minimax_h3_runtime_hip_test
       COMMAND minimax_h3_runtime_hip_test)
     set_tests_properties(minimax_h3_runtime_hip_test PROPERTIES
@@ -1255,7 +1246,7 @@ if (BUILD_TESTING)
     target_compile_definitions(minimax_h3_prompt_encoder_hip_test PRIVATE
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
     target_link_libraries(minimax_h3_prompt_encoder_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 hip::host)
     add_test(NAME minimax_h3_prompt_encoder_analytic
       COMMAND minimax_h3_prompt_encoder_hip_test --analytic)
     set_tests_properties(minimax_h3_prompt_encoder_analytic PROPERTIES
@@ -1269,7 +1260,7 @@ if (BUILD_TESTING)
     add_executable(minimax_h3_sampling_hip_test
       tests/models/minimax_h3_sampling_hip_test.hip)
     target_link_libraries(minimax_h3_sampling_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 hip::host)
     add_test(NAME minimax_h3_sampling_hip_test
       COMMAND minimax_h3_sampling_hip_test)
     set_tests_properties(minimax_h3_sampling_hip_test PROPERTIES
@@ -1281,7 +1272,7 @@ if (BUILD_TESTING)
     target_compile_definitions(minimax_h3_dit_hip_test PRIVATE
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
     target_link_libraries(minimax_h3_dit_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 hip::host)
     add_test(NAME minimax_h3_dit_analytic
       COMMAND minimax_h3_dit_hip_test --analytic)
     set_tests_properties(minimax_h3_dit_analytic PROPERTIES
@@ -1297,7 +1288,7 @@ if (BUILD_TESTING)
     target_compile_definitions(minimax_h3_denoiser_hip_test PRIVATE
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
     target_link_libraries(minimax_h3_denoiser_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 hip::host)
     add_test(NAME minimax_h3_denoiser_smoke
       COMMAND minimax_h3_denoiser_hip_test --smoke)
     set_tests_properties(minimax_h3_denoiser_smoke PROPERTIES
@@ -1325,7 +1316,7 @@ if (BUILD_TESTING)
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
       GUFO_H3_VIDEO_VAE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/video-vae-oracle-v1.json")
     target_link_libraries(minimax_h3_video_vae_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 hip::host)
     add_test(NAME minimax_h3_video_vae_real
       COMMAND minimax_h3_video_vae_hip_test)
     set_tests_properties(minimax_h3_video_vae_real PROPERTIES
@@ -1338,7 +1329,7 @@ if (BUILD_TESTING)
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
       GUFO_H3_AUDIO_VAE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/audio-vae-oracle-v1.json")
     target_link_libraries(minimax_h3_audio_vae_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 hip::host)
     add_test(NAME minimax_h3_audio_vae_primitives
       COMMAND minimax_h3_audio_vae_hip_test --primitives)
     set_tests_properties(minimax_h3_audio_vae_primitives PROPERTIES

@@ -320,6 +320,176 @@ qwen::Real real;
             self.assertIn(constant, header)
             self.assertIn(constant, mirror)
 
+    def test_target_ownership_needs_a_claim_for_every_dependent(self):
+        files = {
+            "src/models/demo/demo.cpp": "int demo() { return 1; }\n",
+            "src/models/demo/library.json": json.dumps({
+                "schema": 1, "name": "demo", "target": "gufo_demo", "kind": "static",
+                "purpose": "Demo model."}),
+            "src/models/demo/CMakeLists.txt":
+                "add_library(gufo_demo STATIC demo.cpp)\n",
+            "tests/tools/probe_test.cpp": "int main() {}\n",
+            "CMakeLists.txt": (
+                "add_subdirectory(src/models/demo)\n"
+                "set(GUFO_DEMO_LIBS gufo_demo)\n"
+                "add_executable(probe_test tests/tools/probe_test.cpp)\n"
+                "target_link_libraries(probe_test PRIVATE ${GUFO_DEMO_LIBS})\n"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            _, edges, violations = ISOLATION.target_ownership(root)
+            self.assertTrue(any("probe_test depends on demo" in violation
+                                for violation in violations), violations)
+            # A manifest that claims the dependent clears the audit, and the
+            # link edge shows up in the ownership graph.
+            (root / "src/models/demo/library.json").write_text(json.dumps({
+                "schema": 1, "name": "demo", "target": "gufo_demo", "kind": "static",
+                "purpose": "Demo model.", "checks": ["probe_test"]}))
+            _, edges, violations = ISOLATION.target_ownership(root)
+            self.assertEqual(violations, [])
+            self.assertIn("demo <- probe_test (links gufo_demo)", edges)
+
+    def test_target_ownership_rejects_unrelated_claim(self):
+        with tempfile.TemporaryDirectory(prefix="card08-", dir="/tmp") as directory:
+            root = Path(directory)
+            model = root / "src/models/demo"
+            model.mkdir(parents=True)
+            (model / "library.json").write_text(json.dumps({
+                "schema": 1, "name": "demo", "target": "gufo_demo", "kind": "static",
+                "purpose": "Demo model.", "checks": ["unrelated_test"]}))
+            (model / "CMakeLists.txt").write_text(
+                "add_library(gufo_demo STATIC demo.cpp)\n")
+            (model / "demo.cpp").write_text("int demo() { return 1; }\n")
+            (root / "CMakeLists.txt").write_text(
+                "add_subdirectory(src/models/demo)\n"
+                "add_executable(unrelated_test unrelated.cpp)\n")
+            (root / "unrelated.cpp").write_text("int main() {}\n")
+            _, _, violations = ISOLATION.target_ownership(root)
+            self.assertEqual(violations, [
+                "src/models/demo/library.json: claimed target unrelated_test "
+                "does not depend on demo"])
+
+    def test_target_ownership_tracks_compiled_sources_elsewhere(self):
+        manifest = {
+            "schema": 1, "name": "demo", "target": "gufo_demo", "kind": "static",
+            "purpose": "Demo model.", "consumers": ["demo_tool"],
+        }
+        files = {
+            "src/models/demo/demo.cpp": "int demo() { return 1; }\n",
+            "src/models/demo/library.json": json.dumps(manifest),
+            "src/models/demo/CMakeLists.txt": "add_library(gufo_demo STATIC demo.cpp)\n",
+            "tools/demo.cpp": "int main() {}\n",
+            "CMakeLists.txt": (
+                "add_subdirectory(src/models/demo)\n"
+                "add_executable(demo_tool tools/demo.cpp "
+                "src/models/demo/demo.cpp)\n"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            _, _, violations = ISOLATION.target_ownership(root)
+            self.assertTrue(any("demo_tool compiles src/models/demo/demo.cpp outside"
+                                in violation for violation in violations), violations)
+            # The justification needs a reason and the source it explains.
+            manifest["compiled_elsewhere"] = [{"target": "demo_tool",
+                                               "source": "src/models/demo/other.cpp",
+                                               "reason": "Stays with the tool."}]
+            (root / "src/models/demo/library.json").write_text(json.dumps(manifest))
+            _, _, violations = ISOLATION.target_ownership(root)
+            self.assertTrue(any("names demo_tool for src/models/demo/other.cpp"
+                                in violation for violation in violations), violations)
+            manifest["compiled_elsewhere"] = [{"target": "demo_tool",
+                                               "source": "src/models/demo/demo.cpp",
+                                               "reason": "Stays with the tool."}]
+            (root / "src/models/demo/library.json").write_text(json.dumps(manifest))
+            _, edges, violations = ISOLATION.target_ownership(root)
+            self.assertEqual(violations, [])
+            self.assertIn("demo <- demo_tool (compiles src/models/demo/demo.cpp)", edges)
+
+    def test_target_ownership_resolves_directory_variable_sources(self):
+        """A model source reached through a CMake directory variable still counts.
+
+        `${PROJECT_SOURCE_DIR}/…` and `${CMAKE_CURRENT_SOURCE_DIR}/…` are how a file
+        outside the declaring directory is usually spelled, so an argument that still
+        contains a variable must not be discarded before that resolution, or a
+        model-dependent target passes without ever being inventoried.
+        """
+        files = {
+            "src/models/demo/demo.cpp": "int demo() { return 1; }\n",
+            "src/models/demo/library.json": json.dumps({
+                "schema": 1, "name": "demo", "target": "gufo_demo", "kind": "static",
+                "purpose": "Demo model."}),
+            "src/models/demo/CMakeLists.txt": "add_library(gufo_demo STATIC demo.cpp)\n",
+            "tools/demo.cpp": "int main() {}\n",
+            "tools/probe/probe.cpp": "int main() {}\n",
+            "CMakeLists.txt": (
+                "add_subdirectory(src/models/demo)\n"
+                "add_subdirectory(tools/probe)\n"
+                "add_executable(demo_tool tools/demo.cpp\n"
+                "  ${PROJECT_SOURCE_DIR}/src/models/demo/demo.cpp)\n"),
+            "tools/probe/CMakeLists.txt": (
+                "add_executable(demo_probe probe.cpp\n"
+                "  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/models/demo/demo.cpp)\n"),
+        }
+        with tempfile.TemporaryDirectory(prefix="card08-", dir="/tmp") as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            _, edges, violations = ISOLATION.target_ownership(root)
+            for target in ("demo_tool", "demo_probe"):
+                self.assertTrue(
+                    any(f"{target} compiles src/models/demo/demo.cpp outside" in violation
+                        for violation in violations), violations)
+            self.assertIn("demo <- demo_tool (compiles src/models/demo/demo.cpp)", edges)
+            self.assertIn("demo <- demo_probe (compiles src/models/demo/demo.cpp)", edges)
+
+    def test_target_ownership_exempt_trees_and_stale_claims(self):
+        manifest = {
+            "schema": 1, "name": "demo", "target": "gufo_demo", "kind": "static",
+            "purpose": "Demo model.", "checks": ["gone_test"],
+        }
+        files = {
+            "src/models/demo/demo.cpp": "int demo() { return 1; }\n",
+            "src/models/demo/library.json": json.dumps(manifest),
+            "src/models/demo/CMakeLists.txt": "add_library(gufo_demo STATIC demo.cpp)\n",
+            "tests/models/demo/model_test.cpp": "int main() {}\n",
+            "tests/models/demo/CMakeLists.txt": (
+                "add_executable(demo_model_test model_test.cpp)\n"
+                "target_link_libraries(demo_model_test PRIVATE gufo_demo)\n"),
+            "CMakeLists.txt": (
+                "add_subdirectory(src/models/demo)\n"
+                "add_subdirectory(tests/models/demo)\n"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            _, edges, violations = ISOLATION.target_ownership(root)
+            # tests/models/<model>/ stays with the model test tree, so the only
+            # finding is the claim that no longer matches a real target.
+            self.assertEqual(violations,
+                             ["src/models/demo/library.json: claimed target gone_test "
+                              "does not exist"])
+            self.assertIn("demo <- demo_model_test (links gufo_demo)", edges)
+
+    def test_repository_satisfies_target_ownership(self):
+        # Card 08 gave the model, comparison and eval tiers their own targets.
+        # If this fails, a target started reaching a library that never claimed
+        # it: claim it in that library.json, or move the dependency out.
+        _, _, violations = ISOLATION.target_ownership(ROOT)
+        self.assertEqual(violations, [])
+
     def test_repository_satisfies_the_core_boundary(self):
         # Card 06 moved Qwen-specific speculation out of src/core/speculative/.
         # If this fails, a core source started including a model or family

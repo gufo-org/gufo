@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "name": "embedding_gemma2",
+  "target": "gufo_embedding_gemma2",
+  "kind": "static",
+  "purpose": "EmbeddingGemma 2 BF16 text and image embedding runtime.",
+  "consumers": [
+    "gufo",
+    "gufo_http"
+  ]
+}

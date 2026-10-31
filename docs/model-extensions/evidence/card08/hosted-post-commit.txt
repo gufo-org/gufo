@@ -1,0 +1,49 @@
+# Card 08 — authoritative post-commit hosted and snapshot proof (orchestrator)
+
+Run after the closing commit, so the Nix source snapshot is the card itself and not a
+parent snapshot (the Card 05 dirty-tree caveat no longer applies: `jj commit`/`jj squash`
+keep git HEAD in sync with the card commit, and every run recorded here evaluated the same
+source store path `/nix/store/isp7sflh7q17i3w3mjk7h3bnk07flm32-source`). The hosted gate
+was executed twice across this card's content — on the first card commit and again after
+the `jj squash` that folded the card record in — with identical verdicts. Later edits to
+this file are wording only and change no build, test or gate input; the markdown-only
+gate they could affect, `python3 tools/ci/check-docs.py`, is re-run after the last one.
+
+## Production source snapshot (dataset admission evidence)
+
+```sh
+nix eval --raw .#packages.x86_64-linux.release.src
+# /nix/store/isp7sflh7q17i3w3mjk7h3bnk07flm32-source
+```
+
+| Check | Result |
+| --- | --- |
+| `src/models/minimax_h3/CMakeLists.txt` | PRESENT (new H3 tier ships) |
+| `src/models/minimax_h3/library.json` | PRESENT |
+| `tests/fixtures/eval/antirez-ds4.json` | PRESENT (core fixture admitted) |
+| `tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json` | ABSENT (old model path gone) |
+| `find $src/tests -type f \| wc -l` | **1** — the single eval fixture; no other test-tree file enters the production derivation |
+| `tools/prof/card08_parity.py`, `docs/model-extensions/target-ownership.md` | ABSENT by design (production filter excludes `tools/` and `docs/`) |
+
+## Hosted checks
+
+```sh
+nix build .#checks.x86_64-linux.pr --no-link --print-out-paths
+# run 1: HOSTED_EXIT=0 -> /nix/store/z1hwy8n7f5n5cswmfkh3jxdg2b22jzz8-check-pr
+# run 2 (after the card record was squashed in): HOSTED_EXIT=0
+#         -> /nix/store/53gkz5g6qm1j3haln4bb7vhxjcv62mp6-check-pr
+```
+
+Freshly built both times, not cache hits: `check-docs.drv`, `check-format.drv`,
+`check-pr-tests.drv`, `check-pr.drv` (plus `check-dependency-inventory.drv`). This is the
+F4 closure: hosted coverage of this revision is established, which the pre-commit run in
+`gates.md` could not claim.
+
+## Still pending after this proof
+
+`nix build .#packages.x86_64-linux.release --no-link` (full production HIP package build —
+distribution gate, not run in this card), the `windows-platform-tests` fileset gap that
+admits two of the three `cmake/PlatformTests.cmake` sources (proven pre-existing; Windows
+execution itself is CI-only), the nine asset-blocked H3/DeepSeek oracle rows, the
+deferred functional/performance half for the post-Card-14 qualification window, and the
+stale `kernel_resources_test` budget owned outside this card.

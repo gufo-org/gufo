@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "name": "qwen3_tts",
+  "target": "gufo_qwen3_tts",
+  "kind": "static",
+  "purpose": "Qwen3-TTS CustomVoice speech model: text and speech encoders, talker and vocoder.",
+  "consumers": [
+    "gufo",
+    "gufo_http"
+  ],
+  "checks": [
+    "qwen3_tts_audio_api_test",
+    "qwen3_tts_audio_test",
+    "qwen3_tts_base_encoders_hip_test",
+    "qwen3_tts_config_test",
+    "qwen3_tts_loader_test",
+    "qwen3_tts_prompt_test",
+    "qwen3_tts_speech_decoder_hip_test",
+    "qwen3_tts_synthesis_hip_test",
+    "qwen3_tts_talker_hip_prefill_test",
+    "qwen3_tts_tokenizer_test",
+    "qwen3_tts_variant_talker_hip_test"
+  ]
+}

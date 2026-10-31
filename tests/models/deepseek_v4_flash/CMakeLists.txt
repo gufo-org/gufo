@@ -9,16 +9,14 @@ set_tests_properties(deepseek_v4_flash_continuation_identity_test PROPERTIES LAB
 
 # DS4 CTest checks are registered here. Shared CLI/parser and scheduler
 # tests remain with their shared components.
-add_executable(ds4_sampling_test sampling_test.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/deepseek_v4_flash/runtime/sampling.cpp)
-target_link_libraries(ds4_sampling_test PRIVATE gufo_core)
+add_executable(ds4_sampling_test sampling_test.cpp)
+target_link_libraries(ds4_sampling_test PRIVATE gufo_core gufo_deepseek_v4_flash_text)
 add_test(NAME ds4.sampling COMMAND ds4_sampling_test)
 set_tests_properties(ds4.sampling PROPERTIES LABELS "cpu;ds4;sampling")
 
-add_executable(ds4_chat_template_test
-  chat_template_test.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/deepseek_v4_flash/chat_template.cpp)
-target_link_libraries(ds4_chat_template_test PRIVATE gufo_core)
+add_executable(ds4_chat_template_test chat_template_test.cpp)
+target_link_libraries(ds4_chat_template_test PRIVATE gufo_core
+  gufo_deepseek_v4_flash_text)
 target_compile_definitions(ds4_chat_template_test PRIVATE
   GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja"
   GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
@@ -143,7 +141,7 @@ set_tests_properties(ds4.dataset PROPERTIES
 
 add_executable(ds4_eval_test eval_test.cpp)
 target_compile_definitions(ds4_eval_test PRIVATE
-  GUFO_EVAL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/antirez-ds4.json")
-target_link_libraries(ds4_eval_test PRIVATE gufo_core)
+  GUFO_EVAL_TEST_DATA="${PROJECT_SOURCE_DIR}/tests/fixtures/eval/antirez-ds4.json")
+target_link_libraries(ds4_eval_test PRIVATE gufo_core gufo_eval)
 add_test(NAME ds4.eval COMMAND ds4_eval_test)
 set_tests_properties(ds4.eval PROPERTIES LABELS "cpu;ds4;quality;eval;dataset;extractor")

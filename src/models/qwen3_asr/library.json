@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "name": "qwen3_asr",
+  "target": "gufo_qwen3_asr",
+  "kind": "static",
+  "purpose": "Qwen3-ASR 1.7B speech recognition runtime and its ROCm support.",
+  "consumers": [
+    "gufo",
+    "gufo_http"
+  ]
+}

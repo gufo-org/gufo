@@ -9,8 +9,12 @@ ratchets; no baseline or exception silently hides current dependencies.
 Enforcement ratchet (one boundary per migrated layer): with
 --fail-on-core-model-includes, no file under src/core/** may include a header
 under src/models/** or src/families/**. Card 06 (RFC step 4) retired the last
-such include, so a new violation fails the check. Other layers stay report
-only until their cards migrate them.
+such include, so a new violation fails the check. --fail-on-family-graph audits
+the Card 07 family manifests. --fail-on-target-ownership audits the Card 08
+(RFC step 5) target graph: every model directory needs a manifest, and every
+target that links, compiles or includes a library must be claimed by it, so
+excluding a library cannot leave an unregistered test or tool behind. Other
+layers stay report only until their cards migrate them.
 """
 
 import argparse
@@ -307,6 +311,332 @@ def cycle_violations(libraries):
     return []
 
 
+# --- target ownership -------------------------------------------------------
+#
+# Card 08 (RFC step 5) gave the model, comparison and eval tiers their own
+# targets. A target depends on a library when it links the library target,
+# compiles a file from the library directory, or includes a header from it.
+# Every such target outside the library's own directory must be named by that
+# library's library.json, so dropping a library cannot leave an unregistered
+# test or tool behind. Targets declared under tests/models/<model>/ stay with
+# the model test tree (CARDS.md leaves that placement open) and are exempt.
+
+CMAKE_COMMAND = re.compile(r"\b(add_executable|add_library|target_link_libraries|set)\s*\(")
+LINK_QUALIFIERS = {"PRIVATE", "PUBLIC", "INTERFACE"}
+TARGET_ATTRIBUTES = {"STATIC", "SHARED", "MODULE", "OBJECT", "IMPORTED", "ALIAS",
+                     "EXCLUDE_FROM_ALL", "INTERFACE", "WIN32"}
+SOURCE_SUFFIXES = {".cpp", ".cc", ".c", ".hip", ".cu"}
+SOURCE_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def cmake_body(text, start):
+    """Return (body, index after the closing paren) for the paren at `start`."""
+    depth, index, end = 0, start, len(text)
+    while index < end:
+        char = text[index]
+        if char == '"':
+            index += 1
+            while index < end and text[index] != '"':
+                index += 2 if text[index] == "\\" else 1
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
+        index += 1
+    return text[start + 1:], end
+
+
+def cmake_arguments(body):
+    """Split a CMake argument list on whitespace outside quotes and parentheses."""
+    args, current, depth, index, end = [], [], 0, 0, len(body)
+
+    def flush():
+        token = "".join(current).strip()
+        if token:
+            args.append(token.strip('"'))
+        current.clear()
+
+    while index < end:
+        char = body[index]
+        if char == '"':
+            closing = index + 1
+            while closing < end and body[closing] != '"':
+                closing += 2 if body[closing] == "\\" else 1
+            current.append(body[index:closing + 1])
+            index = closing + 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char in " \t\n;" and depth == 0:
+            flush()
+        else:
+            current.append(char)
+        index += 1
+    flush()
+    return args
+
+
+def cmake_invocations(text):
+    """Yield (command, arguments) for the CMake commands this audit needs."""
+    text = strip_comments(text, ".cmake")
+    index = 0
+    while True:
+        match = CMAKE_COMMAND.search(text, index)
+        if not match:
+            return
+        body, index = cmake_body(text, text.index("(", match.start()))
+        arguments = cmake_arguments(body)
+        if arguments:
+            yield match.group(1), arguments
+
+
+def cmake_tables(root):
+    """Parse the project CMake files into variables and target tables.
+
+    Returns (variables, targets) where targets maps a target name to its
+    creating file, its literal source files and its linked names. Generator
+    expressions and unresolved variables are dropped: a target that only a
+    toolchain option builds is still inventoried through the manifest claim.
+    """
+    variables, targets = {}, {}
+    for path in source_paths(root):
+        if Path(path).name != "CMakeLists.txt":
+            continue
+        declaring = Path(path).parent.as_posix()
+        declaring = "" if declaring == "." else declaring
+        text = (root / path).read_text(encoding="utf-8")
+        for command, arguments in cmake_invocations(text):
+            name = arguments[0]
+            if command == "set":
+                values, skip = [], 0
+                for item in arguments[1:]:
+                    if skip:
+                        skip -= 1
+                    elif item.upper() == "CACHE":
+                        skip = 2
+                    else:
+                        values.append(item)
+                variables.setdefault(name, values)
+            elif command in ("add_executable", "add_library"):
+                entry = targets.setdefault(name, {"file": path, "files": [],
+                                                  "sources": [], "links": []})
+                entry["file"] = path
+                entry["files"].append(path)
+                for argument in arguments[1:]:
+                    if argument.upper() in TARGET_ATTRIBUTES:
+                        continue
+                    entry["sources"].extend(
+                        source for source in expand_cmake(argument, variables, declaring)
+                        if Path(source).suffix in SOURCE_SUFFIXES)
+            elif command == "target_link_libraries":
+                entry = targets.setdefault(name, {"file": path, "files": [],
+                                                  "sources": [], "links": []})
+                entry["files"].append(path)
+                for argument in arguments[1:]:
+                    if argument.upper() in LINK_QUALIFIERS:
+                        continue
+                    entry["links"].extend(
+                        expand_cmake(argument, variables, declaring, as_path=False))
+    return variables, targets
+
+
+def expand_cmake(argument, variables, declaring, as_path=True):
+    """Resolve one CMake argument to repository-relative paths, or to names.
+
+    Source arguments are paths and become repository-relative; link arguments
+    are target names and stay as written once their variables are expanded.
+    """
+    values, pending = [], [argument]
+    for _ in range(4):
+        resolved = []
+        for value in pending:
+            if "${" not in value:
+                resolved.append(value)
+                continue
+            for name in SOURCE_VARIABLE.findall(value):
+                for replacement in variables.get(name, ["${" + name + "}"]):
+                    resolved.append(value.replace("${%s}" % name, replacement))
+        pending = [value for value in resolved if "${" in value]
+        values.extend(value for value in resolved if "${" not in value)
+        if not pending:
+            break
+    # Sources spelled with a built-in directory variable never lose their `${}`
+    # above, and that spelling is the common way to compile a file that lives in
+    # another directory. Keep them so the resolution below can turn them into
+    # paths; an unknown user variable still falls through unresolved. Link names
+    # keep the previous behaviour: an unresolved name is not a target.
+    if as_path:
+        values.extend(pending)
+    paths = []
+    for value in values:
+        for token in value.split(";"):
+            for item in token.split():
+                if item.startswith("$<"):
+                    continue
+                if not as_path:
+                    paths.append(item)
+                    continue
+                if item.startswith("${CMAKE_CURRENT_SOURCE_DIR}/"):
+                    item = item[len("${CMAKE_CURRENT_SOURCE_DIR}/"):]
+                    item = posixpath.normpath(posixpath.join(declaring, item))
+                elif item.startswith(("${PROJECT_SOURCE_DIR}/", "${CMAKE_SOURCE_DIR}/")):
+                    item = posixpath.normpath(item.split("}/", 1)[1])
+                elif "$" in item:
+                    continue
+                elif not posixpath.isabs(item):
+                    item = posixpath.normpath(posixpath.join(declaring, item))
+                paths.append(item)
+    return paths
+
+
+def library_manifests(root):
+    """Read every library.json under src/, keyed by its CMake target."""
+    libraries = {}
+    violations = []
+    for path in sorted(p.relative_to(root).as_posix()
+                       for p in (root / "src").rglob("library.json")):
+        try:
+            manifest = json.loads((root / path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            violations.append(f"{path}: unreadable library manifest ({error})")
+            continue
+        directory = Path(path).parent.as_posix()
+        name, target, kind = manifest.get("name"), manifest.get("target"), manifest.get("kind")
+        if not isinstance(name, str) or not name:
+            violations.append(f"{path}: manifest needs a non-empty library name")
+            continue
+        if not isinstance(target, str) or not target:
+            violations.append(f"{path}: manifest needs a non-empty CMake target")
+            continue
+        if kind not in ("interface", "static"):
+            violations.append(f"{path}: kind must be interface or static, got {kind!r}")
+        if not manifest.get("purpose"):
+            violations.append(f"{path}: manifest needs a purpose")
+        if target in libraries:
+            violations.append(f"{path}: target {target} is already declared by "
+                              f"{libraries[target]['manifest']}")
+        claims = {}
+        for field in ("consumers", "checks", "tools"):
+            entries = manifest.get(field, [])
+            if not isinstance(entries, list) or any(not isinstance(e, str) for e in entries):
+                violations.append(f"{path}: {field} must be a list of target names")
+                entries = []
+            for entry in entries:
+                claims[entry] = field
+        compiled = []
+        for entry in manifest.get("compiled_elsewhere", []):
+            if not isinstance(entry, dict) or not entry.get("target") or not entry.get("source") \
+                    or not entry.get("reason"):
+                violations.append(f"{path}: compiled_elsewhere entries need target, "
+                                  "source and reason")
+                continue
+            compiled.append((entry["target"], entry["source"]))
+            claims[entry["target"]] = "compiled_elsewhere"
+        libraries[target] = {"manifest": path, "name": name, "directory": directory,
+                             "family": directory.startswith("src/families/"),
+                             "kind": kind, "claims": claims, "compiled_elsewhere": compiled}
+    names = Counter(entry["name"] for entry in libraries.values())
+    for duplicate in sorted(name for name, count in names.items() if count > 1):
+        violations.append(f"library name {duplicate} is declared by "
+                          f"{count} manifests (names are repository-wide)")
+    return libraries, violations
+
+
+def included_prefixes(root, source, cache):
+    """Return the `src/...` header directories a source includes, cached per file."""
+    if source in cache:
+        return cache[source]
+    found = set()
+    path = root / source
+    if path.is_file():
+        text = strip_comments(path.read_text(encoding="utf-8"), Path(source).suffix)
+        for match in INCLUDE.finditer(text):
+            target = match[1]
+            if target.startswith("src/"):
+                found.add(posixpath.dirname(target))
+    return cache.setdefault(source, found)
+
+
+def target_ownership(root):
+    """Audit library.json ownership against the real CMake target graph.
+
+    Returns (libraries, edges, violations). A target depends on a library when
+    it links the library target, compiles a file below the library directory,
+    or includes a header from it. Every such target declared outside that
+    directory must be claimed by the manifest, except targets declared under
+    tests/models/<model>/, which stay with the model test tree.
+    """
+    _, targets = cmake_tables(root)
+    libraries, violations = library_manifests(root)
+    for directory in sorted(p.relative_to(root).as_posix()
+                            for p in (root / "src/models").iterdir() if p.is_dir()):
+        if not any(library["directory"] == directory for library in libraries.values()):
+            violations.append(f"{directory}/library.json: model directory without a manifest")
+
+    includes, edges, dependents = {}, set(), set()
+    for target, info in sorted(targets.items()):
+        outside_test_trees = [path for path in info["files"]
+                              if not Path(path).parent.as_posix().startswith("tests/models/")]
+        if "$" in target:
+            if outside_test_trees:
+                violations.append(f"{outside_test_trees[0]}: {target} is registered through a "
+                                  "helper function, so the ownership audit cannot attribute it")
+            continue
+        declaring = Path(info["file"]).parent.as_posix()
+        sources = sorted(set(info["sources"]))
+        for name, library in sorted(libraries.items()):
+            if library["family"] or name == target:
+                continue
+            directory = library["directory"]
+            if declaring == directory or declaring.startswith(directory + "/"):
+                continue
+            reasons = []
+            if name in info["links"]:
+                reasons.append(f"links {name}")
+            compiled = [source for source in sources if source.startswith(directory + "/")]
+            reasons.extend(f"compiles {source}" for source in compiled)
+            if not compiled and any(direct == directory or direct.startswith(directory + "/")
+                                    for source in sources
+                                    for direct in included_prefixes(root, source, includes)):
+                reasons.append(f"includes {directory}")
+            if not reasons:
+                continue
+            edges.update(f"{library['name']} <- {target} ({reason})"
+                         for reason in dict.fromkeys(reasons))
+            dependents.add((name, target))
+            claim = library["claims"].get(target)
+            if claim is None and not declaring.startswith("tests/models/"):
+                violations.append(f"{info['file']}: {target} depends on {library['name']} "
+                                  f"({'; '.join(reasons[:2])}) but {library['manifest']} "
+                                  "does not claim it")
+            recorded = {source for entry, source in library["compiled_elsewhere"]
+                        if entry == target}
+            for source in compiled:
+                if source not in recorded:
+                    violations.append(f"{info['file']}: {target} compiles {source} outside "
+                                      f"{directory}/ without a compiled_elsewhere entry in "
+                                      f"{library['manifest']}")
+
+    for name, library in sorted(libraries.items(), key=lambda entry: entry[1]["manifest"]):
+        if library["family"]:
+            continue
+        for claim in sorted(library["claims"]):
+            if claim not in targets:
+                violations.append(f"{library['manifest']}: claimed target {claim} does not exist")
+            elif (name, claim) not in dependents:
+                violations.append(f"{library['manifest']}: claimed target {claim} "
+                                  f"does not depend on {library['name']}")
+        for entry, source in library["compiled_elsewhere"]:
+            if source not in set(targets.get(entry, {}).get("sources", ())):
+                violations.append(f"{library['manifest']}: compiled_elsewhere names {entry} "
+                                  f"for {source}, which it does not compile")
+    return libraries, sorted(edges), sorted(set(violations))
+
+
 def core_boundary_violations(report):
     """Return src/core -> src/models|src/families include edges.
 
@@ -335,6 +665,11 @@ def main():
     parser.add_argument("--fail-on-family-graph", action="store_true",
                         help="Fail unless every family library is declared, assigned, "
                              "acyclic and free of model includes")
+    parser.add_argument("--fail-on-target-ownership", action="store_true",
+                        help="Fail unless every model directory has a manifest and every "
+                             "target that links, compiles or includes a library claims it")
+    parser.add_argument("--target-ownership-report", action="store_true",
+                        help="Print the library/target ownership graph")
     args = parser.parse_args()
     report = inventory(args.root.resolve())
     if args.json_report:
@@ -362,6 +697,25 @@ def main():
             return 1
         print("[check-extension-isolation] PASS: core boundary "
               "(no src/core -> src/models|src/families includes)")
+    if args.fail_on_target_ownership or args.target_ownership_report:
+        libraries, edges, violations = target_ownership(args.root.resolve())
+        if args.target_ownership_report:
+            print(f"[check-extension-isolation] target ownership: {len(libraries)} libraries, "
+                  f"{len(edges)} dependency edges")
+            for edge in edges:
+                print(f"  {edge}")
+        for violation in violations:
+            print(f"  ownership: {violation}")
+        if args.fail_on_target_ownership:
+            if violations:
+                print("[check-extension-isolation] TARGET OWNERSHIP INVALID "
+                      "(every model and support library must assign its dependent "
+                      "tests, tools and consumers):")
+                for violation in violations:
+                    print(f"  {violation}")
+                return 1
+            print(f"[check-extension-isolation] PASS: target ownership "
+                  f"({len(libraries)} libraries, {len(edges)} dependency edges)")
     if args.fail_on_family_graph:
         if report["family_violations"]:
             print("[check-extension-isolation] FAMILY GRAPH INVALID "

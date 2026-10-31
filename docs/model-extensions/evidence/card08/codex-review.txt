@@ -1,0 +1,55 @@
+# Card 08 — mandated `codex exec review` (2026-10-31)
+
+Command (verbatim, from the repository root):
+
+```sh
+codex exec review --dangerously-bypass-approvals-and-sandbox \
+  'review the diff of current jj revision, you can use jj diff to see changes'
+```
+
+`CODEX_EXIT=0`. Log size 219 KB (raw log kept out of `docs/` as scratch and deleted); the
+finding and its verdict line are below.
+
+## Finding (codex severity P2; treated as Major because it weakens the card's own gate)
+
+> The new ownership gate drops sources expressed using standard CMake directory
+> variables, leaving a significant hole in its dependency enforcement.
+> [P2] Resolve CMake directory variables before discarding unresolved paths —
+> `tools/ci/check-extension-isolation.py:460-464`. Source arguments containing
+> `${PROJECT_SOURCE_DIR}`, `${CMAKE_SOURCE_DIR}` or `${CMAKE_CURRENT_SOURCE_DIR}` are
+> discarded here before the directory-variable handling below can run. For example,
+> `expand_cmake('${PROJECT_SOURCE_DIR}/src/models/minimax_h3/runtime.cpp', {}, '')`
+> returns `[]` … allowing unclaimed model-dependent targets to pass.
+
+Confirmed from the code: `expand_cmake()` only moved fully resolved values into `values`,
+so anything still holding `${…}` was dropped, which made the existing
+`${CMAKE_CURRENT_SOURCE_DIR}/` / `${PROJECT_SOURCE_DIR}/` / `${CMAKE_SOURCE_DIR}/`
+resolution unreachable for exactly the spellings it was written for.
+
+## Disposition: RESOLVED by the orchestrator (fixed personally, no sub-agent)
+
+`tools/ci/check-extension-isolation.py`: after the expansion loop, unresolved values are
+kept for path resolution (`if as_path: values.extend(pending)`), so a built-in directory
+variable resolves and an unknown user variable still falls through and is dropped; link
+names keep the previous behaviour. Verified:
+
+```text
+${PROJECT_SOURCE_DIR}/src/models/minimax_h3/runtime.cpp  -> ['src/models/minimax_h3/runtime.cpp']
+${CMAKE_CURRENT_SOURCE_DIR}/../chat_template.cpp         -> ['src/models/deepseek_v4_flash/chat_template.cpp']
+${CMAKE_SOURCE_DIR}/src/eval/dataset.cpp                 -> ['src/eval/dataset.cpp']
+${GUFO_QWEN_LIBRARIES} (link name)                       -> []
+${UNKNOWN_VAR}/x.cpp                                     -> []
+```
+
+Regression fixture added: `test_target_ownership_resolves_directory_variable_sources`
+(`tests/tools/check_extension_isolation_test.py`) declares two outside targets that
+compile a demo model source with the `${PROJECT_SOURCE_DIR}` and
+`${CMAKE_CURRENT_SOURCE_DIR}/../../` spellings and asserts both are reported and both
+edges appear. `python3 tests/tools/check_extension_isolation_test.py` → `Ran 20 tests …
+OK`, exit 0. Repository gates after the fix: `PASS: target ownership (17 libraries,
+183 dependency edges)`, `PASS: core boundary`, `PASS: family graph (6 libraries,
+7 declared edges, acyclic)` — the edge count is unchanged, so no dependency is currently
+hidden in this tree; the hole was latent for the next card.
+
+No critical finding. No other actionable regression was reported in the library
+extraction, the fixture move or the manifest work.

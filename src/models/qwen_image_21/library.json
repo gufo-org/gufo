@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "name": "qwen_image_21",
+  "target": "gufo_qwen_image_21",
+  "kind": "static",
+  "purpose": "Qwen-Image-21 image understanding runtime: weights, tokenizer and vision input.",
+  "consumers": [
+    "gufo_http"
+  ]
+}

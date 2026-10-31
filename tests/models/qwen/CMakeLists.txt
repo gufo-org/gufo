@@ -1,6 +1,7 @@
 function(add_qwen_cpu_test target source labels)
   add_executable(${target} ${PROJECT_SOURCE_DIR}/${source})
-  target_link_libraries(${target} PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
+  target_link_libraries(${target} PRIVATE gufo_core
+    ${GUFO_QWEN_LIBRARIES})
   add_test(NAME ${target} COMMAND ${target})
   set_tests_properties(${target} PROPERTIES LABELS "${labels}")
 endfunction()
@@ -48,6 +49,13 @@ add_qwen_cpu_test(qwen_l1_ffn_module_test
 add_qwen_cpu_test(qwen_l1_ssm_module_test
   tests/models/qwen/modules/ssm_test.cpp
   "cpu;models;qwen;module;ssm")
+
+# These four report candidate logits through the shared comparison support
+# (src/testing/compare) via tests/testing/test_common.hpp.
+target_link_libraries(qwen_oracle_test PRIVATE gufo_compare)
+target_link_libraries(qwen_l1_norm_module_test PRIVATE gufo_compare)
+target_link_libraries(qwen_l1_ffn_module_test PRIVATE gufo_compare)
+target_link_libraries(qwen_l1_ssm_module_test PRIVATE gufo_compare)
 
 add_qwen_cpu_test(qwen_fusion_route_test
   tests/models/qwen/hip/execution_policy_test.cpp
