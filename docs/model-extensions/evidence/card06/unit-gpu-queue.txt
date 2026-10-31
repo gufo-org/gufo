@@ -1,0 +1,39 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+Test project /home/mixer/gufo/build/card06-gpu
+    Start 196: qwen_mtp_gpu_test
+1/3 Test #196: qwen_mtp_gpu_test ..........................***Failed    0.08 sec
+qwen_mtp_gpu_test failed: Missing Qwen MTP tensor: token_embd.weight
+
+    Start 198: qwen_dflash_upload_lifetime_test
+2/3 Test #198: qwen_dflash_upload_lifetime_test ...........***Skipped   0.06 sec
+    Start 199: qwen_dflash_noncausal_attention_ops_test
+3/3 Test #199: qwen_dflash_noncausal_attention_ops_test ...   Passed    1.61 sec
+
+67% tests passed, 1 tests failed out of 3
+
+Label Time Summary:
+dflash            =   1.61 sec*proc (1 test)
+dflash2           =   1.67 sec*proc (2 tests)
+external-model    =   0.14 sec*proc (2 tests)
+gpu               =   1.76 sec*proc (3 tests)
+hip               =   1.76 sec*proc (3 tests)
+kernels           =   1.61 sec*proc (1 test)
+mtp               =   0.08 sec*proc (1 test)
+qwen27b           =   1.76 sec*proc (3 tests)
+
+Total Test time (real) =   1.76 sec
+
+The following tests did not run:
+	198 - qwen_dflash_upload_lifetime_test (Skipped)
+
+The following tests FAILED:
+	196 - qwen_mtp_gpu_test (Failed)                        external-model gpu hip mtp qwen27b
+Errors while running CTest
+2/3 Test #243: qwen38_flash_next.prompt_lookup ...........   Passed    0.06 sec
+3/3 Test #255: qwen38_flash_next.verification_sampling ...   Passed    3.31 sec
+67% tests passed, 1 tests failed out of 3
+1/2 Test #198: qwen_dflash_upload_lifetime_test ...   Passed    3.14 sec
+2/2 Test #239: qwen38_flash_next.mtp_sampling .....   Passed    0.14 sec
+100% tests passed out of 2

@@ -10,7 +10,14 @@ time and feature criteria hold.
 
 Current execution milestone: complete cards 01–14 with the three-agent workflow,
 then stop. Cards 15–29 remain the documented later RFC scope and are not
-authorized for this run.
+authorized for this run. User decision (2026-10-31): the functional harness
+(`tests/functional/run.py` rows, `prompt_lookup.py`, standard speed benchmarks
+and main-control matched-timing comparisons) does NOT run during cards 06–14.
+All functional evidence is deferred to one consolidated qualification window
+after Card 14 verifies, scheduled solely by the orchestrator. Cards gate on
+unit tests (including the identity goldens), CPU/hosted checks, static audits
+and formatting; their functional requirements stay recorded as deferred,
+pending evidence with exact commands — never as passes.
 
 Statuses: pending, implementing, reviewing, integrating, complete. The agent
 orchestrating this work records agent names, review findings, their disposition,
@@ -21,20 +28,33 @@ serializes the RFC's parallel paths at the user's request.
 
 ## Shared acceptance gates
 
-- Preserve behavior and cache identity bytes. Numerical quality and existing
-  functional suites run on the candidate; matched main controls cover affected
-  timing histories, with the same revision metadata, toolchain, settings, model,
+- Preserve behavior and cache identity bytes; the identity golden unit tests
+  run in every card. Numerical quality and existing functional suites run on
+  the candidate in the deferred post-Card-14 qualification window; matched
+  main controls cover affected timing histories, with the same revision
+  metadata, toolchain, settings, model,
   harness and cache history recorded. Text timings are per request and phase
   (5% and 10 ms), never averages. Include prefill, decode, TTFT and continuation
   restore; include `long-context` and `cache` for continuation changes and
   inspect loaded modes and actual drafts. Retain standard HTTP speed benchmarks
   and numerical quality tests. Investigate flags and fix confirmed regressions;
   noisy timing evidence stays explicitly inconclusive.
-- Shared text changes need all four text profiles; model migrations need the
-  affected model and modes. DeepSeek needs dedicated local time and actual
-  weights. Replay `tests/functional/pi_agent.py` for affected reported agent
-  loops, retaining sessions and inspecting actual tool results. Avoid unrelated
+- In that qualification window, shared text changes need all four text
+  profiles; model migrations need the affected model and modes. DeepSeek needs
+  dedicated local time and actual weights (its Card 06 rows were dropped by
+  user decision on host-capacity grounds and remain pending unless scheduled). Replay `tests/functional/pi_agent.py` for affected
+  reported agent loops, retaining sessions and inspecting actual tool results. Avoid unrelated
   model sweeps and duplicated correctness runs on main.
+- No functional-harness runs during a card (user decision 2026-10-31); they
+  happen once, after Card 14, in the final qualification window. In-card
+  evidence stays small: curated commands, verdicts, compact tables and short
+  excerpts only; no raw server logs, per-row report trees or multi-megabyte
+  artifacts under `docs/`; scratch above the size notes below lives in `/tmp`
+  with mandatory cleanup.
+- Functional test server disk caches always live in a dedicated
+  `/tmp/<test-specific-dir>` and are always deleted when that test finishes,
+  failures included; only durable report artifacts enter the card's evidence
+  directory. Repository evidence trees never contain regenerable cache extents.
 - `bench` and `prompt` routing changes require matched CLI output and timing
   controls as well as HTTP timings. Existing historical `BENCHMARKS.md` numbers
   are not migration baselines.

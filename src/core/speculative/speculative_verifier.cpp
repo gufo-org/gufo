@@ -66,188 +66,17 @@ template<typename T>
   return static_cast<std::size_t>(value);
 }
 
-class QwenGpuSpeculativeTarget final : public ISpeculativeTargetExecutor {
-public:
-  explicit QwenGpuSpeculativeTarget(hip::QwenGpuExecutor& executor)
-      : executor_(executor) {}
-
-  void Reset() noexcept override { executor_.Reset(); }
-
-  tokenization::TokenId ForwardPromptBatch(
-      std::span<const tokenization::TokenId> prompt_tokens) override {
-    return executor_.ForwardPromptBatch(prompt_tokens);
-  }
-  tokenization::TokenId ForwardPromptSuffix(
-      std::span<const tokenization::TokenId> tokens, std::uint32_t position,
-      bool compute_logits) override {
-    return executor_.ForwardPromptBatch(tokens, position, compute_logits);
-  }
-
-  tokenization::TokenId ForwardToken(tokenization::TokenId token_id,
-                                     std::uint32_t pos,
-                                     bool compute_logits) override {
-    return executor_.ForwardToken(token_id, pos, compute_logits);
-  }
-
-  void SaveState(std::uint32_t valid_context) override {
-    executor_.SaveState(valid_context);
-  }
-
-  void RestoreState() override { executor_.RestoreState(); }
-
-  void SetPromptHiddenCapture(
-      bool enabled, std::span<const std::uint32_t> target_layer_ids) override {
-    executor_.SetPromptHiddenCapture(enabled, target_layer_ids);
-  }
-
-  std::span<const float> GetPromptHiddenStates() const noexcept override {
-    return executor_.GetPromptHiddenStates();
-  }
-
-  std::span<const float> CopyLastHidden() override {
-    return executor_.CopyLastHidden();
-  }
-
-  std::span<const float> CopyLastLogits() override {
-    return executor_.CopyLastLogits();
-  }
-
-  std::span<const float> CopyVerificationLogits(std::size_t row) override {
-    return executor_.CopyVerificationLogits(row);
-  }
-
-  bool SupportsDeviceResidentSampling() const noexcept override { return true; }
-
-  tokenization::TokenId SampleLastLogits(
-      sampling::SamplerState& sampler) override {
-    return executor_.SampleLastLogits(sampler);
-  }
-
-  tokenization::TokenId SampleVerificationLogits(
-      std::size_t row, sampling::SamplerState& sampler) override {
-    return executor_.SampleVerificationLogits(row, sampler);
-  }
-
-  SampledVerificationResult VerifySampledToken(
-      std::size_t row, tokenization::TokenId draft_token,
-      std::span<const tokenization::TokenId> draft_candidate_ids,
-      std::span<const float> draft_candidate_probabilities,
-      double draft_token_probability,
-      sampling::SamplerState& sampler) override {
-    const auto result = executor_.VerifySampledToken(
-        row, draft_token, draft_candidate_ids, draft_candidate_probabilities,
-        draft_token_probability, sampler);
-    return {.token = result.token, .accepted = result.accepted};
-  }
-
-  VerificationChunkResult ForwardVerificationChunk(
-      std::span<const tokenization::TokenId> candidate_tokens,
-      std::uint32_t start_pos, bool capture_hidden,
-      bool capture_logits) override {
-    return CaptureVerification(executor_.ForwardVerificationChunk(
-                                   candidate_tokens, start_pos, capture_logits),
-                               capture_hidden, capture_logits);
-  }
-
-  TargetVerificationBatch ForwardVerificationBatch(
-      std::span<const TargetVerificationItem> items) override {
-    if (items.size() < 2)
-      return ISpeculativeTargetExecutor::ForwardVerificationBatch(items);
-    std::vector<QwenGpuSpeculativeTarget*> targets;
-    std::vector<hip::QwenGpuVerificationItem> gpu_items;
-    targets.reserve(items.size());
-    gpu_items.reserve(items.size());
-    std::size_t rows = 0;
-    for (const auto& item : items) {
-      auto* target = dynamic_cast<QwenGpuSpeculativeTarget*>(item.executor);
-      if (target == nullptr)
-        return ISpeculativeTargetExecutor::ForwardVerificationBatch(items);
-      targets.push_back(target);
-      gpu_items.push_back({&target->executor_, item.tokens, item.position,
-                           item.capture_logits});
-      rows += item.tokens.size();
-    }
-    if (items.size() > 8 ||
-        rows > targets.front()->executor_.GetMaxPromptBatch())
-      return ISpeculativeTargetExecutor::ForwardVerificationBatch(items);
-    auto predictions =
-        hip::QwenGpuExecutor::ForwardVerificationBatch(gpu_items);
-    TargetVerificationBatch result;
-    result.physical_width = items.size();
-    result.chunks.reserve(items.size());
-    for (std::size_t index = 0; index < items.size(); ++index) {
-      result.chunks.push_back(targets[index]->CaptureVerification(
-          std::move(predictions[index]), items[index].capture_hidden,
-          items[index].capture_logits));
-    }
-    return result;
-  }
-
-  void CommitVerificationChunk(
-      std::span<const tokenization::TokenId> committed_tokens,
-      std::uint32_t start_pos) override {
-    executor_.CommitVerificationChunk(committed_tokens, start_pos);
-  }
-
-  void FinishVerification() override { executor_.FinishVerification(); }
-
-  tokenization::TokenId GetEosTokenId() const noexcept override {
-    return executor_.GetTokenizer().GetEosTokenId();
-  }
-  bool IsStopToken(tokenization::TokenId token) const noexcept override {
-    return executor_.GetTokenizer().IsStopToken(token);
-  }
-
-  std::size_t VocabularySize() const noexcept override {
-    return executor_.GetConfig().vocab_size;
-  }
-
-  std::string_view DecodeToken(
-      tokenization::TokenId token_id) const noexcept override {
-    return executor_.GetTokenizer().DecodeToken(token_id);
-  }
-
-private:
-  VerificationChunkResult CaptureVerification(
-      std::vector<tokenization::TokenId> predictions, bool capture_hidden,
-      bool capture_logits) {
-    VerificationChunkResult result;
-    result.predictions = std::move(predictions);
-    if (capture_hidden) {
-      const auto hidden = executor_.GetVerificationHiddenStates();
-      result.hidden_states.assign(hidden.begin(), hidden.end());
-      if (!result.predictions.empty()) {
-        if (result.hidden_states.size() % result.predictions.size() != 0) {
-          throw std::runtime_error(
-              "batched verification hidden-state capture is malformed");
-        }
-        result.hidden_width =
-            result.hidden_states.size() / result.predictions.size();
-      }
-    }
-    if (capture_logits) {
-      const auto logits = executor_.GetVerificationLogits();
-      result.logits.assign(logits.begin(), logits.end());
-      result.vocab_size = executor_.GetModel().GetConfig().vocab_size;
-    }
-    return result;
-  }
-
-  hip::QwenGpuExecutor& executor_;
-};
-
 }  // namespace
 
-bool SpeculativeVerifier::IsStopToken(
-    tokenization::TokenId token, tokenization::TokenId eos_id) const noexcept {
+bool SpeculativeVerifier::IsStopToken(sampling::TokenId token,
+                                      sampling::TokenId eos_id) const noexcept {
   return token == eos_id || target_executor_->IsStopToken(token);
 }
 
 SpeculativeVerifier::SpeculativeVerifier(
-    hip::QwenGpuExecutor& target_executor,
+    std::unique_ptr<ISpeculativeTargetExecutor> target_executor,
     std::unique_ptr<IDraftBackend> draft_backend, SpeculativeOptions options)
-    : owned_target_executor_(
-          std::make_unique<QwenGpuSpeculativeTarget>(target_executor)),
+    : owned_target_executor_(std::move(target_executor)),
       target_executor_(owned_target_executor_.get()),
       owned_draft_backend_(std::move(draft_backend)),
       draft_backend_(owned_draft_backend_.get()),
@@ -257,11 +86,10 @@ SpeculativeVerifier::SpeculativeVerifier(
   ConfigureAdaptiveDraftPolicy();
 }
 
-SpeculativeVerifier::SpeculativeVerifier(hip::QwenGpuExecutor& target_executor,
-                                         IDraftBackend& draft_backend,
-                                         SpeculativeOptions options)
-    : owned_target_executor_(
-          std::make_unique<QwenGpuSpeculativeTarget>(target_executor)),
+SpeculativeVerifier::SpeculativeVerifier(
+    std::unique_ptr<ISpeculativeTargetExecutor> target_executor,
+    IDraftBackend& draft_backend, SpeculativeOptions options)
+    : owned_target_executor_(std::move(target_executor)),
       target_executor_(owned_target_executor_.get()),
       draft_backend_(&draft_backend),
       options_(options),
@@ -337,8 +165,8 @@ void SpeculativeVerifier::UpdateAdaptiveDraftLength(std::size_t accepted,
   }
 }
 
-tokenization::TokenId SpeculativeVerifier::AdvanceCommittedToken(
-    tokenization::TokenId token, std::uint32_t position) {
+sampling::TokenId SpeculativeVerifier::AdvanceCommittedToken(
+    sampling::TokenId token, std::uint32_t position) {
   const auto next = target_executor_->ForwardToken(token, position);
   if (draft_backend_ != nullptr &&
       draft_backend_->RequiresTargetHiddenStates()) {
@@ -356,23 +184,23 @@ tokenization::TokenId SpeculativeVerifier::AdvanceCommittedToken(
 }
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
-    std::vector<tokenization::TokenId>& current_sequence, std::uint32_t cur_pos,
-    tokenization::TokenId current_token, tokenization::TokenId eos_id) {
+    std::vector<sampling::TokenId>& current_sequence, std::uint32_t cur_pos,
+    sampling::TokenId current_token, sampling::TokenId eos_id) {
   return VerifyStep(current_sequence, cur_pos, current_token, eos_id,
                     std::numeric_limits<std::uint32_t>::max());
 }
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
-    std::vector<tokenization::TokenId>& current_sequence, std::uint32_t cur_pos,
-    tokenization::TokenId current_token, tokenization::TokenId eos_id,
+    std::vector<sampling::TokenId>& current_sequence, std::uint32_t cur_pos,
+    sampling::TokenId current_token, sampling::TokenId eos_id,
     std::uint32_t max_emitted_tokens) {
   return VerifyStep(current_sequence, cur_pos, current_token, eos_id,
                     max_emitted_tokens, 0.0F, nullptr);
 }
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
-    std::vector<tokenization::TokenId>& current_sequence, std::uint32_t cur_pos,
-    tokenization::TokenId current_token, tokenization::TokenId eos_id,
+    std::vector<sampling::TokenId>& current_sequence, std::uint32_t cur_pos,
+    sampling::TokenId current_token, sampling::TokenId eos_id,
     std::uint32_t max_emitted_tokens, float temperature,
     std::uint64_t* rng_state) {
   if (!std::isfinite(temperature) || temperature < 0.0F) {
@@ -399,13 +227,13 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
 
 struct SpeculativeVerifier::PreparedStep {
   DraftProposal proposal;
-  std::vector<tokenization::TokenId> inputs;
+  std::vector<sampling::TokenId> inputs;
   std::vector<double> token_probabilities;
   std::optional<sampling::SamplerState> working_sampler;
   std::optional<StepResult> immediate;
   std::vector<sampling::TokenLogprobs> logprobs;
   std::uint32_t position{0};
-  tokenization::TokenId eos_id{0};
+  sampling::TokenId eos_id{0};
   bool sampled{false};
   bool random_sampling{false};
   bool capture_hidden{false};
@@ -419,10 +247,9 @@ struct SpeculativeVerifier::PreparedStep {
 };
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
-    std::span<const tokenization::TokenId> current_sequence,
-    std::uint32_t cur_pos, tokenization::TokenId current_token,
-    tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens,
-    sampling::SamplerState& sampler) {
+    std::span<const sampling::TokenId> current_sequence, std::uint32_t cur_pos,
+    sampling::TokenId current_token, sampling::TokenId eos_id,
+    std::uint32_t max_emitted_tokens, sampling::SamplerState& sampler) {
   sampler.config().Validate();
   if (!use_batched_verification_ &&
       sampler.config().can_use_unmodified_argmax()) {
@@ -553,7 +380,7 @@ void SpeculativeVerifier::PrepareProposalVerification(
   const auto proposal_row = [&](std::size_t row) {
     const std::size_t offset = row * proposal.candidates_per_token;
     return std::pair{
-        std::span<const tokenization::TokenId>(
+        std::span<const sampling::TokenId>(
             proposal.candidate_ids.data() + offset,
             proposal.candidates_per_token),
         std::span<const float>(proposal.candidate_probabilities.data() + offset,
@@ -705,7 +532,7 @@ SpeculativeVerifier::ProcessVerificationChunk(
     return result;
   }
   auto& accepted_count = prepared.accepted_count;
-  tokenization::TokenId correction_token = 0;
+  sampling::TokenId correction_token = 0;
   for (; accepted_count < std::min(num_draft, chunk_end); ++accepted_count) {
     const auto local_row = accepted_count - chunk_begin;
     if (!prepared.sampled) {
@@ -827,8 +654,8 @@ SpeculativeVerifier::ProcessVerificationChunk(
   if (chunk_end > committed_input_count) {
     target_executor_->RestoreState();
     target_executor_->CommitVerificationChunk(
-        std::span<const tokenization::TokenId>(verification_inputs.data(),
-                                               committed_input_count),
+        std::span<const sampling::TokenId>(verification_inputs.data(),
+                                           committed_input_count),
         cur_pos);
     target_executor_->FinishVerification();
   }
@@ -847,7 +674,7 @@ SpeculativeVerifier::ProcessVerificationChunk(
   result.next_token_logits = std::move(frontier);
   result.hit_eos = std::any_of(
       result.emitted_tokens.begin(), result.emitted_tokens.end(),
-      [&](tokenization::TokenId token) { return IsStopToken(token, eos_id); });
+      [&](sampling::TokenId token) { return IsStopToken(token, eos_id); });
 
   stats_.total_draft_tokens += num_draft;
   stats_.total_accepted_tokens += accepted_count;
@@ -856,7 +683,7 @@ SpeculativeVerifier::ProcessVerificationChunk(
   UpdateAdaptiveDraftLength(accepted_count, num_draft);
   if (prepared.sampled)
     sampler.SetRngState(working_sampler.rng_state());
-  draft_backend_->AcceptFeedback(std::span<const tokenization::TokenId>(
+  draft_backend_->AcceptFeedback(std::span<const sampling::TokenId>(
                                      proposal.tokens.data(), accepted_count),
                                  correction_token);
   return result;
@@ -954,7 +781,7 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
       if (indices.size() < 4)
         step.chunk_limit = std::numeric_limits<std::size_t>::max();
       const auto index = prepared_indices[prepared_index];
-      const auto tokens = std::span<const tokenization::TokenId>(step.inputs)
+      const auto tokens = std::span<const sampling::TokenId>(step.inputs)
                               .subspan(step.verified_rows);
       items.push_back(
           {requests[index].verifier.target_executor_,
@@ -988,10 +815,9 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
 }
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
-    std::span<const tokenization::TokenId> current_sequence,
-    std::uint32_t cur_pos, tokenization::TokenId current_token,
-    tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens,
-    std::optional<std::uint32_t> logprobs) {
+    std::span<const sampling::TokenId> current_sequence, std::uint32_t cur_pos,
+    sampling::TokenId current_token, sampling::TokenId eos_id,
+    std::uint32_t max_emitted_tokens, std::optional<std::uint32_t> logprobs) {
   if (max_emitted_tokens == 0) {
     throw std::invalid_argument(
         "speculative verification must emit at least one token");
@@ -1055,7 +881,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
   const bool capture_target_hidden =
       draft_backend_->RequiresTargetHiddenStates();
   std::size_t accepted_count = 0;
-  tokenization::TokenId correction_token = 0;
+  sampling::TokenId correction_token = 0;
   std::vector<float> correction_logits;
 
   // Reference route: sequential transactional verification.
@@ -1082,10 +908,10 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
 
   target_executor_->SaveState(cur_pos);
   std::vector<sampling::TokenLogprobs> probabilities;
-  std::vector<tokenization::TokenId> target_predictions;
+  std::vector<sampling::TokenId> target_predictions;
   target_predictions.reserve(num_draft);
 
-  tokenization::TokenId input_token = current_token;
+  sampling::TokenId input_token = current_token;
   std::uint32_t eval_pos = cur_pos;
   for (std::size_t index = 0; index < num_draft; ++index) {
     const auto target_prediction =
@@ -1120,7 +946,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
     committed_target_hidden = std::move(tentative_target_hidden);
   } else {
     target_executor_->RestoreState();
-    tokenization::TokenId replay_input = current_token;
+    sampling::TokenId replay_input = current_token;
     std::uint32_t replay_pos = cur_pos;
     for (std::size_t index = 0; index < accepted_count; ++index) {
       (void)target_executor_->ForwardToken(replay_input, replay_pos, false);
@@ -1190,7 +1016,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
 
   UpdateAdaptiveDraftLength(accepted_count, num_draft);
 
-  draft_backend_->AcceptFeedback(std::span<const tokenization::TokenId>(
+  draft_backend_->AcceptFeedback(std::span<const sampling::TokenId>(
                                      proposal.tokens.data(), accepted_count),
                                  correction_token);
 
@@ -1415,18 +1241,17 @@ void SpeculativeVerifier::RestorePersistentSnapshot(
   rolling_acceptance_ = std::move(rolling_acceptance);
 }
 
-std::vector<tokenization::TokenId> SpeculativeVerifier::Generate(
-    std::span<const tokenization::TokenId> prompt_tokens,
-    const models::GenerationOptions& options,
-    const std::function<bool(tokenization::TokenId, std::string_view)>&
-        on_token) {
-  std::vector<tokenization::TokenId> output_tokens;
+std::vector<sampling::TokenId> SpeculativeVerifier::Generate(
+    std::span<const sampling::TokenId> prompt_tokens,
+    const GenerationOptions& options,
+    const std::function<bool(sampling::TokenId, std::string_view)>& on_token) {
+  std::vector<sampling::TokenId> output_tokens;
   if (prompt_tokens.empty()) {
     return output_tokens;
   }
   options.sampling.Validate();
 
-  tokenization::TokenId first_token = Prime(prompt_tokens);
+  sampling::TokenId first_token = Prime(prompt_tokens);
   sampling::SamplerState sampler(options.sampling, prompt_tokens);
   if (!options.sampling.can_use_unmodified_argmax()) {
     first_token = target_executor_->SampleLastLogits(sampler);
@@ -1436,11 +1261,11 @@ std::vector<tokenization::TokenId> SpeculativeVerifier::Generate(
     return output_tokens;
   }
 
-  std::vector<tokenization::TokenId> current_sequence(prompt_tokens.begin(),
-                                                      prompt_tokens.end());
+  std::vector<sampling::TokenId> current_sequence(prompt_tokens.begin(),
+                                                  prompt_tokens.end());
   current_sequence.push_back(first_token);
   std::uint32_t cur_pos = static_cast<std::uint32_t>(prompt_tokens.size());
-  tokenization::TokenId next_token = first_token;
+  sampling::TokenId next_token = first_token;
 
   output_tokens.push_back(first_token);
   sampler.Accept(first_token);
@@ -1496,8 +1321,8 @@ std::vector<tokenization::TokenId> SpeculativeVerifier::Generate(
   return output_tokens;
 }
 
-tokenization::TokenId SpeculativeVerifier::ExtendPrompt(
-    std::span<const tokenization::TokenId> tokens, std::uint32_t position,
+sampling::TokenId SpeculativeVerifier::ExtendPrompt(
+    std::span<const sampling::TokenId> tokens, std::uint32_t position,
     bool compute_logits) {
   if (tokens.empty() || position == 0) {
     throw std::invalid_argument(
@@ -1525,8 +1350,8 @@ tokenization::TokenId SpeculativeVerifier::ExtendPrompt(
   return next;
 }
 
-tokenization::TokenId SpeculativeVerifier::Prime(
-    std::span<const tokenization::TokenId> prompt_tokens, bool compute_logits) {
+sampling::TokenId SpeculativeVerifier::Prime(
+    std::span<const sampling::TokenId> prompt_tokens, bool compute_logits) {
   if (prompt_tokens.empty()) {
     throw std::invalid_argument("speculative prompt must not be empty");
   }
@@ -1539,7 +1364,7 @@ tokenization::TokenId SpeculativeVerifier::Prime(
                                     ? draft_backend_->TargetHiddenLayerIds()
                                     : std::span<const std::uint32_t>{};
   target_executor_->SetPromptHiddenCapture(capture_hidden, target_layer_ids);
-  const tokenization::TokenId first_token =
+  const sampling::TokenId first_token =
       target_executor_->ForwardPromptSuffix(prompt_tokens, 0, compute_logits);
   if (capture_hidden) {
     const auto prompt_hidden = target_executor_->GetPromptHiddenStates();

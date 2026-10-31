@@ -1,0 +1,5 @@
+Historical configure excerpt + retained cache:
+-- gufo: extension mode=discovery; included=[]; excluded=[]
+BUILD_TESTING:BOOL=ON
+CMAKE_BUILD_TYPE:STRING=RelWithDebInfo
+ENGINE_ENABLE_HIP:BOOL=ON

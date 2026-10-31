@@ -1,0 +1,5 @@
+$ nix develop -c ctest --test-dir build/card06-gpu -R '^(qwen27b_continuation_identity_test|qwen38_flash_next_continuation_identity_test|deepseek_v4_flash_continuation_identity_test)$' --output-on-failure
+warning: Git tree '/home/mixer/gufo' is dirty
+error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation not permitted
+
+exit=1

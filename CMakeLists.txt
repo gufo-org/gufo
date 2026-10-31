@@ -705,7 +705,12 @@ if (BUILD_TESTING)
   add_test(NAME extension_isolation_report
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py --mode report)
+  add_test(NAME extension_core_model_includes_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-core-model-includes)
   set_tests_properties(check_extension_isolation_test extension_isolation_report
+    extension_core_model_includes_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
   add_test(NAME check_docs_test

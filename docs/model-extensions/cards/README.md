@@ -44,17 +44,36 @@ documentation work and does not itself advance any implementation status.
    and the closing commit. No competing editors in the shared worktree. Finish or
    explicitly transfer live jobs with their exact handles before ownership changes.
 
-Card 06 is a text-path change, not build infrastructure: it needs the affected
-text profiles with `long-context` and `cache`, the identity goldens from Card 02,
-and matched per-request timings against a main control. Reviewers must read
+Card 06 is a text-path change, not build infrastructure: its full acceptance
+still includes the affected text profiles with `long-context` and `cache` and
+matched per-request timings against a main control — but per the user decision
+below those functional suites run in the single post-Card-14 qualification
+window, not inside the card. Within the card, gate on the identity goldens from
+Card 02, the speculative unit tests, static isolation/ISA audits and CPU/hosted
+checks, recording every deferred functional command verbatim. Reviewers must read
 `docs/model-extensions/evidence/card05/review-and-integration.md` first for the
 discovery/selection contracts the core migration now depends on: built extensions
 are dependency-first while excluded ones are canonical lexical, the lock is
-validated in every mode, and the collision gate is cross-tier only. Use
-[HANDOFF.md](../HANDOFF.md) for machine/model provenance and the preserved
-working-copy checkpoint.
+validated in every mode, and the collision gate is cross-tier only.
+Machine/model provenance (weights under `./models`, pinned revisions,
+preserved working-copy checkpoint) is recorded in the per-card evidence READMEs
+(Card 05: `evidence/card05/README.md`; Card 06: `evidence/card06/README.md`).
 
 ## Validation conventions
+
+**User decision (2026-10-31): no functional-harness runs during cards 06–14.**
+`tests/functional/run.py` profile rows, `prompt_lookup.py`, standard speed
+benchmarks and main-control matched-timing comparisons are deferred to ONE
+consolidated qualification window executed after Card 14 is verified, scheduled
+solely by the orchestrator. During a card, agents run unit tests (including the
+identity goldens), weight-free model tests, CPU/hosted checks, formatting and
+static audits only. Evidence stays lean: curated commands, verdict lines,
+compact tables and short excerpts; never raw server logs, per-row report trees,
+caches or multi-megabyte artifacts under `docs/model-extensions/evidence/`
+(the user deleted Card 06's functional report tree as context pollution — keep
+small verdict files instead). Deferred requirements are recorded with their
+exact commands as pending evidence and are never marked passed before the
+qualification window runs them.
 
 Run commands from the repository root in the pinned Nix development environment
 unless a card records a different supported environment. Read
@@ -72,6 +91,22 @@ Discover real target/test names with `ctest --preset gpu-full -N` after configur
 record, not literal commands. New conformance/generator fixtures described in
 future cards are to be added; their names are not claims of existing tests.
 
+Functional server caches are scratch, never evidence. A test's server disk
+cache must ALWAYS live in a dedicated `/tmp/<test-specific-dir>` (for example
+`/tmp/card06-cache/<row-tag>/`) outside the repository, and that directory
+MUST ALWAYS be deleted when the test finishes — including failed, aborted and
+timed-out runs, which `run.py` does not clean up itself (it removes its own
+cache directory only on success). Run each harness invocation with its
+`--output` under `/tmp/<test-specific-dir>`; never point `--output` into
+`docs/**`. Only small verdict artifacts enter the card's evidence directory
+(a per-run summary: status, loaded mode, draft counts, failed cases, phase
+deltas); full `report.json` trees and logs stay in `/tmp` during the session
+and are deleted with it. Never leave cache extents, model blobs or other
+multi-megabyte scratch under `docs/model-extensions/evidence/`. Before closing a card (and after the qualification window), verify
+`du -sh docs/model-extensions/evidence/cardNN` and
+`find docs/model-extensions/evidence/cardNN -type f -size +5M` show only
+explained, durable artifacts.
+
 For hosted CPU scope, configure `cpu-test` and run its relevant tests; use
 `nix build .#checks.x86_64-linux.pr` when the card requires bounded hosted checks.
 C++ changes need the required formatting check in AGENTS.md. Header/include
@@ -79,8 +114,9 @@ changes need `python3 tools/ci/check-extension-api.py --write` followed by a cle
 check and the required API policy updates when declarations/contracts change.
 No extra GPU matrix is implied for this documentation split.
 
-Text migrations use explicit affected suites/modes with
-`tests/functional/run.py` and `compare.py` per the harness README, including
+In the post-Card-14 qualification window, text migrations use explicit
+affected suites/modes with `tests/functional/run.py` and `compare.py` per the
+harness README, including
 `long-context` and `cache` for continuation changes. Record every requested and
 actually loaded mode/draft, cache history, work counters, binary/harness/model
 hashes and toolchain. Shared text changes need all four profiles; individual

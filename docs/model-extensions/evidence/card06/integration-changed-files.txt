@@ -1,0 +1,17 @@
+docs/model-extensions/CARDS.md
+docs/model-extensions/cards/06-model-owned-speculation.md
+docs/model-extensions/cards/README.md
+docs/model-extensions/evidence/card06/README.md
+docs/model-extensions/evidence/card06/build-gpu-test.txt
+docs/model-extensions/evidence/card06/compare-deepseek4-dspark.txt
+docs/model-extensions/evidence/card06/compare-deepseek4-off.txt
+docs/model-extensions/evidence/card06/compare-flash-next-q4-mtp.txt
+docs/model-extensions/evidence/card06/configure-gpu-test.txt
+docs/model-extensions/evidence/card06/hip-build-audit.md
+docs/model-extensions/evidence/card06/integration-audit.txt
+docs/model-extensions/evidence/card06/integration-gates.txt
+docs/model-extensions/evidence/card06/integration-identity-attempt.txt
+docs/model-extensions/evidence/card06/pending-commands.md
+docs/model-extensions/evidence/card06/pipeline-status.txt
+docs/model-extensions/evidence/card06/unit-identity-goldens.txt
+docs/model-extensions/evidence/card06/integration-changed-files.txt

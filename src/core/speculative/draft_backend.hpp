@@ -11,18 +11,14 @@
 #include <utility>
 #include <vector>
 
-#include "src/models/qwen/tokenizer.hpp"
-
-namespace gufo::sampling {
-class SamplerState;
-}
+#include "src/core/sampling.hpp"
 
 namespace gufo::speculative {
 
 /// Represents a speculative draft proposal block
 struct DraftProposal {
-  std::vector<tokenization::TokenId> tokens;
-  std::vector<tokenization::TokenId> candidate_ids;
+  std::vector<sampling::TokenId> tokens;
+  std::vector<sampling::TokenId> candidate_ids;
   std::vector<float> candidate_probabilities;
   std::size_t candidates_per_token{0};
   std::uint32_t start_pos{0};
@@ -30,10 +26,10 @@ struct DraftProposal {
 };
 
 struct DraftTargetContext {
-  std::span<const tokenization::TokenId> prompt_tokens;
+  std::span<const sampling::TokenId> prompt_tokens;
   std::span<const float> prompt_hidden_states;
   std::size_t hidden_size{0};
-  tokenization::TokenId first_token{0};
+  sampling::TokenId first_token{0};
 };
 
 class IDraftBackend;
@@ -42,7 +38,7 @@ class IDraftBackend;
 /// belongs to its request; batching must preserve its proposal distribution.
 struct DraftProposalRequest {
   IDraftBackend* backend{nullptr};
-  std::span<const tokenization::TokenId> tokens;
+  std::span<const sampling::TokenId> tokens;
   std::uint32_t position{0};
   std::uint32_t max_tokens{0};
   float temperature{0.0F};
@@ -88,7 +84,7 @@ public:
 
   /// Proposes up to max_tokens draft tokens given the current sequence
   [[nodiscard]] virtual DraftProposal Propose(
-      std::span<const tokenization::TokenId> prompt_tokens,
+      std::span<const sampling::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) = 0;
 
   /// Samples proposals from the draft distribution and returns each sparse
@@ -97,7 +93,7 @@ public:
   /// proposals. Do not discard a sampled token based on its own probability:
   /// that conditions the proposal without updating its reported distribution.
   [[nodiscard]] virtual DraftProposal ProposeSampled(
-      std::span<const tokenization::TokenId> prompt_tokens,
+      std::span<const sampling::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
       std::uint64_t* rng_state) {
     (void)prompt_tokens;
@@ -189,8 +185,8 @@ public:
 
   /// Notifies the draft backend of which tokens were accepted and the target
   /// correction token
-  virtual void AcceptFeedback(std::span<const tokenization::TokenId> accepted,
-                              tokenization::TokenId correction_token) {
+  virtual void AcceptFeedback(std::span<const sampling::TokenId> accepted,
+                              sampling::TokenId correction_token) {
     (void)accepted;
     (void)correction_token;
   }
@@ -229,7 +225,7 @@ public:
 /// Mock / test draft backend for deterministic verification testing
 class MockDraftBackend : public IDraftBackend {
 public:
-  explicit MockDraftBackend(std::vector<tokenization::TokenId> candidate_pool)
+  explicit MockDraftBackend(std::vector<sampling::TokenId> candidate_pool)
       : candidate_pool_(std::move(candidate_pool)) {}
 
   [[nodiscard]] std::string_view Name() const noexcept override {
@@ -237,7 +233,7 @@ public:
   }
 
   [[nodiscard]] DraftProposal Propose(
-      std::span<const tokenization::TokenId> prompt_tokens,
+      std::span<const sampling::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) override {
     (void)prompt_tokens;
     DraftProposal proposal;
@@ -250,12 +246,12 @@ public:
     return proposal;
   }
 
-  void SetCandidates(std::vector<tokenization::TokenId> candidates) {
+  void SetCandidates(std::vector<sampling::TokenId> candidates) {
     candidate_pool_ = std::move(candidates);
   }
 
 private:
-  std::vector<tokenization::TokenId> candidate_pool_;
+  std::vector<sampling::TokenId> candidate_pool_;
 };
 
 }  // namespace gufo::speculative

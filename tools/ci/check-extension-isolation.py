@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Report extension coupling without enforcing migration rules yet.
+"""Report extension coupling; enforce the migrated core boundary.
 
 This is a lexical inventory, not a C++ name resolver. Includes and qualified
 model/family namespace references are separate evidence. Conditional includes
 are inventoried even when disabled. JSON retains every location for later
 ratchets; no baseline or exception silently hides current dependencies.
+
+Enforcement ratchet (one boundary per migrated layer): with
+--fail-on-core-model-includes, no file under src/core/** may include a header
+under src/models/** or src/families/**. Card 06 (RFC step 4) retired the last
+such include, so a new violation fails the check. Other layers stay report
+only until their cards migrate them.
 """
 
 import argparse
@@ -186,12 +192,31 @@ def inventory(root):
             "qwen_headers": qwen_headers}
 
 
+def core_boundary_violations(report):
+    """Return src/core -> src/models|src/families include edges.
+
+    Card 06 moved Qwen-specific speculation out of src/core/speculative/, so
+    the core layer is now free of model includes and must stay that way.
+    """
+    violations = []
+    for edge in report["includes"]:
+        if not edge["path"].startswith("src/core/"):
+            continue
+        target = edge["resolved"] or posixpath.normpath(
+            posixpath.join(posixpath.dirname(edge["path"]), edge["include"]))
+        if target.startswith("src/models/") or target.startswith("src/families/"):
+            violations.append(f"{edge['path']}:{edge['line']}: {edge['include']}")
+    return sorted(violations)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--mode", choices=["report"], default="report")
     parser.add_argument("--json-report", type=Path, help="Write complete deterministic inventory")
     parser.add_argument("--details", action="store_true", help="Print the full JSON inventory")
+    parser.add_argument("--fail-on-core-model-includes", action="store_true",
+                        help="Fail if any src/core file includes a model or family header")
     args = parser.parse_args()
     report = inventory(args.root.resolve())
     if args.json_report:
@@ -207,6 +232,16 @@ def main():
             print(f"  {key}: {count}")
         for limitation in report["limitations"]:
             print(f"  Note: {limitation}")
+    if args.fail_on_core_model_includes:
+        violations = core_boundary_violations(report)
+        if violations:
+            print("[check-extension-isolation] CORE BOUNDARY VIOLATED "
+                  "(src/core must not include model or family headers):")
+            for violation in violations:
+                print(f"  {violation}")
+            return 1
+        print("[check-extension-isolation] PASS: core boundary "
+              "(no src/core -> src/models|src/families includes)")
     return 0
 
 

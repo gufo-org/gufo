@@ -138,6 +138,40 @@ qwen::Real real;
         self.assertTrue(any(item["path"] == "tests/functional/devlab.json" for item in mentions))
         self.assertFalse(any("ignored" in item["text"] for item in mentions))
 
+    def test_core_boundary_blocks_model_and_family_includes(self):
+        files = {
+            "src/models/qwen/verifier.hpp": "struct Verifier {};\n",
+            "src/families/qwen/speculation.hpp": "struct Spec {};\n",
+            "src/core/speculative/verifier.cpp":
+                '#include "src/models/qwen/verifier.hpp"\n',
+            "src/core/speculative/near.cpp":
+                '#include "../../families/qwen/speculation.hpp"\n',
+            "src/core/sampling.hpp": '#include "src/core/json.hpp"\n',
+            "src/core/json.hpp": "struct Json {};\n",
+            "src/cli/serve/use.cpp": '#include "src/models/qwen/verifier.hpp"\n',
+            "tests/core/use.cpp": '#include "src/models/qwen/verifier.hpp"\n',
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            violations = ISOLATION.core_boundary_violations(
+                ISOLATION.inventory(root))
+        self.assertEqual(violations, [
+            "src/core/speculative/near.cpp:1: ../../families/qwen/speculation.hpp",
+            "src/core/speculative/verifier.cpp:1: src/models/qwen/verifier.hpp",
+        ])
+
+    def test_repository_satisfies_the_core_boundary(self):
+        # Card 06 moved Qwen-specific speculation out of src/core/speculative/.
+        # If this fails, a core source started including a model or family
+        # header again; move the dependency behind a core-owned contract.
+        violations = ISOLATION.core_boundary_violations(
+            ISOLATION.inventory(ROOT))
+        self.assertEqual(violations, [])
+
 
 if __name__ == "__main__":
     unittest.main()

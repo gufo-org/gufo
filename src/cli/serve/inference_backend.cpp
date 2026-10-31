@@ -47,6 +47,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
@@ -242,7 +243,7 @@ public:
     resume_tokens_.reserve(kQwenMaxResumeTokens);
     rollback_tokens_.reserve(kQwenMaxResumeTokens);
     if (draft_backend_) {
-      verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
+      verifier_ = hip::CreateQwenGpuSpeculativeVerifier(
           *executor_, *draft_backend_, options);
       executor_->SetPromptHiddenCapture(true,
                                         draft_backend_->TargetHiddenLayerIds());
@@ -881,19 +882,23 @@ public:
       std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model = nullptr,
       speculative::SpeculativeOptions speculative_options = {},
+      speculative::DFlashDraftPolicy dflash_policy =
+          speculative::DFlashDraftPolicy::kAdaptive,
       std::string artifact_fingerprint = {},
       std::string draft_artifact_fingerprint = {})
       : model_(std::move(model)),
         dflash_model_(std::move(dflash_model)),
         max_context_(max_context),
         speculative_options_(speculative_options),
+        dflash_policy_(dflash_policy),
         execution_policy_(hip::QwenExecutionPolicy::Production()) {
     if (!artifact_fingerprint.empty()) {
       const bool speculative = dflash_model_ != nullptr;
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = QwenCompatibilityIdentity(
               artifact_fingerprint, draft_artifact_fingerprint, max_context_,
-              execution_policy_, speculative, speculative_options_),
+              execution_policy_, speculative, speculative_options_,
+              dflash_policy_),
           .payload_version = kQwenComponentPayloadVersion,
       };
       component_identity_ = persistence_->compatibility_identity;
@@ -915,7 +920,7 @@ public:
             hip::QwenDFlashGpuDraftConfig{
                 .max_context = max_context_,
                 .max_draft_tokens = speculative_options_.max_draft_tokens,
-                .policy = speculative_options_.dflash_policy},
+                .policy = dflash_policy_},
             &ledger),
         ledger);
     // Qwen's 256-row chunks are small. Preserve a bounded group before
@@ -1338,6 +1343,8 @@ private:
   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
   std::uint32_t max_context_;
   speculative::SpeculativeOptions speculative_options_;
+  speculative::DFlashDraftPolicy dflash_policy_{
+      speculative::DFlashDraftPolicy::kAdaptive};
   hip::QwenExecutionPolicy execution_policy_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
@@ -3232,7 +3239,6 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
         return false;
       }
 
-      speculative_options.dflash_policy = speculative_config.dflash_policy;
       speculative_options.max_draft_tokens =
           speculative_config.max_draft_tokens;
       speculative_options.min_draft_tokens =
@@ -3252,7 +3258,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     new_state->supports_images = model->VisionEncoder() != nullptr;
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
-        speculative_options, disk_cache_config.model_artifact_fingerprint,
+        speculative_options, speculative_config.dflash_policy,
+        disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;

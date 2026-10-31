@@ -31,6 +31,7 @@
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
+#include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
 
@@ -784,7 +785,7 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
   const bool block_diffusion_draft = opt.speculative_backend == "dflash2";
   s_opts.enable_adaptive_draft_length = !block_diffusion_draft;
   s_opts.use_batched_verification = true;
-  return std::make_unique<speculative::SpeculativeVerifier>(
+  return hip::CreateQwenGpuSpeculativeVerifier(
       executor, std::move(draft_backend), s_opts);
 }
 
@@ -793,9 +794,6 @@ void GenerateQwenGpuResponse(
     speculative::SpeculativeVerifier* verifier,
     std::span<const tokenization::TokenId> prompt_tokens,
     std::string* reply = nullptr) {
-  models::GenerationOptions generation;
-  generation.max_new_tokens = opt.max_tokens;
-  generation.sampling = opt.sampling;
   std::size_t generated_count = 0;
   std::vector<tokenization::TokenId> generated_ids;
   if (opt.verbose)
@@ -812,8 +810,14 @@ void GenerateQwenGpuResponse(
   };
   const auto start = std::chrono::steady_clock::now();
   if (verifier != nullptr) {
+    speculative::GenerationOptions generation;
+    generation.max_new_tokens = opt.max_tokens;
+    generation.sampling = opt.sampling;
     (void)verifier->Generate(prompt_tokens, generation, on_token);
   } else {
+    models::GenerationOptions generation;
+    generation.max_new_tokens = opt.max_tokens;
+    generation.sampling = opt.sampling;
     (void)executor.Generate(prompt_tokens, generation, on_token);
   }
   const double seconds =

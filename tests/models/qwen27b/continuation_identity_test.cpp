@@ -20,20 +20,25 @@ void QwenCases() {
                                         : hip::QwenRecurrentStateStorage::kFp32;
         Golden("storage-" + std::to_string(fp16) + std::to_string(bf16) +
                    "-draft-" + std::to_string(spec),
-               QwenCompatibilityIdentity(artifact, draft, 4096, p, spec, {}));
+               QwenCompatibilityIdentity(
+                   artifact, draft, 4096, p, spec, {},
+                   speculative::DFlashDraftPolicy::kAdaptive));
       }
     }
   }
   auto p = hip::QwenExecutionPolicy::Production();
   Golden("context",
-         QwenCompatibilityIdentity(artifact, draft, 131072, p, true, {}));
+         QwenCompatibilityIdentity(artifact, draft, 131072, p, true, {},
+                                   speculative::DFlashDraftPolicy::kAdaptive));
   Golden("artifact",
-         QwenCompatibilityIdentity(draft, artifact, 4096, p, true, {}));
+         QwenCompatibilityIdentity(draft, artifact, 4096, p, true, {},
+                                   speculative::DFlashDraftPolicy::kAdaptive));
   for (unsigned variant = 0; variant < 10; ++variant) {
     speculative::SpeculativeOptions o;
+    auto draft_policy = speculative::DFlashDraftPolicy::kAdaptive;
     switch (variant) {
       case 0:
-        o.dflash_policy = speculative::DFlashDraftPolicy::kFixed;
+        draft_policy = speculative::DFlashDraftPolicy::kFixed;
         break;
       case 1:
         o.max_draft_tokens = 7;
@@ -64,7 +69,8 @@ void QwenCases() {
         break;
     }
     Golden("option-" + std::to_string(variant),
-           QwenCompatibilityIdentity(artifact, draft, 4096, p, true, o));
+           QwenCompatibilityIdentity(artifact, draft, 4096, p, true, o,
+                                     draft_policy));
   }
 }
 
@@ -72,14 +78,22 @@ void Validation() {
   for (const std::string& bad :
        {std::string{}, std::string(63, 'a'), std::string(64, 'A'),
         std::string(64, 'g'), std::string(65, 'a')}) {
-    Reject([&] { QwenCompatibilityIdentity(bad, draft, 4096, {}, false, {}); },
-           "Qwen disk cache requires an artifact fingerprint");
     Reject(
-        [&] { QwenCompatibilityIdentity(artifact, bad, 4096, {}, true, {}); },
+        [&] {
+          QwenCompatibilityIdentity(bad, draft, 4096, {}, false, {},
+                                    speculative::DFlashDraftPolicy::kAdaptive);
+        },
+        "Qwen disk cache requires an artifact fingerprint");
+    Reject(
+        [&] {
+          QwenCompatibilityIdentity(artifact, bad, 4096, {}, true, {},
+                                    speculative::DFlashDraftPolicy::kAdaptive);
+        },
         "Qwen DFlash disk cache requires a draft artifact fingerprint");
   }
   Golden("storage-10-draft-0",
-         QwenCompatibilityIdentity(artifact, "ignored", 4096, {}, false, {}));
+         QwenCompatibilityIdentity(artifact, "ignored", 4096, {}, false, {},
+                                   speculative::DFlashDraftPolicy::kAdaptive));
   // Pointer spelling and null spelling are implementation/process specific.
   // Compare each address independently, never persist an ASLR-dependent golden.
   int model{}, other{}, draft_model{};

@@ -99,7 +99,8 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view artifact_fingerprint,
     std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
     const hip::QwenExecutionPolicy& execution_policy, bool speculative,
-    const speculative::SpeculativeOptions& speculative_options) {
+    const speculative::SpeculativeOptions& speculative_options,
+    speculative::DFlashDraftPolicy draft_policy) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen disk cache requires an artifact fingerprint");
@@ -147,8 +148,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
         << "draft_artifact_id=" << core::kGgufIdentityScheme << ':'
         << draft_artifact_fingerprint << '\n'
         << "draft_state_layout=dflash-window-kv-and-frontier-v4\n"
-        << "draft_policy="
-        << speculative::DFlashDraftPolicyName(speculative_options.dflash_policy)
+        << "draft_policy=" << speculative::DFlashDraftPolicyName(draft_policy)
         << "-v3\n"
         << "draft_max_tokens=" << speculative_options.max_draft_tokens << '\n'
         << "draft_min_tokens=" << speculative_options.min_draft_tokens << '\n'

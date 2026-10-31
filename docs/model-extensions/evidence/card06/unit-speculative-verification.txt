@@ -1,0 +1,19 @@
+Test project /home/mixer/gufo/build/card06-gpu
+    Start  68: speculative_corpus_test
+1/2 Test  #68: speculative_corpus_test ..........   Passed    0.07 sec
+    Start 128: speculative_verification_test
+2/2 Test #128: speculative_verification_test ....   Passed    0.07 sec
+
+100% tests passed out of 2
+
+Label Time Summary:
+benchmarks     =   0.07 sec*proc (1 test)
+cpu            =   0.07 sec*proc (1 test)
+ds4            =   0.07 sec*proc (1 test)
+gpu            =   0.07 sec*proc (1 test)
+hip            =   0.07 sec*proc (1 test)
+qwen           =   0.07 sec*proc (1 test)
+speculative    =   0.13 sec*proc (2 tests)
+tools          =   0.07 sec*proc (1 test)
+
+Total Test time (real) =   0.14 sec

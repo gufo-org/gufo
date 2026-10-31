@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/models/qwen/dflash_policy.hpp"
 #include "src/models/qwen/hip/execution_policy.hpp"
 
 namespace gufo::speculative {
@@ -54,7 +55,8 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view artifact_fingerprint,
     std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
     const hip::QwenExecutionPolicy& execution_policy, bool speculative,
-    const speculative::SpeculativeOptions& speculative_options);
+    const speculative::SpeculativeOptions& speculative_options,
+    speculative::DFlashDraftPolicy draft_policy);
 
 std::vector<std::uint8_t> QwenProcessIdentity(const void* model,
                                               const void* draft,
