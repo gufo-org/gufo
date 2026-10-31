@@ -6,6 +6,8 @@ import struct
 import sys
 import zlib
 
+from templates import THINKING_OFF_OPENING_TOKENS
+
 
 # Solid red, 128x128. Fixed fixtures keep this suite independent of image tools.
 JPEG = (
@@ -184,7 +186,7 @@ def check_messages_images(client, model, checks, image_content):
 
 
 def check_image_count(client, model, checks, image_content, chat_result, response_result,
-                      context, concurrency):
+                      context, concurrency, sampling_preset="qwen38"):
     """Image count is bounded by actual prompt size, including replayed history."""
     from concurrent.futures import ThreadPoolExecutor
     from openai import BadRequestError
@@ -244,7 +246,9 @@ def check_image_count(client, model, checks, image_content, chat_result, respons
                           *next_body[key]]
         continued = save(f"image_count_{endpoint}_18",
                           call(client, next_body, True), "red")
-        assert counts(continued)[1] >= counts(first)[0], (first, continued)
+        # History may drop the thinking-off opening (templates.py).
+        opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset, 0)
+        assert counts(continued)[1] >= counts(first)[0] - opening, (first, continued)
 
     body = request("chat", 17, "blue")
     schema = {"type": "object", "properties": {

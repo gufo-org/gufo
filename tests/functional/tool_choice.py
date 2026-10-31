@@ -4,10 +4,12 @@ import json
 import sys
 
 from cache_growth import check_unchanged_retry, log_offset
+from templates import THINKING_OFF_OPENING_TOKENS
 from tool_native import assert_native, cached
 
 
-def check_tool_choice_cache(client, model, checks, chat_result, server_log=None):
+def check_tool_choice_cache(client, model, checks, chat_result, server_log=None,
+                            sampling_preset="qwen38"):
     from messages_count_tokens import assert_count_response
     function = {
         "name": "read", "description": "Read a file.",
@@ -63,7 +65,11 @@ def check_tool_choice_cache(client, model, checks, chat_result, server_log=None)
         start = log_offset(server_log)
         done = record(label + "_continued", continued, index % 2 != 0)
         end = log_offset(server_log)
-        expected = first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
+        # A template whose history drops the thinking-off opening reuses the
+        # stable boundary before it instead of the call (templates.py).
+        opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
+        expected = (first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
+                    if opening is None else first["usage"]["prompt_tokens"] - opening)
         assert cached(done["usage"]) >= expected, (
             label, "tool choice lost the generated frontier", expected, done)
         if after == "required":
