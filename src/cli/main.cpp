@@ -7,6 +7,7 @@
 #include "src/cli/bench/bench.hpp"
 #include "src/cli/diagnose/diagnose.h"
 #include "src/cli/eval/eval.hpp"
+#include "src/cli/extension_diagnostics.hpp"
 #include "src/cli/prompt/prompt.hpp"
 #include "src/cli/serve/serve.hpp"
 #include "src/cli/transcribe/transcribe.hpp"
@@ -26,7 +27,8 @@ namespace {
 
 void print_version() {
   std::cout << "gufo version " << kGufoReleaseVersion << " (" << kGufoRevision
-            << ")\n";
+            << ")\n"
+            << gufo::cli::ExtensionDiagnostics(false);
 }
 
 void print_help(std::string_view program_name) {

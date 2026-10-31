@@ -34,11 +34,13 @@ ParsedOptions Parse(const Registry& registry,
 }
 void TestRegistryAndParser() {
   Registry registry;
-  Require(RuntimeApiVersion() == "0.1.0", "runtime/header API version");
+  Require(RuntimeApiVersion() == "0.1.1", "runtime/header API version");
   RegisterBuiltExtensions(registry);
-  Require(registry.Extensions().size() == 2, "library is not an extension");
-  Require(registry.Extensions()[0].name == "alpha" &&
-              registry.Extensions()[1].name == "beta",
+  Require(registry.Extensions().size() == 3,
+          "built family provenance retained");
+  Require(registry.Extensions()[0].name == "base" &&
+              registry.Extensions()[1].name == "alpha" &&
+              registry.Extensions()[2].name == "beta",
           "stable dependency/discovery ordering");
   Require(registry.Providers().size() == 3, "all metadata retained");
   const auto& alpha = registry.Provider("alpha");

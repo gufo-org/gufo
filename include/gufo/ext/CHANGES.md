@@ -1,5 +1,14 @@
 # Extension API changes
 
+## 0.1.1
+
+Add excluded extension metadata and artifact-key diagnostics, and generated
+selection-mode provenance. Existing registration and provider contracts remain
+source compatible. Discovery and exact lock selection are pure CMake; families
+also appear in built-extension provenance. Incompatible unselected metadata
+can describe a future API series without forcing lock builds to adopt it; only
+selected extensions enforce the current major/minor/revision floor.
+
 ## 0.1.0
 
 Initial development API: metadata/registration, core capability kinds, typed

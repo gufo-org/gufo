@@ -1,8 +1,7 @@
-# Initial extension infrastructure (card 04)
+# Extension infrastructure (cards 04–05)
 
-API 0.1.0 implements explicit metadata registration and typed option parsing.
-It does not migrate production models. Discovery, exclusion by selection,
-lock-mode policy and CLI provenance remain card 05. The public headers are a
+API 0.1.1 implements explicit metadata registration and typed option parsing.
+It does not migrate production models. Card05 adds discovery, exclusion by selection, lock policy and CLI provenance. The public headers are a
 development API; the transitive surface classification remains card 10.
 
 `gufo_extension(MANIFEST path)` validates and records a selected metadata file.
@@ -111,3 +110,59 @@ for an unavailable HIP provider, typed parsing and selected-provider errors.
 Its HIP-enabled condition variant uses a C++ synthetic target, not a HIP
 compiler or model: it verifies registration decisions and boolean parsing,
 without claiming GPU or production migration evidence.
+
+
+## Discovery and selection (card05)
+
+The root discovers only `src/models/*/extension.json` and
+`src/families/*/*/extension.json`, with `CONFIGURE_DEPENDS` on the globs and
+metadata/lock files. Platform-only returns first and needs no lock or manifest.
+`GUFO_EXTENSIONS=*` means all platform-supported discovered manifests; explicit
+semicolon lists (including an empty list) and `extensions.lock` are exact sets
+including dependencies. Lock JSON is `{ "schema": 1, "extensions": [] }` with
+no other keys. `GUFO_EXTENSIONS_FROM_LOCK=ON` conflicts with an explicit
+selector. Missing names, duplicates, unavailable selected platforms and omitted
+dependencies are configuration errors. Names with false-like CMake spelling
+remain legal. No production Python dependency was added.
+
+All discovered manifests receive structural/safety checks, including name and
+entry/target uniqueness and option-type agreement. Unselected manifests skip
+API-compatibility and dependency-graph requirements, allowing an unshipped
+extension to target a future API or an uninstalled dependency without breaking
+a lock build. Their JSON must still be structurally valid to generate truthful
+excluded metadata. Selected manifests receive full API/graph validation.
+Shipped/unshipped collisions in artifact keys, option names (across commands)
+and model IDs fail independently of current selection, including lock builds.
+This collision gate does not establish equivalent runtime behavior.
+
+Selected `extension.cmake` files execute dependency-first in isolated build
+subdirectories. Targets must use the existing helpers; relative source paths
+are resolved against the manifest directory. Use `CMAKE_CURRENT_LIST_DIR` for
+other extension-relative paths. Only selected build manifests execute. Generated
+registration links actual registration/provider archives into `gufo`; disabled
+HIP providers remain metadata stubs. Built family libraries also carry version
+and source provenance. Excluded extensions record version/source/reason plus
+keys, model IDs and option names, with `ExcludedKeyDiagnostic()` available to
+later provider selectors. Legacy CLI provider selection is intentionally not
+migrated in this infrastructure card.
+
+There are currently zero production manifests; `extensions.lock` is deliberately
+empty. Existing legacy model target/routing lists still apply in both builds.
+This is an honest bootstrap, not a claim that empty selection excludes legacy
+model code. Pilot migration and Card14 populate metadata on their stated
+schedule. Synthetic discovery tests create real model/family source directories,
+build/link generated registration, compare default/lock runtime provenance and
+exercise excluded-key diagnostics. Card04's synthetic alpha/beta/base fixtures
+now build in a separate CMake project, so `BUILD_TESTING=ON` cannot contaminate
+the production registry or reserve real extension names. Parent warning and
+sanitizer settings are forwarded to the isolated project.
+
+`--version` retains its first line and adds API/selection/built/excluded details.
+Human default `diagnose` appends the same provenance; the explicit `extensions`
+section emits stable human or JSON provenance without probing hardware.
+Hardware diagnostic JSON remains its existing schema. Nix's default output and
+normal Windows/Devlab paths use discovery. The release package and tagged ZIP
+select lock mode; `extensionsFromLock` is exposed for Toolboxes. Production
+source filters admit `include/`, `schemas/` and the lock. No external image
+publication, model numerical/performance qualification or Windows execution is
+claimed by the initial infrastructure checks.

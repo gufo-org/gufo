@@ -1,0 +1,9 @@
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.001s
+
+OK
+Extension API changed paths: src/cache/forward.hpp
+Extension API changed paths: cmake/GufoExtension.cmake
+Extension API changed paths: src/cache/forward.hpp
+Extension API changed paths: include/gufo/ext/version.hpp, src/cache/forward.hpp

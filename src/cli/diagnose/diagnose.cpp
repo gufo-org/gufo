@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/extension_diagnostics.hpp"
 #include "src/core/diagnostics/allocation_benchmark.h"
 #include "src/core/diagnostics/artifact_validator.h"
 #include "src/core/diagnostics/bandwidth.h"
@@ -56,7 +57,7 @@ void PrintDiagnoseHelp(std::string_view program_name) {
       << "  --output <path>              Write command output to specified "
          "file\n"
       << "  --section <name>             Diagnostic section to run: all, "
-         "inventory, platform, gpu\n"
+         "inventory, platform, gpu, extensions\n"
       << "  -h, --help                   Print help information\n";
 }
 
@@ -324,7 +325,7 @@ int RunDiagnose(std::span<const char* const> args) {
   }
 
   if (section != "all" && section != "inventory" && section != "platform" &&
-      section != "gpu") {
+      section != "gpu" && section != "extensions") {
     std::cerr << "Error: unknown diagnostic section '" << section << "'\n";
     return 2;
   }
@@ -408,9 +409,17 @@ int RunDiagnose(std::span<const char* const> args) {
     return 0;
   }
 
+  if (section == "extensions") {
+    OutputContent(ExtensionDiagnostics(json_mode), output_file);
+    return 0;
+  }
+
   // Handle default diagnostics report
   const auto report = CollectDiagnostics(diagnostics::LinuxSysfs(), section);
-  const std::string content = json_mode ? report.ToJson() : report.ToHuman();
+  const std::string content =
+      json_mode ? report.ToJson()
+                : report.ToHuman() +
+                      (section == "all" ? ExtensionDiagnostics(false) : "");
   OutputContent(content, output_file);
 
   if (report.Status() == diagnostics::DiagnosticStatus::kFail) {

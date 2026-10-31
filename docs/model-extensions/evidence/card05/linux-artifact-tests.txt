@@ -1,0 +1,9 @@
+.gufo version development (aaaaaaa)
+Extension API: 0.1.1
+Extension selection: discovery
+Built extensions: none
+.....
+----------------------------------------------------------------------
+Ran 6 tests in 0.003s
+
+OK

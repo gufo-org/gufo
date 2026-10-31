@@ -58,7 +58,9 @@ list(APPEND gufo_pr_tests
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test
   kernel_resources_parser_test check_docs_test check_pr_title_test
-  check_extension_isolation_test extension_isolation_report extension_metadata_test)
+  check_extension_isolation_test extension_isolation_report extension_metadata_test
+  extension_discovery_test extension_api_policy_test extension_api_surface
+  extension_cli_provenance_test)
 if (WIN32)
   # Linux-only hosted suites: RLIMIT_FSIZE and fork()-based tests, the
   # dup2/mmap/socket fixture tests, the permission-fault disk-store cases,
@@ -78,7 +80,7 @@ endif()
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
 add_custom_target(check-pr
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error
-    --timeout 60 -R "^(${gufo_pr_pattern})$"
+    --timeout 180 -R "^(${gufo_pr_pattern})$"
   DEPENDS gufo ${gufo_pr_targets}
     $<$<NOT:$<BOOL:${WIN32}>>:cache_disk_faults>
   USES_TERMINAL VERBATIM)

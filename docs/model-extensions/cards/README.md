@@ -1,0 +1,101 @@
+# Model extension cards
+
+The [index](../CARDS.md) lists all 29 sequential cards, dependencies, current
+statuses and shared acceptance gates. Each numbered file owns its context,
+implementation plan, definition of done, validation criteria and execution record.
+The [original RFC](../RFC.md) remains the specification; these plans do not amend
+its requirements or waive existing quality gates.
+
+Current checkpoint: cards 01–04 are complete. Card 05 implementation and checks
+are finished, but independent review and third-agent integration are pending.
+Cards 06–29 are pending. The authorized implementation milestone ends after Card
+14 is verified and committed; cards 15–29 document later scope only. This split
+is documentation work and does not itself advance any implementation status.
+
+## Card-by-card workflow
+
+1. Preparation: inspect `jj status`, the card, dependency records and applicable
+   `AGENTS.md` files. Identify owned paths, concrete acceptance evidence and
+   outstanding jobs. Preserve the user-owned RFC and unrelated work.
+2. Implementation: spawn a fresh implementation agent with the complete card,
+   relevant decisions, owned paths and required checks. Give it sole editing
+   ownership. Require a handoff listing changes, exact checks/results, retained
+   evidence, limitations and any live job handles. Do not transfer ownership
+   while its editor or mutations remain active.
+3. Independent review: use a distinct read-only agent after implementation has
+   handed off. Review the actual diff and evidence against the full card and
+   RFC, reproduce relevant checks, and report concrete findings with severity,
+   paths, practical impact and suggested corrections. Passing implementation
+   checks do not replace independent review.
+4. Integration: use a third distinct agent to address every finding, add meaningful
+   regression coverage when needed, rerun affected checks and update the execution
+   record. Even an empty review needs this third agent's acceptance audit and
+   verification handoff. Record each finding as resolved, rejected with evidence,
+   or still pending; unresolved requirements prevent closure.
+5. Closure: the orchestrator inspects the integrated result and proves every
+   definition-of-done item with appropriately scoped evidence. Return substantive
+   issues to review/integration rather than weakening acceptance. Record all three
+   agent names, findings/dispositions, exact checks, artifact/revision evidence and
+   limitations. Commit only task-owned paths with `jj` and a Conventional Commit
+   message; leave the original user-owned RFC unchanged and uncommitted.
+6. Advancement: start the next card only after required verification, integration
+   and the closing commit. No competing editors in the shared worktree. Finish or
+   explicitly transfer live jobs with their exact handles before ownership changes.
+
+For the present Card 05, start at independent review, then use a distinct third
+integration agent. Do not redo its completed implementation or claim completion
+from its existing checks alone. Use [HANDOFF.md](../HANDOFF.md) for machine/model
+provenance and the preserved working-copy checkpoint.
+
+## Validation conventions
+
+Run commands from the repository root in the pinned Nix development environment
+unless a card records a different supported environment. Read
+[AGENTS.md](../../../AGENTS.md), [testing](../../TESTING.md), the affected model's
+`docs/models/<model>/QUALITY.md` and `BENCHMARKS.md`, and the
+[functional harness instructions](../../../tests/functional/README.md) before
+selecting commands. Resolve actual model paths and drafts under `./models`;
+a missing asset or skipped test remains pending evidence.
+
+Discover real target/test names with `ctest --preset gpu-full -N` after configuring
+`nix develop -c cmake --preset gpu-test`. Build only the affected target with
+`nix develop -c cmake --build --preset gpu-test --target <actual-target>` and run
+`nix develop -c ctest --preset gpu-full -R '<anchored-actual-test-regex>'
+--output-on-failure`. Angle-bracket examples are placeholders to resolve and
+record, not literal commands. New conformance/generator fixtures described in
+future cards are to be added; their names are not claims of existing tests.
+
+For hosted CPU scope, configure `cpu-test` and run its relevant tests; use
+`nix build .#checks.x86_64-linux.pr` when the card requires bounded hosted checks.
+C++ changes need the required formatting check in AGENTS.md. Header/include
+changes need `python3 tools/ci/check-extension-api.py --write` followed by a clean
+check and the required API policy updates when declarations/contracts change.
+No extra GPU matrix is implied for this documentation split.
+
+Text migrations use explicit affected suites/modes with
+`tests/functional/run.py` and `compare.py` per the harness README, including
+`long-context` and `cache` for continuation changes. Record every requested and
+actually loaded mode/draft, cache history, work counters, binary/harness/model
+hashes and toolchain. Shared text changes need all four profiles; individual
+migrations need the affected model/modes. Keep candidate correctness and
+independent numerical checks separate from matched main timing controls.
+Text timing acceptance is per request/phase at 5% and 10 ms, never averaged.
+Non-text service comparisons use their existing harness thresholds (currently
+5% and 3 ms for paired service phases), preserving work equivalence and their
+own independent quality requirements. Retain failed and inconclusive attempts.
+Run the standard speed benchmark as well as the functional suites, and keep
+CLI output/timing controls when driver routing changes.
+
+Discovery/default and actual shipped lock-mode HIP artifacts require separate
+runtime evidence; a CPU lock build or collision gate proves neither numerical
+quality nor performance of the shipped binary. Windows workflow edits are not
+Windows execution evidence. Audit actual `CMakeCache.txt`, compile commands,
+assertions, sanitizers and stripped production ISA for moved HIP code. Lexical
+isolation inventory alone does not prove symbol isolation.
+
+Completed cards retain historical commands/results and their precise limits.
+Do not treat a historical `/tmp` artifact as durable new evidence or rerun an
+unrelated model sweep. Broaden checks only when scope or failures justify it;
+retain current unresolved limitations, including the spike's unproven production
+performance parity. Do not graduate API 1.0 without the real elapsed stability
+window and all five qualifying API-affecting serving features.

@@ -67,3 +67,28 @@ const ProviderInfo& Registry::Provider(std::string_view id) const {
   return *found;
 }
 }  // namespace gufo::ext
+
+namespace gufo::ext {
+void Registry::AddExcluded(ExcludedExtension extension) {
+  if (extension.extension.name.empty() ||
+      std::ranges::any_of(excluded_, [&](const auto& e) {
+        return e.extension.name == extension.extension.name;
+      })) {
+    throw std::invalid_argument("duplicate or empty excluded extension name");
+  }
+  excluded_.push_back(std::move(extension));
+}
+std::string Registry::ExcludedKeyDiagnostic(std::string_view key) const {
+  std::string message;
+  for (const auto& extension : excluded_) {
+    if (std::ranges::find(extension.keys, key) != extension.keys.end()) {
+      if (!message.empty())
+        message += "; ";
+      message += "built without extension " + extension.extension.name + " (" +
+                 extension.reason + "); rebuild with -DGUFO_EXTENSIONS=" +
+                 extension.extension.name + " and its declared dependencies";
+    }
+  }
+  return message;
+}
+}  // namespace gufo::ext

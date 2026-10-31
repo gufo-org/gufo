@@ -17,6 +17,7 @@
   ccache,
   rocmPackages,
   releaseVersion ? null,
+  extensionsFromLock ? false,
   revision,
   sourceRoot ? ../..,
 }:
@@ -41,11 +42,13 @@ let
         relativePath = lib.removePrefix "${root}/" pathString;
       in
       pathString == root
-      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" ]
+      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" "extensions.lock" ]
       || relativePath == "licenses"
       || lib.hasPrefix "licenses/" relativePath
       || relativePath == "cmake"
       || lib.hasPrefix "cmake/" relativePath
+      || relativePath == "schemas"
+      || lib.hasPrefix "schemas/" relativePath
       || relativePath == "include"
       || lib.hasPrefix "include/" relativePath
       || relativePath == "src"
@@ -93,6 +96,7 @@ stdenv.mkDerivation {
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     "-DBUILD_TESTING=OFF"
+    "-DGUFO_EXTENSIONS_FROM_LOCK=${if extensionsFromLock then "ON" else "OFF"}"
     "-DGUFO_RELEASE_VERSION=${versionLabel}"
     "-DGUFO_REVISION=${revision}"
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
@@ -134,9 +138,11 @@ stdenv.mkDerivation {
   installCheckPhase = ''
     runHook preInstallCheck
 
-    test "$($out/bin/gufo --version)" = "gufo version ${versionLabel} (${revision})"
+    test "$($out/bin/gufo --version | head -n 1)" = "gufo version ${versionLabel} (${revision})"
+    $out/bin/gufo --version | grep -Fx "Extension selection: ${if extensionsFromLock then "lock" else "discovery"}"
+    $out/bin/gufo diagnose --section extensions --json > extensions.json
     $out/bin/gufo --help >/dev/null
-    test "$($out/bin/gufo-server --version)" = "gufo version ${versionLabel} (${revision})"
+    test "$($out/bin/gufo-server --version | head -n 1)" = "gufo version ${versionLabel} (${revision})"
     $out/bin/gufo-server --help >/dev/null
     test ! -e $out/bin/gufo-kernel-bench
     test -f $out/share/licenses/gufo/LICENSE
@@ -146,7 +152,7 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit releaseVersion revision rocmPackages rocmRuntime;
+    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock;
     toolchain = {
       targetPlatform = "x86_64-linux";
       targetGpu = "gfx1151";

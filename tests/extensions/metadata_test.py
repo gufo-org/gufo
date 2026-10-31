@@ -184,9 +184,9 @@ class ConfigureTests(unittest.TestCase):
         self.invalid(lambda m: m[0].update(depends=["absent"]), "missing dependency absent")
         self.invalid(lambda m: m[2].update(depends=["alpha"]), "cyclic dependency")
         self.invalid(lambda m: m[2].update(platforms=["linux"]), "unsatisfiable dependency platforms")
-        for api in (">= 0.2.0", ">= 0.1.1", ">= 1.0.0", "0.1", ">= 0.01.0"):
+        for api in (">= 0.2.0", ">= 0.1.2", ">= 1.0.0", "0.1", ">= 0.01.0"):
             with self.subTest(api=api):
-                self.invalid(lambda m: m[0].update(api_version=api), "API" if api.startswith(">= 0.") else "api_version")
+                self.invalid(lambda m: m[0].update(api_version=api), "API" if api.startswith(">= ") else "api_version")
 
     def test_target_conditions(self):
         self.invalid(lambda m: m[0]["targets"]["alpha_hip"].update(requires=["unknown"]), "unknown target condition")

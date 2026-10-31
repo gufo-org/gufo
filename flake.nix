@@ -158,7 +158,7 @@
           default = base;
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
-          release = base.override { inherit releaseVersion; };
+          release = base.override { inherit releaseVersion; extensionsFromLock = true; };
           # Windows test binaries of the platform leaves and the CPU cache,
           # cross-built here and run on a Windows CI host.
           windows-platform-tests =
@@ -280,6 +280,7 @@
               ".clang-format"
               ".clang-tidy"
               "CMakeLists.txt"
+              "extensions.lock"
             ];
           };
 
@@ -295,6 +296,8 @@
             files = [
               ".clang-format"
               "CMakeLists.txt"
+              "extensions.lock"
+              "AGENTS.md"
               "docs/RELEASING.md"
               "tools/prof/prof.py"
               "tools/bench/speculative-corpus.py"
@@ -517,6 +520,13 @@
             '' else ''
               cmake --build . --parallel "$NIX_BUILD_CORES" --target check-pr
             ''}
+
+            # Build the real CPU lock-mode executable, using the same source
+            # and toolchain. This does not replace shipped HIP qualification.
+            cmake "$src" -B ../lock-build -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF -DGUFO_EXTENSIONS_FROM_LOCK=ON
+            cmake --build ../lock-build --target gufo --parallel "$NIX_BUILD_CORES"
+            ../lock-build/gufo diagnose --section extensions --json
+            ../lock-build/gufo --version | grep -Fx 'Extension selection: lock'
 
             if [[ -n "$ccache_launcher" ]]; then
               ccache --show-stats

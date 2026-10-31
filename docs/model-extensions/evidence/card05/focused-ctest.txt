@@ -1,0 +1,37 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+Test project /home/mixer/gufo/build/cpu-test
+      Start   8: gufo_version
+ 1/12 Test   #8: gufo_version .....................   Passed    0.01 sec
+      Start  11: strix_diagnose_help
+ 2/12 Test  #11: strix_diagnose_help ..............   Passed    0.01 sec
+      Start  12: strix_diagnose_json
+ 3/12 Test  #12: strix_diagnose_json ..............   Passed    0.00 sec
+      Start  36: extension_isolation_report
+ 4/12 Test  #36: extension_isolation_report .......   Passed    3.38 sec
+      Start 109: extension_runtime_test
+ 5/12 Test #109: extension_runtime_test ...........   Passed    0.00 sec
+      Start 110: extension_role_test
+ 6/12 Test #110: extension_role_test ..............   Passed    0.00 sec
+      Start 111: extension_cli_provenance_test
+ 7/12 Test #111: extension_cli_provenance_test ....   Passed    0.05 sec
+      Start 112: extension_discovery_test
+ 8/12 Test #112: extension_discovery_test .........   Passed   33.88 sec
+      Start 113: extension_api_policy_test
+ 9/12 Test #113: extension_api_policy_test ........   Passed    0.04 sec
+      Start 114: extension_api_surface
+10/12 Test #114: extension_api_surface ............   Passed    0.03 sec
+      Start 115: extension_metadata_test
+11/12 Test #115: extension_metadata_test ..........   Passed   10.79 sec
+      Start 116: extension_schema_test
+12/12 Test #116: extension_schema_test ............   Passed    0.11 sec
+
+100% tests passed out of 12
+
+Label Time Summary:
+cpu           =  48.30 sec*proc (12 tests)
+extensions    =  44.91 sec*proc (8 tests)
+repository    =   3.38 sec*proc (1 test)
+
+Total Test time (real) =  48.30 sec

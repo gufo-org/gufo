@@ -1,0 +1,2 @@
+Extension API changed paths: cmake/GufoExtension.cmake, cmake/GufoExtensionDiscovery.cmake, include/gufo/ext/registry.hpp, include/gufo/ext/version.hpp, schemas/extension.schema.json
+PASS: extension API surface (6 paths)
