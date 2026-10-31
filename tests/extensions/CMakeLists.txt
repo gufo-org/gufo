@@ -13,14 +13,21 @@ if(NOT GUFO_EXTENSION_FIXTURE)
       "-DBUILD_TESTING=ON"
       "-DGUFO_ENABLE_WARNINGS=${GUFO_ENABLE_WARNINGS}"
       "-DGUFO_ENABLE_SANITIZERS=${GUFO_ENABLE_SANITIZERS}"
-    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target extension_runtime_test extension_role_test
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target
+      extension_runtime_test extension_role_test
+      ext_runtime_neutral_contracts_test
     INSTALL_COMMAND ""
     BUILD_ALWAYS TRUE)
   add_custom_target(extension_runtime_test DEPENDS extension_fixture_build)
   add_custom_target(extension_role_test DEPENDS extension_fixture_build)
+  add_custom_target(ext_runtime_neutral_contracts_test
+    DEPENDS extension_fixture_build)
   add_test(NAME extension_runtime_test COMMAND "${fixture_build}/extensions/extension_runtime_test${CMAKE_EXECUTABLE_SUFFIX}")
   add_test(NAME extension_role_test COMMAND "${fixture_build}/extensions/extension_role_test${CMAKE_EXECUTABLE_SUFFIX}")
-  set_tests_properties(extension_runtime_test extension_role_test PROPERTIES LABELS "cpu;extensions")
+  add_test(NAME ext_runtime_neutral_contracts_test
+    COMMAND "${fixture_build}/extensions/ext_runtime_neutral_contracts_test${CMAKE_EXECUTABLE_SUFFIX}")
+  set_tests_properties(extension_runtime_test extension_role_test
+    ext_runtime_neutral_contracts_test PROPERTIES LABELS "cpu;extensions")
   if(Python3_EXECUTABLE)
     add_test(NAME extension_cli_provenance_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/cli_provenance_test.py $<TARGET_FILE:gufo>)
@@ -62,6 +69,17 @@ gufo_extension_target(NAME alpha_hip SOURCES fixture/hip.cpp
   LINK_LIBRARIES gufo_ext_runtime)
 gufo_extension_target(NAME beta_registration SOURCES fixture/beta.cpp
   LINK_LIBRARIES gufo_ext_runtime)
+# Card 09 (RFC step 6): the neutral runtime contracts must stand on their own.
+# gufo_ext_runtime is the only library on this link line, so a continuation
+# base, host budget or device probe that still needed serving would fail here.
+add_executable(ext_runtime_neutral_contracts_test
+  ext_runtime_neutral_contracts_test.cpp)
+target_link_libraries(ext_runtime_neutral_contracts_test PRIVATE gufo_ext_runtime)
+add_test(NAME ext_runtime_neutral_contracts_test
+  COMMAND ext_runtime_neutral_contracts_test)
+set_tests_properties(ext_runtime_neutral_contracts_test PROPERTIES
+  LABELS "cpu;extensions")
+
 add_executable(extension_runtime_test runtime_test.cpp)
 target_compile_definitions(extension_runtime_test PRIVATE
   TEST_PROVIDER_HIP=$<BOOL:${ENGINE_ENABLE_HIP}>)

@@ -1,0 +1,180 @@
+Card 09 — orchestrator closure gates (all run by the orchestrator, after the last
+integration edit, on `@ prusoklk` over parent `uytorytn c03aaa23`).
+These runs supersede the worker and integration histories for the commands below.
+
+O0 — Orchestrator-found defect, fixed by the orchestrator (not by a sub-agent)
+The integration hardening of cmake/TargetGraph.cmake aborted configuration of both
+test builds:
+
+  CMake Error at cmake/TargetGraph.cmake:50 (message):
+    Link graph: unclassified interface item '::@(0x5555565b4040)' on
+    gufo_deepseek_v4_flash
+
+Probe evidence (temporary message() probe, then reverted; logs kept in
+/tmp/card09-logs/probe2.log). CMake wraps the entries one directory adds to a target
+defined elsewhere in a group opened by `::@(<id>)` and closed by `::@`:
+
+  RAW gufo_qwen3_tts: [ICU::uc;Threads::Threads;hip::host;roc::hipblas;roc::rocblas;
+    ::@(0x...);gufo_core;gufo_qwen_control_tokens;::@;::@(0x...);gufo_qwen_kernels;::@]
+  RAW gufo_deepseek_v4_flash: [...;dl;::@(0x...);gufo_core;::@;::@(0x...);gufo_logging;::@]
+
+The names inside the groups remain ordinary list items, so the fix skips only the
+markers. Verified after the fix that no edge is hidden:
+gufo_qwen3_tts closure keeps gufo_core/gufo_qwen_kernels/gufo_qwen_control_tokens,
+gufo_deepseek_v4_flash keeps gufo_logging/gufo_core, gufo_qwen_image_21 keeps
+gufo_qwen_text/gufo_core.
+
+Commands (exit -> verdict):
+
+$ nix develop -c cmake -S . -B build/card09-gpu                     # exit 0
+$ nix develop -c cmake -S . -B build/card09-cpu                     # exit 0
+  (before the fix both exited 1 with the error above)
+
+F1 — hosted check-pr target restored
+$ nix develop -c cmake --build build/card09-cpu --target check-pr -- -n
+  exit 0; ninja planned the target instead of "unknown target".
+
+F2 — corrected selection, complete verdict lists
+$ nix develop -c cmake --build build/card09-gpu --parallel 16       # exit 0
+$ nix develop -c cmake --build build/card09-cpu --parallel 16       # exit 0
+R=$(cat docs/model-extensions/evidence/card09/logs/selection.txt)
+$ nix develop -c ctest --test-dir build/card09-gpu -R "$R" --output-on-failure
+  exit 0; "100% tests passed out of 43"
+$ nix develop -c ctest --test-dir build/card09-cpu -R "$R" --output-on-failure
+  exit 0; "100% tests passed out of 43"
+Full verdict lists (all 43 lines each, not tails):
+logs/ctest-gpu-final.txt and logs/ctest-cpu-final.txt. Named proof that the five
+serving-semantic suites and the previously-dropped dotted row ran and passed in BOTH
+configurations: continuation_cache_test, component_text_cache_test,
+text_model_runner_test, continuation_disk_store_test, text_generation_scheduler_test,
+ext_runtime_neutral_contracts_test, extension_link_graph_gate, check_target_graph_test,
+extension_serving_boundary_gate, qwen27b_continuation_identity_test,
+qwen38_flash_next_continuation_identity_test,
+deepseek_v4_flash_continuation_identity_test, qwen27b_continuation_layout_test,
+qwen38_flash_next.continuation_layout.
+
+F3 — link-graph guard, real and negative-proved (orchestrator runs)
+$ python3 tools/ci/check-target-graph.py --report build/card09-gpu/gufo-link-graph.json --root .
+  exit 0; PASS: link graph (24 protected targets, no edge to gufo_http or gufo_serving)
+$ python3 tools/ci/check-target-graph.py --report build/card09-cpu/gufo-link-graph.json --root .
+  exit 0; PASS (24 protected targets; report records hip=false and
+  absent=[gufo_cache_hip, gufo_deepseek_v4_flash, gufo_hip_host, gufo_qwen_kernels])
+Fresh-configure proof (no reuse of the earlier build tree):
+$ nix develop -c cmake --preset gpu-test -B /tmp/card09-integration/clean-configure
+  exit 0.
+
+Negative proof A — a protected target that silently stops being emitted fails:
+injected by dropping `gufo_cache_hip` from GUFO_LINK_GRAPH_PROTECTED only, then
+$ nix develop -c cmake --preset gpu-test -B /tmp/card09-integration/negative-proof   # exit 0
+  report: gufo_cache_hip neither in targets nor absent (23 targets)
+$ python3 tools/ci/check-target-graph.py --report .../negative-proof/gufo-link-graph.json --root .
+  exit 1; "protected target gufo_cache_hip is missing from the link graph"
+
+Negative proof B — a forbidden edge fails:
+injected `target_link_libraries(gufo_ext_runtime PUBLIC gufo_http)` at the end of
+CMakeLists.txt, reconfigured the throwaway directory (exit 0), then
+$ python3 tools/ci/check-target-graph.py --report .../negative-proof/gufo-link-graph.json --root .
+  exit 1; "gufo_ext_runtime reaches gufo_http through the link graph (closure: ...)"
+Both injections were reverted (grep CARD09-NEGPROOF -> 0, the protected name restored,
+`diff` of cmake/TargetGraph.cmake against the integration version shows only the O0
+marker block), /tmp/card09-integration/negative-proof removed, and both real build
+directories reconfigured and re-gated clean afterwards.
+
+Static gates
+$ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+  exit 0; "PASS: Checked 740 C++ files"
+$ python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes
+  exit 0; PASS: core boundary
+$ python3 tools/ci/check-extension-isolation.py --fail-on-family-graph
+  exit 0; PASS: family graph (6 libraries, 7 declared edges, acyclic)
+$ python3 tools/ci/check-extension-isolation.py --fail-on-target-ownership
+  exit 0; PASS: target ownership (17 libraries, 179 dependency edges)
+$ python3 tools/ci/check-extension-isolation.py --fail-on-serving-boundary
+  exit 0; PASS: serving boundary
+$ python3 tests/tools/check_target_graph_test.py build/card09-gpu    # exit 0; OK
+$ python3 tests/tools/check_extension_isolation_test.py              # exit 0
+$ python3 tools/ci/check-docs.py
+  exit 0; PASSED: 278 markdown files and 1514 local links/anchors
+$ python3 tools/ci/check-extension-api.py                            # exit 0; 6 paths
+$ python3 tools/ci/check-extension-api.py --write && diff vs previous SURFACE
+  SURFACE unchanged (nothing published; no ext-api version bump)
+
+Codex exec review (mandated) and the orchestrator fixes it required
+$ codex exec review --dangerously-bypass-approvals-and-sandbox 'review the diff of
+current jj revision, you can use jj diff to see changes'                 # exit 0
+Two findings, both fixed by the orchestrator (no sub-agent), severity as the
+reviewer's own P-labels adjusted to this card's acceptance:
+
+CR1 (review P1, Major) cmake/TargetGraph.cmake — the hardened classifier treated
+the Windows platform libraries as unclassified items, so a Windows
+`BUILD_TESTING=ON` configure would abort. Real defect introduced by the F3
+hardening and missed by every Linux run.
+Fix: a classified system-library list (dl m pthread rt atomic stdc++ gcc_s
+ws2_32 iphlpapi bcrypt advapi32) plus whatever `GUFO_PLATFORM_LIBS` declares, so
+the leaf's own list keeps it current. Proven on this host by simulating the
+Windows edge: injected `target_link_libraries(gufo_platform PUBLIC ws2_32
+iphlpapi bcrypt advapi32)`, configured /tmp/card09-integration/win-sim
+(exit 0, no unclassified-item error), gate PASS, and the report kept
+`gufo_platform` closure at ['Threads::Threads'] — the system libraries added no
+phantom edge. Injection reverted; throwaway directory removed.
+
+CR2 (review P2, Minor-but-real) tests/extensions/ext_runtime_neutral_contracts_test.cpp —
+`Expect(ceiling * 2 > budget && ceiling < budget * 8)` fails on any host or
+cgroup at or below the 4 GiB headroom, where `HostSnapshotCeilingBytes()`
+correctly returns 0. Fix: assert the formula relation instead of a ratio between
+two independent live samples, with a 256 MiB drift allowance, and an explicit
+zero-ceiling branch (`budget * 2 <= headroom + allowance`). Attempted host
+reproduction under `systemd-run --user --scope -p MemoryMax=2G`: the test passed
+in the scope, but no readable `memory.max` was exposed on this host, so the
+low-memory branch is not proven executed here — recorded as an unexercised
+branch, not as a pass. Re-run after the fix: `ext_runtime_neutral_contracts_test`
+PASSED in both build directories.
+
+After both fixes: reconfigured both build directories, rebuilt both
+(exit 0 each), re-ran the 43-test selection in both (43/43 each), re-ran the
+graph gates on the regenerated reports (PASS/PASS), the isolation modes, the two
+test fixtures, `check-docs` (278 files/1514 links), `check-extension-api`
+(6 paths, `--write` leaves SURFACE unchanged) and
+`nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py`
+(exit 1 first: `ext_runtime_neutral_contracts_test.cpp:116` needed clang-format;
+formatted it, then exit 0 "PASS: Checked 740 C++ files").
+
+Production artifacts (post-edit rebuild)
+$ nix develop -c cmake --preset release -B build/card09-release      # exit 0
+$ nix develop -c cmake --build build/card09-release --target gufo --parallel 16  # exit 0
+$ nix develop -c cmake -S . -B build/card09-lock -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=ON -DGUFO_EXTENSIONS_FROM_LOCK=ON     # exit 0
+$ nix develop -c cmake --build build/card09-lock --target gufo --parallel 16      # exit 0
+CMakeCache audit: release BUILD_TESTING=OFF CMAKE_BUILD_TYPE=RelWithDebInfo
+  ENGINE_ENABLE_HIP=ON GUFO_EXTENSIONS_FROM_LOCK=OFF (discovery);
+  lock   BUILD_TESTING=OFF CMAKE_BUILD_TYPE=RelWithDebInfo
+  ENGINE_ENABLE_HIP=ON GUFO_EXTENSIONS_FROM_LOCK=ON.
+$ ./build/card09-release/gufo diagnose   # exit 0; "=== Compatibility Verdict: [supported] ==="
+$ ./build/card09-lock/gufo diagnose      # exit 0; same verdict, selection: lock
+Matched control against the parent artifact (rebuilt here, not historical):
+$ ./build/card08-release/gufo diagnose > /tmp/card09-logs/diagnose-card08.log  # exit 0
+  diff vs build/card09-release diagnose: only "Timestamp" and "availableBytes" lines
+  differ; selection, verdict, device and capability sections identical.
+Re-ran after the two review fixes: both production directories reconfigured and
+rebuilt (exit 0 each), `diagnose` exit 0 in both, and with the Timestamp and
+availableBytes lines filtered out the Card 08 and Card 09 discovery reports are
+byte-identical (0 diff lines).
+Limitation: `diagnose` is a startup/runtime smoke, not numerical quality or timing,
+and Built extensions is still `none` because no model ships an extension.json yet.
+
+Working-copy integrity after all injections
+`grep CARD09-NEGPROOF\|CARD09-WINSIM CMakeLists.txt` -> 0; the protected list and
+`include(cmake/Checks.cmake)` are present; `diff` of cmake/TargetGraph.cmake
+against the integration version shows only the O0 marker block and the CR1
+classified-system-library list. `sha256sum docs/model-extensions/RFC.md` ->
+2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448 (unchanged, and
+RFC.md is not among the changed paths). Nothing under docs/ exceeds 1 MB
+(`find docs/model-extensions/evidence/card09 -size +1M` -> empty).
+
+Hosted bounded checks (AGENTS.md)
+$ nix build .#checks.x86_64-linux.pr --no-link
+  exit 0; the built source snapshot contains cmake/TargetGraph.cmake, so the
+  hosted check-pr-tests / check-format / check-docs derivations covered this
+  working set rather than the parent.
+$ (after the closing commit) nix build .#checks.x86_64-linux.pr --no-link
+  exit 0; check-docs and check-pr rebuilt against the committed tree.

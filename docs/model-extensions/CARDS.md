@@ -114,7 +114,7 @@ the current implementation milestone stops after Card 14.
 | 06 | 4; 02, 05 | [Move model-specific speculation out of core](cards/06-model-owned-speculation.md) | pending |
 | 07 | 5; 06 | [Extract acyclic Qwen family libraries](cards/07-qwen-family-libraries.md) | complete |
 | 08 | 5; 07 | [Extract H3, evaluation and model-dependent targets](cards/08-h3-eval-and-test-targets.md) | complete |
-| 09 | 6; 08 | [Separate serving policy from extension execution](cards/09-serving-runtime-boundary.md) | pending |
+| 09 | 6; 08 | [Separate serving policy from extension execution](cards/09-serving-runtime-boundary.md) | complete |
 | 10 | 7; 09 | [Publish and measure the public extension API](cards/10-public-api-surface.md) | pending |
 | 11 | 7; 10 | [Migrate models to public extension headers](cards/11-public-header-migrations.md) | pending |
 | 12 | 7b; 11 | [Add in-tree model API test support](cards/12-model-api-test-support.md) | pending |
@@ -184,3 +184,26 @@ unresolved gates are the deferred functional/performance half, Windows execution
 asset-blocked H3/DeepSeek oracle rows, per-model extension exclusion (no
 `extension.json` yet) and the shipped lock-mode artifact — none of which it claims.
 
+
+### Card 09
+
+See [Card 09: execution record](cards/09-serving-runtime-boundary.md#execution-record).
+It extracted `gufo_serving` (scheduler, runner pool, component text cache,
+`InferenceBackend`, continuation cache/store/identity), so the executable and the
+model test trees no longer re-compile those seven sources; moved neutral
+continuation state/snapshot bases, host snapshot budgets, the default HIP probe and
+reasoning/tokenizer token types into `gufo_ext_runtime` (`src/ext/`); put the
+backing/resource contracts in `src/cache/component_resources.hpp` with a
+virtual `cache::Adapter::BackingPlan`; and placed the HIP backing provider in
+`gufo_cache_hip` behind injected budget/log callbacks. Two permanent guards are new:
+`--fail-on-serving-boundary` (`extension_serving_boundary_gate`) and the link-graph
+guard (`cmake/TargetGraph.cmake`, `tools/ci/check-target-graph.py`,
+`extension_link_graph_gate`, 24 protected targets), each with a run negative proof.
+The blocking review (hosted `check-pr` include lost, an unselected layout suite, a
+coverage-vacuous graph guard) plus the orchestrator-found `::@` item-group break and
+two `codex exec review` findings (Windows system libraries, a ratio assertion that
+fails at or below the 4 GiB host headroom) are fixed. Its unresolved gates — none of
+which it claims — are the deferred functional/performance half, Windows execution,
+the probe's HIP branch and asset-heavy serving rows, the low-memory budget branch,
+per-model extension exclusion until `extension.json` exists, lock-mode runtime
+qualification beyond `diagnose`, and the exempt ASR in-tree test edge until Card 12.

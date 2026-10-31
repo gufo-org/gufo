@@ -41,7 +41,7 @@ public:
   void FinishPrefill(cache::Slot&) noexcept;
   void RollbackPrefill(cache::Slot&);
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
-      std::size_t ram_bytes) const {
+      std::size_t ram_bytes) const override {
     return layout_.BackingPlan(ram_bytes);
   }
   // Prompt-capture bytes the live slots pinned and charged to the ledger.

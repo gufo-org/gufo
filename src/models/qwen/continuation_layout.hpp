@@ -4,6 +4,7 @@
 #include <span>
 #include <vector>
 
+#include "src/cache/adapter.hpp"
 #include "src/cache/types.hpp"
 #include "src/core/model_config.hpp"
 #include "src/families/qwen/hip_common/execution_policy.hpp"
@@ -33,9 +34,9 @@ inline constexpr std::size_t kContinuationMetadataBytes = 64;
 inline constexpr std::size_t kContinuationFrontierMetadataBytes = 96;
 inline constexpr std::size_t kContinuationPendingTokens = 9;
 
-struct ContinuationBackingClass {
-  std::size_t block_bytes{}, blocks{}, metadata_bytes{};
-};
+// Backing classes are the cache's neutral contract (RFC step 6); the layout
+// owns the arithmetic that fills them.
+using ContinuationBackingClass = cache::BackingClass;
 
 // KV rows have a canonical token/head/channel order. FP32's native head-major
 // planes are gathered without conversion; their layout version differs from

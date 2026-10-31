@@ -1,4 +1,6 @@
-# Pre-migration serialization check needs neither HIP nor model weights.
+# Pre-migration serialization check needs neither HIP nor model weights:
+# it compiles continuation_identity.cpp itself for its own fixture path and
+# a HIP-free compile, instead of linking gufo_serving.
 add_executable(deepseek_v4_flash_continuation_identity_test continuation_identity_test.cpp
   ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp)
 target_include_directories(deepseek_v4_flash_continuation_identity_test PRIVATE ${PROJECT_SOURCE_DIR})
@@ -78,20 +80,10 @@ if(ENGINE_ENABLE_HIP)
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
-  add_executable(ds4_serving_test
-    serving_test.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_cache.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_disk_store.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/component_text_cache.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
-  # It compiles src/cli/serve/inference_backend.cpp, which still reaches the
-  # Qwen 27B model and vision stack until the serving split (step 6) removes it.
-  target_link_libraries(ds4_serving_test PRIVATE gufo_logging
-    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next
-    ${GUFO_QWEN_LIBRARIES} gufo_qwen_vision gufo_cache_hip hip::host)
+  add_executable(ds4_serving_test serving_test.cpp)
+  # gufo_serving still reaches the Qwen 27B model and vision stack through
+  # inference_backend.cpp; step 10 removes that interim edge.
+  target_link_libraries(ds4_serving_test PRIVATE gufo_serving)
   add_test(NAME ds4.serving COMMAND ds4_serving_test)
   set_tests_properties(ds4.serving PROPERTIES
     LABELS "gpu;hip;ds4;server;external-model;slow"

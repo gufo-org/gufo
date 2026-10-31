@@ -264,6 +264,7 @@ if (ENGINE_ENABLE_HIP)
   target_include_directories(gufo_hip_host PUBLIC ${PROJECT_SOURCE_DIR})
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
+    src/core/hip/component_cache_resources.cpp
     src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
@@ -400,6 +401,40 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
 endif()
 
+# RFC step 6: the text-serving tier the gufo executable used to compile into
+# itself. Scheduler, runner pool, component text cache and InferenceBackend
+# live here; queueing, retention/admission and API policy stay on this core
+# side of the boundary, while models reach execution through gufo_ext_runtime.
+add_library(gufo_serving STATIC
+  src/cli/serve/continuation_cache.cpp
+  src/cli/serve/continuation_disk_store.cpp
+  src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp
+  src/cli/serve/text_generation_scheduler.cpp
+  src/cli/serve/continuation_identity.cpp
+  src/cli/serve/inference_backend.cpp)
+target_link_libraries(gufo_serving PUBLIC gufo_ext_runtime gufo_logging
+  gufo_core gufo_cache)
+# The executable's own objects carried production NDEBUG, the test binaries that
+# re-compiled these sources forced assertions on. One library can only pick
+# one: test builds keep assertions, so a test-preset `gufo` now asserts where it
+# previously did not. Production (BUILD_TESTING=OFF) is unchanged.
+if (BUILD_TESTING)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(gufo_serving PRIVATE -UNDEBUG)
+  elseif (MSVC)
+    target_compile_options(gufo_serving PRIVATE /UNDEBUG)
+  endif()
+endif()
+if (ENGINE_ENABLE_HIP)
+  # Interim edges the RFC allows between steps 5 and 6: the concrete text
+  # runners and the model-specific identity lines still compile in these
+  # sources, so the library links the models until step 10 moves them out.
+  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip hip::host
+    gufo_deepseek_v4_flash gufo_qwen38_flash_next ${GUFO_QWEN_LIBRARIES}
+    gufo_qwen_vision)
+endif()
+
 add_library(gufo_http STATIC
   src/cli/serve/image_api.cpp
   src/cli/serve/audio_asr_api.cpp
@@ -431,17 +466,10 @@ add_executable(gufo
   src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
-  src/cli/serve/continuation_cache.cpp
-  src/cli/serve/continuation_disk_store.cpp
-  src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp
-  src/cli/serve/text_generation_scheduler.cpp
-  src/cli/serve/continuation_identity.cpp
-  src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
 target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_eval
-  gufo_llm_cli gufo_http CURL::libcurl)
+  gufo_llm_cli gufo_http gufo_serving CURL::libcurl)
 gufo_build_discovered_extensions()
 get_property(gufo_selected_extensions GLOBAL PROPERTY GUFO_SELECTED_EXTENSIONS)
 gufo_target_extensions(gufo EXTENSIONS ${gufo_selected_extensions})
@@ -713,6 +741,10 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
       --fail-on-core-model-includes)
+  add_test(NAME extension_serving_boundary_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-serving-boundary)
   add_test(NAME extension_family_graph_gate
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
@@ -723,7 +755,7 @@ if (BUILD_TESTING)
       --fail-on-target-ownership)
   set_tests_properties(check_extension_isolation_test extension_isolation_report
     extension_core_model_includes_gate extension_family_graph_gate
-    extension_target_ownership_gate
+    extension_serving_boundary_gate extension_target_ownership_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
   add_test(NAME check_docs_test
@@ -770,32 +802,22 @@ if (BUILD_TESTING)
       SKIP_RETURN_CODE 77)
   endif()
 
-  add_executable(continuation_cache_test
-    tests/cli/continuation_cache_test.cpp
-    src/cli/serve/continuation_cache.cpp)
-  target_link_libraries(continuation_cache_test PRIVATE gufo_core gufo_logging)
+  add_executable(continuation_cache_test tests/cli/continuation_cache_test.cpp)
+  target_link_libraries(continuation_cache_test PRIVATE gufo_serving)
   add_test(NAME continuation_cache_test COMMAND continuation_cache_test)
   set_tests_properties(continuation_cache_test PROPERTIES
     LABELS "cpu;server;cache;state;lifecycle")
 
   add_executable(component_text_cache_test
-    tests/cli/component_text_cache_test.cpp
-    src/cli/serve/component_text_cache.cpp
-    src/cli/serve/continuation_cache.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp)
-  target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake gufo_core gufo_logging)
+    tests/cli/component_text_cache_test.cpp)
+  target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake
+    gufo_serving)
   add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
   set_tests_properties(component_text_cache_test PROPERTIES LABELS "cpu;server;cache;state;lifecycle")
 
-  add_executable(text_model_runner_test
-    tests/cli/text_model_runner_test.cpp
-    src/cli/serve/continuation_cache.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp)
-  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core
-    gufo_cache ${GUFO_QWEN_LIBRARIES})
+  add_executable(text_model_runner_test tests/cli/text_model_runner_test.cpp)
+  target_link_libraries(text_model_runner_test PRIVATE gufo_serving
+    ${GUFO_QWEN_LIBRARIES})
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
@@ -803,12 +825,8 @@ if (BUILD_TESTING)
   # the disk-store suite exercises permission faults with chmod and lstat
   if (NOT WIN32)
   add_executable(continuation_disk_store_test
-    tests/cli/continuation_disk_store_test.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp
-    src/cli/serve/continuation_cache.cpp)
-  target_link_libraries(continuation_disk_store_test PRIVATE gufo_logging gufo_core gufo_cache)
+    tests/cli/continuation_disk_store_test.cpp)
+  target_link_libraries(continuation_disk_store_test PRIVATE gufo_serving)
   add_test(NAME continuation_disk_store_test
     COMMAND continuation_disk_store_test)
   set_tests_properties(continuation_disk_store_test PROPERTIES
@@ -822,13 +840,8 @@ if (BUILD_TESTING)
     LABELS "cpu;server;sampling")
 
   add_executable(text_generation_scheduler_test
-    tests/cli/text_generation_scheduler_test.cpp
-    src/cli/serve/continuation_cache.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp
-    src/cli/serve/text_generation_scheduler.cpp)
-  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_logging gufo_core gufo_cache)
+    tests/cli/text_generation_scheduler_test.cpp)
+  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_serving)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES
@@ -1396,6 +1409,25 @@ if (BUILD_TESTING)
     set_tests_properties(gufo_cpu_probe PROPERTIES
       LABELS "platform;probe;cpu")
   endif()
+endif()
+
+include(cmake/TargetGraph.cmake)
+if (BUILD_TESTING)
+  # Card 09 (RFC step 6): record the real link edges here, where every target
+  # is defined, and let `extension_link_graph_gate` judge them.
+  gufo_write_link_graph("${CMAKE_BINARY_DIR}/gufo-link-graph.json")
+  add_test(NAME extension_link_graph_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-target-graph.py
+      --report ${CMAKE_BINARY_DIR}/gufo-link-graph.json
+      --root ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(extension_link_graph_gate PROPERTIES
+    LABELS "cpu;repository" TIMEOUT 60)
+  add_test(NAME check_target_graph_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_target_graph_test.py ${CMAKE_BINARY_DIR})
+  set_tests_properties(check_target_graph_test PROPERTIES
+    LABELS "cpu;repository" TIMEOUT 60)
 endif()
 
 if (BUILD_TESTING)

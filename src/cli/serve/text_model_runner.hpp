@@ -16,15 +16,20 @@
 #include <vector>
 
 #include "src/cache/adapter.hpp"
+#include "src/cache/component_resources.hpp"
 #include "src/cache/ledger.hpp"
 #include "src/cli/serve/continuation_cache.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
 #include "src/core/sampling.hpp"
+#include "src/ext/device_probe.hpp"
+#include "src/ext/host_budget.hpp"
+#include "src/ext/text_contracts.hpp"
 
 namespace gufo::server {
 
-struct ComponentCacheResources;
+// The backing/resource contract is cache-owned (RFC step 6).
+using ComponentCacheResources = cache::ComponentCacheResources;
 
 using TextRunnerToken = ContinuationToken;
 
@@ -84,28 +89,13 @@ struct TextRunnerDiskCacheOptions {
   std::size_t min_checkpoint_step_tokens{2048};
 };
 
-/// MemAvailable from /proc/meminfo text minus CmaFree, in bytes. Free CMA
-/// pages count as available but only hold movable pages, not GPU
-/// allocations; the kernel's KHO scratch area can make that several GiB.
-/// Nullopt when MemAvailable is missing.
-[[nodiscard]] std::optional<std::uint64_t> MeminfoAvailableBytes(
-    std::string_view meminfo);
-/// `host_available` bounded by every cgroup v2 memory limit from the process's
-/// cgroup (named in `membership_text`, the /proc/self/cgroup contents) up to
-/// `root`. Inactive file pages in memory.stat are reclaimable page cache and
-/// are not counted as used; without that line, memory.current is used as is.
-[[nodiscard]] std::uint64_t CgroupAvailableBytes(
-    const std::filesystem::path& root, std::string_view membership_text,
-    std::uint64_t host_available);
-/// Automatic snapshot budget: half the host RAM available after loading
-/// (excluding free CMA pages), after cgroup limits.
-[[nodiscard]] std::size_t HostSnapshotBudgetBytes();
-/// RAM always left to the OS and other processes by an explicit cache limit.
-inline constexpr std::uint64_t kHostSnapshotHeadroomBytes = std::uint64_t{4}
-                                                            << 30;
-/// Most an explicit --cache-ram-bytes may claim: available host RAM minus
-/// kHostSnapshotHeadroomBytes.
-[[nodiscard]] std::size_t HostSnapshotCeilingBytes();
+// Host memory budgets are a runtime host service (RFC step 6); these aliases
+// keep the serving spelling until consumers name `gufo::ext` directly.
+using ext::CgroupAvailableBytes;
+using ext::HostSnapshotBudgetBytes;
+using ext::HostSnapshotCeilingBytes;
+using ext::kHostSnapshotHeadroomBytes;
+using ext::MeminfoAvailableBytes;
 
 enum class TextExecutionPlanKind : std::uint8_t {
   kSerial,
@@ -329,11 +319,7 @@ public:
   /// Reasoning tags for a token budget, as llama.cpp's chat format for the
   /// model defines them: `forced_end` is emitted once the budget is spent and
   /// any of `ends` closes reasoning early.
-  struct ReasoningTags {
-    std::string_view start;
-    std::string_view forced_end;
-    std::vector<std::string_view> ends;
-  };
+  using ReasoningTags = ext::ReasoningTags;
   [[nodiscard]] virtual ReasoningTags ReasoningBudgetTags() const {
     return {"<think>", "</think>", {"</think>"}};
   }
@@ -477,7 +463,7 @@ public:
   /// Retain a safe executed frontier when cancellation interrupts publication
   /// of a completed speculative block. Called with cancellation checks cleared.
   virtual void PrepareCancellation(TextRunnerState&) const {}
-  enum class DeviceProbeStatus { kUsable, kPending, kLost };
+  using DeviceProbeStatus = ext::DeviceProbeStatus;
   /// Submit or poll one private device probe without waiting. Called only by
   /// the scheduler between work units. Pending work is reused, never queued
   /// again.

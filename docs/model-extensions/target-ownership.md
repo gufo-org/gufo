@@ -126,6 +126,68 @@ because core-owned tests and tools reach it: `exact_token_test`,
 `persistent_deltanet_test`, `text_model_runner_test` and the installed
 `gufo-kernel-bench`.
 
+## The serving tier and the link-graph guard
+
+Card 09 (RFC step 6) added one more core-owned library consumed by the executable: `gufo_serving` (`src/cli/serve/continuation_cache.cpp`,
+`continuation_disk_store.cpp`, `component_text_cache.cpp`,
+`text_model_runner.cpp`, `text_generation_scheduler.cpp`,
+`continuation_identity.cpp`, `inference_backend.cpp`). It owns the scheduler,
+the runner, the cache facade, the model-selection switch and injected logging callbacks; `gufo` links it, `gufo_http` does not.
+
+Because the models can no longer reach it, the direction is enforced by a
+second static record, `cmake/TargetGraph.cmake` plus
+`tools/ci/check-target-graph.py` (CTest `extension_link_graph_gate`):
+
+```sh
+python3 tools/ci/check-target-graph.py --report build/<dir>/gufo-link-graph.json
+python3 tools/ci/check-target-graph.py --report build/<dir>/gufo-link-graph.json \
+  --show
+```
+
+A configured test build (`BUILD_TESTING=ON`) writes the report at the end of
+the root `CMakeLists.txt`, where every target is defined; the edges it records
+are the production ones because the model and HIP links of `gufo_serving` do
+not depend on `BUILD_TESTING`. It lists, for `gufo_core`,
+`gufo_cache`, `gufo_cache_hip`, `gufo_ext_runtime`, every manifest library and
+the fixed support targets, the transitive closure of their
+`INTERFACE_LINK_LIBRARIES` (`$<LINK_ONLY:...>` and `$<BUILD_INTERFACE:...>`
+items included; unsupported expressions fail configuration). Two invariants:
+
+- no protected target may reach `gufo_serving` or `gufo_http`, directly or
+  transitively;
+- every fixed or manifest-declared protected name must appear in the report.
+  Only `gufo_hip_host`, `gufo_cache_hip`, `gufo_deepseek_v4_flash` and
+  `gufo_qwen_kernels` may appear in `absent`, and only with `hip: false`.
+  The checker owns the forbidden set and rejects disagreement. Libraries with
+  neither a manifest nor a fixed protected name are outside this coverage.
+
+`gufo_serving` and `gufo_http` are excluded from the protected set on purpose:
+the executables `gufo` and `gufo_llm_cli` legitimately link the serving tier,
+and checking them would report the intended edge.
+
+The interim edges the guard tolerates, and who removes them:
+
+| Edge | Removed by |
+| --- | --- |
+| `gufo_serving` → `gufo_qwen27b`, `gufo_qwen38_flash_next`, `gufo_deepseek_v4_flash`, `gufo_qwen_config` | Card 20 / 21 / 22: those models register through the public API and `gufo_serving` consumes the registry |
+| `gufo_serving` → `gufo_hip_host`, `hip::host` | Card 12 / 14, once the backing provider is reached through a registered hook instead of a direct call |
+| `gufo_ext_runtime` → `hip::host` | stays: it is the default device probe's own implementation edge (`src/ext/device_probe.cpp`), not a serving edge |
+| model test targets → `gufo_serving` | Card 12 (`gufo_test_support`) |
+
+The same card moved the neutral contracts out of the serving headers:
+continuation state/snapshot/token and prefix identity live in
+`src/ext/continuation.hpp`, the host memory-budget service in
+`src/ext/host_budget.hpp`, the device-probe default in
+`src/ext/device_probe.{hpp,cpp}`, and the capture/backing contract
+(`ComponentCaptureBuffer`, `ComponentCacheResources`, `BackingClass`,
+`Adapter::BackingPlan`) in `src/cache/component_resources.hpp` and
+`src/cache/adapter.hpp`. `src/core/hip/component_cache_resources.{hpp,cpp}` is
+the single HIP backing provider, reached with injected host-service hooks.
+They stay private until Card 10 publishes them; `include/gufo/ext/SURFACE` is
+unchanged, and `--fail-on-serving-boundary` keeps `src/models/**`,
+`src/families/**`, `src/cache/**`, `src/ext/**` and `include/gufo/ext/**` free
+of any `src/cli` include.
+
 ## Build conditions
 
 `library.json` records identity and ownership; when a target exists stays with
@@ -137,6 +199,7 @@ CMake, which the graph and this table summarize:
 | H3 ROCm sources inside `gufo_minimax_h3` | `ENGINE_ENABLE_HIP` |
 | `gufo_deepseek_v4_flash_text`, `gufo_minimax_h3`, `gufo_eval`, `gufo_compare` | always, so CPU builds keep DeepSeek text support and `gufo bench` |
 | `minimax_h3_*_hip_test`, `video_*_test`, `qwen3_tts_*_hip_test` | `BUILD_TESTING` and `ENGINE_ENABLE_HIP` |
+| `gufo_serving` | always: `gufo` links it in every configuration |
 
 ## Limits of the audit
 

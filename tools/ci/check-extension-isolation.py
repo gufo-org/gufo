@@ -9,8 +9,11 @@ ratchets; no baseline or exception silently hides current dependencies.
 Enforcement ratchet (one boundary per migrated layer): with
 --fail-on-core-model-includes, no file under src/core/** may include a header
 under src/models/** or src/families/**. Card 06 (RFC step 4) retired the last
-such include, so a new violation fails the check. --fail-on-family-graph audits
-the Card 07 family manifests. --fail-on-target-ownership audits the Card 08
+such include, so a new violation fails the check. --fail-on-serving-boundary
+audits the Card 09 (RFC step 6) split: no src/cli/** include from production
+sources under src/models/**, src/families/**, src/cache/**, src/ext/** or
+include/gufo/ext/**; sources under a tests/ tree stay exempt until step 7b.
+--fail-on-family-graph audits the Card 07 family manifests. --fail-on-target-ownership audits the Card 08
 (RFC step 5) target graph: every model directory needs a manifest, and every
 target that links, compiles or includes a library must be claimed by it, so
 excluding a library cannot leave an unregistered test or tool behind. Other
@@ -654,6 +657,37 @@ def core_boundary_violations(report):
     return sorted(violations)
 
 
+# Layers that reach execution only through neutral contracts (RFC step 6).
+BOUNDARY_LAYERS = ("src/models/", "src/families/", "src/cache/", "src/ext/",
+                   "include/gufo/ext/")
+
+
+def in_test_tree(path):
+    """True for a source below a `tests/` (or `test/`) directory."""
+    return any(part in ("tests", "test") for part in path.split("/")[:-1])
+
+
+def serving_boundary_violations(report):
+    """Return model/runtime/cache/API includes of a src/cli/** header.
+
+    Card 09 separated serving policy from extension execution: models, family
+    libraries, the cache tier, the extension runtime and the public extension
+    API must compile without a serving or HTTP implementation header. Sources
+    under a `tests/` tree are exempt: those executables keep reaching serving
+    and HTTP directly until `gufo_test_support` (step 7b, Card 12) wraps them.
+    """
+    violations = []
+    for edge in report["includes"]:
+        path = edge["path"]
+        if not path.startswith(BOUNDARY_LAYERS) or in_test_tree(path):
+            continue
+        target = edge["resolved"] or posixpath.normpath(
+            posixpath.join(posixpath.dirname(path), edge["include"]))
+        if target.startswith("src/cli/"):
+            violations.append(f"{path}:{edge['line']}: {edge['include']}")
+    return sorted(violations)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
@@ -665,6 +699,9 @@ def main():
     parser.add_argument("--fail-on-family-graph", action="store_true",
                         help="Fail unless every family library is declared, assigned, "
                              "acyclic and free of model includes")
+    parser.add_argument("--fail-on-serving-boundary", action="store_true",
+                        help="Fail if a model, family, cache, extension-runtime or "
+                             "public-API file includes a src/cli serving or HTTP header")
     parser.add_argument("--fail-on-target-ownership", action="store_true",
                         help="Fail unless every model directory has a manifest and every "
                              "target that links, compiles or includes a library claims it")
@@ -697,6 +734,18 @@ def main():
             return 1
         print("[check-extension-isolation] PASS: core boundary "
               "(no src/core -> src/models|src/families includes)")
+    if args.fail_on_serving_boundary:
+        violations = serving_boundary_violations(report)
+        if violations:
+            print("[check-extension-isolation] SERVING BOUNDARY VIOLATED "
+                  "(models, families, cache, src/ext and the public API must "
+                  "not include a src/cli header):")
+            for violation in violations:
+                print(f"  {violation}")
+            return 1
+        print("[check-extension-isolation] PASS: serving boundary "
+              "(no src/cli include from models, families, cache, src/ext or "
+              "the public extension API)")
     if args.fail_on_target_ownership or args.target_ownership_report:
         libraries, edges, violations = target_ownership(args.root.resolve())
         if args.target_ownership_report:

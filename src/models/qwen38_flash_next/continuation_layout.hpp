@@ -5,6 +5,7 @@
 #include <span>
 #include <vector>
 
+#include "src/cache/adapter.hpp"
 #include "src/cache/types.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 
@@ -43,9 +44,9 @@ struct ContinuationComponent {
 // restoration.
 inline constexpr std::size_t kContinuationMetadataBytes = 160;
 
-struct ContinuationBackingClass {
-  std::size_t block_bytes{}, blocks{}, metadata_bytes{};
-};
+// Backing classes are the cache's neutral contract (RFC step 6); the layout
+// owns the arithmetic that fills them.
+using ContinuationBackingClass = cache::BackingClass;
 
 class ContinuationLayout {
 public:

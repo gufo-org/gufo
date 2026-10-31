@@ -1,0 +1,62 @@
+HISTORICAL WORKER EVIDENCE — predates integration.
+Correction F2: the 42-test run did NOT select Flash-Next continuation-layout;
+its registered name is qwen38_flash_next.continuation_layout. The five serving
+suite verdicts were not retained in the original partial tails. The corrected
+43-alternative selection has not been run here (Nix denied). See final log slots
+and pending-commands.txt; do not use this historical summary as corrected proof.
+
+Card 09 build/test evidence (unit + identity + CPU + hosted + static only)
+
+Host: AMD Strix Halo (gfx1151, 20 CUs), 125 GiB RAM, 32 CPUs.
+`free -g` before the GPU-heavy runs: 12 used / 112 available (>= 15 GiB headroom).
+`llama-swap.service` stayed active throughout; nothing was served or benchmarked.
+Every scratch path lived under /tmp/card09-logs and /tmp/card09-backup.
+
+Configurations built from this working copy (no commit was made)
+  build/card09-gpu     gpu-test          RelWithDebInfo, HIP ON,  BUILD_TESTING=ON
+  build/card09-cpu     cpu-test          RelWithDebInfo, HIP OFF, BUILD_TESTING=ON
+  build/card09-release release           RelWithDebInfo, HIP ON,  BUILD_TESTING=OFF, lock OFF
+  build/card09-lock    manual equivalent of `nix build .#release`
+                       RelWithDebInfo, HIP ON, BUILD_TESTING=OFF, GUFO_EXTENSIONS_FROM_LOCK=ON
+  Baselines kept from the Card 08 work: build/card08-gpu, build/card08-release
+  (used only for the compile-line audit and the `gufo diagnose` comparison).
+
+Focused selection, run identically in build/card09-gpu and build/card09-cpu
+  (regex retained in /tmp/card09-logs/selection.txt, logs
+  ctest-gpu-selection2.log and ctest-cpu-selection2.log):
+
+    GPU: 100% tests passed out of 42   (exit 0)
+    CPU: 100% tests passed out of 42   (exit 0)
+
+  Covered: continuation_cache_test, component_text_cache_test,
+  text_model_runner_test, continuation_disk_store_test,
+  text_generation_scheduler_test, ext_runtime_neutral_contracts_test,
+  cache_adapter_test + 10 other cache tests, extension_runtime_test,
+  extension_role_test, extension_api_surface, extension_api_policy_test,
+  extension_discovery_test, extension_cli_provenance_test,
+  extension_metadata_test, qwen27b_continuation_layout_test (Flash-Next layout omitted),
+  the three continuation_identity conformance tests, kernel_resources_parser_test,
+  openai_chat_test, http_server_test, serve_cli_test, check_docs_test and the
+  repository gates: extension_core_model_includes_gate,
+  extension_serving_boundary_gate, extension_target_ownership_gate,
+  extension_family_graph_gate, extension_link_graph_gate,
+  check_target_graph_test, check_extension_isolation_test,
+  extension_isolation_report.
+
+Production artifacts
+  build/card09-release/gufo  and build/card09-lock/gufo both link the new
+  gufo_serving library and `gufo diagnose` exits 0 on each:
+    GPU Model : AMD Radeon 8060S Graphics [gfx1151, 20 CUs] (available)
+    Extension API: 0.1.1
+    Extension selection: discovery   (release)
+    Extension selection: lock        (lock-mode)
+  `diff` against the Card 08 `gufo diagnose` output differs only in the run
+  timestamp, the live `availableBytes` reading, and the expected
+  discovery-vs-lock selection line (diagnose-card08-release.txt,
+  diagnose-release.txt, diagnose-lock.txt in /tmp/card09-logs).
+
+Compile-line parity: see moved-source-flags.txt (script `flag-audit.py`, output
+under `logs/`). Boundary gate negative proofs: see negative-proofs.txt, with
+the pre- and post-injection gate output retained in `logs/`. Final ctest
+transcripts for both configurations are `logs/ctest-gpu-final.txt` and
+`logs/ctest-cpu-final.txt`; `logs/selection.txt` is the exact regex.

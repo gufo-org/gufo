@@ -1,4 +1,6 @@
-# Pre-migration serialization check needs neither HIP nor model weights.
+# Pre-migration serialization check needs neither HIP nor model weights:
+# it compiles continuation_identity.cpp itself for its own fixture path and
+# a HIP-free compile, instead of linking gufo_serving.
 add_executable(qwen27b_continuation_identity_test continuation_identity_test.cpp
   ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp)
 target_include_directories(qwen27b_continuation_identity_test PRIVATE ${PROJECT_SOURCE_DIR})
@@ -59,21 +61,12 @@ if (ENGINE_ENABLE_HIP)
   add_qwen27b_test(qwen_dflash_noncausal_attention_ops_test attention_test.cpp
     "gpu;hip;dflash;dflash2;kernels")
   target_link_libraries(qwen_dflash_noncausal_attention_ops_test PRIVATE hip::host)
-  add_library(qwen_serving_test_support STATIC
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_cache.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_disk_store.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/component_text_cache.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
-  target_link_libraries(qwen_serving_test_support PUBLIC gufo_logging
-    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next
-    ${GUFO_QWEN_LIBRARIES} gufo_qwen_vision gufo_cache_hip hip::host)
+  # The serving tier is one library now (RFC step 6); these tests keep naming
+  # the models they drive directly.
   add_executable(inference_backend_gpu_test serving_test.cpp)
-  target_link_libraries(inference_backend_gpu_test PRIVATE qwen_serving_test_support)
+  target_link_libraries(inference_backend_gpu_test PRIVATE gufo_serving)
   add_executable(qwen_vision_serving_test ../qwen/vision_serving_test.cpp)
-  target_link_libraries(qwen_vision_serving_test PRIVATE qwen_serving_test_support)
+  target_link_libraries(qwen_vision_serving_test PRIVATE gufo_serving)
   add_test(NAME qwen_vision_serving_test COMMAND qwen_vision_serving_test)
   set_tests_properties(qwen_vision_serving_test PROPERTIES
     LABELS "qwen27b;qwen38-flash-next;hip;gpu;vision;external-model"

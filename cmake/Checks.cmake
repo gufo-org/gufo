@@ -60,7 +60,9 @@ list(APPEND gufo_pr_tests
   cache_boundary_test
   kernel_resources_parser_test check_docs_test check_pr_title_test
   check_extension_isolation_test extension_isolation_report
+  extension_core_model_includes_gate extension_serving_boundary_gate
   extension_family_graph_gate extension_metadata_test
+  check_target_graph_test extension_link_graph_gate
   extension_discovery_test extension_api_policy_test extension_api_surface
   extension_cli_provenance_test)
 if (WIN32)

@@ -21,7 +21,19 @@ gates are the deferred functional/performance half, Windows execution, the asset
 H3/DeepSeek oracle rows, per-model extension exclusion until `extension.json` exists, the
 shipped lock-mode artifact and the still-unbuilt production Nix derivation. See
 [target ownership](../target-ownership.md) for the manifest/claim contract later cards
-must satisfy. Cards 09–29 are pending.
+must satisfy. Card 09 is complete for its in-card gates: `gufo_serving` now owns the
+scheduler, runner pool, component text cache and `InferenceBackend` sources instead
+of the executable and three model test trees re-compiling them; `gufo_ext_runtime`
+owns the neutral continuation state/snapshot bases, host snapshot budgets, default
+HIP probing and reasoning/tokenizer token types; the backing/resource contracts and
+the HIP backing provider moved to `src/cache` and `gufo_cache_hip` behind injected
+budget/log callbacks; and `extension_serving_boundary_gate` plus
+`extension_link_graph_gate` (each negative-proved) guard the split. Its unresolved
+gates are the deferred functional/performance half, Windows execution, the probe's
+HIP branch and asset-heavy serving rows, lock-mode runtime qualification, and the
+exempt ASR in-tree test edge until Card 12 — none of which it claims. See its
+[execution record](09-serving-runtime-boundary.md#execution-record).
+Cards 10–29 are pending.
 The authorized implementation milestone ends after Card 14 is
 verified and committed; cards 15–29 document later scope only. This split is
 documentation work and does not itself advance any implementation status.

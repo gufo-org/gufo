@@ -1,0 +1,153 @@
+[check-extension-isolation] REPORT ONLY (coupling does not fail this check)
+  files: 1274
+  includes: 8443
+  cross_owner_includes: 1192
+  namespace_references: 1387
+  name_references: 15361
+  configuration_mentions: 1872
+  qwen_headers: 61
+  family_libraries: 6
+  family_edges: 7
+  configuration -> src/core: 1
+  families/qwen -> src/core: 56
+  models/deepseek_v4_flash -> src/core: 20
+  models/embedding_gemma2 -> src/core: 11
+  models/minimax_h3 -> families/qwen: 1
+  models/minimax_h3 -> src/core: 11
+  models/qwen -> families/qwen: 52
+  models/qwen -> src/cache: 4
+  models/qwen -> src/core: 49
+  models/qwen38_flash_next -> families/qwen: 8
+  models/qwen38_flash_next -> src/cache: 3
+  models/qwen38_flash_next -> src/core: 26
+  models/qwen3_asr -> src/cli: 2
+  models/qwen3_asr -> src/core: 11
+  models/qwen3_tts -> families/qwen: 2
+  models/qwen3_tts -> src/core: 10
+  models/qwen_image_21 -> families/qwen: 2
+  models/qwen_image_21 -> src/core: 7
+  src/cache -> src/core: 1
+  src/cli -> configuration: 2
+  src/cli -> families/qwen: 17
+  src/cli -> models/deepseek_v4_flash: 9
+  src/cli -> models/embedding_gemma2: 8
+  src/cli -> models/minimax_h3: 4
+  src/cli -> models/qwen: 16
+  src/cli -> models/qwen38_flash_next: 6
+  src/cli -> models/qwen3_asr: 5
+  src/cli -> models/qwen3_tts: 8
+  src/cli -> models/qwen_image_21: 1
+  src/cli -> src/cache: 11
+  src/cli -> src/core: 93
+  src/cli -> src/eval: 3
+  src/cli -> src/ext: 4
+  src/cli -> src/testing: 1
+  src/core -> src/cache: 7
+  src/eval -> src/core: 1
+  src/ext -> configuration: 5
+  src/ext -> src/core: 3
+  tests/benchmarks -> src/cli: 1
+  tests/benchmarks -> src/core: 2
+  tests/cache -> src/cache: 25
+  tests/cache -> src/core: 8
+  tests/cli -> families/qwen: 3
+  tests/cli -> models/deepseek_v4_flash: 1
+  tests/cli -> src/cache: 1
+  tests/cli -> src/cli: 37
+  tests/cli -> src/core: 21
+  tests/cli -> tests/cache: 1
+  tests/cli -> tests/models/qwen27b: 1
+  tests/cli -> tests/support: 3
+  tests/core -> src/core: 36
+  tests/core -> tests/fixtures: 1
+  tests/core -> tests/support: 1
+  tests/diagnostics -> src/core: 11
+  tests/extensions -> configuration: 4
+  tests/extensions -> src/cli: 1
+  tests/extensions -> src/ext: 4
+  tests/families -> families/qwen: 1
+  tests/families -> src/core: 1
+  tests/families -> tests/fixtures: 1
+  tests/fixtures -> src/core: 2
+  tests/kernels -> families/qwen: 2
+  tests/kernels -> models/qwen: 1
+  tests/kernels -> src/core: 4
+  tests/models/chat_template_golden_helpers.hpp -> src/core: 2
+  tests/models/chat_template_hf_token_golden_test.cpp -> families/qwen: 2
+  tests/models/chat_template_hf_token_golden_test.cpp -> src/core: 3
+  tests/models/chat_template_hf_token_golden_test.cpp -> tests/models/chat_template_golden_helpers.hpp: 1
+  tests/models/deepseek_v4_flash -> families/qwen: 1
+  tests/models/deepseek_v4_flash -> models/deepseek_v4_flash: 27
+  tests/models/deepseek_v4_flash -> src/cli: 4
+  tests/models/deepseek_v4_flash -> src/core: 8
+  tests/models/deepseek_v4_flash -> src/eval: 2
+  tests/models/deepseek_v4_flash -> tests/models/chat_template_golden_helpers.hpp: 2
+  tests/models/deepseek_v4_flash -> tests/support: 1
+  tests/models/embedding_gemma2 -> models/embedding_gemma2: 22
+  tests/models/embedding_gemma2 -> src/cli: 2
+  tests/models/embedding_gemma2 -> src/core: 12
+  tests/models/minimax_h3_audio_vae_hip_test.hip -> models/minimax_h3: 5
+  tests/models/minimax_h3_denoiser_hip_test.hip -> models/minimax_h3: 4
+  tests/models/minimax_h3_dit_hip_test.hip -> models/minimax_h3: 5
+  tests/models/minimax_h3_generation_test.cpp -> models/minimax_h3: 2
+  tests/models/minimax_h3_generation_test.cpp -> src/core: 1
+  tests/models/minimax_h3_media_test.cpp -> models/minimax_h3: 1
+  tests/models/minimax_h3_media_test.cpp -> src/core: 1
+  tests/models/minimax_h3_prompt_encoder_hip_test.hip -> models/minimax_h3: 4
+  tests/models/minimax_h3_runtime_hip_test.cpp -> models/minimax_h3: 1
+  tests/models/minimax_h3_runtime_test.cpp -> models/minimax_h3: 3
+  tests/models/minimax_h3_runtime_test.cpp -> tests/support: 1
+  tests/models/minimax_h3_sampling_hip_test.hip -> models/minimax_h3: 1
+  tests/models/minimax_h3_sampling_test.cpp -> models/minimax_h3: 2
+  tests/models/minimax_h3_tokenizer_test.cpp -> families/qwen: 1
+  tests/models/minimax_h3_tokenizer_test.cpp -> models/minimax_h3: 2
+  tests/models/minimax_h3_video_vae_hip_test.hip -> models/minimax_h3: 4
+  tests/models/minimax_h3_video_vae_test.cpp -> models/minimax_h3: 2
+  tests/models/qwen -> families/qwen: 48
+  tests/models/qwen -> models/qwen: 96
+  tests/models/qwen -> models/qwen38_flash_next: 1
+  tests/models/qwen -> src/cache: 1
+  tests/models/qwen -> src/cli: 1
+  tests/models/qwen -> src/core: 57
+  tests/models/qwen -> src/testing: 1
+  tests/models/qwen -> tests/models/chat_template_golden_helpers.hpp: 1
+  tests/models/qwen -> tests/support: 1
+  tests/models/qwen -> tests/testing: 6
+  tests/models/qwen27b -> families/qwen: 9
+  tests/models/qwen27b -> models/qwen: 16
+  tests/models/qwen27b -> src/cache: 1
+  tests/models/qwen27b -> src/cli: 2
+  tests/models/qwen27b -> src/core: 20
+  tests/models/qwen27b -> src/testing: 1
+  tests/models/qwen27b -> tests/models/qwen: 3
+  tests/models/qwen27b -> tests/support: 2
+  tests/models/qwen38_flash_next -> families/qwen: 7
+  tests/models/qwen38_flash_next -> models/qwen38_flash_next: 54
+  tests/models/qwen38_flash_next -> src/cache: 1
+  tests/models/qwen38_flash_next -> src/cli: 2
+  tests/models/qwen38_flash_next -> src/core: 10
+  tests/models/qwen38_flash_next -> tests/models/qwen27b: 2
+  tests/models/qwen38_flash_next -> tests/support: 2
+  tests/models/qwen3_tts -> models/qwen3_tts: 20
+  tests/models/qwen3_tts -> src/cli: 3
+  tests/models/qwen_image_21 -> models/qwen_image_21: 6
+  tests/models/qwen_image_21 -> src/cli: 2
+  tests/models/qwen_image_21 -> src/core: 2
+  tests/models/qwen_image_21 -> tests/support: 1
+  tests/quality -> models/qwen: 2
+  tests/quality -> src/core: 1
+  tests/quality -> src/eval: 3
+  tests/support -> src/core: 2
+  tests/testing -> src/testing: 1
+  tools/bench -> families/qwen: 1
+  tools/bench -> src/core: 1
+  tools/llama_parity -> src/core: 1
+  tools/models -> models/qwen_image_21: 2
+  tools/models -> src/core: 1
+  tools/qwen27b -> families/qwen: 12
+  tools/qwen27b -> tests/models/qwen: 2
+  Note: Lexical namespace references are candidates, not compiler-resolved symbols.
+  Note: Includes in all conditional branches are counted; macro includes are not resolved.
+  Note: Header closure covers literal repository-local includes, not compiler search paths.
+  Note: Directories named vendor and Python bytecode caches are excluded.
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)

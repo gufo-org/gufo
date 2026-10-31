@@ -37,6 +37,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
+#include "src/core/hip/component_cache_resources.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/host_allocations.hpp"
@@ -630,248 +631,40 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
   return *qwen;
 }
 
-// Owns a four-byte device buffer and a private stream from load, so probing
-// a lost context needs no allocation. HIP context loss is sticky: after a GPU
-// reset even this memset fails with a hard error. Only such an error marks the
-// device lost; a memset still pending at the deadline may be queued behind
-// long kernels on the shared hardware queues, so it counts as usable.
+// Shared runner base for the HIP models. Device-loss probing is the runtime's
+// `ext::DeviceProbe` (RFC step 6); the probe holds its buffer and private
+// stream from construction, with the 5 s bound the scheduler expects.
 class HipTextModelRunner : public TextModelRunner {
 public:
-  HipTextModelRunner() {
-    HIP_CHECK(hipStreamCreateWithFlags(&probe_stream_, hipStreamNonBlocking));
-    if (const auto error = hipMalloc(&probe_buffer_, sizeof(std::uint32_t));
-        error != hipSuccess) {
-      hip::LogCleanupError(hipStreamDestroy(probe_stream_));
-      throw std::runtime_error(std::string("device probe allocation: ") +
-                               hipGetErrorString(error));
-    }
-  }
-  ~HipTextModelRunner() override {
-    hip::LogCleanupError(hipFree(probe_buffer_));
-    hip::LogCleanupError(hipStreamDestroy(probe_stream_));
-  }
+  HipTextModelRunner() = default;
+
   HipTextModelRunner(const HipTextModelRunner&) = delete;
   HipTextModelRunner& operator=(const HipTextModelRunner&) = delete;
   HipTextModelRunner(HipTextModelRunner&&) = delete;
   HipTextModelRunner& operator=(HipTextModelRunner&&) = delete;
 
   [[nodiscard]] DeviceProbeStatus PollDevice() const override {
-    if (!probe_pending_) {
-      // Clear the failed work unit's thread-local error before probing.
-      (void)hipGetLastError();
-      if (hipMemsetAsync(probe_buffer_, 0, sizeof(std::uint32_t),
-                         probe_stream_) != hipSuccess ||
-          hipGetLastError() != hipSuccess)
-        return DeviceProbeStatus::kLost;
-      probe_pending_ = true;
-    }
-    const auto status = hipStreamQuery(probe_stream_);
-    if (status == hipErrorNotReady)
-      return DeviceProbeStatus::kPending;
-    probe_pending_ = false;
-    return status == hipSuccess ? DeviceProbeStatus::kUsable
-                                : DeviceProbeStatus::kLost;
+    return probe_.Poll();
   }
 
   [[nodiscard]] bool DeviceUsable() const override {
-    constexpr auto kTimeout = std::chrono::seconds(5);
-    const auto deadline = Clock::now() + kTimeout;
-    for (;;) {
-      const auto status = PollDevice();
-      if (status == DeviceProbeStatus::kUsable)
-        return true;
-      if (status == DeviceProbeStatus::kLost)
-        return false;
-      if (Clock::now() >= deadline) {
-        Logger::Warn("scheduler", "event=device_probe_timeout timeout_s=" +
-                                      std::to_string(kTimeout.count()));
-        return true;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    return probe_.WaitUsable(std::chrono::seconds(5), "scheduler");
   }
 
 private:
-  hipStream_t probe_stream_{};
-  void* probe_buffer_{};
-  mutable bool probe_pending_{false};
+  ext::DeviceProbe probe_;
 };
 
-template<typename AdapterType>
-std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
-    std::unique_ptr<AdapterType> adapter, cache::ResourceLedger& ledger) {
-  struct Backing {
-    hip::TransferPool streams{64};
-    std::unique_ptr<hip::CommittedBackingPool> pool;
-    std::map<std::uint32_t, std::size_t> component_classes;
-  };
-  auto result = std::make_unique<ComponentCacheResources>();
-  result->adapter = std::move(adapter);
-  auto backing = std::make_shared<Backing>();
-  result->transfer_batch_size = 16;
-  const auto rounded = [](std::size_t bytes) {
-    return (bytes + 4095) / 4096 * 4096;
-  };
-  for (const auto& d : result->adapter->Components()) {
-    const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
-                                   ? d.state_bytes
-                                   : d.row_bytes * d.rows_per_chunk);
-    backing->component_classes.emplace(d.id.value, bytes);
-  }
-  // The remainder belongs to index, histories, disk catalog and queue
-  // metadata. The pools charge their own per-block allocator headroom.
-  result->commit_backing = [backing, &ledger, adapter = result->adapter.get()](
-                               std::size_t budget) {
-    const auto plan = static_cast<AdapterType*>(adapter)->BackingPlan(budget);
-    if (plan.size() != 1)
-      throw std::invalid_argument("insufficient component backing budget");
-    const auto& allocation = plan.front();
-    // Pages commit as captures need them. A payload cannot span segments,
-    // so segments of about 128 MiB bound registration pauses and stranded
-    // edge space, fitting at least two of the largest payloads. Prefill
-    // chunks prepare backing before GPU work, after any fallback capture.
-    // Growth stops when the host keeps less than its reserve.
-    std::size_t largest = 0;
-    for (const auto& [id, bytes] : backing->component_classes)
-      largest = std::max(largest, bytes);
-    const auto block = allocation.block_bytes;
-    const auto target =
-        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
-    const auto parts =
-        std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
-    const auto segment = (allocation.blocks + parts - 1) / parts * block;
-    struct Limited {
-      std::mutex mutex;
-      std::chrono::steady_clock::time_point refused;
-      bool active{};
-    };
-    backing->pool = std::make_unique<hip::CommittedBackingPool>(
-        ledger,
-        hip::BackingPoolConfig{
-            allocation.blocks * allocation.block_bytes +
-                allocation.metadata_bytes,
-            allocation.block_bytes, allocation.metadata_bytes, segment,
-            [limited = std::make_shared<Limited>()](std::size_t bytes) {
-              const std::lock_guard lock(limited->mutex);
-              const auto now = std::chrono::steady_clock::now();
-              // Pressure retries ask once per capture; recheck at most
-              // once a second while the host is short.
-              if (limited->active &&
-                  now - limited->refused < std::chrono::seconds(1))
-                return false;
-              const auto ceiling = HostSnapshotCeilingBytes();
-              // Pinned host pages come out of the same device heap that
-              // session and scratch allocations draw on; keep its dispatch
-              // reserve so they do not fall back to managed memory.
-              std::size_t heap_free = 0, heap_total = 0;
-              const bool heap_fits =
-                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
-                  hip::HeapFitsAboveReserve(heap_free, bytes);
-              if (ceiling >= bytes && heap_fits) {
-                limited->active = false;
-                return true;
-              }
-              if (!limited->active)
-                Logger::Warn(
-                    "cache",
-                    "schema=component-cache-v1 "
-                    "event=backing_limited reason=" +
-                        std::string(heap_fits ? "host_reserve "
-                                              : "device_heap_reserve ") +
-                        "segment_bytes=" + std::to_string(bytes) +
-                        " host_headroom_bytes=" + std::to_string(ceiling) +
-                        " device_heap_free_bytes=" + std::to_string(heap_free));
-              limited->active = true;
-              limited->refused = now;
-              return false;
-            }});
-    // Prepare a bounded reserve before readiness. The first shared-prefix
-    // capture needs more than one segment; preparing 2 GiB avoids moving
-    // registration onto that request's capture or decode path.
-    backing->pool->GrowAhead(2ULL << 30);
-    backing->pool->WaitForGrowth();
-    Logger::Info(
-        "cache",
-        "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
-            std::to_string(backing->pool->CommittedBytes()) +
-            " long_term_pinned_bytes=" +
-            std::to_string(backing->pool->LongTermPinnedBytes()));
-  };
-  result->prepare_prefill = [backing](std::size_t tokens) {
-    // Prepare after any fallback capture, alongside actual prefill work.
-    // Short turns need a smaller reserve for private states and row tails.
-    backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
-  };
-  result->can_capture = [backing](auto payloads) {
-    return backing->pool->CanFit(payloads);
-  };
-  result->owner = backing;
-  result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
-    return backing->streams.TryAcquire();
-  };
-  result->allocate = [backing](const cache::PayloadRequest& request) {
-    // Bound the logical capture, then assign whole shared backing pages.
-    const auto capacity =
-        backing->component_classes.at(request.component.value);
-    if (request.bytes > capacity)
-      throw std::logic_error("component capture exceeds its backing class");
-    const auto category =
-        request.category == cache::ResourceCategory::kBackingAssigned
-            ? cache::ResourceCategory::kBackingAssigned
-            : request.category;
-    const auto segments = backing->pool->PageCommitAllocations();
-    const auto started = std::chrono::steady_clock::now();
-    auto block = backing->pool->TryAcquire(category, request.bytes);
-    if (backing->pool->PageCommitAllocations() != segments)
-      Logger::Info(
-          "cache",
-          "schema=component-cache-v1 event=backing_grown committed_bytes=" +
-              std::to_string(backing->pool->CommittedBytes()) + " segments=" +
-              std::to_string(backing->pool->PageCommitAllocations()) +
-              " long_term_pinned_bytes=" +
-              std::to_string(backing->pool->LongTermPinnedBytes()) +
-              " acquire_ms=" +
-              std::to_string(std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - started)
-                                 .count()));
-    if (!block)
-      throw cache::ResourceExhausted();
-    // Do not start registration between a capture's allocations and copies.
-    // Each prefill chunk prepares its own reserve before GPU work.
-    auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
-    return ComponentCaptureBuffer{
-        owner->Bytes(),
-        [owner] {
-          owner->Convert();
-          return std::move(*owner).TakePayload();
-        },
-        backing->pool.get(),
-        [owner, request](cache::SlotLease& lease, auto source) {
-          return cache::Payload::Borrowed(
-              std::move(*owner).Borrow(lease, request.component, request.first,
-                                       request.end, request.bytes, source));
-        }};
-  };
-  result->staging = [](std::size_t bytes) {
-    auto allocation = std::make_shared<hip::HostAllocations>();
-    void* data = nullptr;
-    const auto status =
-        allocation->Allocate(&data, bytes, hipHostMallocCoherent);
-    if (status != hipSuccess)
-      throw std::runtime_error(hipGetErrorString(status));
-    auto owner = std::shared_ptr<void>(std::move(allocation), data);
-    std::memset(data, 0, bytes);
-    return cache::StagingAllocation{std::move(owner),
-                                    {static_cast<std::uint8_t*>(data), bytes}};
-  };
-  result->copy_observed_rows = [](auto source, auto destination,
-                                  cache::Stream& stream) {
-    return dynamic_cast<hip::TransferStream&>(stream).Copy(
-        destination.data(), source.data(), destination.size(),
-        hip::CopyDirection::kDeviceToHost, destination.size());
-  };
-  return result;
+#if defined(ENGINE_ENABLE_HIP)
+// The backing provider's policy inputs. Queueing and cache policy stay here;
+// the pool only receives the host ceiling and the process logger, under the
+// cache component tag it logged before the split.
+[[nodiscard]] hip::ComponentCacheHooks HipComponentCacheHooks() {
+  return {HostSnapshotCeilingBytes,
+          [](std::string_view message) { Logger::Warn("cache", message); },
+          [](std::string_view message) { Logger::Info("cache", message); }};
 }
+#endif  // ENGINE_ENABLE_HIP
 
 class QwenTextRunner final : public HipTextModelRunner {
 public:
@@ -913,7 +706,7 @@ public:
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
     (void)ram;
-    auto resources = CreateHipComponentCacheResources(
+    auto resources = hip::CreateHipComponentCacheResources(
         std::make_unique<models::qwen::ContinuationAdapter>(
             model_, max_context_, component_identity_, execution_policy_,
             dflash_model_,
@@ -922,7 +715,7 @@ public:
                 .max_draft_tokens = speculative_options_.max_draft_tokens,
                 .policy = dflash_policy_},
             &ledger),
-        ledger);
+        ledger, HipComponentCacheHooks());
     // Qwen's 256-row chunks are small. Preserve a bounded group before
     // waiting, instead of synchronizing every half-MiB range individually.
     resources->reassignment_batch_size = 16;
@@ -2301,13 +2094,13 @@ public:
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
     (void)ram;
-    return CreateHipComponentCacheResources(
+    return hip::CreateHipComponentCacheResources(
         std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
             model_,
             use_mtp_ ? core::SessionMode::kSpeculative
                      : core::SessionMode::kAutoregressive,
             max_context_, component_identity_),
-        ledger);
+        ledger, HipComponentCacheHooks());
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {

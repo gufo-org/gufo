@@ -490,6 +490,56 @@ qwen::Real real;
         _, _, violations = ISOLATION.target_ownership(ROOT)
         self.assertEqual(violations, [])
 
+    def test_serving_boundary_blocks_cli_includes_from_production_layers(self):
+        files = {
+            "src/cli/serve/scheduler.hpp": "struct Scheduler {};\n",
+            "src/cli/serve/http_server.hpp": "struct Http {};\n",
+            "src/cli/serve/logging.hpp": "struct Logger {};\n",
+            "src/models/deepseek/engine.cpp":
+                '#include "src/cli/serve/logging.hpp"\n',
+            "src/families/qwen/text/template.cpp":
+                '#include "../http.hpp"\n',
+            "src/families/qwen/http.hpp": '#include "src/cli/serve/http_server.hpp"\n',
+            "src/cache/pool.cpp": '#include "src/cli/serve/scheduler.hpp"\n',
+            "src/ext/runtime.cpp": '#include "src/cli/serve/scheduler.hpp"\n',
+            "include/gufo/ext/serving.hpp":
+                '#include "src/cli/serve/scheduler.hpp"\n',
+            # Serving reaching a model is the interim step-6 edge, not this gate.
+            "src/cli/serve/inference_backend.cpp":
+                '#include "src/models/deepseek/engine.hpp"\n',
+            # Test executables keep reaching serving until step 7b.
+            "src/models/qwen3_asr/tests/audio_api_test.cpp":
+                '#include "src/cli/serve/http_server.hpp"\n',
+            "tests/cli/scheduler_test.cpp":
+                '#include "src/cli/serve/scheduler.hpp"\n',
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            violations = ISOLATION.serving_boundary_violations(
+                ISOLATION.inventory(root))
+        # The family header reached through `../http.hpp` is itself reported, so
+        # the parent-relative edge to it is not a serving edge.
+        self.assertEqual(violations, [
+            "include/gufo/ext/serving.hpp:1: src/cli/serve/scheduler.hpp",
+            "src/cache/pool.cpp:1: src/cli/serve/scheduler.hpp",
+            "src/ext/runtime.cpp:1: src/cli/serve/scheduler.hpp",
+            "src/families/qwen/http.hpp:1: src/cli/serve/http_server.hpp",
+            "src/models/deepseek/engine.cpp:1: src/cli/serve/logging.hpp",
+        ])
+
+    def test_repository_satisfies_the_serving_boundary(self):
+        # Card 09 moved the continuation bases, host budgets and device probe to
+        # gufo_ext_runtime and the capture/backing contract to gufo_cache. If
+        # this fails, production model, cache or runtime code started including
+        # a serving or HTTP header again; use the neutral contract instead.
+        violations = ISOLATION.serving_boundary_violations(
+            ISOLATION.inventory(ROOT))
+        self.assertEqual(violations, [])
+
     def test_repository_satisfies_the_core_boundary(self):
         # Card 06 moved Qwen-specific speculation out of src/core/speculative/.
         # If this fails, a core source started including a model or family

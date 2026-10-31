@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-#include "src/cli/serve/logging.hpp"
+#include "src/core/logging/logging.hpp"
 #include "src/core/mapped_prefetch.hpp"
 #include "src/core/platform/publish.hpp"
 #include "../kernels/rocm/resident_api.h"
