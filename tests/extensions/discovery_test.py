@@ -2,6 +2,7 @@
 """Exercise production discovery/selection using actual model/family directories."""
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -14,7 +15,9 @@ class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="gufo-discovery-")
         self.addCleanup(self.temporary.cleanup)
-        self.source = Path(self.temporary.name)
+        # Windows may spell TEMP with 8.3 short names, while the manifest glob
+        # returns long ones; relative extension sources need one spelling.
+        self.source = Path(self.temporary.name).resolve()
         self.build = self.source / "build"
         (self.source / "extensions.lock").write_text('{"schema":1,"extensions":[]}')
         (self.source / "main.cpp").write_text('''#include <iostream>
@@ -238,13 +241,14 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
 
     def test_platform_selection(self):
         path = self.source / "src/models/beta/extension.json"
-        data = json.loads(path.read_text()); data["platforms"] = ["windows"]
+        host = "windows" if os.name == "nt" else "linux"
+        data = json.loads(path.read_text()); data["platforms"] = ["linux" if host == "windows" else "windows"]
         path.write_text(json.dumps(data))
         self.configure()
-        self.assertIn("unsupported platform linux", self.run_fixture()["excludedExtensions"][0]["reason"])
-        self.configure("-DGUFO_EXTENSIONS=beta", error="unavailable on linux")
+        self.assertIn(f"unsupported platform {host}", self.run_fixture()["excludedExtensions"][0]["reason"])
+        self.configure("-DGUFO_EXTENSIONS=beta", error=f"unavailable on {host}")
         self.lock(["beta"])
-        self.configure("-DGUFO_EXTENSIONS=*", "-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="unavailable on linux")
+        self.configure("-DGUFO_EXTENSIONS=*", "-DGUFO_EXTENSIONS_FROM_LOCK=ON", error=f"unavailable on {host}")
 
 
 if __name__ == "__main__":

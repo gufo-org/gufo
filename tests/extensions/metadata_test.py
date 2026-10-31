@@ -132,6 +132,7 @@ class ConfigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gufo-extension-edges-") as temp:
             source = Path(temp)
             cmake = ["cmake_minimum_required(VERSION 3.21)", "project(extension_edges LANGUAGES CXX)",
+                     "set(CMAKE_CXX_STANDARD 20)", "set(CMAKE_CXX_STANDARD_REQUIRED ON)",
                      f'set(PROJECT_SOURCE_DIR "{ROOT.as_posix()}")', "find_package(Threads REQUIRED)",
                      f'add_subdirectory("{ROOT.as_posix()}/src/core/platform" platform)',
                      f'add_subdirectory("{ROOT.as_posix()}/src/ext" runtime)', f'include("{MODULE.as_posix()}")']
@@ -171,7 +172,9 @@ class ConfigureTests(unittest.TestCase):
                 'for (const auto& p : r.Providers()) {'
                 'if (p.id.ends_with("-extra")) { if (!p.options.empty()) return 3; continue; }'
                 'if (p.options.size() != 1 || p.options[0].help != "x\\\\u0000y") return 2; } return 0; }\n')
-            for command in (["cmake", "-S", str(source), "-B", str(source / "build")],
+            # Ninja keeps the build's compiler (CXX); a Visual Studio generator
+            # would select MSVC instead.
+            for command in (["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
                             ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "4"],
                             ["ctest", "--test-dir", str(source / "build"), "-C", "Release", "--output-on-failure"]):
                 result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

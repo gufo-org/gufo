@@ -354,7 +354,7 @@ qwen::Real real;
             self.assertIn("demo <- probe_test (links gufo_demo)", edges)
 
     def test_target_ownership_rejects_unrelated_claim(self):
-        with tempfile.TemporaryDirectory(prefix="card08-", dir="/tmp") as directory:
+        with tempfile.TemporaryDirectory(prefix="card08-") as directory:
             root = Path(directory)
             model = root / "src/models/demo"
             model.mkdir(parents=True)
@@ -438,7 +438,7 @@ qwen::Real real;
                 "add_executable(demo_probe probe.cpp\n"
                 "  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/models/demo/demo.cpp)\n"),
         }
-        with tempfile.TemporaryDirectory(prefix="card08-", dir="/tmp") as directory:
+        with tempfile.TemporaryDirectory(prefix="card08-") as directory:
             root = Path(directory)
             for name, content in files.items():
                 path = root / name
