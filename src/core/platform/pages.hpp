@@ -18,12 +18,18 @@ struct SharedTempMapping {
 /// Reserves and commits `bytes` of zero-filled anonymous memory, opting out
 /// of transparent huge pages and touching every page before returning, so
 /// later promotions cannot invalidate device mappings. Returns nullptr on
-/// failure. Pair with ReleaseCommittedPages(); registration with a device
-/// runtime stays with the caller.
+/// failure. The mapping may extend past `bytes` to whole 2 MiB blocks, so no
+/// other mapping shares a block with a registered range. Pair with
+/// ReleaseZeroedPages(); registration with a device runtime stays with the
+/// caller.
 void* CommitZeroedPages(std::size_t bytes) noexcept;
 
-/// Releases memory obtained from CommitZeroedPages() or
-/// CloneMappedWeightsToAnonymousPages(). `bytes` must match the commit call.
+/// Releases memory obtained from CommitZeroedPages(). `bytes` must match the
+/// commit call.
+void ReleaseZeroedPages(void* base, std::size_t bytes) noexcept;
+
+/// Releases memory obtained from CloneMappedWeightsToAnonymousPages().
+/// `bytes` must match the clone call.
 void ReleaseCommittedPages(void* base, std::size_t bytes) noexcept;
 
 /// Clones a read-only file mapping range into anonymous pages populated in

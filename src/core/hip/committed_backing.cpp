@@ -33,7 +33,7 @@ CommittedPages CommitPages(std::size_t bytes) {
   const int pin = platform::PinHostPages(data, bytes);
   if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
     platform::UnpinHostPages(pin);
-    platform::ReleaseCommittedPages(data, bytes);
+    platform::ReleaseZeroedPages(data, bytes);
     return {};
   }
   return {data, pin};
@@ -41,7 +41,7 @@ CommittedPages CommitPages(std::size_t bytes) {
 void ReleasePages(CommittedPages pages, std::size_t bytes) {
   (void)hipHostUnregister(pages.data);
   platform::UnpinHostPages(pages.pin);
-  platform::ReleaseCommittedPages(pages.data, bytes);
+  platform::ReleaseZeroedPages(pages.data, bytes);
 }
 }  // namespace
 struct BackingState {
