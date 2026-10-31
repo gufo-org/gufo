@@ -33,7 +33,36 @@ namespace {
 
 using Bytes = std::vector<std::uint8_t>;
 
-const std::map<std::string_view, std::string_view> kKnownDeviations{};
+constexpr std::string_view kNoAdler =
+    "libpng rejects a zlib stream without its Adler-32 trailer; the png crate "
+    "stops reading once the last row is complete";
+constexpr std::string_view kChunkName =
+    "libpng rejects a chunk type with a non-letter byte; the png crate "
+    "treats it as an unknown chunk";
+constexpr std::string_view kIend =
+    "libpng ignores a bad IEND CRC or length; the png crate rejects it";
+constexpr std::string_view kStrayIdat =
+    "libpng accepts IDAT after another chunk once the image data is complete; "
+    "the png crate rejects it";
+constexpr std::string_view kFctl =
+    "libpng ignores APNG chunks; the png crate rejects an fcTL outside "
+    "the image";
+
+const std::map<std::string_view, std::string_view> kKnownDeviations{
+    {"missing-adler", kNoAdler},
+    {"big-missing-adler", kNoAdler},
+    {"bad-chunk-name", kChunkName},
+    {"palette4-trns-mutation-32", kChunkName},
+    {"palette4-trns-mutation-53", kChunkName},
+    {"palette4-trns-mutation-72", kChunkName},
+    {"iend-bad-crc", kIend},
+    {"iend-nonempty", kIend},
+    {"stray-idat-after-text", kStrayIdat},
+    {"apng-fctl-out-of-bounds", kFctl},
+    {"apng-later-fctl-out-of-bounds", kFctl},
+    {"apng-first-fctl-narrow", kFctl},
+    {"apng-first-fctl-offset", kFctl},
+};
 
 struct Outcome {
   enum class Kind {

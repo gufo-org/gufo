@@ -1,6 +1,6 @@
 add_library(gufo_qwen_image_21 STATIC image.cpp weights.cpp tokenizer.cpp)
 target_include_directories(gufo_qwen_image_21 PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(gufo_qwen_image_21 PUBLIC gufo_core ICU::i18n)
+target_link_libraries(gufo_qwen_image_21 PUBLIC gufo_core ICU::i18n PNG::PNG)
 
 if(ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen_image_21 PRIVATE

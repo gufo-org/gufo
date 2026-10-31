@@ -39,6 +39,17 @@ Selection by preset: `gpu-fast` excludes `slow` and `external-model` tests,
 their documented local artifacts. A skip due to an absent model or device is
 not a quality pass.
 
+## PNG decoding
+
+`png_decode_test` decodes generated PNGs and chunk edits with `DecodeImage` and
+with a frozen copy of the libpng decoder from 0.28.1 in
+`tests/core/png_reference.cpp`. The pixels, or the exception type and message,
+must match unless the case is in `kKnownDeviations`. It runs in `check-pr`.
+
+`png_decode_test --corpus DIR... [--repeat N]` runs the same comparison over
+the `.png` files under each directory and prints the median decode time of both
+decoders per file. CTest does not run this mode.
+
 ## Hosted versus local checks
 
 GitHub runs formatting, documentation, dependency-inventory and server-command

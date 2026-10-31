@@ -309,6 +309,7 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_subdirectory(src/core/platform)
+add_subdirectory(src/core/png_decode)
 
 add_library(gufo_core STATIC
   src/core/image.cpp
@@ -345,7 +346,7 @@ target_compile_definitions(gufo_core PRIVATE
   GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
   GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
-  Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_png_decode JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
 add_subdirectory(src/models/qwen)

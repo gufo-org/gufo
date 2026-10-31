@@ -337,6 +337,10 @@
             ];
           };
 
+          cargoSetup = import ./.devops/nix/png-decode-cargo.nix {
+            inherit (pkgsSys) rustPlatform;
+          };
+
           formatCheck = pkgsSys.runCommand "check-format" {
             nativeBuildInputs = [ pkgsSys.clang-tools pkgsSys.python3 ];
             src = formatSource;
@@ -361,13 +365,15 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.cargo
+              pkgsSys.rustc
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
             src = staticAnalysisSource;
-          } ''
+          } (cargoSetup + ''
             export HOME=$TMPDIR
             mkdir -p build && cd build
             cmake "$src" -GNinja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF
@@ -405,7 +411,7 @@
 
             mkdir -p $out
             echo "PASS: clang-tidy static analysis clean" > $out/result.txt
-          '';
+          '');
 
           dependencyInventoryCheck = pkgsSys.runCommand "check-dependency-inventory" {
             nativeBuildInputs = [ pkgsSys.python3 ];
@@ -481,13 +487,15 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.cargo
+              pkgsSys.rustc
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
             src = testSource;
-          } ''
+          } (cargoSetup + ''
             export HOME=$TMPDIR
             set -euo pipefail
 
@@ -520,7 +528,7 @@
 
             mkdir -p $out
             echo "PASS: ${if full then "Full CPU" else "Hosted CPU contract"} suite passed" > $out/result.txt
-          '';
+          '');
 
           testCheck = mkTestCheck true;
           prTestCheck = mkTestCheck false;
