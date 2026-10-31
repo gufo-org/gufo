@@ -41,6 +41,14 @@ public:
   bool in_pass{};
   bool partial{};
   std::size_t private_blocks{128};
+  // Nonzero: the adapter adds a ring-backed window component, and the next
+  // token also depends on the window rows, so a wrong restore changes it.
+  cache::Rows window_rows{}, ring_rows{};
+  bool in_place{};
+  // Transfers share one stream per batch; `streams` counts the leases.
+  bool share_streams{};
+  std::size_t transfer_batch{4};
+  mutable std::atomic<std::size_t> streams{};
   cache::Rows rows_per_chunk{4};
   mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
@@ -104,16 +112,21 @@ public:
                          std::shared_ptr<const void>(data, bytes.data())});
     }
     auto resources = std::make_unique<ComponentCacheResources>();
-    resources->adapter = std::make_unique<FakeAdapter>(rows_per_chunk);
+    resources->adapter =
+        window_rows ? std::make_unique<FakeAdapter>(window_rows, ring_rows)
+                    : std::make_unique<FakeAdapter>(rows_per_chunk);
     adapter = dynamic_cast<FakeAdapter*>(resources->adapter.get());
+    adapter->SetInPlaceRestore(in_place);
     resources->owner = blocks;
     resources->stream = [this, foreground = std::this_thread::get_id()]()
         -> std::unique_ptr<cache::Stream> {
       if (defer_idle && std::this_thread::get_id() != foreground)
         return {};
+      ++streams;
       return std::make_unique<FakeStream>(true);
     };
-    resources->transfer_batch_size = 4;
+    resources->transfer_batch_size = transfer_batch;
+    resources->transfers_share_stream = share_streams;
     resources->allocate = [this, blocks,
                            data](const cache::PayloadRequest& request) {
       for (const auto& block : *blocks) {
@@ -206,9 +219,11 @@ public:
   TextDecodeSelection SelectNext(TextRunnerState& state,
                                  sampling::SamplerState&) const override {
     auto& s = dynamic_cast<State&>(state);
-    return {.token = static_cast<TextRunnerToken>(
-                s.adapter.RecurrentHash(s.slot) % 100000),
-            .piece = "x"};
+    auto hash = s.adapter.RecurrentHash(s.slot);
+    if (window_rows)
+      for (const auto token : s.adapter.WindowTokens(s.slot))
+        hash = (hash ^ token) * 0x100000001b3ULL;
+    return {.token = static_cast<TextRunnerToken>(hash % 100000), .piece = "x"};
   }
   void Advance(TextRunnerState& state, TextRunnerToken token) const override {
     auto& s = dynamic_cast<State&>(state);
@@ -1782,6 +1797,276 @@ void UnbackedDeepRowsSurviveDiskRestart() {
   }
   std::filesystem::remove_all(directory);
 }
+// Window components through serving: RAM retries, continuations and edits
+// match an uncached control. Window 6 rows, ring 16, chunks of 4.
+std::shared_ptr<Runner> WindowRunner() {
+  auto runner = std::make_shared<Runner>();
+  runner->window_rows = 6;
+  runner->ring_rows = 16;
+  return runner;
+}
+// Transfers that do not run on their stream share one lease across every
+// batch; the restore is otherwise the same.
+void SharedStreamBatchesLeaseOneStream() {
+  std::array<std::size_t, 2> leases{};
+  std::array<TextRunnerToken, 2> tokens{};
+  for (const bool shared : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    runner->share_streams = shared;
+    runner->transfer_batch = 1;
+    TextRunnerPool pool(runner, 2);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto initial = pool.Acquire(prompt);
+    Prefill(initial);
+    const auto token = Generate(initial);
+    assert(initial.Commit().snapshot_bytes > 0);
+    const auto before = runner->streams.load();
+    auto retry = pool.Acquire(prompt);
+    leases[shared] = runner->streams - before;
+    assert(retry.cached_prompt_tokens() == prompt.size() &&
+           retry.cache_restore_bytes() > 0);
+    tokens[shared] = Generate(retry);
+    assert(tokens[shared] == token);
+  }
+  // Unshared, each one-transfer batch leases its own stream.
+  assert(leases[false] > 1 && leases[true] == 1 &&
+         tokens[false] == tokens[true]);
+}
+void WindowRowsReuseAndBranches() {
+  auto runner = WindowRunner();
+  TextRunnerPool pool(runner, 2);
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto initial = pool.Acquire(prompt);
+  Prefill(initial);
+  const auto token = Generate(initial);
+  assert(initial.Commit().snapshot_bytes > 0);
+  auto retry = pool.Acquire(prompt);
+  assert(retry.cached_prompt_tokens() == prompt.size());
+  assert(retry.cache_restore_bytes() > 0);
+  assert(Generate(retry) == token);
+  (void)retry.Commit();
+  auto history = prompt;
+  history.push_back(token);
+  for (TextRunnerToken t = 500; t < 530; ++t)
+    history.push_back(t);
+  auto continued = pool.Acquire(history);
+  assert(continued.cached_prompt_tokens() == prompt.size() + 1);
+  Prefill(continued);
+  const auto next = Generate(continued);
+  (void)continued.Commit();
+  auto edited_history = history;
+  edited_history[45] += 1;
+  auto edit = pool.Acquire(edited_history);
+  assert(edit.cache_hit() && edit.cached_prompt_tokens() <= 45);
+  Prefill(edit);
+  const auto edited = Generate(edit);
+  (void)edit.Commit();
+  for (const auto* tokens : {&history, &edited_history}) {
+    auto cold =
+        pool.Acquire(*tokens, sampling::SamplingConfig{}, {}, {}, false);
+    assert(!cold.cache_hit());
+    Prefill(cold);
+    assert(Generate(cold) == (tokens == &history ? next : edited));
+    cold.Invalidate();
+  }
+}
+// Rows beyond the RAM pool go to disk only. A later capture three tokens
+// deeper inherits the parent's second window chunk as its first, and both
+// restore with the window a continuation reads.
+void WindowedDeepRowsSurviveDiskRestart() {
+  char pattern[] = "/tmp/gufo-component-window-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 8,
+                                        .min_checkpoint_step_tokens = 1};
+  std::vector<TextRunnerToken> prompt(5001);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  const auto window = [&](std::size_t n) {
+    return std::vector<cache::Token>(prompt.begin() + n - 6,
+                                     prompt.begin() + n);
+  };
+  const auto capture = [&](ComponentTextCache::Lease& lease) {
+    assert(lease.TryReserveSnapshot(lease.CaptureBytes(), prompt.size(), false,
+                                    SnapshotPurpose::kContinuation, prompt));
+    auto snapshot = lease.Capture();
+    assert(snapshot);
+    assert(lease.PublishSnapshot(prompt, std::move(snapshot), false) == 0);
+    assert(lease.Metrics().disk_queued_bytes > 40000);
+    (void)lease.Commit(prompt, {}, prompt);
+  };
+  std::uint64_t hash;
+  {
+    auto runner = WindowRunner();
+    ComponentTextCache cache(runner, 1, 1 << 24, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    capture(*lease);
+  }
+  {
+    const auto seed_size = prompt.size();
+    const std::vector<TextRunnerToken> appended{8000, 8001, 8002};
+    prompt.insert(prompt.end(), appended.begin(), appended.end());
+    auto runner = WindowRunner();
+    ComponentTextCache cache(runner, 1, 1 << 24, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->restored_from_disk() && lease->cached_tokens() == seed_size);
+    auto& state = dynamic_cast<State&>(lease->state());
+    assert(runner->adapter->RecurrentHash(state.slot) == hash);
+    assert(runner->adapter->WindowTokens(state.slot) == window(seed_size));
+    runner->adapter->Append(state.slot, appended, appended);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    capture(*lease);
+  }
+  {
+    cache::ResourceLedger ledger({1 << 24, 1 << 24, 0, 0});
+    cache::DiskStore store(ledger, directory, disk.capacity_bytes);
+    assert(store.Entries().size() == 2);
+    const cache::DiskManifest* parent = nullptr;
+    const cache::DiskManifest* child = nullptr;
+    for (const auto& entry : store.Entries())
+      (entry.Manifest().tokens.size() == 5001 ? parent : child) =
+          &entry.Manifest();
+    const auto& before = parent->components.back();
+    const auto& after = child->components.back();
+    assert(before.descriptor.id == kWindow && after.descriptor.id == kWindow);
+    // Parent window chunks [4992, 5000) and tail row 5000; child [4996, 5004).
+    assert(before.chunks.size() == 2 && before.tail);
+    assert(after.chunks.size() == 2 && !after.tail);
+    assert(before.chunks[1].file == after.chunks[0].file);
+    assert(before.tail->file != after.chunks[1].file);
+  }
+  {
+    auto runner = WindowRunner();
+    ComponentTextCache cache(runner, 1, 1 << 24, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->restored_from_disk() &&
+           lease->cached_tokens() == prompt.size());
+    auto& state = dynamic_cast<State&>(lease->state());
+    assert(runner->adapter->RecurrentHash(state.slot) == hash);
+    assert(runner->adapter->WindowTokens(state.slot) == window(prompt.size()));
+  }
+  std::filesystem::remove_all(directory);
+}
+// A retry of the same prompt (swipe, regenerate) restores in place into the
+// slot that answered it: rows it still holds stay, and only the private state
+// and window rows the reply evicted from the ring load. The retry matches an
+// uncached control.
+void SwipeRestoresInPlace() {
+  for (const bool window : {false, true}) {
+    auto runner = window ? WindowRunner() : std::make_shared<Runner>();
+    runner->in_place = true;
+    TextRunnerPool pool(runner, 2);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto first = pool.Acquire(prompt);
+    Prefill(first);
+    const auto token = Generate(first);
+    // Rows 40-60: the ring of 16 no longer holds window rows 32-39.
+    for (int i = 0; i < 20; ++i)
+      (void)Generate(first);
+    (void)first.Commit();
+    auto swipe = pool.Acquire(prompt);
+    assert(swipe.cached_prompt_tokens() == prompt.size());
+    assert(swipe.cache_restore_bytes() ==
+           32 + (window ? 8 * sizeof(cache::Token) : 0));
+    assert(Generate(swipe) == token);
+    (void)swipe.Commit();
+    auto cold = pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, false);
+    assert(!cold.cache_hit());
+    Prefill(cold);
+    assert(Generate(cold) == token);
+    cold.Invalidate();
+  }
+}
+// Cancellation between selection and restore still resets a retained slot
+// before exposing a cold lease. Otherwise its old rows survive at position 0.
+void CancelledInPlaceRestoreResetsRetainedRows() {
+  auto runner = std::make_shared<Runner>();
+  runner->in_place = true;
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  auto first = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(first->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(first->TryReserveSnapshot(first->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(first->PublishSnapshot(prompt, first->Capture(), false));
+  auto history = prompt;
+  history.push_back(4);
+  runner->adapter->Append(state.slot, std::span(history).last(1),
+                          std::span(history).last(1));
+  (void)first->Commit(prompt, {}, history);
+  const auto before = runner->adapter->Invalidations();
+  int checks = 0;
+  auto cancelled =
+      cache.Acquire(prompt, [&] { return ++checks > 1; }, {}, true, 0, true);
+  assert(cancelled && !cancelled->cache_hit());
+  assert(runner->adapter->Invalidations() == before + 1);
+  auto& cold = dynamic_cast<State&>(cancelled->state());
+  assert(runner->adapter->Positions(cold.slot).front().valid_rows == 0);
+}
+// A live slot whose tokens and inputs extend a checkpoint another slot
+// captured computed those rows itself: they need not equal the checkpoint's,
+// and its history does not hold them. Restoring that checkpoint into it loads
+// the rows too, whether or not the prompt goes on past the checkpoint.
+void SharedPrefixRestoresRows(bool continues) {
+  auto runner = std::make_shared<Runner>();
+  runner->in_place = true;
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  const auto append = [&](auto& lease,
+                          std::span<const TextRunnerToken> tokens) {
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, tokens, tokens);
+  };
+  const auto hash = [&](auto& lease) {
+    return runner->adapter->RecurrentHash(
+        dynamic_cast<State&>(lease->state()).slot);
+  };
+  std::vector<TextRunnerToken> shared(8);
+  std::iota(shared.begin(), shared.end(), 1);
+  const auto suffix = [&](TextRunnerToken token) {
+    auto tokens = shared;
+    tokens.insert(tokens.end(), 4, token);
+    return tokens;
+  };
+  // The first slot captures the shared prefix and stays busy.
+  auto first = cache.Acquire(shared, {}, {}, true, 0, true);
+  append(first, shared);
+  assert(first->TryReserveSnapshot(first->CaptureBytes(), shared.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(first->PublishSnapshot(shared, first->Capture(), false));
+  // The second computes the prefix itself and leaves a frontier past it.
+  const auto other = suffix(50);
+  auto second = cache.Acquire(other, {}, {}, false, 0, true);
+  append(second, other);
+  (void)second->Commit({}, {}, other);
+  // A third conversation takes the second slot, the only idle one.
+  const auto third_tokens = continues ? suffix(60) : shared;
+  auto third = cache.Acquire(third_tokens, {}, {}, true, 0, true);
+  assert(third->cached_tokens() == shared.size());
+  std::size_t private_bytes = 0;
+  for (const auto& d : runner->adapter->Components())
+    private_bytes += d.state_bytes;
+  assert(third->restored_snapshot_bytes() > private_bytes);
+  if (!continues) {
+    third->Invalidate();
+    first->Invalidate();
+    return;
+  }
+  append(third, std::span(third_tokens).subspan(shared.size()));
+  const auto restored = hash(third);
+  third->Invalidate();
+  first->Invalidate();
+  auto cold = cache.Acquire(third_tokens, {}, {}, false, 0, true);
+  append(cold, third_tokens);
+  assert(hash(cold) == restored);
+  cold->Invalidate();
+}
 void OverRamCaptureStagesPrivateStateUnderPressure(bool protect) {
   // An over-RAM checkpoint is captured for disk only. Its rows are borrowed
   // from the live slot, but its private state is staged in RAM backing, and
@@ -1913,6 +2198,13 @@ int main() {
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
   UnbackedDeepRowsSurviveDiskRestart();
+  SharedStreamBatchesLeaseOneStream();
+  WindowRowsReuseAndBranches();
+  WindowedDeepRowsSurviveDiskRestart();
+  SwipeRestoresInPlace();
+  CancelledInPlaceRestoreResetsRetainedRows();
+  SharedPrefixRestoresRows(true);
+  SharedPrefixRestoresRows(false);
   OverRamCaptureStagesPrivateStateUnderPressure(false);
   OverRamCaptureStagesPrivateStateUnderPressure(true);
 }
