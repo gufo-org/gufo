@@ -216,6 +216,15 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
       break;
+    case core::GgmlType::kIQ3_XXS:
+      block_bytes = sizeof(block_iq3_xxs);
+      break;
+    case core::GgmlType::kIQ2_S:
+      block_bytes = sizeof(block_iq2_s);
+      break;
+    case core::GgmlType::kQ2_0:
+      block_bytes = sizeof(block_q2_0);
+      break;
     default:
       return 0;
   }
@@ -433,111 +442,6 @@ namespace {
 
 // 512-entry IQ3_S grid, verbatim from ggml-common.h. Each entry packs four
 // uint8 magnitudes for one group of four elements.
-constexpr std::uint32_t kIq3sGrid[512] = {
-    0x01010101U, 0x01010103U, 0x01010105U, 0x0101010bU, 0x0101010fU,
-    0x01010301U, 0x01010303U, 0x01010305U, 0x01010309U, 0x0101030dU,
-    0x01010501U, 0x01010503U, 0x0101050bU, 0x01010707U, 0x01010901U,
-    0x01010905U, 0x0101090bU, 0x0101090fU, 0x01010b03U, 0x01010b07U,
-    0x01010d01U, 0x01010d05U, 0x01010f03U, 0x01010f09U, 0x01010f0fU,
-    0x01030101U, 0x01030103U, 0x01030105U, 0x01030109U, 0x01030301U,
-    0x01030303U, 0x0103030bU, 0x01030501U, 0x01030507U, 0x0103050fU,
-    0x01030703U, 0x0103070bU, 0x01030909U, 0x01030d03U, 0x01030d0bU,
-    0x01030f05U, 0x01050101U, 0x01050103U, 0x0105010bU, 0x0105010fU,
-    0x01050301U, 0x01050307U, 0x0105030dU, 0x01050503U, 0x0105050bU,
-    0x01050701U, 0x01050709U, 0x01050905U, 0x0105090bU, 0x0105090fU,
-    0x01050b03U, 0x01050b07U, 0x01050f01U, 0x01050f07U, 0x01070107U,
-    0x01070303U, 0x0107030bU, 0x01070501U, 0x01070505U, 0x01070703U,
-    0x01070707U, 0x0107070dU, 0x01070909U, 0x01070b01U, 0x01070b05U,
-    0x01070d0fU, 0x01070f03U, 0x01070f0bU, 0x01090101U, 0x01090307U,
-    0x0109030fU, 0x01090503U, 0x01090509U, 0x01090705U, 0x01090901U,
-    0x01090907U, 0x01090b03U, 0x01090f01U, 0x010b0105U, 0x010b0109U,
-    0x010b0501U, 0x010b0505U, 0x010b050dU, 0x010b0707U, 0x010b0903U,
-    0x010b090bU, 0x010b090fU, 0x010b0d0dU, 0x010b0f07U, 0x010d010dU,
-    0x010d0303U, 0x010d0307U, 0x010d0703U, 0x010d0b05U, 0x010d0f03U,
-    0x010f0101U, 0x010f0105U, 0x010f0109U, 0x010f0501U, 0x010f0505U,
-    0x010f050dU, 0x010f0707U, 0x010f0b01U, 0x010f0b09U, 0x03010101U,
-    0x03010103U, 0x03010105U, 0x03010109U, 0x03010301U, 0x03010303U,
-    0x03010307U, 0x0301030bU, 0x0301030fU, 0x03010501U, 0x03010505U,
-    0x03010703U, 0x03010709U, 0x0301070dU, 0x03010b09U, 0x03010b0dU,
-    0x03010d03U, 0x03010f05U, 0x03030101U, 0x03030103U, 0x03030107U,
-    0x0303010dU, 0x03030301U, 0x03030309U, 0x03030503U, 0x03030701U,
-    0x03030707U, 0x03030903U, 0x03030b01U, 0x03030b05U, 0x03030f01U,
-    0x03030f0dU, 0x03050101U, 0x03050305U, 0x0305030bU, 0x0305030fU,
-    0x03050501U, 0x03050509U, 0x03050705U, 0x03050901U, 0x03050907U,
-    0x03050b0bU, 0x03050d01U, 0x03050f05U, 0x03070103U, 0x03070109U,
-    0x0307010fU, 0x03070301U, 0x03070307U, 0x03070503U, 0x0307050fU,
-    0x03070701U, 0x03070709U, 0x03070903U, 0x03070d05U, 0x03070f01U,
-    0x03090107U, 0x0309010bU, 0x03090305U, 0x03090309U, 0x03090703U,
-    0x03090707U, 0x03090905U, 0x0309090dU, 0x03090b01U, 0x03090b09U,
-    0x030b0103U, 0x030b0301U, 0x030b0307U, 0x030b0503U, 0x030b0701U,
-    0x030b0705U, 0x030b0b03U, 0x030d0501U, 0x030d0509U, 0x030d050fU,
-    0x030d0909U, 0x030d090dU, 0x030f0103U, 0x030f0107U, 0x030f0301U,
-    0x030f0305U, 0x030f0503U, 0x030f070bU, 0x030f0903U, 0x030f0d05U,
-    0x030f0f01U, 0x05010101U, 0x05010103U, 0x05010107U, 0x0501010bU,
-    0x0501010fU, 0x05010301U, 0x05010305U, 0x05010309U, 0x0501030dU,
-    0x05010503U, 0x05010507U, 0x0501050fU, 0x05010701U, 0x05010705U,
-    0x05010903U, 0x05010907U, 0x0501090bU, 0x05010b01U, 0x05010b05U,
-    0x05010d0fU, 0x05010f01U, 0x05010f07U, 0x05010f0bU, 0x05030101U,
-    0x05030105U, 0x05030301U, 0x05030307U, 0x0503030fU, 0x05030505U,
-    0x0503050bU, 0x05030703U, 0x05030709U, 0x05030905U, 0x05030b03U,
-    0x05050103U, 0x05050109U, 0x0505010fU, 0x05050503U, 0x05050507U,
-    0x05050701U, 0x0505070fU, 0x05050903U, 0x05050b07U, 0x05050b0fU,
-    0x05050f03U, 0x05050f09U, 0x05070101U, 0x05070105U, 0x0507010bU,
-    0x05070303U, 0x05070505U, 0x05070509U, 0x05070703U, 0x05070707U,
-    0x05070905U, 0x05070b01U, 0x05070d0dU, 0x05090103U, 0x0509010fU,
-    0x05090501U, 0x05090507U, 0x05090705U, 0x0509070bU, 0x05090903U,
-    0x05090f05U, 0x05090f0bU, 0x050b0109U, 0x050b0303U, 0x050b0505U,
-    0x050b070fU, 0x050b0901U, 0x050b0b07U, 0x050b0f01U, 0x050d0101U,
-    0x050d0105U, 0x050d010fU, 0x050d0503U, 0x050d0b0bU, 0x050d0d03U,
-    0x050f010bU, 0x050f0303U, 0x050f050dU, 0x050f0701U, 0x050f0907U,
-    0x050f0b01U, 0x07010105U, 0x07010303U, 0x07010307U, 0x0701030bU,
-    0x0701030fU, 0x07010505U, 0x07010703U, 0x07010707U, 0x0701070bU,
-    0x07010905U, 0x07010909U, 0x0701090fU, 0x07010b03U, 0x07010d07U,
-    0x07010f03U, 0x07030103U, 0x07030107U, 0x0703010bU, 0x07030309U,
-    0x07030503U, 0x07030507U, 0x07030901U, 0x07030d01U, 0x07030f05U,
-    0x07030f0dU, 0x07050101U, 0x07050305U, 0x07050501U, 0x07050705U,
-    0x07050709U, 0x07050b01U, 0x07070103U, 0x07070301U, 0x07070309U,
-    0x07070503U, 0x07070507U, 0x0707050fU, 0x07070701U, 0x07070903U,
-    0x07070907U, 0x0707090fU, 0x07070b0bU, 0x07070f07U, 0x07090107U,
-    0x07090303U, 0x0709030dU, 0x07090505U, 0x07090703U, 0x07090b05U,
-    0x07090d01U, 0x07090d09U, 0x070b0103U, 0x070b0301U, 0x070b0305U,
-    0x070b050bU, 0x070b0705U, 0x070b0909U, 0x070b0b0dU, 0x070b0f07U,
-    0x070d030dU, 0x070d0903U, 0x070f0103U, 0x070f0107U, 0x070f0501U,
-    0x070f0505U, 0x070f070bU, 0x09010101U, 0x09010109U, 0x09010305U,
-    0x09010501U, 0x09010509U, 0x0901050fU, 0x09010705U, 0x09010903U,
-    0x09010b01U, 0x09010f01U, 0x09030105U, 0x0903010fU, 0x09030303U,
-    0x09030307U, 0x09030505U, 0x09030701U, 0x0903070bU, 0x09030907U,
-    0x09030b03U, 0x09030b0bU, 0x09050103U, 0x09050107U, 0x09050301U,
-    0x0905030bU, 0x09050503U, 0x09050707U, 0x09050901U, 0x09050b0fU,
-    0x09050d05U, 0x09050f01U, 0x09070109U, 0x09070303U, 0x09070307U,
-    0x09070501U, 0x09070505U, 0x09070703U, 0x0907070bU, 0x09090101U,
-    0x09090105U, 0x09090509U, 0x0909070fU, 0x09090901U, 0x09090f03U,
-    0x090b010bU, 0x090b010fU, 0x090b0503U, 0x090b0d05U, 0x090d0307U,
-    0x090d0709U, 0x090d0d01U, 0x090f0301U, 0x090f030bU, 0x090f0701U,
-    0x090f0907U, 0x090f0b03U, 0x0b010105U, 0x0b010301U, 0x0b010309U,
-    0x0b010505U, 0x0b010901U, 0x0b010909U, 0x0b01090fU, 0x0b010b05U,
-    0x0b010d0dU, 0x0b010f09U, 0x0b030103U, 0x0b030107U, 0x0b03010bU,
-    0x0b030305U, 0x0b030503U, 0x0b030705U, 0x0b030f05U, 0x0b050101U,
-    0x0b050303U, 0x0b050507U, 0x0b050701U, 0x0b05070dU, 0x0b050b07U,
-    0x0b070105U, 0x0b07010fU, 0x0b070301U, 0x0b07050fU, 0x0b070909U,
-    0x0b070b03U, 0x0b070d0bU, 0x0b070f07U, 0x0b090103U, 0x0b090109U,
-    0x0b090501U, 0x0b090705U, 0x0b09090dU, 0x0b0b0305U, 0x0b0b050dU,
-    0x0b0b0b03U, 0x0b0b0b07U, 0x0b0d0905U, 0x0b0f0105U, 0x0b0f0109U,
-    0x0b0f0505U, 0x0d010303U, 0x0d010307U, 0x0d01030bU, 0x0d010703U,
-    0x0d010707U, 0x0d010d01U, 0x0d030101U, 0x0d030501U, 0x0d03050fU,
-    0x0d030d09U, 0x0d050305U, 0x0d050709U, 0x0d050905U, 0x0d050b0bU,
-    0x0d050d05U, 0x0d050f01U, 0x0d070101U, 0x0d070309U, 0x0d070503U,
-    0x0d070901U, 0x0d09050bU, 0x0d090907U, 0x0d090d05U, 0x0d0b0101U,
-    0x0d0b0107U, 0x0d0b0709U, 0x0d0b0d01U, 0x0d0d010bU, 0x0d0d0901U,
-    0x0d0f0303U, 0x0d0f0307U, 0x0f010101U, 0x0f010109U, 0x0f01010fU,
-    0x0f010501U, 0x0f010505U, 0x0f01070dU, 0x0f010901U, 0x0f010b09U,
-    0x0f010d05U, 0x0f030105U, 0x0f030303U, 0x0f030509U, 0x0f030907U,
-    0x0f03090bU, 0x0f050103U, 0x0f050109U, 0x0f050301U, 0x0f05030dU,
-    0x0f050503U, 0x0f050701U, 0x0f050b03U, 0x0f070105U, 0x0f070705U,
-    0x0f07070bU, 0x0f070b07U, 0x0f090103U, 0x0f09010bU, 0x0f090307U,
-    0x0f090501U, 0x0f090b01U, 0x0f0b0505U, 0x0f0b0905U, 0x0f0d0105U,
-    0x0f0d0703U, 0x0f0f0101U,
-};
 
 constexpr std::uint8_t kSignMaskIq2xs[8] = {1, 2, 4, 8, 16, 32, 64, 128};
 
@@ -627,6 +531,86 @@ void DequantizeIQ3_S(const void* src, float* dst, std::size_t k) {
   for (std::size_t b = 0; b < nb; ++b) {
     for (std::size_t i = 0; i < 256; ++i) {
       dst[(b * 256) + i] = Iq3sValue(blocks[b], i);
+    }
+  }
+}
+
+float Iq3XxsValue(const block_iq3_xxs& block, std::size_t index) noexcept {
+  const std::size_t ib32 = index / 32;
+  const std::size_t l = (index / 8) % 4;
+  const std::size_t j = index % 8;
+  std::uint32_t aux32 = 0;
+  std::memcpy(&aux32, block.scales_and_signs + 4 * ib32, sizeof(aux32));
+  const float d = Fp16ToFloat(block.d);
+  const float db = d * (0.5f + (aux32 >> 28)) * 0.25f;
+  const std::uint8_t grid_low = block.qs[8 * ib32 + 2 * l];
+  const std::uint8_t grid_high = block.qs[8 * ib32 + 2 * l + 1];
+  const std::uint8_t signs = kSignsIq2xs[(aux32 >> (7 * l)) & 127];
+  const std::uint8_t magnitudes0 =
+      static_cast<std::uint8_t>(kIq3xxsGrid[grid_low] >> (8 * j));
+  const std::uint8_t magnitudes1 =
+      static_cast<std::uint8_t>(kIq3xxsGrid[grid_high] >> (8 * j));
+  return db * static_cast<float>(magnitudes0 + 8 * magnitudes1) *
+         ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
+}
+
+// IQ2_S: element `index` of one 256-element block (reference semantics from
+// llama.cpp dequantize_row_iq2_s). The 1024-entry grid index is the qs byte
+// plus two high bits from the qh byte of the 32-element sub-block; sign bits
+// physically overlap qs at offset QK_K/8 in the packed block, hence the raw
+// byte indexing below.
+float Iq2SValue(const block_iq2_s& block, std::size_t index) noexcept {
+  const std::size_t ib32 = index / 32;
+  const std::size_t l = (index / 8) % 4;
+  const std::size_t j = index % 8;
+  const float d = Fp16ToFloat(block.d);
+  const std::uint8_t scales_byte = block.scales[ib32];
+  const float db =
+      d * (0.5f + ((l / 2) == 0 ? (scales_byte & 0xF) : (scales_byte >> 4))) *
+      0.25f;
+  const std::uint8_t* bytes =
+      reinterpret_cast<const std::uint8_t*>(&block);  // NOLINT
+  const std::uint8_t qs_byte = bytes[2 + 4 * ib32 + l];
+  const std::size_t grid_index =
+      static_cast<std::size_t>(qs_byte) |
+      ((static_cast<std::size_t>(bytes[66 + ib32]) << (8 - 2 * l)) & 0x300);
+  const std::uint8_t magnitude = static_cast<std::uint8_t>(
+      kIq2sGrid[grid_index] >> (8 * static_cast<std::size_t>(j)));
+  const std::uint8_t signs = kSignsIq2xs[bytes[64 + 4 * ib32 + l] & 127];
+  return db * static_cast<float>(magnitude) *
+         ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
+}
+
+void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq3_xxs*>(src);
+  const std::size_t nb = k / 256;
+  for (std::size_t b = 0; b < nb; ++b) {
+    for (std::size_t i = 0; i < 256; ++i) {
+      dst[(b * 256) + i] = Iq3XxsValue(blocks[b], i);
+    }
+  }
+}
+
+void DequantizeIQ2_S(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq2_s*>(src);
+  const std::size_t nb = k / 256;
+  for (std::size_t b = 0; b < nb; ++b) {
+    for (std::size_t i = 0; i < 256; ++i) {
+      dst[(b * 256) + i] = Iq2SValue(blocks[b], i);
+    }
+  }
+}
+
+// Q2_0: IST-DASLab's 2-bit linear format (QK = 64). Codes pack four per byte,
+// low bits first, with the mapping 00=-1, 01=0, 10=+1, 11=+2.
+void DequantizeQ2_0(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q2_0*>(src);
+  const std::size_t nb = k / 64;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    for (std::size_t j = 0; j < 64; ++j) {
+      const std::uint8_t q = (blocks[b].qs[j / 4] >> (2 * (j % 4))) & 0x03;
+      dst[(b * 64) + j] = (static_cast<float>(static_cast<int>(q)) - 1.0f) * d;
     }
   }
 }

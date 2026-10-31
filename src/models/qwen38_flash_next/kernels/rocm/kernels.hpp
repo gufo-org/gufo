@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/core/gguf_reader.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/qwen/vision/rope.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
@@ -44,7 +46,13 @@ enum class WeightType : std::uint32_t {
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kIQ2_S = 17,
+  kIQ3_XXS = 19,
+  kIQ4_NL = 20,
+  kIQ3_S = 21,
+  kIQ4_XS = 23,
   kBF16 = 30,
+  kQ2_0 = 42,
 };
 
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).
@@ -183,6 +191,23 @@ void NarrowActivations(const float* x, void* out, bool bf16, std::size_t count,
 /// Expands `count` Q8_0 weights (whole 32-element blocks) to F32.
 void ExpandQ8_0(const void* q8, float* out, std::size_t count,
                 hipStream_t stream);
+
+/// Converts a tensor stored in one of the low-bit codebook formats (IQ2_S,
+/// IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS or Q2_0) to Q8_0 so it runs the existing
+/// Q8_0 expert/dense tiers. `elements` is the logical element count
+/// (cols * rows * experts); `source_type` carries the storage format. The
+/// reference element semantics match src/core/quant/ggml_dequant.cpp.
+void ConvertToQ8_0(const void* source, void* destination, std::size_t elements,
+                   WeightType source_type, hipStream_t stream);
+
+/// out[i] = float(source[i]) for BF16 storage; used to upconvert BF16 stack
+/// members (RCO routers) so the existing F32 stack path can consume them.
+void UpcastBf16(const void* source, float* destination, std::size_t count,
+                hipStream_t stream);
+
+/// Same for F16 storage (RCO stores blk.1.ple_conv1d in F16).
+void UpcastF16(const void* source, float* destination, std::size_t count,
+               hipStream_t stream);
 
 /// W8A8 route for wide batches over Q8_0 weights: activations quantized per
 /// 32-wide block into the tiled fragment layout (`Q8TiledBytes(batch, k)`

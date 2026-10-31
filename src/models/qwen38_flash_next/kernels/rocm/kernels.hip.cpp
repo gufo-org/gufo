@@ -13,6 +13,8 @@
 
 // HIP kernels follow the layouts and operator formulas in reference.cpp.
 
+namespace quant = gufo::quant;
+
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
 
@@ -1334,6 +1336,193 @@ __global__ void ExpandQ8_0Kernel(const std::uint8_t* q8, float* out,
     const auto q = static_cast<const std::int8_t*>(
         static_cast<const void*>(blk + 2))[i % 32];
     out[i] = __half2float(d) * static_cast<float>(q);
+  }
+}
+
+// --- Load-time conversion of low-bit codebook formats to Q8_0 -------------
+// Element semantics mirror src/core/quant/ggml_dequant.cpp (the reference
+// dequant from llama.cpp). Block layouts are re-declared here because the
+// host-side quant library's structs are not device headers.
+
+struct DevBlockQ2_0 {
+  std::uint16_t d;
+  std::uint8_t qs[16];
+};
+struct DevBlockIq4Nl {
+  std::uint16_t d;
+  std::uint8_t qs[16];
+};
+struct DevBlockIq4Xs {
+  std::uint16_t d;
+  std::uint16_t scales_h;
+  std::uint8_t scales_l[4];
+  std::uint8_t qs[128];
+};
+struct DevBlockIq3Xxs {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t scales_and_signs[16];
+};
+struct DevBlockIq3S {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t qh[8];
+  std::uint8_t signs[32];
+  std::uint8_t scales[4];
+};
+struct DevBlockIq2S {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t qh[8];
+  std::uint8_t scales[8];
+};
+
+__device__ __forceinline__ float DevIq4NlElement(const std::uint8_t* row,
+                                                 std::size_t i) {
+  const auto* blk = reinterpret_cast<const DevBlockIq4Nl*>(row) + (i / 32);
+  const std::size_t within = i % 32;
+  const std::uint8_t packed = blk->qs[(within % 16)];
+  const std::uint8_t code = within >= 16 ? (packed >> 4U) : (packed & 0xFU);
+  return __half2float(*reinterpret_cast<const __half*>(&blk->d)) *
+         static_cast<float>(quant::kValuesIq4Nl[code]);
+}
+
+__device__ __forceinline__ float DevIq4XsElement(const std::uint8_t* row,
+                                                 std::size_t i) {
+  const auto* blk = reinterpret_cast<const DevBlockIq4Xs*>(row) + (i / 256);
+  const std::size_t ib = (i % 256) / 32;
+  const std::size_t within = i % 32;
+  const std::uint8_t packed = blk->qs[(ib * 16) + (within % 16)];
+  const std::uint8_t code = within >= 16 ? (packed >> 4U) : (packed & 0xFU);
+  const int ls =
+      static_cast<int>((blk->scales_l[ib / 2] >> (4U * (ib % 2))) & 0xFU) |
+      static_cast<int>(((blk->scales_h >> (2U * ib)) & 0x3U) << 4U);
+  return __half2float(*reinterpret_cast<const __half*>(&blk->d)) *
+         static_cast<float>(ls - 32) *
+         static_cast<float>(quant::kValuesIq4Nl[code]);
+}
+
+__device__ __forceinline__ float DevIq3XxsElement(const std::uint8_t* row,
+                                                  std::size_t i) {
+  const auto* blk = reinterpret_cast<const DevBlockIq3Xxs*>(row) + (i / 256);
+  const std::size_t ib32 = (i % 256) / 32;
+  const std::size_t l = ((i % 256) / 8) % 4;
+  const std::size_t j = i % 8;
+  const std::uint32_t aux32 =
+      *reinterpret_cast<const std::uint32_t*>(blk->scales_and_signs + 4 * ib32);
+  const float db = __half2float(*reinterpret_cast<const __half*>(&blk->d)) *
+                   (0.5f + static_cast<float>(aux32 >> 28)) * 0.25f;
+  const std::uint8_t m0 = static_cast<std::uint8_t>(
+      quant::kIq3xxsGrid[blk->qs[8 * ib32 + 2 * l]] >> (8 * j));
+  const std::uint8_t m1 = static_cast<std::uint8_t>(
+      quant::kIq3xxsGrid[blk->qs[8 * ib32 + 2 * l + 1]] >> (8 * j));
+  const std::uint8_t signs = quant::kSignsIq2xs[(aux32 >> (7 * l)) & 127];
+  return db * static_cast<float>(m0 + 8 * m1) *
+         ((signs & (1u << j)) != 0 ? -1.0f : 1.0f);
+}
+
+__device__ __forceinline__ float DevIq3sElement(const std::uint8_t* row,
+                                                std::size_t i) {
+  const auto* blk = reinterpret_cast<const DevBlockIq3S*>(row) + (i / 256);
+  const std::size_t ib32 = (i % 256) / 32;
+  const std::size_t within = i % 32;
+  const std::size_t l = within / 8;
+  const std::size_t j = within % 8;
+  const std::size_t half = j / 4;
+  const std::size_t jj = j % 4;
+  const std::uint32_t grid_index =
+      static_cast<std::uint32_t>(blk->qs[(ib32 * 8) + (2 * l) + half]) |
+      ((static_cast<std::uint32_t>(blk->qh[ib32]) << (8 - (2 * l) - half)) &
+       256U);
+  const std::uint8_t magnitude =
+      static_cast<std::uint8_t>(quant::kIq3sGrid[grid_index] >> (8 * jj));
+  const bool negate = (blk->signs[(ib32 * 4) + l] & (1u << j)) != 0;
+  const std::uint8_t scale_byte = blk->scales[ib32 / 2];
+  const int scale_nibble = static_cast<int>(
+      (ib32 % 2 == 0) ? (scale_byte & 0xFU) : (scale_byte >> 4U));
+  const float db = __half2float(*reinterpret_cast<const __half*>(&blk->d)) *
+                   static_cast<float>(1 + (2 * scale_nibble));
+  const float value = db * static_cast<float>(magnitude);
+  return negate ? -value : value;
+}
+
+__device__ __forceinline__ float DevIq2sElement(const std::uint8_t* row,
+                                                std::size_t i) {
+  const auto* blk = reinterpret_cast<const DevBlockIq2S*>(row) + (i / 256);
+  const std::size_t ib32 = (i % 256) / 32;
+  const std::size_t l = ((i % 256) / 8) % 4;
+  const std::size_t j = i % 8;
+  const std::uint8_t scales_byte = blk->scales[ib32];
+  const float db =
+      __half2float(*reinterpret_cast<const __half*>(&blk->d)) *
+      (0.5f + static_cast<float>((l / 2) == 0 ? (scales_byte & 0xFU)
+                                              : (scales_byte >> 4))) *
+      0.25f;
+  const std::size_t grid_index =
+      static_cast<std::size_t>(blk->qs[4 * ib32 + l]) |
+      ((static_cast<std::size_t>(blk->qh[ib32]) << (8 - 2 * l)) & 0x300);
+  const std::uint8_t magnitude =
+      static_cast<std::uint8_t>(quant::kIq2sGrid[grid_index] >> (8 * j));
+  // IQ2_S sign bytes physically overlap the qs payload at offset QK_K/8.
+  const std::uint8_t signs =
+      quant::kSignsIq2xs[blk->qs[64 + 4 * ib32 + l] & 127];
+  return db * static_cast<float>(magnitude) *
+         ((signs & (1u << j)) != 0 ? -1.0f : 1.0f);
+}
+
+__device__ __forceinline__ float DevQ2_0Element(const std::uint8_t* row,
+                                                std::size_t i) {
+  const auto* blk = reinterpret_cast<const DevBlockQ2_0*>(row) + (i / 64);
+  const std::uint8_t q = (blk->qs[(i % 64) / 4] >> (2 * ((i % 64) % 4))) & 3U;
+  return (static_cast<float>(static_cast<int>(q)) - 1.0f) *
+         __half2float(*reinterpret_cast<const __half*>(&blk->d));
+}
+
+template<WeightType type>
+__device__ __forceinline__ float ConvertedElement(const std::uint8_t* row,
+                                                  std::size_t i) {
+  if constexpr (type == WeightType::kIQ4_NL) {
+    return DevIq4NlElement(row, i);
+  } else if constexpr (type == WeightType::kIQ4_XS) {
+    return DevIq4XsElement(row, i);
+  } else if constexpr (type == WeightType::kIQ3_XXS) {
+    return DevIq3XxsElement(row, i);
+  } else if constexpr (type == WeightType::kIQ3_S) {
+    return DevIq3sElement(row, i);
+  } else if constexpr (type == WeightType::kIQ2_S) {
+    return DevIq2sElement(row, i);
+  } else {
+    return DevQ2_0Element(row, i);
+  }
+}
+
+/// One thread per 32-element Q8_0 block: read the source elements, take the
+/// block max, and emit the Q8_0 block. The scale formula (d = amax / 127,
+/// nearest rounding) matches the engine's own quantize kernels, so the
+/// conversion is the same re-quantization any other resident path applies.
+template<WeightType type>
+__global__ void ConvertToQ8_0Kernel(const std::uint8_t* source,
+                                    std::uint8_t* destination,
+                                    std::size_t blocks) {
+  const std::size_t i =
+      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+  if (i >= blocks) {
+    return;
+  }
+  float v[32];
+  float amax = 0.0f;
+  for (std::size_t k = 0; k < 32; ++k) {
+    v[k] = ConvertedElement<type>(source, (i * 32) + k);
+    amax = fmaxf(amax, fabsf(v[k]));
+  }
+  const __half hd = __float2half(amax / 127.0f);
+  auto* out = reinterpret_cast<std::uint8_t*>(destination) + i * 34;
+  *reinterpret_cast<__half*>(out) = hd;
+  const float scale = __half2float(hd);
+  for (std::size_t k = 0; k < 32; ++k) {
+    const float q = scale == 0.0f ? 0.0f : rintf(v[k] / scale);
+    out[2 + k] = static_cast<std::uint8_t>(static_cast<std::int8_t>(
+        q < -127.0f ? -127.0f : (q > 127.0f ? 127.0f : q)));
   }
 }
 
@@ -3959,6 +4148,16 @@ inline unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
 
+template<WeightType type>
+void LaunchConvertToQ8_0(const void* source, void* destination,
+                         std::size_t elements, hipStream_t stream) {
+  const std::size_t blocks = elements / 32;
+  hipLaunchKernelGGL((ConvertToQ8_0Kernel<type>), dim3(Blocks(blocks)),
+                     dim3(kThreads), 0, stream,
+                     static_cast<const std::uint8_t*>(source),
+                     static_cast<std::uint8_t*>(destination), blocks);
+}
+
 // A barrier for kernels whose waves exchange data through LDS only.
 // __syncthreads also waits for every outstanding global load and drops the
 // L0 cache, which serializes register prefetches behind the barrier. The
@@ -6222,6 +6421,68 @@ void ExpandQ8_0(const void* q8, float* out, std::size_t count,
                 hipStream_t stream) {
   hipLaunchKernelGGL(ExpandQ8_0Kernel, dim3(Blocks(count)), dim3(kThreads), 0,
                      stream, static_cast<const std::uint8_t*>(q8), out, count);
+}
+
+void ConvertToQ8_0(const void* source, void* destination, std::size_t elements,
+                   WeightType source_type, hipStream_t stream) {
+  switch (source_type) {
+    case WeightType::kIQ4_NL:
+      LaunchConvertToQ8_0<WeightType::kIQ4_NL>(source, destination, elements,
+                                               stream);
+      break;
+    case WeightType::kIQ4_XS:
+      LaunchConvertToQ8_0<WeightType::kIQ4_XS>(source, destination, elements,
+                                               stream);
+      break;
+    case WeightType::kIQ3_XXS:
+      LaunchConvertToQ8_0<WeightType::kIQ3_XXS>(source, destination, elements,
+                                                stream);
+      break;
+    case WeightType::kIQ3_S:
+      LaunchConvertToQ8_0<WeightType::kIQ3_S>(source, destination, elements,
+                                              stream);
+      break;
+    case WeightType::kIQ2_S:
+      LaunchConvertToQ8_0<WeightType::kIQ2_S>(source, destination, elements,
+                                              stream);
+      break;
+    case WeightType::kQ2_0:
+      LaunchConvertToQ8_0<WeightType::kQ2_0>(source, destination, elements,
+                                             stream);
+      break;
+  }
+}
+
+__global__ void UpcastBf16Kernel(const std::uint16_t* x, float* out,
+                                 std::size_t count) {
+  const std::size_t i =
+      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+  if (i < count) {
+    out[i] = Bf16ToF32(x[i]);
+  }
+}
+
+void UpcastBf16(const void* source, float* destination, std::size_t count,
+                hipStream_t stream) {
+  hipLaunchKernelGGL(UpcastBf16Kernel, dim3(Blocks(count)), dim3(kThreads), 0,
+                     stream, static_cast<const std::uint16_t*>(source),
+                     destination, count);
+}
+
+__global__ void UpcastF16Kernel(const __half* x, float* out,
+                                std::size_t count) {
+  const std::size_t i =
+      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+  if (i < count) {
+    out[i] = __half2float(x[i]);
+  }
+}
+
+void UpcastF16(const void* source, float* destination, std::size_t count,
+               hipStream_t stream) {
+  hipLaunchKernelGGL(UpcastF16Kernel, dim3(Blocks(count)), dim3(kThreads), 0,
+                     stream, static_cast<const __half*>(source), destination,
+                     count);
 }
 
 void NarrowActivations(const float* x, void* out, bool bf16, std::size_t count,

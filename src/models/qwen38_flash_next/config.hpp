@@ -58,7 +58,7 @@ struct Config {
   std::uint32_t ssm_inner_size{0};   ///< 6144
 
   // Mixture of experts with one always-on shared expert.
-  std::uint32_t num_experts{0};       ///< 512
+  std::uint32_t num_experts{0};       ///< 512 or 256 (RCO-pruned releases)
   std::uint32_t num_experts_used{0};  ///< 10
   std::uint32_t expert_ff{0};         ///< 640
   std::uint32_t shared_expert_ff{0};  ///< 640

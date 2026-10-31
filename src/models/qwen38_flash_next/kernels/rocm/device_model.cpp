@@ -29,6 +29,10 @@ struct Conversion {
   /// Expands Q8_0 weights to F32 instead of narrowing F32 to F16.
   bool expand_q8{false};
   std::size_t source_bytes{0};
+  /// Source format when the tensor is a low-bit codebook weight converted
+  /// to Q8_0 during upload; kF32 means "no codebook conversion" (the type
+  /// is already carried by expand_q8 and the narrow path).
+  WeightType converted_from{WeightType::kF32};
 };
 
 /// The trunk and the optional MTP block as one traversal's output.
@@ -73,16 +77,44 @@ struct Uploader {
     return weights->Allocate(pointer, size);
   }
 
+  /// True for the storage formats that have no on-device kernel in this
+  /// runtime (the IQ codebook families and IST-DASLab's Q2_0). They bind in
+  /// weights.cpp but must be converted to Q8_0 before any tier reads them.
+  [[nodiscard]] static bool NeedsQ8Conversion(core::GgmlType type) noexcept {
+    switch (type) {
+      case core::GgmlType::kIQ2_S:
+      case core::GgmlType::kIQ3_XXS:
+      case core::GgmlType::kIQ3_S:
+      case core::GgmlType::kIQ4_NL:
+      case core::GgmlType::kIQ4_XS:
+      case core::GgmlType::kQ2_0:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   DeviceTensor Copy(const TensorRef& t) {
     DeviceTensor d;
     if (t.empty() || !ok) {
       return d;
     }
+    // Formats without an on-device kernel are staged raw and converted to
+    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion).
+    const bool convert_q8 = NeedsQ8Conversion(t.type);
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
       Fail("device allocation failed for " + std::string(t.name) + " (" +
            std::to_string(size) + " bytes)");
+      return d;
+    }
+    void* q8 = nullptr;
+    const std::size_t count = t.cols * t.rows * t.experts;
+    const std::size_t q8_size = (count / 32) * 34;
+    if (convert_q8 && Allocate(&q8, q8_size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + std::string(t.name) +
+           " (Q8_0 conversion)");
       return d;
     }
     if (Measuring()) {
@@ -102,10 +134,20 @@ struct Uploader {
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
+    if (convert_q8) {
+      allocations.push_back(q8);
+      bytes += q8_size + kTailMargin;
+      conversions.push_back(
+          {ptr, q8, count, false, size, static_cast<WeightType>(t.type)});
+      (void)hipMemsetAsync(static_cast<std::uint8_t*>(q8) + q8_size, 0,
+                           kTailMargin, nullptr);
+      d.data = q8;
+      d.type = core::GgmlType::kQ8_0;
+    }
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
-    if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
+    if (d.type == core::GgmlType::kQ8_0 && t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
     return d;
@@ -117,6 +159,9 @@ struct Uploader {
   /// its dequantized values instead of quantizing their activations.
   DeviceTensor CopyF32(const TensorRef& t) {
     if (t.empty() || !ok || t.type != core::GgmlType::kQ8_0) {
+      if (t.type == core::GgmlType::kF16) {
+        return UpcastF32(t);
+      }
       return Copy(t);
     }
     DeviceTensor d = Copy(t);
@@ -135,6 +180,36 @@ struct Uploader {
     conversions.push_back({d.data, f32, count, true, t.SizeBytes()});
     (void)hipMemsetAsync(static_cast<std::uint8_t*>(f32) + count * 4, 0,
                          kTailMargin, nullptr);
+    d.data = f32;
+    d.type = core::GgmlType::kF32;
+    return d;
+  }
+
+  /// Uploads an F16 tensor and widens it to F32 once the disk pipeline
+  /// drains (RCO stores the PLE conv in F16 while the conv kernels read
+  /// F32). The staged F16 source is freed after the conversion.
+  DeviceTensor UpcastF32(const TensorRef& t) {
+    DeviceTensor src = Copy(t);
+    if (t.empty() || !ok) {
+      return src;
+    }
+    const std::size_t count = t.cols * t.rows * t.experts;
+    void* f32 = nullptr;
+    if (Allocate(&f32, count * sizeof(float) + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + std::string(t.name) +
+           " (F16 upconvert)");
+      return {};
+    }
+    if (Measuring()) {
+      return DeviceTensor{};
+    }
+    allocations.push_back(f32);
+    bytes += count * sizeof(float) + kTailMargin;
+    conversions.push_back(
+        {src.data, f32, count, false, t.SizeBytes(), WeightType::kF16});
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(f32) + count * 4, 0,
+                         kTailMargin, nullptr);
+    DeviceTensor d = src;
     d.data = f32;
     d.type = core::GgmlType::kF32;
     return d;
@@ -198,15 +273,29 @@ struct Uploader {
     }
     std::size_t rows = 0;
     std::size_t size = 0;
+    std::size_t bf16_members = 0;
     const core::GgmlType type = (*parts.begin())->type;
+    const bool f32_mode =
+        type == core::GgmlType::kF32 || type == core::GgmlType::kBF16;
     for (const TensorRef* t : parts) {
-      if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0)) {
-        Fail("stacked upload needs F32 or Q8_0 tensors of one shape");
+      // F32 and BF16 members share one stack: the buffer is F32-shaped and
+      // BF16 members are upconverted in place once the disk pipeline drains
+      // (RCO checkpoints store some router rows in BF16).
+      const bool ok_type = type == core::GgmlType::kQ8_0
+                               ? t->type == core::GgmlType::kQ8_0
+                               : t->type == core::GgmlType::kF32 ||
+                                     t->type == core::GgmlType::kBF16;
+      if (t->empty() || !ok_type || t->cols != (*parts.begin())->cols ||
+          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0 &&
+           type != core::GgmlType::kBF16)) {
+        Fail("stacked upload needs F32/BF16 or Q8_0 tensors of one shape");
         return d;
       }
       rows += t->rows;
-      size += t->SizeBytes();
+      size += f32_mode ? t->rows * t->cols * sizeof(float) : t->SizeBytes();
+      if (t->type == core::GgmlType::kBF16) {
+        ++bf16_members;
+      }
     }
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
@@ -223,7 +312,20 @@ struct Uploader {
           Fail("upload failed for " + std::string(t->name));
           return d;
         }
-        offset += t->SizeBytes();
+        offset += f32_mode ? t->rows * t->cols * sizeof(float) : t->SizeBytes();
+      }
+    }
+    if (f32_mode && bf16_members != 0 && !Measuring()) {
+      // Upconvert the BF16 members in place: each element reads two bytes
+      // below where it writes, so one kernel over the region is race-free.
+      std::size_t offset = 0;
+      for (const TensorRef* t : parts) {
+        if (t->type == core::GgmlType::kBF16) {
+          conversions.push_back({static_cast<std::uint8_t*>(ptr) + offset,
+                                 nullptr, t->rows * t->cols, false, 0,
+                                 WeightType::kBF16});
+        }
+        offset += t->rows * t->cols * sizeof(float);
       }
     }
     if (type == core::GgmlType::kQ8_0 && !expand_q8) {
@@ -332,7 +434,9 @@ struct Uploader {
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
-    d.ple_conv1d = Copy(l.ple_conv1d);
+    d.ple_conv1d = l.ple_conv1d.type == core::GgmlType::kF16
+                       ? UpcastF32(l.ple_conv1d)
+                       : Copy(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
@@ -475,27 +579,54 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   m->layers_ = std::move(uploaded.layers);
   m->mtp_ = uploaded.mtp;
   m->has_mtp_ = mtp != nullptr;
-  for (const auto& c : conversions) {
-    if (c.expand_q8) {
-      ExpandQ8_0(c.source, static_cast<float*>(c.destination), c.count,
-                 nullptr);
-    } else {
-      NarrowActivations(static_cast<const float*>(c.source), c.destination,
-                        false, c.count, nullptr);
+  // Drain the staged conversions on the default stream. Entries with a
+  // null destination upconvert BF16 in place; they only feed the following
+  // narrow entry, so the launch loop is split around them.
+  for (std::size_t begin = 0; begin < conversions.size();) {
+    std::size_t end = begin;
+    while (end < conversions.size() &&
+           conversions[end].destination == nullptr) {
+      ++end;  // in-place entries are consumed by the split below
     }
-  }
-  const auto status = hipDeviceSynchronize();
-  if (status != hipSuccess) {
-    if (error_msg != nullptr) {
-      *error_msg =
-          "weight conversion failed: " + std::string(hipGetErrorString(status));
+    if (end == begin) {
+      ++end;
     }
-    return nullptr;
-  }
-  for (const auto& c : conversions) {
-    std::erase(m->allocations_, c.source);
-    (void)hipFree(c.source);
-    m->bytes_ -= c.source_bytes + kTailMargin;
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto& c = conversions[i];
+      if (c.destination == nullptr) {
+        UpcastBf16(c.source, static_cast<float*>(c.source), c.count, nullptr);
+      } else if (c.converted_from == WeightType::kF16) {
+        UpcastF16(c.source, static_cast<float*>(c.destination), c.count,
+                  nullptr);
+      } else if (c.expand_q8) {
+        ExpandQ8_0(c.source, static_cast<float*>(c.destination), c.count,
+                   nullptr);
+      } else if (c.converted_from != WeightType::kF32) {
+        ConvertToQ8_0(c.source, c.destination, c.count, c.converted_from,
+                      nullptr);
+      } else {
+        NarrowActivations(static_cast<const float*>(c.source), c.destination,
+                          false, c.count, nullptr);
+      }
+    }
+    const auto status = hipDeviceSynchronize();
+    if (status != hipSuccess) {
+      if (error_msg != nullptr) {
+        *error_msg = "weight conversion failed: " +
+                     std::string(hipGetErrorString(status));
+      }
+      return nullptr;
+    }
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto& c = conversions[i];
+      if (c.destination == nullptr) {
+        continue;  // in place; the owner frees the buffer below
+      }
+      std::erase(m->allocations_, c.source);
+      (void)hipFree(c.source);
+      m->bytes_ -= c.source_bytes + kTailMargin;
+    }
+    begin = end;
   }
   return m;
 }

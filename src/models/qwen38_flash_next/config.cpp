@@ -255,7 +255,8 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
       c.indexer_top_k != 2048 || c.compress_ratio != 4 ||
       c.ssm_conv_kernel != 4 || c.ssm_head_dim != 128 ||
       c.ssm_num_k_heads != 16 || c.ssm_num_v_heads != 48 ||
-      c.num_experts != 512 || c.num_experts_used != 10 || c.expert_ff != 640 ||
+      (c.num_experts != 512 && c.num_experts != 256) ||
+      c.num_experts_used != 10 || c.expert_ff != 640 ||
       c.shared_expert_ff != 640 ||
       (c.ple_layer >= 0 &&
        (c.ple_ngram_size != 3 || c.ple_heads_per_ngram != 8 ||

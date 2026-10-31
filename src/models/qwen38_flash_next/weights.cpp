@@ -29,6 +29,14 @@ struct Format {
       return {32, 24};
     case GgmlType::kIQ4_NL:
       return {32, 18};
+    case GgmlType::kIQ4_XS:
+      return {256, 136};
+    case GgmlType::kIQ3_XXS:
+      return {256, 82};
+    case GgmlType::kIQ2_S:
+      return {256, 82};
+    case GgmlType::kQ2_0:
+      return {64, 18};
     case GgmlType::kQ4_K:
       return {256, 144};
     case GgmlType::kQ5_K:
@@ -138,10 +146,18 @@ struct Binder {
     const std::string p = "blk." + std::to_string(il) + ".";
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
-    const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                        GgmlType::kF32};
-    const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
-                          GgmlType::kQ5_1, GgmlType::kQ8_0};
+    // Formats beyond this list have no on-device kernel; the upload stage
+    // converts them to Q8_0 once staged (see NeedsQ8Conversion in
+    // device_model.cpp).
+    const auto dense = {GgmlType::kQ8_0,  GgmlType::kBF16,    GgmlType::kF16,
+                        GgmlType::kF32,   GgmlType::kIQ4_NL,  GgmlType::kIQ4_XS,
+                        GgmlType::kIQ3_S, GgmlType::kIQ3_XXS, GgmlType::kIQ2_S,
+                        GgmlType::kQ2_0};
+    const auto experts = {GgmlType::kQ4_K,  GgmlType::kQ5_K,
+                          GgmlType::kQ6_K,  GgmlType::kQ5_1,
+                          GgmlType::kQ8_0,  GgmlType::kIQ4_NL,
+                          GgmlType::kIQ3_S, GgmlType::kIQ3_XXS,
+                          GgmlType::kIQ2_S, GgmlType::kQ2_0};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -194,12 +210,14 @@ struct Binder {
           Get(p + "ple_norm_query.weight", hc_dim, 1, 1, {GgmlType::kF32});
       l.ple_norm_conv =
           Get(p + "ple_norm_conv.weight", hc_dim, 1, 1, {GgmlType::kF32});
+      // RCO releases store this small depthwise conv in F16; the upload
+      // stage upconverts it to F32 in place (see UpcastF16 handling).
       l.ple_conv1d = Get(p + "ple_conv1d.weight", c.ple_conv_kernel, hc_dim, 1,
-                         {GgmlType::kF32});
+                         {GgmlType::kF32, GgmlType::kF16});
     }
 
     l.router = Get(p + "ffn_gate_inp.weight", hidden, c.num_experts, 1,
-                   {GgmlType::kF32});
+                   {GgmlType::kF32, GgmlType::kBF16});
     l.ffn_gate_exps = Get(p + "ffn_gate_exps.weight", hidden, c.expert_ff,
                           c.num_experts, experts);
     l.ffn_up_exps = Get(p + "ffn_up_exps.weight", hidden, c.expert_ff,
@@ -248,8 +266,10 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   ModelWeights w;
   w.config = *config;
   const Config& c = w.config;
-  const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
-                      GgmlType::kF16, GgmlType::kF32};
+  const auto dense = {GgmlType::kQ8_0,   GgmlType::kQ6_K,  GgmlType::kBF16,
+                      GgmlType::kF16,    GgmlType::kF32,   GgmlType::kIQ4_NL,
+                      GgmlType::kIQ4_XS, GgmlType::kIQ3_S, GgmlType::kIQ3_XXS,
+                      GgmlType::kIQ2_S,  GgmlType::kQ2_0};
 
   {
     // The vocabulary is the embedding row count; no metadata key carries it.

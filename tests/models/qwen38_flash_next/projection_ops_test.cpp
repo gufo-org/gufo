@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
@@ -419,6 +420,96 @@ void CheckExpandQ8_0(std::size_t m, std::size_t k, std::uint32_t seed) {
   }
   CheckHip(hipFree(d_out), "expand output free");
   CheckHip(hipFree(d_w), "expand weights free");
+}
+
+namespace qg = gufo::quant;
+
+/// RCO releases ship IQ2_S/IQ3_XXS/IQ3_S/IQ4_NL/IQ4_XS and Q2_0 weights that
+/// the upload stage converts to Q8_0. A random payload is almost certainly
+/// not a real encoder's output, which is exactly the point: it exercises the
+/// kernel's full decode path (index math, grid tables, sign bits, scale
+/// words), and the expected values come from the reference CPU dequant of
+/// the same bytes. The Q8_0 re-quantization mirrors the engine formula
+/// (d = amax/127, round-to-nearest codes), so the comparison is exact.
+void CheckConvertToQ8_0(q::WeightType type, std::size_t count,
+                        std::uint32_t seed) {
+  std::size_t block_bytes = 0;
+  std::size_t elements_per_block = 32;
+  switch (type) {
+    case q::WeightType::kIQ4_NL:
+      block_bytes = 18;
+      break;
+    case q::WeightType::kIQ4_XS:
+      block_bytes = 144;
+      break;
+    case q::WeightType::kIQ3_XXS:
+      block_bytes = 82;
+      elements_per_block = 256;
+      break;
+    case q::WeightType::kIQ2_S:
+      block_bytes = 82;
+      elements_per_block = 256;
+      break;
+    case q::WeightType::kIQ3_S:
+      block_bytes = 112;
+      elements_per_block = 256;
+      break;
+    default:  // kQ2_0
+      block_bytes = 18;
+      elements_per_block = 64;
+      break;
+  }
+  std::vector<std::uint8_t> src((count / elements_per_block) * block_bytes);
+  for (auto& b : src)
+    b = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+  std::vector<float> ref(count);
+  switch (type) {
+    case q::WeightType::kIQ4_NL:
+      qg::DequantizeIQ4_NL(src.data(), ref.data(), count);
+      break;
+    case q::WeightType::kIQ4_XS:
+      qg::DequantizeIQ4_XS(src.data(), ref.data(), count);
+      break;
+    case q::WeightType::kIQ3_XXS:
+      qg::DequantizeIQ3_XXS(src.data(), ref.data(), count);
+      break;
+    case q::WeightType::kIQ3_S:
+      qg::DequantizeIQ3_S(src.data(), ref.data(), count);
+      break;
+    case q::WeightType::kIQ2_S:
+      qg::DequantizeIQ2_S(src.data(), ref.data(), count);
+      break;
+    default:
+      qg::DequantizeQ2_0(src.data(), ref.data(), count);
+      break;
+  }
+  void* d_src = nullptr;
+  void* d_q8 = nullptr;
+  const std::size_t q8_bytes = (count / 32) * 34;
+  CheckHip(hipMalloc(&d_src, src.size()), "convert source");
+  CheckHip(hipMalloc(&d_q8, q8_bytes + 64), "convert destination");
+  CheckHip(hipMemcpy(d_src, src.data(), src.size(), hipMemcpyHostToDevice),
+           "convert source upload");
+  CheckHip(hipMemset(d_q8, 0x7F, q8_bytes + 64), "convert guards");
+  q::ConvertToQ8_0(d_src, d_q8, count, type, nullptr);
+  std::vector<std::uint8_t> got(q8_bytes + 64);
+  CheckHip(hipMemcpy(got.data(), d_q8, got.size(), hipMemcpyDeviceToHost),
+           "convert download");
+  std::vector<float> ref_q8(count);
+  qg::DequantizeQ8_0(got.data(), ref_q8.data(), count);
+  for (std::size_t i = 0; i < count; ++i) {
+    const float tol = 1e-4f + 1e-3f * std::fabs(ref[i]);
+    if (std::fabs(ref_q8[i] - ref[i]) > tol) {
+      throw std::runtime_error("converted Q8_0 value differs at " +
+                               std::to_string(i));
+    }
+  }
+  for (std::size_t i = q8_bytes; i < got.size(); ++i) {
+    if (got[i] != 0x7F)
+      throw std::runtime_error("conversion wrote past its block region");
+  }
+  CheckHip(hipFree(d_q8), "convert destination free");
+  CheckHip(hipFree(d_src), "convert source free");
 }
 
 /// A batch a few tokens past a full 128-token tile computes its tail with
@@ -1290,6 +1381,14 @@ int main() {
     // shapes.
     CheckExpandQ8_0(4, 10240, 0xE8A4D1U);
     CheckExpandQ8_0(96, 2560, 0xE8A4D2U);
+    // RCO codebook formats re-encode to Q8_0 at load; random payloads must
+    // match the CPU reference dequant of the same bytes.
+    CheckConvertToQ8_0(q::WeightType::kIQ4_NL, 2560, 0xC0A001U);
+    CheckConvertToQ8_0(q::WeightType::kIQ4_XS, 2560, 0xC0A002U);
+    CheckConvertToQ8_0(q::WeightType::kIQ3_XXS, 512, 0xC0A003U);
+    CheckConvertToQ8_0(q::WeightType::kIQ3_S, 512, 0xC0A004U);
+    CheckConvertToQ8_0(q::WeightType::kIQ2_S, 512, 0xC0A005U);
+    CheckConvertToQ8_0(q::WeightType::kQ2_0, 512, 0xC0A006U);
     CheckW8A8Tail(320, 10240, 0x7A1320U);
     CheckW8A8Tail(640, 2560, 0x7A1640U);
     // The output projection takes the wave64 kernel from 1,024 rows; the
