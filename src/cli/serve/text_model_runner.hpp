@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -37,6 +38,14 @@ struct TextPromptContext {
   [[nodiscard]] std::span<const std::uint8_t> CacheIdentity(
       std::size_t token_count) const {
     return PrefixInputIdentity(cache_identity, cache_prefixes, token_count);
+  }
+  /// The nearest position at or before `position` (`up`: at or after) where
+  /// prefill may stop. A model can need an input whole, such as an image
+  /// whose rows attend each other; a step starting at such an input then
+  /// consumes it entirely, even beyond its token budget.
+  [[nodiscard]] virtual std::size_t PrefillStop(std::size_t position,
+                                                bool /*up*/) const {
+    return position;
   }
 };
 
@@ -425,6 +434,19 @@ public:
   virtual void PrepareBatchExecution(TextRunnerState& state) const {
     (void)state;
   }
+  /// The prompt tokens after the next Prefill's frontier, set before every
+  /// prefill step (empty when the frontier ends the prompt), and where later
+  /// steps stop inside them (token counts, ascending). A step that stops at a
+  /// snapshot boundary must still leave the state exactly at that boundary;
+  /// a runner may compute these tokens alongside and adopt the result when a
+  /// following step stops at one of `stops` or at their end.
+  virtual void SetPromptLookahead(TextRunnerState& state,
+                                  std::span<const TextRunnerToken> tokens,
+                                  std::span<const std::size_t> stops) const {
+    (void)state;
+    (void)tokens;
+    (void)stops;
+  }
   /// Processes at most max_input_tokens, yielding after one model-owned
   /// chunk even when the scheduler grants the whole remaining prompt.
   [[nodiscard]] virtual TextPrefillStep Prefill(
@@ -536,6 +558,7 @@ public:
     struct CommitMetrics {
       std::optional<ComponentCacheMetrics> component_cache;
       std::size_t snapshot_bytes{0};
+      /// Capture work through worker completion, excluding later collection.
       double snapshot_ms{0.0};
       std::size_t disk_queued_bytes{0};
       double disk_enqueue_ms{0.0};
@@ -610,6 +633,9 @@ public:
     /// Starts capture and polls completion without blocking other sessions.
     [[nodiscard]] bool PreparePromptSnapshot();
     [[nodiscard]] bool SnapshotPending() const;
+    /// Waits up to `timeout` for a pending snapshot; true once none is.
+    [[nodiscard]] bool AwaitSnapshot(
+        std::chrono::steady_clock::duration timeout) const;
     void Invalidate() noexcept;
 
   private:
