@@ -162,9 +162,11 @@ Windows ZIP use `GUFO_EXTENSIONS_FROM_LOCK=ON`. Toolboxes can select the same
 policy through `gufo.override { extensionsFromLock = true; }`; publishing actual
 Toolboxes images remains an external distribution deliverable. The lock is an
 exact name list, including every family dependency, not an implicit dependency
-closure. An unavailable platform or missing dependency in the lock is an error.
-`GUFO_EXTENSIONS` is also an exact semicolon list; `*` selects discovery and an
-empty list selects none. An explicit list and lock mode conflict.
+closure. An unavailable platform or missing dependency in the lock is an error
+in every configure mode, including plain discovery, so a stale lock also fails
+development builds. `GUFO_EXTENSIONS` is also an exact semicolon list; `*`
+selects discovery and an explicitly empty list selects none. An explicit list
+and lock mode conflict, and an empty entry from a stray `;` is rejected.
 
 Bootstrap: the current lock contains no migrated extensions. Existing legacy
 models still build and serve through their existing routes in both modes; they

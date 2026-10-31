@@ -161,6 +161,7 @@
             "type": "array",
             "items": {
               "type": "string",
+              "pattern": "^(gguf|safetensors|manifest|diffusers):.+$",
               "minLength": 1
             },
             "uniqueItems": true,
@@ -617,7 +618,7 @@
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gufo.dev/schemas/extension.schema.json",
-  "title": "Gufo extension metadata API 0.1.0",
+  "title": "Gufo extension metadata API 0.1.1",
   "allOf": [
     {
       "if": {

@@ -1,7 +1,13 @@
-# Card05 implementation evidence
+# Card05 evidence
 
-Implementation only; independent review and third-agent integration are pending.
-The worktree parent is `3d2ce45a`. No commit or root revision switch was made.
+Implementation evidence first, then the independent review and third-agent
+integration in `review-and-integration.md`, with the verbatim transcripts
+`review/independent-static-review.md` and
+`review/independent-execution-review.md`. Those three files are referenced as
+plain paths because the Nix source filter takes tracked files only, so a link
+here would dangle in any hosted check that runs before they are committed; the
+navigable links live inside `review-and-integration.md` itself. The worktree
+parent during implementation was `3d2ce45a`.
 The user-owned RFC SHA-256 remains
 `2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448`.
 
@@ -63,7 +69,32 @@ excluded manifests, whose missing dependencies are intentionally not visited.
 `initial-fixture-order-failure.txt` retains that failure. The expectation now
 matches canonical lexical exclusion order; final discovery and full focused
 CTest runs pass. No runtime defect, model failure or timing threshold was
-hidden by that fixture correction.
+hidden by that fixture correction. Integration made that ordering contract
+explicit in [INFRASTRUCTURE.md](../../INFRASTRUCTURE.md): built extensions are
+dependency-first, excluded extensions are canonical lexical.
+
+Integration retained one more failure of its own:
+`initial-unshipped-reporting-failure.txt`, where a newly added test wrongly
+expected configure-time "unshipped" reporting to follow the selection mode
+instead of `extensions.lock` membership. The test expectation was corrected and
+the implementation was left unchanged, because the lock-independent meaning is
+the intended contract.
+
+## Review and integration
+
+Two distinct read-only reviewers and one integration agent closed the card.
+The static audit found no correctness defect and blocked narrowly on the
+unexecuted hosted-CI gate; the execution pass reproduced every claim above, in
+cluding the negative API-gate probe failing as required. Integration added four
+discovery cases (explicit empty selector, missing lock in every mode,
+configure-time unshipped reporting, deterministic collision attribution) and one
+selector-failure case, fixed the collision-owner attribution and its mode-neutral
+prefix, removed the duplicated lock read, agreed the metadata schema with the
+configure-time artifact-key rule and the 0.1.1 version, and documented the
+ordering, lock-in-every-mode and excluded-metadata contracts. Focused CTest is
+still 12/12 with zero skips, discovery is now 13 cases, and the formatter still
+passes 725 C++ files. See `review-and-integration.md` for the per-finding
+dispositions, exact commands, fresh artifact hashes and pending gates.
 
 ## Scope and remaining gates
 

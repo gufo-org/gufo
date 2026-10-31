@@ -66,9 +66,6 @@ const ProviderInfo& Registry::Provider(std::string_view id) const {
   }
   return *found;
 }
-}  // namespace gufo::ext
-
-namespace gufo::ext {
 void Registry::AddExcluded(ExcludedExtension extension) {
   if (extension.extension.name.empty() ||
       std::ranges::any_of(excluded_, [&](const auto& e) {

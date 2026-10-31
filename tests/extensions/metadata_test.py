@@ -302,6 +302,13 @@ class SchemaTests(unittest.TestCase):
             invalid[field] = value
             with self.subTest(field=field), self.assertRaises(jsonschema.ValidationError):
                 validator.validate(invalid)
+        # Every artifact key carries the key kind configure requires
+        # (gguf|safetensors|manifest|diffusers in cmake/GufoExtension.cmake).
+        for key in ("arbitrary:key", "gguf", "GGUF:x"):
+            invalid = copy.deepcopy(broad)
+            invalid["providers"][0]["keys"] = [key]
+            with self.subTest(artifact_key=key), self.assertRaises(jsonschema.ValidationError):
+                validator.validate(invalid)
 
 
 if __name__ == "__main__":

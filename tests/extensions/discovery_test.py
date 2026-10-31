@@ -121,6 +121,51 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         self.assertEqual([e["name"] for e in report["excludedExtensions"]], ["beta", "gamma"])
         self.assertEqual(report, self.run_fixture())
 
+    def test_explicit_empty_selector_selects_none(self):
+        # An empty GUFO_EXTENSIONS is a deliberate selection of none, distinct
+        # from '*' (discovery) and from the lock-mode conflict case.
+        self.configure("-DGUFO_EXTENSIONS=")
+        report = self.run_fixture()
+        self.assertEqual(report["selectionMode"], "explicit")
+        self.assertEqual(report["builtExtensions"], [])
+        self.assertEqual([e["name"] for e in report["excludedExtensions"]], ["alpha", "base", "beta"])
+        self.assertEqual([e["reason"] for e in report["excludedExtensions"]],
+                         ["not selected in explicit mode"] * 3)
+
+    def test_missing_lock_is_an_error_in_every_mode(self):
+        (self.source / "extensions.lock").unlink()
+        self.configure(error="extension lock: missing")
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="extension lock: missing")
+
+    def test_unshipped_reporting_at_configure_time(self):
+        # Unshipped means "discovered but not in extensions.lock", independently
+        # of the selection mode, so an empty lock marks all three as unshipped.
+        output = self.configure()
+        for name in ("alpha", "base", "beta"):
+            self.assertIn(f"gufo: unshipped discovered extension {name}", output)
+        self.lock(["alpha", "base"])
+        output = self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON")
+        self.assertIn("gufo: unshipped discovered extension beta", output)
+        self.assertNotIn("gufo: unshipped discovered extension alpha", output)
+
+    def test_collision_names_the_first_recorded_owner(self):
+        # Names are visited dependency-first over sorted names: base, alpha,
+        # beta, gamma. Two unshipped extensions claim the same artifact key as
+        # shipped gamma, so the diagnostic must name the first recorded holder
+        # (alpha) rather than whichever was seen last.
+        for name in ("alpha", "beta", "gamma"):
+            if name == "gamma":
+                directory = self.add("gamma")
+            else:
+                directory = self.source / f"src/models/{name}"
+            path = directory / "extension.json"
+            data = json.loads(path.read_text())
+            data["providers"][0]["keys"] = ["gguf:shared"]
+            path.write_text(json.dumps(data))
+        self.lock(["base", "gamma"])
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON",
+                       error="keys collision 'gguf:shared' (alpha, gamma)")
+
     def test_false_like_name_and_production_test_isolation(self):
         self.add("off")
         # Real alpha/beta/base targets coexist with the separately configured
@@ -144,6 +189,8 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         self.configure("-DGUFO_EXTENSIONS=missing", error="unknown extension missing")
         self.configure("-DGUFO_EXTENSIONS=alpha", error="missing selected dependency base")
         self.configure("-DGUFO_EXTENSIONS=alpha;alpha", error="duplicate names")
+        # A stray separator is a malformed selector, not an unknown name.
+        self.configure("-DGUFO_EXTENSIONS=alpha;;beta", error="empty entry")
         self.configure("-DGUFO_EXTENSIONS=", "-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="conflicts")
         self.configure("-DGUFO_EXTENSIONS=*", "-DGUFO_EXTENSIONS_FROM_LOCK=OFF")
         self.lock(["alpha"])

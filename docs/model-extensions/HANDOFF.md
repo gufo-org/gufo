@@ -8,15 +8,24 @@ review comments and finishing verification. Complete cards sequentially.
 ## Authoritative starting state
 
 - Workspace: `/home/mixer/gufo`; use `jj` and read `AGENTS.md`.
-- Cards 01–04 are complete through all three agents. The last committed parent
-  is `3d2ce45a`, `feat(extensions): add validated build-time registry and provider options`.
-- Card 05 implementation and its checks are complete in the uncommitted
-  worktree. Its implementation agent was `/root/card05_implement`.
-  **Independent review and third-agent integration are still pending.** Start
-  with those phases; do not redo implementation or mark Card 05 complete merely
-  because implementation tests pass. See [its evidence](evidence/card05/README.md).
-- All previous agents have released editing ownership. All their build/test
-  jobs and the model download have finished; no old jobs need restarting.
+- Cards 01–05 are complete through all three agents. Card 05's implementation
+  parent is `381c1648`, `feat(extensions): add cmake discovery system`; its
+  review/integration follow-ups sit in the working copy `@`
+  ("feat(extensions): card 5 follow-ups") for the orchestrator to commit.
+- Card 05 used three distinct agents: implementation `/root/card05_implement`,
+  independent review pi `reviewer` (static) plus pi `delegate` (execution pass),
+  and integration pi `worker`. Findings, dispositions, exact commands and
+  remaining gates are in
+  `docs/model-extensions/evidence/card05/review-and-integration.md` and
+  [its evidence index](evidence/card05/README.md). Next is **Card 06**
+  (model-specific speculation out of `src/core/speculative/`), a text-path card:
+  it needs the affected text profiles plus `long-context` and `cache`, the
+  Card 02 identity goldens, and matched per-request timings against a main
+  control.
+- Editing ownership returns to the orchestrator when the Card 05 integration
+  agent finishes; start Card 06 only after that and after the commit. All
+  build/test jobs and the model download have finished; no old jobs need
+  restarting.
 - The current diff, except the original RFC, contains task-owned Card 05 work
   plus this handoff and the documentation-only card split. Inspect `jj status` and the actual files before relying
   on this checkpoint. Do not discard or reset pending changes.
@@ -68,7 +77,10 @@ files have downloaded and passed complete SHA-256 verification:
 Card 05's implementation checks include real default/lock CPU executables and
 CLI provenance, 12/12 focused CTests, a final 4/4 affected-fixture check, nine
 discovery groups, formatting, platform-only builds, and Nix evaluation/source
-admission checks. These do not replace the pending independent review.
+admission checks. Independent review and integration reproduced them, added four
+discovery cases and one selector-failure case, and recorded the results, so Card
+05's infrastructure evidence is current; what remains outstanding is the future
+lock-mode HIP and Windows evidence, not this card's checks.
 
 Apply the repository's optimization skill for profiling/kernel work and the
 affected numerical/functional/speed gates for later migrations. Preserve exact

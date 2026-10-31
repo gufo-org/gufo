@@ -6,11 +6,13 @@ implementation plan, definition of done, validation criteria and execution recor
 The [original RFC](../RFC.md) remains the specification; these plans do not amend
 its requirements or waive existing quality gates.
 
-Current checkpoint: cards 01–04 are complete. Card 05 implementation and checks
-are finished, but independent review and third-agent integration are pending.
-Cards 06–29 are pending. The authorized implementation milestone ends after Card
-14 is verified and committed; cards 15–29 document later scope only. This split
-is documentation work and does not itself advance any implementation status.
+Current checkpoint: cards 01–05 are complete. Card 05 closed with two read-only
+reviewers and a third integration agent; its unresolved gates are the real
+lock-mode HIP artifacts and Windows execution, which it never claims.
+Cards 06–29 are pending, with Card 06 (moving model-specific speculation out of
+core) next. The authorized implementation milestone ends after Card 14 is
+verified and committed; cards 15–29 document later scope only. This split is
+documentation work and does not itself advance any implementation status.
 
 ## Card-by-card workflow
 
@@ -42,10 +44,15 @@ is documentation work and does not itself advance any implementation status.
    and the closing commit. No competing editors in the shared worktree. Finish or
    explicitly transfer live jobs with their exact handles before ownership changes.
 
-For the present Card 05, start at independent review, then use a distinct third
-integration agent. Do not redo its completed implementation or claim completion
-from its existing checks alone. Use [HANDOFF.md](../HANDOFF.md) for machine/model
-provenance and the preserved working-copy checkpoint.
+Card 06 is a text-path change, not build infrastructure: it needs the affected
+text profiles with `long-context` and `cache`, the identity goldens from Card 02,
+and matched per-request timings against a main control. Reviewers must read
+`docs/model-extensions/evidence/card05/review-and-integration.md` first for the
+discovery/selection contracts the core migration now depends on: built extensions
+are dependency-first while excluded ones are canonical lexical, the lock is
+validated in every mode, and the collision gate is cross-tier only. Use
+[HANDOFF.md](../HANDOFF.md) for machine/model provenance and the preserved
+working-copy checkpoint.
 
 ## Validation conventions
 

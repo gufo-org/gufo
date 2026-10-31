@@ -90,7 +90,7 @@ the current implementation milestone stops after Card 14.
 | 02 | 1b; 01 | [Exact continuation identity goldens](cards/02-identity-goldens.md) | complete |
 | 03 | 2; 01–02 | [Throwaway Flash-Next interface spike](cards/03-flash-next-spike.md) | complete |
 | 04 | 3; 03 | [Extension runtime, schema and explicit registration](cards/04-runtime-and-registration.md) | complete |
-| 05 | 3; 04 | [Discovery, lock selection and provenance](cards/05-discovery-and-provenance.md) | implementing |
+| 05 | 3; 04 | [Discovery, lock selection and provenance](cards/05-discovery-and-provenance.md) | complete |
 | 06 | 4; 02, 05 | [Move model-specific speculation out of core](cards/06-model-owned-speculation.md) | pending |
 | 07 | 5; 06 | [Extract acyclic Qwen family libraries](cards/07-qwen-family-libraries.md) | pending |
 | 08 | 5; 07 | [Extract H3, evaluation and model-dependent targets](cards/08-h3-eval-and-test-targets.md) | pending |
@@ -120,7 +120,8 @@ the current implementation milestone stops after Card 14.
 
 Card-specific records now live with their plans. Completed records describe
 historical evidence and limitations; they are not instructions to redo completed
-work. Card 05 still needs independent review and integration. See the
+work. Cards 01–05 have now been through implementation, independent review and
+review integration. See the
 [three-agent workflow](cards/README.md#card-by-card-workflow) before continuing.
 
 ### Card 01

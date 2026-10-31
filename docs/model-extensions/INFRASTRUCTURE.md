@@ -122,8 +122,16 @@ semicolon lists (including an empty list) and `extensions.lock` are exact sets
 including dependencies. Lock JSON is `{ "schema": 1, "extensions": [] }` with
 no other keys. `GUFO_EXTENSIONS_FROM_LOCK=ON` conflicts with an explicit
 selector. Missing names, duplicates, unavailable selected platforms and omitted
-dependencies are configuration errors. Names with false-like CMake spelling
-remain legal. No production Python dependency was added.
+dependencies are configuration errors, as is an empty entry from a stray `;`.
+Names with false-like CMake spelling remain legal. No production Python
+dependency was added.
+
+`extensions.lock` is read and validated in every mode, including plain discovery:
+unknown locked names and incomplete locked dependencies fail a development
+configure too, so a stale lock cannot pass silently. Built extensions are
+ordered dependency-first over lexically sorted names, while excluded extensions
+are reported in canonical lexical order because dependency order is meaningless
+for extensions that are never built.
 
 All discovered manifests receive structural/safety checks, including name and
 entry/target uniqueness and option-type agreement. Unselected manifests skip
@@ -132,7 +140,13 @@ extension to target a future API or an uninstalled dependency without breaking
 a lock build. Their JSON must still be structurally valid to generate truthful
 excluded metadata. Selected manifests receive full API/graph validation.
 Shipped/unshipped collisions in artifact keys, option names (across commands)
-and model IDs fail independently of current selection, including lock builds.
+and model IDs fail independently of current selection, including lock builds,
+and the message names the first recorded holder of the value in the other tier.
+Two extensions inside the same tier may share an artifact key: overlapping keys
+are decided by probes later. Provider IDs and entry symbols may not collide
+(`gufo_extension()`) and shared option types may not disagree
+(`Registry::AddProvider`); both fail elsewhere, not in this gate. The collision
+prefix is `gufo:`, not a lock-mode claim, because the check runs in both modes.
 This collision gate does not establish equivalent runtime behavior.
 
 Selected `extension.cmake` files execute dependency-first in isolated build
@@ -143,8 +157,10 @@ registration links actual registration/provider archives into `gufo`; disabled
 HIP providers remain metadata stubs. Built family libraries also carry version
 and source provenance. Excluded extensions record version/source/reason plus
 keys, model IDs and option names, with `ExcludedKeyDiagnostic()` available to
-later provider selectors. Legacy CLI provider selection is intentionally not
-migrated in this infrastructure card.
+later provider selectors. `diagnose` deliberately reports excluded provenance
+and their artifact keys only; the full model-ID and option-name sets stay
+internal to the collision gate and `ExcludedKeyDiagnostic()`. Legacy CLI
+provider selection is intentionally not migrated in this infrastructure card.
 
 There are currently zero production manifests; `extensions.lock` is deliberately
 empty. Existing legacy model target/routing lists still apply in both builds.
