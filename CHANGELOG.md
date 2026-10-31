@@ -4,6 +4,18 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.28.1](https://github.com/gufo-org/gufo/compare/v0.28.0...v0.28.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **qwen38-flash-next:** keep prefill rows independent of the pass route ([#875](https://github.com/gufo-org/gufo/issues/875)) ([192b75a](https://github.com/gufo-org/gufo/commit/192b75a8b6079b498461b598b8514ecd05d71caf))
+
+
+### Performance
+
+* **qwen38-flash-next:** end MTP chains at the first unconfident draft ([#882](https://github.com/gufo-org/gufo/issues/882)) ([5d66de8](https://github.com/gufo-org/gufo/commit/5d66de8cd98e7c09ed4b6ee0af0c195adc3f861d))
+
 ## [0.28.0](https://github.com/gufo-org/gufo/compare/v0.27.0...v0.28.0) (2026-10-30)
 
 
