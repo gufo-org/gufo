@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "src/core/cancellable_gate.hpp"
+#include "src/models/fish_drama3/config.hpp"
+#include "src/models/fish_drama3/hip/synthesis_runtime.hpp"
 #include "src/models/qwen3_tts/config.hpp"
 #include "src/models/qwen3_tts/hip/synthesis_runtime.hpp"
 
@@ -30,6 +32,81 @@ std::string ModelId(models::qwen3_tts::ModelVariant variant) {
 
 struct TtsService::Impl {
   explicit Impl(TtsServiceOptions supplied) : options(std::move(supplied)) {
+    if (!options.model_root.empty() &&
+        models::fish_drama3::LooksLikeFishDrama3(options.model_root.string())) {
+      is_drama3 = true;
+      options.variant = models::qwen3_tts::ModelVariant::kBase;
+      if (options.model_id.empty()) {
+        options.model_id = "fish-drama-3";
+      }
+      if (options.voices.empty()) {
+        options.voices.push_back("default");
+        options.voices.push_back("voice-clone");
+      }
+      for (const auto& [name, unused] : options.voice_presets) {
+        (void)unused;
+        if (std::ranges::find(options.voices, name) == options.voices.end()) {
+          options.voices.push_back(name);
+        }
+      }
+      if (!options.runner) {
+        drama3_runtime = models::fish_drama3::hip::SynthesisHipRuntime::Create(
+            options.model_root.string(), options.native_context_tokens,
+            &initialization_error);
+        if (drama3_runtime == nullptr) {
+          return;
+        }
+        options.runner =
+            [this](const models::qwen3_tts::SynthesisRequest& request,
+                   const models::qwen3_tts::CancellationCheck& is_cancelled,
+                   models::qwen3_tts::SynthesisResult* result,
+                   std::string* error) {
+              models::fish_drama3::SynthesisRequest d3_req;
+              d3_req.text = request.text;
+              d3_req.reference_audio_mono = request.reference_audio.samples;
+              d3_req.reference_sample_rate =
+                  request.reference_audio.sample_rate > 0
+                      ? request.reference_audio.sample_rate
+                      : 44100U;
+              d3_req.reference_text = request.reference_text;
+              d3_req.sampling.temperature = request.sampling.temperature;
+              d3_req.sampling.top_p = request.sampling.top_p;
+              d3_req.sampling.top_k = static_cast<int>(request.sampling.top_k);
+              d3_req.sampling.seed =
+                  static_cast<std::uint32_t>(request.sampling.seed);
+              d3_req.sampling.max_new_frames = request.max_new_tokens;
+              d3_req.on_audio = request.on_audio;
+
+              models::fish_drama3::SynthesisResult d3_res;
+              if (!drama3_runtime->Generate(d3_req, is_cancelled, &d3_res,
+                                            error)) {
+                return false;
+              }
+              if (result != nullptr) {
+                result->sample_rate = d3_res.sample_rate;
+                result->code_groups = d3_res.code_groups;
+                result->samples = std::move(d3_res.samples);
+                result->sample_count = d3_res.sample_count;
+                const auto frames = static_cast<std::size_t>(
+                    std::max<std::int64_t>(0, d3_res.codes.frames));
+                const auto groups = static_cast<std::size_t>(
+                    std::max<std::int64_t>(0, d3_res.codes.codebooks));
+                result->codes.resize(frames * groups);
+                for (std::size_t f = 0; f < frames; ++f) {
+                  for (std::size_t g = 0; g < groups; ++g) {
+                    result->codes[f * groups + g] =
+                        d3_res.codes.codes[g * frames + f];
+                  }
+                }
+              }
+              return true;
+            };
+      }
+      std::ranges::sort(options.voices);
+      ready = true;
+      return;
+    }
+
     std::optional<models::qwen3_tts::ModelConfig> config;
     if (options.validate_model) {
       config = models::qwen3_tts::LoadModelConfigFromPath(
@@ -37,7 +114,8 @@ struct TtsService::Impl {
       if (!config.has_value() ||
           !models::qwen3_tts::IsSupportedModelConfig(*config)) {
         initialization_error =
-            "Qwen3-TTS service requires a supported 1.7B model";
+            "TTS service requires a supported Qwen3-TTS 1.7B or Fish Drama-3 "
+            "model";
         return;
       }
       options.variant = config->variant;
@@ -59,13 +137,9 @@ struct TtsService::Impl {
         options.voices.push_back("voice-clone");
       }
     }
-    // Presets carry reference audio, which only the Base checkpoint consumes:
-    // CustomVoice selects a trained speaker embedding and VoiceDesign is
-    // driven by `instruct`, so neither has anything to apply them to.
     if (!options.voice_presets.empty() &&
         options.variant != models::qwen3_tts::ModelVariant::kBase) {
-      initialization_error =
-          "voice presets require a Qwen3-TTS Base checkpoint";
+      initialization_error = "voice presets require a Base checkpoint";
       return;
     }
     for (const auto& [name, unused] : options.voice_presets) {
@@ -96,8 +170,10 @@ struct TtsService::Impl {
 
   TtsServiceOptions options;
   std::unique_ptr<models::qwen3_tts::hip::SynthesisHipRuntime> native_runtime;
+  std::unique_ptr<models::fish_drama3::hip::SynthesisHipRuntime> drama3_runtime;
   std::string initialization_error;
   core::CancellableGate generation_gate;
+  bool is_drama3{false};
   bool ready{false};
 };
 
@@ -133,6 +209,10 @@ const TtsVoicePreset* TtsService::voice_preset(const std::string& name) const {
 
 models::qwen3_tts::ModelVariant TtsService::variant() const noexcept {
   return impl_->options.variant;
+}
+
+bool TtsService::is_fish_drama3() const noexcept {
+  return impl_->is_drama3;
 }
 
 bool TtsService::Synthesize(

@@ -35,7 +35,7 @@ set(gufo_pr_targets
   embedding_gemma2_video_processor_test
   embedding_gemma2_image_processor_test
   embedding_gemma2_batch_scheduler_test
-  qwen3_tts_config_test qwen3_tts_audio_api_test
+  qwen3_tts_config_test qwen3_tts_audio_api_test fish_drama3_config_test
   qwen_image_21_test qwen_image_21_weights_test
   video_api_test minimax_h3_sampling_test minimax_h3_runtime_test)
 set(gufo_pr_tests ${gufo_pr_targets})
