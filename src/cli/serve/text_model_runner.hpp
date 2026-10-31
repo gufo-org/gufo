@@ -405,6 +405,10 @@ public:
   InitialOutputState(const ChatRequest&) const {
     return TextGenerationBackend::InitialOutputState::kAuto;
   }
+  /// Reasoning delimiters and tool-call syntax of generated text.
+  [[nodiscard]] virtual TextGenerationBackend::OutputMarkup Markup() const {
+    return {};
+  }
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
 
