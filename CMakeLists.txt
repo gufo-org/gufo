@@ -232,8 +232,8 @@ endif()
 
 if (WIN32)
   # Platform layer: WinSock (net), process memory counters (logging), BCrypt
-  # and the registry (os_info), DXGI (gpu_budget).
-  set(GUFO_PLATFORM_LIBS ws2_32 iphlpapi bcrypt advapi32 dxgi)
+  # and the registry (os_info).
+  set(GUFO_PLATFORM_LIBS ws2_32 iphlpapi bcrypt advapi32)
 endif()
 
 add_subdirectory(src/cache)
