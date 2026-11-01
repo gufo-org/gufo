@@ -468,6 +468,22 @@ int main(int argc, char** argv) {
       CheckPrefillCheckpoint(model, prompt, mode, 0, 0);
       CheckPrefillCheckpoint(
           model, std::span<const std::int32_t>(warm_prompt).first(2055), mode);
+      // The longest in-pass tail: an eight-row suffix behind a boundary that
+      // four-token alignment moved back by three (sparse at 2,048, and after
+      // a warm prefix so the pass starts off the alignment).
+      CheckPrefillCheckpoint(model,
+                             std::span<const std::int32_t>(prompt).first(2059),
+                             mode, 0, 11);
+      CheckPrefillCheckpoint(
+          model, std::span<const std::int32_t>(warm_prompt).first(4111), mode,
+          prompt.size(), 11);
+      auto longer = model->CreateSession(mode, 8192, &error);
+      Require(longer != nullptr, error);
+      std::unique_ptr<qfn::SessionSnapshot> refused;
+      Require(!longer->SyncThrough(
+                  std::span<const std::int32_t>(prompt).first(2060), 2048,
+                  &refused, &error),
+              "a 12-row in-pass tail was accepted");
     }
     CheckBorrowedSnapshots(model, prompt,
                            gufo::core::SessionMode::kAutoregressive);

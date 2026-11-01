@@ -278,6 +278,10 @@ public:
   [[nodiscard]] std::unique_ptr<PrefillCheckpoint> MakePrefillCheckpoint(
       Session& session, std::span<const std::int32_t> tokens,
       std::uint32_t prefix, std::string* error_msg) const;
+  /// Rows an in-pass checkpoint may leave after its boundary: a short
+  /// assistant suffix (eight rows) plus the compress ratio less one, by
+  /// which a four-token-aligned boundary can fall back.
+  [[nodiscard]] std::uint32_t PrefillCheckpointTail() const noexcept;
 
   /// Appends `tokens` (at most max_batch) to the session and returns the
   /// logits of the last `n_logits` tokens in `logits` (n_logits * vocab

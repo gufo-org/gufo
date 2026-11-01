@@ -14,8 +14,12 @@ four runs to the next one), and the stable final-user-turn boundary, grid
 and shared checkpoints are rounded down to it, so a restore re-prefills at
 most three tokens. The complete-prompt checkpoint keeps its exact end: an
 unchanged retry continues it without prefill, and `ComponentTextCache`
-never restores an unaligned checkpoint for a longer prompt.
-`Session::Feed` aligns its own passes the same way. An unaligned prefill frontier is not kept as a live continuation;
+never restores an unaligned checkpoint for a longer prompt. An in-pass
+checkpoint may leave up to eleven rows after its boundary (eight plus the
+three alignment can take), so the five-to-seven-token assistant framing after
+a rounded-down stable boundary still fits in the final pass instead of
+needing a pass of its own. `Session::Feed` aligns its own passes the same
+way. An unaligned prefill frontier is not kept as a live continuation;
 decoded frontiers are. `TextRunnerPool::Request::Prefill` asserts that every
 step after a request's first starts aligned. The snapshot payload version
 is 19.
@@ -25,6 +29,18 @@ is 19.
   restores at 32 for edits and for a longer prompt, an unchanged retry from
   all 41 tokens without prefill, and a budget of 3 running to the next
   multiple of four.
+- `qwen38_flash_next_snapshot_test` captures in-pass checkpoints with an
+  eleven-row tail (boundary 2,048 of a 2,059-token pass, and boundary 4,100
+  of a pass starting at 4,095) in AR and MTP: logits, payload and sampled
+  continuation equal a split at the boundary; a twelve-row tail is refused.
+- `run.py --tier pr --suite cache --suite long-context` (MTP) on a downstream
+  branch (v0.28 base, `--sessions 2 --context 32768`), 50 requests, main
+  and this change alternated twice: every request takes the same number of
+  prefill passes as on main, and all 677 timing measurements pass. With
+  the eight-row tail, 13 of them took an extra pass for the stable boundary
+  (a 13-token warm turn 94 → 168 ms TTFT, a 289-token one 324 → 399 ms, a
+  2,454-token cold prompt 1,483 → 1,559 ms). Unchanged retries reuse the
+  complete 12,359- and 12,481-token prompts without prefill.
 - `tests/functional/cache_alignment_qwen38.py` (`--sessions 2 --context
   40960`, 4 GiB RAM cache): four conversations whose final user turn ends at
   2,944–2,947 tokens (all four residues). A seeds the cache, B continues it;

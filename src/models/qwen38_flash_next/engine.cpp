@@ -250,6 +250,10 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
                   options_.max_context);
 }
 
+std::uint32_t Model::PrefillCheckpointTail() const noexcept {
+  return executor_->PrefillCheckpointTail();
+}
+
 bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
 }
@@ -821,7 +825,8 @@ bool Session::SyncThrough(std::span<const std::int32_t> prompt,
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
   if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
-      prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
+      prompt.size() - boundary > model_->PrefillCheckpointTail() ||
+      boundary <= tokens_.size()) {
     AssignError(error_msg,
                 "checkpoint must extend the frontier in the text tail");
     return false;
@@ -839,7 +844,8 @@ bool Session::SyncThroughComponents(std::span<const std::int32_t> prompt,
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
   if (!capture || boundary == 0 || boundary > prompt.size() ||
-      prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
+      prompt.size() - boundary > model_->PrefillCheckpointTail() ||
+      boundary <= tokens_.size()) {
     AssignError(
         error_msg,
         "component checkpoint must extend the frontier in the text tail");
