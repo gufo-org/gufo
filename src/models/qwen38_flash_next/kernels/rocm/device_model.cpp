@@ -108,12 +108,13 @@ struct Uploader {
     // kernels' row stride assumes it (a down projection at k=640 carries
     // 32/64-block storages only — anything else falls back to Q8_0).
     const bool ragged_blocks =
-        (t.type == core::GgmlType::kIQ3_XXS ||
-         t.type == core::GgmlType::kIQ3_S ||
-         t.type == core::GgmlType::kIQ2_S ||
-         t.type == core::GgmlType::kIQ4_XS ||
-         t.type == core::GgmlType::kQ4_K || t.type == core::GgmlType::kQ5_K) &&
-        t.cols % 256 != 0;
+        ((t.type == core::GgmlType::kIQ3_XXS ||
+          t.type == core::GgmlType::kIQ3_S ||
+          t.type == core::GgmlType::kIQ2_S ||
+          t.type == core::GgmlType::kIQ4_XS ||
+          t.type == core::GgmlType::kQ4_K || t.type == core::GgmlType::kQ5_K) &&
+         t.cols % 256 != 0) ||
+        (t.type == core::GgmlType::kQ2_0 && t.cols % 64 != 0);
     const bool convert_q8 =
         NeedsQ8Conversion(t.type) &&
         !(native_routed && t.experts > 1 && RoutedNativeWMMA(t.type) &&

@@ -5418,6 +5418,8 @@ constexpr std::size_t kIq4NlBlockBytes = 18;
 constexpr std::size_t kIq3xxsBlockBytes = 98;
 constexpr std::size_t kIq3sBlockBytes = 110;
 constexpr std::size_t kIq2sBlockBytes = 82;
+constexpr std::size_t kIq4XsBlockBytes = 136;
+constexpr std::size_t kQ20BlockBytes = 18;
 
 template<WeightType kType>
 __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
@@ -5428,6 +5430,8 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kIQ3_XXS ? (k / 256) * kIq3xxsBlockBytes
          : kType == WeightType::kIQ3_S ? (k / 256) * kIq3sBlockBytes
          : kType == WeightType::kIQ2_S ? (k / 256) * kIq2sBlockBytes
+         : kType == WeightType::kIQ4_XS ? (k / 256) * kIq4XsBlockBytes
+         : kType == WeightType::kQ2_0 ? (k / 64) * kQ20BlockBytes
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -5484,6 +5488,8 @@ __launch_bounds__(256) __global__
   constexpr bool kIQ3X = kType == WeightType::kIQ3_XXS;
   constexpr bool kIQ3S = kType == WeightType::kIQ3_S;
   constexpr bool kIQ2 = kType == WeightType::kIQ2_S;
+  constexpr bool kI4XS = kType == WeightType::kIQ4_XS;
+  constexpr bool kQ20 = kType == WeightType::kQ2_0;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
@@ -5517,7 +5523,7 @@ __launch_bounds__(256) __global__
   // IQ4_NL resolves its codebook through a half2 table indexed by the byte
   // pair that supplies a fragment word's two consecutive elements. It lives
   // past the shared stage/epilogue region so tile reuse never touches it.
-  constexpr std::size_t kLutBytes = (kIQ4 ? 1024 : 0) +
+  constexpr std::size_t kLutBytes = ((kIQ4 || kI4XS) ? 1024 : 0) +
                                     (kIQ3X ? 1024 : 0) +
                                     (kIQ3S ? 2048 : 0) +
                                     (kIQ2 ? 8192 : 0);
@@ -5661,6 +5667,28 @@ __launch_bounds__(256) __global__
             f_ptr[u] + ((kb0 + f_c) * kIq4NlBlockBytes);
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
         f_codes[u] = *reinterpret_cast<const uint4*>(blk + 2);
+      } else if constexpr (kI4XS) {
+        // block_iq4_xs is 136 bytes / 256 elements: the same 32-element
+        // sub-block layout as IQ4_NL (the golden's lane/nibble mapping),
+        // but with a 6-bit scale per sub-block stored as
+        // [d | scales_h | scales_l[4] | qs[128]]. The effective sub-block
+        // scale d * (ls - 32) is pre-multiplied into f_dm so the IQ4_NL
+        // compute arm serves it unchanged.
+        const auto* blk =
+            f_ptr[u] + (((kb0 + f_c) >> 3) * kIq4XsBlockBytes);
+        const int ib32 = (kb0 + f_c) & 7;
+        const float d = __half2float(__builtin_bit_cast(
+            __half, *reinterpret_cast<const std::uint16_t*>(blk)));
+        const std::uint32_t sh =
+            *reinterpret_cast<const std::uint16_t*>(blk + 2);
+        const std::uint32_t ls =
+            ((blk[4 + (ib32 >> 1)] >> (4 * (ib32 & 1))) & 0xFU) |
+            (((sh >> (2 * ib32)) & 0x3U) << 4U);
+        f_dm[u] = static_cast<std::uint32_t>(__half_as_ushort(__float2half_rn(
+            d * static_cast<float>(static_cast<int>(ls) - 32))));
+        // The 136-byte row stride leaves codes 8-byte aligned at worst;
+        // stage through memcpy like the IQ3 arm rather than a uint4 load.
+        __builtin_memcpy(&f_codes[u], blk + 8 + (ib32 * 16), 16);
       } else if constexpr (kIQ3X || kIQ3S) {
         // IQ3_XXS/IQ3_S stage one 32-element sub-block per chunk: the
         // eight group indices (x, y), the aux word (XXS) or sign bytes
@@ -5723,6 +5751,20 @@ __launch_bounds__(256) __global__
                       (static_cast<std::uint32_t>(__half_as_ushort(db_hi))
                        << 16)
                 : 0U);
+      } else if constexpr (kQ20) {
+        // block_q2_0 is 18 bytes / 64 elements: two consecutive chunks
+        // share one block and its f16 scale. The chunk's 8 code bytes
+        // (four elements each, value d * (q - 1)) ride x/y and the
+        // block's d is staged in w.
+        const auto* blk = f_ptr[u] + (((kb0 + f_c) >> 1) * kQ20BlockBytes);
+        const int sub = (kb0 + f_c) & 1;
+        std::uint32_t q0 = 0;
+        std::uint32_t q1 = 0;
+        __builtin_memcpy(&q0, blk + 2 + 8 * sub, 4);
+        __builtin_memcpy(&q1, blk + 6 + 8 * sub, 4);
+        const std::uint32_t dh16 =
+            *reinterpret_cast<const std::uint16_t*>(blk);
+        f_codes[u] = make_uint4(q0, q1, 0U, f_live[u] ? dh16 : 0U);
       } else if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
@@ -5810,11 +5852,12 @@ __launch_bounds__(256) __global__
       if constexpr (kQ5K && !kPair) {
         s_high[(f_c * BM) + row] = f_high[u];
       }
-      if constexpr (kIQ4) {
+      if constexpr (kIQ4 || kI4XS) {
         // half2 (d, d): the codebook values carry the code itself, so only
-        // the block scale remains; the affine bias is unused.
+        // the block scale remains; the affine bias is unused. IQ4_XS rides
+        // this path with the per-sub-block scale pre-multiplied at fetch.
         scale_bias = f_live[u] ? (f_dm[u] | (f_dm[u] << 16)) : 0U;
-      } else if constexpr (kIQ3X || kIQ3S || kIQ2) {
+      } else if constexpr (kIQ3X || kIQ3S || kIQ2 || kQ20) {
         // The sub-block scale travels inside the staged word itself
         // (w), so the shared scale slot stays zero.
         scale_bias = 0U;
@@ -5944,14 +5987,14 @@ __launch_bounds__(256) __global__
             q5_lo = *reinterpret_cast<const uint2*>(blk + 8);
             q5_hi = *reinterpret_cast<const uint2*>(blk + 16);
             scale_bias = r_block + row < m_i ? q5_head.x : 0U;
-          } else if constexpr (!kIQ3X && !kIQ3S && !kIQ2) {
+          } else if constexpr (!kIQ3X && !kIQ3S && !kIQ2 && !kQ20) {
             scale_bias = s_scale[(kb * BM) + row];
           }
           const __half2 sb = __builtin_bit_cast(__half2, scale_bias);
           const __half2 scale2 = __low2half2(sb);
           const __half2 bias2 = __high2half2(sb);
-          if constexpr (kIQ4) {
-            // IQ4_NL: byte j of a block holds element j in its low nibble
+          if constexpr (kIQ4 || kI4XS) {
+            // IQ4_NL/IQ4_XS: byte j of a block holds element j in its low nibble
             // and element j + 16 in its high nibble. The code halves are
             // built with the same permutes as the affine formats — so the
             // fragment placement matches the proven paths exactly — then
@@ -6079,6 +6122,35 @@ __launch_bounds__(256) __global__
             }
             __builtin_memcpy(&a_lo[u], &h[0], 32);
             __builtin_memcpy(&a_hi[u], &h[8], 32);
+          } else if constexpr (kQ20) {
+            // Q2_0: four elements per byte, value = d * (q - 1); the
+            // block's d was staged in w at fetch time. Values go through
+            // the same float arithmetic as the golden reference before
+            // rounding into F16 fragments.
+            const std::uint32_t qw[2] = {raw[u][kb].x, raw[u][kb].y};
+            const float d = __half2float(__builtin_bit_cast(
+                __half, static_cast<std::uint16_t>(raw[u][kb].w)));
+            float v[32];
+#pragma unroll
+            for (int e = 0; e < 32; ++e) {
+              // Element e lives at bit 2*e of the staged word (x holds code
+              // bytes 0-3 = elements 0-15, y bytes 4-7 = elements 16-31):
+              // byte e/4 at bit offset 2*(e%4) within it, as the golden.
+              const std::uint32_t q = (qw[e >> 4] >> (2 * (e & 15))) & 0x3U;
+              v[e] = (static_cast<float>(q) - 1.0F) * d;
+            }
+            __half2 h[16];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+              h[2 * i] = __floats2half2_rn(v[4 * i], v[4 * i + 1]);
+              h[2 * i + 1] = __floats2half2_rn(v[4 * i + 2], v[4 * i + 3]);
+              h[8 + 2 * i] =
+                  __floats2half2_rn(v[16 + 4 * i], v[16 + 4 * i + 1]);
+              h[8 + 2 * i + 1] =
+                  __floats2half2_rn(v[16 + 4 * i + 2], v[16 + 4 * i + 3]);
+            }
+            __builtin_memcpy(&a_lo[u], &h[0], 32);
+            __builtin_memcpy(&a_hi[u], &h[8], 32);
           } else {
           std::uint32_t nib[8];
           if constexpr (kQ8) {
@@ -6179,7 +6251,7 @@ __launch_bounds__(256) __global__
   // index; the permute below already fixes the fragment placement, so the
   // values only need an index. The single barrier below publishes it
   // together with the first stage.
-  if constexpr (kIQ4) {
+  if constexpr (kIQ4 || kI4XS) {
     if (tid < 16) {
       reinterpret_cast<__half*>(s_lut)[tid] =
           __float2half_rn(static_cast<float>(quant::kValuesIq4Nl[tid]));
@@ -7051,6 +7123,18 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
     case WeightType::kIQ2_S:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kIQ2_S, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
+    case WeightType::kIQ4_XS:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ4_XS, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
+    case WeightType::kQ2_0:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kQ2_0, kBM, BN, kBK>), grid,
           dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
           rows_out, swiglu_gate, out, out_half, m, k, nullptr);
       return true;

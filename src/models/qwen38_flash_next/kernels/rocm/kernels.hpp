@@ -66,7 +66,8 @@ constexpr bool RoutedNativeWMMA(core::GgmlType t) noexcept {
   return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
          t == core::GgmlType::kQ5_1 || t == core::GgmlType::kQ8_0 ||
          t == core::GgmlType::kIQ4_NL || t == core::GgmlType::kIQ3_XXS ||
-         t == core::GgmlType::kIQ3_S || t == core::GgmlType::kIQ2_S;
+         t == core::GgmlType::kIQ3_S || t == core::GgmlType::kIQ2_S ||
+         t == core::GgmlType::kIQ4_XS || t == core::GgmlType::kQ2_0;
 }
 
 /// Storages the vendored MMQ vec/tiled family dequantizes natively. A
