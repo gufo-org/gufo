@@ -150,6 +150,7 @@ public:
               std::to_string(static_cast<unsigned>(e.action)) +
               " reason=" + std::to_string(static_cast<unsigned>(e.reason)) +
               " tokens=" + std::to_string(e.boundary) +
+              " purpose=" + std::to_string(static_cast<unsigned>(e.purpose)) +
               " rank=" + std::to_string(e.rank) +
               " unique_bytes_freed=" + std::to_string(e.unique_bytes_freed) +
               " ledger_bytes=" + std::to_string(e.ledger_bytes));

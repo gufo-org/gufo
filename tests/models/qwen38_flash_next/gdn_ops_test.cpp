@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -227,8 +228,12 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
         Upload(&checkpoint_conv,
                std::vector<float>(kConvState + kCheckpointGuard,
                                   kCheckpointSentinel));
-        forward(kTokens,
-                {checkpoint_state.get(), checkpoint_conv.get(), prefix});
+        q::GdnCheckpoint one;
+        one.state[0] = checkpoint_state.get();
+        one.history[0] = checkpoint_conv.get();
+        one.tokens[0] = prefix;
+        one.count = 1;
+        forward(kTokens, one);
         const auto final_state = Download(&d_state, kStateCount);
         const auto final_out = Download(&d_out, kOut);
         if (std::memcmp(final_state.data(), states[route].data(),
@@ -254,6 +259,43 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
               history[kConvState + i] != kCheckpointSentinel)
             throw std::runtime_error(
                 "GDN checkpoint wrote beyond its boundary");
+      }
+      // Several checkpoints in one pass: each equals a pass ending there.
+      {
+        const std::vector<std::uint32_t> prefixes = [&] {
+          std::vector<std::uint32_t> p{1U};
+          for (const auto v : {kTokens / 3, kTokens / 2, kTokens})
+            if (v > p.back())
+              p.push_back(v);
+          return p;
+        }();
+        std::vector<std::unique_ptr<HipBuffer<float>>> states_at, convs_at;
+        q::GdnCheckpoint many;
+        for (const auto prefix : prefixes) {
+          states_at.push_back(std::make_unique<HipBuffer<float>>(kStateCount));
+          convs_at.push_back(std::make_unique<HipBuffer<float>>(kConvState));
+          many.state[many.count] = states_at.back()->get();
+          many.history[many.count] = convs_at.back()->get();
+          many.tokens[many.count++] = prefix;
+        }
+        forward(kTokens, many);
+        if (std::memcmp(Download(&d_state, kStateCount).data(),
+                        states[route].data(), kStateCount * sizeof(float)))
+          throw std::runtime_error(
+              "GDN checkpoints changed full-pass arithmetic");
+        for (std::size_t i = 0; i < prefixes.size(); ++i) {
+          const auto captured = Download(states_at[i].get(), kStateCount);
+          const auto history = Download(convs_at[i].get(), kConvState);
+          forward(prefixes[i], {});
+          if (std::memcmp(captured.data(),
+                          Download(&d_state, kStateCount).data(),
+                          kStateCount * sizeof(float)) ||
+              std::memcmp(history.data(),
+                          Download(&d_conv_state, kConvState).data(),
+                          kConvState * sizeof(float)))
+            throw std::runtime_error(
+                "GDN checkpoints changed a boundary state");
+        }
       }
       // Direct F16 output must equal narrowing the independently checked
       // F32 epilogue and must not change the recurrent state.

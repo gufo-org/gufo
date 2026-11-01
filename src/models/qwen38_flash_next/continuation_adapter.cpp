@@ -257,16 +257,18 @@ Session& ContinuationAdapter::GetSession(cache::Slot& slot) {
   state.BeforeExecution();
   return *state.session;
 }
-void ContinuationAdapter::PrefillThrough(cache::Slot& slot,
-                                         std::span<const std::int32_t> prompt,
-                                         std::uint32_t boundary,
-                                         const std::function<void()>& capture) {
+void ContinuationAdapter::PrefillThrough(
+    cache::Slot& slot, std::span<const std::int32_t> prompt,
+    std::span<const std::uint32_t> boundaries,
+    const std::function<void(std::size_t)>& capture,
+    std::span<const std::int32_t> next) {
   auto& state = As(slot);
   state.BeforeExecution();
   if (!capture)
     throw std::invalid_argument("missing component checkpoint consumer");
   std::string error;
-  const auto consume = [&](const rocm::PrefillCheckpoint* checkpoint) {
+  const auto consume = [&](std::size_t index,
+                           const rocm::PrefillCheckpoint* checkpoint) {
     struct BoundaryScope {
       State& state;
       bool guarding;
@@ -288,11 +290,12 @@ void ContinuationAdapter::PrefillThrough(cache::Slot& slot,
         state.guarding = guarding;
       }
     } scope(state, checkpoint);
-    capture();
+    capture(index);
     if (state.pending)
       throw std::logic_error("in-pass capture returned with pending transfers");
   };
-  if (!state.session->SyncThroughComponents(prompt, boundary, consume, &error))
+  if (!state.session->SyncThroughComponents(prompt, boundaries, consume, &error,
+                                            next))
     throw std::runtime_error("component in-pass prefill failed: " + error);
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {

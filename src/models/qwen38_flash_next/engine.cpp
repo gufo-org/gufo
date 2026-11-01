@@ -251,10 +251,6 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
                   options_.max_context);
 }
 
-std::uint32_t Model::PrefillCheckpointTail() const noexcept {
-  return executor_->PrefillCheckpointTail();
-}
-
 bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
 }
@@ -723,10 +719,15 @@ bool Session::DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
 }
 
 bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
-                   bool prefill, std::uint32_t boundary,
-                   std::unique_ptr<SessionSnapshot>* checkpoint,
+                   bool prefill, std::span<const std::uint32_t> boundaries,
+                   std::vector<std::unique_ptr<SessionSnapshot>>* checkpoints,
                    double* capture_ms, std::span<const std::int32_t> after,
                    const PrefillCapture& consume) {
+  const bool capturing = checkpoints != nullptr || bool(consume);
+  if (checkpoints != nullptr)
+    checkpoints->resize(boundaries.size());
+  // The first boundary no pass has captured yet.
+  std::size_t next_boundary = 0;
   rocm::Executor& exec = *model_->executor_;
   const std::size_t ratio =
       std::max<std::uint32_t>(1, model_->config().compress_ratio);
@@ -741,26 +742,46 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
         prefill && off + n < tokens.size() && end % ratio != 0 &&
         n > end % ratio)
       n -= end % ratio;
-    const bool captures = (checkpoint || consume) && boundary > tokens_.size();
-    // Extended-context attention can fall back from WMMA to the per-token
-    // kernel. Its checkpoint must end a pass: the fused in-pass path requires
-    // WMMA for both query groups. Preserve ordinary split-pass arithmetic on
-    // either side of the boundary. Use the actual launch capability rather
-    // than the model's independently configured native context length.
-    if (captures && boundary < tokens_.size() + n &&
-        tokens_.size() + n >
-            rocm::WmmaCausalAttentionContextLimit(
-                model_->config().num_heads, model_->config().num_kv_heads,
-                model_->config().head_dim, model_->config().compress_ratio)) {
-      n = boundary - tokens_.size();
+    // This pass captures boundaries [next_boundary, last_boundary) in place.
+    std::size_t last_boundary = next_boundary;
+    // True when the pass ends at its only boundary and the live session is
+    // captured there, without an in-pass checkpoint.
+    bool live = false;
+    if (capturing) {
+      while (last_boundary < boundaries.size() &&
+             boundaries[last_boundary] <= tokens_.size() + n)
+        ++last_boundary;
+      // A pass holds a bounded number of checkpoints; the next one starts
+      // where the last of them ends.
+      if (last_boundary - next_boundary > rocm::kMaxPassCheckpoints) {
+        last_boundary = next_boundary + rocm::kMaxPassCheckpoints;
+        n = boundaries[last_boundary - 1] - tokens_.size();
+      }
+      // Extended-context attention can fall back from WMMA to the per-token
+      // kernel. Its checkpoint must end a pass: the fused in-pass path
+      // requires WMMA for every query group. Preserve ordinary split-pass
+      // arithmetic on either side of the boundary. Use the actual launch
+      // capability rather than the model's independently configured native
+      // context length.
+      if (last_boundary > next_boundary &&
+          boundaries[next_boundary] < tokens_.size() + n &&
+          tokens_.size() + n >
+              rocm::WmmaCausalAttentionContextLimit(
+                  model_->config().num_heads, model_->config().num_kv_heads,
+                  model_->config().head_dim, model_->config().compress_ratio)) {
+        n = boundaries[next_boundary] - tokens_.size();
+        last_boundary = next_boundary + 1;
+      }
+      // Without device room for the checkpoint arena, end the pass at the
+      // first boundary and capture the live session there instead:
+      // split-pass rows are the same as in-pass rows.
+      if (last_boundary > next_boundary &&
+          !exec.ReservePrefillCheckpoint(*session_)) {
+        n = boundaries[next_boundary] - tokens_.size();
+        last_boundary = next_boundary + 1;
+        live = true;
+      }
     }
-    // Without device room for the checkpoint arena, end the pass at the
-    // boundary and capture the live session there instead: split-pass rows
-    // are the same as in-pass rows.
-    const bool live = captures && boundary <= tokens_.size() + n &&
-                      !exec.ReservePrefillCheckpoint(*session_);
-    if (live)
-      n = boundary - tokens_.size();
     const auto chunk = tokens.subspan(off, n);
     if (exec.DynamicYarn() &&
         !exec.SetYarnFactor(*session_, exec.YarnLevelFor(tokens_.size() + n),
@@ -773,37 +794,57 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     }
     const auto mode = prefill ? rocm::Executor::ForwardMode::kPrefill
                               : rocm::Executor::ForwardMode::kDecode;
-    std::unique_ptr<rocm::PrefillCheckpoint> capture;
-    if (captures && !live && boundary <= tokens_.size() + n) {
-      capture = exec.MakePrefillCheckpoint(
-          *session_, chunk,
-          static_cast<std::uint32_t>(boundary - tokens_.size()), error_msg);
-      if (!capture)
-        return false;
+    std::vector<std::unique_ptr<rocm::PrefillCheckpoint>> captures;
+    std::vector<rocm::PrefillCheckpoint*> views;
+    for (auto i = next_boundary; !live && i < last_boundary; ++i) {
+      const auto prefix =
+          static_cast<std::uint32_t>(boundaries[i] - tokens_.size());
+      auto capture = exec.MakePrefillCheckpoint(
+          *session_, chunk.first(n), prefix, error_msg,
+          static_cast<std::uint32_t>(i - next_boundary),
+          views.empty() ? 0 : views.back()->tokens);
+      if (!capture) {
+        if (views.empty())
+          return false;
+        // No device room for another checkpoint in this pass: end it at
+        // the previous one, which the next pass follows.
+        if (error_msg)
+          error_msg->clear();
+        n = views.back()->tokens;
+        last_boundary = i;
+        break;
+      }
+      views.push_back(capture.get());
+      captures.push_back(std::move(capture));
     }
+    const auto chunk_rows = tokens.subspan(off, n);
     // The chunk this loop, or the following Sync, takes next.
     const auto rest = off + n < tokens.size() ? tokens.subspan(off + n) : after;
     const auto next = rest.first(std::min<std::size_t>(
         rest.size() <= exec.max_batch() ? exec.max_batch()
                                         : model_->PrefillCapacity(),
         rest.size()));
-    if (!exec.Forward(*session_, chunk, 1, logits_.data(), mode, error_msg,
-                      capture.get(), next)) {
+    if (!exec.Forward(*session_, chunk_rows, 1, logits_.data(), mode, error_msg,
+                      views, next)) {
       return false;
     }
-    const auto kept = capture && capture->tokens < n ? n - capture->tokens : n;
+    const auto kept = !views.empty() && views.back()->tokens < n
+                          ? n - views.back()->tokens
+                          : n;
     hidden_base_ = static_cast<std::uint32_t>(
         tokens_.size() + n -
         std::min<std::size_t>(kept, exec.max_speculative()));
-    tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
-    if (capture || live) {
+    tokens_.insert(tokens_.end(), chunk_rows.begin(), chunk_rows.end());
+    for (auto i = next_boundary; i < last_boundary; ++i) {
+      const auto* capture = live ? nullptr : captures[i - next_boundary].get();
       const auto started = std::chrono::steady_clock::now();
       if (consume) {
-        consume(capture.get());
+        consume(i, capture);
       } else {
-        *checkpoint = SaveSnapshotImpl(
+        auto& checkpoint = (*checkpoints)[i];
+        checkpoint = SaveSnapshotImpl(
             capture ? *capture->state : *session_,
-            std::span<const std::int32_t>(tokens_).first(boundary),
+            std::span<const std::int32_t>(tokens_).first(boundaries[i]),
             capture ? std::span<const float>(capture->logits)
                     : std::span<const float>(logits_),
             capture ? capture->hidden_rows : KeptHiddenRows(), error_msg,
@@ -812,10 +853,13 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
           *capture_ms += std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - started)
                              .count();
-        if (!*checkpoint)
+        if (!checkpoint)
           return false;
       }
     }
+    if (captures.size() > 1)
+      exec.ReleasePassCheckpointStorage();
+    next_boundary = last_boundary;
     off += n;
   }
   return true;
@@ -825,7 +869,20 @@ bool Session::Sync(std::span<const std::int32_t> prompt, std::string* error_msg,
                    std::span<const std::int32_t> next) {
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
-  return SyncImpl(prompt, error_msg, 0, nullptr, nullptr, next);
+  return SyncImpl(prompt, error_msg, {}, nullptr, nullptr, next);
+}
+
+bool Session::ValidCheckpointBoundaries(
+    std::span<const std::int32_t> prompt,
+    std::span<const std::uint32_t> boundaries, std::string* error_msg) const {
+  for (std::size_t i = 0; i < boundaries.size(); ++i)
+    if (boundaries[i] <= tokens_.size() || boundaries[i] > prompt.size() ||
+        (i != 0 && boundaries[i] <= boundaries[i - 1])) {
+      AssignError(error_msg,
+                  "checkpoints must ascend beyond the frontier in the prompt");
+      return false;
+    }
+  return !boundaries.empty();
 }
 
 bool Session::SyncThrough(std::span<const std::int32_t> prompt,
@@ -834,41 +891,61 @@ bool Session::SyncThrough(std::span<const std::int32_t> prompt,
                           std::string* error_msg, double* capture_ms) {
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
-  if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
-      prompt.size() - boundary > model_->PrefillCheckpointTail() ||
-      boundary <= tokens_.size()) {
-    AssignError(error_msg,
-                "checkpoint must extend the frontier in the text tail");
+  if (!checkpoint) {
+    AssignError(error_msg, "missing checkpoint destination");
     return false;
   }
   checkpoint->reset();
+  std::vector<std::unique_ptr<SessionSnapshot>> checkpoints;
+  const std::uint32_t boundaries[] = {boundary};
+  if (!SyncThrough(prompt, boundaries, &checkpoints, error_msg, capture_ms))
+    return false;
+  *checkpoint = std::move(checkpoints.front());
+  return true;
+}
+
+bool Session::SyncThrough(
+    std::span<const std::int32_t> prompt,
+    std::span<const std::uint32_t> boundaries,
+    std::vector<std::unique_ptr<SessionSnapshot>>* checkpoints,
+    std::string* error_msg, double* capture_ms) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
+  if (!checkpoints ||
+      !ValidCheckpointBoundaries(prompt, boundaries, error_msg)) {
+    AssignError(error_msg,
+                "checkpoints must ascend beyond the frontier in the prompt");
+    return false;
+  }
+  checkpoints->clear();
   if (capture_ms)
     *capture_ms = 0;
-  return SyncImpl(prompt, error_msg, boundary, checkpoint, capture_ms);
+  return SyncImpl(prompt, error_msg, boundaries, checkpoints, capture_ms);
 }
 
 bool Session::SyncThroughComponents(std::span<const std::int32_t> prompt,
-                                    std::uint32_t boundary,
+                                    std::span<const std::uint32_t> boundaries,
                                     const PrefillCapture& capture,
-                                    std::string* error_msg) {
+                                    std::string* error_msg,
+                                    std::span<const std::int32_t> next) {
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
-  if (!capture || boundary == 0 || boundary > prompt.size() ||
-      prompt.size() - boundary > model_->PrefillCheckpointTail() ||
-      boundary <= tokens_.size()) {
-    AssignError(
-        error_msg,
-        "component checkpoint must extend the frontier in the text tail");
+  if (!capture || !ValidCheckpointBoundaries(prompt, boundaries, error_msg)) {
+    AssignError(error_msg,
+                "component checkpoints must ascend beyond the frontier in the "
+                "prompt");
     return false;
   }
-  return SyncImpl(prompt, error_msg, boundary, nullptr, nullptr, {}, capture);
+  return SyncImpl(prompt, error_msg, boundaries, nullptr, nullptr, next,
+                  capture);
 }
 
-bool Session::SyncImpl(std::span<const std::int32_t> prompt,
-                       std::string* error_msg, std::uint32_t boundary,
-                       std::unique_ptr<SessionSnapshot>* checkpoint,
-                       double* capture_ms, std::span<const std::int32_t> next,
-                       const PrefillCapture& capture) {
+bool Session::SyncImpl(
+    std::span<const std::int32_t> prompt, std::string* error_msg,
+    std::span<const std::uint32_t> boundaries,
+    std::vector<std::unique_ptr<SessionSnapshot>>* checkpoints,
+    double* capture_ms, std::span<const std::int32_t> next,
+    const PrefillCapture& capture) {
   if (prompt.empty()) {
     AssignError(error_msg, "prompt is empty");
     return false;
@@ -897,8 +974,8 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
     common = 0;
   }
   valid_ = false;
-  const bool ok = Feed(prompt.subspan(common), error_msg, true, boundary,
-                       checkpoint, capture_ms, next, capture);
+  const bool ok = Feed(prompt.subspan(common), error_msg, true, boundaries,
+                       checkpoints, capture_ms, next, capture);
   valid_ = ok;
   return ok;
 }

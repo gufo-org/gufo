@@ -590,14 +590,15 @@ public:
       return std::nullopt;
     return sizeof(FakeSnapshot);
   }
-  TextPrefillStep PrefillThrough(
-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget, std::size_t boundary,
-      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>&)
-      const override {
-    ++stats_->snapshot_captures;
-    *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
+  TextPrefillStep PrefillThrough(TextRunnerState& state,
+                                 std::span<const TextRunnerToken> prompt,
+                                 std::size_t offset, std::size_t budget,
+                                 std::span<const std::size_t> boundaries,
+                                 const InPassConsumer& consume) const override {
+    for (std::size_t i = 0; i < boundaries.size(); ++i) {
+      ++stats_->snapshot_captures;
+      consume(i, std::make_unique<FakeSnapshot>(boundaries[i], 0, 90));
+    }
     auto step = FakeRunner::Prefill(state, prompt, offset, budget);
     if (fail_after_prefill) {
       auto& fake = RequireFakeState(state);

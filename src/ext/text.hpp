@@ -439,15 +439,26 @@ public:
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
+  /// Returns a claim only when this chunk covers the boundary, ending
+  /// beyond it, and can capture it in place. Admission happens before
+  /// allocating checkpoint state.
   [[nodiscard]] virtual std::optional<std::size_t> PrefillCheckpointBytes(
       const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
       std::size_t, std::size_t) const {
     return std::nullopt;
   }
+  /// Prefills one chunk like Prefill, capturing each of the ascending
+  /// `boundaries` the chunk covers (each with a PrefillCheckpointBytes
+  /// claim) without ending a pass there. The runner invokes `consume` with
+  /// each boundary's index, synchronously while that boundary is readable
+  /// as the lease's component state (it must drain its captures before
+  /// returning), or with the boundary's own snapshot (native snapshot
+  /// runners).
+  using InPassConsumer =
+      std::function<void(std::size_t, std::unique_ptr<TextRunnerSnapshot>)>;
   [[nodiscard]] virtual TextPrefillStep PrefillThrough(
       TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
-      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
+      std::size_t, std::span<const std::size_t>, const InPassConsumer&) const {
     throw std::logic_error("runner does not support in-pass checkpoints");
   }
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
