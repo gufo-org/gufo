@@ -13,6 +13,8 @@ if(NOT GUFO_EXTENSION_FIXTURE)
       "-DBUILD_TESTING=ON"
       "-DGUFO_ENABLE_WARNINGS=${GUFO_ENABLE_WARNINGS}"
       "-DGUFO_ENABLE_SANITIZERS=${GUFO_ENABLE_SANITIZERS}"
+      "-DOPENSSL_INCLUDE_DIR=${OPENSSL_INCLUDE_DIR}"
+      "-DOPENSSL_CRYPTO_LIBRARY=${OPENSSL_CRYPTO_LIBRARY}"
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target
       extension_runtime_test extension_role_test
       ext_runtime_neutral_contracts_test
@@ -74,11 +76,14 @@ gufo_extension_target(NAME alpha_hip SOURCES fixture/hip.cpp
 gufo_extension_target(NAME beta_registration SOURCES fixture/beta.cpp
   LINK_LIBRARIES gufo_ext_runtime)
 # Card 09 (RFC step 6): the neutral runtime contracts must stand on their own.
-# gufo_ext_runtime is the only library on this link line, so a continuation
+# gufo_ext_runtime is the only Gufo library on this link line, so a continuation
 # base, host budget or device probe that still needed serving would fail here.
 add_executable(ext_runtime_neutral_contracts_test
   ext_runtime_neutral_contracts_test.cpp)
-target_link_libraries(ext_runtime_neutral_contracts_test PRIVATE gufo_ext_runtime)
+# The public-header coverage also includes crypto.hpp, whose SHA-256 contract
+# exposes OpenSSL types. Keep that dependency explicit in the isolated fixture.
+target_link_libraries(ext_runtime_neutral_contracts_test PRIVATE
+  gufo_ext_runtime OpenSSL::Crypto)
 add_test(NAME ext_runtime_neutral_contracts_test
   COMMAND ext_runtime_neutral_contracts_test)
 set_tests_properties(ext_runtime_neutral_contracts_test PROPERTIES

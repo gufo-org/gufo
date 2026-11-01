@@ -1,6 +1,6 @@
 // Neutral contracts the extension runtime owns after Card 09 (RFC step 6).
 //
-// This executable links `gufo_ext_runtime` and nothing else: if the
+// This executable links only `gufo_ext_runtime` among Gufo libraries: if the
 // continuation bases, host budgets, reasoning tags or the default device probe
 // needed a serving or HTTP object, this link would fail.
 //
