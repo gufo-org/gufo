@@ -286,6 +286,7 @@
 
           testSource = mkFilteredSource {
             directories = [
+              "examples/extension_template"
               "include"
               "schemas"
               "cmake"

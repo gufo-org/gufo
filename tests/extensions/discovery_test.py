@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import shutil
+import stat
 from pathlib import Path
 import subprocess
 import tempfile
@@ -377,6 +378,9 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
     def template(self):
         external = self.source / "external template"
         shutil.copytree(ROOT / "examples/extension_template", external)
+        # Nix store fixtures are read-only; the tests mutate their local copy.
+        for path in [external, *external.rglob("*")]:
+            path.chmod(path.stat().st_mode | stat.S_IWUSR)
         return external
 
     def test_external_template_public_headers(self):
