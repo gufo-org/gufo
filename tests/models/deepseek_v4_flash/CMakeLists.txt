@@ -27,6 +27,7 @@ set_tests_properties(ds4.template PROPERTIES LABELS "cpu;ds4;tokenization")
 
 add_executable(ds4_cli_test cli_test.cpp)
 target_link_libraries(ds4_cli_test PRIVATE gufo_llm_cli)
+gufo_target_extensions(ds4_cli_test EXTENSIONS deepseek_v4_flash)
 add_test(NAME ds4.cli COMMAND ds4_cli_test)
 set_tests_properties(ds4.cli PROPERTIES LABELS "cpu;ds4;cli")
 
