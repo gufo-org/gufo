@@ -161,6 +161,10 @@ float Q3Value(const block_q3_K& block,
 
 }  // namespace
 
+float Q6KValue(const block_q6_K& block, std::size_t index) noexcept {
+  return Q6Value(block, index);
+}
+
 std::size_t QuantizedRowBytes(core::GgmlType type,
                               std::size_t elements) noexcept {
   const std::size_t block_qk = QuantizedBlockElements(type);

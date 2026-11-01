@@ -789,6 +789,8 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
                                std::size_t index) noexcept;
 [[nodiscard]] float Q2_0Value(const block_q2_0& block,
                               std::size_t index) noexcept;
+[[nodiscard]] float Q6KValue(const block_q6_K& block,
+                               std::size_t index) noexcept;
 
 // Compute dot product of Q8_0 quantized row with FP32 vector
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,

@@ -5420,6 +5420,7 @@ constexpr std::size_t kIq3sBlockBytes = 110;
 constexpr std::size_t kIq2sBlockBytes = 82;
 constexpr std::size_t kIq4XsBlockBytes = 136;
 constexpr std::size_t kQ20BlockBytes = 18;
+constexpr std::size_t kQ6kBlockBytes = 210;
 
 template<WeightType kType>
 __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
@@ -5432,6 +5433,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kIQ2_S ? (k / 256) * kIq2sBlockBytes
          : kType == WeightType::kIQ4_XS ? (k / 256) * kIq4XsBlockBytes
          : kType == WeightType::kQ2_0 ? (k / 64) * kQ20BlockBytes
+         : kType == WeightType::kQ6_K ? (k / 256) * kQ6kBlockBytes
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -5490,10 +5492,12 @@ __launch_bounds__(256) __global__
   constexpr bool kIQ2 = kType == WeightType::kIQ2_S;
   constexpr bool kI4XS = kType == WeightType::kIQ4_XS;
   constexpr bool kQ20 = kType == WeightType::kQ2_0;
+  constexpr bool kQ6K = kType == WeightType::kQ6_K;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
+  static_assert(!(kPair && kQ6K), "Q6_K stages through the separate-projection path");
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
-  constexpr int kChunks = kQ8 ? 2 * BK : BK;
+  constexpr int kChunks = kQ6K ? 4 * BK : kQ8 ? 2 * BK : BK;
 
   // Separate projections stage codes and affine parameters in LDS, with
   // nearby rows permuted across the bank groups. Paired waves keep them in
@@ -5508,7 +5512,7 @@ __launch_bounds__(256) __global__
   constexpr int kCodeBytes = kPair ? 0
                              : kQ5 ? BM * kQ5Bytes
                                    : BM * kChunks * 16;
-  constexpr int kHighBytes = !kPair && kQ5K ? BK * BM * 4 : 0;
+  constexpr int kHighBytes = !kPair && (kQ5K || kQ6K) ? BK * BM * 4 : 0;
   constexpr int kScaleBytes = kPair || kQ5 ? 0 : BK * BM * 4;
   // One slot of padding per activation quarter plane: the eight chunks of
   // a token then land on eight bank groups when they are written.
@@ -5596,8 +5600,9 @@ __launch_bounds__(256) __global__
   // Keep its remaining codes in registers alongside the cached header.
   uint4 code_cache[kWaveRowTiles][4];
   uint4 f_codes_hi[kWaveRowTiles];  ///< Q8_0: the block's second 16 codes
-  uint4 f_qh[kWaveRowTiles][2];     ///< Q5_K: the superblock's high bits
+  uint4 f_qh[kWaveRowTiles][2];  ///< Q5_K high bits / Q6_K segment's qh
   std::uint32_t f_high[kWaveRowTiles];
+  std::uint32_t f_q6sc[kWaveRowTiles];  ///< Q6_K: half2 (d*sA, d*sB)
   std::uint32_t f_dm[kWaveRowTiles];  ///< Q8_0 / IQ4_NL: d
   int f_sb32[kWaveRowTiles];          ///< Q4_K: the K block in its superblock
   constexpr int kActFetch = BN <= 64 ? 2 : 4;
@@ -5765,6 +5770,36 @@ __launch_bounds__(256) __global__
         const std::uint32_t dh16 =
             *reinterpret_cast<const std::uint16_t*>(blk);
         f_codes[u] = make_uint4(q0, q1, 0U, f_live[u] ? dh16 : 0U);
+      } else if constexpr (kQ6K) {
+        // block_q6_K is 210 bytes / 256 elements (6.5625 bpw, the
+        // {ql, qh, scales, d} order): the golden's Q6Value
+        // lane mapping. One 32-element segment per chunk reads its code
+        // bytes from one ql half (byte e for even segments, byte 32 + e
+        // for odd; low nibbles for segments 0/1, high nibbles for 2/3)
+        // and its qh bytes supply the two-bit high parts at shift
+        // 2 * segment. The per-16-element signed scales are
+        // pre-multiplied with the block d into a half2 (like IQ4_XS);
+        // the segment index rides the s_high slot.
+        const auto* blk = f_ptr[u] + (((kb0 + f_c) >> 3) * kQ6kBlockBytes);
+        const int ib32 = (kb0 + f_c) & 7;
+        const int seg = ib32 & 3;
+        const int hl = ib32 >> 2;
+        const std::uint8_t* ql = blk + (hl * 64) + ((seg & 1) ? 32 : 0);
+        __builtin_memcpy(&f_codes[u], ql, 16);
+        __builtin_memcpy(&f_codes_hi[u], ql + 16, 16);
+        __builtin_memcpy(&f_qh[u][0], blk + 128 + (hl * 32), 16);
+        __builtin_memcpy(&f_qh[u][1], blk + 128 + (hl * 32) + 16, 16);
+        f_high[u] = static_cast<std::uint32_t>(seg);
+        const float d = __half2float(__builtin_bit_cast(
+            __half, *reinterpret_cast<const std::uint16_t*>(blk + 208)));
+        const std::int8_t* sc =
+            reinterpret_cast<const std::int8_t*>(blk + 192) + (hl * 8) +
+            (seg * 2);
+        const __half2 ds = __floats2half2_rn(
+            d * static_cast<float>(sc[0]), d * static_cast<float>(sc[1]));
+        f_q6sc[u] = f_live[u]
+                        ? __builtin_bit_cast(std::uint32_t, ds)
+                        : 0U;
       } else if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
@@ -5846,10 +5881,15 @@ __launch_bounds__(256) __global__
         s_codes[swizzle(row, 2 * f_c)] = f_codes[u];
         s_codes[swizzle(row, (2 * f_c) + 1)] = f_codes_hi[u];
         scale_bias = f_live[u] ? f_dm[u] : 0U;  // half2 (d, 0)
+      } else if constexpr (kQ6K) {
+        s_codes[swizzle(row, 4 * f_c)] = f_codes[u];
+        s_codes[swizzle(row, (4 * f_c) + 1)] = f_codes_hi[u];
+        s_codes[swizzle(row, (4 * f_c) + 2)] = f_qh[u][0];
+        s_codes[swizzle(row, (4 * f_c) + 3)] = f_qh[u][1];
       } else {
         s_codes[swizzle(row, f_c)] = f_codes[u];
       }
-      if constexpr (kQ5K && !kPair) {
+      if constexpr ((kQ5K || kQ6K) && !kPair) {
         s_high[(f_c * BM) + row] = f_high[u];
       }
       if constexpr (kIQ4 || kI4XS) {
@@ -5861,6 +5901,8 @@ __launch_bounds__(256) __global__
         // The sub-block scale travels inside the staged word itself
         // (w), so the shared scale slot stays zero.
         scale_bias = 0U;
+      } else if constexpr (kQ6K) {
+        scale_bias = f_q6sc[u];
       } else if constexpr (!kQ8) {
         const int sb32 = f_sb32[u];
         // The first four scale/min bytes live in y/z. Their remaining
@@ -6138,6 +6180,50 @@ __launch_bounds__(256) __global__
               // byte e/4 at bit offset 2*(e%4) within it, as the golden.
               const std::uint32_t q = (qw[e >> 4] >> (2 * (e & 15))) & 0x3U;
               v[e] = (static_cast<float>(q) - 1.0F) * d;
+            }
+            __half2 h[16];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+              h[2 * i] = __floats2half2_rn(v[4 * i], v[4 * i + 1]);
+              h[2 * i + 1] = __floats2half2_rn(v[4 * i + 2], v[4 * i + 3]);
+              h[8 + 2 * i] =
+                  __floats2half2_rn(v[16 + 4 * i], v[16 + 4 * i + 1]);
+              h[8 + 2 * i + 1] =
+                  __floats2half2_rn(v[16 + 4 * i + 2], v[16 + 4 * i + 3]);
+            }
+            __builtin_memcpy(&a_lo[u], &h[0], 32);
+            __builtin_memcpy(&a_hi[u], &h[8], 32);
+          } else if constexpr (kQ6K) {
+            // Q6_K: the staged code half supplies 32 nibbles (low or high
+            // by segment), and qh byte e adds the two-bit high part at
+            // shift 2 * segment. The block d is already folded into the
+            // per-16 scale half2; values stay in float before the single
+            // F16 fragment rounding, matching the golden's ordering up to
+            // that rounding.
+            const uint4 c0 = s_codes[swizzle(row, 4 * kb)];
+            const uint4 c1 = s_codes[swizzle(row, (4 * kb) + 1)];
+            const uint4 hb0 = s_codes[swizzle(row, (4 * kb) + 2)];
+            const uint4 hb1 = s_codes[swizzle(row, (4 * kb) + 3)];
+            const std::uint32_t seg = s_high[(kb * BM) + row] & 3U;
+            const std::uint32_t sbs = s_scale[(kb * BM) + row];
+            const std::uint32_t cw[8] = {c0.x, c0.y, c0.z, c0.w,
+                                         c1.x, c1.y, c1.z, c1.w};
+            const std::uint32_t hw[8] = {hb0.x, hb0.y, hb0.z, hb0.w,
+                                         hb1.x, hb1.y, hb1.z, hb1.w};
+            float v[32];
+#pragma unroll
+            for (int e = 0; e < 32; ++e) {
+              const std::uint32_t lo =
+                  (cw[e >> 2] >>
+                   ((e & 3) * 8 + ((seg & 2U) != 0U ? 4U : 0U))) &
+                  0xFU;
+              const std::uint32_t hi =
+                  (hw[e >> 2] >> ((e & 3) * 8 + 2U * seg)) & 3U;
+              const float ds = __half2float(__builtin_bit_cast(
+                  __half, static_cast<std::uint16_t>(e < 16 ? (sbs & 0xFFFFU)
+                                                            : (sbs >> 16))));
+              v[e] = ds * static_cast<float>((static_cast<int>(hi) << 4) +
+                                             static_cast<int>(lo) - 32);
             }
             __half2 h[16];
 #pragma unroll
@@ -7150,6 +7236,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
       return true;
+    case WeightType::kQ6_K:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ6_K, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {
         return false;
@@ -7175,7 +7267,8 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   const std::size_t block_elems =
-      (type == WeightType::kQ4_K || type == WeightType::kQ5_K)
+      (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
+               type == WeightType::kQ6_K)
           ? 256
           : (type == WeightType::kIQ3_XXS || type == WeightType::kIQ3_S ||
                      type == WeightType::kIQ2_S ||

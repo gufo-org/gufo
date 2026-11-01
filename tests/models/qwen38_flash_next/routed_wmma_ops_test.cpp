@@ -405,6 +405,29 @@ Experts MakeQ2_0(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+Experts MakeQ6_K(std::size_t e, std::size_t m, std::size_t k,
+                 std::uint32_t seed) {
+  Experts w;
+  const std::size_t blocks = e * m * (k / 256);
+  w.packed.resize(blocks * 210);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    auto* blk =
+        reinterpret_cast<gufo::quant::block_q6_K*>(w.packed.data() + b * 210);
+    const __half ds = __float2half(Uniform(&seed, 0.02F) + 0.03F);
+    std::memcpy(&blk->d, &ds, sizeof(blk->d));
+    for (std::int8_t& s : blk->scales)
+      s = static_cast<std::int8_t>(NextRandom(&seed) & 0x3F);
+    for (std::uint8_t& q : blk->ql)
+      q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (std::uint8_t& q : blk->qh)
+      q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (int i = 0; i < 256; ++i)
+      w.values[b * 256 + i] = gufo::quant::Q6KValue(*blk, i);
+  }
+  return w;
+}
+
 struct Result {
   double vs_mmq;
   double vs_ref;
@@ -417,6 +440,7 @@ struct Result {
 const char* TypeName(q::WeightType type) {
   return type == q::WeightType::kQ4_K   ? "Q4_K"
          : type == q::WeightType::kQ5_K ? "Q5_K"
+         : type == q::WeightType::kQ6_K ? "Q6_K"
          : type == q::WeightType::kQ5_1 ? "Q5_1"
          : type == q::WeightType::kIQ4_NL
              ? "IQ4_NL"
@@ -444,6 +468,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   const Experts w =
       type == q::WeightType::kQ4_K   ? MakeQ4K(experts, m, k, seed)
       : type == q::WeightType::kQ5_K ? MakeQ5K(experts, m, k, seed)
+      : type == q::WeightType::kQ6_K ? MakeQ6_K(experts, m, k, seed)
       : type == q::WeightType::kQ5_1 ? MakeQ5_1(experts, m, k, seed)
       : type == q::WeightType::kIQ4_NL
           ? MakeIQ4_NL(experts, m, k, seed)
@@ -508,7 +533,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                        type != q::WeightType::kIQ3_S &&
                        type != q::WeightType::kIQ2_S &&
                        type != q::WeightType::kIQ4_XS &&
-                       type != q::WeightType::kQ2_0;
+                       type != q::WeightType::kQ2_0 &&
+                       type != q::WeightType::kQ6_K;
   const auto mmq_raw = type == q::WeightType::kQ4_K   ? qfn_mmq_q4_K_moe_raw
                        : type == q::WeightType::kQ5_K ? qfn_mmq_q5_K_moe_raw
                        : type == q::WeightType::kQ5_1 ? qfn_mmq_q5_1_moe_raw
@@ -1549,6 +1575,20 @@ int main() {
     ok = Ok(Run(q::WeightType::kQ2_0, 97, 1, 8, 129, 640, 0x7402A003U, 64)) &&
          ok;
     ok = Ok(Run(q::WeightType::kQ2_0, 300, 10, 64, 640, 2560, 0x7402A004U,
+                16)) &&
+         ok;
+    // Q6_K: the dense tier's dominant storage (103 tensors, 1.72 GiB on
+    // the pruned checkpoint; production consumes it through the degenerate
+    // single-expert path, which the golden Q6Value oracle covers). 210-byte
+    // blocks ride the 256-element rule.
+    std::printf("== routed Q6_K (dense-tier storage; F64 oracle)\n");
+    ok = Ok(Run(q::WeightType::kQ6_K, 300, 10, 64, 640, 2560, 0x7406A001U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ6_K, 3000, 1, 64, 2560, 768, 0x7406A002U, 64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ6_K, 97, 1, 8, 129, 768, 0x7406A003U, 64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ6_K, 300, 10, 64, 640, 2560, 0x7406A004U,
                 16)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
