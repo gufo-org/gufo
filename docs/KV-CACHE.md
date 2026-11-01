@@ -603,12 +603,21 @@ a top-level `cache_persist`; see [the server guide](SERVER.md).
 
 Per-request outcomes appear in the completion log and in `usage.gufo`:
 `cache_hit`, `cache_miss_reason`, `cache_common_prefix_tokens`,
-`cache_checkpoint_tokens`, `cache_restore_bytes`, `cache_restore_ms`,
+`cache_checkpoint_tokens`, `cache_restore_bytes`, `cache_restore_ms` (bytes and
+milliseconds restored on a hit), `cache_disk_hit` (the restored prefix came
+from disk), `cache_snapshot_bytes`, `cache_snapshot_ms` (the KV snapshot this
+request's retained prefix occupies and the time to snapshot it, also reported
+when a stop or cancel path retains the prefix), `cache_disk_queued_bytes`,
+`cache_disk_enqueue_ms` (snapshot bytes handed to disk publication and their
+enqueue time), `cache_shared_prefix_snapshots`, `cache_shared_prefix_bytes`,
+`cache_shared_prefix_ms` (shared-prefix snapshots and bytes queued for
+persistence during prefill and the time spent capturing them),
 `shared_prefix_wait_ms` (time spent waiting for a concurrent request, part of
 `queue_ms`), plus
 `prompt_n` (newly processed) and `cache_n` (reused) in the llama.cpp-compatible
 `timings` object. Miss reasons are `no_checkpoint`, `prefix_changed`,
-`input_changed` and `disabled`. Flash-Next reports `no_checkpoint` when no
+`input_changed`, `no_compatible_boundary` and `disabled`. Flash-Next reports
+`no_checkpoint` when no
 stored prompt shares a token with the request and `no_compatible_boundary`
 when one does but no restorable boundary covers it;
 `cache_common_prefix_tokens` is then the longest agreement and
