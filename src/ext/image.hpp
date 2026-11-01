@@ -32,7 +32,8 @@ struct ImageRequest {
   std::vector<ImageBuffer> images;
   int width{1024};
   int height{1024};
-  int steps{40};
+  // Zero selects the checkpoint's default; runners reject unsupported counts.
+  int steps{0};
   std::uint64_t seed{0};
 };
 

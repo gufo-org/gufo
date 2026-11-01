@@ -1,0 +1,374 @@
+{
+  "status": "qualified",
+  "date": "2026-10-25",
+  "engine_source": "5388d5d5af2b6c117657e6f5a3e711b73e94c5fb",
+  "model_revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+  "precision": "BF16",
+  "generation_only": true,
+  "hardware": "Two Ryzen AI MAX+ 395 / Radeon 8060S gfx1151 desktops, 122 GiB usable RAM each",
+  "toolchain": {
+    "compiler": "GCC 15.3",
+    "rocm": "7.2.3",
+    "kernel": "7.2.6-070206-generic"
+  },
+  "reference": {
+    "torch": "2.12.0",
+    "transformers": "5.17.0",
+    "diffusers": "0.42.0.dev0",
+    "diffusers_commit": "aaf57d03a3edfbd9de457d2872417a92f149a91d",
+    "huggingface_hub": "1.32.0",
+    "tokenizers": "0.23.1",
+    "safetensors": "0.8.0"
+  },
+  "matched_checks": {
+    "count": 313,
+    "worst_relative_l2": 0.003111321604425084,
+    "limit": 0.01
+  },
+  "base_pixel_replay": [
+    {
+      "mode": "compat-native-generation",
+      "exact_pixels": true,
+      "pixel_sha256": "d14b2c62e5c0f0bda2cc3e4b5856179c94c6e1869e2c7da8ff610655563a2c87"
+    },
+    {
+      "mode": "compat-native-edit",
+      "exact_pixels": true,
+      "pixel_sha256": "0dbf814430f14706dee1a768058aa085fc45e779a745987679eebeb7558f8f23"
+    }
+  ],
+  "quality": [
+    {
+      "name": "photo",
+      "native_size": [
+        1920,
+        1088
+      ],
+      "prompt": "A photorealistic architectural photograph of a small modern timber cabin beside a calm alpine lake at sunrise, mountains reflected in the water, wide cinematic composition, natural lighting, fine wood texture, no text.",
+      "final_latent": {
+        "elements": 522240,
+        "max_abs": 1.19140625,
+        "relative_l2": 0.03620093323219017,
+        "cosine": 0.9993471937755932,
+        "exact_fraction": 0.22270029105392156
+      },
+      "decoded": {
+        "elements": 8355840,
+        "max_abs": 1.72265625,
+        "relative_l2": 0.056337509139613634,
+        "cosine": 0.9984157987320875,
+        "exact_fraction": 0.4679680319393382
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 33.71837360723886
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      }
+    },
+    {
+      "name": "portrait",
+      "native_size": [
+        1024,
+        1024
+      ],
+      "prompt": "A studio photograph of an adult woman with short dark hair wearing a red wool coat, waist-up, gently holding a white ceramic cup with both hands, plain gray background, natural skin texture, realistic hands.",
+      "final_latent": {
+        "elements": 262144,
+        "max_abs": 1.5078125,
+        "relative_l2": 0.037876149669123386,
+        "cosine": 0.9992836986785664,
+        "exact_fraction": 0.2546806335449219
+      },
+      "decoded": {
+        "elements": 4194304,
+        "max_abs": 1.169921875,
+        "relative_l2": 0.04601954885267234,
+        "cosine": 0.9989407209337393,
+        "exact_fraction": 0.3045978546142578
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 36.33271248207531
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      }
+    },
+    {
+      "name": "typography",
+      "native_size": [
+        1024,
+        1024
+      ],
+      "prompt": "A clean graphic poster on cream paper. Large bold black text at the top reads exactly \"GUFO TURBO\". Below it, smaller red text reads exactly \"8 STEPS\". A simple red cube sits at the bottom. Precise typography, centered layout.",
+      "final_latent": {
+        "elements": 262144,
+        "max_abs": 1.1484375,
+        "relative_l2": 0.025301499478907835,
+        "cosine": 0.9996805200652973,
+        "exact_fraction": 0.34090423583984375
+      },
+      "decoded": {
+        "elements": 4194304,
+        "max_abs": 2.0390625,
+        "relative_l2": 0.04865311917928809,
+        "cosine": 0.9988159610495544,
+        "exact_fraction": 0.7560276985168457
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 32.861814056527535
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      }
+    },
+    {
+      "name": "diagram",
+      "native_size": [
+        1024,
+        1024
+      ],
+      "prompt": "A clean flat vector-style flow diagram on a white background, three evenly spaced blue rounded rectangles connected from left to right by black arrows. The labels read \"PROMPT\", \"GUFO\", and \"IMAGE\". Crisp legible text, simple geometry.",
+      "final_latent": {
+        "elements": 262144,
+        "max_abs": 1.00390625,
+        "relative_l2": 0.012597541837689376,
+        "cosine": 0.999920868347578,
+        "exact_fraction": 0.4297943115234375
+      },
+      "decoded": {
+        "elements": 4194304,
+        "max_abs": 1.9140625,
+        "relative_l2": 0.024717111363985925,
+        "cosine": 0.9996945323386988,
+        "exact_fraction": 0.8207607269287109
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 38.41959429001235
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      }
+    },
+    {
+      "name": "composition",
+      "native_size": [
+        1024,
+        1024
+      ],
+      "prompt": "A product photograph on a pale wooden table: a yellow pear on the left, a tall blue glass bottle in the center, and a small red ceramic cup on the right. All three objects fully visible, soft daylight, consistent shadows, white wall background.",
+      "final_latent": {
+        "elements": 262144,
+        "max_abs": 0.455078125,
+        "relative_l2": 0.01081140143788191,
+        "cosine": 0.9999416771553084,
+        "exact_fraction": 0.326995849609375
+      },
+      "decoded": {
+        "elements": 4194304,
+        "max_abs": 1.60546875,
+        "relative_l2": 0.014383050430768745,
+        "cosine": 0.9998969317380697,
+        "exact_fraction": 0.5503394603729248
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 44.75465131006031
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      }
+    },
+    {
+      "name": "transparent",
+      "native_size": [
+        1024,
+        1024
+      ],
+      "prompt": "This is an RGBA image with transparency. A red ceramic teapot isolated in the center. The image has alpha channel and the background is transparent.",
+      "final_latent": {
+        "elements": 262144,
+        "max_abs": 0.15625,
+        "relative_l2": 0.007847953849970678,
+        "cosine": 0.9999707566940916,
+        "exact_fraction": 0.3681144714355469
+      },
+      "decoded": {
+        "elements": 4194304,
+        "max_abs": 0.873046875,
+        "relative_l2": 0.010192198173666575,
+        "cosine": 0.9999482702854822,
+        "exact_fraction": 0.6542620658874512
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 48.6819776056238
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      }
+    }
+  ],
+  "latency": [
+    {
+      "desktop": "Desktop 1",
+      "base_steps": 40,
+      "turbo_steps": 8,
+      "base_median_seconds": 244.92062801400607,
+      "turbo_median_seconds": 50.45639767999819,
+      "latency_speedup": 4.854104519457142,
+      "engine_medians": {
+        "base": {
+          "prompt_ms": 89.2047,
+          "denoise_ms": 242957.0,
+          "vae_ms": 1563.94,
+          "total_ms": 244617.0,
+          "resident_weight_mib": 28489.0
+        },
+        "turbo": {
+          "prompt_ms": 88.2221,
+          "denoise_ms": 48484.4,
+          "vae_ms": 1564.43,
+          "total_ms": 50144.4,
+          "resident_weight_mib": 28489.0
+        }
+      },
+      "requests": [
+        {
+          "variant": "base",
+          "seed": 42,
+          "seconds": 236.61694374999206,
+          "pixel_sha256": "5fc17f8b68ffa88bfc52c3d5e49de7f032d31d55585032051b5a491d07d3c59d"
+        },
+        {
+          "variant": "turbo",
+          "seed": 42,
+          "seconds": 48.946818052994786,
+          "pixel_sha256": "b853b562a70165bd16c197b1e3cdc097df9529c4e3f1753c5707b86694e9c722"
+        },
+        {
+          "variant": "turbo",
+          "seed": 43,
+          "seconds": 50.45639767999819,
+          "pixel_sha256": "5779a22f27298a992aa52edfceabbbfe44a757c6549cb15aa88d4a79b3d8382e"
+        },
+        {
+          "variant": "base",
+          "seed": 43,
+          "seconds": 245.010292424995,
+          "pixel_sha256": "40d743a48507880c2ae07d040f25c1d6b279e5d53f7d80efc2cf9621ddbfba94"
+        },
+        {
+          "variant": "base",
+          "seed": 44,
+          "seconds": 244.92062801400607,
+          "pixel_sha256": "2ef18c5f453769a1e265dbfc99691d15b9dcfc24d9a78e236da9dd851e6f5438"
+        },
+        {
+          "variant": "turbo",
+          "seed": 44,
+          "seconds": 50.531068570999196,
+          "pixel_sha256": "0b94c7fd9a2db75086e4ed289f2243e9c1f4d7871fe160d0ff61bfd7de5fae40"
+        }
+      ]
+    },
+    {
+      "desktop": "Desktop 2",
+      "base_steps": 40,
+      "turbo_steps": 8,
+      "base_median_seconds": 234.72936353900877,
+      "turbo_median_seconds": 49.74651594100578,
+      "latency_speedup": 4.718508605052332,
+      "engine_medians": {
+        "base": {
+          "prompt_ms": 87.7238,
+          "denoise_ms": 232774.0,
+          "vae_ms": 1536.1,
+          "total_ms": 234404.0,
+          "resident_weight_mib": 28489.0
+        },
+        "turbo": {
+          "prompt_ms": 87.5714,
+          "denoise_ms": 47795.4,
+          "vae_ms": 1538.08,
+          "total_ms": 49427.6,
+          "resident_weight_mib": 28489.0
+        }
+      },
+      "requests": [
+        {
+          "variant": "turbo",
+          "seed": 42,
+          "seconds": 48.08123959999648,
+          "pixel_sha256": "b853b562a70165bd16c197b1e3cdc097df9529c4e3f1753c5707b86694e9c722"
+        },
+        {
+          "variant": "base",
+          "seed": 42,
+          "seconds": 232.65569082500588,
+          "pixel_sha256": "5fc17f8b68ffa88bfc52c3d5e49de7f032d31d55585032051b5a491d07d3c59d"
+        },
+        {
+          "variant": "base",
+          "seed": 43,
+          "seconds": 234.72936353900877,
+          "pixel_sha256": "40d743a48507880c2ae07d040f25c1d6b279e5d53f7d80efc2cf9621ddbfba94"
+        },
+        {
+          "variant": "turbo",
+          "seed": 43,
+          "seconds": 49.74651594100578,
+          "pixel_sha256": "5779a22f27298a992aa52edfceabbbfe44a757c6549cb15aa88d4a79b3d8382e"
+        },
+        {
+          "variant": "turbo",
+          "seed": 44,
+          "seconds": 49.75605631498911,
+          "pixel_sha256": "0b94c7fd9a2db75086e4ed289f2243e9c1f4d7871fe160d0ff61bfd7de5fae40"
+        },
+        {
+          "variant": "base",
+          "seed": 44,
+          "seconds": 241.18286524699943,
+          "pixel_sha256": "2ef18c5f453769a1e265dbfc99691d15b9dcfc24d9a78e236da9dd851e6f5438"
+        }
+      ]
+    }
+  ],
+  "throughput": {
+    "serial_pair_median_seconds": 101.81032470800005,
+    "dual_pair_median_seconds": 49.49367408299986,
+    "throughput_speedup": 2.05703711826417,
+    "all_seed_pairs_exact": true,
+    "single_image_distributed_execution": false
+  },
+  "stability": [
+    {
+      "desktop": "Desktop 1",
+      "gpu_errors": 0,
+      "maximum_edge_temperature_c": 82.0,
+      "mean_reported_apu_power_w": 126.60570706319696,
+      "maximum_driver_reported_vram_bytes": 180457472,
+      "rdma_byte_counter_change": 0
+    },
+    {
+      "desktop": "Desktop 2",
+      "gpu_errors": 0,
+      "maximum_edge_temperature_c": 91.0,
+      "mean_reported_apu_power_w": 131.616459486166,
+      "maximum_driver_reported_vram_bytes": 157900800,
+      "rdma_byte_counter_change": 0
+    }
+  ],
+  "image_id": "sha256:fbb4437858d53105c074fc11d81198c3082dbd942fa676a3a50ac44a0b433435"
+}

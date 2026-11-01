@@ -1,0 +1,408 @@
+{
+  "date": "2026-10-26",
+  "source_revision": "c5bad09cef01a5eb3a515cf7f4afc4a498910834",
+  "image_id": "b0ae766e2ee81a5e081de6b951d8d8fd44e3138809443510ef4f8cf2eb90150e",
+  "model": "Qwen/Qwen-Image-2.1-Turbo",
+  "model_revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+  "diffusers_revision": "aaf57d03a3edfbd9de457d2872417a92f149a91d",
+  "runtime": {
+    "torch": "2.12.0",
+    "transformers": "5.17.0",
+    "diffusers": "0.42.0.dev0"
+  },
+  "matched_input": {
+    "checks": 346,
+    "relative_l2_limit": 0.01,
+    "maximum_relative_l2": 0.004787742077055188,
+    "passed": true
+  },
+  "trajectories": [
+    {
+      "case": "single",
+      "teacher_forced": false,
+      "reference": {
+        "torch": "2.12.0",
+        "transformers": "5.17.0",
+        "diffusers": "0.42.0.dev0",
+        "model_revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+        "model_directory": "Qwen-Image-2.1-Turbo",
+        "model_index_sha256": "97e2febeb19d93cb41fa44807cde8bd42757950b5dffeacdb0331fb2d390cf20",
+        "diffusers_revision": "aaf57d03a3edfbd9de457d2872417a92f149a91d",
+        "teacher_forced": false,
+        "decoded": true,
+        "initial_noise_sha256": "2c2fc70e51dd6d37891503a82585e89636bfbe7389aaef0e39abb1f1b81321de"
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      },
+      "sigmas": {
+        "elements": 9,
+        "max_abs": 0.0,
+        "relative_l2": 0.0,
+        "cosine": 1.0000000000000002,
+        "exact_fraction": 1.0
+      },
+      "latent": {
+        "elements": 16384,
+        "max_abs": 0.0625,
+        "relative_l2": 0.008396488815096208,
+        "cosine": 0.9999649992485756,
+        "exact_fraction": 0.25299072265625
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 53.44340648289549
+      },
+      "matched_checks": 368
+    },
+    {
+      "case": "single",
+      "teacher_forced": true,
+      "reference": {
+        "torch": "2.12.0",
+        "transformers": "5.17.0",
+        "diffusers": "0.42.0.dev0",
+        "model_revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+        "model_directory": "Qwen-Image-2.1-Turbo",
+        "model_index_sha256": "97e2febeb19d93cb41fa44807cde8bd42757950b5dffeacdb0331fb2d390cf20",
+        "diffusers_revision": "aaf57d03a3edfbd9de457d2872417a92f149a91d",
+        "teacher_forced": true,
+        "decoded": true,
+        "initial_noise_sha256": "2c2fc70e51dd6d37891503a82585e89636bfbe7389aaef0e39abb1f1b81321de"
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      },
+      "sigmas": {
+        "elements": 9,
+        "max_abs": 0.0,
+        "relative_l2": 0.0,
+        "cosine": 1.0000000000000002,
+        "exact_fraction": 1.0
+      },
+      "latent": {
+        "elements": 16384,
+        "max_abs": 0.03125,
+        "relative_l2": 0.0036027616460178402,
+        "cosine": 0.9999941592268575,
+        "exact_fraction": 0.61199951171875
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 68.670692874656
+      },
+      "matched_checks": 368
+    },
+    {
+      "case": "mask",
+      "teacher_forced": false,
+      "reference": {
+        "torch": "2.12.0",
+        "transformers": "5.17.0",
+        "diffusers": "0.42.0.dev0",
+        "model_revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+        "model_directory": "Qwen-Image-2.1-Turbo",
+        "model_index_sha256": "97e2febeb19d93cb41fa44807cde8bd42757950b5dffeacdb0331fb2d390cf20",
+        "diffusers_revision": "aaf57d03a3edfbd9de457d2872417a92f149a91d",
+        "teacher_forced": false,
+        "decoded": true,
+        "initial_noise_sha256": "e4b54b0834352a13e1fbbad19d049522996106f0f896c694d5de8a77ba956587"
+      },
+      "validation": {
+        "passed": true,
+        "failures": []
+      },
+      "sigmas": {
+        "elements": 9,
+        "max_abs": 0.0,
+        "relative_l2": 0.0,
+        "cosine": 1.0000000000000002,
+        "exact_fraction": 1.0
+      },
+      "latent": {
+        "elements": 16384,
+        "max_abs": 0.3125,
+        "relative_l2": 0.018502644687716174,
+        "cosine": 0.9998291199855711,
+        "exact_fraction": 0.21405029296875
+      },
+      "png": {
+        "exact": false,
+        "psnr_db": 40.622097966426
+      },
+      "matched_checks": 10
+    }
+  ],
+  "api": {
+    "turbo_edit_images": 10,
+    "normal_control_images": 1,
+    "cases": [
+      {
+        "name": "edit",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "667876a201ca8e2fb935b045c5ad84ab4637b0264d3d600964fe224868c4f4d2",
+        "transparentFraction": 0,
+        "references": 1
+      },
+      {
+        "name": "edit",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "667876a201ca8e2fb935b045c5ad84ab4637b0264d3d600964fe224868c4f4d2",
+        "transparentFraction": 0,
+        "references": 1
+      },
+      {
+        "name": "masked",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "6623b61ef6a2abc87433b02db694e8a2702b11d080e06f92906c863becf30f99",
+        "transparentFraction": 0,
+        "references": 2
+      },
+      {
+        "name": "masked",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "6623b61ef6a2abc87433b02db694e8a2702b11d080e06f92906c863becf30f99",
+        "transparentFraction": 0,
+        "references": 2
+      },
+      {
+        "name": "masked",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "6623b61ef6a2abc87433b02db694e8a2702b11d080e06f92906c863becf30f99",
+        "transparentFraction": 0,
+        "references": 2
+      },
+      {
+        "name": "transparent",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "transparent"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "662e401b6772bab1eb7e5770e353b22f2432374f1d550364b33ab4c96f4af963",
+        "transparentFraction": 0.942474365234375,
+        "references": 1
+      },
+      {
+        "name": "batch",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "527cbf399166025dad6fb5de213f10ff3dad3b04cbb923ee3116ddbbbee1723e",
+        "transparentFraction": 0,
+        "references": 1
+      },
+      {
+        "name": "batch",
+        "seed": 792044,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "59fce896138958a050f299d6713c0546006d7f7c9ccf5914b7afbf9f59ccc7dc",
+        "transparentFraction": 0,
+        "references": 1
+      },
+      {
+        "name": "combine",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "b2dba60ef23f4802081ec981f849eb319077ff9ba6c810536ed90dc34f70304a",
+        "transparentFraction": 0,
+        "references": 2
+      },
+      {
+        "name": "fullsize",
+        "seed": 792043,
+        "settings": {
+          "model": "turbo",
+          "width": 1920,
+          "height": 1080,
+          "steps": 8,
+          "background": "auto"
+        },
+        "width": 1920,
+        "height": 1080,
+        "native": {
+          "width": 1920,
+          "height": 1088
+        },
+        "pixelHash": "326863a185e31f5cda96a97093a93eb6bacf35eafbe5b18558f29a1f276197d1",
+        "transparentFraction": 0,
+        "references": 1
+      },
+      {
+        "name": "normal",
+        "seed": 792043,
+        "settings": {
+          "model": "normal",
+          "width": 512,
+          "height": 512,
+          "steps": 40,
+          "background": "auto"
+        },
+        "width": 512,
+        "height": 512,
+        "native": {
+          "width": 512,
+          "height": 512
+        },
+        "pixelHash": "a9aded5d8380619e16e96b34f0c282437fd1c7c99173acfb349a8a7a9bcefa4d",
+        "transparentFraction": 0,
+        "references": 2
+      }
+    ],
+    "fixed_seed_replay": true,
+    "mask_replay_after_restart": true,
+    "normal_control_pixel_replay": true
+  },
+  "generation_regression": {
+    "identical": true,
+    "before": {
+      "width": 256,
+      "height": 256,
+      "sha256": "b5fe507f66d749adadaf24dc8db263209e9a2bd77cb74b424202d55ebac75739"
+    },
+    "after": {
+      "width": 256,
+      "height": 256,
+      "sha256": "b5fe507f66d749adadaf24dc8db263209e9a2bd77cb74b424202d55ebac75739"
+    }
+  },
+  "tests": {
+    "model_and_http_contract": "passed",
+    "cpp_format_files": 665,
+    "python_syntax": "passed",
+    "moodboard_tests": 188,
+    "moodboard_typecheck": "passed",
+    "moodboard_build": "passed"
+  },
+  "scope": "Native BF16 editing at the checkpoint-supplied eight-step schedule. Single-reference matched-input checks and separate original-plus-mask full trajectories use shared noise tensors. These checks do not establish aesthetic parity with the base checkpoint.",
+  "reproduction": {
+    "width": 256,
+    "height": 256,
+    "steps": 8,
+    "native_seed": 42,
+    "initial_noise": "Native observer noise.f32, provided to the independent reference; equal numeric seeds are not assumed equivalent.",
+    "inputs": [
+      {
+        "file": "turbo-editing-input.png",
+        "sha256": "b169e6acddb8cef2ae346c58f997f22f62a02ea0d56c40b9f0e18ef833188b45"
+      },
+      {
+        "file": "turbo-editing-mask.png",
+        "sha256": "b299ec645ed73e82ffb484fbd8dd61d4278513128dfa08e5546ea7ae78454332"
+      }
+    ],
+    "single_prompt": "Change the red cup to glossy cobalt blue, preserving its shape, table and lighting.",
+    "mask_prompt": "Use image 1 as the original and image 2 as a black-and-white editing mask. Add a fresh green pear in the white area to the right of the cup. Remove mask and guidance marks."
+  }
+}
