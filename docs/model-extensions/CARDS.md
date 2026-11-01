@@ -129,7 +129,7 @@ the current implementation milestone stops after Card 14.
 | 21 | 10 Flash-Next; 20 | [Migrate Flash-Next text generation](cards/21-flash-next-extension.md) | complete |
 | 22 | 10 DeepSeek; 21 | [Migrate DeepSeek text generation](cards/22-deepseek-extension.md) | complete |
 | 23 | 11; 22 | [Support external extension source trees](cards/23-external-extensions.md) | complete |
-| 24 | 11; 23 | [Prove capability extensibility with second providers](cards/24-second-provider-conformance.md) | pending |
+| 24 | 11; 23 | [Prove capability extensibility with second providers](cards/24-second-provider-conformance.md) | implementing |
 | 25 | 11b; 24 | [Generate Nix serving arguments and validation](cards/25-generated-serve-module.md) | pending |
 | 26 | distribution/conformance; 25 | [Complete distribution recipes and conformance policy](cards/26-distribution-and-policy.md) | pending |
 | 27 | success criteria; 26 | [Audit every RFC success criterion](cards/27-final-requirements-audit.md) | pending |
@@ -389,6 +389,20 @@ migrated DSpark speculation, native snapshot persistence, and CLI drivers into `
 split the manifest into `gufo_deepseek_v4_flash` and `gufo_deepseek_v4_flash_hip` (`requires: ["hip"]`);
 resolved reviewer findings M1 (`kProvider_deepseek4`) and N1 (canonical `deepseek4` ID);
 passed `deepseek_v4_flash_continuation_identity_test`; and passed all verification gates.
+
+### Card 23
+
+See [Card 23: execution record](cards/23-external-extensions.md#execution-record).
+
+### Card 24
+
+See [Card 24: execution record](cards/24-second-provider-conformance.md#execution-record).
+In progress (`implementing`): completed the external `text_generation` second-provider
+port in `lfm3-gufo-extension` (`git@github.com:gufo-org/lfm3-gufo-extension.git`,
+commit `6360b0fc`) with zero core/build/preset/workflow/Nix/registry edits, passing
+GPU/CPU builds, `lfm3_config_test`, `lfm3_ops_test`, `lfm3_session_test`, CPU vs GPU
+`lfm3_probe`, CLI `prompt`/`bench`, and live `gufo serve llm` HTTP conformance.
+Non-text second providers and the full exclusion matrix remain pending.
 
 
 
