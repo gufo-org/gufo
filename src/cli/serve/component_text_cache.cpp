@@ -1888,6 +1888,10 @@ void ServingCacheLease::AdoptRestoredPrefix(std::size_t tokens,
     throw std::logic_error("component restore is owned by the component cache");
   legacy_.AdoptRestoredPrefix(tokens, bytes, ms);
 }
+bool ServingCacheLease::retains_snapshots() const noexcept {
+  // The component cache keeps its own commit semantics.
+  return component_ != nullptr || legacy_.retains_snapshots();
+}
 void ServingCacheLease::PreparePrefill(std::size_t tokens) {
   if (component_)
     component_->PreparePrefill(tokens);
