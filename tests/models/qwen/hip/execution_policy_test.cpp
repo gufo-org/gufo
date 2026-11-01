@@ -1,5 +1,5 @@
 // Graph identity must separate production execution from operator references.
-#include "src/models/qwen/hip/execution_policy.hpp"
+#include "src/families/qwen/hip_common/execution_policy.hpp"
 
 #include <cassert>
 #include <cstdint>

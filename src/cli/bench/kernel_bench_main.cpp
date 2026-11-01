@@ -25,9 +25,9 @@
 #include "src/core/diagnostics/system_inventory.h"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/model_config.hpp"
-#include "src/models/qwen/gemm_route.hpp"
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/families/qwen/hip_common/attention_policy.hpp"
+#include "src/families/qwen/hip_common/gemm_route.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
 
 #ifndef GUFO_REVISION
 #define GUFO_REVISION "unknown"

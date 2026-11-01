@@ -1,4 +1,4 @@
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -15,9 +15,9 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen/control_tokens.hpp"
-#include "src/models/qwen/tokenizer.hpp"
-#include "src/models/qwen/vision/prompt.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
+#include "src/families/qwen/vision/prompt.hpp"
 #include "tests/models/chat_template_golden_helpers.hpp"
 
 using gufo::tokenization::kEndOfText;

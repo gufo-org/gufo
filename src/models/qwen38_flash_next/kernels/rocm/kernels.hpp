@@ -6,11 +6,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/sampling.hpp>
 
-#include "src/core/gguf_reader.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
-#include "src/core/sampling.hpp"
-#include "src/models/qwen/vision/rope.hpp"
+#include <gufo/ext/gguf_reader.hpp>
+#include "src/families/qwen/hip_common/rope.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 /// Model-private HIP launchers for everything outside the quantized GEMM
@@ -347,7 +346,8 @@ void RoutedTiles(const std::uint32_t* counts, std::int32_t* tiles,
 /// projection's F32 output over the same rows) turns it into
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
-/// or 64 for Q5_1/Q8_0.
+/// or 128 for the prefill down projection (Q5_1/Q8_0, F16 output and no
+/// `swiglu_gate`). Every tile height gives each row the same bits.
 /// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
 /// and tile widths return false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
@@ -359,7 +359,8 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
 
 /// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
 /// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
-/// projections share one launch and never materialize the gate output.
+/// projections share one launch and never materialize the gate output;
+/// every row equals the separate gate and up launches bit for bit.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,
                         std::uint32_t n_tiles, const std::int32_t* pad_bounds,
@@ -559,14 +560,17 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
 /// output is bitwise identical to the mask walk. Null lists use the mask walk.
 /// Complete blocks past a row's `mask_words` * 32 bits are not selected,
 /// whatever the device position; keys up to the position must exist.
+/// Rows seeing at most `dense_extent` keys ignore the mask and sweep densely,
+/// as they do without one; pass the token budget so a row's arithmetic does
+/// not depend on whether its batch crosses the budget.
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* mask, std::uint32_t mask_words, float* out,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                hipStream_t stream, std::uint32_t* lists = nullptr,
-               std::uint32_t* counts = nullptr,
-               std::uint32_t list_capacity = 0);
+               std::uint32_t* counts = nullptr, std::uint32_t list_capacity = 0,
+               std::uint32_t dense_extent = 0);
 
 /// Maximum visible sparse context for this WMMA geometry, or zero when the
 /// geometry is unsupported. Checkpoint planning uses the same dispatch limit.

@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "name": "qwen3_asr",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.0",
+  "entry": "qwen3_asr_register",
+  "registration_target": "gufo_qwen3_asr",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "qwen3-asr",
+      "capability": "speech_recognition",
+      "keys": [
+        "safetensors:qwen3_asr",
+        "safetensors:Qwen3ASRModel"
+      ],
+      "model_ids": [
+        "qwen3-asr"
+      ],
+      "target": "gufo_qwen3_asr",
+      "entry": "qwen3_asr_provider_register"
+    }
+  ],
+  "targets": {
+    "gufo_qwen3_asr": {
+      "requires": []
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "Qwen3-ASR 1.7B",
+    "inputs": "BF16 safetensors; audio to text",
+    "guide": "docs/models/qwen3-asr/README.md"
+  },
+  "tests": [
+    {
+      "target": "qwen3_asr_config_test",
+      "ctest": "qwen3_asr_config_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen3_asr_audio_api_test",
+      "ctest": "qwen3_asr_audio_api_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "qwen3-asr"
+  ],
+  "fixtures": "src/models/qwen3_asr/reference/",
+  "functional": "functional/",
+  "tools": "tools/"
+}

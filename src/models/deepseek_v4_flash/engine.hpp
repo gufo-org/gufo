@@ -4,13 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "src/core/session_mode.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/runtime/model.h"
 

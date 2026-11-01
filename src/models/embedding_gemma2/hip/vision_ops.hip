@@ -1,6 +1,6 @@
 #include <cmath>
 
-#include "src/models/embedding_gemma2/hip/vision_ops.hpp"
+#include "vision_ops.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 namespace {

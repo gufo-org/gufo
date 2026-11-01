@@ -220,9 +220,9 @@ jobs:
       - name: Configure Windows build
         id: configure
         run: |
-          $identity = @()
+          $identity = @("-DGUFO_EXTENSIONS_FROM_LOCK=OFF")
           if ($env:GUFO_RELEASE_VERSION) {
-            $identity = @("-DGUFO_RELEASE_VERSION=$env:GUFO_RELEASE_VERSION", "-DGUFO_REVISION=$env:GUFO_REVISION")
+            $identity = @("-DGUFO_RELEASE_VERSION=$env:GUFO_RELEASE_VERSION", "-DGUFO_REVISION=$env:GUFO_REVISION", "-DGUFO_EXTENSIONS_FROM_LOCK=ON")
           }
           # ccache cannot cache objects that write a shared /Zi PDB: embed
           # the debug info in each object instead (/Z7).
@@ -384,7 +384,10 @@ jobs:
           try {
             $expected = "gufo version $env:GUFO_RELEASE_VERSION ($env:GUFO_REVISION)"
             $actual = & ./gufo.exe --version
-            if ($LASTEXITCODE -ne 0 -or ($actual -join "`n") -cne $expected) {
+            # Historical tags predate extension selection; repackaging them
+            # still checks their immutable version/revision first line.
+            $hasExtensionLock = Test-Path "$env:GITHUB_WORKSPACE/extensions.lock"
+            if ($LASTEXITCODE -ne 0 -or @($actual)[0] -cne $expected -or ($hasExtensionLock -and -not ($actual -contains "Extension selection: lock"))) {
               throw "release reports '$actual', expected '$expected'"
             }
             $help = & ./gufo.exe --help

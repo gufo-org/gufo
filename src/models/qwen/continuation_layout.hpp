@@ -1,12 +1,13 @@
 #ifndef GUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
 #define GUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
 
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/model_config.hpp>
+#include <gufo/ext/types.hpp>
 #include <span>
 #include <vector>
 
-#include "src/cache/types.hpp"
-#include "src/core/model_config.hpp"
-#include "src/models/qwen/hip/execution_policy.hpp"
+#include "src/families/qwen/hip_common/execution_policy.hpp"
 
 namespace gufo::models::qwen {
 
@@ -33,9 +34,9 @@ inline constexpr std::size_t kContinuationMetadataBytes = 64;
 inline constexpr std::size_t kContinuationFrontierMetadataBytes = 96;
 inline constexpr std::size_t kContinuationPendingTokens = 9;
 
-struct ContinuationBackingClass {
-  std::size_t block_bytes{}, blocks{}, metadata_bytes{};
-};
+// Backing classes are the cache's neutral contract (RFC step 6); the layout
+// owns the arithmetic that fills them.
+using ContinuationBackingClass = cache::BackingClass;
 
 // KV rows have a canonical token/head/channel order. FP32's native head-major
 // planes are gathered without conversion; their layout version differs from

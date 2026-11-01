@@ -1,0 +1,64 @@
+# Card 14 Orchestrator Verification Gates
+
+Date: 2026-11-01
+Orchestrator: Parent Agent (run ID: 96a2ae41-29cf-4272-bacb-3b48823c7bba)
+Parent commit: qupqlxsk 642af9d6 model-extensions-3* | feat(extensions): migrate embeddinggemma pilot to isolated extension
+
+## Pinned Gate Set Re-run Results
+
+1. Gate 1: Infrastructure Generator & Drift Check
+   Command: python3 tools/ci/generate-infrastructure.py --check
+   Result: Exit 0 (PASS: Infrastructure files are up to date with model metadata.)
+   Verdict: PASS
+
+2. Gate 2: Infrastructure Generator Unit Tests
+   Command: python3 -m unittest tests/tools/generate_infrastructure_test.py
+   Result: Exit 0 (Ran 9 tests in 0.032s, OK)
+   Verdict: PASS
+
+3. Gate 3: Extension Metadata Schema Verification
+   Command: nix develop -c python3 tests/extensions/metadata_test.py --schema
+   Result: Exit 0 (test_full_schema passed across all 8 in-tree manifests)
+   Verdict: PASS
+
+4. Gate 4: Documentation Integrity & Link Check
+   Command: python3 tools/ci/check-docs.py
+   Result: Exit 0 (PASSED: 316 markdown files and 1604 local links/anchors verified clean)
+   Verdict: PASS
+
+5. Gate 5: Clang-Format CI Check
+   Command: nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+   Result: Exit 0 (PASS: Checked 792 C++ files)
+   Verdict: PASS
+
+6. Gate 6: Extension Isolation Ratchet Unit Tests
+   Command: python3 tests/tools/check_extension_isolation_test.py
+   Result: Exit 0 (Ran 27 tests in 22.981s, OK)
+   Verdict: PASS
+
+7. Gate 7: Continuation Identity Goldens (CPU test preset)
+   Command: nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure
+   Result: Exit 0 (3/3 tests passed: qwen27b, ds4, qwen38 in 0.01s)
+   Verdict: PASS
+
+8. Gate 8: Bounded Hosted Check-PR Target Suite
+   Command: nix develop -c cmake --build --preset cpu-test --target check-pr
+   Result: Exit 0 (96/96 tests passed, 100%, 140.20s)
+   Verdict: PASS
+
+9. Gate 9: Bounded Hosted PR Nix Checks
+   Command: nix build .#checks.x86_64-linux.pr --no-link
+   Result: Exit 0 (All 4 derivations built and passed: check-format, check-docs, check-pr-tests, check-pr)
+   Verdict: PASS
+
+## Codex Review Resolution
+
+Command:
+codex exec review --dangerously-bypass-approvals-and-sandbox 'review the diff of current jj revision, you can use jj diff to see changes'
+
+Finding:
+- [P2] Generate valid doc tuples for small manifest sets in `tools/ci/generate-infrastructure.py:202-206`.
+  When fewer than four manifests declare model guides, unconditional separators produced empty tuple elements, resulting in invalid Python syntax.
+Disposition:
+- RESOLVED by orchestrator: Chunked model directory strings into populated slices of up to 3 elements, joined with valid line breaks, added trailing comma for single-element tuples, and added `compile(docs_py, "check-docs.py", "exec")` to `tests/tools/generate_infrastructure_test.py`.
+- Re-ran all gates: `generate-infrastructure.py --check` (exit 0), `generate_infrastructure_test.py` (9/9 pass, exit 0), `check-format.py` (exit 0), `check-docs.py` (exit 0), `nix build .#checks.x86_64-linux.pr` (exit 0).

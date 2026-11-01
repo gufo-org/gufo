@@ -1,15 +1,14 @@
-#include "src/models/embedding_gemma2/image_processor.hpp"
+#include "image_processor.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
-
-#include "src/core/json.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

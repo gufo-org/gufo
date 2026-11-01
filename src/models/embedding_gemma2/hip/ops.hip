@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/embedding_gemma2/hip/ops.hpp"
+#include "ops.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 namespace {

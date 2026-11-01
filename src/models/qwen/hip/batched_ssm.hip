@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/ops/ssm.hpp"
+#include "src/families/qwen/kernels/ops/ssm.hpp"
 
 namespace gufo::hip {
 

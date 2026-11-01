@@ -1,0 +1,46 @@
+{
+  "assets": {
+    "embedding": {
+      "repo": "google/embeddinggemma-2",
+      "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors"
+      ]
+    }
+  },
+  "models": {
+    "embedding-gemma2": {
+      "title": "EmbeddingGemma 2",
+      "category": "embedding",
+      "asset": "embedding",
+      "service": "embedding"
+    }
+  },
+  "rules": [
+    {
+      "id": "embedding",
+      "priority": 20,
+      "paths": [
+        "src/models/embedding_gemma2/**",
+        "tests/models/embedding_gemma2/**",
+        "tests/fixtures/embedding_gemma2/**",
+        "tools/models/embedding_gemma2/**",
+        "src/cli/serve/embedding*",
+        "src/cli/embedding*",
+        "tests/functional/embedding*"
+      ],
+      "owners": [
+        "embedding"
+      ]
+    }
+  ]
+}

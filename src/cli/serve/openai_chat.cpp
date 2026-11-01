@@ -32,9 +32,9 @@
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/tool_calls.hpp"
-#include "src/models/qwen/chat_template.hpp"
 
 namespace gufo::server {
 

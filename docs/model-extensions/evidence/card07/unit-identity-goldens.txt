@@ -1,0 +1,8 @@
+G3 identity goldens, exact bytes, zero skips (run twice: 11:59 and again after the
+   final rebuild at 12:1x; identical verdict lines).
+  1/3 Test #189: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+  2/3 Test #220: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+  3/3 Test #237: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+  100% tests passed out of 3
+  Total Test time (real) =   0.01 sec
+  EXIT=0

@@ -1,126 +1,89 @@
-target_sources(gufo_core PRIVATE
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_layout.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/image_cache.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/tokenizer.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/chat_template.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/oracles.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/state.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/weights.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/ssm.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/forward.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/attention.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/embed.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/ffn.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/norm.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/quant_gemm.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/residual.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/rope.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/sample.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/ssm.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/unembed.cpp
-   ${PROJECT_SOURCE_DIR}/src/models/qwen/generator.cpp
-   ${PROJECT_SOURCE_DIR}/src/models/qwen/mtp_reference.cpp
-   ${PROJECT_SOURCE_DIR}/src/models/qwen/dflash_weights.cpp)
+# Qwen3.8-27B model library: target inference, native MTP and DFlash2.
+#
+# Everything shared with other Qwen extensions lives in src/families/qwen/ and
+# is named explicitly below. This directory stays the model's home until Card 20
+# turns it into an extension with its own extension.json manifest, so the
+# library here is a plain target rather than a registered extension.
+add_library(gufo_qwen27b STATIC
+  continuation_layout.cpp
+  oracles.cpp
+  state.cpp
+  weights.cpp
+  ssm.cpp
+  forward.cpp
+  modules/attention.cpp
+  modules/embed.cpp
+  modules/ffn.cpp
+  modules/norm.cpp
+  modules/quant_gemm.cpp
+  modules/residual.cpp
+  modules/rope.cpp
+  modules/sample.cpp
+  modules/ssm.cpp
+  modules/unembed.cpp
+  generator.cpp
+  mtp_reference.cpp
+  dflash_weights.cpp)
+
+target_include_directories(gufo_qwen27b PUBLIC ${PROJECT_SOURCE_DIR})
+target_link_libraries(gufo_qwen27b PUBLIC
+  gufo_core
+  gufo_qwen_config
+  gufo_qwen_control_tokens
+  gufo_qwen_hip_common
+  gufo_qwen_text)
 
 if (ENGINE_ENABLE_HIP)
-  find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-  target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
-  target_link_libraries(gufo_core PRIVATE gufo_cache_hip)
-  target_sources(gufo_core PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_adapter.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/attention.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/batched_ssm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_embed.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_gemm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_gemm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_fp16.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_norm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_residual.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_rope.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_ssm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_swiglu.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_unpack.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/embed.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/residual.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/unpack.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/rope.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/sample.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/norm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/gemv.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/gemv_quant.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/fused.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/qkv.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm_decode_recurrence.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm_recurrence.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm_row_split.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/swiglu.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_batched.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/verify_gemm_27b.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_graph.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_tile.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_wmma.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/hipblas_gemm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/hipblaslt_gemm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/dflash_kernels.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/arena.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/batched_decode.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/decode.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/decode_step.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/executor.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/model_loader.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prefill.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prefill_chunk.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prompt_hidden_buffer.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/ssm_replay.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/model.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/executor.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/backend.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/model.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/executor.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/batch.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/backend.cpp)
-
-  # HIP helpers must share the kernel's wave size, so compile this unit
-  # separately while the other Qwen kernels retain wave32.
-  set_source_files_properties(
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip
-    TARGET_DIRECTORY gufo_core
-    PROPERTIES COMPILE_OPTIONS -mwavefrontsize64)
-  # Iterative ILP improves Q4/Q5 groups of sixteen without changing arithmetic.
-  # Keep it isolated: other widths regress. Line tables retain source profiling
-  # while avoiding an LLVM register-pressure crash with full debug information.
-  set_source_files_properties(
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip
-    TARGET_DIRECTORY gufo_core
-    PROPERTIES COMPILE_OPTIONS
-    "-mwavefrontsize64;-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
-  # SLP vectorization puts the K-quant scales and offsets of the blocked
-  # prefill GEMMs into wide register tuples. With clang 23, the Q3_K and Q6_K
-  # 128x128 tiles then spill. Disable SLP for the two units on all compilers.
-  set_property(
-    SOURCE
-      ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_gemm.hip
-      ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
-    TARGET_DIRECTORY gufo_core
-    APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
+  target_sources(gufo_qwen27b PRIVATE
+    continuation_adapter.cpp
+    hip/attention.hip
+    hip/batched_ssm.hip
+    hip/arena.cpp
+    hip/batched_decode.cpp
+    hip/decode.cpp
+    hip/decode_step.cpp
+    hip/executor.cpp
+    hip/model_loader.cpp
+    hip/prefill.cpp
+    hip/prefill_chunk.cpp
+    hip/prompt_hidden_buffer.cpp
+    hip/qwen_speculative_verifier.cpp
+    hip/ssm_replay.cpp
+    hip/mtp/model.cpp
+    hip/mtp/executor.cpp
+    hip/mtp/backend.cpp
+    hip/dflash/model.cpp
+    hip/dflash/executor.cpp
+    hip/dflash/batch.cpp
+    hip/dflash/backend.cpp)
+  # gufo_core kept these device headers private, so the model repeats them.
+  target_include_directories(gufo_qwen27b SYSTEM PUBLIC
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR})
+  target_link_libraries(gufo_qwen27b PUBLIC
+    gufo_cache_hip
+    gufo_qwen_kernels
+    gufo_qwen_vision)
 endif()
+
+# Complete Qwen link set for test and tool executables that exercise the family
+# and the 27B model together. gufo_qwen27b propagates the family libraries it
+# needs, and the family-only entries keep a CPU-only test honest. Production
+# libraries and executables name the Qwen libraries they actually use instead.
+set(GUFO_QWEN_LIBRARIES
+  gufo_qwen27b
+  gufo_qwen_config
+  gufo_qwen_control_tokens
+  gufo_qwen_hip_common
+  gufo_qwen_text
+  gufo_qwen_vision
+  CACHE INTERNAL "Qwen libraries a test or tool links")
 
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   add_executable(qwen27b_continuation_probe EXCLUDE_FROM_ALL
     ${PROJECT_SOURCE_DIR}/tests/models/qwen27b/continuation_probe.cpp)
-  target_link_libraries(qwen27b_continuation_probe PRIVATE gufo_core)
+  target_link_libraries(qwen27b_continuation_probe PRIVATE ${GUFO_QWEN_LIBRARIES})
   add_executable(qwen27b_verify_sweep EXCLUDE_FROM_ALL
     ${PROJECT_SOURCE_DIR}/tools/qwen27b/verify_sweep/sweep.hip)
-  target_link_libraries(qwen27b_verify_sweep PRIVATE gufo_core hip::device)
+  target_link_libraries(qwen27b_verify_sweep PRIVATE ${GUFO_QWEN_LIBRARIES} hip::device)
 endif()

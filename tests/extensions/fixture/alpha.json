@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "name": "alpha",
+  "version": "1.2.3",
+  "api_version": ">= 0.1.0",
+  "entry": "alpha_register",
+  "registration_target": "alpha_registration",
+  "depends": [
+    "base"
+  ],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "alpha",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:alpha"
+      ],
+      "model_ids": [
+        "alpha-model"
+      ],
+      "speculative": [
+        "draft"
+      ],
+      "target": "alpha_cpu",
+      "entry": "alpha_cpu_register"
+    },
+    {
+      "id": "alpha-hip",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:alpha_hip"
+      ],
+      "speculative": [
+        "hip-draft"
+      ],
+      "target": "alpha_hip",
+      "entry": "alpha_hip_register"
+    }
+  ],
+  "options": [
+    {
+      "name": "--draft-tokens",
+      "type": "integer",
+      "commands": [
+        "prompt",
+        "bench"
+      ]
+    },
+    {
+      "name": "--alpha-path",
+      "type": "path",
+      "commands": [
+        "prompt"
+      ],
+      "providers": [
+        "alpha"
+      ],
+      "help": "Path to a \"draft\" file: @PROJECT_SOURCE_DIR@ ${NO_EXPANSION} $<CONFIG>"
+    },
+    {
+      "name": "--hip-only",
+      "type": "boolean",
+      "commands": [
+        "prompt"
+      ],
+      "providers": [
+        "alpha-hip"
+      ]
+    },
+    {
+      "name": "--scale",
+      "type": "number",
+      "commands": [
+        "prompt"
+      ]
+    },
+    {
+      "name": "--label",
+      "type": "string",
+      "commands": [
+        "prompt"
+      ]
+    }
+  ],
+  "targets": {
+    "alpha_registration": {
+      "requires": []
+    },
+    "alpha_cpu": {
+      "requires": []
+    },
+    "alpha_hip": {
+      "requires": [
+        "hip"
+      ]
+    }
+  }
+}

@@ -10,14 +10,14 @@
 #include <cmath>
 #include <cstddef>
 #include <future>
+#include <gufo/ext/cancellable_gate.hpp>
+#include <gufo/ext/utf8.hpp>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
-#include "src/core/cancellable_gate.hpp"
-#include "src/core/utf8.hpp"
 #include "src/models/qwen3_asr/audio.hpp"
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/hip/audio_encoder_runtime.hpp"

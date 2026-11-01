@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "name": "compare",
+  "target": "gufo_compare",
+  "kind": "static",
+  "purpose": "Reference/candidate logit comparison with absolute and relative tolerances, reported by `gufo bench` and the model oracle tests.",
+  "consumers": [
+    "gufo_llm_cli"
+  ],
+  "checks": [
+    "qwen27b_target_test",
+    "qwen_l1_ffn_module_test",
+    "qwen_l1_norm_module_test",
+    "qwen_l1_ssm_module_test",
+    "qwen_oracle_test"
+  ]
+}

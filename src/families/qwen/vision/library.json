@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "vision",
+  "target": "gufo_qwen_vision",
+  "kind": "static",
+  "purpose": "Qwen vision encoder, image prompt expansion and image cache shared by Qwen 27B and Flash-Next.",
+  "depends": ["control_tokens", "hip_common", "kernels", "text"]
+}

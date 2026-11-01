@@ -72,7 +72,7 @@ def launcher(directory, name, loader, libraries, environment):
 def pack(package, revision, destination):
     package = package.resolve(strict=True)
     version = output(str(package / 'bin/gufo'), '--version')
-    if not version.endswith(f'({revision[:7]})'):
+    if not version.splitlines()[0].endswith(f'({revision[:7]})'):
         raise ValueError(f'Package revision mismatch: {version}; expected {revision}')
     root = destination.parent
     closure = [Path(path) for path in output('nix-store', '--query', '--requisites', str(package)).splitlines()]
@@ -148,7 +148,7 @@ def verify(source, revision):
         if hashlib.file_digest(file, 'sha256').hexdigest() != manifest['sha256']:
             raise ValueError('Linux binary checksum mismatch')
     version = output(str(source / 'gufo'), '--version')
-    if version != manifest['version'] or not version.endswith(f'({revision[:7]})'):
+    if version != manifest['version'] or not version.splitlines()[0].endswith(f'({revision[:7]})'):
         raise ValueError('Linux binary has the wrong revision')
     root = source.parent
     linked = output(str(root / manifest['loader']), '--library-path',

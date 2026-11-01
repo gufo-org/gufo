@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -12,7 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/json.hpp"
 #include "src/models/qwen3_asr/bpe.hpp"
 
 namespace gufo::models::qwen3_asr {

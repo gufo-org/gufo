@@ -8,6 +8,9 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <gufo/ext/experimental/managed_alloc.hpp>
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
+#include <gufo/ext/platform/pages.hpp>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
@@ -17,9 +20,6 @@
 #include <vector>
 
 #include "qfn_mmq.h"
-#include "src/core/hip/managed_alloc.hpp"
-#include "src/core/hip/snapshot_transfer.hpp"
-#include "src/core/platform/pages.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
@@ -1846,7 +1846,7 @@ void Executor::RoutedHints(const DeviceTensor& w,
 }
 
 bool Executor::RouteHints(std::uint32_t n_tokens, std::string* error_msg,
-                          bool wmma_forced) const {
+                          bool wmma_forced, bool pairable) const {
   // Every column tile past an expert's bucket still costs a dispatch and a
   // full shared-memory reservation, so the grid is cut to the real largest
   // bucket. Counts are downloaded before the shared expert; wait only for
@@ -1855,9 +1855,7 @@ bool Executor::RouteHints(std::uint32_t n_tokens, std::string* error_msg,
   const Config& c = config();
   routed_max_rows_ = 0;
   routed_n_tiles_ = 0;
-  routed_64_tiles_ = 0;
-  routed_pair_tiles_ = 0;
-  routed_pair_offset_ = 0;
+  routed_wide_tiles_ = 0;
   if (!ExpertMatrixRows(n_tokens) && !wmma_forced) {
     return true;
   }
@@ -1899,14 +1897,12 @@ bool Executor::RouteHints(std::uint32_t n_tokens, std::string* error_msg,
       }
     }
   };
-  if (WidePrefill(n_tokens)) {
-    // Prefill batches: 64-token tiles for the down projection, then 128-token
-    // tiles for the paired gate/up projections.
-    append(64);
-    routed_64_tiles_ = n_tiles;
-    routed_pair_offset_ = n_tiles;
+  if (WidePrefill(n_tokens) && pairable) {
+    // Prefill batches: one map of 128-token tiles serves the paired gate/up
+    // and the down projections. Codebook layouts have no paired kernel; they
+    // keep the standard tile-height map for every batch size.
     append(128);
-    routed_pair_tiles_ = n_tiles - routed_pair_offset_;
+    routed_wide_tiles_ = n_tiles;
   } else {
     append(routed_tile_rows_);
     routed_n_tiles_ = n_tiles;
@@ -2738,12 +2734,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // Narrow batches split each row's key tiles over kAttnSplits blocks so a
   // decode step at depth fills the device.
   const bool split = !MatrixRows(n_tokens);
-  rocm::Attention(
-      s_.q, s.k_cache, s.v_cache, mask, mask_words_, s_.ctx,
-      split ? s_.attn_partials : nullptr, kAttnSplits, n_tokens, pos,
-      c.num_heads, c.num_kv_heads, c.head_dim, c.compress_ratio, stream_,
-      split ? s_.attn_lists : nullptr, split ? s_.attn_counts : nullptr,
-      c.compress_ratio > 0 ? c.indexer_top_k / c.compress_ratio : 0);
+  rocm::Attention(s_.q, s.k_cache, s.v_cache, mask, mask_words_, s_.ctx,
+                  split ? s_.attn_partials : nullptr, kAttnSplits, n_tokens,
+                  pos, c.num_heads, c.num_kv_heads, c.head_dim,
+                  c.compress_ratio, stream_, split ? s_.attn_lists : nullptr,
+                  split ? s_.attn_counts : nullptr,
+                  c.compress_ratio > 0 ? c.indexer_top_k / c.compress_ratio : 0,
+                  c.indexer_top_k);
   const std::uint32_t q_dim = c.AttentionQDim();
   const std::size_t ctx_count = static_cast<std::size_t>(n_tokens) * q_dim;
   // A decode batch's output projection reads the gate's Q8_1 rows.
@@ -2902,7 +2899,14 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // The WMMA route needs the tile map even on decode-sized batches, so
   // RouteHints must know it before anything else reads the hints.
   const bool wmma_experts = WmmaExperts(l, n_tokens);
-  if (!RouteHints(n_tokens, error_msg, wmma_experts)) {
+  // The 128-row wide prefill map only serves the paired gate/up kernel,
+  // which exists for the K-quant nibble layout; codebook layouts take the
+  // standard-height map instead.
+  const bool wide_pairable =
+      l.ffn_gate_exps.type == l.ffn_up_exps.type &&
+      (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
+       l.ffn_gate_exps.type == GgmlType::kQ5_K);
+  if (!RouteHints(n_tokens, error_msg, wmma_experts, wide_pairable)) {
     return false;
   }
   // Tiled batches take the WMMA route: assignments compacted by expert
@@ -2938,39 +2942,44 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                           (gate_type == WeightType::kQ4_K ||
                            gate_type == WeightType::kQ5_K);
     const bool gated_ok =
-        routed_64_tiles_ != 0 && pairable
-            ? RoutedGatedF16Gemm(
-                  l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
-                  s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
-                  s_.routed_bounds, s_.rows_token, s_.rows_slot, up_half,
-                  c.expert_ff, c.hidden_size, stream_)
-            : (RoutedF16Gemm(
-                   l.ffn_gate_exps.data, gate_type, x_half, s_.routed_tiles,
-                   routed_64_tiles_ != 0 ? routed_64_tiles_ : routed_n_tiles_,
-                   routed_64_tiles_ != 0 ? 64 : routed_tile_rows_,
-                   s_.routed_bounds, s_.rows_token, s_.rows_slot, nullptr,
-                   s_.gate_e, nullptr, c.expert_ff, c.hidden_size, stream_) &&
-               RoutedF16Gemm(
-                   l.ffn_up_exps.data, up_type, x_half, s_.routed_tiles,
-                   routed_64_tiles_ != 0 ? routed_64_tiles_ : routed_n_tiles_,
-                   routed_64_tiles_ != 0 ? 64 : routed_tile_rows_,
-                   s_.routed_bounds, s_.rows_token, s_.rows_slot, s_.gate_e,
-                   nullptr, up_half, c.expert_ff, c.hidden_size, stream_));
+        routed_wide_tiles_ != 0 && pairable
+            ? RoutedGatedF16Gemm(l.ffn_gate_exps.data, l.ffn_up_exps.data,
+                                 gate_type, x_half, s_.routed_tiles,
+                                 routed_wide_tiles_, s_.routed_bounds,
+                                 s_.rows_token, s_.rows_slot, up_half,
+                                 c.expert_ff, c.hidden_size, stream_)
+            : (RoutedF16Gemm(l.ffn_gate_exps.data, gate_type, x_half,
+                             s_.routed_tiles, routed_n_tiles_,
+                             routed_tile_rows_, s_.routed_bounds, s_.rows_token,
+                             s_.rows_slot, nullptr, s_.gate_e, nullptr,
+                             c.expert_ff, c.hidden_size, stream_) &&
+               RoutedF16Gemm(l.ffn_up_exps.data, up_type, x_half,
+                             s_.routed_tiles, routed_n_tiles_,
+                             routed_tile_rows_, s_.routed_bounds, s_.rows_token,
+                             s_.rows_slot, s_.gate_e, nullptr, up_half,
+                             c.expert_ff, c.hidden_size, stream_));
     if (!gated_ok) {
       AssignError(error_msg, "routed F16 gate/up GEMM failed");
       return false;
     }
-    const WeightType down_type =
-        static_cast<WeightType>(l.ffn_down_exps.type);
-    // Prefill takes the 64-token down tiles: they decode each expert's
-    // weights over more rows, also where narrower tiles would be fewer.
-    const bool wide_down = routed_64_tiles_ != 0;
+    // Q5_1/Q8_0 keep the historical collapse (it is what every baseline
+    // file stores); anything else runs in its own encoding, which the
+    // WMMA launcher covers exactly for the RoutedNativeWMMA set.
+    const WeightType down_type = l.ffn_down_exps.type == GgmlType::kQ8_0
+                                     ? WeightType::kQ8_0
+                                 : l.ffn_down_exps.type == GgmlType::kQ5_1
+                                     ? WeightType::kQ5_1
+                                     : static_cast<WeightType>(
+                                           l.ffn_down_exps.type);
+    // Prefill takes the gate/up map's 128-token tiles: each wave decodes its
+    // rows' weights once for up to 128 tokens.
+    const bool wide_down = routed_wide_tiles_ != 0;
     // The down projection's rows are F16 too: the epilogue reads half the
     // bytes of the largest routed intermediate.
     if (!RoutedF16Gemm(l.ffn_down_exps.data, down_type, up_half,
                        s_.routed_tiles,
-                       wide_down ? routed_64_tiles_ : routed_n_tiles_,
-                       wide_down ? 64 : routed_tile_rows_, s_.routed_bounds,
+                       wide_down ? routed_wide_tiles_ : routed_n_tiles_,
+                       wide_down ? 128 : routed_tile_rows_, s_.routed_bounds,
                        s_.rows_slot, s_.rows_slot, nullptr, nullptr,
                        reinterpret_cast<__half*>(s_.down_e), c.hidden_size,
                        c.expert_ff, stream_)) {

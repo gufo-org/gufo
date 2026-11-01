@@ -161,10 +161,6 @@ float Q3Value(const block_q3_K& block,
 
 }  // namespace
 
-float Q6KValue(const block_q6_K& block, std::size_t index) noexcept {
-  return Q6Value(block, index);
-}
-
 std::size_t QuantizedRowBytes(core::GgmlType type,
                               std::size_t elements) noexcept {
   const std::size_t block_qk = QuantizedBlockElements(type);
@@ -193,6 +189,21 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kIQ2_XXS:
       block_bytes = 66;
       break;
+    case core::GgmlType::kIQ2_XS:
+      block_bytes = 74;
+      break;
+    case core::GgmlType::kIQ2_S:
+      block_bytes = 82;
+      break;
+    case core::GgmlType::kIQ3_XXS:
+      block_bytes = 98;
+      break;
+    case core::GgmlType::kIQ1_S:
+      block_bytes = 50;
+      break;
+    case core::GgmlType::kIQ1_M:
+      block_bytes = 56;
+      break;
     case core::GgmlType::kQ3_K:
       block_bytes = sizeof(block_q3_K);
       break;
@@ -219,15 +230,6 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       break;
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
-      break;
-    case core::GgmlType::kIQ3_XXS:
-      block_bytes = sizeof(block_iq3_xxs);
-      break;
-    case core::GgmlType::kIQ2_S:
-      block_bytes = sizeof(block_iq2_s);
-      break;
-    case core::GgmlType::kQ2_0:
-      block_bytes = sizeof(block_q2_0);
       break;
     default:
       return 0;
@@ -417,6 +419,31 @@ void DequantizeQ8_0(const void* src, float* dst, std::size_t k) {
   }
 }
 
+void DequantizeQ5_1(const void* src, float* dst, std::size_t k) {
+  // d, m (F16), 32 high bits, then 16 bytes of low nibbles per 32 elements.
+  constexpr std::size_t kBlockBytes = 24;
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    const std::uint8_t* blk = bytes + b * kBlockBytes;
+    std::uint16_t dh = 0;
+    std::uint16_t mh = 0;
+    std::uint32_t qh = 0;
+    std::memcpy(&dh, blk, 2);
+    std::memcpy(&mh, blk + 2, 2);
+    std::memcpy(&qh, blk + 4, 4);
+    const std::uint8_t* qs = blk + 8;
+    const float d = Fp16ToFloat(dh);
+    const float m = Fp16ToFloat(mh);
+    float* y = dst + b * 32;
+    for (int j = 0; j < 16; ++j) {
+      const int xh0 = ((qh >> j) & 1U) << 4;
+      const int xh1 = ((qh >> (j + 16)) & 1U) << 4;
+      y[j] = static_cast<float>((qs[j] & 0x0F) | xh0) * d + m;
+      y[j + 16] = static_cast<float>((qs[j] >> 4) | xh1) * d + m;
+    }
+  }
+}
+
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
                      std::size_t k) {
   const auto* blocks = static_cast<const block_q8_0*>(row_data);
@@ -448,6 +475,7 @@ namespace {
 // uint8 magnitudes for one group of four elements.
 
 constexpr std::uint8_t kSignMaskIq2xs[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+}  // namespace
 
 float Iq4NlValue(const block_iq4_nl& block, std::size_t index) noexcept {
   const std::size_t lane = index % 16;
@@ -457,12 +485,20 @@ float Iq4NlValue(const block_iq4_nl& block, std::size_t index) noexcept {
   return Fp16ToFloat(block.d) * static_cast<float>(kValuesIq4Nl[code]);
 }
 
+float Iq4XsValue(const block_iq4_xs& block, std::size_t index) noexcept {
+  const std::size_t ib = index / 32;  // 0..7 sub-block
+  const std::size_t within = index % 32;
+  const std::size_t lane = within % 16;
+  const bool high_nibble = within >= 16;
+  const std::uint8_t packed = block.qs[(ib * 16) + lane];
+  const std::uint8_t code = high_nibble ? (packed >> 4U) : (packed & 0x0FU);
+  const int ls =
+      static_cast<int>((block.scales_l[ib / 2] >> (4U * (ib % 2))) & 0x0FU) |
+      static_cast<int>(((block.scales_h >> (2U * ib)) & 0x03U) << 4U);
+  return Fp16ToFloat(block.d) * static_cast<float>(ls - 32) *
+         static_cast<float>(kValuesIq4Nl[code]);
+}
 
-
-}  // namespace
-
-// Public IQ3_S/IQ4_XS element accessors: the routed GPU kernels mirror these
-// semantics through the same public grid and sign tables.
 float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
   const std::size_t ib32 = index / 32;    // 0..7 sub-block
   const std::size_t within = index % 32;  // 0..31
@@ -495,26 +531,9 @@ float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
   return negate ? -db * magnitude : db * magnitude;
 }
 
-float Iq4XsValue(const block_iq4_xs& block, std::size_t index) noexcept {
-  const std::size_t ib = index / 32;  // 0..7 sub-block
-  const std::size_t within = index % 32;
-  const std::size_t lane = within % 16;
-  const bool high_nibble = within >= 16;
-  const std::uint8_t packed = block.qs[(ib * 16) + lane];
-  const std::uint8_t code = high_nibble ? (packed >> 4U) : (packed & 0x0FU);
-  const int ls =
-      static_cast<int>((block.scales_l[ib / 2] >> (4U * (ib % 2))) & 0x0FU) |
-      static_cast<int>(((block.scales_h >> (2U * ib)) & 0x03U) << 4U);
-  return Fp16ToFloat(block.d) * static_cast<float>(ls - 32) *
-         static_cast<float>(kValuesIq4Nl[code]);
-}
-
-
 const std::uint32_t* Iq3sGrid() noexcept {
   return kIq3sGrid;
 }
-
-
 
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k) {
   const auto* blocks = static_cast<const block_iq4_nl*>(src);
@@ -542,93 +561,6 @@ void DequantizeIQ3_S(const void* src, float* dst, std::size_t k) {
   for (std::size_t b = 0; b < nb; ++b) {
     for (std::size_t i = 0; i < 256; ++i) {
       dst[(b * 256) + i] = Iq3sValue(blocks[b], i);
-    }
-  }
-}
-
-float Iq3XxsValue(const block_iq3_xxs& block, std::size_t index) noexcept {
-  const std::size_t ib32 = index / 32;
-  const std::size_t l = (index / 8) % 4;
-  const std::size_t j = index % 8;
-  std::uint32_t aux32 = 0;
-  std::memcpy(&aux32, block.scales_and_signs + 4 * ib32, sizeof(aux32));
-  const float d = Fp16ToFloat(block.d);
-  const float db = d * (0.5f + static_cast<float>(aux32 >> 28)) * 0.5f;
-  const std::uint8_t grid_index = block.qs[8 * ib32 + 2 * l + (j >= 4 ? 1 : 0)];
-  const std::uint8_t magnitude =
-      static_cast<std::uint8_t>(kIq3xxsGrid[grid_index] >> (8 * (j % 4)));
-  const std::uint8_t signs = kSignsIq2xs[(aux32 >> (7 * l)) & 127];
-  return db * static_cast<float>(magnitude) *
-         ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
-}
-
-// IQ2_S: element `index` of one 256-element block (reference semantics from
-// llama.cpp dequantize_row_iq2_s). The 1024-entry grid index is the qs byte
-// plus two high bits from the qh byte of the 32-element sub-block; sign bits
-// physically overlap qs at offset QK_K/8 in the packed block, hence the raw
-// byte indexing below.
-float Iq2SValue(const block_iq2_s& block, std::size_t index) noexcept {
-  const std::size_t ib32 = index / 32;
-  const std::size_t l = (index / 8) % 4;
-  const std::size_t j = index % 8;
-  const float d = Fp16ToFloat(block.d);
-  const std::uint8_t scales_byte = block.scales[ib32];
-  const float db =
-      d * (0.5f + ((l / 2) == 0 ? (scales_byte & 0xF) : (scales_byte >> 4))) *
-      0.25f;
-  const std::uint8_t* bytes =
-      reinterpret_cast<const std::uint8_t*>(&block);  // NOLINT
-  const std::uint8_t qs_byte = bytes[2 + 4 * ib32 + l];
-  const std::size_t grid_index =
-      static_cast<std::size_t>(qs_byte) |
-      ((static_cast<std::size_t>(bytes[66 + ib32]) << (8 - 2 * l)) & 0x300);
-  const std::uint8_t magnitude = static_cast<std::uint8_t>(
-      kIq2sGrid[grid_index] >> (8 * static_cast<std::size_t>(j)));
-  // Signs overlap qs at offset QK_K/8 (byte 34 of the block); one bit per
-  // element (1 = negative), no sign-table indirection.
-  const std::uint8_t signs = bytes[34 + 4 * ib32 + l];
-  return db * static_cast<float>(magnitude) *
-         ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
-}
-
-void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k) {
-  const auto* blocks = static_cast<const block_iq3_xxs*>(src);
-  const std::size_t nb = k / 256;
-  for (std::size_t b = 0; b < nb; ++b) {
-    for (std::size_t i = 0; i < 256; ++i) {
-      dst[(b * 256) + i] = Iq3XxsValue(blocks[b], i);
-    }
-  }
-}
-
-void DequantizeIQ2_S(const void* src, float* dst, std::size_t k) {
-  const auto* blocks = static_cast<const block_iq2_s*>(src);
-  const std::size_t nb = k / 256;
-  for (std::size_t b = 0; b < nb; ++b) {
-    for (std::size_t i = 0; i < 256; ++i) {
-      dst[(b * 256) + i] = Iq2SValue(blocks[b], i);
-    }
-  }
-}
-
-// Q2_0: IST-DASLab's 2-bit linear format (QK = 64). Codes pack four per byte,
-// low bits first, with the mapping 00=-1, 01=0, 10=+1, 11=+2.
-// Public Q2_0 element accessor: the 2-bit code biased by -1 and scaled
-// by the block's f16 delta; the routed GPU kernel mirrors this exactly.
-float Q2_0Value(const block_q2_0& block, std::size_t index) noexcept {
-  const std::uint8_t q = (block.qs[index / 4] >> (2 * (index % 4))) & 0x03U;
-  return (static_cast<float>(static_cast<int>(q)) - 1.0f) *
-         Fp16ToFloat(block.d);
-}
-
-void DequantizeQ2_0(const void* src, float* dst, std::size_t k) {
-  const auto* blocks = static_cast<const block_q2_0*>(src);
-  const std::size_t nb = k / 64;
-  for (std::size_t b = 0; b < nb; ++b) {
-    const float d = Fp16ToFloat(blocks[b].d);
-    for (std::size_t j = 0; j < 64; ++j) {
-      const std::uint8_t q = (blocks[b].qs[j / 4] >> (2 * (j % 4))) & 0x03;
-      dst[(b * 64) + j] = (static_cast<float>(static_cast<int>(q)) - 1.0f) * d;
     }
   }
 }
@@ -673,6 +605,456 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
     }
   }
   return sum;
+}
+
+// ---------------------------------------------------------------------------
+// Q4_0 / Q4_1 / Q5_0 / Q2_K and the IQ1/IQ2/IQ3 importance formats, element
+// for element as ggml-quants.c's dequantize_row_* (the same products in the
+// same order, so an exact-arithmetic consumer reproduces them bit for bit).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+#include "src/core/quant/ggml_iq_grids.inc"
+
+constexpr float kIq1Delta = 0.125F;
+
+std::uint16_t LoadU16(const std::uint8_t* p) noexcept {
+  std::uint16_t v = 0;
+  std::memcpy(&v, p, sizeof(v));
+  return v;
+}
+
+std::uint32_t LoadU32(const std::uint8_t* p) noexcept {
+  std::uint32_t v = 0;
+  std::memcpy(&v, p, sizeof(v));
+  return v;
+}
+
+float SignOf(std::uint8_t signs, int j) noexcept {
+  return (signs & kSignMaskIq2xs[j]) != 0 ? -1.0F : 1.0F;
+}
+
+/// Element j of iq1s_grid entry `index`, from the GPU packing (value + 1).
+float Iq1sGrid(std::uint32_t index, int j) noexcept {
+  const int nibble = 2 * (j % 4) + j / 4;
+  return static_cast<float>(
+      static_cast<int>((kIq1sGridGpu[index] >> (4 * nibble)) & 0x0FU) - 1);
+}
+
+}  // namespace
+
+void DequantizeQ4_0(const void* src, float* dst, std::size_t k) {
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    const std::uint8_t* blk = bytes + b * 18;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    const std::uint8_t* qs = blk + 2;
+    float* y = dst + b * 32;
+    for (int j = 0; j < 16; ++j) {
+      y[j] = static_cast<float>((qs[j] & 0x0F) - 8) * d;
+      y[j + 16] = static_cast<float>((qs[j] >> 4) - 8) * d;
+    }
+  }
+}
+
+void DequantizeQ4_1(const void* src, float* dst, std::size_t k) {
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    const std::uint8_t* blk = bytes + b * 20;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    const float m = Fp16ToFloat(LoadU16(blk + 2));
+    const std::uint8_t* qs = blk + 4;
+    float* y = dst + b * 32;
+    for (int j = 0; j < 16; ++j) {
+      y[j] = static_cast<float>(qs[j] & 0x0F) * d + m;
+      y[j + 16] = static_cast<float>(qs[j] >> 4) * d + m;
+    }
+  }
+}
+
+void DequantizeQ5_0(const void* src, float* dst, std::size_t k) {
+  // d (F16), 32 high bits, then 16 bytes of low nibbles per 32 elements.
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    const std::uint8_t* blk = bytes + b * 22;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    const std::uint32_t qh = LoadU32(blk + 2);
+    const std::uint8_t* qs = blk + 6;
+    float* y = dst + b * 32;
+    for (int j = 0; j < 16; ++j) {
+      const int xh0 = static_cast<int>(((qh >> j) << 4) & 0x10U);
+      const int xh1 = static_cast<int>((qh >> (j + 12)) & 0x10U);
+      y[j] = static_cast<float>(((qs[j] & 0x0F) | xh0) - 16) * d;
+      y[j + 16] = static_cast<float>(((qs[j] >> 4) | xh1) - 16) * d;
+    }
+  }
+}
+
+void DequantizeQ2_K(const void* src, float* dst, std::size_t k) {
+  // scales[16] (low nibble scale, high nibble minimum), qs[64], d, dmin.
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    const std::uint8_t* blk = bytes + b * 84;
+    const std::uint8_t* scales = blk;
+    const std::uint8_t* q = blk + 16;
+    const float d = Fp16ToFloat(LoadU16(blk + 80));
+    const float min = Fp16ToFloat(LoadU16(blk + 82));
+    float* y = dst + b * 256;
+    int is = 0;
+    for (int n = 0; n < 256; n += 128) {
+      int shift = 0;
+      for (int j = 0; j < 4; ++j) {
+        for (int half = 0; half < 2; ++half) {
+          const std::uint8_t sc = scales[is++];
+          const float dl = d * static_cast<float>(sc & 0x0F);
+          const float ml = min * static_cast<float>(sc >> 4);
+          for (int l = 0; l < 16; ++l) {
+            *y++ =
+                dl * static_cast<float>((q[l + 16 * half] >> shift) & 3) - ml;
+          }
+        }
+        shift += 2;
+      }
+      q += 32;
+    }
+  }
+}
+
+void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k) {
+  // d, then per 32 elements two words: four grid indices, and seven-bit
+  // sign groups with a four-bit scale in the top bits.
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    const std::uint8_t* blk = bytes + b * 66;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    float* y = dst + b * 256;
+    for (int ib32 = 0; ib32 < 8; ++ib32) {
+      const std::uint8_t* q = blk + 2 + 8 * ib32;
+      const std::uint32_t aux1 = LoadU32(q + 4);
+      const float db = d * (0.5F + static_cast<float>(aux1 >> 28)) * 0.25F;
+      for (int l = 0; l < 4; ++l) {
+        const auto* grid =
+            reinterpret_cast<const std::uint8_t*>(&kIq2xxsGrid[q[l]]);
+        const std::uint8_t signs = kKsignsIq2xs[(aux1 >> (7 * l)) & 127U];
+        for (int j = 0; j < 8; ++j)
+          y[j] = db * static_cast<float>(grid[j]) * SignOf(signs, j);
+        y += 8;
+      }
+    }
+  }
+}
+
+void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k) {
+  // d, qs[32] (nine-bit grid index, seven-bit sign group), scales[8].
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    const std::uint8_t* blk = bytes + b * 74;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    const std::uint8_t* scales = blk + 66;
+    float* y = dst + b * 256;
+    for (int ib32 = 0; ib32 < 8; ++ib32) {
+      const float db[2] = {
+          d * (0.5F + static_cast<float>(scales[ib32] & 0x0F)) * 0.25F,
+          d * (0.5F + static_cast<float>(scales[ib32] >> 4)) * 0.25F};
+      for (int l = 0; l < 4; ++l) {
+        const std::uint16_t qs = LoadU16(blk + 2 + 2 * (4 * ib32 + l));
+        const auto* grid =
+            reinterpret_cast<const std::uint8_t*>(&kIq2xsGrid[qs & 511U]);
+        const std::uint8_t signs = kKsignsIq2xs[qs >> 9];
+        for (int j = 0; j < 8; ++j)
+          y[j] = db[l / 2] * static_cast<float>(grid[j]) * SignOf(signs, j);
+        y += 8;
+      }
+    }
+  }
+}
+
+void DequantizeIQ2_S(const void* src, float* dst, std::size_t k) {
+  // d, qs[32] grid lows, signs[32], qh[8] grid highs, scales[8].
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    const std::uint8_t* blk = bytes + b * 82;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    const std::uint8_t* qs = blk + 2;
+    const std::uint8_t* signs = qs + 32;
+    const std::uint8_t* qh = blk + 66;
+    const std::uint8_t* scales = blk + 74;
+    float* y = dst + b * 256;
+    for (int ib32 = 0; ib32 < 8; ++ib32) {
+      const float db[2] = {
+          d * (0.5F + static_cast<float>(scales[ib32] & 0x0F)) * 0.25F,
+          d * (0.5F + static_cast<float>(scales[ib32] >> 4)) * 0.25F};
+      for (int l = 0; l < 4; ++l) {
+        const float dl = db[l / 2];
+        const std::uint32_t index =
+            qs[l] |
+            ((static_cast<std::uint32_t>(qh[ib32]) << (8 - 2 * l)) & 0x300U);
+        const auto* grid =
+            reinterpret_cast<const std::uint8_t*>(&gufo::quant::kIq2sGrid[index]);
+        for (int j = 0; j < 8; ++j)
+          y[j] = dl * static_cast<float>(grid[j]) * SignOf(signs[l], j);
+        y += 8;
+      }
+      qs += 4;
+      signs += 4;
+    }
+  }
+}
+
+void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k) {
+  // d, qs[64] grid indices, then per 32 elements a word of sign groups
+  // with a four-bit scale in the top bits.
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    const std::uint8_t* blk = bytes + b * 98;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    const std::uint8_t* qs = blk + 2;
+    const std::uint8_t* scales_and_signs = blk + 2 + 64;
+    float* y = dst + b * 256;
+    for (int ib32 = 0; ib32 < 8; ++ib32) {
+      const std::uint32_t aux = LoadU32(scales_and_signs + 4 * ib32);
+      const float db = d * (0.5F + static_cast<float>(aux >> 28)) * 0.5F;
+      for (int l = 0; l < 4; ++l) {
+        const std::uint8_t signs = kKsignsIq2xs[(aux >> (7 * l)) & 127U];
+        const auto* grid1 =
+            reinterpret_cast<const std::uint8_t*>(&gufo::quant::kIq3xxsGrid[qs[2 * l]]);
+        const auto* grid2 =
+            reinterpret_cast<const std::uint8_t*>(&gufo::quant::kIq3xxsGrid[qs[2 * l + 1]]);
+        for (int j = 0; j < 4; ++j) {
+          y[j] = db * static_cast<float>(grid1[j]) * SignOf(signs, j);
+          y[j + 4] = db * static_cast<float>(grid2[j]) * SignOf(signs, j + 4);
+        }
+        y += 8;
+      }
+      qs += 8;
+    }
+  }
+}
+
+void DequantizeIQ1_S(const void* src, float* dst, std::size_t k) {
+  // d, qs[32] grid lows, qh[8] words: three grid highs per group, a
+  // three-bit scale and the delta's sign.
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    const std::uint8_t* blk = bytes + b * 50;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    const std::uint8_t* qs = blk + 2;
+    float* y = dst + b * 256;
+    for (int ib = 0; ib < 8; ++ib) {
+      const std::uint16_t qh = LoadU16(blk + 34 + 2 * ib);
+      const float dl = d * static_cast<float>(2 * ((qh >> 12) & 7) + 1);
+      const float delta = (qh & 0x8000U) != 0 ? -kIq1Delta : kIq1Delta;
+      for (int l = 0; l < 4; ++l) {
+        const std::uint32_t index = qs[l] | (((qh >> (3 * l)) & 7U) << 8);
+        for (int j = 0; j < 8; ++j)
+          y[j] = dl * (Iq1sGrid(index, j) + delta);
+        y += 8;
+      }
+      qs += 4;
+    }
+  }
+}
+
+void DequantizeIQ1_M(const void* src, float* dst, std::size_t k) {
+  // qs[32] grid lows, qh[16] (grid highs and delta signs per group of
+  // eight), scales[8]: twelve three-bit scales and the F16 d in the top
+  // nibbles of the four scale words.
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    const std::uint8_t* blk = bytes + b * 56;
+    const std::uint8_t* qs = blk;
+    const std::uint8_t* qh = blk + 32;
+    std::uint16_t sc[4];
+    for (int i = 0; i < 4; ++i)
+      sc[i] = LoadU16(blk + 48 + 2 * i);
+    const auto packed =
+        static_cast<std::uint16_t>((sc[0] >> 12) | ((sc[1] >> 8) & 0x00F0) |
+                                   ((sc[2] >> 4) & 0x0F00) | (sc[3] & 0xF000));
+    const float d = Fp16ToFloat(packed);
+    float* y = dst + b * 256;
+    for (int ib = 0; ib < 8; ++ib) {
+      const float dl1 =
+          d *
+          static_cast<float>(2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 7) + 1);
+      const float dl2 =
+          d *
+          static_cast<float>(2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 7) + 1);
+      const std::uint32_t idx[4] = {
+          qs[0] | ((static_cast<std::uint32_t>(qh[0]) << 8) & 0x700U),
+          qs[1] | ((static_cast<std::uint32_t>(qh[0]) << 4) & 0x700U),
+          qs[2] | ((static_cast<std::uint32_t>(qh[1]) << 8) & 0x700U),
+          qs[3] | ((static_cast<std::uint32_t>(qh[1]) << 4) & 0x700U)};
+      const float delta[4] = {(qh[0] & 0x08) != 0 ? -kIq1Delta : kIq1Delta,
+                              (qh[0] & 0x80) != 0 ? -kIq1Delta : kIq1Delta,
+                              (qh[1] & 0x08) != 0 ? -kIq1Delta : kIq1Delta,
+                              (qh[1] & 0x80) != 0 ? -kIq1Delta : kIq1Delta};
+      for (int l = 0; l < 4; ++l) {
+        const float dl = l < 2 ? dl1 : dl2;
+        for (int j = 0; j < 8; ++j)
+          y[j] = dl * (Iq1sGrid(idx[l], j) + delta[l]);
+        y += 8;
+      }
+      qs += 4;
+      qh += 2;
+    }
+  }
+}
+
+bool DequantizeRow(core::GgmlType type, const void* src, float* dst,
+                   std::size_t k) {
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  switch (type) {
+    case core::GgmlType::kF32:
+      std::memcpy(dst, src, k * sizeof(float));
+      return true;
+    case core::GgmlType::kF16:
+      for (std::size_t i = 0; i < k; ++i)
+        dst[i] = Fp16ToFloat(LoadU16(bytes + 2 * i));
+      return true;
+    case core::GgmlType::kBF16:
+      for (std::size_t i = 0; i < k; ++i) {
+        const std::uint32_t bits =
+            static_cast<std::uint32_t>(LoadU16(bytes + 2 * i)) << 16;
+        std::memcpy(dst + i, &bits, sizeof(float));
+      }
+      return true;
+    default:
+      break;
+  }
+  const std::size_t block = QuantizedBlockElements(type);
+  if (block == 0 || k % block != 0) {
+    return false;
+  }
+  switch (type) {
+    case core::GgmlType::kQ4_0:
+      DequantizeQ4_0(src, dst, k);
+      return true;
+    case core::GgmlType::kQ4_1:
+      DequantizeQ4_1(src, dst, k);
+      return true;
+    case core::GgmlType::kQ5_0:
+      DequantizeQ5_0(src, dst, k);
+      return true;
+    case core::GgmlType::kQ5_1:
+      DequantizeQ5_1(src, dst, k);
+      return true;
+    case core::GgmlType::kQ8_0:
+      DequantizeQ8_0(src, dst, k);
+      return true;
+    case core::GgmlType::kQ2_K:
+      DequantizeQ2_K(src, dst, k);
+      return true;
+    case core::GgmlType::kQ3_K:
+      DequantizeQ3_K(src, dst, k);
+      return true;
+    case core::GgmlType::kQ4_K:
+      DequantizeQ4_K(src, dst, k);
+      return true;
+    case core::GgmlType::kQ5_K:
+      DequantizeQ5_K(src, dst, k);
+      return true;
+    case core::GgmlType::kQ6_K:
+      DequantizeQ6_K(src, dst, k);
+      return true;
+    case core::GgmlType::kQ8_K:
+      DequantizeQ8_K(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ2_XXS:
+      DequantizeIQ2_XXS(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ2_XS:
+      DequantizeIQ2_XS(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ2_S:
+      DequantizeIQ2_S(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ3_XXS:
+      DequantizeIQ3_XXS(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ3_S:
+      DequantizeIQ3_S(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ1_S:
+      DequantizeIQ1_S(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ1_M:
+      DequantizeIQ1_M(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ4_NL:
+      DequantizeIQ4_NL(src, dst, k);
+      return true;
+    case core::GgmlType::kIQ4_XS:
+      DequantizeIQ4_XS(src, dst, k);
+      return true;
+    default:
+      return false;
+  }
+}
+
+// IQ3_XXS / IQ2_S / Q2_0 per-element reference dequantizers
+
+float Iq3XxsValue(const block_iq3_xxs& block, std::size_t index) noexcept {
+  const std::size_t ib32 = index / 32;
+  const std::size_t l = (index / 8) % 4;
+  const std::size_t j = index % 8;
+  std::uint32_t aux32 = 0;
+  std::memcpy(&aux32, block.scales_and_signs + 4 * ib32, sizeof(aux32));
+  const float d = Fp16ToFloat(block.d);
+  const float db = d * (0.5f + static_cast<float>(aux32 >> 28)) * 0.5f;
+  const std::uint8_t grid_index = block.qs[8 * ib32 + 2 * l + (j >= 4 ? 1 : 0)];
+  const std::uint8_t magnitude =
+      static_cast<std::uint8_t>(gufo::quant::kIq3xxsGrid[grid_index] >> (8 * (j % 4)));
+  const std::uint8_t signs = kSignsIq2xs[(aux32 >> (7 * l)) & 127];
+  return db * static_cast<float>(magnitude) *
+         ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
+}
+
+float Iq2SValue(const block_iq2_s& block, std::size_t index) noexcept {
+  const std::size_t ib32 = index / 32;
+  const std::size_t l = (index / 8) % 4;
+  const std::size_t j = index % 8;
+  const float d = Fp16ToFloat(block.d);
+  const std::uint8_t scales_byte = block.scales[ib32];
+  const float db =
+      d * (0.5f + ((l / 2) == 0 ? (scales_byte & 0xF) : (scales_byte >> 4))) *
+      0.25f;
+  const std::uint8_t* bytes =
+      reinterpret_cast<const std::uint8_t*>(&block);  // NOLINT
+  const std::uint8_t qs_byte = bytes[2 + 4 * ib32 + l];
+  const std::size_t grid_index =
+      static_cast<std::size_t>(qs_byte) |
+      ((static_cast<std::size_t>(bytes[66 + ib32]) << (8 - 2 * l)) & 0x300);
+  const std::uint8_t magnitude = static_cast<std::uint8_t>(
+      gufo::quant::kIq2sGrid[grid_index] >> (8 * static_cast<std::size_t>(j)));
+  // Signs overlap qs at offset QK_K/8 (byte 34 of the block); one bit per
+  // element (1 = negative), no sign-table indirection.
+  const std::uint8_t signs = bytes[34 + 4 * ib32 + l];
+  return db * static_cast<float>(magnitude) *
+         ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
+}
+
+float Q2_0Value(const block_q2_0& block, std::size_t index) noexcept {
+  const std::uint8_t q = (block.qs[index / 4] >> (2 * (index % 4))) & 0x03U;
+  return (static_cast<float>(static_cast<int>(q)) - 1.0f) *
+         Fp16ToFloat(block.d);
+}
+
+float Q6KValue(const block_q6_K& block, std::size_t index) noexcept {
+  // Two half-blocks of 128; four rows of 32 per half. The 6-bit value is a
+  // 4-bit low nibble from ql (column-interleaved) and a 2-bit high piece
+  // from qh, biased by -32 and scaled per 32-element row.
+  const std::size_t h = (index / 128) & 1U;
+  const std::size_t within = index % 128;
+  const std::size_t seg = within / 32;
+  const std::size_t lane = within % 32;
+  const std::uint8_t qbyte = block.ql[(seg & 1U) ? h * 64 + 32 + lane
+                                                 : h * 64 + lane];
+  const std::uint8_t low = (seg & 2U) ? (qbyte >> 4U) : (qbyte & 0x0FU);
+  const std::uint8_t high = (block.qh[h * 32 + lane] >> (2 * seg)) & 0x3U;
+  const std::int8_t s = block.scales[h * 8 + lane / 16 + seg * 2];
+  return Fp16ToFloat(block.d) * static_cast<float>(s) *
+         static_cast<float>(static_cast<int>((high << 4U) | low) - 32);
 }
 
 }  // namespace gufo::quant

@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/platform/mapped_file.hpp"
-#include "src/core/platform/os_info.hpp"
+#include <gufo/ext/platform/mapped_file.hpp>
+#include <gufo/ext/platform/os_info.hpp>
 #include "src/models/minimax_h3/audio_vae.hpp"
 #include "src/models/minimax_h3/audio_vae_ops.hip.hpp"
 #include "src/models/minimax_h3/json.hpp"

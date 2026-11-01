@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "deepseek_v4_flash",
+  "target": "gufo_deepseek_v4_flash",
+  "kind": "static",
+  "purpose": "DeepSeek V4 Flash ROCm runtime: model data, graph capture, session and tokenizer over the CPU-only text tier. Registered only when ENGINE_ENABLE_HIP is ON.",
+  "consumers": [
+    "gufo",
+    "gufo_http",
+    "gufo_llm_cli",
+    "gufo_serving"
+  ],
+  "checks": [
+    "openai_chat_test"
+  ],
+  "compiled_elsewhere": [
+    {
+      "target": "gufo_http",
+      "source": "src/models/deepseek_v4_flash/tool_calls.cpp",
+      "reason": "The tool-call scanner is part of the shared HTTP layer today; the step-10 text migration (Card 22) moves it back behind this library."
+    }
+  ]
+}

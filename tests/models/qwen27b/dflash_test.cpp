@@ -22,9 +22,10 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 
 namespace {
 
@@ -707,12 +708,13 @@ void CaptureAcceptanceTrace(
       draft_model, {.max_context = capacity, .max_draft_tokens = 7}, &error);
   Expect(backend != nullptr, error);
   auto* inspect = backend.get();
-  gufo::speculative::SpeculativeVerifier verifier(
+  auto verifier_owner = gufo::hip::CreateQwenGpuSpeculativeVerifier(
       *executor, std::move(backend),
       {.max_draft_tokens = 7,
        .initial_draft_tokens = 7,
        .enable_adaptive_draft_length = false,
        .use_batched_verification = true});
+  auto& verifier = *verifier_owner;
   Token current = verifier.Prime(prompt);
   const Token first = current;
   const auto target_prefix = executor->SaveSnapshot(prompt.size());
@@ -774,12 +776,13 @@ void CaptureAcceptanceTrace(
   // single expensive target prefill for every arm.
   for (const int arm : {0, 1, 2}) {
     executor->RestoreSnapshot(*target_prefix);
-    gufo::speculative::SpeculativeVerifier rebuilt_verifier(
+    auto rebuilt_verifier_owner = gufo::hip::CreateQwenGpuSpeculativeVerifier(
         *executor, *rebuilt,
         {.max_draft_tokens = 7,
          .initial_draft_tokens = 7,
          .enable_adaptive_draft_length = false,
          .use_batched_verification = true});
+    auto& rebuilt_verifier = *rebuilt_verifier_owner;
     if (arm == 0)
       verifier.RestoreSnapshot(*draft_prefix);
     else if (arm == 1)

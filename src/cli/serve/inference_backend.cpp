@@ -22,6 +22,7 @@
 #include <utility>
 
 #include "src/cli/serve/component_text_cache.hpp"
+#include "src/cli/serve/continuation_identity.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
@@ -29,23 +30,25 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
 #include "src/core/sampling.hpp"
-#include "src/models/qwen/chat_template.hpp"
-#include "src/models/qwen/control_tokens.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
+#include "src/families/qwen/vision/image_cache.hpp"
 #include "src/models/qwen/generator.hpp"
-#include "src/models/qwen/vision/image_cache.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/committed_backing.hpp"
+#include "src/core/hip/component_cache_resources.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
+#include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
@@ -217,188 +220,10 @@ void PrepareVision(
                    " " + Logger::MemoryStatus());
 }
 
-constexpr std::string_view kDeepSeekStateAbi =
-    "deepseek-v4-flash-gfx1151-state-v4";
-constexpr std::uint32_t kQwenComponentPayloadVersion = 2;
 constexpr std::size_t kQwenMaxResumeTokens = 9;
-
-constexpr std::string_view QwenStateAbi(bool speculative,
-                                        bool fp16_attention_kv,
-                                        bool bf16_recurrent_state) noexcept {
-  if (bf16_recurrent_state) {
-    if (speculative) {
-      return fp16_attention_kv
-                 ? "qwen-gfx1151-dflash-state-v4-fp16-kv-bf16-recurrent"
-                 : "qwen-gfx1151-dflash-state-v4-fp32-kv-bf16-recurrent";
-    }
-    return fp16_attention_kv ? "qwen-gfx1151-state-v3-fp16-kv-bf16-recurrent"
-                             : "qwen-gfx1151-state-v3-fp32-kv-bf16-recurrent";
-  }
-  if (speculative) {
-    return fp16_attention_kv ? "qwen-gfx1151-dflash-state-v3-fp16-kv"
-                             : "qwen-gfx1151-dflash-state-v3-fp32-kv";
-  }
-  return fp16_attention_kv ? "qwen-gfx1151-state-v2-fp16-kv"
-                           : "qwen-gfx1151-state-v2-fp32-kv";
-}
 
 bool DiskCacheEnabled(const TextDiskCacheConfig& config) noexcept {
   return !config.directory.empty();
-}
-
-bool IsSha256Hex(std::string_view value) noexcept {
-  return value.size() == 64 && std::ranges::all_of(value, [](char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
-}
-
-std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
-    std::string_view artifact_fingerprint, std::string_view support_fingerprint,
-    std::uint32_t max_context, std::uint32_t max_draft_tokens) {
-  if (!IsSha256Hex(artifact_fingerprint)) {
-    throw std::invalid_argument(
-        "DeepSeek disk cache requires an artifact fingerprint");
-  }
-  std::ostringstream identity;
-  identity << "schema=gufo-text-continuation-v2\n"
-           << "model_kind=deepseek4\n"
-           << "artifact_id=" << core::kGgufIdentityScheme << ':'
-           << artifact_fingerprint << '\n'
-           << "tokenizer=joyai-byte-bpe-v1\n"
-           << "chat_template=" << models::deepseek_v4_flash::ChatTemplateId()
-           << '\n'
-           << "chat_template_reference_sha256="
-           << models::deepseek_v4_flash::EncoderReferenceSha256() << '\n'
-           << "state_abi=" << kDeepSeekStateAbi << '\n'
-           << "payload_layout=ds4-rocm-v4-window128-continuation\n"
-           // Cached frontiers also depend on the compiled numerical routes.
-           << "numerics=ds4-scalar-verifier-v1\n"
-           << "context_tokens=" << max_context << '\n'
-           << "position_policy=absolute-v1\n"
-           << "rope_window_policy=deepseek4-compiled-v1\n"
-           << "adapters=none\n";
-  identity << "support_id=" << core::kGgufIdentityScheme << ':'
-           << support_fingerprint << '\n'
-           << "max_draft_tokens=" << max_draft_tokens << '\n'
-           << "draft_policy=dspark-cost-v5-window128\n";
-  const std::string canonical = identity.str();
-  return {canonical.begin(), canonical.end()};
-}
-
-std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
-    std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
-    bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
-    std::uint32_t decode_concurrency, std::string_view position_policy) {
-  if (!IsSha256Hex(artifact_fingerprint)) {
-    throw std::invalid_argument(
-        "Qwen3.8-Flash-Next disk cache requires an artifact fingerprint");
-  }
-  if (has_mtp && !IsSha256Hex(mtp_fingerprint)) {
-    throw std::invalid_argument(
-        "Qwen3.8-Flash-Next MTP disk cache requires a draft artifact "
-        "fingerprint");
-  }
-  std::ostringstream identity;
-  identity << "schema=gufo-text-continuation-v2\n"
-           << "model_kind=qwen38-flash-next\n"
-           << "artifact_id=" << core::kGgufIdentityScheme << ':'
-           << artifact_fingerprint << '\n'
-           << "tokenizer=embedded-in-artifact\n"
-           << "chat_template=qwen38-reasoning-compiled-v3\n"
-           << "chat_template_reference_sha256="
-           << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
-           << "state_abi=qwen38-flash-next-rocm-session-v1\n"
-           << "payload_layout=qfn-rocm-session-snapshot-v"
-           << models::qwen38_flash_next::Session::kSnapshotPayloadVersion
-           << '\n'
-           << "context_tokens=" << max_context << '\n'
-           << "position_policy=" << position_policy << '\n'
-           << "adapters=none\n";
-  if (has_mtp) {
-    identity << "draft_backend=qfn-mtp-v1\n"
-             << "draft_artifact_id=" << core::kGgufIdentityScheme << ':'
-             << mtp_fingerprint << '\n'
-             << "draft_max_tokens=" << max_draft_tokens << '\n'
-             << "draft_cost_concurrency=" << decode_concurrency << '\n';
-  }
-  const std::string canonical = identity.str();
-  return {canonical.begin(), canonical.end()};
-}
-
-std::vector<std::uint8_t> QwenCompatibilityIdentity(
-    std::string_view artifact_fingerprint,
-    std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
-    const hip::QwenExecutionPolicy& execution_policy, bool speculative,
-    const speculative::SpeculativeOptions& speculative_options) {
-  if (!IsSha256Hex(artifact_fingerprint)) {
-    throw std::invalid_argument(
-        "Qwen disk cache requires an artifact fingerprint");
-  }
-  if (speculative && !IsSha256Hex(draft_artifact_fingerprint)) {
-    throw std::invalid_argument(
-        "Qwen DFlash disk cache requires a draft artifact fingerprint");
-  }
-  const std::string_view state_abi =
-      QwenStateAbi(speculative, execution_policy.UsesFp16AttentionKv(),
-                   execution_policy.UsesBf16RecurrentState());
-  std::ostringstream identity;
-  identity << "schema=gufo-text-continuation-v2\n"
-           << "model_kind=qwen3.8\n"
-           << "artifact_id=" << core::kGgufIdentityScheme << ':'
-           << artifact_fingerprint << '\n'
-           << "tokenizer=embedded-in-artifact\n"
-           << "chat_template=qwen38-reasoning-compiled-v3\n"
-           << "chat_template_reference_sha256="
-           << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
-           << "state_abi=" << state_abi << "-component-v2\n"
-           << "payload_layout=qwen-component-v2\n"
-           // Older learned boundaries could keep logits from an earlier
-           // prefix. Their payload has no readiness tag to distinguish them.
-           << "checkpoint_frontier=complete-prefix-v1\n"
-           << "numerics=qwen-bf16-fp32-prefill-v1\n"
-           << "rmsnorm=fused-square-sum-v1\n"
-           << "prefill_attention=visible-causal-tail-v1\n"
-           << "attention_split_min_context="
-           << hip::detail::kSplitKDecodeAttentionMinContext << '\n'
-           << "attention_split_count="
-           << hip::detail::kSplitKDecodeAttentionMaxSplits << '\n'
-           << "kv_storage="
-           << (execution_policy.UsesFp16AttentionKv() ? "fp16" : "fp32") << '\n'
-           << "recurrent_storage="
-           << (execution_policy.UsesBf16RecurrentState() ? "bf16" : "fp32")
-           << '\n'
-           << "context_tokens=" << max_context << '\n'
-           << "position_policy=absolute-v1\n"
-           << "rope_window_policy=qwen-gguf-config-v1\n"
-           << "adapters=none\n";
-  if (speculative) {
-    identity
-        << "draft_backend=dflash2-gfx1151-v1\n"
-        << "draft_artifact_id=" << core::kGgufIdentityScheme << ':'
-        << draft_artifact_fingerprint << '\n'
-        << "draft_state_layout=dflash-window-kv-and-frontier-v4\n"
-        << "draft_policy="
-        << speculative::DFlashDraftPolicyName(speculative_options.dflash_policy)
-        << "-v3\n"
-        << "draft_max_tokens=" << speculative_options.max_draft_tokens << '\n'
-        << "draft_min_tokens=" << speculative_options.min_draft_tokens << '\n'
-        << "draft_initial_tokens=" << speculative_options.initial_draft_tokens
-        << '\n'
-        << "draft_rolling_window=" << speculative_options.rolling_window << '\n'
-        << std::setprecision(std::numeric_limits<float>::max_digits10)
-        << "draft_target_acceptance="
-        << speculative_options.target_acceptance_rate << '\n'
-        << "draft_adaptive="
-        << (speculative_options.enable_adaptive_draft_length ? "true" : "false")
-        << '\n'
-        << "draft_batched_verification="
-        << (speculative_options.use_batched_verification ? "true" : "false")
-        << '\n'
-        << "draft_target_verification=decode-equivalent-v1\n";
-  }
-  const std::string canonical = identity.str();
-  return {canonical.begin(), canonical.end()};
 }
 
 class QwenTextRunnerState final : public TextRunnerState {
@@ -419,7 +244,7 @@ public:
     resume_tokens_.reserve(kQwenMaxResumeTokens);
     rollback_tokens_.reserve(kQwenMaxResumeTokens);
     if (draft_backend_) {
-      verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
+      verifier_ = hip::CreateQwenGpuSpeculativeVerifier(
           *executor_, *draft_backend_, options);
       executor_->SetPromptHiddenCapture(true,
                                         draft_backend_->TargetHiddenLayerIds());
@@ -806,248 +631,40 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
   return *qwen;
 }
 
-// Owns a four-byte device buffer and a private stream from load, so probing
-// a lost context needs no allocation. HIP context loss is sticky: after a GPU
-// reset even this memset fails with a hard error. Only such an error marks the
-// device lost; a memset still pending at the deadline may be queued behind
-// long kernels on the shared hardware queues, so it counts as usable.
+// Shared runner base for the HIP models. Device-loss probing is the runtime's
+// `ext::DeviceProbe` (RFC step 6); the probe holds its buffer and private
+// stream from construction, with the 5 s bound the scheduler expects.
 class HipTextModelRunner : public TextModelRunner {
 public:
-  HipTextModelRunner() {
-    HIP_CHECK(hipStreamCreateWithFlags(&probe_stream_, hipStreamNonBlocking));
-    if (const auto error = hipMalloc(&probe_buffer_, sizeof(std::uint32_t));
-        error != hipSuccess) {
-      hip::LogCleanupError(hipStreamDestroy(probe_stream_));
-      throw std::runtime_error(std::string("device probe allocation: ") +
-                               hipGetErrorString(error));
-    }
-  }
-  ~HipTextModelRunner() override {
-    hip::LogCleanupError(hipFree(probe_buffer_));
-    hip::LogCleanupError(hipStreamDestroy(probe_stream_));
-  }
+  HipTextModelRunner() = default;
+
   HipTextModelRunner(const HipTextModelRunner&) = delete;
   HipTextModelRunner& operator=(const HipTextModelRunner&) = delete;
   HipTextModelRunner(HipTextModelRunner&&) = delete;
   HipTextModelRunner& operator=(HipTextModelRunner&&) = delete;
 
   [[nodiscard]] DeviceProbeStatus PollDevice() const override {
-    if (!probe_pending_) {
-      // Clear the failed work unit's thread-local error before probing.
-      (void)hipGetLastError();
-      if (hipMemsetAsync(probe_buffer_, 0, sizeof(std::uint32_t),
-                         probe_stream_) != hipSuccess ||
-          hipGetLastError() != hipSuccess)
-        return DeviceProbeStatus::kLost;
-      probe_pending_ = true;
-    }
-    const auto status = hipStreamQuery(probe_stream_);
-    if (status == hipErrorNotReady)
-      return DeviceProbeStatus::kPending;
-    probe_pending_ = false;
-    return status == hipSuccess ? DeviceProbeStatus::kUsable
-                                : DeviceProbeStatus::kLost;
+    return probe_.Poll();
   }
 
   [[nodiscard]] bool DeviceUsable() const override {
-    constexpr auto kTimeout = std::chrono::seconds(5);
-    const auto deadline = Clock::now() + kTimeout;
-    for (;;) {
-      const auto status = PollDevice();
-      if (status == DeviceProbeStatus::kUsable)
-        return true;
-      if (status == DeviceProbeStatus::kLost)
-        return false;
-      if (Clock::now() >= deadline) {
-        Logger::Warn("scheduler", "event=device_probe_timeout timeout_s=" +
-                                      std::to_string(kTimeout.count()));
-        return true;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    return probe_.WaitUsable(std::chrono::seconds(5), "scheduler");
   }
 
 private:
-  hipStream_t probe_stream_{};
-  void* probe_buffer_{};
-  mutable bool probe_pending_{false};
+  ext::DeviceProbe probe_;
 };
 
-template<typename AdapterType>
-std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
-    std::unique_ptr<AdapterType> adapter, cache::ResourceLedger& ledger) {
-  struct Backing {
-    hip::TransferPool streams{64};
-    std::unique_ptr<hip::CommittedBackingPool> pool;
-    std::map<std::uint32_t, std::size_t> component_classes;
-  };
-  auto result = std::make_unique<ComponentCacheResources>();
-  result->adapter = std::move(adapter);
-  auto backing = std::make_shared<Backing>();
-  result->transfer_batch_size = 16;
-  const auto rounded = [](std::size_t bytes) {
-    return (bytes + 4095) / 4096 * 4096;
-  };
-  for (const auto& d : result->adapter->Components()) {
-    const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
-                                   ? d.state_bytes
-                                   : d.row_bytes * d.rows_per_chunk);
-    backing->component_classes.emplace(d.id.value, bytes);
-  }
-  // The remainder belongs to index, histories, disk catalog and queue
-  // metadata. The pools charge their own per-block allocator headroom.
-  result->commit_backing = [backing, &ledger, adapter = result->adapter.get()](
-                               std::size_t budget) {
-    const auto plan = static_cast<AdapterType*>(adapter)->BackingPlan(budget);
-    if (plan.size() != 1)
-      throw std::invalid_argument("insufficient component backing budget");
-    const auto& allocation = plan.front();
-    // Pages commit as captures need them. A payload cannot span segments,
-    // so segments of about 128 MiB bound registration pauses and stranded
-    // edge space, fitting at least two of the largest payloads. Prefill
-    // chunks prepare backing before GPU work, after any fallback capture.
-    // Growth stops when the host keeps less than its reserve.
-    std::size_t largest = 0;
-    for (const auto& [id, bytes] : backing->component_classes)
-      largest = std::max(largest, bytes);
-    const auto block = allocation.block_bytes;
-    const auto target =
-        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
-    const auto parts =
-        std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
-    const auto segment = (allocation.blocks + parts - 1) / parts * block;
-    struct Limited {
-      std::mutex mutex;
-      std::chrono::steady_clock::time_point refused;
-      bool active{};
-    };
-    backing->pool = std::make_unique<hip::CommittedBackingPool>(
-        ledger,
-        hip::BackingPoolConfig{
-            allocation.blocks * allocation.block_bytes +
-                allocation.metadata_bytes,
-            allocation.block_bytes, allocation.metadata_bytes, segment,
-            [limited = std::make_shared<Limited>()](std::size_t bytes) {
-              const std::lock_guard lock(limited->mutex);
-              const auto now = std::chrono::steady_clock::now();
-              // Pressure retries ask once per capture; recheck at most
-              // once a second while the host is short.
-              if (limited->active &&
-                  now - limited->refused < std::chrono::seconds(1))
-                return false;
-              const auto ceiling = HostSnapshotCeilingBytes();
-              // Pinned host pages come out of the same device heap that
-              // session and scratch allocations draw on; keep its dispatch
-              // reserve so they do not fall back to managed memory.
-              std::size_t heap_free = 0, heap_total = 0;
-              const bool heap_fits =
-                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
-                  hip::HeapFitsAboveReserve(heap_free, bytes);
-              if (ceiling >= bytes && heap_fits) {
-                limited->active = false;
-                return true;
-              }
-              if (!limited->active)
-                Logger::Warn(
-                    "cache",
-                    "schema=component-cache-v1 "
-                    "event=backing_limited reason=" +
-                        std::string(heap_fits ? "host_reserve "
-                                              : "device_heap_reserve ") +
-                        "segment_bytes=" + std::to_string(bytes) +
-                        " host_headroom_bytes=" + std::to_string(ceiling) +
-                        " device_heap_free_bytes=" + std::to_string(heap_free));
-              limited->active = true;
-              limited->refused = now;
-              return false;
-            }});
-    // Prepare a bounded reserve before readiness. The first shared-prefix
-    // capture needs more than one segment; preparing 2 GiB avoids moving
-    // registration onto that request's capture or decode path.
-    backing->pool->GrowAhead(2ULL << 30);
-    backing->pool->WaitForGrowth();
-    Logger::Info(
-        "cache",
-        "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
-            std::to_string(backing->pool->CommittedBytes()) +
-            " long_term_pinned_bytes=" +
-            std::to_string(backing->pool->LongTermPinnedBytes()));
-  };
-  result->prepare_prefill = [backing](std::size_t tokens) {
-    // Prepare after any fallback capture, alongside actual prefill work.
-    // Short turns need a smaller reserve for private states and row tails.
-    backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
-  };
-  result->can_capture = [backing](auto payloads) {
-    return backing->pool->CanFit(payloads);
-  };
-  result->owner = backing;
-  result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
-    return backing->streams.TryAcquire();
-  };
-  result->allocate = [backing](const cache::PayloadRequest& request) {
-    // Bound the logical capture, then assign whole shared backing pages.
-    const auto capacity =
-        backing->component_classes.at(request.component.value);
-    if (request.bytes > capacity)
-      throw std::logic_error("component capture exceeds its backing class");
-    const auto category =
-        request.category == cache::ResourceCategory::kBackingAssigned
-            ? cache::ResourceCategory::kBackingAssigned
-            : request.category;
-    const auto segments = backing->pool->PageCommitAllocations();
-    const auto started = std::chrono::steady_clock::now();
-    auto block = backing->pool->TryAcquire(category, request.bytes);
-    if (backing->pool->PageCommitAllocations() != segments)
-      Logger::Info(
-          "cache",
-          "schema=component-cache-v1 event=backing_grown committed_bytes=" +
-              std::to_string(backing->pool->CommittedBytes()) + " segments=" +
-              std::to_string(backing->pool->PageCommitAllocations()) +
-              " long_term_pinned_bytes=" +
-              std::to_string(backing->pool->LongTermPinnedBytes()) +
-              " acquire_ms=" +
-              std::to_string(std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - started)
-                                 .count()));
-    if (!block)
-      throw cache::ResourceExhausted();
-    // Do not start registration between a capture's allocations and copies.
-    // Each prefill chunk prepares its own reserve before GPU work.
-    auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
-    return ComponentCaptureBuffer{
-        owner->Bytes(),
-        [owner] {
-          owner->Convert();
-          return std::move(*owner).TakePayload();
-        },
-        backing->pool.get(),
-        [owner, request](cache::SlotLease& lease, auto source) {
-          return cache::Payload::Borrowed(
-              std::move(*owner).Borrow(lease, request.component, request.first,
-                                       request.end, request.bytes, source));
-        }};
-  };
-  result->staging = [](std::size_t bytes) {
-    auto allocation = std::make_shared<hip::HostAllocations>();
-    void* data = nullptr;
-    const auto status =
-        allocation->Allocate(&data, bytes, hipHostMallocCoherent);
-    if (status != hipSuccess)
-      throw std::runtime_error(hipGetErrorString(status));
-    auto owner = std::shared_ptr<void>(std::move(allocation), data);
-    std::memset(data, 0, bytes);
-    return cache::StagingAllocation{std::move(owner),
-                                    {static_cast<std::uint8_t*>(data), bytes}};
-  };
-  result->copy_observed_rows = [](auto source, auto destination,
-                                  cache::Stream& stream) {
-    return dynamic_cast<hip::TransferStream&>(stream).Copy(
-        destination.data(), source.data(), destination.size(),
-        hip::CopyDirection::kDeviceToHost, destination.size());
-  };
-  return result;
+#if defined(ENGINE_ENABLE_HIP)
+// The backing provider's policy inputs. Queueing and cache policy stay here;
+// the pool only receives the host ceiling and the process logger, under the
+// cache component tag it logged before the split.
+[[nodiscard]] hip::ComponentCacheHooks HipComponentCacheHooks() {
+  return {HostSnapshotCeilingBytes,
+          [](std::string_view message) { Logger::Warn("cache", message); },
+          [](std::string_view message) { Logger::Info("cache", message); }};
 }
+#endif  // ENGINE_ENABLE_HIP
 
 class QwenTextRunner final : public HipTextModelRunner {
 public:
@@ -1058,30 +675,29 @@ public:
       std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model = nullptr,
       speculative::SpeculativeOptions speculative_options = {},
+      speculative::DFlashDraftPolicy dflash_policy =
+          speculative::DFlashDraftPolicy::kAdaptive,
       std::string artifact_fingerprint = {},
       std::string draft_artifact_fingerprint = {})
       : model_(std::move(model)),
         dflash_model_(std::move(dflash_model)),
         max_context_(max_context),
         speculative_options_(speculative_options),
+        dflash_policy_(dflash_policy),
         execution_policy_(hip::QwenExecutionPolicy::Production()) {
     if (!artifact_fingerprint.empty()) {
       const bool speculative = dflash_model_ != nullptr;
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = QwenCompatibilityIdentity(
               artifact_fingerprint, draft_artifact_fingerprint, max_context_,
-              execution_policy_, speculative, speculative_options_),
+              execution_policy_, speculative, speculative_options_,
+              dflash_policy_),
           .payload_version = kQwenComponentPayloadVersion,
       };
       component_identity_ = persistence_->compatibility_identity;
     } else {
-      std::ostringstream identity;
-      identity << "schema=gufo-process-qwen-component-v2\n"
-               << "model_instance=" << model_.get() << '\n'
-               << "draft_instance=" << dflash_model_.get() << '\n'
-               << "context_tokens=" << max_context_ << '\n';
-      const auto canonical = identity.str();
-      component_identity_.assign(canonical.begin(), canonical.end());
+      component_identity_ =
+          QwenProcessIdentity(model_.get(), dflash_model_.get(), max_context_);
     }
   }
 
@@ -1090,16 +706,16 @@ public:
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
     (void)ram;
-    auto resources = CreateHipComponentCacheResources(
+    auto resources = hip::CreateHipComponentCacheResources(
         std::make_unique<models::qwen::ContinuationAdapter>(
             model_, max_context_, component_identity_, execution_policy_,
             dflash_model_,
             hip::QwenDFlashGpuDraftConfig{
                 .max_context = max_context_,
                 .max_draft_tokens = speculative_options_.max_draft_tokens,
-                .policy = speculative_options_.dflash_policy},
+                .policy = dflash_policy_},
             &ledger),
-        ledger);
+        ledger, HipComponentCacheHooks());
     // Qwen's 256-row chunks are small. Preserve a bounded group before
     // waiting, instead of synchronizing every half-MiB range individually.
     resources->reassignment_batch_size = 16;
@@ -1520,6 +1136,8 @@ private:
   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
   std::uint32_t max_context_;
   speculative::SpeculativeOptions speculative_options_;
+  speculative::DFlashDraftPolicy dflash_policy_{
+      speculative::DFlashDraftPolicy::kAdaptive};
   hip::QwenExecutionPolicy execution_policy_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
@@ -2465,16 +2083,9 @@ public:
       };
       component_identity_ = persistence_->compatibility_identity;
     } else {
-      std::ostringstream identity;
-      identity << "schema=gufo-process-text-continuation-v1\n"
-               << "model_instance=" << model_.get() << '\n'
-               << "context_tokens=" << max_context_ << '\n'
-               << "mtp=" << use_mtp_ << '\n'
-               << "draft_max_tokens=" << max_draft_tokens_ << '\n'
-               << "draft_cost_concurrency=" << model_->DecodeConcurrency()
-               << '\n';
-      const auto canonical = identity.str();
-      component_identity_.assign(canonical.begin(), canonical.end());
+      component_identity_ = QwenFlashNextProcessIdentity(
+          model_.get(), max_context_, use_mtp_, max_draft_tokens_,
+          model_->DecodeConcurrency());
     }
   }
 
@@ -2483,13 +2094,13 @@ public:
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
     (void)ram;
-    return CreateHipComponentCacheResources(
+    return hip::CreateHipComponentCacheResources(
         std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
             model_,
             use_mtp_ ? core::SessionMode::kSpeculative
                      : core::SessionMode::kAutoregressive,
             max_context_, component_identity_),
-        ledger);
+        ledger, HipComponentCacheHooks());
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
@@ -3421,7 +3032,6 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
         return false;
       }
 
-      speculative_options.dflash_policy = speculative_config.dflash_policy;
       speculative_options.max_draft_tokens =
           speculative_config.max_draft_tokens;
       speculative_options.min_draft_tokens =
@@ -3441,7 +3051,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     new_state->supports_images = model->VisionEncoder() != nullptr;
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
-        speculative_options, disk_cache_config.model_artifact_fingerprint,
+        speculative_options, speculative_config.dflash_policy,
+        disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;

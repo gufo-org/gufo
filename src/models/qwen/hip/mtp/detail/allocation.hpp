@@ -8,7 +8,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-#include "src/core/hip/managed_alloc.hpp"
+#include <gufo/ext/experimental/managed_alloc.hpp>
 
 namespace gufo::hip::detail {
 

@@ -1,0 +1,22 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+Test project /home/mixer/gufo/build/cpu-test
+    Start 109: extension_runtime_test
+1/4 Test #109: extension_runtime_test ...........   Passed    0.00 sec
+    Start 110: extension_role_test
+2/4 Test #110: extension_role_test ..............   Passed    0.00 sec
+    Start 113: extension_api_policy_test
+3/4 Test #113: extension_api_policy_test ........   Passed    0.04 sec
+    Start 114: extension_api_surface
+4/4 Test #114: extension_api_surface ............   Passed    0.02 sec
+
+100% tests passed out of 4
+
+Label Time Summary:
+cpu           =   0.06 sec*proc (4 tests)
+extensions    =   0.06 sec*proc (4 tests)
+
+Total Test time (real) =   0.09 sec

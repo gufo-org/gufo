@@ -4,10 +4,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/image.hpp>
 #include <string>
 #include <vector>
-
-#include "src/core/image.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 

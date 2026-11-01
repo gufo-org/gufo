@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "name": "minimax_h3",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.0",
+  "entry": "minimax_h3_register",
+  "registration_target": "gufo_minimax_h3",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "minimax-h3",
+      "capability": "video_generation",
+      "keys": [
+        "safetensors:minimax_h3",
+        "safetensors:MiniMaxH3Model"
+      ],
+      "model_ids": [
+        "minimax-h3"
+      ],
+      "target": "gufo_minimax_h3",
+      "entry": "minimax_h3_provider_register"
+    }
+  ],
+  "targets": {
+    "gufo_minimax_h3": {
+      "requires": []
+    }
+  },
+  "packages": [
+    {
+      "pkg_config": "libavformat",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[avformat]"
+    },
+    {
+      "pkg_config": "libavcodec",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[avcodec]"
+    },
+    {
+      "pkg_config": "libavutil",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[avutil]"
+    },
+    {
+      "pkg_config": "libswscale",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[swscale]"
+    }
+  ],
+  "compile_definitions": {
+    "GUFO_H3_SOURCE_MANIFEST": "install_data:src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+  },
+  "install_data": [
+    "src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+  ],
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "MiniMax H3 FL2VA",
+    "inputs": "Pinned safetensors; text to audiovisual output",
+    "guide": "docs/models/minimax-h3/README.md"
+  },
+  "tests": [
+    {
+      "target": "video_api_test",
+      "ctest": "video_api_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "minimax_h3_sampling_test",
+      "ctest": "minimax_h3_sampling_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "minimax_h3_runtime_test",
+      "ctest": "minimax_h3_runtime_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "minimax-h3"
+  ],
+  "fixtures": "tests/fixtures/minimax_h3/",
+  "python_checks": [
+    {
+      "name": "h3-manifest",
+      "tests": "tests/tools/test_h3_manifest.py",
+      "sources": [
+        "tools/gufo",
+        "tools/h3"
+      ]
+    },
+    {
+      "name": "h3-quality",
+      "tests": "tests/tools/test_h3_quality.py",
+      "sources": [
+        "tools/gufo",
+        "tools/h3",
+        "tests/fixtures/minimax_h3"
+      ]
+    },
+    {
+      "name": "h3-ml-quality",
+      "tests": "tests/tools/h3_denoiser_golden_test.py",
+      "sources": [
+        "tools/gufo",
+        "tools/h3",
+        "tests/fixtures/minimax_h3"
+      ]
+    }
+  ]
+}

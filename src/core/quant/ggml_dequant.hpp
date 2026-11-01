@@ -14,10 +14,10 @@ namespace gufo::quant {
 // layouts for the dequant/dot paths. Relocated verbatim from the internal
 // definitions in ggml_dequant.cpp so the header is the single source of
 // truth; field order and byte sizes match the HIP path
-// (src/models/qwen/hip/quant_ops.hpp) and the historical per-file copies
-// (models/qwen/state.hpp, tests/). Do NOT redefine block_* locally. Sizes are
-// static_asserted; this is the layout contract (see the parity test that
-// proves field order against the byte-level spec).
+// (src/families/qwen/hip_common/quant_ops.hpp) and the historical per-file
+// copies (models/qwen/state.hpp, tests/). Do NOT redefine block_* locally.
+// Sizes are static_asserted; this is the layout contract (see the parity test
+// that proves field order against the byte-level spec).
 #pragma pack(push, 1)
 struct block_q4_K {
   std::uint16_t d;
@@ -89,23 +89,18 @@ struct block_iq3_s {
   std::uint8_t scales[4];
 };
 
-// IQ3_XXS: super-block of 256 (layout ported from llama.cpp ggml-common.h).
-// Each group of 8 elements is two 8-bit indexes into the 256-entry
-// kIq3xxsGrid table (four magnitudes each); the 32 bytes after qs carry one
-// 32-bit word per 32-element sub-block: seven 7-bit sign-table indices (bits
-// 0..27, one per group of 8) and the sub-block scale (4 bits) in bits 28..31.
+// IQ3_XXS: super-block of 256. Each group of 8 elements indexes the
+// 256-entry kIq3xxsGrid (6 bits in qs, signs and the 4-bit sub-block scale
+// packed per group into kSignsIq2xs-indexed bytes of scales_and_signs).
 struct block_iq3_xxs {
   std::uint16_t d;
   std::uint8_t qs[64];
   std::uint8_t scales_and_signs[32];
 };
 
-// IQ2_S: super-block of 256 (layout ported from llama.cpp ggml-common.h).
-// Each group of 8 elements indexes the 1024-entry kIq2sGrid table (8 low bits
-// in qs, 2 high bits spread over the qh byte of the sub-block via
-// (qh << (8 - 2*l)) & 0x300). Signs are not a separate array: they physically
-// overlap qs at offset QK_K/8, one bit per element (1 = negative). scales
-// holds two 4-bit sub-block scales per byte; db = d*(0.5+nibble)*0.25.
+// IQ2_S: super-block of 256. Sixteen bits per four elements (four in qs,
+// two in qh) index the 1024-entry kIq2sGrid; the element signs overlap qs
+// at byte 32 of the block, exactly as llama.cpp stores them.
 struct block_iq2_s {
   std::uint16_t d;
   std::uint8_t qs[64];
@@ -113,9 +108,7 @@ struct block_iq2_s {
   std::uint8_t scales[8];
 };
 
-// Q2_0: IST-DASLab's 2-bit linear format (block_q2_0 in the llama.cpp fork):
-// fp16 scale plus 64 2-bit codes with the mapping 00=-1, 01=0, 10=+1, 11=+2,
-// i.e. value = (q - 1) * d. Codes pack four per byte, low bits first.
+// Q2_0: 2-bit linear blocks, 64 elements per 18 bytes.
 struct block_q2_0 {
   std::uint16_t d;
   std::uint8_t qs[16];
@@ -130,14 +123,146 @@ static_assert(sizeof(block_q8_K) == 292, "block_q8_K must be 292 bytes");
 static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
 static_assert(sizeof(block_iq4_nl) == 18, "block_iq4_nl must be 18 bytes");
 static_assert(sizeof(block_iq4_xs) == 136, "block_iq4_xs must be 136 bytes");
+static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
 static_assert(sizeof(block_iq3_xxs) == 98, "block_iq3_xxs must be 98 bytes");
 static_assert(sizeof(block_iq2_s) == 82, "block_iq2_s must be 82 bytes");
 static_assert(sizeof(block_q2_0) == 18, "block_q2_0 must be 18 bytes");
-static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
 
 /// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
 inline constexpr std::int8_t kValuesIq4Nl[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+/// Returns the logical elements represented by one supported quant block, or
+/// zero for dense and unsupported storage types.
+[[nodiscard]] constexpr std::size_t QuantizedBlockElements(
+    core::GgmlType type) noexcept {
+  switch (type) {
+    case core::GgmlType::kQ4_0:
+    case core::GgmlType::kQ4_1:
+    case core::GgmlType::kQ5_0:
+    case core::GgmlType::kQ5_1:
+    case core::GgmlType::kQ8_1:
+    case core::GgmlType::kQ8_0:
+    case core::GgmlType::kIQ4_NL:
+      return 32;
+    case core::GgmlType::kQ2_K:
+    case core::GgmlType::kIQ2_XXS:
+    case core::GgmlType::kIQ2_XS:
+    case core::GgmlType::kIQ2_S:
+    case core::GgmlType::kIQ3_XXS:
+    case core::GgmlType::kIQ1_S:
+    case core::GgmlType::kIQ1_M:
+    case core::GgmlType::kIQ4_XS:
+    case core::GgmlType::kIQ3_S:
+    case core::GgmlType::kQ3_K:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ5_K:
+    case core::GgmlType::kQ6_K:
+    case core::GgmlType::kQ8_K:
+      return 256;
+    default:
+      return 0;
+  }
+}
+
+/// Returns the encoded byte count for one logical quantized row, or zero when
+/// the type is not quantized or the element count is not block aligned.
+[[nodiscard]] std::size_t QuantizedRowBytes(core::GgmlType type,
+                                            std::size_t elements) noexcept;
+
+/// Returns the physical byte count for a tensor with `elements` logical
+/// elements, or zero when the format is unsupported/misaligned.
+[[nodiscard]] std::size_t EncodedSizeBytes(core::GgmlType type,
+                                           std::size_t elements) noexcept;
+
+// Standard 16-bit float helper
+float Fp16ToFloat(std::uint16_t h) noexcept;
+
+// Dequantize row of Q4_K to float
+void DequantizeQ4_K(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of Q5_K to float
+void DequantizeQ5_K(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of Q6_K to float
+void DequantizeQ6_K(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of Q3_K to float
+void DequantizeQ3_K(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of Q8_K to float
+void DequantizeQ8_K(const void* src, float* dst, std::size_t k);
+
+// Compute dot product of quantized row with FP32 vector
+float DotProductQ4_K(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+// Compute dot product of Q5_K quantized row with FP32 vector
+float DotProductQ5_K(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+float DotProductQ6_K(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+float DotProductQ3_K(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+float DotProductQ8_K(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+
+// Dequantize row of Q8_0 to float
+void DequantizeQ8_0(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of Q5_1 to float
+void DequantizeQ5_1(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of IQ4_NL to float
+void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of IQ4_XS to float
+void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);
+
+// Dequantize row of IQ3_S to float
+void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
+
+// Compute dot product of IQ4_NL quantized row with FP32 vector
+float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,
+                       std::size_t k);
+// Compute dot product of IQ4_XS quantized row with FP32 vector
+float DotProductIQ4_XS(const void* row_data, std::span<const float> vec,
+                       std::size_t k);
+// Compute dot product of IQ3_S quantized row with FP32 vector
+float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
+                      std::size_t k);
+
+// The remaining GGML block formats, element for element as ggml-quants.c's
+// dequantize_row_* (Q4_0, Q4_1, Q5_0: 32 elements; Q2_K and the IQ1/IQ2/IQ3
+// formats: 256).
+void DequantizeQ4_0(const void* src, float* dst, std::size_t k);
+void DequantizeQ4_1(const void* src, float* dst, std::size_t k);
+void DequantizeQ5_0(const void* src, float* dst, std::size_t k);
+void DequantizeQ2_K(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_S(const void* src, float* dst, std::size_t k);
+void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ1_S(const void* src, float* dst, std::size_t k);
+void DequantizeIQ1_M(const void* src, float* dst, std::size_t k);
+
+/// Dequantizes `k` elements of one row of any GGML storage type this header
+/// sizes (F32/F16/BF16 included); false for any other type or a row that is
+/// not block aligned.
+[[nodiscard]] bool DequantizeRow(core::GgmlType type, const void* src,
+                                 float* dst, std::size_t k);
+
+/// Returns the 512-entry IQ3_S grid table (each entry packs four uint8
+/// magnitudes).
+[[nodiscard]] const std::uint32_t* Iq3sGrid() noexcept;
+
+// Compute dot product of Q8_0 quantized row with FP32 vector
+float DotProductQ8_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+
+
+// Device-visible GGML codebook tables (verbatim llama.cpp ggml-common.h,
+// MIT). inline constexpr so the ROCm tile loaders and the CPU dequantizer
+// oracle read one definition; the CPU oracle is what pins their contents.
 
 // --- IQ3_XXS / IQ2_S reference tables (ported from llama.cpp ggml-common.h)
 // --- kSignsIq2xs expands a 7-bit sign index into one sign byte (paired with
@@ -662,139 +787,18 @@ inline constexpr std::uint64_t kIq2sGrid[1024] = {
     0x2B2B2B2B082B082BULL, 0x2B2B2B2B082B2B08ULL, 0x2B2B2B2B2B082B08ULL,
     0x2B2B2B2B2B2B2B2BULL,
 };
+// Public per-element IQ accessors: definitions live in ggml_dequant.cpp;
+// the device parity harness consumes them.
+[[nodiscard]] float Iq4NlValue(const block_iq4_nl& block, std::size_t index) noexcept;
+[[nodiscard]] float Iq4XsValue(const block_iq4_xs& block, std::size_t index) noexcept;
+[[nodiscard]] float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept;
+[[nodiscard]] float Iq3XxsValue(const block_iq3_xxs& block, std::size_t index) noexcept;
+[[nodiscard]] float Iq2SValue(const block_iq2_s& block, std::size_t index) noexcept;
+[[nodiscard]] float Q2_0Value(const block_q2_0& block, std::size_t index) noexcept;
 
-// IQ3_XXS: element `index` of one 256-element block (reference semantics from
-// llama.cpp dequantize_row_iq3_xxs). Each group of 8 elements indexes the
-// grid twice; the 32-bit aux word per 32-element sub-block carries 7 sign bits
-// per group in bits 7*l and the sub-block scale in bits 28..31.
-
-/// Returns the logical elements represented by one supported quant block, or
-/// zero for dense and unsupported storage types.
-[[nodiscard]] constexpr std::size_t QuantizedBlockElements(
-    core::GgmlType type) noexcept {
-  switch (type) {
-    case core::GgmlType::kQ4_0:
-    case core::GgmlType::kQ4_1:
-    case core::GgmlType::kQ5_0:
-    case core::GgmlType::kQ5_1:
-    case core::GgmlType::kQ8_1:
-    case core::GgmlType::kQ8_0:
-    case core::GgmlType::kIQ4_NL:
-      return 32;
-    case core::GgmlType::kQ2_0:
-      return 64;
-    case core::GgmlType::kQ2_K:
-    case core::GgmlType::kIQ2_XXS:
-    case core::GgmlType::kIQ2_S:
-    case core::GgmlType::kIQ3_XXS:
-    case core::GgmlType::kIQ4_XS:
-    case core::GgmlType::kIQ3_S:
-    case core::GgmlType::kQ3_K:
-    case core::GgmlType::kQ4_K:
-    case core::GgmlType::kQ5_K:
-    case core::GgmlType::kQ6_K:
-    case core::GgmlType::kQ8_K:
-      return 256;
-    default:
-      return 0;
-  }
-}
-
-/// Returns the encoded byte count for one logical quantized row, or zero when
-/// the type is not quantized or the element count is not block aligned.
-[[nodiscard]] std::size_t QuantizedRowBytes(core::GgmlType type,
-                                            std::size_t elements) noexcept;
-
-/// Returns the physical byte count for a tensor with `elements` logical
-/// elements, or zero when the format is unsupported/misaligned.
-[[nodiscard]] std::size_t EncodedSizeBytes(core::GgmlType type,
-                                           std::size_t elements) noexcept;
-
-// Standard 16-bit float helper
-float Fp16ToFloat(std::uint16_t h) noexcept;
-
-// Dequantize row of Q4_K to float
-void DequantizeQ4_K(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of Q5_K to float
-void DequantizeQ5_K(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of Q6_K to float
-void DequantizeQ6_K(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of Q3_K to float
-void DequantizeQ3_K(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of Q8_K to float
-void DequantizeQ8_K(const void* src, float* dst, std::size_t k);
-
-// Compute dot product of quantized row with FP32 vector
-float DotProductQ4_K(const void* row_data, std::span<const float> vec,
-                     std::size_t k);
-// Compute dot product of Q5_K quantized row with FP32 vector
-float DotProductQ5_K(const void* row_data, std::span<const float> vec,
-                     std::size_t k);
-float DotProductQ6_K(const void* row_data, std::span<const float> vec,
-                     std::size_t k);
-float DotProductQ3_K(const void* row_data, std::span<const float> vec,
-                     std::size_t k);
-float DotProductQ8_K(const void* row_data, std::span<const float> vec,
-                     std::size_t k);
-
-// Dequantize row of Q8_0 to float
-void DequantizeQ8_0(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of IQ4_NL to float
-void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of IQ4_XS to float
-void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of IQ3_S to float
-void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of IQ3_XXS to float
-void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of IQ2_S to float
-void DequantizeIQ2_S(const void* src, float* dst, std::size_t k);
-
-// Dequantize row of Q2_0 (IST-DASLab 2-bit linear) to float
-void DequantizeQ2_0(const void* src, float* dst, std::size_t k);
-
-// Compute dot product of IQ4_NL quantized row with FP32 vector
-float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,
-                       std::size_t k);
-// Compute dot product of IQ4_XS quantized row with FP32 vector
-float DotProductIQ4_XS(const void* row_data, std::span<const float> vec,
-                       std::size_t k);
-// Compute dot product of IQ3_S quantized row with FP32 vector
-float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
-                      std::size_t k);
-
-/// Returns the 512-entry IQ3_S grid table (each entry packs four uint8
-/// magnitudes).
-[[nodiscard]] const std::uint32_t* Iq3sGrid() noexcept;
-
-/// Element `index` of one IQ3_XXS / IQ3_S block, following the reference
-/// llama.cpp dequantizers bit for bit (the GPU routed kernels mirror these
-/// semantics through the same public grid and sign tables).
-[[nodiscard]] float Iq3XxsValue(const block_iq3_xxs& block,
-                                std::size_t index) noexcept;
-[[nodiscard]] float Iq3sValue(const block_iq3_s& block,
-                              std::size_t index) noexcept;
-[[nodiscard]] float Iq2SValue(const block_iq2_s& block,
-                              std::size_t index) noexcept;
-[[nodiscard]] float Iq4XsValue(const block_iq4_xs& block,
-                               std::size_t index) noexcept;
-[[nodiscard]] float Q2_0Value(const block_q2_0& block,
-                              std::size_t index) noexcept;
-[[nodiscard]] float Q6KValue(const block_q6_K& block,
-                               std::size_t index) noexcept;
-
-// Compute dot product of Q8_0 quantized row with FP32 vector
-float DotProductQ8_0(const void* row_data, std::span<const float> vec,
-                     std::size_t k);
+/// Q6_K: 256 elements per 210-byte block ({ql, qh, scales, d}); one scalar
+/// reference reader, mirroring the device loader's decoded value exactly.
+[[nodiscard]] float Q6KValue(const block_q6_K& block, std::size_t index) noexcept;
 
 }  // namespace gufo::quant
 

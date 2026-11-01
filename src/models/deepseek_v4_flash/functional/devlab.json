@@ -1,0 +1,50 @@
+{
+  "assets": {
+    "deepseek4": {
+      "repo": "antirez/deepseek-v4-gguf",
+      "revision": "1cd7b564460821938add0475a60b942c409295e0",
+      "patterns": [
+        "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+      ],
+      "required": [
+        "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+      ]
+    },
+    "dspark": {
+      "repo": "antirez/deepseek-v4-gguf",
+      "revision": "e7f04037032990db0346398d249baf9fb9df1ccc",
+      "patterns": [
+        "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+      ],
+      "required": [
+        "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+      ]
+    }
+  },
+  "models": {
+    "deepseek4": {
+      "title": "DeepSeek V4 Flash",
+      "category": "llm",
+      "asset": "deepseek4",
+      "target": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+      "draft_asset": "dspark",
+      "draft": "DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "draft_option": "--dspark-model",
+      "mode": "dspark",
+      "sampling": "deepseek4"
+    }
+  },
+  "rules": [
+    {
+      "id": "private-deepseek",
+      "priority": 20,
+      "paths": [
+        "src/models/deepseek_v4_flash/**",
+        "tests/models/deepseek_v4_flash/**"
+      ],
+      "owners": [
+        "deepseek4"
+      ]
+    }
+  ]
+}

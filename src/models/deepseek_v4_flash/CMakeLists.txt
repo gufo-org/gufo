@@ -44,15 +44,18 @@ target_link_libraries(gufo_deepseek_v4_flash_mmq PUBLIC
   hip::host
   roc::hipblas)
 
+# The chat template and the scalar sampler have their own CPU-only target
+# (text/CMakeLists.txt) so CPU builds and the ds4 tests share one
+# implementation; this library links it instead of compiling them again.
 add_library(gufo_deepseek_v4_flash STATIC
-  chat_template.cpp
   engine.cpp
   ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/model_data.cpp
   ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/rocm_graph.cpp
-  ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/sampling.cpp
   ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/session.cpp
   ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}/tokenizer.cpp
   ${DEEPSEEK_V4_FLASH_ROCM_DIR}/backend.hip.cpp)
+
+target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_deepseek_v4_flash_text)
 
 set_source_files_properties(
   ${DEEPSEEK_V4_FLASH_ROCM_DIR}/backend.hip.cpp

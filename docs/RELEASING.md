@@ -117,3 +117,72 @@ installed on Gufo with Contents write permission; Toolboxes' own
 `GITHUB_TOKEN` cannot upload assets to Gufo. The upload job creates a fresh app
 token after the build and does not overwrite existing release assets.
 Toolboxes' manual release workflow accepts a tag for recovery runs.
+
+
+## Extension API and build selection
+
+Gufo's CLI, HTTP API and existing public flake outputs retain the release
+compatibility rules above. The separately versioned source extension API and
+the future experimental flake `extensions` argument are outside that surface.
+A source extension API break alone does not require `!`; a CLI/HTTP/public flake
+break made during migration does. Ordinary PRs may update the extension API
+version and [its change log](../include/gufo/ext/CHANGES.md), independently of
+release automation's ownership of Gufo's version/changelog.
+
+Before 1.0, the API version is `0.MINOR.REVISION`: a minor bump may break source
+compatibility, while revision bumps are additive. Extensions request a revision
+floor within one minor series. From 1.0, minor bumps are additive and breaking
+changes increment the major; retain an adapter from the preceding major for at
+least 60 days where feasible and report deprecations at configure time. Fix
+in-tree extensions in the same PR. Compatibility means rebuilding extension
+source against a compatible Gufo release; there is no binary ABI promise.
+Experimental hooks have no stability guarantee and graduate only by explicit
+review after their own 60 unchanged days. API 1.0 remains gated by all RFC
+criteria, including the measured text surface, external pilot, independently
+pinned external text compatibility fixture, five additive API features and an
+actual 60-day period. In-tree migrations alone do not establish external
+compatibility. No 1.0 stability claim is made today.
+
+Every declaration/contract change in the generated
+[SURFACE](../include/gufo/ext/SURFACE) transitive closure, including forwarded
+core/cache headers, and every public CMake/schema contract change requires the
+`ext-api` PR label, an increased extension API version and a matching change-log
+entry. The PR workflow runs `tools/ci/check-extension-api.py --base <base-sha>
+--labels <json-label-list>`; the hosted suite checks inventory drift and policy
+fixtures. The initial token check conservatively includes inline bodies,
+initializers and CMake/schema statements; comments/whitespace do not trigger it.
+Card10 will expand classification of stable/platform/experimental/private
+headers and measure declarations; the initial inventory is no claim that all
+future text interfaces are already stable.
+
+`nix build` / `.#default`, every normal CMake preset and both Devlab build paths
+use discovery: all supported in-tree extensions are selected, including ones
+not in [extensions.lock](../extensions.lock). `.#release` and the release-tag
+Windows ZIP use `GUFO_EXTENSIONS_FROM_LOCK=ON`. Toolboxes can select the same
+policy through `gufo.override { extensionsFromLock = true; }`; publishing actual
+Toolboxes images remains an external distribution deliverable. The lock is an
+exact name list, including every family dependency, not an implicit dependency
+closure. An unavailable platform or missing dependency in the lock is an error
+in every configure mode, including plain discovery, so a stale lock also fails
+development builds. `GUFO_EXTENSIONS` is also an exact semicolon list; `*`
+selects discovery and an explicitly empty list selects none. An explicit list
+and lock mode conflict, and an empty entry from a stray `;` is rejected.
+
+Bootstrap: the current lock contains no migrated extensions. Existing legacy
+models still build and serve through their existing routes in both modes; they
+are not falsely reported as extension providers. Lock mode controls discovered
+extension manifests only. The pilot and later model cards populate this list as
+providers move, while Card14 adds metadata for remaining models before code
+migration. `gufo --version` preserves the version line first, then reports API,
+selection and extension provenance. `gufo diagnose --section extensions
+[--json]` inspects provenance without model loads/HIP probes; ordinary human
+`diagnose` also lists extensions. Existing diagnostic JSON schema is unchanged.
+
+Hosted CPU checks build a real lock-mode executable, report unshipped
+extensions and reject shipped/unshipped artifact-key, option-name and model-ID
+collisions. They do not establish HIP release behavior or performance parity.
+Run affected functional, numerical and performance gates on the actual shipped
+HIP lock artifact as well as the default artifact when providers migrate;
+include dialect selection/fallback and forced tool choice. Keep unshipped
+discovery evidence separate. The RFC's strict-subset/default-Devlab inference
+is not accepted as release qualification.

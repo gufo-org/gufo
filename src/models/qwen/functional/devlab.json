@@ -1,0 +1,56 @@
+{
+  "assets": {
+    "qwen27": {
+      "repo": "unsloth/Qwen3.8-27B-GGUF",
+      "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "patterns": [
+        "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "mmproj-BF16.gguf"
+      ],
+      "required": [
+        "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "mmproj-BF16.gguf"
+      ]
+    },
+    "dflash2": {
+      "repo": "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+      "revision": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
+      "patterns": [
+        "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ],
+      "required": [
+        "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ]
+    }
+  },
+  "models": {
+    "qwen27-q4": {
+      "title": "Qwen27 Q4",
+      "category": "llm",
+      "asset": "qwen27",
+      "target": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "projector": "mmproj-BF16.gguf",
+      "draft_asset": "dflash2",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "draft_option": "--dflash-model",
+      "mode": "dflash2",
+      "sampling": "qwen38"
+    }
+  },
+  "rules": [
+    {
+      "id": "private-qwen27",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen/**",
+        "src/families/qwen/**",
+        "tests/models/qwen/**",
+        "tests/models/qwen27b/**",
+        "tests/families/qwen/**"
+      ],
+      "owners": [
+        "qwen27-q4"
+      ]
+    }
+  ]
+}

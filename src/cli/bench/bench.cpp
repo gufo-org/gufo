@@ -35,6 +35,7 @@
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
+#include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 #endif
 
 namespace gufo::cli {
@@ -1422,7 +1423,7 @@ int RunBench(std::span<const char* const> args) {
     options.initial_draft_tokens = opt.draft_tokens;
     options.enable_adaptive_draft_length = false;
     options.use_batched_verification = true;
-    dflash_verifier = std::make_unique<speculative::SpeculativeVerifier>(
+    dflash_verifier = hip::CreateQwenGpuSpeculativeVerifier(
         *gpu_exec, std::move(draft), options);
   }
   const std::string model_name =
@@ -1647,9 +1648,8 @@ int RunBench(std::span<const char* const> args) {
           s_opts.min_draft_tokens = opt.min_draft_tokens;
           s_opts.initial_draft_tokens = opt.draft_tokens;
           s_opts.use_batched_verification = true;
-          owned_spec_verifier =
-              std::make_unique<speculative::SpeculativeVerifier>(
-                  *gpu_exec, std::move(draft_backend), s_opts);
+          owned_spec_verifier = hip::CreateQwenGpuSpeculativeVerifier(
+              *gpu_exec, std::move(draft_backend), s_opts);
           spec_verifier = owned_spec_verifier.get();
         }
 

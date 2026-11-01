@@ -1,0 +1,28 @@
+[
+  {
+    "command": [
+      "nm",
+      "-C",
+      "build/cpu-test/tests/extensions/extension_runtime_test"
+    ],
+    "binary_sha256": "d07c40e02230dd39be6ebf003fb44424b94b6432cfbd6a2446492e64efa0a09e",
+    "returncode": 0,
+    "symbols": {
+      "CreateUnavailableHipProvider()": false,
+      "alpha_hip_register(gufo::ext::Registry&)": false
+    }
+  },
+  {
+    "command": [
+      "nm",
+      "-C",
+      "build/extensions-card04-available/extensions/extension_runtime_test"
+    ],
+    "binary_sha256": "f5054f0a8a9691c3b7b6bc3b0f2e79b3ddab1c21317d4f8409db06e11f73fe7c",
+    "returncode": 0,
+    "symbols": {
+      "CreateUnavailableHipProvider()": true,
+      "alpha_hip_register(gufo::ext::Registry&)": true
+    }
+  }
+]

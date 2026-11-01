@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "name": "qwen38_flash_next",
+  "target": "gufo_qwen38_flash_next",
+  "kind": "static",
+  "purpose": "Qwen3.8-Flash-Next CPU reference and ROCm runtime, including the continuation layout and the ngram draft model.",
+  "consumers": [
+    "gufo_llm_cli",
+    "gufo_serving"
+  ]
+}

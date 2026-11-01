@@ -3,7 +3,7 @@
 //
 // Self-contained (no repository headers) so it compiles directly with hipcc on
 // the supported gfx1151 host for fast kernel-design iteration. Winning variants
-// are ported into src/models/qwen/hip/kernels/ssm_recurrence.hip and validated
+// are ported into src/families/qwen/kernels/ssm_recurrence.hip and validated
 // through `nix build` plus the CTest oracles.
 //
 // Build inside Nix with tools/bench/build.sh and this source path.
@@ -57,7 +57,7 @@ constexpr int kStatePerHead = kKeyDim * kValDim;
 
 // ---------------------------------------------------------------------------
 // Baseline: verbatim copy of the production kernel
-// (src/models/qwen/hip/kernels/ssm_recurrence.hip). Two lanes own one state
+// (src/families/qwen/kernels/ssm_recurrence.hip). Two lanes own one state
 // row; every token runs four block-wide barriers and two single-thread
 // cross-warp reductions.
 // ---------------------------------------------------------------------------

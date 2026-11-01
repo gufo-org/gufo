@@ -7,9 +7,8 @@
 #include <string>
 #include <utility>
 
-#include "src/cli/serve/asr_service.hpp"
-#include "src/cli/serve/audio_asr_api.hpp"
 #include "src/models/qwen3_asr/audio.hpp"
+#include "tests/support/model_api_test_support.hpp"
 
 namespace {
 

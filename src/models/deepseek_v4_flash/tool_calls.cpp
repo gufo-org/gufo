@@ -3,14 +3,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <gufo/ext/json.hpp>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include "src/core/json.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
 

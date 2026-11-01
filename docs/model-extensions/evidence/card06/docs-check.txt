@@ -1,0 +1,15 @@
+# Task-scoped documentation check (Card 06)
+
+cmd: nix develop -c python3 tools/ci/check-docs.py   (whole-repo checker)
+result: FAILED overall with exactly 164 errors, ALL under the unrelated
+untracked hrx-system/ tree — the pre-existing baseline recorded by Cards
+01–05 (0 errors outside hrx-system).
+
+grep -E "^\s+- " | grep -vc hrx-system  →  0
+
+During this session the count briefly reached 165 because
+cards/README.md:58 linked the user-deleted ../HANDOFF.md; the reference was
+rewritten to the per-card evidence READMEs and the count returned to the
+164-line baseline. The plain-text "HANDOFF.md" mention in
+cards/22-deepseek-extension.md is prose (not a link) for a later card and was
+left untouched.

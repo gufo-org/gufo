@@ -1,5 +1,5 @@
 #include "qfn_mmq_prelude.h"
-#include "src/core/hip/managed_alloc.hpp"
+#include <gufo/ext/experimental/managed_alloc.hpp>
 namespace qfn_mmq {
 #include "common.hpp"
 #include "mmid.hpp"

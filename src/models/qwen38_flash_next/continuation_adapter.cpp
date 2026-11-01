@@ -4,13 +4,13 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <gufo/ext/experimental/snapshot_copy.hpp>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/snapshot_copy.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 

@@ -18,11 +18,12 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/image.hpp"
+#include "src/families/qwen/config/qwen_config.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
-#include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/generator.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -31,6 +32,7 @@
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
+#include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
 
@@ -299,7 +301,7 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
     preset = sampling::TextModelPreset::kQwen38;
-  } else if (const auto config = reader.ExtractModelConfig()) {
+  } else if (const auto config = models::qwen::ExtractQwenConfig(reader)) {
     preset = sampling::TextPreset(*config);
   }
   opt->sampling = sampling::ResolveTextSampling(
@@ -784,7 +786,7 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
   const bool block_diffusion_draft = opt.speculative_backend == "dflash2";
   s_opts.enable_adaptive_draft_length = !block_diffusion_draft;
   s_opts.use_batched_verification = true;
-  return std::make_unique<speculative::SpeculativeVerifier>(
+  return hip::CreateQwenGpuSpeculativeVerifier(
       executor, std::move(draft_backend), s_opts);
 }
 
@@ -793,9 +795,6 @@ void GenerateQwenGpuResponse(
     speculative::SpeculativeVerifier* verifier,
     std::span<const tokenization::TokenId> prompt_tokens,
     std::string* reply = nullptr) {
-  models::GenerationOptions generation;
-  generation.max_new_tokens = opt.max_tokens;
-  generation.sampling = opt.sampling;
   std::size_t generated_count = 0;
   std::vector<tokenization::TokenId> generated_ids;
   if (opt.verbose)
@@ -812,8 +811,14 @@ void GenerateQwenGpuResponse(
   };
   const auto start = std::chrono::steady_clock::now();
   if (verifier != nullptr) {
+    speculative::GenerationOptions generation;
+    generation.max_new_tokens = opt.max_tokens;
+    generation.sampling = opt.sampling;
     (void)verifier->Generate(prompt_tokens, generation, on_token);
   } else {
+    models::GenerationOptions generation;
+    generation.max_new_tokens = opt.max_tokens;
+    generation.sampling = opt.sampling;
     (void)executor.Generate(prompt_tokens, generation, on_token);
   }
   const double seconds =

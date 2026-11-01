@@ -1,0 +1,138 @@
+================================================================================
+CARD 12 ORCHESTRATOR CLOSURE VERIFICATION TRANSCRIPT
+================================================================================
+Host: Linux x86_64 Strix Halo (gfx1151), 125 GiB RAM, 32 cores
+Date: 2026-11-01
+Parent commit: ytumsxmz 7752857d refactor(extensions): migrate models to public extension headers
+RFC.md sha256: 2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448 (byte-identical, uncommitted)
+
+--------------------------------------------------------------------------------
+1. Memory Headroom Check
+--------------------------------------------------------------------------------
+$ free -g
+               total        used        free      shared  buff/cache   available
+Mem:             125          12          12           0         101         112
+Swap:              0           0           0
+VERDICT: PASS (112 GiB available >= 15 GiB required headroom)
+
+--------------------------------------------------------------------------------
+2. Extension API Surface Check (check-extension-api.py)
+--------------------------------------------------------------------------------
+$ python3 tools/ci/check-extension-api.py
+PASS: extension API surface (97 paths)
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+3. Extension Isolation & Ratchet Boundary Gates (check-extension-isolation.py)
+--------------------------------------------------------------------------------
+$ python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-serving-boundary --fail-on-family-graph --fail-on-target-ownership --fail-on-model-core-includes
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: model core boundary (no production src/models -> src/core|src/cache includes)
+[check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+4. Extension Isolation Unit & Ratchet Tests (check_extension_isolation_test.py)
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_extension_isolation_test.py
+Ran 24 tests in 19.074s
+OK
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+5. Extension API Policy Tests (check_extension_api_test.py)
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_extension_api_test.py
+Ran 7 tests in 0.002s
+OK
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+6. Documentation Policy Tests (check_docs_test.py)
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_docs_test.py
+Ran 11 tests in 0.005s
+OK
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+7. Clang-Format Verification (check-format.py)
+--------------------------------------------------------------------------------
+$ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+PASS: Checked 787 C++ files
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+8. Bounded CPU CTest (Migrated Model API Tests + Continuation Identity Goldens)
+--------------------------------------------------------------------------------
+$ nix develop -c ctest --test-dir build/cpu-test -R '^(qwen3_asr_audio_api_test|qwen_image_21_test|qwen3_tts_audio_api_test|embedding_gemma2_embeddings_api_test|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Test project /home/mixer/gufo/build/cpu-test
+    Start   5: qwen3_asr_audio_api_test
+1/7 Test   #5: qwen3_asr_audio_api_test .......................   Passed    0.01 sec
+    Start   7: qwen_image_21_test
+2/7 Test   #7: qwen_image_21_test .............................   Passed    0.01 sec
+    Start  74: qwen3_tts_audio_api_test
+3/7 Test  #74: qwen3_tts_audio_api_test .......................   Passed    0.00 sec
+    Start 140: qwen27b_continuation_identity_test
+4/7 Test #140: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 149: embedding_gemma2_embeddings_api_test
+5/7 Test #149: embedding_gemma2_embeddings_api_test ...........   Passed    0.17 sec
+    Start 154: deepseek_v4_flash_continuation_identity_test
+6/7 Test #154: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 160: qwen38_flash_next_continuation_identity_test
+7/7 Test #160: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 7
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+9. Bounded GPU CTest (Migrated Model API Tests + Continuation Identity Goldens)
+--------------------------------------------------------------------------------
+$ nix develop -c ctest --test-dir build/gpu-test -R '^(qwen3_asr_audio_api_test|qwen_image_21_test|qwen3_tts_audio_api_test|embedding_gemma2_embeddings_api_test|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Test project /home/mixer/gufo/build/gpu-test
+    Start   5: qwen3_asr_audio_api_test
+1/7 Test   #5: qwen3_asr_audio_api_test .......................   Passed    0.06 sec
+    Start  10: qwen_image_21_test
+2/7 Test  #10: qwen_image_21_test .............................   Passed    0.06 sec
+    Start  81: qwen3_tts_audio_api_test
+3/7 Test  #81: qwen3_tts_audio_api_test .......................   Passed    0.06 sec
+    Start 195: qwen27b_continuation_identity_test
+4/7 Test #195: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 219: embedding_gemma2_embeddings_api_test
+5/7 Test #219: embedding_gemma2_embeddings_api_test ...........   Passed    0.23 sec
+    Start 226: deepseek_v4_flash_continuation_identity_test
+6/7 Test #226: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 243: qwen38_flash_next_continuation_identity_test
+7/7 Test #243: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 7
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+10. Repository PR Checks (nix build .#checks.x86_64-linux.pr)
+--------------------------------------------------------------------------------
+$ nix build .#checks.x86_64-linux.pr
+building '/nix/store/5mx9i4k1ipblgpv1n918k4dqj90qiw23-check-docs.drv'...
+building '/nix/store/q651qmjb7yn2zskdn8d9awmbi0mvh0w5-check-format.drv'...
+building '/nix/store/4vfgx8r8b3pacaz3142xw6k0zgvp696c-check-pr-tests.drv'...
+building '/nix/store/59780zf7d2qbaiszzk17yk93xhckzyn0-check-pr.drv'...
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+11. OpenAI Codex Exec Review
+--------------------------------------------------------------------------------
+$ codex exec review --dangerously-bypass-approvals-and-sandbox 'review the diff of current jj revision, you can use jj diff to see changes'
+Result:
+"The diff preserves the migrated tests’ behavior while consolidating serving dependencies behind test-only support. No actionable regressions were identified; all 24 extension-isolation unit tests passed."
+Verdict: CLEAN PASS (0 critical, 0 major findings)

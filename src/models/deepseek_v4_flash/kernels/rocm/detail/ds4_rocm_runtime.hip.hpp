@@ -1,7 +1,7 @@
 #include <chrono>
 
-#include "src/core/platform/mapped_file.hpp"
-#include "src/core/platform/os_info.hpp"
+#include <gufo/ext/platform/mapped_file.hpp>
+#include <gufo/ext/platform/os_info.hpp>
 
 static const void *g_model_host_base;
 static uint64_t g_model_registered_size;
@@ -50,7 +50,7 @@ static int g_rocm_mmq_ready;
 #endif
 #ifdef __HIP_PLATFORM_AMD__
 #include "ds4_rocm_hipblaslt.hip.hpp"
-#include "src/core/hip/snapshot_transfer.hpp"
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
 #endif
 enum {
     DS4_ROCM_N_EXPERT = 256u,
