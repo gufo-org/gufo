@@ -1,12 +1,12 @@
 #ifndef GUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
 #define GUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
 
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/model_config.hpp>
+#include <gufo/ext/types.hpp>
 #include <span>
 #include <vector>
 
-#include "src/cache/adapter.hpp"
-#include "src/cache/types.hpp"
-#include "src/core/model_config.hpp"
 #include "src/families/qwen/hip_common/execution_policy.hpp"
 
 namespace gufo::models::qwen {

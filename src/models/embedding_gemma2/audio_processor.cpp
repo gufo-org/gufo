@@ -6,11 +6,10 @@
 #include <complex>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <numbers>
 #include <sstream>
 #include <stdexcept>
-
-#include "src/core/json.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

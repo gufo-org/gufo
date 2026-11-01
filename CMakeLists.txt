@@ -26,7 +26,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(GUFO_RELEASE_VERSION "development" CACHE STRING "Gufo release version")
 set(GUFO_REVISION "unknown" CACHE STRING "Gufo source revision")
-include_directories(${CMAKE_SOURCE_DIR})
+include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include)
 
 # Reuse the compiler cache whenever it is installed, as the CPU check
 # derivations do. HIP kernels stay uncached: hipcc drive files and bitcode
@@ -739,6 +739,10 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
       --fail-on-serving-boundary)
+  add_test(NAME extension_model_core_includes_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-model-core-includes)
   add_test(NAME extension_family_graph_gate
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
@@ -752,6 +756,7 @@ if (BUILD_TESTING)
     LABELS "cpu;repository" TIMEOUT 180)
   set_tests_properties(extension_isolation_report
     extension_core_model_includes_gate extension_family_graph_gate
+    extension_model_core_includes_gate
     extension_serving_boundary_gate extension_target_ownership_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 

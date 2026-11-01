@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #ifdef __cplusplus
-#include "src/core/platform/mapped_file.hpp"
+#include <gufo/ext/platform/mapped_file.hpp>
 
 extern "C" {
 #endif

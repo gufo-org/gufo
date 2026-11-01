@@ -548,6 +548,46 @@ qwen::Real real;
             ISOLATION.inventory(ROOT))
         self.assertEqual(violations, [])
 
+    def test_model_core_boundary_blocks_core_and_cache_includes_from_production_models(self):
+        files = {
+            "src/core/json.hpp": "struct Json {};\n",
+            "src/cache/types.hpp": "struct Types {};\n",
+            "src/core/hip/hip_utils.hpp": "struct HipUtils {};\n",
+            "src/models/demo/demo.hpp": '#include "src/cache/types.hpp"\n',
+            "src/models/demo/demo.cpp": '#include "src/core/json.hpp"\n',
+            "src/models/demo/hip/ops.hip": '#include "src/core/hip/hip_utils.hpp"\n',
+            "src/models/demo/valid.cpp": (
+                '#include <gufo/ext/json.hpp>\n'
+                '#include "src/models/demo/demo.hpp"\n'
+                '#include "src/families/qwen/foo.hpp"\n'),
+            "src/families/qwen/foo.hpp": "struct Foo {};\n",
+            "include/gufo/ext/json.hpp": "struct ExtJson {};\n",
+            # Test files are exempt from this ratchet (governed by test-support in Card 12)
+            "src/models/demo/tests/demo_test.cpp": '#include "src/core/json.hpp"\n',
+            "tests/models/demo/other_test.cpp": '#include "src/core/json.hpp"\n',
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            violations = ISOLATION.model_core_boundary_violations(
+                ISOLATION.inventory(root))
+        self.assertEqual(violations, [
+            "src/models/demo/demo.cpp:1: src/core/json.hpp",
+            "src/models/demo/demo.hpp:1: src/cache/types.hpp",
+            "src/models/demo/hip/ops.hip:1: src/core/hip/hip_utils.hpp",
+        ])
+
+    def test_repository_satisfies_the_model_core_boundary(self):
+        # Card 11 migrated all models to public extension headers under include/gufo/ext.
+        # If this fails, a production model source started including a private core
+        # or cache header; include <gufo/ext/...> instead.
+        violations = ISOLATION.model_core_boundary_violations(
+            ISOLATION.inventory(ROOT))
+        self.assertEqual(violations, [])
+
 
 if __name__ == "__main__":
     unittest.main()

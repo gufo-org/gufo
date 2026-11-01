@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -12,8 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/snapshot_transfer.hpp"
 #include "src/families/qwen/kernels/dflash_kernels.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/families/qwen/kernels/verify_gemm_27b.hpp"

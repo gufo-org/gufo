@@ -3,11 +3,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
 
-#include "src/core/hip/hip_utils.hpp"
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/families/qwen/kernels/verify_gemm_27b.hpp"

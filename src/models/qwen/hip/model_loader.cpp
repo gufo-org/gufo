@@ -2,6 +2,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <gufo/ext/experimental/heap_placement.hpp>
+#include <gufo/ext/experimental/weight_upload.hpp>
+#include <gufo/ext/platform/pages.hpp>
+#include <gufo/ext/platform/prefault.hpp>
 #include <limits>
 #include <memory>
 #include <span>
@@ -9,10 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/heap_placement.hpp"
-#include "src/core/hip/weight_upload.hpp"
-#include "src/core/platform/pages.hpp"
-#include "src/core/platform/prefault.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen/hip/executor.hpp"

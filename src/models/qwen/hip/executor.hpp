@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <gufo/ext/model_config.hpp>
 #include <memory>
 #include <optional>
 #include <span>
@@ -14,7 +15,6 @@
 #include <type_traits>
 #include <vector>
 
-#include "src/core/model_config.hpp"
 #include "src/families/qwen/hip_common/continuation_hooks.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
@@ -26,7 +26,8 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
-#include "src/core/hip/detail/hip_graph_decode_executor.hpp"
+#include <gufo/ext/experimental/hip_graph_decode_executor.hpp>
+
 #include "src/families/qwen/hip_common/execution_policy.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"

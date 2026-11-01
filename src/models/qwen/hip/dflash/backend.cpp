@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/sampling.hpp>
 #include <limits>
 #include <optional>
 #include <ranges>
@@ -14,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/sampling.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 

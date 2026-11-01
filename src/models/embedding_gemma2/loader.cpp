@@ -3,14 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <gufo/ext/json.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
-
-#include "src/core/json.hpp"
-#include "src/core/platform/mapped_file.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

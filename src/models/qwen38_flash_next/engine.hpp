@@ -4,6 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/prompt_lookup.hpp>
+#include <gufo/ext/sampling.hpp>
+#include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,9 +14,6 @@
 #include <string_view>
 #include <vector>
 
-#include "src/core/sampling.hpp"
-#include "src/core/session_mode.hpp"
-#include "src/core/speculative/prompt_lookup.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/families/qwen/vision/encoder.hpp"
 #include "src/families/qwen/vision/prompt.hpp"

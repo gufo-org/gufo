@@ -3,12 +3,12 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
 
-#include "src/core/quant/ggml_dequant.hpp"
 #include "src/families/qwen/config/qwen_config.hpp"
 #include "src/models/qwen/forward.hpp"
 

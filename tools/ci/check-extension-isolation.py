@@ -13,6 +13,8 @@ such include, so a new violation fails the check. --fail-on-serving-boundary
 audits the Card 09 (RFC step 6) split: no src/cli/** include from production
 sources under src/models/**, src/families/**, src/cache/**, src/ext/** or
 include/gufo/ext/**; sources under a tests/ tree stay exempt until step 7b.
+--fail-on-model-core-includes audits the Card 11 (RFC step 7) migration:
+no production file under src/models/** may include src/core/** or src/cache/**.
 --fail-on-family-graph audits the Card 07 family manifests. --fail-on-target-ownership audits the Card 08
 (RFC step 5) target graph: every model directory needs a manifest, and every
 target that links, compiles or includes a library must be claimed by it, so
@@ -688,6 +690,27 @@ def serving_boundary_violations(report):
     return sorted(violations)
 
 
+def model_core_boundary_violations(report):
+    """Return production src/models/** includes of src/core/** or src/cache/** headers.
+
+    Card 11 (RFC step 7) migrated all eight model implementations to public
+    extension headers under <gufo/ext/...>. Production sources under
+    src/models/** must not include src/core/** or src/cache/**.
+    """
+    violations = []
+    for edge in report["includes"]:
+        path = edge["path"]
+        if not path.startswith("src/models/") or in_test_tree(path):
+            continue
+        inc = edge["include"]
+        target = edge["resolved"] or posixpath.normpath(
+            posixpath.join(posixpath.dirname(path), inc))
+        if (target.startswith("src/core/") or target.startswith("src/cache/")
+                or inc.startswith(("src/core/", "src/cache/"))):
+            violations.append(f"{path}:{edge['line']}: {inc}")
+    return sorted(violations)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
@@ -702,6 +725,8 @@ def main():
     parser.add_argument("--fail-on-serving-boundary", action="store_true",
                         help="Fail if a model, family, cache, extension-runtime or "
                              "public-API file includes a src/cli serving or HTTP header")
+    parser.add_argument("--fail-on-model-core-includes", action="store_true",
+                        help="Fail if any production model file includes a core or cache header")
     parser.add_argument("--fail-on-target-ownership", action="store_true",
                         help="Fail unless every model directory has a manifest and every "
                              "target that links, compiles or includes a library claims it")
@@ -746,6 +771,16 @@ def main():
         print("[check-extension-isolation] PASS: serving boundary "
               "(no src/cli include from models, families, cache, src/ext or "
               "the public extension API)")
+    if args.fail_on_model_core_includes:
+        violations = model_core_boundary_violations(report)
+        if violations:
+            print("[check-extension-isolation] MODEL CORE BOUNDARY VIOLATED "
+                  "(production models must not include src/core or src/cache headers):")
+            for violation in violations:
+                print(f"  {violation}")
+            return 1
+        print("[check-extension-isolation] PASS: model core boundary "
+              "(no production src/models -> src/core|src/cache includes)")
     if args.fail_on_target_ownership or args.target_ownership_report:
         libraries, edges, violations = target_ownership(args.root.resolve())
         if args.target_ownership_report:

@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/experimental/host_allocations.hpp>
+#include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -16,8 +18,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "src/core/hip/host_allocations.hpp"
-#include "src/core/session_mode.hpp"
 #include "src/families/qwen/kernels/ops/token.hpp"
 #include "src/families/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"

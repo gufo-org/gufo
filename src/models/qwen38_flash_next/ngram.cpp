@@ -4,13 +4,12 @@
 #include <bit>
 #include <cerrno>
 #include <cstring>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
+#include <gufo/ext/platform/fs.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
-
-#include "src/core/platform/fs.hpp"
-#include "src/core/platform/mapped_file.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {

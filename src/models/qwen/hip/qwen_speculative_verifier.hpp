@@ -1,9 +1,8 @@
 #ifndef GUFO_MODELS_QWEN_HIP_QWEN_SPECULATIVE_VERIFIER_HPP_
 #define GUFO_MODELS_QWEN_HIP_QWEN_SPECULATIVE_VERIFIER_HPP_
 
+#include <gufo/ext/speculative_verifier.hpp>
 #include <memory>
-
-#include "src/core/speculative/speculative_verifier.hpp"
 
 namespace gufo::hip {
 

@@ -8,6 +8,9 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <gufo/ext/experimental/managed_alloc.hpp>
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
+#include <gufo/ext/platform/pages.hpp>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
@@ -17,9 +20,6 @@
 #include <vector>
 
 #include "qfn_mmq.h"
-#include "src/core/hip/managed_alloc.hpp"
-#include "src/core/hip/snapshot_transfer.hpp"
-#include "src/core/platform/pages.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 

@@ -2,9 +2,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <vector>
-
-#include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models::qwen38_flash_next::cpu {
 namespace {

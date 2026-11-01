@@ -7,10 +7,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
+#include <gufo/ext/experimental/ggml_gemm.hpp>
 #include <span>
 
-#include "src/core/quant/ggml_dequant.hpp"
-#include "src/core/quant/ggml_gemm.hpp"
 #include "src/families/qwen/hip_common/gemm_route.hpp"
 #include "src/models/qwen/modules/attention.hpp"
 #include "src/models/qwen/modules/embed.hpp"

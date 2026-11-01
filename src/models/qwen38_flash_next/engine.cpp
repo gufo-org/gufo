@@ -5,11 +5,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/gguf_reader.hpp>
 #include <limits>
 #include <optional>
 #include <type_traits>
 
-#include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"

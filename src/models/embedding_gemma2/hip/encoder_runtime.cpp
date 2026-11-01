@@ -8,11 +8,11 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <map>
 #include <string>
 #include <utility>
 
-#include "src/core/hip/hip_utils.hpp"
 #include "src/models/embedding_gemma2/batch_scheduler.hpp"
 #include "src/models/embedding_gemma2/hip/audio_runtime.hpp"
 #include "src/models/embedding_gemma2/hip/blas.hpp"

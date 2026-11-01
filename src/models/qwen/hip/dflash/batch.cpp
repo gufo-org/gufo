@@ -5,12 +5,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/hip_utils.hpp"
 #include "src/families/qwen/kernels/dflash_kernels.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/models/qwen/hip/dflash.hpp"

@@ -1,8 +1,9 @@
 #ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_ADAPTER_HPP_
 #define GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_ADAPTER_HPP_
 
-#include "src/cache/adapter.hpp"
-#include "src/core/hip/transfer_pool.hpp"
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/experimental/transfer_pool.hpp>
+
 #include "src/models/qwen38_flash_next/continuation_layout.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 

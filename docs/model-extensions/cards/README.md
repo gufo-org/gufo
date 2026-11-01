@@ -45,7 +45,17 @@ unresolved gates — none of which it claims — are the deferred functional/per
 half, Windows execution, model include migration (deferred to Card 11), and the
 exempt ASR in-tree test edge until Card 12. See its
 [execution record](10-public-api-surface.md#execution-record).
-Cards 11–29 are pending.
+Card 11 is complete for its in-card gates: migrated all eight model implementations
+(152 includes across 95 files) to published `<gufo/ext/...>` headers with zero
+non-include edits; added `${CMAKE_SOURCE_DIR}/include` to root `CMakeLists.txt`;
+preserved 386 own root-relative and 65 family includes; enforced
+`--fail-on-model-core-includes` via `extension_model_core_includes_gate` with negative
+proof; and passed bounded CPU/GPU CTests including continuation identity goldens. Its
+unresolved gates — none of which it claims — are the deferred functional/performance
+half, native Windows binary execution, own/family root-relative coupling (to be migrated
+in cards 13–22), and the exempt ASR in-tree test edge until Card 12. See its
+[execution record](11-public-header-migrations.md#execution-record).
+Cards 12–29 are pending.
 The authorized implementation milestone ends after Card 14 is
 verified and committed; cards 15–29 document later scope only. This split is
 documentation work and does not itself advance any implementation status.

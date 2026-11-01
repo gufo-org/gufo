@@ -4,12 +4,11 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <gufo/ext/mapped_prefetch.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <limits>
 #include <set>
 #include <stdexcept>
-
-#include "src/core/mapped_prefetch.hpp"
-#include "src/core/platform/mapped_file.hpp"
 
 namespace gufo::models::qwen_image_21 {
 namespace {

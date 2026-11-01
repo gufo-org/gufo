@@ -2,10 +2,10 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <limits>
 #include <stdexcept>
 
-#include "src/core/hip/hip_utils.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 

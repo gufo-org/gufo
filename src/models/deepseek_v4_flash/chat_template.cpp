@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/sha256.hpp>
 #include <span>
 #include <string>
 #include <string_view>
@@ -10,7 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/crypto/sha256.hpp"
 #include "src/models/deepseek_v4_flash/tool_calls.hpp"
 
 namespace gufo::models::deepseek_v4_flash {

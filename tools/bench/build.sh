@@ -54,7 +54,7 @@ for t in "${targets[@]}"; do
   fi
   echo "==> $src -> $out"
   compile=(hipcc -O3 --offload-arch=gfx1151 -std=c++20
-    -I. "${inc[@]}" -Rpass-analysis=kernel-resource-usage)
+    -I. -I./include "${inc[@]}" -Rpass-analysis=kernel-resource-usage)
   if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ]]; then
     # Exact projection comparisons use the production compiler optimization level.
     compile[1]=-O2

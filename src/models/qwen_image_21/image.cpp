@@ -1,16 +1,15 @@
-#include "src/core/image.hpp"
-
 #include <png.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/image.hpp>
+#include <gufo/ext/sha256.hpp>
 #include <limits>
 #include <numbers>
 #include <stdexcept>
 
-#include "src/core/crypto/sha256.hpp"
 #include "src/models/qwen_image_21/model.hpp"
 
 namespace gufo::models::qwen_image_21 {

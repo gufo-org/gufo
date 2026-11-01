@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <gufo/ext/experimental/weight_upload.hpp>
+#include <gufo/ext/mapped_prefetch.hpp>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -28,8 +30,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/weight_upload.hpp"
-#include "src/core/mapped_prefetch.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/models/qwen3_tts/hip/talker_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"

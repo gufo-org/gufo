@@ -3,11 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <gufo/ext/experimental/dispatch_telemetry.hpp>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
 #include <utility>
-
-#include "src/core/hip/detail/dispatch_telemetry.hpp"
-#include "src/core/hip/hip_utils.hpp"
 
 namespace gufo::hip {
 namespace {

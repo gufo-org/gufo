@@ -2,11 +2,11 @@
 #define GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_LAYOUT_HPP_
 
 #include <cstdint>
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/types.hpp>
 #include <span>
 #include <vector>
 
-#include "src/cache/adapter.hpp"
-#include "src/cache/types.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 
 namespace gufo::models::qwen38_flash_next {

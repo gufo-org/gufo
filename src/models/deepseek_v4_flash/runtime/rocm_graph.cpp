@@ -13,8 +13,8 @@
 #include <vector>
 
 #include "../kernels/rocm/resident_api.h"
-#include "src/core/logging/logging.hpp"
-#include "src/core/platform/fs.hpp"
+#include <gufo/ext/host.hpp>
+#include <gufo/ext/platform/fs.hpp>
 #include "dspark_internal.h"
 #include "dspark_policy.h"
 #include "model_data_internal.h"
