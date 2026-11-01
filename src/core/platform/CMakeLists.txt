@@ -16,7 +16,7 @@ add_library(gufo_platform STATIC
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/pages_windows.cpp>"
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/page_pin_windows.cpp>"
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/process_windows.cpp>")
-target_include_directories(gufo_platform PUBLIC ${PROJECT_SOURCE_DIR})
+target_include_directories(gufo_platform PRIVATE ${PROJECT_SOURCE_DIR})
 target_compile_definitions(gufo_platform PRIVATE
   GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
   GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
