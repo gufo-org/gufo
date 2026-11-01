@@ -774,6 +774,11 @@ if (BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_pr_title_test.py)
   set_tests_properties(check_pr_title_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
 
+  add_test(NAME generate_infrastructure_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/generate_infrastructure_test.py)
+  set_tests_properties(generate_infrastructure_test PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
+
   # It reads the gufo binary, which Windows does not build yet.
   if(ENGINE_ENABLE_HIP AND TARGET gufo)
     # A compiler update can make a kernel spill with no source change. Clang 23

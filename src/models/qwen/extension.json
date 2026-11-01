@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "name": "qwen",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.0",
+  "entry": "qwen_register",
+  "registration_target": "gufo_qwen27b",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "qwen27-q4",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:qwen27"
+      ],
+      "model_ids": [
+        "qwen27"
+      ],
+      "speculative": [
+        "dflash2"
+      ],
+      "target": "gufo_qwen27b",
+      "entry": "qwen_provider_register"
+    }
+  ],
+  "options": [
+    {
+      "name": "--dflash-model",
+      "type": "path",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt"
+      ],
+      "providers": [
+        "qwen27-q4"
+      ],
+      "help": "DFlash2 draft model path for speculative decoding"
+    }
+  ],
+  "targets": {
+    "gufo_qwen27b": {
+      "requires": []
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "Qwen3.8 27B",
+    "inputs": "Q4/Q8 GGUF; text/images",
+    "guide": "docs/models/qwen3.8-27b/README.md"
+  },
+  "tests": [
+    {
+      "target": "qwen_tokenizer_test",
+      "ctest": "qwen_tokenizer_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen_chat_template_test",
+      "ctest": "qwen_chat_template_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen27b_continuation_identity_test",
+      "ctest": "qwen27b_continuation_identity_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen27b_continuation_layout_test",
+      "ctest": "qwen27b_continuation_layout_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "qwen27b"
+  ],
+  "fixtures": "tests/models/qwen27b/fixtures/",
+  "functional": "functional/"
+}

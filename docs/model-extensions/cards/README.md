@@ -78,10 +78,27 @@ lock, and explicit exclusion modes; and passed all bounded CTests, continuation 
 goldens, and format checks. Its unresolved gates — none of which it claims — are the deferred
 functional/performance half (deferred to post-Card-14 qualification window). See its
 [execution record](13-embeddinggemma-pilot.md#execution-record).
-Cards 14–29 are pending.
-The authorized implementation milestone ends after Card 14 is
-verified and committed; cards 15–29 document later scope only. This split is
-documentation work and does not itself advance any implementation status.
+Card 14 is complete for its in-card gates and concludes the current authorized implementation
+milestone (cards 01–14): authored complete schema-1 manifests for all 7 unmigrated models
+(`deepseek_v4_flash`, `minimax_h3`, `qwen`, `qwen38_flash_next`, `qwen3_asr`, `qwen3_tts`,
+`qwen_image_21`) and expanded `embedding_gemma2`; ensured truthful metadata-only discovery in
+`cmake/GufoExtensionDiscovery.cmake` (omitted from discovery builds with reason `"metadata only"`,
+failing explicit requests due to missing `extension.cmake`); prevented premature isolation ratchet
+checks on unmigrated models in `tools/ci/check-extension-isolation.py`; proved Nix production
+derivation independence in `.devops/nix/package.nix` by filtering test/functional/fixture/tool
+paths (identical `default.drvPath` before and after test modifications); split functional
+registries (`tests/functional/devlab.json` and `impact.json`) into core bases and model fragments;
+implemented the automated infrastructure generator `tools/ci/generate-infrastructure.py` managing
+6 target files with drift checks; added generator unit tests in `tests/tools/generate_infrastructure_test.py`
+(9/9 passed); resolved review findings F1 (dead code) and F2 (non-existent manifest paths); and
+passed all 8 affected verification gates including `check-pr` (96/96 passed, 100%) and
+`nix build .#checks.x86_64-linux.pr` (all 4 derivations built and passed). Its unresolved gates — none
+of which it claims — are the deferred functional harness runs and speed benchmark sweeps, which are
+now ready for the consolidated post-Card-14 qualification window. See its
+[execution record](14-generated-infrastructure.md#execution-record).
+Cards 15–29 remain pending. The authorized implementation milestone stops after Card 14;
+cards 15–29 document later scope only. This split is documentation work and does not itself
+advance any implementation status.
 
 ## Card-by-card workflow
 

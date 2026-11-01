@@ -299,6 +299,7 @@
               "extensions.lock"
               "AGENTS.md"
               "docs/RELEASING.md"
+              "docs/models/README.md"
               "tools/prof/prof.py"
               "tools/bench/speculative-corpus.py"
             ];

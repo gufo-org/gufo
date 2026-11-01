@@ -756,12 +756,13 @@ def classify_edge(owner, dep, root=None):
       - 'WARN': Legacy coupling or cross-model coupling tracked for RFC migration.
       - 'OK':   An architecturally compliant and expected dependency.
     """
-    # Detect migrated extensions with manifests
+    # Detect migrated extensions with manifests and build files
     migrated = set()
     if root is not None:
         try:
             for manifest in (Path(root) / "src/models").glob("*/extension.json"):
-                migrated.add(manifest.parent.name)
+                if (manifest.parent / "extension.cmake").exists():
+                    migrated.add(manifest.parent.name)
         except Exception:
             pass
     if not migrated:

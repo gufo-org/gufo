@@ -119,7 +119,7 @@ the current implementation milestone stops after Card 14.
 | 11 | 7; 10 | [Migrate models to public extension headers](cards/11-public-header-migrations.md) | complete |
 | 12 | 7b; 11 | [Add in-tree model API test support](cards/12-model-api-test-support.md) | complete |
 | 13 | 8 embeddings; 12 | [Migrate the EmbeddingGemma pilot](cards/13-embeddinggemma-pilot.md) | complete |
-| 14 | 9; 13 | [Generate infrastructure from model metadata](cards/14-generated-infrastructure.md) | pending |
+| 14 | 9; 13 | [Generate infrastructure from model metadata](cards/14-generated-infrastructure.md) | complete |
 | 15 | 8 ASR; 14 | [Migrate speech recognition](cards/15-speech-recognition.md) | pending |
 | 16 | 8 TTS; 15 | [Migrate speech synthesis](cards/16-speech-synthesis.md) | pending |
 | 17 | 8 image; 16 | [Migrate image generation](cards/17-image-generation.md) | pending |
@@ -271,5 +271,31 @@ added `"embedding_gemma2"` to `extensions.lock`; verified discovery mode, lock m
 and passed bounded CTests (9 passed, 6 skipped missing external weights), continuation
 identity goldens, and formatting checks. Its unresolved gates — none of which it claims —
 are the deferred functional/performance half (deferred to post-Card-14 qualification window).
+
+### Card 14
+
+See [Card 14: execution record](cards/14-generated-infrastructure.md#execution-record).
+Card 14 is complete for its in-card gates and concludes the current authorized
+implementation milestone (cards 01–14). It authored complete, schema-compliant
+`extension.json` manifests for all 7 unmigrated models (`deepseek_v4_flash`,
+`minimax_h3`, `qwen`, `qwen38_flash_next`, `qwen3_asr`, `qwen3_tts`,
+`qwen_image_21`) and expanded `embedding_gemma2/extension.json`; implemented
+truthful metadata-only discovery in `cmake/GufoExtensionDiscovery.cmake` (excluded
+with reason `"metadata only"` during discovery `*`, failing explicit selection
+due to missing `extension.cmake`); excluded unmigrated extensions from premature
+isolation ratchet checks in `tools/ci/check-extension-isolation.py`; established
+Nix production derivation independence in `.devops/nix/package.nix` (excluding
+`tests/`, `functional/`, `tools/`, and `fixtures/` from production sources, proven
+with identical `default.drvPath` before and after test modifications); split
+`tests/functional/devlab.json` and `impact.json` into core bases and model
+fragments; implemented the automated infrastructure generator `tools/ci/generate-infrastructure.py`
+managing 6 target files with `--check` drift validation and `--write` updates;
+added unit tests in `tests/tools/generate_infrastructure_test.py` (9/9 passed);
+resolved reviewer findings F1 (dead code) and F2 (non-existent manifest paths);
+and passed all 8 affected verification gates including `check-pr` (96/96 passed, 100%)
+and `nix build .#checks.x86_64-linux.pr` (all 4 check derivations built and passed).
+Its unresolved gates — none of which it claims — are the deferred functional
+harness runs and speed benchmark sweeps, which are now ready to run in the consolidated
+post-Card-14 qualification window.
 
 

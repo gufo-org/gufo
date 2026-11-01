@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "disabled": {
-  "deepseek4": "Temporarily disabled: its 81 GiB weights and 36-suite PR set make the Devlab run too long to finish within a PR; re-enable by removing this entry"
- },
- "representatives": {
+    "deepseek4": "Temporarily disabled: its 81 GiB weights and 36-suite PR set make the Devlab run too long to finish within a PR; re-enable by removing this entry"
+  },
+  "representatives": {
     "llm": "flash-next-q4",
     "embedding": "embedding-gemma2",
     "asr": "qwen3-asr",

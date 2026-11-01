@@ -236,7 +236,12 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
 
     def test_missing_build_manifest(self):
         (self.source / "src/models/beta/extension.cmake").unlink()
-        self.configure(error="missing")
+        self.configure()
+        report = self.run_fixture()
+        self.assertEqual([e["name"] for e in report["builtExtensions"]], ["base", "alpha"])
+        self.assertEqual([e["name"] for e in report["excludedExtensions"]], ["beta"])
+        self.assertEqual(report["excludedExtensions"][0]["reason"], "metadata only")
+        self.configure("-DGUFO_EXTENSIONS=beta", error="missing")
         self.configure("-DGUFO_EXTENSIONS=alpha;base")
 
     def test_platform_selection(self):

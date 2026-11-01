@@ -18,72 +18,1242 @@
     "tokenization"
   ],
   "profiles": {
-    "qwen27-q4/off": {"model": "qwen27-q4", "mode": "off", "vision": true},
-    "qwen27-q4/dflash2": {"model": "qwen27-q4", "mode": "dflash2", "vision": true},
-    "qwen27-q8/off": {"model": "qwen27-q8", "mode": "off", "vision": true},
-    "qwen27-q8/dflash2": {"model": "qwen27-q8", "mode": "dflash2", "vision": true},
-    "flash-next-q4/off": {"model": "flash-next-q4", "mode": "off", "vision": true},
-    "flash-next-q4/mtp": {"model": "flash-next-q4", "mode": "mtp", "vision": true},
-    "deepseek4/off": {"model": "deepseek4", "mode": "off", "vision": false},
-    "deepseek4/dspark": {"model": "deepseek4", "mode": "dspark", "vision": false}
+    "qwen27-q4/off": {
+      "model": "qwen27-q4",
+      "mode": "off",
+      "vision": true
+    },
+    "qwen27-q4/dflash2": {
+      "model": "qwen27-q4",
+      "mode": "dflash2",
+      "vision": true
+    },
+    "qwen27-q8/off": {
+      "model": "qwen27-q8",
+      "mode": "off",
+      "vision": true
+    },
+    "qwen27-q8/dflash2": {
+      "model": "qwen27-q8",
+      "mode": "dflash2",
+      "vision": true
+    },
+    "flash-next-q4/off": {
+      "model": "flash-next-q4",
+      "mode": "off",
+      "vision": true
+    },
+    "flash-next-q4/mtp": {
+      "model": "flash-next-q4",
+      "mode": "mtp",
+      "vision": true
+    },
+    "deepseek4/off": {
+      "model": "deepseek4",
+      "mode": "off",
+      "vision": false
+    },
+    "deepseek4/dspark": {
+      "model": "deepseek4",
+      "mode": "dspark",
+      "vision": false
+    }
   },
   "suites": {
-    "logprobs": {"covers": ["sampling", "streaming"], "uses": ["tokenization", "framing", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "responses-logprobs": {"covers": ["sampling", "streaming"], "uses": ["tokenization", "framing", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "discovery": {"covers": ["discovery"], "uses": [], "status": "active", "configuration": "standard", "vision_required": false},
-    "openai-count-tokens": {"covers": ["accounting", "vision"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "messages-count-tokens": {"covers": ["accounting", "tool-schemas"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "messages-image-counts": {"covers": ["accounting", "vision"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "responses": {"covers": ["framing", "streaming"], "uses": ["tokenization", "sampling", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "stops": {"covers": ["framing", "limits"], "uses": ["tokenization", "sampling", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "conversation": {"covers": ["continuation", "framing", "vision"], "uses": ["tokenization", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "image-inputs": {"covers": ["vision"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "profiles": ["qwen27-q4/off", "qwen27-q4/dflash2", "qwen27-q8/off", "qwen27-q8/dflash2", "flash-next-q4/off", "flash-next-q4/mtp"], "configuration": "standard", "vision_required": true},
-    "image-count": {"covers": ["accounting", "limits", "structured", "vision"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "tool-schemas", "generation"], "status": "active", "profiles": ["qwen27-q4/off", "qwen27-q4/dflash2", "qwen27-q8/off", "qwen27-q8/dflash2", "flash-next-q4/off", "flash-next-q4/mtp"], "configuration": "standard", "vision_required": true, "tier": "release"},
-    "tool-images": {"covers": ["continuation", "tools", "vision"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "profiles": ["qwen27-q4/off", "qwen27-q4/dflash2", "qwen27-q8/off", "qwen27-q8/dflash2", "flash-next-q4/off", "flash-next-q4/mtp"], "configuration": "standard", "vision_required": true, "tier": "release"},
-    "image-detail": {"covers": ["continuation", "vision"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "generation"], "status": "active", "profiles": ["qwen27-q4/off", "qwen27-q4/dflash2", "qwen27-q8/off", "qwen27-q8/dflash2", "flash-next-q4/off", "flash-next-q4/mtp"], "configuration": "standard", "vision_required": true, "tier": "release"},
-    "structured": {"covers": ["structured"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "structured-limits": {"covers": ["limits", "structured"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-reasoning": {"covers": ["continuation", "framing", "tools"], "uses": ["tokenization", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-streaming": {"covers": ["limits", "streaming", "tools"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "reasoning-separator": {"covers": ["continuation", "framing", "structured"], "uses": ["tokenization", "sampling", "limits", "scheduling", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "reasoning-budget": {"covers": ["framing", "sampling", "streaming"], "uses": ["tokenization", "limits", "scheduling", "continuation", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release", "escalate": ["src/core/sampling.*", "src/core/speculative/**", "src/cli/serve/sampling_request.hpp", "tests/functional/reasoning_budget.py"]},
-    "tools": {"covers": ["tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "auto-tools": {"covers": ["tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-edges": {"covers": ["tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-agent": {"covers": ["limits", "tool-schemas", "tools", "vision"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-agent-loop": {"covers": ["continuation", "tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-history": {"covers": ["limits", "tool-schemas", "tools", "vision"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "messages-tools": {"covers": ["continuation", "streaming", "tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-untyped": {"covers": ["limits", "tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-mixed": {"covers": ["limits", "structured", "tool-schemas", "tools", "vision"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-native-schemas": {"covers": ["tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-choice-cache": {"covers": ["continuation", "tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-parameter-order": {"covers": ["tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-native-types": {"covers": ["tool-schemas", "tools", "vision"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "tool-schema-edges": {"covers": ["limits", "tool-schemas", "tools"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "sampling-defaults": {"covers": ["sampling"], "uses": ["tokenization", "framing", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "sampling-ranges": {"covers": ["sampling"], "uses": ["tokenization", "framing", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "batch": {"covers": ["scheduling", "streaming"], "uses": ["tokenization", "framing", "sampling", "limits", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "long-context": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "single-session", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "src/models/qwen38_flash_next/**"]},
-    "state-edges": {"covers": ["limits", "tool-schemas", "tools", "vision"], "uses": ["tokenization", "framing", "sampling", "scheduling", "continuation", "structured", "generation"], "status": "active", "configuration": "standard", "vision_required": false},
-    "progress": {"covers": ["limits", "scheduling", "streaming", "vision"], "uses": ["tokenization", "framing", "sampling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "stream-start": {"covers": ["scheduling", "streaming"], "uses": ["tokenization", "framing", "sampling", "limits", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "prefill-scheduling": {"covers": ["scheduling"], "uses": ["tokenization", "framing", "sampling", "limits", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "metrics": {"covers": ["accounting", "streaming"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "continuation", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "cache-edits": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "cache-growth": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "tests/functional/cache_growth.py"]},
-    "cache-depth": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "single-session", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "src/models/qwen38_flash_next/**", "tests/functional/cache_depth.py"]},
-    "cache-stalls": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "scheduling", "generation"], "status": "active", "profiles": ["flash-next-q4/off", "flash-next-q4/mtp"], "configuration": "cache-stalls", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "tests/functional/cache_stalls.py"]},
-    "cache-rotation": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "single-session", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "tests/functional/cache_rotation.py"]},
-    "cache-concurrency": {"covers": ["continuation", "scheduling"], "uses": ["tokenization", "framing", "sampling", "limits", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "tests/functional/cache_concurrency.py"]},
-    "cache-shared-prefix": {"covers": ["continuation", "scheduling"], "uses": ["tokenization", "framing", "sampling", "limits", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "tests/functional/cache_shared_prefix.py"]},
-    "cache-bridge": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "cache-pressure", "vision_required": false, "tier": "release", "escalate": ["src/cache/**", "src/cli/serve/continuation_*", "src/cli/serve/component_text_cache.*", "src/cli/serve/component_cache_metrics.hpp", "src/cli/serve/text_generation_scheduler.*", "src/cli/serve/text_model_runner.*", "src/models/qwen38_flash_next/continuation_*", "tests/functional/cache_bridge.py"]},
-    "cache-compaction": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "deferred", "configuration": "single-session", "vision_required": false},
-    "cache-transforms": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "deferred", "configuration": "standard", "vision_required": false},
-    "cache-pressure": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "deferred", "configuration": "cache-pressure", "vision_required": false},
-    "cache-messages-loop": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "deferred", "configuration": "standard", "vision_required": false},
-    "system-injection": {"covers": ["continuation", "framing"], "uses": ["tokenization", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false, "tier": "release"},
-    "cache": {"covers": ["continuation"], "uses": ["tokenization", "framing", "sampling", "limits", "scheduling", "structured", "tool-schemas", "generation"], "status": "active", "configuration": "standard", "vision_required": false}
+    "logprobs": {
+      "covers": [
+        "sampling",
+        "streaming"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "responses-logprobs": {
+      "covers": [
+        "sampling",
+        "streaming"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "discovery": {
+      "covers": [
+        "discovery"
+      ],
+      "uses": [],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "openai-count-tokens": {
+      "covers": [
+        "accounting",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "messages-count-tokens": {
+      "covers": [
+        "accounting",
+        "tool-schemas"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "messages-image-counts": {
+      "covers": [
+        "accounting",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "responses": {
+      "covers": [
+        "framing",
+        "streaming"
+      ],
+      "uses": [
+        "tokenization",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "stops": {
+      "covers": [
+        "framing",
+        "limits"
+      ],
+      "uses": [
+        "tokenization",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "conversation": {
+      "covers": [
+        "continuation",
+        "framing",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "image-inputs": {
+      "covers": [
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "profiles": [
+        "qwen27-q4/off",
+        "qwen27-q4/dflash2",
+        "qwen27-q8/off",
+        "qwen27-q8/dflash2",
+        "flash-next-q4/off",
+        "flash-next-q4/mtp"
+      ],
+      "configuration": "standard",
+      "vision_required": true
+    },
+    "image-count": {
+      "covers": [
+        "accounting",
+        "limits",
+        "structured",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "profiles": [
+        "qwen27-q4/off",
+        "qwen27-q4/dflash2",
+        "qwen27-q8/off",
+        "qwen27-q8/dflash2",
+        "flash-next-q4/off",
+        "flash-next-q4/mtp"
+      ],
+      "configuration": "standard",
+      "vision_required": true,
+      "tier": "release"
+    },
+    "tool-images": {
+      "covers": [
+        "continuation",
+        "tools",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "profiles": [
+        "qwen27-q4/off",
+        "qwen27-q4/dflash2",
+        "qwen27-q8/off",
+        "qwen27-q8/dflash2",
+        "flash-next-q4/off",
+        "flash-next-q4/mtp"
+      ],
+      "configuration": "standard",
+      "vision_required": true,
+      "tier": "release"
+    },
+    "image-detail": {
+      "covers": [
+        "continuation",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "generation"
+      ],
+      "status": "active",
+      "profiles": [
+        "qwen27-q4/off",
+        "qwen27-q4/dflash2",
+        "qwen27-q8/off",
+        "qwen27-q8/dflash2",
+        "flash-next-q4/off",
+        "flash-next-q4/mtp"
+      ],
+      "configuration": "standard",
+      "vision_required": true,
+      "tier": "release"
+    },
+    "structured": {
+      "covers": [
+        "structured"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "structured-limits": {
+      "covers": [
+        "limits",
+        "structured"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-reasoning": {
+      "covers": [
+        "continuation",
+        "framing",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-streaming": {
+      "covers": [
+        "limits",
+        "streaming",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "reasoning-separator": {
+      "covers": [
+        "continuation",
+        "framing",
+        "structured"
+      ],
+      "uses": [
+        "tokenization",
+        "sampling",
+        "limits",
+        "scheduling",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "reasoning-budget": {
+      "covers": [
+        "framing",
+        "sampling",
+        "streaming"
+      ],
+      "uses": [
+        "tokenization",
+        "limits",
+        "scheduling",
+        "continuation",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/core/sampling.*",
+        "src/core/speculative/**",
+        "src/cli/serve/sampling_request.hpp",
+        "tests/functional/reasoning_budget.py"
+      ]
+    },
+    "tools": {
+      "covers": [
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "auto-tools": {
+      "covers": [
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-edges": {
+      "covers": [
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-agent": {
+      "covers": [
+        "limits",
+        "tool-schemas",
+        "tools",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-agent-loop": {
+      "covers": [
+        "continuation",
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-history": {
+      "covers": [
+        "limits",
+        "tool-schemas",
+        "tools",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "messages-tools": {
+      "covers": [
+        "continuation",
+        "streaming",
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-untyped": {
+      "covers": [
+        "limits",
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-mixed": {
+      "covers": [
+        "limits",
+        "structured",
+        "tool-schemas",
+        "tools",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-native-schemas": {
+      "covers": [
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-choice-cache": {
+      "covers": [
+        "continuation",
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-parameter-order": {
+      "covers": [
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-native-types": {
+      "covers": [
+        "tool-schemas",
+        "tools",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "tool-schema-edges": {
+      "covers": [
+        "limits",
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "sampling-defaults": {
+      "covers": [
+        "sampling"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "sampling-ranges": {
+      "covers": [
+        "sampling"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "batch": {
+      "covers": [
+        "scheduling",
+        "streaming"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "long-context": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "single-session",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "src/models/qwen38_flash_next/**"
+      ]
+    },
+    "state-edges": {
+      "covers": [
+        "limits",
+        "tool-schemas",
+        "tools",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "continuation",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "progress": {
+      "covers": [
+        "limits",
+        "scheduling",
+        "streaming",
+        "vision"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "stream-start": {
+      "covers": [
+        "scheduling",
+        "streaming"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "prefill-scheduling": {
+      "covers": [
+        "scheduling"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "metrics": {
+      "covers": [
+        "accounting",
+        "streaming"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "continuation",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "cache-edits": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "cache-growth": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "tests/functional/cache_growth.py"
+      ]
+    },
+    "cache-depth": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "single-session",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "src/models/qwen38_flash_next/**",
+        "tests/functional/cache_depth.py"
+      ]
+    },
+    "cache-stalls": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "scheduling",
+        "generation"
+      ],
+      "status": "active",
+      "profiles": [
+        "flash-next-q4/off",
+        "flash-next-q4/mtp"
+      ],
+      "configuration": "cache-stalls",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "tests/functional/cache_stalls.py"
+      ]
+    },
+    "cache-rotation": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "single-session",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "tests/functional/cache_rotation.py"
+      ]
+    },
+    "cache-concurrency": {
+      "covers": [
+        "continuation",
+        "scheduling"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "tests/functional/cache_concurrency.py"
+      ]
+    },
+    "cache-shared-prefix": {
+      "covers": [
+        "continuation",
+        "scheduling"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "tests/functional/cache_shared_prefix.py"
+      ]
+    },
+    "cache-bridge": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "cache-pressure",
+      "vision_required": false,
+      "tier": "release",
+      "escalate": [
+        "src/cache/**",
+        "src/cli/serve/continuation_*",
+        "src/cli/serve/component_text_cache.*",
+        "src/cli/serve/component_cache_metrics.hpp",
+        "src/cli/serve/text_generation_scheduler.*",
+        "src/cli/serve/text_model_runner.*",
+        "src/models/qwen38_flash_next/continuation_*",
+        "tests/functional/cache_bridge.py"
+      ]
+    },
+    "cache-compaction": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "deferred",
+      "configuration": "single-session",
+      "vision_required": false
+    },
+    "cache-transforms": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "deferred",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "cache-pressure": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "deferred",
+      "configuration": "cache-pressure",
+      "vision_required": false
+    },
+    "cache-messages-loop": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "deferred",
+      "configuration": "standard",
+      "vision_required": false
+    },
+    "system-injection": {
+      "covers": [
+        "continuation",
+        "framing"
+      ],
+      "uses": [
+        "tokenization",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false,
+      "tier": "release"
+    },
+    "cache": {
+      "covers": [
+        "continuation"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "limits",
+        "scheduling",
+        "structured",
+        "tool-schemas",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    }
   },
   "rules": [
     {
@@ -460,9 +1630,22 @@
     ]
   },
   "configurations": {
-    "cache-stalls": {"context": 262144, "sessions": 2},
-    "standard": {"context": 32768, "sessions": 2},
-    "single-session": {"context": 32768, "sessions": 1},
-    "cache-pressure": {"context": 32768, "sessions": 1, "cache_ram_bytes": 2147483648}
+    "cache-stalls": {
+      "context": 262144,
+      "sessions": 2
+    },
+    "standard": {
+      "context": 32768,
+      "sessions": 2
+    },
+    "single-session": {
+      "context": 32768,
+      "sessions": 1
+    },
+    "cache-pressure": {
+      "context": 32768,
+      "sessions": 1,
+      "cache_ram_bytes": 2147483648
+    }
   }
 }

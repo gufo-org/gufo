@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "name": "qwen3_tts",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.0",
+  "entry": "qwen3_tts_register",
+  "registration_target": "gufo_qwen3_tts",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "qwen3-tts",
+      "capability": "speech_synthesis",
+      "keys": [
+        "safetensors:qwen3_tts",
+        "safetensors:Qwen3TTSModel"
+      ],
+      "model_ids": [
+        "qwen3-tts"
+      ],
+      "target": "gufo_qwen3_tts",
+      "entry": "qwen3_tts_provider_register"
+    }
+  ],
+  "targets": {
+    "gufo_qwen3_tts": {
+      "requires": []
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "Qwen3-TTS 12Hz 1.7B",
+    "inputs": "BF16 safetensors; text/reference audio to speech",
+    "guide": "docs/models/qwen3-tts/README.md"
+  },
+  "tests": [
+    {
+      "target": "qwen3_tts_config_test",
+      "ctest": "qwen3_tts_config_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen3_tts_audio_api_test",
+      "ctest": "qwen3_tts_audio_api_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "qwen3-tts"
+  ],
+  "fixtures": "src/models/qwen3_tts/reference/",
+  "functional": "functional/"
+}

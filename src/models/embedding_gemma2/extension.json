@@ -47,5 +47,100 @@
         "hip"
       ]
     }
-  }
+  },
+  "packages": [
+    {
+      "pkg_config": "sndfile",
+      "nix": "libsndfile",
+      "windows": "libsndfile"
+    },
+    {
+      "pkg_config": "soxr",
+      "nix": "soxr",
+      "windows": "libsoxr"
+    },
+    {
+      "pkg_config": "libavformat",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[avformat]"
+    },
+    {
+      "pkg_config": "libavcodec",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[avcodec]"
+    },
+    {
+      "pkg_config": "libavutil",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[avutil]"
+    },
+    {
+      "pkg_config": "libswscale",
+      "nix": "ffmpeg-headless",
+      "windows": "ffmpeg[swscale]"
+    }
+  ],
+  "runtime_libraries": [
+    "gufo-video-libraries.txt"
+  ],
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "EmbeddingGemma 2",
+    "inputs": "BF16 safetensors; text/image to embeddings",
+    "guide": "docs/models/embeddinggemma-2/README.md"
+  },
+  "tests": [
+    {
+      "target": "embedding_gemma2_config_test",
+      "ctest": "embedding_gemma2_config_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "embedding_gemma2_embeddings_api_test",
+      "ctest": "embedding_gemma2_embeddings_api_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "embedding_gemma2_video_processor_test",
+      "ctest": "embedding_gemma2_video_processor_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "embedding_gemma2_image_processor_test",
+      "ctest": "embedding_gemma2_image_processor_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "embedding_gemma2_batch_scheduler_test",
+      "ctest": "embedding_gemma2_batch_scheduler_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "embedding-gemma2"
+  ],
+  "fixtures": "tests/fixtures/embedding_gemma2/",
+  "bundled_tests": [
+    "embedding_gemma2_video_processor_test"
+  ],
+  "functional": "functional/"
 }

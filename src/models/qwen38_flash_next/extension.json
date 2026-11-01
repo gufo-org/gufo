@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "name": "qwen38_flash_next",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.0",
+  "entry": "qwen38_flash_next_register",
+  "registration_target": "gufo_qwen38_flash_next",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "flash-next-q4",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:qwen4exp"
+      ],
+      "model_ids": [
+        "flash-next-q4"
+      ],
+      "speculative": [
+        "mtp"
+      ],
+      "target": "gufo_qwen38_flash_next",
+      "entry": "qwen38_flash_next_provider_register"
+    }
+  ],
+  "options": [
+    {
+      "name": "--mtp-model",
+      "type": "path",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt"
+      ],
+      "providers": [
+        "flash-next-q4"
+      ],
+      "help": "MTP draft model path for speculative decoding"
+    }
+  ],
+  "targets": {
+    "gufo_qwen38_flash_next": {
+      "requires": []
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "vendored_paths": [
+    "src/models/qwen38_flash_next/kernels/rocm/mmq/"
+  ],
+  "docs": {
+    "title": "Qwen3.8 Flash-Next",
+    "inputs": "Sharded Q4 GGUF; text/images",
+    "guide": "docs/models/qwen3.8-flash-next/README.md"
+  },
+  "tests": [
+    {
+      "target": "qwen38_flash_next_continuation_identity_test",
+      "ctest": "qwen38_flash_next_continuation_identity_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen38_flash_next_config_test",
+      "ctest": "qwen38_flash_next\\.config",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen38_flash_next_mtp_sampling_test",
+      "ctest": "qwen38_flash_next\\.mtp_sampling",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen38_flash_next_rope_scaling_test",
+      "ctest": "qwen38_flash_next\\.rope_scaling",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen38_flash_next_continuation_layout_test",
+      "ctest": "qwen38_flash_next\\.continuation_layout",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "qwen38_flash_next"
+  ],
+  "fixtures": "tests/models/qwen38_flash_next/fixtures/",
+  "functional": "functional/"
+}

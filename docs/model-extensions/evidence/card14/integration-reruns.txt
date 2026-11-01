@@ -1,0 +1,106 @@
+================================================================================
+Card 14 Integration Phase Gate Reruns
+Date: 2026-11-01
+Integrator Agent ID: 57f173b6-4af4-4f84-ba0a-d5b175156e90
+Parent Revision: qupqlxsk 642af9d6
+Findings Addressed:
+  - F1 (Nit): Removed dead/unreachable statements after `return 1` in tools/ci/generate-infrastructure.py:556-557.
+  - F2 (Minor): Removed non-existent fixture/functional paths from src/models/qwen_image_21/extension.json and src/models/minimax_h3/extension.json.
+================================================================================
+
+Gate 1: Infrastructure Drift Check
+Command: python3 tools/ci/generate-infrastructure.py --check
+Exit code: 0
+Output:
+PASS: Infrastructure files are up to date with model metadata.
+Verdict: PASS
+
+--------------------------------------------------------------------------------
+
+Gate 2: Infrastructure Generator Unit Tests
+Command: python3 -m unittest tests/tools/generate_infrastructure_test.py
+Exit code: 0
+Output:
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.031s
+
+OK
+Verdict: PASS
+
+--------------------------------------------------------------------------------
+
+Gate 3: Extension Schema Validation
+Command: nix develop -c python3 tests/extensions/metadata_test.py --schema
+Exit code: 0
+Output:
+test_full_schema (__main__.SchemaTests.test_full_schema) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.083s
+
+OK
+Verdict: PASS
+
+--------------------------------------------------------------------------------
+
+Gate 4: Documentation Integrity Check
+Command: python3 tools/ci/check-docs.py
+Exit code: 0
+Output:
+[check-docs] PASSED: 315 markdown files and 1591 local links/anchors verified with zero broken links or invalid JSON blocks.
+Verdict: PASS
+
+--------------------------------------------------------------------------------
+
+Gate 5: Clang-Format Code Formatting Check
+Command: nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+Exit code: 0
+Output:
+PASS: Checked 792 C++ files
+Verdict: PASS
+
+--------------------------------------------------------------------------------
+
+Gate 6: CPU-Test Check-PR Suite
+Command: nix develop -c cmake --build --preset cpu-test --target check-pr
+Exit code: 0
+Output:
+100% tests passed out of 96
+Total Test time (real) = 139.82 sec
+Verdict: PASS
+
+--------------------------------------------------------------------------------
+
+Gate 7: Hosted PR Checks Suite (Nix Sandbox)
+Command: nix build .#checks.x86_64-linux.pr
+Exit code: 0
+Output:
+these 4 derivations will be built:
+  /nix/store/4lkkv91n2k67wn6rnx78k2grghm3krg7-check-pr-tests.drv
+  /nix/store/kn6w8hxh8m2n679dn313bgc7nplb84a7-check-docs.drv
+  /nix/store/s3b2n67dpfd2n0aycyljdgv8dhskdwl5-check-format.drv
+  /nix/store/0yxnny48n62rb4hpxv5f6fpz47zhgyvy-check-pr.drv
+building '/nix/store/kn6w8hxh8m2n679dn313bgc7nplb84a7-check-docs.drv'...
+building '/nix/store/s3b2n67dpfd2n0aycyljdgv8dhskdwl5-check-format.drv'...
+building '/nix/store/4lkkv91n2k67wn6rnx78k2grghm3krg7-check-pr-tests.drv'...
+building '/nix/store/0yxnny48n62rb4hpxv5f6fpz47zhgyvy-check-pr.drv'...
+Verdict: PASS
+
+--------------------------------------------------------------------------------
+
+Gate 8: Nix Production Derivation Hash Invariance
+Command: nix eval --raw .#packages.x86_64-linux.default.drvPath
+Exit code: 0
+Output:
+/nix/store/qnga21mdw4f1363jpnsb2139992ngvvn-gufo-0-unstable-642af9d-dirty.drv
+Touch check:
+touch src/models/qwen3_asr/tests/audio_test.cpp && nix eval --raw .#packages.x86_64-linux.default.drvPath
+Output:
+/nix/store/qnga21mdw4f1363jpnsb2139992ngvvn-gufo-0-unstable-642af9d-dirty.drv
+Invariance verified: drvPath is identical before and after modifying model test file.
+Verdict: PASS
+
+================================================================================
+Summary: 8/8 gates passed cleanly.
+================================================================================

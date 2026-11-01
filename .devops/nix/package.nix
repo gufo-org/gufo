@@ -60,8 +60,19 @@ let
       || lib.hasPrefix "schemas/" relativePath
       || relativePath == "include"
       || lib.hasPrefix "include/" relativePath
-      || relativePath == "src"
-      || lib.hasPrefix "src/" relativePath
+      || (
+        (relativePath == "src" || lib.hasPrefix "src/" relativePath)
+        && !(
+          lib.hasInfix "/tests/" "/${relativePath}"
+          || lib.hasSuffix "/tests" relativePath
+          || lib.hasInfix "/functional/" "/${relativePath}"
+          || lib.hasSuffix "/functional" relativePath
+          || lib.hasInfix "/tools/" "/${relativePath}"
+          || lib.hasSuffix "/tools" relativePath
+          || lib.hasInfix "/fixtures/" "/${relativePath}"
+          || lib.hasSuffix "/fixtures" relativePath
+        )
+      )
       # `gufo eval` reads its default dataset at run time and that dataset is
       # core-owned, so exactly one test-tree file is admitted: the core eval
       # fixture. No model test file enters the production derivation.

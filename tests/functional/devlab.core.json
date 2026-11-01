@@ -1,0 +1,189 @@
+{
+  "schema": 1,
+  "disabled": {
+    "deepseek4": "Temporarily disabled: its 81 GiB weights and 36-suite PR set make the Devlab run too long to finish within a PR; re-enable by removing this entry"
+  },
+  "representatives": {
+    "llm": "flash-next-q4",
+    "embedding": "embedding-gemma2",
+    "asr": "qwen3-asr",
+    "tts": "qwen3-tts-base"
+  },
+  "rules": [
+    {
+      "id": "documentation",
+      "priority": 5,
+      "paths": [
+        "docs/**",
+        "*.md",
+        "**/AGENTS.md",
+        "LICENSE",
+        "NOTICE",
+        "licenses/**",
+        "THIRD_PARTY_NOTICES.md"
+      ],
+      "owners": []
+    },
+    {
+      "id": "outside-current-scope",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen_image_21/**",
+        "src/models/minimax_h3/**",
+        "tests/models/qwen_image_21/**",
+        "tests/models/minimax_h3*",
+        "tools/h3/**",
+        "tools/gufo/h3*",
+        "tools/models/qwen_image_21/**",
+        "tests/cli/video*"
+      ],
+      "owners": []
+    },
+    {
+      "id": "shared-audio",
+      "priority": 20,
+      "paths": [
+        "src/cli/serve/audio_stream*",
+        "src/cli/serve/audio_websocket*",
+        "tests/cli/audio_websocket*",
+        "tests/functional/fixtures/audio/**"
+      ],
+      "owners": [
+        "asr",
+        "tts"
+      ]
+    },
+    {
+      "id": "service-harness",
+      "priority": 20,
+      "paths": [
+        "tests/functional/model_services.py",
+        "tests/functional/service_http.py",
+        "tests/functional/test_service_http.py"
+      ],
+      "owners": [
+        "embedding",
+        "asr",
+        "tts"
+      ]
+    },
+    {
+      "id": "shared-qwen",
+      "priority": 30,
+      "paths": [
+        "src/families/qwen/text/chat_template.*",
+        "src/families/qwen/text/tokenizer.*",
+        "src/families/qwen/control_tokens/control_tokens.hpp",
+        "src/families/qwen/vision/**"
+      ],
+      "owners": [
+        "llm"
+      ]
+    },
+    {
+      "id": "shared-text",
+      "priority": 20,
+      "paths": [
+        "src/cache/**",
+        "src/core/sampling*",
+        "src/core/speculative/**",
+        "src/core/json_constraint*",
+        "src/core/json_schema*",
+        "src/core/text_sampling*",
+        "src/cli/serve/text*",
+        "src/cli/serve/component_text*",
+        "src/cli/serve/continuation*",
+        "src/cli/serve/openai*",
+        "src/cli/serve/messages*",
+        "src/cli/serve/response*",
+        "src/cli/serve/stop_sequences*",
+        "src/cli/serve/quote_tracker*",
+        "src/cli/sampling_options.hpp",
+        "src/cli/serve/sampling_request.hpp",
+        "src/cli/serve/chat*",
+        "src/cli/serve/token*",
+        "src/cli/serve/tool*",
+        "src/cli/serve/json*"
+      ],
+      "owners": [
+        "llm"
+      ]
+    },
+    {
+      "id": "functional-text",
+      "priority": 10,
+      "paths": [
+        "tests/functional/**"
+      ],
+      "owners": [
+        "llm"
+      ]
+    },
+    {
+      "id": "hosted-checks",
+      "priority": 20,
+      "paths": [
+        "cmake/Checks.cmake",
+        "tests/cli/arg_parser_test.cpp",
+        "tests/cli/bench_test.cpp",
+        "tests/cli/component_text_cache_test.cpp",
+        "tests/cli/continuation_disk_store_test.cpp",
+        "tests/cli/http_server_signals_test.cpp",
+        "tests/cli/http_server_test.cpp",
+        "tests/cli/http_server_test_support.hpp",
+        "tests/cli/logit_sampler_test.cpp",
+        "tests/cli/openai_chat_test.cpp",
+        "tests/cli/prompt_test.cpp",
+        "tests/cli/quote_tracker_test.cpp",
+        "tests/cli/serve_test.py",
+        "tests/cli/text_generation_scheduler_test.cpp",
+        "tests/cli/text_model_runner_test.cpp",
+        "tests/cli/trace_test.cpp"
+      ],
+      "owners": []
+    },
+    {
+      "id": "shared-infrastructure",
+      "priority": 10,
+      "paths": [
+        "src/core/**",
+        "src/runtime/**",
+        "src/cli/**",
+        "CMakeLists.txt",
+        "CMakePresets.json",
+        "cmake/**",
+        "flake.nix",
+        "flake.lock",
+        ".devops/**",
+        ".github/**",
+        "version.txt",
+        "tests/functional/devlab*",
+        "tests/functional/service_phases.py",
+        "tests/functional/requirements.txt"
+      ],
+      "owners": [
+        "llm",
+        "embedding",
+        "asr",
+        "tts"
+      ]
+    },
+    {
+      "id": "devlab-orchestration",
+      "priority": 30,
+      "paths": [
+        "tests/functional/devlab*",
+        "tests/functional/service_phases.py",
+        "tests/functional/requirements.txt",
+        "tools/ci/linux_artifact.py",
+        "tools/ci/devlab_artifact.py"
+      ],
+      "owners": [
+        "llm",
+        "embedding",
+        "asr",
+        "tts"
+      ]
+    }
+  ]
+}
