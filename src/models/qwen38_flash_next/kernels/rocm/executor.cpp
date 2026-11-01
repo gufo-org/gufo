@@ -1763,7 +1763,9 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
   // view -- one bucket holding every token row, identity scatter. The tile
   // map is rebuilt by a tiny device kernel before each launch, so the call
   // stays valid inside a captured graph and never reads a host snapshot of
-  // the token count.
+  // the token count. Everything outside the float storages takes this
+  // route, Q6_K included (it has a WMMA loader but is not part of the
+  // routed native set, so the predicate is not reused here).
   if (w.type != GgmlType::kF32 && w.type != GgmlType::kF16 &&
       w.type != GgmlType::kBF16 && w.type != GgmlType::kQ8_0) {
     const std::uint32_t piece = static_cast<std::uint32_t>(options_.max_batch);
@@ -2768,19 +2770,17 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   if (ExpertMatrixRows(n_tokens) || RoutedMmqBlocked(l)) {
     ExpertCounts(s_.ids, s_.expert_counts, n_tokens, c.num_experts, used,
                  stream_);
-    if (ExpertMatrixRows(n_tokens) &&
-        !Check(hipMemcpyAsync(counts_host_, s_.expert_counts,
-                              c.num_experts * sizeof(std::uint32_t),
-                              hipMemcpyDeviceToHost, stream_),
-               "expert counts download", error_msg)) {
-      return false;
-    }
-    // Only the host-side tile map needs the readback event; the forced
-    // WMMA route builds its map on the device and never reads back.
-    if (ExpertMatrixRows(n_tokens) &&
-        !Check(hipEventRecord(counts_ready_, stream_), "expert counts event",
-               error_msg)) {
-      return false;
+    // Only the host-side tile map needs the readback; the forced WMMA
+    // route builds its map on the device and never reads counts back.
+    if (ExpertMatrixRows(n_tokens)) {
+      if (!Check(hipMemcpyAsync(counts_host_, s_.expert_counts,
+                                c.num_experts * sizeof(std::uint32_t),
+                                hipMemcpyDeviceToHost, stream_),
+                 "expert counts download", error_msg) ||
+          !Check(hipEventRecord(counts_ready_, stream_),
+                 "expert counts event", error_msg)) {
+        return false;
+      }
     }
   }
   // The shared expert (gated by the last router row) does not depend on
@@ -2932,15 +2932,13 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     // Prefill pairs the gate/up projections and applies SwiGLU without
     // materializing the gate; decode-time batches keep separate projections.
     auto* up_half = reinterpret_cast<__half*>(s_.up_e);
-    const WeightType gate_type =
-        static_cast<WeightType>(l.ffn_gate_exps.type);
-    const WeightType up_type = static_cast<WeightType>(l.ffn_up_exps.type);
+    const WeightType gate_type = SmallType(l.ffn_gate_exps.type);
+    const WeightType up_type = SmallType(l.ffn_up_exps.type);
     // The fused gate/up kernel exists for the K-quant nibble layout; a
-    // pruned checkpoint's IQ4_NL experts take the separate projections
-    // over the same wide tiles instead.
-    const bool pairable = gate_type == up_type &&
-                          (gate_type == WeightType::kQ4_K ||
-                           gate_type == WeightType::kQ5_K);
+    // pruned checkpoint's codebook experts take the separate projections
+    // over the same tiles instead. Same condition as `wide_pairable`
+    // passed to RouteHints, in the launcher's type vocabulary.
+    const bool pairable = wide_pairable;
     const bool gated_ok =
         routed_wide_tiles_ != 0 && pairable
             ? RoutedGatedF16Gemm(l.ffn_gate_exps.data, l.ffn_up_exps.data,

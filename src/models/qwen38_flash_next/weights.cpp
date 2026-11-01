@@ -1,40 +1,14 @@
 #include "src/models/qwen38_flash_next/weights.hpp"
 
-#include <algorithm>
-#include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <initializer_list>
 #include <string>
 #include <utility>
-#include <vector>
-
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
 
 using core::GgmlType;
-
-/// Encodes an IEEE-754 binary32 value as binary16 (round-to-nearest-even).
-/// Restricted to finite normal-range inputs, which covers the Q8_0 block
-/// scales encoded at bind time.
-[[nodiscard]] std::uint16_t Fp16Bits(float value) noexcept {
-  std::uint32_t u = 0;
-  std::memcpy(&u, &value, sizeof(u));
-  const std::uint32_t sign = (u >> 16u) & 0x8000u;
-  const std::int32_t e =
-      static_cast<std::int32_t>((u >> 23u) & 0xFFu) - 127 + 15;
-  if (e <= 0) {
-    return static_cast<std::uint16_t>(sign);
-  }
-  if (e >= 31) {
-    return static_cast<std::uint16_t>(sign | 0x7C00u);
-  }
-  const std::uint32_t m = u & 0x7FFFFFu;
-  const std::uint32_t half = (m >> 13u) + ((m >> 12u) & 1u);
-  return static_cast<std::uint16_t>(
-      sign | (static_cast<std::uint32_t>(e) << 10u) | (half & 0x3FFu));
-}
 
 struct Format {
   std::uint32_t block;
@@ -242,7 +216,7 @@ struct Binder {
       l.ple_norm_conv =
           Get(p + "ple_norm_conv.weight", hc_dim, 1, 1, {GgmlType::kF32});
       // RCO releases store this small depthwise conv in F16; the upload
-      // stage upconverts it to F32 in place (see UpcastF16 handling).
+      // stage widens it to F32 once at load (see UpcastF32).
       l.ple_conv1d = Get(p + "ple_conv1d.weight", c.ple_conv_kernel, hc_dim, 1,
                          {GgmlType::kF32, GgmlType::kF16});
     }

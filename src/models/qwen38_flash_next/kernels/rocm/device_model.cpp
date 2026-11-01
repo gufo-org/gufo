@@ -123,11 +123,10 @@ struct Uploader {
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
-    if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
-      max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
-    }
-    // Dense quantized rows stage through s_.x_half in the WMMA family.
-    if (t.experts == 1) {
+    // Half-precision storages at any width, and every dense quantized row,
+    // stage through s_.x_half in the WMMA family.
+    if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16 ||
+        t.experts == 1) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
     if (d.type == core::GgmlType::kQ8_0 && t.experts == 1) {
