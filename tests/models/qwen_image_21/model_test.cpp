@@ -5,10 +5,9 @@
 #include <cmath>
 #include <iostream>
 
-#include "src/cli/serve/http_server.hpp"
-#include "src/cli/serve/image_api.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen_image_21/tokenizer.hpp"
+#include "tests/support/model_api_test_support.hpp"
 
 int main(int argc, char** argv) {
   using namespace gufo::models::qwen_image_21;

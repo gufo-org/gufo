@@ -10,10 +10,8 @@
 #include <string>
 #include <utility>
 
-#include "src/cli/serve/audio_stream.hpp"
-#include "src/cli/serve/audio_tts_api.hpp"
-#include "src/cli/serve/tts_service.hpp"
 #include "src/models/qwen3_tts/text_stream.hpp"
+#include "tests/support/model_api_test_support.hpp"
 
 namespace {
 

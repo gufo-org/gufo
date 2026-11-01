@@ -27,7 +27,7 @@ function(gufo_qwen_image_21_register_tests)
   set_tests_properties(qwen_image_21_weights_test PROPERTIES LABELS "cpu;models;qwen-image")
   add_executable(qwen_image_21_test
     ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/model_test.cpp)
-  target_link_libraries(qwen_image_21_test PRIVATE gufo_qwen_image_21 gufo_http)
+  target_link_libraries(qwen_image_21_test PRIVATE gufo_qwen_image_21 gufo_test_support)
   add_test(NAME qwen_image_21_test COMMAND qwen_image_21_test)
   set_tests_properties(qwen_image_21_test PROPERTIES LABELS "cpu;models;qwen-image")
   if(ENGINE_ENABLE_HIP)

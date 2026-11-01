@@ -55,7 +55,18 @@ unresolved gates — none of which it claims — are the deferred functional/per
 half, native Windows binary execution, own/family root-relative coupling (to be migrated
 in cards 13–22), and the exempt ASR in-tree test edge until Card 12. See its
 [execution record](11-public-header-migrations.md#execution-record).
-Cards 12–29 are pending.
+Card 12 is complete for its in-card gates: added `gufo_test_support` STATIC library
+under `BUILD_TESTING` wrapping serving fixtures; migrated all four model API test suites
+(Qwen3-ASR, EmbeddingGemma 2, Qwen3-TTS, Qwen-Image-21) to `tests/support/model_api_test_support.hpp`;
+removed production serving sources from test targets; tightened the serving boundary
+ratchet in `tools/ci/check-extension-isolation.py` (with negative unit test proof) to forbid
+`src/cli/` includes across all boundary layers including model test trees; kept test machinery
+out of public `SURFACE` (97 paths unchanged) and out of production builds (`BUILD_TESTING=OFF`);
+and passed all bounded CPU/GPU CTests, continuation identity goldens, and format checks.
+Its unresolved gates — none of which it claims — are the deferred functional/performance half
+and remaining CLI text runner coupling in text model integration harnesses. See its
+[execution record](12-model-api-test-support.md#execution-record).
+Cards 13–29 are pending.
 The authorized implementation milestone ends after Card 14 is
 verified and committed; cards 15–29 document later scope only. This split is
 documentation work and does not itself advance any implementation status.

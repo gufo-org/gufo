@@ -674,14 +674,15 @@ def serving_boundary_violations(report):
 
     Card 09 separated serving policy from extension execution: models, family
     libraries, the cache tier, the extension runtime and the public extension
-    API must compile without a serving or HTTP implementation header. Sources
-    under a `tests/` tree are exempt: those executables keep reaching serving
-    and HTTP directly until `gufo_test_support` (step 7b, Card 12) wraps them.
+    API must compile without a serving or HTTP implementation header. Card 12
+    (RFC step 7b) introduced gufo_test_support, eliminating the test-tree
+    exemption: all sources under BOUNDARY_LAYERS (including model tests under
+    src/models/) must compile without a serving or HTTP implementation header.
     """
     violations = []
     for edge in report["includes"]:
         path = edge["path"]
-        if not path.startswith(BOUNDARY_LAYERS) or in_test_tree(path):
+        if not path.startswith(BOUNDARY_LAYERS):
             continue
         target = edge["resolved"] or posixpath.normpath(
             posixpath.join(posixpath.dirname(path), edge["include"]))

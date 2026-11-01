@@ -1,7 +1,5 @@
 // POST /v1/embeddings contract against a fake encoder: no model files, no
 // device, and no socket. The test calls the HTTP handler directly.
-#include "src/cli/serve/embeddings_api.hpp"
-
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -24,8 +22,8 @@
 #include <utility>
 #include <vector>
 
-#include "src/cli/serve/embedding_service.hpp"
 #include "src/core/json.hpp"
+#include "tests/support/model_api_test_support.hpp"
 
 namespace {
 

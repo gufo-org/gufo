@@ -82,11 +82,9 @@ set_tests_properties(embedding_gemma2_tokenizer_test PROPERTIES
 
 # POST /v1/embeddings against a fake encoder: no weights, no device, no socket.
 add_executable(embedding_gemma2_embeddings_api_test
-  embeddings_api_test.cpp
-  ${PROJECT_SOURCE_DIR}/src/cli/serve/embeddings_api.cpp
-  ${PROJECT_SOURCE_DIR}/src/cli/serve/embedding_service.cpp)
+  embeddings_api_test.cpp)
 target_link_libraries(embedding_gemma2_embeddings_api_test PRIVATE
-  gufo_embedding_gemma2 gufo_logging gufo_core)
+  gufo_embedding_gemma2 gufo_test_support gufo_logging gufo_core)
 target_compile_definitions(embedding_gemma2_embeddings_api_test PRIVATE
   GUFO_EMBEDDING_GEMMA2_NATIVE_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/llama_cpp_native_embeddings.json")
 add_test(NAME embedding_gemma2_embeddings_api_test

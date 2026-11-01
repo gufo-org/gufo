@@ -507,9 +507,10 @@ qwen::Real real;
             # Serving reaching a model is the interim step-6 edge, not this gate.
             "src/cli/serve/inference_backend.cpp":
                 '#include "src/models/deepseek/engine.hpp"\n',
-            # Test executables keep reaching serving until step 7b.
+            # Model test executables in src/models/ are forbidden from reaching serving (step 7b).
             "src/models/qwen3_asr/tests/audio_api_test.cpp":
                 '#include "src/cli/serve/http_server.hpp"\n',
+            # CLI test executables under tests/ keep reaching serving directly.
             "tests/cli/scheduler_test.cpp":
                 '#include "src/cli/serve/scheduler.hpp"\n',
         }
@@ -529,6 +530,7 @@ qwen::Real real;
             "src/ext/runtime.cpp:1: src/cli/serve/scheduler.hpp",
             "src/families/qwen/http.hpp:1: src/cli/serve/http_server.hpp",
             "src/models/deepseek/engine.cpp:1: src/cli/serve/logging.hpp",
+            "src/models/qwen3_asr/tests/audio_api_test.cpp:1: src/cli/serve/http_server.hpp",
         ])
 
     def test_repository_satisfies_the_serving_boundary(self):

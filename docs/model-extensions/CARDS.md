@@ -117,7 +117,7 @@ the current implementation milestone stops after Card 14.
 | 09 | 6; 08 | [Separate serving policy from extension execution](cards/09-serving-runtime-boundary.md) | complete |
 | 10 | 7; 09 | [Publish and measure the public extension API](cards/10-public-api-surface.md) | complete |
 | 11 | 7; 10 | [Migrate models to public extension headers](cards/11-public-header-migrations.md) | complete |
-| 12 | 7b; 11 | [Add in-tree model API test support](cards/12-model-api-test-support.md) | pending |
+| 12 | 7b; 11 | [Add in-tree model API test support](cards/12-model-api-test-support.md) | complete |
 | 13 | 8 embeddings; 12 | [Migrate the EmbeddingGemma pilot](cards/13-embeddinggemma-pilot.md) | pending |
 | 14 | 9; 13 | [Generate infrastructure from model metadata](cards/14-generated-infrastructure.md) | pending |
 | 15 | 8 ASR; 14 | [Migrate speech recognition](cards/15-speech-recognition.md) | pending |
@@ -238,3 +238,20 @@ with negative unit test proof; and verified continuation identity goldens and bo
 tests on both CPU and GPU presets. Its unresolved gates — none of which it claims — are
 the deferred functional/performance half, native Windows execution, own and family coupling
 (to be migrated with each model's card), and the exempt ASR test edge until Card 12.
+
+### Card 12
+
+See [Card 12: execution record](cards/12-model-api-test-support.md#execution-record).
+It added the in-tree `gufo_test_support` STATIC library under `BUILD_TESTING` wrapping
+HTTP and serving fixtures (`HttpRequest`, `HttpResponse`, `AsrService`, `AudioAsrApi`,
+`AudioStream`, `TtsService`, `AudioTtsApi`, `EmbeddingService`, `EmbeddingsApi`, `ImageService`, `ImageApi`),
+and migrated all four model API test suites (Qwen3-ASR, EmbeddingGemma 2, Qwen3-TTS, Qwen-Image-21)
+from production `src/cli/serve/*.hpp` includes to `tests/support/model_api_test_support.hpp`;
+removed production serving sources from test compile targets; tightened the serving boundary
+ratchet in `tools/ci/check-extension-isolation.py` to forbid `src/cli/` includes from all
+`BOUNDARY_LAYERS` (including model test trees); preserved `include/gufo/ext/SURFACE` (97 paths)
+without leaking test machinery; proved exclusion under `BUILD_TESTING=OFF`; and passed bounded
+CPU/GPU tests, continuation identity goldens, and format checks. Its unresolved gates — none of
+which it claims — are the deferred functional/performance half (deferred to post-Card-14 qualification
+window) and remaining CLI text runner coupling in text model integration harnesses.
+
