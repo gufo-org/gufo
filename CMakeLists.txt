@@ -977,12 +977,19 @@ endfunction()
   add_test(NAME bench_cli_test COMMAND bench_cli_test)
   set_tests_properties(bench_cli_test PROPERTIES LABELS "cpu;server;cli")
 
+  # H3 host contracts share an object with generation. In HIP builds that
+  # object references the backend implementations, so tests need both tiers.
+  set(gufo_minimax_h3_test_libraries gufo_minimax_h3)
+  if (TARGET gufo_minimax_h3_hip)
+    list(APPEND gufo_minimax_h3_test_libraries gufo_minimax_h3_hip)
+  endif()
+
   if (TARGET gufo_minimax_h3)
     add_executable(video_cli_test
       tests/cli/video_test.cpp
       src/cli/video/video.cpp
     )
-    target_link_libraries(video_cli_test PRIVATE gufo_core gufo_minimax_h3 gufo_ext_runtime)
+    target_link_libraries(video_cli_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries} gufo_ext_runtime)
     add_test(NAME video_cli_test COMMAND video_cli_test)
     set_tests_properties(video_cli_test PROPERTIES
       LABELS "cpu;server;cli;minimax-h3;quality")
@@ -992,7 +999,7 @@ endfunction()
       src/cli/serve/video_jobs.cpp
     )
     target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core
-      gufo_minimax_h3 gufo_cache gufo_ext_runtime)
+      ${gufo_minimax_h3_test_libraries} gufo_cache gufo_ext_runtime)
     add_test(NAME video_jobs_test COMMAND video_jobs_test)
     set_tests_properties(video_jobs_test PROPERTIES
       LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality")
@@ -1003,7 +1010,7 @@ endfunction()
       src/cli/serve/video_jobs.cpp
     )
     target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core
-      gufo_minimax_h3 gufo_cache gufo_ext_runtime)
+      ${gufo_minimax_h3_test_libraries} gufo_cache gufo_ext_runtime)
     add_test(NAME video_api_test COMMAND video_api_test)
     set_tests_properties(video_api_test PROPERTIES
       LABELS "cpu;server;api;video;minimax-h3;quality")
@@ -1122,7 +1129,7 @@ endfunction()
   if (TARGET gufo_minimax_h3)
   add_executable(minimax_h3_runtime_test
     tests/models/minimax_h3_runtime_test.cpp)
-  target_link_libraries(minimax_h3_runtime_test PRIVATE gufo_core gufo_minimax_h3)
+  target_link_libraries(minimax_h3_runtime_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_runtime_test COMMAND minimax_h3_runtime_test)
   set_tests_properties(minimax_h3_runtime_test PROPERTIES
     LABELS "cpu;models;minimax-h3;safetensors;residency;failure-injection")
@@ -1187,21 +1194,21 @@ endfunction()
   if (TARGET gufo_minimax_h3)
   add_executable(minimax_h3_tokenizer_test
     tests/models/minimax_h3_tokenizer_test.cpp)
-  target_link_libraries(minimax_h3_tokenizer_test PRIVATE gufo_core gufo_minimax_h3)
+  target_link_libraries(minimax_h3_tokenizer_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_tokenizer_test COMMAND minimax_h3_tokenizer_test)
   set_tests_properties(minimax_h3_tokenizer_test PROPERTIES
     LABELS "cpu;models;minimax-h3;tokenizer;quality")
 
   add_executable(minimax_h3_sampling_test
     tests/models/minimax_h3_sampling_test.cpp)
-  target_link_libraries(minimax_h3_sampling_test PRIVATE gufo_core gufo_minimax_h3)
+  target_link_libraries(minimax_h3_sampling_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_sampling_test COMMAND minimax_h3_sampling_test)
   set_tests_properties(minimax_h3_sampling_test PROPERTIES
     LABELS "cpu;models;minimax-h3;layout;schedule;rng;quality")
 
   add_executable(minimax_h3_generation_test
     tests/models/minimax_h3_generation_test.cpp)
-  target_link_libraries(minimax_h3_generation_test PRIVATE gufo_core gufo_minimax_h3)
+  target_link_libraries(minimax_h3_generation_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_generation_test
     COMMAND minimax_h3_generation_test)
   set_tests_properties(minimax_h3_generation_test PROPERTIES
@@ -1209,7 +1216,7 @@ endfunction()
 
   add_executable(minimax_h3_video_vae_test
     tests/models/minimax_h3_video_vae_test.cpp)
-  target_link_libraries(minimax_h3_video_vae_test PRIVATE gufo_core gufo_minimax_h3)
+  target_link_libraries(minimax_h3_video_vae_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_video_vae_plan
     COMMAND minimax_h3_video_vae_test)
   set_tests_properties(minimax_h3_video_vae_plan PROPERTIES
@@ -1217,7 +1224,7 @@ endfunction()
 
   add_executable(minimax_h3_media_test
     tests/models/minimax_h3_media_test.cpp)
-  target_link_libraries(minimax_h3_media_test PRIVATE gufo_core gufo_minimax_h3)
+  target_link_libraries(minimax_h3_media_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_media_test COMMAND minimax_h3_media_test)
   set_tests_properties(minimax_h3_media_test PROPERTIES
     LABELS "cpu;models;minimax-h3;video;audio;ffmpeg;mux;quality"

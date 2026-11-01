@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <gufo/ext/registry.hpp>
 #include <iostream>
 #include <string>
 
@@ -166,7 +167,11 @@ void TestSharedOptionParsing() {
 
 }  // namespace
 
+void minimax_h3_register(gufo::ext::Registry&);
+
 int main() {
+  gufo::ext::Registry registry;
+  minimax_h3_register(registry);
   TestPresets();
   TestDevelopmentAndOverrides();
   TestSelectedFramesAndFailures();
