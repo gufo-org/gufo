@@ -2174,6 +2174,9 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   json::Value prompt_details = json::Value::object();
   prompt_details["cached_tokens"] = result.cached_prompt_tokens;
   usage["prompt_tokens_details"] = std::move(prompt_details);
+  json::Value completion_details = json::Value::object();
+  completion_details["reasoning_tokens"] = result.reasoning_tokens;
+  usage["completion_tokens_details"] = std::move(completion_details);
 
   const double prompt_per_second = PrefillTokensPerSecond(result);
   const double predicted_per_second =
