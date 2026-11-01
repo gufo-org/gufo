@@ -11,10 +11,15 @@ add_library(gufo_platform STATIC
   "$<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/fs_posix.cpp>"
   "$<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/pages_posix.cpp>"
   "$<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/page_pin_linux.cpp>"
+  "$<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/process_posix.cpp>"
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/fs_windows.cpp>"
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/pages_windows.cpp>"
-  "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/page_pin_windows.cpp>")
+  "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/page_pin_windows.cpp>"
+  "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/process_windows.cpp>")
 target_include_directories(gufo_platform PUBLIC ${PROJECT_SOURCE_DIR})
+target_compile_definitions(gufo_platform PRIVATE
+  GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
+  GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
 target_link_libraries(gufo_platform PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 if (WIN32)
   # WinSock (net), process memory counters (logging), BCrypt and the registry

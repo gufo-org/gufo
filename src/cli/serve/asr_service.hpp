@@ -7,15 +7,14 @@
 #include <memory>
 #include <string>
 
-#include "src/models/qwen3_asr/transcription.hpp"
+#include "gufo/ext/asr.hpp"
 
 namespace gufo::server {
 
 struct AsrServiceOptions {
-  using Runner = std::function<bool(
-      const models::qwen3_asr::TranscriptionRequest&,
-      const models::qwen3_asr::CancellationCheck&,
-      models::qwen3_asr::TranscriptionResult*, std::string*)>;
+  using Runner = std::function<bool(const ext::TranscriptionRequest&,
+                                    const ext::CancellationCheck&,
+                                    ext::TranscriptionResult*, std::string*)>;
 
   std::filesystem::path model_root;
   std::size_t native_context_tokens{1024};
@@ -40,11 +39,10 @@ public:
   [[nodiscard]] std::string model_id() const;
   [[nodiscard]] std::string backend_name() const;
 
-  [[nodiscard]] bool Transcribe(
-      const models::qwen3_asr::TranscriptionRequest& request,
-      const models::qwen3_asr::CancellationCheck& is_cancelled,
-      models::qwen3_asr::TranscriptionResult* result,
-      std::string* error = nullptr);
+  [[nodiscard]] bool Transcribe(const ext::TranscriptionRequest& request,
+                                const ext::CancellationCheck& is_cancelled,
+                                ext::TranscriptionResult* result,
+                                std::string* error = nullptr);
 
 private:
   struct Impl;

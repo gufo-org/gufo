@@ -10,7 +10,8 @@
 #include <string>
 #include <utility>
 
-#include "src/models/qwen3_tts/text_stream.hpp"
+#include "src/cli/serve/text_stream.hpp"
+#include "src/models/qwen3_tts/synthesis.hpp"
 #include "tests/support/model_api_test_support.hpp"
 
 namespace {
@@ -80,7 +81,7 @@ TtsService MakeVoiceDesignService(FakeRunner* runner) {
   return TtsService(TtsServiceOptions{
       .model_root = {},
       .validate_model = false,
-      .variant = qwen3_tts::ModelVariant::kVoiceDesign,
+      .variant = gufo::ext::TtsVariant::kVoiceDesign,
       .model_id = {},
       .voices = {},
       .runner =
@@ -96,7 +97,7 @@ TtsService MakeBaseService(FakeRunner* runner) {
   return TtsService(TtsServiceOptions{
       .model_root = {},
       .validate_model = false,
-      .variant = qwen3_tts::ModelVariant::kBase,
+      .variant = gufo::ext::TtsVariant::kBase,
       .model_id = {},
       .voices = {},
       .runner =
@@ -275,12 +276,12 @@ void TestStreaming() {
   const std::string text = "Value 3.14 is fine. Next phrase! Then 中文。";
   std::string pending = text;
   const auto expected =
-      qwen3_tts::TakeSpeechSegments(&pending, "sentence", true);
+      gufo::server::TakeSpeechSegments(&pending, "sentence", true);
   for (std::size_t split = 0; split <= text.size(); ++split) {
     pending = text.substr(0, split);
-    auto actual = qwen3_tts::TakeSpeechSegments(&pending, "sentence", false);
+    auto actual = gufo::server::TakeSpeechSegments(&pending, "sentence", false);
     pending += text.substr(split);
-    auto tail = qwen3_tts::TakeSpeechSegments(&pending, "sentence", true);
+    auto tail = gufo::server::TakeSpeechSegments(&pending, "sentence", true);
     actual.insert(actual.end(), tail.begin(), tail.end());
     Check(actual == expected,
           "text splitting is independent of packet boundaries");

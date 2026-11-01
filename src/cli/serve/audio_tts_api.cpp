@@ -12,9 +12,10 @@
 #include <string>
 #include <utility>
 
+#include "src/cli/serve/audio_buffer.hpp"
 #include "src/cli/serve/audio_stream.hpp"
 #include "src/core/json.hpp"
-#include "src/models/qwen3_tts/audio.hpp"
+#include "src/ext/tts.hpp"
 
 namespace gufo::server {
 namespace {
@@ -54,6 +55,19 @@ bool ReadFloat(const json::Value& body, std::string_view name, float* output) {
   }
   *output = static_cast<float>(value->as_double());
   return std::isfinite(*output);
+}
+
+bool ValidSamplingOptions(const ext::TtsSamplingOptions& options) {
+  const auto temperature = [](float value) {
+    return std::isfinite(value) && value > 0.0F;
+  };
+  const auto top_p = [](float value) {
+    return std::isfinite(value) && value > 0.0F && value <= 1.0F;
+  };
+  return temperature(options.temperature) &&
+         temperature(options.predictor_temperature) &&
+         temperature(options.repetition_penalty) && top_p(options.top_p) &&
+         top_p(options.predictor_top_p);
 }
 
 HttpResponse Error(int status, std::string reason, std::string message,
@@ -218,8 +232,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
                  "input_too_large");
   }
   const std::vector<std::string> voices = service.voices();
-  if (service.variant() == models::qwen3_tts::ModelVariant::kCustomVoice &&
-      voice == nullptr) {
+  if (service.variant() == ext::TtsVariant::kCustomVoice && voice == nullptr) {
     return Error(400, "Bad Request",
                  "CustomVoice requests require a 'voice' speaker",
                  "missing_voice");
@@ -231,18 +244,17 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
     return Error(400, "Bad Request", "unsupported Qwen3-TTS voice",
                  "invalid_voice");
   }
-  if (service.variant() == models::qwen3_tts::ModelVariant::kVoiceDesign &&
+  if (service.variant() == ext::TtsVariant::kVoiceDesign &&
       body.member_str("instructions").empty()) {
     return Error(400, "Bad Request",
                  "VoiceDesign requests require non-empty 'instructions'",
                  "missing_instruction");
   }
-  models::qwen3_tts::AudioBuffer reference_audio;
+  AudioBuffer reference_audio;
   std::string reference_text;
   bool speaker_embedding_only = false;
   const TtsVoicePreset* preset = service.voice_preset(selected_voice);
-  if (service.variant() == models::qwen3_tts::ModelVariant::kBase &&
-      preset != nullptr) {
+  if (service.variant() == ext::TtsVariant::kBase && preset != nullptr) {
     // The named preset already carries the reference audio, so accepting
     // per-request reference fields too would leave which one wins ambiguous.
     if (body.find("reference_audio") != nullptr ||
@@ -256,7 +268,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
     reference_audio = preset->reference_audio;
     reference_text = preset->reference_text;
     speaker_embedding_only = preset->speaker_embedding_only;
-  } else if (service.variant() == models::qwen3_tts::ModelVariant::kBase) {
+  } else if (service.variant() == ext::TtsVariant::kBase) {
     const json::Value* encoded_audio = body.find("reference_audio");
     const json::Value* clone_text = body.find("reference_text");
     const json::Value* clone_mode = body.find("voice_clone_mode");
@@ -290,8 +302,8 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
                    "invalid_parameter_type");
     }
     std::string audio_error;
-    if (!models::qwen3_tts::DecodeBase64Wav(encoded_audio->str(),
-                                            &reference_audio, &audio_error)) {
+    if (!DecodeBase64Wav(encoded_audio->str(), &reference_audio,
+                         &audio_error)) {
       return Error(400, "Bad Request", std::move(audio_error),
                    "invalid_reference_audio");
     }
@@ -356,7 +368,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
     }
     greedy = value->as_bool();
   }
-  models::qwen3_tts::SamplingOptions sampling;
+  ext::TtsSamplingOptions sampling;
   sampling.seed = static_cast<std::uint32_t>(seed);
   sampling.sample = !greedy;
   sampling.predictor_sample = !greedy;
@@ -379,7 +391,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
       !ReadFloat(body, "subtalker_temperature",
                  &sampling.predictor_temperature) ||
       !ReadFloat(body, "subtalker_top_p", &sampling.predictor_top_p) ||
-      !models::qwen3_tts::ValidSamplingOptions(sampling)) {
+      !ValidSamplingOptions(sampling)) {
     return Error(400, "Bad Request", "invalid Qwen3-TTS sampling options",
                  "invalid_sampling");
   }
@@ -395,12 +407,17 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
                    : std::string("english");
   }
 
-  models::qwen3_tts::SynthesisRequest synthesis{
+  ext::SynthesisRequest synthesis{
       .text = input->str(),
       .speaker = selected_voice,
       .language = std::move(language),
       .instruct = body.member_str("instructions"),
-      .reference_audio = std::move(reference_audio),
+      .reference_audio =
+          ext::TtsAudioBuffer{
+              .sample_rate = reference_audio.sample_rate,
+              .channels = reference_audio.channels,
+              .samples = std::move(reference_audio.samples),
+          },
       .reference_text = std::move(reference_text),
       .speaker_embedding_only = speaker_embedding_only,
       .max_new_tokens = max_new_tokens,
@@ -443,7 +460,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
         samples += chunk.size();
         return !disconnected;
       };
-      models::qwen3_tts::SynthesisResult result;
+      ext::SynthesisResult result;
       std::string error;
       const auto check = [&] {
         return disconnected || (cancelled && cancelled());
@@ -476,7 +493,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
     };
     return response;
   }
-  models::qwen3_tts::SynthesisResult result;
+  ext::SynthesisResult result;
   std::string error;
   const auto started = std::chrono::steady_clock::now();
   if (!service.Synthesize(synthesis, request.is_cancelled, &result, &error)) {

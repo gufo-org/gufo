@@ -1,0 +1,63 @@
+Cards 15-18: Pending and Deferred Commands
+
+Per standing user decision and model-extensions RFC policy:
+Functional harness runs, main-control timings, and standard speed benchmarks are
+deferred to the single post-Card-14 qualification window. They are recorded here
+as PENDING with exact commands.
+
+================================================================================
+1. Speech Recognition (Card 15: qwen3_asr)
+================================================================================
+- Command:
+  python3 tests/functional/model_services.py asr --model-id qwen3-asr --workdir /tmp/card15-asr-eval
+  Status: PENDING
+  Reason: Requires full weights and live model deployment; deferred to post-Card-14 qualification window.
+
+- Command:
+  result/bin/gufo transcribe --model-dir /var/cache/gufo/models/qwen3_asr --input fixtures/audio/sample_16k.wav
+  Status: PENDING
+  Reason: Local GPU transcription benchmark deferred to qualification window.
+
+- Command:
+  tests/functional/run.py --service asr --preset release
+  Status: PENDING
+  Reason: Full functional regression suite deferred to qualification window.
+
+================================================================================
+2. Speech Synthesis (Card 16: qwen3_tts)
+================================================================================
+- Command:
+  python3 tests/functional/model_services.py tts --model-id qwen3-tts --variant base --workdir /tmp/card16-tts-eval
+  Status: PENDING
+  Reason: Requires independent ASR evaluation binary/model and full weights; deferred to qualification window.
+
+- Command:
+  tests/functional/run.py --service tts --preset release
+  Status: PENDING
+  Reason: Full functional TTS suite deferred to qualification window.
+
+================================================================================
+3. Image Generation (Card 17: qwen_image_21)
+================================================================================
+- Command:
+  python3 tests/functional/model_services.py image --model-id qwen-image-2.1 --prompt "A red fox in snow" --workdir /tmp/card17-image-eval
+  Status: PENDING
+  Reason: Multimodal image generation weights and GPU runner deferred to qualification window.
+
+- Command:
+  tests/functional/run.py --service image --preset release
+  Status: PENDING
+  Reason: Image functional harness deferred to qualification window.
+
+================================================================================
+4. Video Generation (Card 18: minimax_h3)
+================================================================================
+- Command:
+  python3 tests/functional/model_services.py video --model-id minimax-h3 --workdir /tmp/card18-video-eval
+  Status: PENDING
+  Reason: Video generation and FFmpeg media encoding pipeline deferred to qualification window.
+
+- Command:
+  tests/functional/run.py --service video --preset release
+  Status: PENDING
+  Reason: Full functional video regression harness deferred to qualification window.

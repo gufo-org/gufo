@@ -5,8 +5,12 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/asr.hpp"
 #include "gufo/ext/embeddings.hpp"
+#include "gufo/ext/image.hpp"
 #include "gufo/ext/options.hpp"
+#include "gufo/ext/tts.hpp"
+#include "gufo/ext/video.hpp"
 
 namespace gufo::ext {
 // Adding a capability requires a core contract. Extensions cannot invent kinds.
@@ -47,6 +51,10 @@ public:
   void AddProvider(ProviderInfo provider);
   void AddExcluded(ExcludedExtension extension);
   void AddEmbeddingProvider(EmbeddingProvider provider);
+  void AddAsrProvider(AsrProvider provider);
+  void AddTtsProvider(TtsProvider provider);
+  void AddImageProvider(ImageProvider provider);
+  void AddVideoProvider(VideoProvider provider);
   std::span<const ExcludedExtension> Excluded() const { return excluded_; }
   // Empty means the key was not found among excluded extensions.
   std::string ExcludedKeyDiagnostic(std::string_view key) const;

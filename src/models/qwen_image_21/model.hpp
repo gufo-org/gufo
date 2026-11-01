@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <gufo/ext/image.hpp>
 #include <memory>
 #include <span>
 #include <string>
@@ -11,11 +12,11 @@
 
 namespace gufo::models::qwen_image_21 {
 
-struct Image {
-  int width{0};
-  int height{0};
-  std::vector<std::uint8_t> rgba;
-};
+using Image = ext::ImageBuffer;
+using Request = ext::ImageRequest;
+using Metrics = ext::ImageMetrics;
+using Result = ext::ImageResult;
+using CancellationCheck = ext::CancellationCheck;
 
 Image DecodeImage(std::span<const std::uint8_t> bytes);
 std::vector<std::uint8_t> EncodePng(const Image& image);
@@ -24,30 +25,6 @@ Image ResizeImage(const Image& image, int width, int height);
 /// Supply the canonical resized RGBA references; generation retains its seed.
 std::uint64_t InitialNoiseSeed(std::uint64_t seed,
                                std::span<const Image> images);
-
-struct Request {
-  std::string prompt;
-  std::vector<Image> images;
-  int width{1024};
-  int height{1024};
-  int steps{40};
-  std::uint64_t seed{0};
-};
-
-struct Metrics {
-  double prompt_ms{0};
-  double denoise_ms{0};
-  double vae_ms{0};
-  double total_ms{0};
-  std::size_t resident_weight_bytes{0};
-};
-
-struct Result {
-  Image image;
-  Metrics metrics;
-};
-
-using CancellationCheck = std::function<bool()>;
 /// Development observer; tensors are FP32 views of the actual BF16 boundary.
 struct Observer {
   std::function<void(std::string_view, std::span<const float>, int, int)> write;

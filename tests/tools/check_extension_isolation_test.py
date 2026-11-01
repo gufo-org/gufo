@@ -594,8 +594,16 @@ qwen::Real real;
         files = {
             "src/models/embedding_gemma2/config.hpp": "struct Config {};\n",
             "src/models/embedding_gemma2/loader.hpp": "struct Loader {};\n",
+            "src/models/minimax_h3/runtime.hpp": "struct Runtime {};\n",
+            "src/models/qwen3_asr/audio.hpp": "struct Audio {};\n",
+            "src/models/qwen3_tts/synthesis.hpp": "struct Synthesis {};\n",
+            "src/models/qwen_image_21/image.hpp": "struct Image {};\n",
             "src/cli/serve/bad_service.hpp": '#include "src/models/embedding_gemma2/config.hpp"\n',
             "src/cli/serve/bad_handler.cpp": '#include "src/models/embedding_gemma2/loader.hpp"\n',
+            "src/cli/serve/bad_h3.cpp": '#include "src/models/minimax_h3/runtime.hpp"\n',
+            "src/cli/serve/bad_asr.cpp": '#include "src/models/qwen3_asr/audio.hpp"\n',
+            "src/cli/serve/bad_tts.cpp": '#include "src/models/qwen3_tts/synthesis.hpp"\n',
+            "src/cli/serve/bad_image.cpp": '#include "src/models/qwen_image_21/image.hpp"\n',
             "src/cli/serve/good_service.hpp": '#include <gufo/ext/embeddings.hpp>\n',
             "include/gufo/ext/embeddings.hpp": "struct Embeddings {};\n",
         }
@@ -608,8 +616,12 @@ qwen::Real real;
             violations = ISOLATION.extension_boundary_violations(
                 ISOLATION.inventory(root))
         self.assertEqual(violations, [
+            "src/cli/serve/bad_asr.cpp:1: src/models/qwen3_asr/audio.hpp",
+            "src/cli/serve/bad_h3.cpp:1: src/models/minimax_h3/runtime.hpp",
             "src/cli/serve/bad_handler.cpp:1: src/models/embedding_gemma2/loader.hpp",
+            "src/cli/serve/bad_image.cpp:1: src/models/qwen_image_21/image.hpp",
             "src/cli/serve/bad_service.hpp:1: src/models/embedding_gemma2/config.hpp",
+            "src/cli/serve/bad_tts.cpp:1: src/models/qwen3_tts/synthesis.hpp",
         ])
 
     def test_repository_satisfies_the_extension_boundary(self):

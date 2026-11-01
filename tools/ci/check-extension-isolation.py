@@ -712,13 +712,22 @@ def model_core_boundary_violations(report):
     return sorted(violations)
 
 
+MIGRATED_EXTENSIONS = (
+    "src/models/embedding_gemma2/",
+    "src/models/minimax_h3/",
+    "src/models/qwen3_asr/",
+    "src/models/qwen3_tts/",
+    "src/models/qwen_image_21/",
+)
+
+
 def extension_boundary_violations(report):
     """Return src/cli/** includes of migrated model extensions.
 
-    Card 13 migrated EmbeddingGemma 2 to the neutral extension runtime.
-    The CLI and serving layer must not include headers from migrated extensions
-    (currently src/models/embedding_gemma2/**), interacting only via ext::Registry
-    and neutral extension interfaces.
+    Cards 13 and 15–18 migrated EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS,
+    Qwen-Image-2.1, and MiniMax H3 to the neutral extension runtime.
+    The CLI and serving layer must not include headers from migrated extensions,
+    interacting only via ext::Registry and neutral extension interfaces.
     """
     violations = []
     for edge in report["includes"]:
@@ -728,8 +737,8 @@ def extension_boundary_violations(report):
         inc = edge["include"]
         target = edge["resolved"] or posixpath.normpath(
             posixpath.join(posixpath.dirname(path), inc))
-        if (target.startswith("src/models/embedding_gemma2/")
-                or inc.startswith("src/models/embedding_gemma2/")):
+        if (target.startswith(MIGRATED_EXTENSIONS)
+                or inc.startswith(MIGRATED_EXTENSIONS)):
             violations.append(f"{path}:{edge['line']}: {inc}")
     return sorted(violations)
 
@@ -874,7 +883,7 @@ def main():
                         help="Fail if any production model file includes a core or cache header")
     parser.add_argument("--fail-on-extension-boundary", "--fail-on-cli-model-includes",
                         dest="fail_on_extension_boundary", action="store_true",
-                        help="Fail if any src/cli file includes a migrated extension (src/models/embedding_gemma2)")
+                        help="Fail if any src/cli file includes a migrated extension (src/models/{embedding_gemma2,minimax_h3,qwen3_asr,qwen3_tts,qwen_image_21})")
     parser.add_argument("--fail-on-target-ownership", action="store_true",
                         help="Fail unless every model directory has a manifest and every "
                              "target that links, compiles or includes a library claims it")
@@ -941,7 +950,7 @@ def main():
                 print(f"  {violation}")
             return 1
         print("[check-extension-isolation] PASS: extension boundary "
-              "(no src/cli -> src/models/embedding_gemma2 includes)")
+              "(no src/cli -> migrated extension includes)")
     if args.fail_on_target_ownership or args.target_ownership_report:
         libraries, edges, violations = target_ownership(args.root.resolve())
         if args.target_ownership_report:

@@ -120,10 +120,10 @@ the current implementation milestone stops after Card 14.
 | 12 | 7b; 11 | [Add in-tree model API test support](cards/12-model-api-test-support.md) | complete |
 | 13 | 8 embeddings; 12 | [Migrate the EmbeddingGemma pilot](cards/13-embeddinggemma-pilot.md) | complete |
 | 14 | 9; 13 | [Generate infrastructure from model metadata](cards/14-generated-infrastructure.md) | complete |
-| 15 | 8 ASR; 14 | [Migrate speech recognition](cards/15-speech-recognition.md) | pending |
-| 16 | 8 TTS; 15 | [Migrate speech synthesis](cards/16-speech-synthesis.md) | pending |
-| 17 | 8 image; 16 | [Migrate image generation](cards/17-image-generation.md) | pending |
-| 18 | 8 video; 17 | [Migrate video generation](cards/18-video-generation.md) | pending |
+| 15 | 8 ASR; 14 | [Migrate speech recognition](cards/15-speech-recognition.md) | complete |
+| 16 | 8 TTS; 15 | [Migrate speech synthesis](cards/16-speech-synthesis.md) | complete |
+| 17 | 8 image; 16 | [Migrate image generation](cards/17-image-generation.md) | complete |
+| 18 | 8 video; 17 | [Migrate video generation](cards/18-video-generation.md) | complete |
 | 19 | 10 shared text; 18 | [Finalize the shared text-generation contract](cards/19-shared-text-contract.md) | pending |
 | 20 | 10 Qwen 27B; 19 | [Migrate Qwen 27B text generation](cards/20-qwen27b-extension.md) | pending |
 | 21 | 10 Flash-Next; 20 | [Migrate Flash-Next text generation](cards/21-flash-next-extension.md) | pending |
@@ -297,5 +297,56 @@ and `nix build .#checks.x86_64-linux.pr` (all 4 check derivations built and pass
 Its unresolved gates — none of which it claims — are the deferred functional
 harness runs and speed benchmark sweeps, which are now ready to run in the consolidated
 post-Card-14 qualification window.
+
+### Card 15
+
+See [Card 15: execution record](cards/15-speech-recognition.md#execution-record).
+It migrated `src/models/qwen3_asr` from a direct core compile dependency into an
+isolated extension; published neutral ASR contracts in `<gufo/ext/asr.hpp>`
+(`AsrRunner`, `AsrProvider`, `TranscriptionRequest`, `TranscriptionResult`);
+decoupled `src/cli/serve/asr_service.cpp` and `asr_websocket.cpp` to use dynamic
+provider registration; moved `audio_buffer.hpp`/`.cpp` to host serving; split the
+manifest into `gufo_qwen3_asr` and `gufo_qwen3_asr_hip` (`requires: ["hip"]`);
+resolved reviewer finding M2 (registered both `"qwen3-asr"` and `"qwen3-asr-1.7b"`
+aliases); resolved user finding U1 (separate HIP target in manifest); and passed
+all CI checks, `check-pr` (96/96 suites passed), and `nix build` (active in
+diagnostics).
+
+### Card 16
+
+See [Card 16: execution record](cards/16-speech-synthesis.md#execution-record).
+It migrated `src/models/qwen3_tts` into an isolated extension; published neutral
+TTS contracts in `<gufo/ext/tts.hpp>` (`TtsRunner`, `TtsProvider`, `SynthesisRequest`,
+`SynthesisResult`); decoupled `src/cli/serve/tts_service.cpp` and `tts_websocket.cpp`;
+consolidated streaming speech segments into `src/cli/serve/text_stream.hpp`; split
+the manifest into `gufo_qwen3_tts` and `gufo_qwen3_tts_hip` (`requires: ["hip"]`);
+resolved reviewer findings M1 (dead `DecodeBase64Wav` eliminated) and M3 (duplicate
+`text_stream.hpp` deleted); resolved user finding U1; and passed all CI checks,
+`check-pr`, and `nix build`.
+
+### Card 17
+
+See [Card 17: execution record](cards/17-image-generation.md#execution-record).
+It migrated `src/models/qwen_image_21` into an isolated extension; published neutral
+Image contracts in `<gufo/ext/image.hpp>` (`ImageRunner`, `ImageProvider`, `ImageRequest`,
+`ImageResult`, `ImageBuffer`); decoupled `src/cli/serve/image_api.cpp` to use
+`ext::FindImageProvider` and `ext::ProbeImageProvider`; split the manifest into
+`gufo_qwen_image_21` and `gufo_qwen_image_21_hip` (`requires: ["hip"]`); resolved
+user finding U1; and passed all CI checks, `check-pr`, and `nix build`.
+
+### Card 18
+
+See [Card 18: execution record](cards/18-video-generation.md#execution-record).
+It migrated `src/models/minimax_h3` into an isolated extension; moved subprocess
+execution to platform leaves (`src/core/platform/process.hpp`, `process_posix.cpp`,
+`process_windows.cpp`); published public process abstractions in `<gufo/ext/platform/process.hpp>`
+(`RunCapture`, `RunMediaMux`); published neutral Video contracts in `<gufo/ext/video.hpp>`
+(`VideoRunner`, `VideoProvider`, `VideoRequest`, `VideoParameters`, `VideoTelemetry`);
+decoupled `src/cli/serve/video_api.cpp` and `video_jobs.cpp`; split the manifest into
+`gufo_minimax_h3` and `gufo_minimax_h3_hip` (`requires: ["hip"]`), linking `roc::hipblaslt`
+and `roc::rocblas`; resolved reviewer findings N1 (`CHANGES.md`) and N2 (`platform`
+namespace alias removed); resolved user finding U1; and passed all CI checks, `check-pr`,
+and `nix build`.
+
 
 

@@ -86,9 +86,11 @@ int main(int argc, char** argv) {
   assert(std::abs(schedule[39] - 0.02F) < 1e-6F);
   for (std::size_t i = 1; i < schedule.size(); ++i)
     assert(std::isfinite(schedule[i]) && schedule[i] < schedule[i - 1]);
-  ValidateRequest(Request{.prompt = "a red cube"});
-  for (const auto invalid :
-       {Request{.width = 31}, Request{.steps = 1}, Request{.height = 8192}}) {
+  ValidateRequest(Request{.prompt = "a red cube", .images = {}});
+  for (const auto& invalid :
+       {Request{.prompt = "", .images = {}, .width = 31},
+        Request{.prompt = "", .images = {}, .steps = 1},
+        Request{.prompt = "", .images = {}, .height = 8192}}) {
     bool rejected = false;
     try {
       ValidateRequest(invalid);
@@ -104,7 +106,7 @@ int main(int argc, char** argv) {
         assert(request.prompt == "a red cube");
         assert(request.width == 256 && request.height == 256);
         assert(request.seed == static_cast<std::uint64_t>(calls + 40));
-        return Result{.image = image};
+        return Result{.image = image, .metrics = {}};
       });
   gufo::server::HttpRequest http;
   http.method = "POST";

@@ -1,6 +1,10 @@
 {
   "schema": 1,
   "extensions": [
-    "embedding_gemma2"
+    "embedding_gemma2",
+    "minimax_h3",
+    "qwen3_asr",
+    "qwen3_tts",
+    "qwen_image_21"
   ]
 }

@@ -2,9 +2,13 @@
 #include <stdexcept>
 #include <utility>
 
+#include "gufo/ext/asr.hpp"
 #include "gufo/ext/host.hpp"
+#include "gufo/ext/image.hpp"
 #include "gufo/ext/registry.hpp"
+#include "gufo/ext/tts.hpp"
 #include "gufo/ext/version.hpp"
+#include "gufo/ext/video.hpp"
 
 namespace gufo::ext {
 std::string_view RuntimeApiVersion() {
@@ -121,5 +125,141 @@ const EmbeddingProvider* ProbeEmbeddingProvider(std::string_view model_root) {
 
 void Registry::AddEmbeddingProvider(EmbeddingProvider provider) {
   RegisterEmbeddingProvider(std::move(provider));
+}
+
+static std::vector<AsrProvider> g_asr_providers;
+
+void RegisterAsrProvider(AsrProvider provider) {
+  for (auto& existing : g_asr_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_asr_providers.push_back(std::move(provider));
+}
+
+const AsrProvider* FindAsrProvider(std::string_view id) {
+  for (const auto& provider : g_asr_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const AsrProvider* ProbeAsrProvider(std::string_view model_root) {
+  for (const auto& provider : g_asr_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddAsrProvider(AsrProvider provider) {
+  RegisterAsrProvider(std::move(provider));
+}
+
+static std::vector<TtsProvider> g_tts_providers;
+
+void RegisterTtsProvider(TtsProvider provider) {
+  for (auto& existing : g_tts_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_tts_providers.push_back(std::move(provider));
+}
+
+const TtsProvider* FindTtsProvider(std::string_view id) {
+  for (const auto& provider : g_tts_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const TtsProvider* ProbeTtsProvider(std::string_view model_root) {
+  for (const auto& provider : g_tts_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddTtsProvider(TtsProvider provider) {
+  RegisterTtsProvider(std::move(provider));
+}
+
+static std::vector<ImageProvider> g_image_providers;
+
+void RegisterImageProvider(ImageProvider provider) {
+  for (auto& existing : g_image_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_image_providers.push_back(std::move(provider));
+}
+
+const ImageProvider* FindImageProvider(std::string_view id) {
+  for (const auto& provider : g_image_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const ImageProvider* ProbeImageProvider(std::string_view model_root) {
+  for (const auto& provider : g_image_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddImageProvider(ImageProvider provider) {
+  RegisterImageProvider(std::move(provider));
+}
+
+static std::vector<VideoProvider> g_video_providers;
+
+void RegisterVideoProvider(VideoProvider provider) {
+  for (auto& existing : g_video_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_video_providers.push_back(std::move(provider));
+}
+
+const VideoProvider* FindVideoProvider(std::string_view id) {
+  for (const auto& provider : g_video_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const VideoProvider* ProbeVideoProvider(std::string_view model_root) {
+  for (const auto& provider : g_video_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddVideoProvider(VideoProvider provider) {
+  RegisterVideoProvider(std::move(provider));
 }
 }  // namespace gufo::ext

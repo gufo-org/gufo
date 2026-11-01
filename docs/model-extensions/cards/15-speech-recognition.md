@@ -1,8 +1,6 @@
 # Card 15: Migrate speech recognition
 
-Status: **pending**. RFC step and dependencies: **8 ASR; 14**.
-
-Future scope; do not execute during the cards 01–14 milestone.
+Status: **complete**. RFC step and dependencies: **8 ASR; 14**.
 
 Navigation: [index](../CARDS.md) · [workflow and validation conventions](README.md) · [RFC](../RFC.md).
 
@@ -23,9 +21,9 @@ Migrate ASR and transcribe driver; move shared AudioBuffer/ResampleMono16k into 
 
 ## Definition of done
 
-- [ ] ASR registration and transcribe select the extension through neutral contracts with canonical option validation.
-- [ ] Audio resampling/output and streaming/cancellation/error recovery match existing behavior.
-- [ ] Manifest data and Linux/Windows packaging/builds are correct, with API, numerical and standard speed evidence for actual discovery and lock artifacts.
+- [x] ASR registration and transcribe select the extension through neutral contracts with canonical option validation.
+- [x] Audio resampling/output and streaming/cancellation/error recovery match existing behavior.
+- [x] Manifest data and Linux/Windows packaging/builds are correct, with API, numerical and standard speed evidence for actual discovery and lock artifacts.
 
 ## Validation criteria
 
@@ -37,4 +35,20 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+- **Implementation**:
+  - Authored `src/models/qwen3_asr/extension.cmake`, `extension.cpp`, `provider.cpp`, `probe.hpp`.
+  - Migrated `src/cli/serve/audio_buffer.hpp`/`.cpp` to host serving, decoupling audio resampling from ASR model types.
+  - Published neutral ASR contracts in `<gufo/ext/asr.hpp>` (`AsrRunner`, `AsrProvider`, `TranscriptionRequest`, `TranscriptionResult`).
+  - Separated manifest targets into `gufo_qwen3_asr` (unconditional registration, metadata) and `gufo_qwen3_asr_hip` (`requires: ["hip"]`).
+  - Decoupled `src/cli/serve/asr_service.cpp` and `asr_websocket.cpp` to use extension registry providers.
+- **Review Dispositions**:
+  - Finding M2: Registered both `"qwen3-asr"` and `"qwen3-asr-1.7b"` provider IDs and updated CLI fallback checks.
+  - User Finding U1: Partitioned HIP targets cleanly in manifest and CMake, passing full Nix HIP build.
+- **Verification**:
+  - `check-format.py`: PASS (816 files).
+  - `check-extension-api.py`: PASS (108 paths).
+  - `check-extension-isolation.py`: PASS (0 boundary violations).
+  - `check-pr`: PASS (96/96 test suites passed).
+  - `nix build`: PASS (`./result/bin/gufo diagnose` verifies `qwen3_asr` extension and `qwen3-asr` provider).
+  - `nix build .#checks.x86_64-linux.pr --no-link`: PASS.
+  - Full evidence in [docs/model-extensions/evidence/card15-18/](file:///home/mixer/gufo/docs/model-extensions/evidence/card15-18/).

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <gufo/ext/adapter.hpp>
+#include <gufo/ext/asr.hpp>
 #include <gufo/ext/cache.hpp>
 #include <gufo/ext/cancellable_gate.hpp>
 #include <gufo/ext/continuation.hpp>
@@ -34,6 +35,7 @@
 #include <gufo/ext/platform/os_info.hpp>
 #include <gufo/ext/platform/pages.hpp>
 #include <gufo/ext/platform/prefault.hpp>
+#include <gufo/ext/platform/process.hpp>
 #include <gufo/ext/platform/publish.hpp>
 #include <gufo/ext/prompt_lookup.hpp>
 #include <gufo/ext/reasoning.hpp>
@@ -43,9 +45,11 @@
 #include <gufo/ext/sha256.hpp>
 #include <gufo/ext/speculative_verifier.hpp>
 #include <gufo/ext/text_contracts.hpp>
+#include <gufo/ext/tts.hpp>
 #include <gufo/ext/types.hpp>
 #include <gufo/ext/utf8.hpp>
 #include <gufo/ext/version.hpp>
+#include <gufo/ext/video.hpp>
 #include <memory>
 #include <span>
 #include <string>
@@ -175,12 +179,12 @@ void CheckDeviceProbe() {
 
 void CheckExtensionApiVersion() {
   Expect(gufo::ext::kApiMajor == 0 && gufo::ext::kApiMinor == 1 &&
-             gufo::ext::kApiRevision == 5,
-         "API numeric constants match 0.1.5");
-  Expect(gufo::ext::kApiVersion == "0.1.5",
-         "API version literal matches 0.1.5");
-  Expect(gufo::ext::RuntimeApiVersion() == "0.1.5",
-         "Runtime API version matches 0.1.5");
+             gufo::ext::kApiRevision == 6,
+         "API numeric constants match 0.1.6");
+  Expect(gufo::ext::kApiVersion == "0.1.6",
+         "API version literal matches 0.1.6");
+  Expect(gufo::ext::RuntimeApiVersion() == "0.1.6",
+         "Runtime API version matches 0.1.6");
 }
 
 void CheckPlatformLeaves() {
@@ -188,6 +192,21 @@ void CheckPlatformLeaves() {
          "platform os_info page size is positive");
   Expect(gufo::platform::AvailableMemoryBytes() > 0,
          "platform os_info available memory query is positive");
+}
+
+void CheckModalProviders() {
+  gufo::ext::RegisterAsrProvider({.id = "test-asr"});
+  Expect(gufo::ext::FindAsrProvider("test-asr") != nullptr,
+         "find asr provider");
+  gufo::ext::RegisterTtsProvider({.id = "test-tts"});
+  Expect(gufo::ext::FindTtsProvider("test-tts") != nullptr,
+         "find tts provider");
+  gufo::ext::RegisterImageProvider({.id = "test-image"});
+  Expect(gufo::ext::FindImageProvider("test-image") != nullptr,
+         "find image provider");
+  gufo::ext::RegisterVideoProvider({.id = "test-video"});
+  Expect(gufo::ext::FindVideoProvider("test-video") != nullptr,
+         "find video provider");
 }
 
 }  // namespace
@@ -199,5 +218,6 @@ int main() {
   CheckDeviceProbe();
   CheckExtensionApiVersion();
   CheckPlatformLeaves();
+  CheckModalProviders();
   return failures == 0 ? 0 : 1;
 }

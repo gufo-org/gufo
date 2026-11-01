@@ -185,12 +185,12 @@ class ConfigureTests(unittest.TestCase):
     def test_dependencies_and_version(self):
         self.configure(BASE)
         current = copy.deepcopy(BASE)
-        current[0]["api_version"] = ">= 0.1.5"
+        current[0]["api_version"] = ">= 0.1.6"
         self.configure(current)
         self.invalid(lambda m: m[0].update(depends=["absent"]), "missing dependency absent")
         self.invalid(lambda m: m[2].update(depends=["alpha"]), "cyclic dependency")
         self.invalid(lambda m: m[2].update(platforms=["linux"]), "unsatisfiable dependency platforms")
-        for api in (">= 0.2.0", ">= 0.1.6", ">= 1.0.0", "0.1", ">= 0.01.0"):
+        for api in (">= 0.2.0", ">= 0.1.7", ">= 1.0.0", "0.1", ">= 0.01.0"):
             with self.subTest(api=api):
                 self.invalid(lambda m: m[0].update(api_version=api), "API" if api.startswith(">= ") else "api_version")
 

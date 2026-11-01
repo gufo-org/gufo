@@ -21,13 +21,18 @@
       "model_ids": [
         "qwen3-asr"
       ],
-      "target": "gufo_qwen3_asr",
+      "target": "gufo_qwen3_asr_hip",
       "entry": "qwen3_asr_provider_register"
     }
   ],
   "targets": {
     "gufo_qwen3_asr": {
       "requires": []
+    },
+    "gufo_qwen3_asr_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "production_paths": {

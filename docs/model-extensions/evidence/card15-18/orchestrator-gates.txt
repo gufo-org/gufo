@@ -1,0 +1,59 @@
+Card 15-18 Verification Evidence: Orchestrator Closure Gates
+Executed on: Linux x86_64 Strix Halo gfx1151
+Workspace: /home/mixer/gufo
+Parent commit: yuvlvuwx 0125a678 model-extensions-4* | fix(extensions): version metadata discovery contract
+
+================================================================================
+Gate 1: Infrastructure Sync Check
+================================================================================
+Command: python3 tools/ci/generate-infrastructure.py --check
+Result: PASS (0 drift across 6 files)
+
+================================================================================
+Gate 2: Extension API Surface & Ratchet Invariants
+================================================================================
+Command: python3 tools/ci/check-extension-api.py
+Result: PASS (108 public paths match SURFACE and declarations)
+
+Command: python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes
+Result: PASS (0 boundary violations across serving, model-core, and extension boundaries)
+
+================================================================================
+Gate 3: Documentation and Code Formatting
+================================================================================
+Command: python3 tools/ci/check-docs.py
+Result: PASS (322 markdown files, 1609 links verified, 0 broken)
+
+Command: nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+Result: PASS (816 C++ files verified)
+
+================================================================================
+Gate 4: Hosted PR Test Suite (check-pr)
+================================================================================
+Command: nix develop -c cmake --build --preset cpu-test --target check-pr
+Result: PASS (96/96 test suites passed, 100%)
+
+================================================================================
+Gate 5: Nix Production Build & Extension Diagnostics
+================================================================================
+Command: nix build && ./result/bin/gufo diagnose
+Result: PASS
+Extension API: 0.1.5
+Extension selection: discovery
+Built extensions:
+  embedding_gemma2 0.1.0 (src/models/embedding_gemma2)
+  minimax_h3 0.1.0 (src/models/minimax_h3)
+  qwen3_asr 0.1.0 (src/models/qwen3_asr)
+  qwen3_tts 0.1.0 (src/models/qwen3_tts)
+  qwen_image_21 0.1.0 (src/models/qwen_image_21)
+  provider embeddinggemma-2: available
+  provider minimax-h3: available
+  provider qwen3-asr: available
+  provider qwen3-tts: available
+  provider qwen-image-21: available
+
+================================================================================
+Gate 6: Sandboxed Nix PR Derivations
+================================================================================
+Command: nix build .#checks.x86_64-linux.pr --no-link
+Result: PASS (All check derivations built and passed)

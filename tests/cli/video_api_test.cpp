@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/registry.hpp>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -23,7 +24,9 @@
 
 namespace {
 
-namespace h3 = gufo::minimax_h3;
+using gufo::ext::VideoProgress;
+using gufo::ext::VideoRequest;
+using gufo::ext::VideoTelemetry;
 using gufo::server::HandleVideoApiRequest;
 using gufo::server::HttpRequest;
 using gufo::server::HttpResponse;
@@ -53,10 +56,10 @@ class FakeRunner {
 public:
   explicit FakeRunner(bool blocked = false) : blocked_(blocked) {}
 
-  bool Run(const h3::GenerationRequest& request,
-           const h3::CancellationToken* cancellation,
-           h3::GenerationProgress progress, void* progress_opaque,
-           h3::GenerationTelemetry*, std::string* error) {
+  bool Run(const VideoRequest& request,
+           const gufo::ext::CancellationCheck& cancellation,
+           VideoProgress progress, void* progress_opaque, VideoTelemetry*,
+           std::string* error) {
     {
       const std::lock_guard<std::mutex> lock(mutex_);
       ++calls_;
@@ -66,12 +69,11 @@ public:
     progress("denoiser", 1, 2, progress_opaque);
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      while (blocked_ && !released_ &&
-             (cancellation == nullptr || !cancellation->IsCancelled())) {
+      while (blocked_ && !released_ && (!cancellation || !cancellation())) {
         condition_.wait_for(lock, std::chrono::milliseconds(5));
       }
     }
-    if (cancellation != nullptr && cancellation->IsCancelled()) {
+    if (cancellation && cancellation()) {
       if (error != nullptr) {
         *error = "cancelled";
       }
@@ -113,7 +115,7 @@ public:
     condition_.notify_all();
   }
 
-  h3::GenerationRequest latest() {
+  VideoRequest latest() {
     const std::lock_guard<std::mutex> lock(mutex_);
     return latest_;
   }
@@ -122,7 +124,7 @@ private:
   bool blocked_{false};
   bool released_{false};
   int calls_{0};
-  h3::GenerationRequest latest_;
+  VideoRequest latest_;
   std::mutex mutex_;
   std::condition_variable condition_;
 };
@@ -139,10 +141,10 @@ VideoJobServiceOptions Options(const std::filesystem::path& root,
       .id_factory = NextId,
       .now = [] { return 1000; },
       .runner =
-          [runner](const h3::GenerationRequest& request,
-                   const h3::CancellationToken* cancellation,
-                   h3::GenerationProgress progress, void* progress_opaque,
-                   h3::GenerationTelemetry* telemetry, std::string* error) {
+          [runner](const VideoRequest& request,
+                   const gufo::ext::CancellationCheck& cancellation,
+                   VideoProgress progress, void* progress_opaque,
+                   VideoTelemetry* telemetry, std::string* error) {
             return runner->Run(request, cancellation, progress, progress_opaque,
                                telemetry, error);
           },
@@ -228,7 +230,7 @@ void TestLifecycleAndRange(const std::filesystem::path& root) {
   runner.WaitForCalls(1);
   WaitCompleted(service, id);
 
-  const h3::GenerationRequest generation = runner.latest();
+  const VideoRequest generation = runner.latest();
   Check(generation.seed == 7 &&
             generation.parameters.preset == "development-256" &&
             generation.parameters.frames == 22 &&
@@ -272,7 +274,7 @@ void TestValidation(const std::filesystem::path& root) {
       R"({"model":"minimax-h3","prompt":"A goalkeeper saves a shot","size":"1344x768","seconds":5})");
   Check(fullres.status == 202, "released full-resolution API request accepted");
   runner.WaitForCalls(1);
-  const h3::GenerationRequest fullres_generation = runner.latest();
+  const VideoRequest fullres_generation = runner.latest();
   Check(fullres_generation.parameters.preset == "exact-1344x768" &&
             fullres_generation.parameters.internal_width == 1344 &&
             fullres_generation.parameters.internal_height == 768 &&
@@ -523,7 +525,11 @@ void TestQueueSaturation(const std::filesystem::path& root) {
 
 }  // namespace
 
+void minimax_h3_register(gufo::ext::Registry&);
+
 int main() {
+  gufo::ext::Registry registry;
+  minimax_h3_register(registry);
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() /
       ("gufo-video-api-test-" + std::to_string(gufo::platform::ProcessId()));

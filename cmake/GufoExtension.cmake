@@ -1,6 +1,6 @@
 include_guard(GLOBAL)
 include(CMakeParseArguments)
-set(GUFO_EXTENSION_API_VERSION "0.1.5")
+set(GUFO_EXTENSION_API_VERSION "0.1.6")
 
 # Production validation is pure CMake 3.21. Hosted checks additionally apply
 # the complete JSON schema (including packaging/docs/CI-only metadata).

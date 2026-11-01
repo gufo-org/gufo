@@ -21,13 +21,18 @@
       "model_ids": [
         "qwen-image-2.1"
       ],
-      "target": "gufo_qwen_image_21",
+      "target": "gufo_qwen_image_21_hip",
       "entry": "qwen_image_21_provider_register"
     }
   ],
   "targets": {
     "gufo_qwen_image_21": {
       "requires": []
+    },
+    "gufo_qwen_image_21_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "production_paths": {

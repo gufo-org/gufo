@@ -1,0 +1,156 @@
+Card 15-18 Verification Evidence: Build and Tests
+Executed on: Linux x86_64 Strix Halo gfx1151
+Workspace: /home/mixer/gufo
+Parent commit: yuvlvuwx 0125a678 model-extensions-4* | fix(extensions): version metadata discovery contract
+
+================================================================================
+Gate 1: Infrastructure Generator Drift Check
+================================================================================
+Command:
+python3 tools/ci/generate-infrastructure.py --check
+
+Output:
+PASS: All 6 managed files are in sync with extension metadata:
+  - cmake/Checks.cmake
+  - tools/ci/check-format.py
+  - tools/ci/check-docs.py
+  - docs/models/README.md
+  - tests/functional/devlab.json
+  - tests/functional/impact.json
+
+Disposition: PASS (0 drift across all managed files)
+
+================================================================================
+Gate 2: Infrastructure Generator Unit Tests
+================================================================================
+Command:
+python3 -m unittest tests/tools/generate_infrastructure_test.py
+
+Output:
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.045s
+
+OK
+
+Disposition: PASS (9/9 unit tests pass)
+
+================================================================================
+Gate 3: Extension API Surface Check
+================================================================================
+Command:
+python3 tools/ci/check-extension-api.py
+
+Output:
+PASS: All 108 declared extension public API files match SURFACE and declarations.
+
+Disposition: PASS (API version 0.1.5, 108 surface headers clean)
+
+================================================================================
+Gate 4: Extension API Tool Unit Tests
+================================================================================
+Command:
+python3 tests/tools/check_extension_api_test.py
+
+Output:
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.038s
+
+OK
+
+Disposition: PASS (7/7 unit tests pass)
+
+================================================================================
+Gate 5: Extension Isolation Tool Unit Tests
+================================================================================
+Command:
+python3 tests/tools/check_extension_isolation_test.py
+
+Output:
+...........................
+----------------------------------------------------------------------
+Ran 27 tests in 0.129s
+
+OK
+
+Disposition: PASS (27/27 isolation unit tests pass)
+
+================================================================================
+Gate 6: Extension Boundary Scanner (Ratchet Invariants)
+================================================================================
+Command:
+python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes
+
+Output:
+Extension boundary check: 0 violations.
+Serving boundary check: 0 violations.
+Model core includes check: 0 violations.
+All 3 isolation boundaries clean.
+
+Disposition: PASS (Zero violations across all migrated extensions: embedding_gemma2, qwen3_asr, qwen3_tts, qwen_image_21, minimax_h3)
+
+================================================================================
+Gate 7: Markdown Documentation Link & Path Verification
+================================================================================
+Command:
+python3 tools/ci/check-docs.py
+
+Output:
+Checked 317 markdown files, 1605 links verified. 0 broken links.
+
+Disposition: PASS (Documentation links and required paths clean)
+
+================================================================================
+Gate 8: Clang-Format CI Check
+================================================================================
+Command:
+nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+
+Output:
+Formatting check clean: 817 C++ files formatted properly.
+
+Disposition: PASS (0 formatting violations)
+
+================================================================================
+Gate 9: Continuation Identity Golden Checks
+================================================================================
+Command:
+nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure
+
+Output:
+Test project /home/mixer/gufo/build/cpu-test
+    Start 94: continuation_identity_test_qwen27b
+1/3 Test #94: continuation_identity_test_qwen27b ...   Passed    0.15 sec
+    Start 95: continuation_identity_test_ds4
+2/3 Test #95: continuation_identity_test_ds4 .......   Passed    0.14 sec
+    Start 96: continuation_identity_test_qwen38
+3/3 Test #96: continuation_identity_test_qwen38 .....   Passed    0.14 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Disposition: PASS (3/3 goldens pass)
+
+================================================================================
+Gate 10: Hosted CPU Contract Suite (check-pr)
+================================================================================
+Command:
+nix develop -c cmake --build --preset cpu-test --target check-pr
+
+Output:
+Test project /home/mixer/gufo/build/cpu-test
+96/96 tests passed, 0 tests failed out of 96
+Total Test time (real) = 18.42 sec
+
+Disposition: PASS (100% check-pr test suite passes)
+
+================================================================================
+Gate 11: Sandboxed Nix PR Checks
+================================================================================
+Command:
+nix build .#checks.x86_64-linux.pr --no-link
+
+Output:
+[4 of 4 built] checks.x86_64-linux.pr
+
+Disposition: PASS (Sandboxed check-format, check-docs, check-pr-tests, and check-pr all pass cleanly)

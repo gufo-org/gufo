@@ -1,3 +1,3 @@
 #pragma once
 
-#include "src/core/image.hpp"
+#include "src/ext/image.hpp"
