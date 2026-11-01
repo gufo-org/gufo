@@ -534,7 +534,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
               << " seed=" << generation.seed << " size=" << generation.width
               << 'x' << generation.height
               << " references=" << generation.images.size()
-              << " steps=" << generation.steps
+              << " steps=" << result.metrics.steps
               << " prompt_ms=" << result.metrics.prompt_ms
               << " denoise_ms=" << result.metrics.denoise_ms
               << " vae_ms=" << result.metrics.vae_ms

@@ -607,6 +607,7 @@ Result Model::Generate(const Request& request,
     result.metrics.vae_ms = Milliseconds(vae_start);
     result.metrics.total_ms = Milliseconds(start);
     result.metrics.resident_weight_bytes = rt.WeightBytes();
+    result.metrics.steps = steps;
     return result;
   } catch (...) {
     // All launches on this request's stream must finish before temporary

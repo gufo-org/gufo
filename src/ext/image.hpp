@@ -25,6 +25,7 @@ struct ImageMetrics {
   double vae_ms{0};
   double total_ms{0};
   std::size_t resident_weight_bytes{0};
+  int steps{0};  // Denoising steps executed after resolving the default.
 };
 
 struct ImageRequest {
