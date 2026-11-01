@@ -127,6 +127,12 @@ if (ENGINE_ENABLE_HIP)
       "${CMAKE_HIP_FLAGS_RELWITHDEBINFO}")
     string(REPLACE "/Ob1" "/Ob2" CMAKE_HIP_FLAGS_MINSIZEREL
       "${CMAKE_HIP_FLAGS_MINSIZEREL}")
+    # Under /Fo, clang-cl writes the device image and .hipfb into the build
+    # directory named after the source, so same-named sources race and can
+    # swap device code in parallel builds. -o keeps them in unique temp files
+    # and is still recognised by ccache.
+    string(REPLACE "/Fo<OBJECT>" "-o <OBJECT>" CMAKE_HIP_COMPILE_OBJECT
+      "${CMAKE_HIP_COMPILE_OBJECT}")
   endif()
   find_package(hip REQUIRED)
   find_package(hipblas REQUIRED)
