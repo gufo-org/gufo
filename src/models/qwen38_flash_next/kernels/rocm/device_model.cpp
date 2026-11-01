@@ -521,6 +521,24 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
       (mtp != nullptr && !layer_supported(mtp->block))) {
     return nullptr;
   }
+  // token_embd and output are read row-wise by EmbedKernel through the
+  // RowElement scalar mirrors; a format outside that set would silently
+  // compute zero-stride rows, so reject it at load instead.
+  const auto embed_supported = [&](const TensorRef& t) {
+    const bool ok = t.type == core::GgmlType::kF32 ||
+                    t.type == core::GgmlType::kBF16 ||
+                    t.type == core::GgmlType::kF16 ||
+                    t.type == core::GgmlType::kQ8_0 ||
+                    t.type == core::GgmlType::kQ6_K ||
+                    t.type == core::GgmlType::kIQ4_XS;
+    if (!ok && error_msg != nullptr)
+      *error_msg = "embedding/logits gather has no scalar mirror for " +
+                   std::string(t.name);
+    return ok;
+  };
+  if (!embed_supported(w.token_embd) || !embed_supported(w.output)) {
+    return nullptr;
+  }
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = w.config;
   const auto regions = reader.GetMappedRegions();

@@ -1483,6 +1483,57 @@ void CheckDeviceTiles() {
   (void)hipFree(d_tiles);
 }
 
+/// EmbedKernel reads token_embd/output rows through the RowBytes +
+/// RowElement pair. That pair is separate machinery from the WMMA loaders,
+/// so a stride bug only shows up as garbage embeddings and a control-token
+/// storm on the real model — never in a GEMM parity suite. Verify the
+/// gather row-major against the same CPU dequantizers the GEMM tests use.
+/// Embedding storage differs per checkpoint (Flash-Next ships Q8_0 rows,
+/// the coder ships IQ4_XS/Q6_K), hence all three here.
+bool CheckEmbedGather() {
+  const std::size_t k = 256;
+  const std::vector<std::int32_t> rows = {7, 130, 257};
+  bool ok = true;
+  for (auto type : {q::WeightType::kQ8_0, q::WeightType::kQ6_K,
+                    q::WeightType::kIQ4_XS}) {
+    for (std::size_t m : rows) {
+      const Experts w = type == q::WeightType::kQ8_0
+                            ? MakeQ8_0(1, m, k, 0x6E7B1000U + m)
+                            : type == q::WeightType::kQ6_K
+                                  ? MakeQ6_K(1, m, k, 0x6E7B2000U + m)
+                                  : MakeIQ4_XS(1, m, k, 0x6E7B3000U + m);
+      // Non-monotonic token order so a wrong row stride cannot alias the
+      // row it is supposed to read.
+      std::vector<std::int32_t> tokens(m);
+      for (std::size_t i = 0; i < m; ++i)
+        tokens[i] = static_cast<std::int32_t>((i * 7 + 3) % m);
+      std::int32_t* d_tokens = Upload(tokens);
+      const std::uint8_t* d_table = Upload(w.packed);
+      float* d_res = nullptr;
+      CheckHip(hipMalloc(&d_res, m * k * sizeof(float)), "alloc embed");
+      q::EmbedTokens(d_table, type, d_tokens, d_res,
+                     static_cast<std::uint32_t>(m),
+                     static_cast<std::uint32_t>(k), 1, nullptr);
+      CheckHip(hipDeviceSynchronize(), "embed gather");
+      const std::vector<float> got = Download(d_res, m * k);
+      float worst = 0.0F;
+      for (std::size_t t = 0; t < m; ++t) {
+        const std::size_t src = static_cast<std::size_t>(tokens[t]) * k;
+        for (std::size_t i = 0; i < k; ++i)
+          worst = std::max(worst, std::abs(got[t * k + i] - w.values[src + i]));
+      }
+      const bool pass = worst < 1e-4F;
+      std::cout << TypeName(type) << " embed rows=" << m
+                << " worst=" << worst << (pass ? "" : " FAIL") << '\n';
+      ok = ok && pass;
+      (void)hipFree(d_res);
+      (void)hipFree(const_cast<std::uint8_t*>(d_table));
+      (void)hipFree(d_tokens);
+    }
+  }
+  return ok;
+}
+
 int main() {
   try {
     CheckGatedDecodeShape();
@@ -1635,6 +1686,7 @@ int main() {
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x16160004U,
                 16)) &&
          ok;
+    ok = CheckEmbedGather() && ok;
     return ok ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

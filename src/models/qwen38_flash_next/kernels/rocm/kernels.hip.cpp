@@ -180,7 +180,9 @@ __device__ __forceinline__ std::size_t RowBytes(WeightType type,
     case WeightType::kF16:
       return static_cast<std::size_t>(k) * 2;
     case WeightType::kQ8_0:
-      return static_cast<std::size_t>(k / 256) * 34;  // sizeof(block_q8_0)
+      // Q8_0 blocks hold 32 elements (d half + 32 quints), not 256; GGML
+      // stores k as a multiple of 32 here.
+      return static_cast<std::size_t>((k + 31) / 32) * 34;  // sizeof(block_q8_0)
     case WeightType::kIQ4_XS:
       return static_cast<std::size_t>((k + 255) / 256) * 136;
     case WeightType::kQ6_K:
