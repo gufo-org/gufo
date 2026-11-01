@@ -95,6 +95,15 @@ bool MatrixRows(std::uint32_t rows) {
 bool ExpertMatrixRows(std::uint32_t rows) {
   return prefill_phase || rows > 4 * kVecBatch;
 }
+/// True when some routed matrix of the layer has a storage no MMQ kernel
+/// can dequantize, so the WMMA route is mandatory at every batch size and
+/// the decode-time expert bookkeeping (counts, tiles, compaction) must run
+/// even for single-token batches.
+bool RoutedMmqBlocked(const DeviceLayer& l) {
+  return !RoutedMmqCapable(l.ffn_gate_exps.type) ||
+         !RoutedMmqCapable(l.ffn_up_exps.type) ||
+         !RoutedMmqCapable(l.ffn_down_exps.type);
+}
 /// Prefill passes wider than a vector batch take the fused projections and
 /// the paired routed expert tiles: they win from 9 rows up to the full chunk.
 /// Decode and verification batches keep their single-token arithmetic.
@@ -1780,8 +1789,8 @@ void Executor::RoutedHints(const DeviceTensor& w,
       RoutedTileCols(n_tokens, config().num_experts_used, w.experts));
 }
 
-bool Executor::RouteHints(std::uint32_t n_tokens,
-                          std::string* error_msg) const {
+bool Executor::RouteHints(std::uint32_t n_tokens, std::string* error_msg,
+                          bool wmma_forced) const {
   // Every column tile past an expert's bucket still costs a dispatch and a
   // full shared-memory reservation, so the grid is cut to the real largest
   // bucket. Counts are downloaded before the shared expert; wait only for
@@ -1793,7 +1802,22 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   routed_64_tiles_ = 0;
   routed_pair_tiles_ = 0;
   routed_pair_offset_ = 0;
+  if (!ExpertMatrixRows(n_tokens) && !wmma_forced) {
+    return true;
+  }
   if (!ExpertMatrixRows(n_tokens)) {
+    // Forced WMMA route on decode-sized batches (storages no MMQ kernel
+    // can read): decode replays a captured graph, where the host cannot
+    // read the routing back mid-flight. Build the tile map on the device
+    // instead, sized to the fixed launch bound; surplus tiles carry a -1
+    // sentinel that makes their blocks exit immediately.
+    const std::uint32_t slots = n_tokens * c.num_experts_used;
+    routed_tile_rows_ = RoutedTileRows(slots, c);
+    const std::size_t capacity = RoutedTileCapacity(slots, c);
+    RoutedTiles(s_.expert_counts, s_.routed_tiles, c.num_experts,
+                routed_tile_rows_, static_cast<std::uint32_t>(capacity),
+                stream_);
+    routed_n_tiles_ = static_cast<std::uint32_t>(capacity);
     return true;
   }
   if (!Check(hipEventSynchronize(counts_ready_), "expert counts", error_msg)) {
@@ -2688,13 +2712,19 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   }
   RouterTopK(s_.router, c.num_experts + 1, s_.ids, s_.weights, n_tokens,
              c.num_experts, used, stream_);
-  if (ExpertMatrixRows(n_tokens)) {
+  if (ExpertMatrixRows(n_tokens) || RoutedMmqBlocked(l)) {
     ExpertCounts(s_.ids, s_.expert_counts, n_tokens, c.num_experts, used,
                  stream_);
-    if (!Check(hipMemcpyAsync(counts_host_, s_.expert_counts,
+    if (ExpertMatrixRows(n_tokens) &&
+        !Check(hipMemcpyAsync(counts_host_, s_.expert_counts,
                               c.num_experts * sizeof(std::uint32_t),
                               hipMemcpyDeviceToHost, stream_),
-               "expert counts download", error_msg) ||
+               "expert counts download", error_msg)) {
+      return false;
+    }
+    // Only the host-side tile map needs the readback event; the forced
+    // WMMA route builds its map on the device and never reads back.
+    if (ExpertMatrixRows(n_tokens) &&
         !Check(hipEventRecord(counts_ready_, stream_), "expert counts event",
                error_msg)) {
       return false;
@@ -2800,10 +2830,7 @@ bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
   // checkpoints' IQ codebook experts. A storage no MMQ kernel can read
   // must keep the WMMA route at every batch size, not just on
   // matrix-shaped tiles.
-  const bool mmq_blocked = !RoutedMmqCapable(l.ffn_gate_exps.type) ||
-                           !RoutedMmqCapable(l.ffn_up_exps.type) ||
-                           !RoutedMmqCapable(l.ffn_down_exps.type);
-  return (ExpertMatrixRows(n_tokens) || mmq_blocked) &&
+  return (ExpertMatrixRows(n_tokens) || RoutedMmqBlocked(l)) &&
          RoutedNativeWMMA(l.ffn_gate_exps.type) &&
          RoutedNativeWMMA(l.ffn_up_exps.type) &&
          RoutedNativeWMMA(l.ffn_down_exps.type) && c.hidden_size % 256 == 0 &&
@@ -2816,13 +2843,15 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   const std::uint32_t slots = n_tokens * used;
-  if (!RouteHints(n_tokens, error_msg)) {
+  // The WMMA route needs the tile map even on decode-sized batches, so
+  // RouteHints must know it before anything else reads the hints.
+  const bool wmma_experts = WmmaExperts(l, n_tokens);
+  if (!RouteHints(n_tokens, error_msg, wmma_experts)) {
     return false;
   }
   // Tiled batches take the WMMA route: assignments compacted by expert
   // into 16-row padded buckets, token rows narrowed to F16 once, then the
   // F16 matrix-core GEMM per (expert, row tile).
-  const bool wmma_experts = WmmaExperts(l, n_tokens);
   if (wmma_experts) {
     RoutedCompact(s_.ids, s_.expert_counts, s_.routed_bounds, s_.routed_cursors,
                   s_.rows_token, s_.rows_slot, n_tokens, used, c.num_experts,

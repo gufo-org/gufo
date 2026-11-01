@@ -322,6 +322,14 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
                    std::uint32_t n_tokens, std::uint32_t k,
                    std::uint32_t n_experts, hipStream_t stream);
 
+/// Builds the routed tile launch map (`expert | tile << 16`, padded to
+/// `capacity` with -1 sentinels the WMMA GEMM exits on) from the per-expert
+/// `counts` on the device, for batches whose routing the host cannot read
+/// back because the pass replays a captured graph.
+void RoutedTiles(const std::uint32_t* counts, std::int32_t* tiles,
+                 std::uint32_t n_experts, std::uint32_t tile_rows,
+                 std::uint32_t capacity, hipStream_t stream);
+
 /// Routed expert GEMM on the F16 WMMA cores over F16 activation rows
 /// `x` ([rows][k]): the weights are dequantized to F16 after the LDS read
 /// and the whole K extent accumulates in F32. `tiles` (n_tiles entries)

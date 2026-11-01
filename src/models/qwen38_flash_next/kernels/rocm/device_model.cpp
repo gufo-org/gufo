@@ -100,14 +100,24 @@ struct Uploader {
       return d;
     }
     // Formats without an on-device kernel are staged raw and converted to
-    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion). Gate/up
-    // call sites pass `native_routed` for storages listed by kernels.hpp's
-    // RoutedNativeWMMA, keeping their disk bytes — IQ4_NL today. The down
-    // call site does not: it dispatches through the MMQ vec/tiled family,
-    // which knows no IQ formats, so it keeps the Q8_0 conversion.
+    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion). Gate/up/
+    // down call sites pass `native_routed` for storages listed by kernels.
+    // hpp's RoutedNativeWMMA, keeping their disk bytes. A 256-element
+    // block format is only kept native when every row spans whole blocks:
+    // GGUF never stores such a tensor with a ragged tail, and the WMMA
+    // kernels' row stride assumes it (a down projection at k=640 carries
+    // 32/64-block storages only — anything else falls back to Q8_0).
+    const bool ragged_blocks =
+        (t.type == core::GgmlType::kIQ3_XXS ||
+         t.type == core::GgmlType::kIQ3_S ||
+         t.type == core::GgmlType::kIQ2_S ||
+         t.type == core::GgmlType::kIQ4_XS ||
+         t.type == core::GgmlType::kQ4_K || t.type == core::GgmlType::kQ5_K) &&
+        t.cols % 256 != 0;
     const bool convert_q8 =
         NeedsQ8Conversion(t.type) &&
-        !(native_routed && t.experts > 1 && RoutedNativeWMMA(t.type));
+        !(native_routed && t.experts > 1 && RoutedNativeWMMA(t.type) &&
+          !ragged_blocks);
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {

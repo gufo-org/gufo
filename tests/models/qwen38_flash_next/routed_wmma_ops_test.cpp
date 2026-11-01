@@ -1359,9 +1359,55 @@ bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type) {
 
 }  // namespace
 
+/// The device-built decode tile map must match the host-built map the
+/// matrix route produces (expert | tile << 16 per bucket tile), padded to
+/// the launch bound with -1 sentinels.
+void CheckDeviceTiles() {
+  const std::uint32_t experts = 256;
+  const std::uint32_t tile_rows = 16;
+  std::vector<std::uint32_t> counts(experts, 0);
+  // A spill bucket (20 rows -> two tiles), an exact boundary bucket (16 ->
+  // one tile) and singles, including the last expert id.
+  counts[3] = 1;
+  counts[7] = 20;
+  counts[70] = 1;
+  counts[255] = 16;
+  std::uint32_t slots = 0;
+  std::vector<std::int32_t> expect;
+  for (std::uint32_t e = 0; e < experts; ++e) {
+    slots += counts[e];
+    for (std::uint32_t j = 0; j < (counts[e] + tile_rows - 1) / tile_rows;
+         ++j)
+      expect.push_back(static_cast<std::int32_t>(e | (j << 16)));
+  }
+  const std::uint32_t capacity = static_cast<std::uint32_t>(
+      (slots + std::size_t{experts} * 15) / tile_rows + experts + 1);
+  expect.resize(capacity, -1);
+  auto* d_counts = Upload(counts);
+  std::vector<std::int32_t> zero(capacity, 0);
+  auto* d_tiles = Upload(zero);
+  q::RoutedTiles(d_counts, d_tiles, experts, tile_rows, capacity, nullptr);
+  CheckHip(hipDeviceSynchronize(), "device tile map");
+  const auto got = Download<std::int32_t>(d_tiles, capacity);
+  if (got != expect) {
+    std::size_t i = 0;
+    while (got[i] == expect[i])
+      ++i;
+    throw std::runtime_error(
+        std::string("device tile map differs at ") + std::to_string(i) +
+        " got " + std::to_string(got[i]) + " want " +
+        std::to_string(expect[i]));
+  }
+  std::printf("device-built decode tile map: %u tiles + sentinels exact\n",
+              static_cast<std::uint32_t>(expect.size()));
+  (void)hipFree(d_counts);
+  (void)hipFree(d_tiles);
+}
+
 int main() {
   try {
     CheckGatedDecodeShape();
+    CheckDeviceTiles();
     bool routes = true;
     for (const auto gate : {q::WeightType::kQ4_K, q::WeightType::kQ5_K})
       for (const auto down : {q::WeightType::kQ5_1, q::WeightType::kQ8_0})
@@ -1419,6 +1465,17 @@ int main() {
                 64)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ2_S, 97, 1, 8, 129, 512, 0x7104A003U, 64)) &&
+         ok;
+    // Decode-shape narrow tiles (16 rows) exactly as the server dispatches
+    // them for one-token batches; the IQ family must survive this too.
+    ok = Ok(Run(q::WeightType::kIQ2_S, 300, 10, 64, 640, 2560, 0x7104A004U,
+                16)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ3_S, 300, 10, 64, 640, 2560, 0x7103B004U,
+                16)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 300, 10, 64, 640, 2560, 0x7102C004U,
+                16)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,

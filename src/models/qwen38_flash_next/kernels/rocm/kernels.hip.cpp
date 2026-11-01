@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <hipcub/block/block_radix_sort.hpp>
 #include <stdexcept>
 #include <type_traits>
@@ -5532,6 +5533,11 @@ __launch_bounds__(256) __global__
   auto* s_lut64 = reinterpret_cast<std::uint64_t*>(lds + kLdsBytes);
 
   const std::int32_t tile = tiles[blockIdx.y];
+  if (tile < 0) {
+    // Sentinel from the device-built decode tile map: this launch slot is
+    // past the real tiles of the current routing.
+    return;
+  }
   const int expert = tile & 0xFFFF;
   const int t_local = (tile >> 16) * BN;
   const int bucket_begin = pad_bounds[expert];
@@ -6401,6 +6407,45 @@ __global__ void RoutedScatterKernel(const std::int32_t* __restrict__ ids,
   rows_slot[c] = static_cast<std::int32_t>(slot);
 }
 
+/// Upper bound on experts the device-side tile-map builder scans in one
+/// block (both shipped checkpoints fit: 256 pruned, 512 original).
+constexpr std::uint32_t kMaxRoutedTilesExperts = 1024;
+
+/// The (expert, column tile) launch map for a batch whose routing the host
+/// cannot read back: decode replays a captured graph, so the map is built
+/// device-side from the routing histogram as `e | (j << 16)` entries, then
+/// padded to the launch bound with -1 sentinels the GEMM exits on. The
+/// serial prefix over expert tile counts is fine at these expert counts.
+__global__ void RoutedTilesKernel(const std::uint32_t* __restrict__ counts,
+                                  std::int32_t* __restrict__ tiles,
+                                  std::uint32_t n_experts,
+                                  std::uint32_t tile_rows,
+                                  std::uint32_t capacity) {
+  __shared__ std::uint32_t off[kMaxRoutedTilesExperts + 1];
+  if (threadIdx.x == 0) {
+    std::uint32_t run = 0;
+    for (std::uint32_t e = 0; e < n_experts; ++e) {
+      off[e] = run;
+      run += (counts[e] + tile_rows - 1) / tile_rows;
+    }
+    off[n_experts] = run;
+  }
+  __syncthreads();
+  if (threadIdx.x < n_experts) {
+    const std::uint32_t base = off[threadIdx.x];
+    const std::uint32_t n = off[threadIdx.x + 1] - base;
+    for (std::uint32_t j = 0; j < n; ++j) {
+      tiles[base + j] = static_cast<std::int32_t>(threadIdx.x) |
+                        static_cast<std::int32_t>(j << 16);
+    }
+  }
+  __syncthreads();
+  for (std::uint32_t i = off[n_experts] + threadIdx.x; i < capacity;
+       i += blockDim.x) {
+    tiles[i] = -1;
+  }
+}
+
 }  // namespace
 
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
@@ -6957,6 +7002,13 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
                      static_cast<std::uint32_t>(slots), k);
 }
 
+void RoutedTiles(const std::uint32_t* counts, std::int32_t* tiles,
+                 std::uint32_t n_experts, std::uint32_t tile_rows,
+                 std::uint32_t capacity, hipStream_t stream) {
+  hipLaunchKernelGGL(RoutedTilesKernel, dim3(1), dim3(1024), 0, stream, counts,
+                     tiles, n_experts, tile_rows, capacity);
+}
+
 template<int BN>
 bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                      const std::int32_t* tiles, std::uint32_t n_tiles,
@@ -7025,6 +7077,9 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
         return true;
       }
     default:
+      std::fprintf(stderr,
+                   "routed F16 GEMM has no WMMA launcher: type=%d BN=%d\n",
+                   static_cast<int>(type), BN);
       return false;
   }
 }
@@ -7036,9 +7091,20 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   const std::size_t block_elems =
-      (type == WeightType::kQ4_K || type == WeightType::kQ5_K) ? 256 : 64;
+      (type == WeightType::kQ4_K || type == WeightType::kQ5_K)
+          ? 256
+          : (type == WeightType::kIQ3_XXS || type == WeightType::kIQ3_S ||
+                     type == WeightType::kIQ2_S ||
+                     type == WeightType::kIQ4_XS)
+                ? 256
+                : 64;
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
       (out_half == nullptr) == (out == nullptr)) {
+    std::fprintf(stderr,
+                 "routed F16 GEMM rejected: type=%d m=%zu k=%zu n_tiles=%u "
+                 "tile_rows=%u out=%d out_half=%d\n",
+                 static_cast<int>(type), m, k, n_tiles, tile_rows,
+                 out != nullptr, out_half != nullptr);
     return false;
   }
   switch (tile_rows) {

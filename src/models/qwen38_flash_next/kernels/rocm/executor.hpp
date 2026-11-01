@@ -484,7 +484,8 @@ private:
   void RoutedHints(const DeviceTensor& w, std::uint32_t n_tokens) const;
   /// Reads the routing of the current batch back and derives the tile
   /// hints for its expert GEMMs (tiled batches only).
-  bool RouteHints(std::uint32_t n_tokens, std::string* error_msg) const;
+  bool RouteHints(std::uint32_t n_tokens, std::string* error_msg,
+                  bool wmma_forced = false) const;
   /// Routed gate/up projections followed by SwiGLU.
   bool GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                     const float* x, const std::int32_t* ids, float* out,
