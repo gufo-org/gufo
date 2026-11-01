@@ -1,5 +1,21 @@
 # Extension API changes
 
+## 0.1.11
+
+Publish the GGML block formats and quant geometry extensions need to execute
+low-bit storages as stored (`gguf_reader.hpp`, `ggml_dequant.hpp`):
+- `GgmlType` gains `kQ2_0`, and the block layout structs `block_iq3_xxs`,
+  `block_iq2_s` and `block_q2_0` are published with size `static_assert`s.
+- `QuantizedBlockElements` and the row-byte tables cover `Q2_0` (64
+  elements, 18-byte blocks) alongside the IQ formats.
+- IQ codebook tables (`kIq3sGrid` and friends) are `inline constexpr` in
+  the header, so device kernels and CPU dequantizers share one source;
+  scalar block accessors (`Iq4XsValue`, `Iq3sValue`, `Q6KValue`) are
+  single public functions without forwarding wrappers.
+- The GGUF reader validates quant block alignment per expert slab for
+  fused `(k, n, experts)` tensors, where `k` alone may legitimately be
+  a non-multiple of the block size.
+
 ## 0.1.10
 
 Support external extension source trees and build sandboxing (Card 23):
