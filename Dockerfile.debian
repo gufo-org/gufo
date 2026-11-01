@@ -1,0 +1,143 @@
+# Gufo on Debian 13 with ROCm 10.1 for AMD gfx1151 (Strix Halo).
+ARG BASE_CONTAINER=docker.io/debian:13-slim
+
+### Build ROCm base image: Debian + build toolchain + AMD's stable repository
+FROM ${BASE_CONTAINER} AS rocm-base
+
+ARG ROCM_DISTRO=debian13
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ccache \
+        cmake \
+        gpg \
+        ninja-build \
+        pkg-config \
+        wget \
+        ca-certificates
+
+RUN mkdir --parents --mode=0755 /etc/apt/keyrings \
+    && wget -q -O - https://stable.repo.amd.com/rocm/gpg/packages.gpg \
+        | gpg --dearmor --yes > /etc/apt/keyrings/amdrocm.gpg
+
+RUN tee /etc/apt/sources.list.d/amdrocm-stable.sources << EOF
+X-Repo-Id: amdrocm-stable
+Types: deb
+URIs: https://stable.repo.amd.com/rocm/core/packages/${ROCM_DISTRO}/
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/amdrocm.gpg
+Enabled: yes
+EOF
+
+### Build ROCm runtime image: ROCr, runtime libraries and gfx1151 kernels
+FROM rocm-base AS rocm-runtime
+
+ARG ROCM_VERSION=10.1
+ARG ROCM_ARCH=gfx1151
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        amdrocm${ROCM_VERSION}-${ROCM_ARCH} \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+### Build ROCm dev image: HIP compiler, headers and CMake configs
+FROM rocm-base AS rocm-dev
+
+ARG ROCM_VERSION=10.1
+ARG ROCM_ARCH=gfx1151
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        amdrocm-core-dev${ROCM_VERSION}-${ROCM_ARCH} \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+### Build gufo
+FROM rocm-dev AS build
+
+# Build dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libicu-dev \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        libpng-dev \
+        libjpeg-dev \
+        libwebp-dev \
+        libsndfile1-dev \
+        libsoxr-dev \
+        libavformat-dev \
+        libavcodec-dev \
+        libavutil-dev \
+        libswscale-dev \
+        ffmpeg \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/gufo
+
+COPY . .
+
+# Default the release version and source revision to the checkout's values
+ARG GUFO_RELEASE_VERSION=$(cat version.txt 2>/dev/null || echo development)
+ARG GUFO_RELEASE_REVISION=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
+ENV CCACHE_DIR=/tmp/gufo-ccache \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_MAXSIZE=4G \
+    CCACHE_NOHASHDIR=true \
+    CCACHE_UMASK=000
+
+RUN ccache --zero-stats \
+    && HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+        cmake --preset release \
+        -DGUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}" \
+        -DGUFO_REVISION="${GUFO_RELEASE_REVISION}" \
+    && cmake --build --preset release --parallel "$(nproc)" \
+    && cmake --install build/release \
+    && ccache --show-stats
+
+### Runtime image: ROCm runtime (from the runtime stage) + gufo host libs
+FROM rocm-runtime
+
+# Shared libraries for the gufo
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        ffmpeg \
+        libgomp1 \
+        libicu76 \
+        libjpeg62-turbo \
+        libpng16-16t64 \
+        libsoxr0 \
+        libsndfile1 \
+        libssl3t64 \
+        libcurl4t64 \
+        libstdc++6 \
+        libwebp7 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install gufo: binaries and share/
+COPY --from=build /usr/local/bin /usr/local/bin
+COPY --from=build /usr/local/share /usr/local/share
+
+# ROCm
+ENV LD_LIBRARY_PATH=/opt/rocm/lib
+
+# Serve on 0.0.0.0:8080 by default
+ENV GUFO_HOST=0.0.0.0 \
+    GUFO_PORT=8080
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD sh -c 'curl -fsS http://127.0.0.1:${GUFO_PORT}/health || exit 1'
+
+CMD ["gufo", "serve", "llm"]
