@@ -191,6 +191,7 @@ public:
                 .prefix_reuse = true,
             },
         .persistence = persistence_,
+        .sampling_preset = sampling::TextModelPreset::kDeepSeekV4Flash,
     };
   }
 

@@ -3,6 +3,8 @@
 ## 0.1.8
 
 Publish capability-neutral text generation contracts and registries:
+- Runner descriptors declare their sampling preset so omitted HTTP settings
+  retain model-specific defaults after extension loading.
 - Text (`include/gufo/ext/text.hpp`, `src/ext/text.hpp`):
   `TextRunnerToken`, `TextPromptContext`, `TextPreparedPrompt`,
   `TextRunnerRamCacheOptions`, `TextRunnerDiskCacheOptions`,

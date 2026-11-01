@@ -115,6 +115,8 @@ struct TextRunnerDescriptor {
   std::uint32_t max_context{0};
   TextRunnerCapabilities capabilities;
   std::optional<TextRunnerPersistenceDescriptor> persistence;
+  sampling::TextModelPreset sampling_preset{
+      sampling::TextModelPreset::kUnspecified};
 };
 
 struct TextRunnerResourceClaim {

@@ -297,6 +297,7 @@ public:
                 .partial_prefill_retention = true,
             },
         .persistence = persistence_,
+        .sampling_preset = sampling::TextModelPreset::kQwen38,
     };
   }
 

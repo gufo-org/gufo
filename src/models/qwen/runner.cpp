@@ -685,6 +685,7 @@ public:
                 .prefill_rollback = true,
             },
         .persistence = persistence_,
+        .sampling_preset = sampling::TextPreset(model_->GetConfig()),
     };
   }
 
