@@ -83,60 +83,6 @@ struct Binder {
   std::string* error;
   bool ok{true};
 
-  /// Trunk bind only: dense (experts == 1) tensors stored in K-quants are
-  /// decoded and requantized to Q8_0 on the CPU at bind time. GSQ-RCO files
-  /// spend bits across attention/SSM/output with K-quants, which the dense
-  /// kernel family does not execute; experts keep their native path. See
-  /// ModelWeights::converted.
-  bool convert_dense_kquant{false};
-  /// Mapped-region count of this binder's reader; arena slots are exposed as
-  /// synthetic regions appended after those, so arena-backed tensors address
-  /// shard = region_base + slot (see ModelWeights::ConversionRegions).
-  std::uint32_t region_base{0};
-  std::vector<std::vector<std::uint8_t>> arena;
-
-  /// Replaces a dense K-quant bound view with a Q8_0 payload materialized in
-  /// the next arena slot. Upload then streams the arena region exactly like a
-  /// mapped shard payload; no device-side decode of K-quants is introduced.
-  void ConvertDenseToQ8_0(TensorRef& t) {
-    const std::size_t n = static_cast<std::size_t>(t.ElementCount());
-    std::vector<float> values(n);
-    switch (t.type) {
-      case GgmlType::kQ4_K:
-        quant::DequantizeQ4_K(t.data, values.data(), n);
-        break;
-      case GgmlType::kQ5_K:
-        quant::DequantizeQ5_K(t.data, values.data(), n);
-        break;
-      case GgmlType::kQ6_K:
-        quant::DequantizeQ6_K(t.data, values.data(), n);
-        break;
-      default:
-        return;
-    }
-    arena.emplace_back((n / 32u) * 34u);
-    std::vector<std::uint8_t>& out = arena.back();
-    for (std::size_t b = 0; b < n; b += 32u) {
-      float amax = 0.0f;
-      for (std::size_t j = 0; j < 32u; ++j) {
-        amax = std::max(amax, std::fabs(values[b + j]));
-      }
-      const float d = amax > 0.0f ? amax / 127.0f : 1.0f;
-      std::uint8_t* dst = out.data() + (b / 32u) * 34u;
-      const std::uint16_t scale = Fp16Bits(d);
-      std::memcpy(dst, &scale, sizeof(scale));
-      for (std::size_t j = 0; j < 32u; ++j) {
-        const float q = std::nearbyintf(values[b + j] / d);
-        dst[2u + j] = static_cast<std::uint8_t>(
-            static_cast<std::int8_t>(std::min(127.0f, std::max(-127.0f, q))));
-      }
-    }
-    t.data = out.data();
-    t.type = GgmlType::kQ8_0;
-    t.shard = region_base + static_cast<std::uint32_t>(arena.size()) - 1u;
-    t.file_offset = 0;
-  }
-
   void Fail(const std::string& message) {
     if (ok && error != nullptr) {
       *error = message;
@@ -203,11 +149,6 @@ struct Binder {
       Fail("tensor " + name + " is truncated");
       return TensorRef{};
     }
-    if (convert_dense_kquant && experts == 1u &&
-        (t.type == GgmlType::kQ4_K || t.type == GgmlType::kQ5_K ||
-         t.type == GgmlType::kQ6_K)) {
-      ConvertDenseToQ8_0(t);
-    }
     return t;
   }
 
@@ -235,10 +176,10 @@ struct Binder {
     const std::string p = "blk." + std::to_string(il) + ".";
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
-    // Formats beyond this list have no on-device kernel; the upload stage
-    // converts codebook formats to Q8_0 once staged (see NeedsQ8Conversion
-    // in device_model.cpp), and dense K-quant tensors are requantized to
-    // Q8_0 at bind time (see Binder::ConvertDenseToQ8_0).
+    // Every listed format is read by the kernel family in its disk
+    // encoding (kernels.hpp's RoutedNativeWMMA), at both the routed-expert
+    // and the dense tier: local inference never requantizes a tensor into
+    // a wider storage just to run it.
     const auto dense = {GgmlType::kQ8_0,  GgmlType::kBF16,    GgmlType::kF16,
                         GgmlType::kF32,   GgmlType::kIQ4_NL,  GgmlType::kIQ4_XS,
                         GgmlType::kIQ3_S, GgmlType::kIQ3_XXS, GgmlType::kIQ2_S,
@@ -354,8 +295,6 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     return std::nullopt;
   }
   Binder b{reader, error_msg};
-  b.convert_dense_kquant = true;
-  b.region_base = static_cast<std::uint32_t>(reader.GetMappedRegions().size());
   ModelWeights w;
   w.config = *config;
   const Config& c = w.config;
@@ -404,20 +343,7 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   if (!b.ok) {
     return std::nullopt;
   }
-  w.converted = std::move(b.arena);
   return w;
-}
-
-std::vector<core::GgufMappedRegion> ModelWeights::ConversionRegions() const {
-  std::vector<core::GgufMappedRegion> out;
-  out.reserve(converted.size());
-  for (const auto& buf : converted) {
-    core::GgufMappedRegion region;
-    region.data = buf.data();
-    region.size = buf.size();
-    out.push_back(region);
-  }
-  return out;
 }
 
 std::optional<MtpWeights> MtpWeights::Bind(const core::GgufReader& reader,

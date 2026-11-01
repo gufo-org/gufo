@@ -129,6 +129,44 @@ __device__ __forceinline__ float RowElement(const void* row, WeightType type,
           static_cast<const void*>(blk + 2))[i % 32];
       return __half2float(d) * static_cast<float>(q);
     }
+    case WeightType::kIQ4_XS: {
+      // block_iq4_xs: 136 bytes / 256 elements (6-bit per-32 sub-scales on
+      // the IQ4_NL codebook), the golden's layout.
+      const auto* blk =
+          static_cast<const std::uint8_t*>(row) + (i / 256) * 136;
+      const std::uint32_t sub = (i % 256) / 32;
+      const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+      const std::uint16_t sh =
+          static_cast<std::uint16_t>(blk[2] | (blk[3] << 8));
+      const std::uint32_t ls =
+          ((blk[4 + (sub >> 1)] >> (4 * (sub & 1))) & 0xFU) |
+          (((sh >> (2 * sub)) & 0x3U) << 4U);
+      const std::uint8_t packed = blk[8 + ((i % 32) % 16) + sub * 16];
+      const std::uint8_t code =
+          (i % 32) >= 16 ? (packed >> 4U) : (packed & 0x0FU);
+      return d * static_cast<float>(static_cast<int>(ls) - 32) *
+             static_cast<float>(quant::kValuesIq4Nl[code]);
+    }
+    case WeightType::kQ6_K: {
+      // block_q6_K: 210 bytes / 256 elements ({ql, qh, scales, d}).
+      const auto* blk =
+          static_cast<const std::uint8_t*>(row) + (i / 256) * 210;
+      const std::uint32_t h = (i / 128) & 1U;
+      const std::uint32_t within = i % 128;
+      const std::uint32_t seg = within / 32;
+      const std::uint32_t lane = within % 32;
+      const std::uint8_t qbyte =
+          blk[h * 64 + ((seg & 1U) ? 32 + lane : lane)];
+      const std::uint8_t low = (seg & 2U) ? (qbyte >> 4U) : (qbyte & 0x0FU);
+      const std::uint8_t high =
+          (blk[128 + h * 32 + lane] >> (2 * seg)) & 0x3U;
+      const auto s =
+          static_cast<std::int8_t>(blk[192 + h * 8 + lane / 16 + seg * 2]);
+      const float d =
+          __half2float(*reinterpret_cast<const __half*>(blk + 208));
+      return d * static_cast<float>(s) *
+             static_cast<float>(static_cast<int>((high << 4U) | low) - 32);
+    }
   }
   return 0.0f;
 }
@@ -142,7 +180,11 @@ __device__ __forceinline__ std::size_t RowBytes(WeightType type,
     case WeightType::kF16:
       return static_cast<std::size_t>(k) * 2;
     case WeightType::kQ8_0:
-      return static_cast<std::size_t>(k / 32) * 34;
+      return static_cast<std::size_t>(k / 256) * 34;  // sizeof(block_q8_0)
+    case WeightType::kIQ4_XS:
+      return static_cast<std::size_t>((k + 255) / 256) * 136;
+    case WeightType::kQ6_K:
+      return static_cast<std::size_t>((k + 255) / 256) * 210;
   }
   return 0;
 }
@@ -1493,36 +1535,6 @@ __device__ __forceinline__ float ConvertedElement(const std::uint8_t* row,
     return DevIq2sElement(row, i);
   } else {
     return DevQ2_0Element(row, i);
-  }
-}
-
-/// One thread per 32-element Q8_0 block: read the source elements, take the
-/// block max, and emit the Q8_0 block. The scale formula (d = amax / 127,
-/// nearest rounding) matches the engine's own quantize kernels, so the
-/// conversion is the same re-quantization any other resident path applies.
-template<WeightType type>
-__global__ void ConvertToQ8_0Kernel(const std::uint8_t* source,
-                                    std::uint8_t* destination,
-                                    std::size_t blocks) {
-  const std::size_t i =
-      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
-  if (i >= blocks) {
-    return;
-  }
-  float v[32];
-  float amax = 0.0f;
-  for (std::size_t k = 0; k < 32; ++k) {
-    v[k] = ConvertedElement<type>(source, (i * 32) + k);
-    amax = fmaxf(amax, fabsf(v[k]));
-  }
-  const __half hd = __float2half(amax / 127.0f);
-  auto* out = reinterpret_cast<std::uint8_t*>(destination) + i * 34;
-  *reinterpret_cast<__half*>(out) = hd;
-  const float scale = __half2float(hd);
-  for (std::size_t k = 0; k < 32; ++k) {
-    const float q = scale == 0.0f ? 0.0f : rintf(v[k] / scale);
-    out[2 + k] = static_cast<std::uint8_t>(static_cast<std::int8_t>(
-        q < -127.0f ? -127.0f : (q > 127.0f ? 127.0f : q)));
   }
 }
 
@@ -4148,16 +4160,6 @@ inline unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
 
-template<WeightType type>
-void LaunchConvertToQ8_0(const void* source, void* destination,
-                         std::size_t elements, hipStream_t stream) {
-  const std::size_t blocks = elements / 32;
-  hipLaunchKernelGGL((ConvertToQ8_0Kernel<type>), dim3(Blocks(blocks)),
-                     dim3(kThreads), 0, stream,
-                     static_cast<const std::uint8_t*>(source),
-                     static_cast<std::uint8_t*>(destination), blocks);
-}
-
 // A barrier for kernels whose waves exchange data through LDS only.
 // __syncthreads also waits for every outstanding global load and drops the
 // L0 cache, which serializes register prefetches behind the barrier. The
@@ -6613,6 +6615,35 @@ void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                      table, type, tokens, res, hidden, streams);
 }
 
+// Tile map for a native-quantized dense projection: the degenerate single-
+// expert view of the routed GEMM's contract -- every token row in one
+// bucket, identity scatter. Built on the device so a captured graph
+// rebuilds it from the stream order rather than a stale host snapshot.
+__global__ void DenseGemmMapKernel(std::int32_t* tiles, std::uint32_t n_tiles,
+                                   std::int32_t* bounds, std::int32_t* rows,
+                                   std::uint32_t n) {
+  const std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) {
+    rows[i] = static_cast<std::int32_t>(i);
+  }
+  if (i < n_tiles) {
+    tiles[i] = static_cast<std::int32_t>(i << 16);
+  }
+  if (i == 0) {
+    bounds[0] = 0;
+    bounds[1] = static_cast<std::int32_t>(n);
+  }
+}
+
+void DenseGemmMap(std::int32_t* tiles, std::int32_t* bounds,
+                  std::int32_t* rows, std::uint32_t n, std::uint32_t tile_rows,
+                  hipStream_t stream) {
+  const std::uint32_t n_tiles = (n + tile_rows - 1) / tile_rows;
+  const std::uint32_t work = n > n_tiles ? n : n_tiles;
+  hipLaunchKernelGGL(DenseGemmMapKernel, dim3((work + 255) / 256), dim3(256),
+                     0, stream, tiles, n_tiles, bounds, rows, n);
+}
+
 void RmsNormRows(const float* x, const float* gamma, float* out,
                  std::uint32_t n_rows, std::uint32_t dim, std::uint32_t groups,
                  float eps, hipStream_t stream) {
@@ -6878,36 +6909,6 @@ void ExpandQ8_0(const void* q8, float* out, std::size_t count,
                 hipStream_t stream) {
   hipLaunchKernelGGL(ExpandQ8_0Kernel, dim3(Blocks(count)), dim3(kThreads), 0,
                      stream, static_cast<const std::uint8_t*>(q8), out, count);
-}
-
-void ConvertToQ8_0(const void* source, void* destination, std::size_t elements,
-                   WeightType source_type, hipStream_t stream) {
-  switch (source_type) {
-    case WeightType::kIQ4_NL:
-      LaunchConvertToQ8_0<WeightType::kIQ4_NL>(source, destination, elements,
-                                               stream);
-      break;
-    case WeightType::kIQ4_XS:
-      LaunchConvertToQ8_0<WeightType::kIQ4_XS>(source, destination, elements,
-                                               stream);
-      break;
-    case WeightType::kIQ3_XXS:
-      LaunchConvertToQ8_0<WeightType::kIQ3_XXS>(source, destination, elements,
-                                                stream);
-      break;
-    case WeightType::kIQ3_S:
-      LaunchConvertToQ8_0<WeightType::kIQ3_S>(source, destination, elements,
-                                              stream);
-      break;
-    case WeightType::kIQ2_S:
-      LaunchConvertToQ8_0<WeightType::kIQ2_S>(source, destination, elements,
-                                              stream);
-      break;
-    case WeightType::kQ2_0:
-      LaunchConvertToQ8_0<WeightType::kQ2_0>(source, destination, elements,
-                                             stream);
-      break;
-  }
 }
 
 __global__ void UpcastBf16Kernel(const std::uint16_t* x, float* out,
@@ -7266,16 +7267,11 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* rows_in, const std::int32_t* rows_out,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream) {
-  const std::size_t block_elems =
-      (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
-               type == WeightType::kQ6_K)
-          ? 256
-          : (type == WeightType::kIQ3_XXS || type == WeightType::kIQ3_S ||
-                     type == WeightType::kIQ2_S ||
-                     type == WeightType::kIQ4_XS)
-                ? 256
-                : 64;
-  if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
+  // GGML stores ceil(k / block) blocks per row, so a row whose tail is
+  // ragged against its block size still spans whole blocks up to a 64-
+  // element boundary; the loaders consume the zero-padded sub-blocks
+  // harmlessly. 64 is the alignment every member of this family needs.
+  if (m == 0 || k == 0 || k % 64 != 0 || n_tiles == 0 ||
       (out_half == nullptr) == (out == nullptr)) {
     std::fprintf(stderr,
                  "routed F16 GEMM rejected: type=%d m=%zu k=%zu n_tiles=%u "

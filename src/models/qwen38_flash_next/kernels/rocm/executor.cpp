@@ -71,6 +71,24 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kQ8_0;
     case GgmlType::kF32:
       return WeightType::kF32;
+    case GgmlType::kQ4_K:
+      return WeightType::kQ4_K;
+    case GgmlType::kQ5_K:
+      return WeightType::kQ5_K;
+    case GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
+    case GgmlType::kIQ4_NL:
+      return WeightType::kIQ4_NL;
+    case GgmlType::kIQ4_XS:
+      return WeightType::kIQ4_XS;
+    case GgmlType::kIQ3_XXS:
+      return WeightType::kIQ3_XXS;
+    case GgmlType::kIQ3_S:
+      return WeightType::kIQ3_S;
+    case GgmlType::kIQ2_S:
+      return WeightType::kIQ2_S;
+    case GgmlType::kQ2_0:
+      return WeightType::kQ2_0;
     default:
       throw std::logic_error("unsupported Flash-Next matrix format");
   }
@@ -1013,6 +1031,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   auto f32 = [&](std::size_t n) { return Alloc<float>(a, n, error_msg); };
   s.tokens = Alloc<std::int32_t>(a, T, error_msg);
   s.x_half = Alloc<std::uint16_t>(a, T * model.max_half_cols(), error_msg);
+  s.dense_map = Alloc<std::int32_t>(a, T / 16 + 3 + T, error_msg);
   for (void*& slot : s.x_q8) {
     slot = Alloc<std::uint8_t>(
         a,
@@ -1734,6 +1753,37 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                     out + static_cast<std::size_t>(r0) * w.rows, rows, w.rows,
                     w.cols, stream_)) {
         AssignError(error_msg, "W8A8 GEMM failed");
+        return false;
+      }
+    }
+    return true;
+  }
+  // Native-storage projections (the pruned checkpoint's dense tier): the
+  // WMMA family reads the disk encoding through a degenerate single-expert
+  // view -- one bucket holding every token row, identity scatter. The tile
+  // map is rebuilt by a tiny device kernel before each launch, so the call
+  // stays valid inside a captured graph and never reads a host snapshot of
+  // the token count.
+  if (w.type != GgmlType::kF32 && w.type != GgmlType::kF16 &&
+      w.type != GgmlType::kBF16 && w.type != GgmlType::kQ8_0) {
+    const std::uint32_t piece = static_cast<std::uint32_t>(options_.max_batch);
+    const std::size_t cap_tiles = static_cast<std::size_t>(piece) / 16 + 1;
+    std::int32_t* tiles = s_.dense_map;
+    std::int32_t* bounds = tiles + cap_tiles;
+    std::int32_t* map_rows = bounds + 2;
+    for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
+      const std::uint32_t rows = std::min(piece, n_tokens - r0);
+      const std::uint32_t tile_rows = rows > 48 ? 64 : (rows > 16 ? 48 : 16);
+      PrepareHalfInput(x + static_cast<std::size_t>(r0) * w.cols, rows,
+                       w.cols);
+      DenseGemmMap(tiles, bounds, map_rows, rows, tile_rows, stream_);
+      if (!RoutedF16Gemm(w.data, SmallType(w.type),
+                         static_cast<const __half*>(s_.x_half), tiles,
+                         (rows + tile_rows - 1) / tile_rows, tile_rows,
+                         bounds, map_rows, map_rows, nullptr,
+                         out + static_cast<std::size_t>(r0) * w.rows, nullptr,
+                         w.rows, w.cols, stream_)) {
+        AssignError(error_msg, "dense WMMA GEMM failed");
         return false;
       }
     }

@@ -85,6 +85,14 @@ void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream);
 
+/// Writes the degenerate single-expert tile map a native-quantized dense
+/// projection feeds RoutedF16Gemm: `tiles` gets ceil(n / tile_rows) tile
+/// entries, `bounds` the single bucket's [begin, end), and `rows` the
+/// identity token rows. All three buffers are device-side.
+void DenseGemmMap(std::int32_t* tiles, std::int32_t* bounds,
+                  std::int32_t* rows, std::uint32_t n, std::uint32_t tile_rows,
+                  hipStream_t stream);
+
 /// out[t][d] = rmsnorm(x[t][d]) * gamma[d]; `groups` independent norms of
 /// `dim/groups` elements each share the gamma row. gamma may be null.
 void RmsNormRows(const float* x, const float* gamma, float* out,
@@ -222,8 +230,6 @@ void ExpandQ8_0(const void* q8, float* out, std::size_t count,
 /// Q8_0 expert/dense tiers. `elements` is the logical element count
 /// (cols * rows * experts); `source_type` carries the storage format. The
 /// reference element semantics match src/core/quant/ggml_dequant.cpp.
-void ConvertToQ8_0(const void* source, void* destination, std::size_t elements,
-                   WeightType source_type, hipStream_t stream);
 
 /// out[i] = float(source[i]) for BF16 storage; used to upconvert BF16 stack
 /// members (RCO routers) so the existing F32 stack path can consume them.

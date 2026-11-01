@@ -32,7 +32,8 @@ struct Conversion {
   /// Source format when the tensor is a low-bit codebook weight converted
   /// to Q8_0 during upload; kF32 means "no codebook conversion" (the type
   /// is already carried by expand_q8 and the narrow path).
-  WeightType converted_from{WeightType::kF32};
+  /// The staged source is F16 and widens to F32 after the drain.
+  bool f16_upcast{false};
 };
 
 /// The trunk and the optional MTP block as one traversal's output.
@@ -77,61 +78,32 @@ struct Uploader {
     return weights->Allocate(pointer, size);
   }
 
-  /// True for the storage formats that have no on-device kernel in this
-  /// runtime (the IQ codebook families and IST-DASLab's Q2_0). They bind in
-  /// weights.cpp but must be converted to Q8_0 before any tier reads them.
-  [[nodiscard]] static bool NeedsQ8Conversion(core::GgmlType type) noexcept {
-    switch (type) {
-      case core::GgmlType::kIQ2_S:
-      case core::GgmlType::kIQ3_XXS:
-      case core::GgmlType::kIQ3_S:
-      case core::GgmlType::kIQ4_NL:
-      case core::GgmlType::kIQ4_XS:
-      case core::GgmlType::kQ2_0:
-        return true;
-      default:
-        return false;
-    }
-  }
-
   DeviceTensor Copy(const TensorRef& t, bool native_routed = false) {
     DeviceTensor d;
     if (t.empty() || !ok) {
       return d;
     }
-    // Formats without an on-device kernel are staged raw and converted to
-    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion). Gate/up/
-    // down call sites pass `native_routed` for storages listed by kernels.
-    // hpp's RoutedNativeWMMA, keeping their disk bytes. A 256-element
-    // block format is only kept native when every row spans whole blocks:
-    // GGUF never stores such a tensor with a ragged tail, and the WMMA
-    // kernels' row stride assumes it (a down projection at k=640 carries
-    // 32/64-block storages only — anything else falls back to Q8_0).
-    const bool ragged_blocks =
-        ((t.type == core::GgmlType::kIQ3_XXS ||
-          t.type == core::GgmlType::kIQ3_S ||
-          t.type == core::GgmlType::kIQ2_S ||
-          t.type == core::GgmlType::kIQ4_XS ||
-          t.type == core::GgmlType::kQ4_K || t.type == core::GgmlType::kQ5_K) &&
-         t.cols % 256 != 0) ||
-        (t.type == core::GgmlType::kQ2_0 && t.cols % 64 != 0);
-    const bool convert_q8 =
-        NeedsQ8Conversion(t.type) &&
-        !(native_routed && t.experts > 1 && RoutedNativeWMMA(t.type) &&
-          !ragged_blocks);
+    // Gate/up/down call sites pass `native_routed` for the storages listed
+    // by kernels.hpp's RoutedNativeWMMA; every format that reaches this
+    // runtime now has a kernel that reads it as stored, at both the routed
+    // and the dense tier. Local inference runs under a memory ceiling, so
+    // a storage the kernels cannot read is a hard error rather than a
+    // silent inflation to a wider one. GGML pads a row to whole blocks up
+    // to a 64-element boundary, exactly the alignment the loaders assume.
+    const bool mmq_reads_it =
+        t.experts > 1 && native_routed && RoutedMmqCapable(t.type);
+    if (!mmq_reads_it &&
+        (RoutedNativeWMMA(t.type) || t.type == core::GgmlType::kQ6_K) &&
+        t.cols % 64 != 0) {
+      Fail("ragged-block row is not GGML-padded storage: " +
+           std::string(t.name));
+      return d;
+    }
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
       Fail("device allocation failed for " + std::string(t.name) + " (" +
            std::to_string(size) + " bytes)");
-      return d;
-    }
-    void* q8 = nullptr;
-    const std::size_t count = t.cols * t.rows * t.experts;
-    const std::size_t q8_size = (count / 32) * 34;
-    if (convert_q8 && Allocate(&q8, q8_size + kTailMargin) != hipSuccess) {
-      Fail("device allocation failed for " + std::string(t.name) +
-           " (Q8_0 conversion)");
       return d;
     }
     if (Measuring()) {
@@ -151,17 +123,11 @@ struct Uploader {
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
-    if (convert_q8) {
-      allocations.push_back(q8);
-      bytes += q8_size + kTailMargin;
-      conversions.push_back(
-          {ptr, q8, count, false, size, static_cast<WeightType>(t.type)});
-      (void)hipMemsetAsync(static_cast<std::uint8_t*>(q8) + q8_size, 0,
-                           kTailMargin, nullptr);
-      d.data = q8;
-      d.type = core::GgmlType::kQ8_0;
-    }
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
+      max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
+    }
+    // Dense quantized rows stage through s_.x_half in the WMMA family.
+    if (t.experts == 1) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
     if (d.type == core::GgmlType::kQ8_0 && t.experts == 1) {
@@ -223,7 +189,7 @@ struct Uploader {
     allocations.push_back(f32);
     bytes += count * sizeof(float) + kTailMargin;
     conversions.push_back(
-        {src.data, f32, count, false, t.SizeBytes(), WeightType::kF16});
+        {src.data, f32, count, false, t.SizeBytes(), true});
     (void)hipMemsetAsync(static_cast<std::uint8_t*>(f32) + count * 4, 0,
                          kTailMargin, nullptr);
     DeviceTensor d = src;
@@ -340,7 +306,7 @@ struct Uploader {
         if (t->type == core::GgmlType::kBF16) {
           conversions.push_back({static_cast<std::uint8_t*>(ptr) + offset,
                                  nullptr, t->rows * t->cols, false, 0,
-                                 WeightType::kBF16});
+                                 false});
         }
         offset += t->rows * t->cols * sizeof(float);
       }
@@ -549,13 +515,6 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   m->config_ = w.config;
   const auto regions = reader.GetMappedRegions();
   std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
-  // Bind-time Q8_0 conversions (dense K-quant payloads, see
-  // ModelWeights::converted) are addressed as synthetic shards appended
-  // here; the shard indices Bind assigned already point past the mapped
-  // regions, and MTP tensors are based off this same count.
-  for (const auto& region : w.ConversionRegions()) {
-    shards.push_back(region);
-  }
   const auto shard_count = static_cast<std::uint32_t>(shards.size());
   if (mtp != nullptr) {
     if (mtp_reader == nullptr) {
@@ -641,15 +600,12 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
           }
           return nullptr;
         }
-      } else if (c.converted_from == WeightType::kF16) {
+      } else if (c.f16_upcast) {
         UpcastF16(c.source, static_cast<float*>(c.destination), c.count,
                   nullptr);
       } else if (c.expand_q8) {
         ExpandQ8_0(c.source, static_cast<float*>(c.destination), c.count,
                    nullptr);
-      } else if (c.converted_from != WeightType::kF32) {
-        ConvertToQ8_0(c.source, c.destination, c.count, c.converted_from,
-                      nullptr);
       } else {
         NarrowActivations(static_cast<const float*>(c.source), c.destination,
                           false, c.count, nullptr);

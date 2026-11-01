@@ -1591,6 +1591,16 @@ int main() {
     ok = Ok(Run(q::WeightType::kQ6_K, 300, 10, 64, 640, 2560, 0x7406A004U,
                 16)) &&
          ok;
+    // Degenerate single-expert view: the dense projections run through the
+    // same kernel with every row in one bucket (identity scatter), so the
+    // whole-row k strides -- including ceil-stored ragged 256-block rows
+    // like attn_gate's k=640 -- are covered at E=1 for each K-quant the
+    // pruned checkpoint keeps dense.
+    ok = Ok(Run(q::WeightType::kQ5_K, 300, 1, 1, 640, 2560, 0x7405A010U)) && ok;
+    ok = Ok(Run(q::WeightType::kQ4_K, 300, 1, 1, 640, 2560, 0x7404B011U)) && ok;
+    ok = Ok(Run(q::WeightType::kQ6_K, 300, 1, 1, 640, 2560, 0x7406A012U)) && ok;
+    ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 1, 1, 640, 2560, 0x7404C013U)) &&
+         ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
                 64)) &&

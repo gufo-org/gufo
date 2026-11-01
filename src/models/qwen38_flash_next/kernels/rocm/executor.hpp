@@ -615,6 +615,9 @@ private:
   struct Scratch {
     std::int32_t* tokens;
     void* x_half;   ///< activations narrowed to the weight's 16-bit type
+    /// Tile map for native-quantized dense projections (DenseGemmMap):
+    /// ceil(T/16) tile entries, two bucket bounds, T identity rows.
+    std::int32_t* dense_map;
     void* x_q8[2];  ///< Q8_1 activations of a decode batch, alternating
     /// Q8_1 rows of a decode batch written by the kernel that produces
     /// them: xn by HcCombine, lo by SiluScale, mixed by the mix epilogue.
