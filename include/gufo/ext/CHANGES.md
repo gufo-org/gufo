@@ -1,5 +1,11 @@
 # Extension API changes
 
+## 0.1.7
+
+Sampling (`sampling.hpp`): `SamplerState` keeps a private `LogitRowScratch`
+for the block-maxima top-p/top-k sampler. Source compatible; extensions that
+embed `SamplerState` rebuild.
+
 ## 0.1.6
 
 Publish capability-neutral contracts and provider registries:
