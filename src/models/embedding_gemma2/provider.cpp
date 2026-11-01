@@ -80,6 +80,7 @@ public:
     std::size_t audio_count = 0;
     std::size_t video_count = 0;
     std::size_t video_frames = 0;
+    std::size_t video_soft_tokens = 0;
 
     for (std::size_t index = 0; index < inputs.size(); ++index) {
       if (is_cancelled && is_cancelled()) {
@@ -115,9 +116,12 @@ public:
                 .max_frames = request.video.max_frames,
                 .timestamps = request.video.timestamps,
                 .truncate_overflow = request.video.truncate_overflow,
+                .max_soft_tokens = request.video.max_soft_tokens,
             };
-            auto frames = ProcessVideo(bytes, video_opts, is_cancelled,
-                                       ext::kMaxVideoFrames - video_frames);
+            auto frames =
+                ProcessVideo(bytes, video_opts, is_cancelled,
+                             ext::kMaxVideoFrames - video_frames,
+                             ext::kMaxVideoSoftTokens - video_soft_tokens);
             video_frames += frames.size();
             if (video_frames > ext::kMaxVideoFrames) {
               throw std::invalid_argument(
@@ -125,6 +129,7 @@ public:
             }
             text += FrameVideo(frames, video_opts);
             for (auto& frame : frames) {
+              video_soft_tokens += frame.patches.soft_tokens();
               sequence.images.push_back(
                   {0, std::move(frame.patches), kVideoTokenId});
             }
