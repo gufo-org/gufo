@@ -128,7 +128,7 @@ the current implementation milestone stops after Card 14.
 | 20 | 10 Qwen 27B; 19 | [Migrate Qwen 27B text generation](cards/20-qwen27b-extension.md) | complete |
 | 21 | 10 Flash-Next; 20 | [Migrate Flash-Next text generation](cards/21-flash-next-extension.md) | complete |
 | 22 | 10 DeepSeek; 21 | [Migrate DeepSeek text generation](cards/22-deepseek-extension.md) | complete |
-| 23 | 11; 22 | [Support external extension source trees](cards/23-external-extensions.md) | pending |
+| 23 | 11; 22 | [Support external extension source trees](cards/23-external-extensions.md) | complete |
 | 24 | 11; 23 | [Prove capability extensibility with second providers](cards/24-second-provider-conformance.md) | pending |
 | 25 | 11b; 24 | [Generate Nix serving arguments and validation](cards/25-generated-serve-module.md) | pending |
 | 26 | distribution/conformance; 25 | [Complete distribution recipes and conformance policy](cards/26-distribution-and-policy.md) | pending |

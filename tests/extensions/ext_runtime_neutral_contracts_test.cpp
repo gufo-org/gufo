@@ -179,12 +179,12 @@ void CheckDeviceProbe() {
 
 void CheckExtensionApiVersion() {
   Expect(gufo::ext::kApiMajor == 0 && gufo::ext::kApiMinor == 1 &&
-             gufo::ext::kApiRevision == 9,
-         "API numeric constants match 0.1.9");
-  Expect(gufo::ext::kApiVersion == "0.1.9",
-         "API version literal matches 0.1.9");
-  Expect(gufo::ext::RuntimeApiVersion() == "0.1.9",
-         "Runtime API version matches 0.1.9");
+             gufo::ext::kApiRevision == 10,
+         "API numeric constants match 0.1.10");
+  Expect(gufo::ext::kApiVersion == "0.1.10",
+         "API version literal matches 0.1.10");
+  Expect(gufo::ext::RuntimeApiVersion() == "0.1.10",
+         "Runtime API version matches 0.1.10");
 }
 
 void CheckPlatformLeaves() {

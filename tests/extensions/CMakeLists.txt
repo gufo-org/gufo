@@ -90,6 +90,9 @@ set_tests_properties(ext_runtime_neutral_contracts_test PROPERTIES
   LABELS "cpu;extensions")
 
 add_executable(extension_runtime_test runtime_test.cpp)
+# This in-tree integration test also exercises the private CLI logging facade.
+# The public runtime deliberately no longer exports the repository root.
+target_include_directories(extension_runtime_test PRIVATE "${PROJECT_SOURCE_DIR}")
 target_compile_definitions(extension_runtime_test PRIVATE
   TEST_PROVIDER_HIP=$<BOOL:${ENGINE_ENABLE_HIP}>)
 gufo_target_extensions(extension_runtime_test EXTENSIONS beta base alpha)
