@@ -4,6 +4,20 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.29.0](https://github.com/gufo-org/gufo/compare/v0.28.1...v0.29.0) (2026-11-01)
+
+
+### Features
+
+* **extensions:** add source extension infrastructure and separate model execution ([#911](https://github.com/gufo-org/gufo/issues/911)) ([6b6a6b0](https://github.com/gufo-org/gufo/commit/6b6a6b04fab46f610d1725368cdd2db3e5b2c3ce))
+* **extensions:** migrate embeddinggemma pilot to isolated extension ([#924](https://github.com/gufo-org/gufo/issues/924)) ([8fec1ce](https://github.com/gufo-org/gufo/commit/8fec1ce96bffc728e03a9e271e787cef4a48bbda))
+* **extensions:** publish public api surface, migrate model includes, and add test support ([#922](https://github.com/gufo-org/gufo/issues/922)) ([0071637](https://github.com/gufo-org/gufo/commit/00716376fd949c3c867b08497d5848ad9ccd57f5))
+
+
+### Bug Fixes
+
+* **qwen38-flash-next:** sweep pre-budget rows densely in budget-crossing chains ([#876](https://github.com/gufo-org/gufo/issues/876)) ([2e6aa96](https://github.com/gufo-org/gufo/commit/2e6aa96ce20a0e244561cb86915dd79260042eac))
+
 ## [0.28.1](https://github.com/gufo-org/gufo/compare/v0.28.0...v0.28.1) (2026-10-31)
 
 
