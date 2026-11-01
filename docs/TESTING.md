@@ -99,10 +99,24 @@ and only when the report records `hip: false`; missing protected names fail.
 Unsupported interface expressions fail configuration. The checker itself has unit coverage in `tests/tools/`.
 
 `ext_runtime_neutral_contracts_test` builds inside the isolated extension
-fixture project and links only `gufo_ext_runtime`: the neutral continuation
+fixture project and links only `gufo_ext_runtime` among Gufo libraries (plus
+OpenSSL for public crypto-header coverage): the neutral continuation
 bases, host memory budgets, reasoning tags and device-probe default have to
 work with no serving or HTTP target even defined. The capture and backing-plan
 contract is cache-owned and is covered by `cache_adapter_test`.
+
+For Windows extension-header and runtime changes, the **Check Windows extension
+contracts** job runs this fixture independently of the package build. It uses
+the hosted ClangCL toolset and only OpenSSL from the application's vcpkg baseline;
+it does not require the HIP SDK or media dependencies. Rerun that individual job
+while iterating. The full package job still validates the production toolchain.
+On a Windows development host with OpenSSL installed, the same focused check is:
+
+```powershell
+cmake -S tests/extensions/fixture -B build/windows-extensions -A x64 -T ClangCL -DOPENSSL_ROOT_DIR=C:/path/to/openssl
+cmake --build build/windows-extensions --config RelWithDebInfo --parallel 4 --target extension_runtime_test extension_role_test ext_runtime_neutral_contracts_test
+ctest --test-dir build/windows-extensions -C RelWithDebInfo --output-on-failure --no-tests=error --timeout 60 -R '^(extension_runtime_test|extension_role_test|ext_runtime_neutral_contracts_test)$'
+```
 
 The qualification window must use a `BUILD_TESTING=OFF` artifact. Test-preset
 binaries now assert inside serving sources where the previous executable did not;

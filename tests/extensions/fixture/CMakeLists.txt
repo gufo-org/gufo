@@ -6,6 +6,11 @@ get_filename_component(GUFO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 set(PROJECT_SOURCE_DIR "${GUFO_ROOT}")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(WIN32)
+  # This standalone project does not inherit the root project's definitions.
+  # Public platform headers must not introduce windows.h's min/max macros.
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN PSAPI_VERSION=2)
+endif()
 option(GUFO_ENABLE_WARNINGS "Enable fixture compiler warnings" ON)
 option(GUFO_ENABLE_SANITIZERS "Enable fixture sanitizers" OFF)
 if(GUFO_ENABLE_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
