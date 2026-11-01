@@ -6,7 +6,7 @@ namespace gufo::ext {
 // Pre-1.0 compatibility is one minor series and an additive revision floor.
 inline constexpr unsigned kApiMajor = 0;
 inline constexpr unsigned kApiMinor = 1;
-inline constexpr unsigned kApiRevision = 4;
-inline constexpr std::string_view kApiVersion = "0.1.4";
+inline constexpr unsigned kApiRevision = 5;
+inline constexpr std::string_view kApiVersion = "0.1.5";
 std::string_view RuntimeApiVersion();
 }  // namespace gufo::ext
