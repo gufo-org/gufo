@@ -2795,17 +2795,12 @@ bool Executor::JoinSide(std::string* error_msg) const {
 
 bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
   const Config& c = config();
-  // Every storage the F16 WMMA family runs natively: the original
-  // checkpoint's K-quants plus the pruned checkpoints' IQ4_NL experts.
-  // (Keep in step with the bind-time conversion skip in device_model.cpp.)
-  const auto routed_storage = [](GgmlType t) {
-    return t == GgmlType::kQ4_K || t == GgmlType::kQ5_K ||
-           t == GgmlType::kQ5_1 || t == GgmlType::kQ8_0 ||
-           t == GgmlType::kIQ4_NL;
-  };
-  return ExpertMatrixRows(n_tokens) && routed_storage(l.ffn_gate_exps.type) &&
-         routed_storage(l.ffn_up_exps.type) &&
-         routed_storage(l.ffn_down_exps.type) && c.hidden_size % 256 == 0 &&
+  // Every storage the F16 WMMA family runs natively (kernels.hpp's
+  // RoutedNativeWMMA): the original checkpoint's K-quants plus the
+  // pruned checkpoints' IQ4_NL experts.
+  return ExpertMatrixRows(n_tokens) && RoutedNativeWMMA(l.ffn_gate_exps.type) &&
+         RoutedNativeWMMA(l.ffn_up_exps.type) &&
+         RoutedNativeWMMA(l.ffn_down_exps.type) && c.hidden_size % 256 == 0 &&
          c.expert_ff % 64 == 0;
 }
 

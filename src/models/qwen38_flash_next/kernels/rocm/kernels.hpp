@@ -55,6 +55,20 @@ enum class WeightType : std::uint32_t {
   kQ2_0 = 42,
 };
 
+/// The storage the routed F16 WMMA family runs natively — the single
+/// authoritative list. At bind time it keeps gate/up tensors in their
+/// disk encoding (`DeviceModel::Copy`'s `native_routed` argument), and
+/// the Executor only launches WMMA for layers whose three matrices all
+/// appear here; the down projection is excluded at the call site because
+/// it dispatches through the MMQ vec/tiled family instead. A new storage
+/// (IQ3/IQ2 kernels, later) flips here once a WMMA launcher exists — the
+/// host launch switches in kernels.hip.cpp must grow the matching case.
+constexpr bool RoutedNativeWMMA(core::GgmlType t) noexcept {
+  return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
+         t == core::GgmlType::kQ5_1 || t == core::GgmlType::kQ8_0 ||
+         t == core::GgmlType::kIQ4_NL;
+}
+
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,

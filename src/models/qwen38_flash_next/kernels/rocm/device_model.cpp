@@ -94,22 +94,20 @@ struct Uploader {
     }
   }
 
-  DeviceTensor Copy(const TensorRef& t) {
+  DeviceTensor Copy(const TensorRef& t, bool native_routed = false) {
     DeviceTensor d;
     if (t.empty() || !ok) {
       return d;
     }
     // Formats without an on-device kernel are staged raw and converted to
-    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion). Routed
-    // gate/up in a storage the F16 WMMA family runs natively keep their
-    // disk bytes — IQ4_NL today; see the Executor::WmmaExperts guard.
-    // The down projection has no WMMA dispatch (it runs through the MMQ
-    // vec/tiled family, which knows no IQ4_NL yet), so down keeps the
-    // Q8_0 conversion or every decode step fails its expert GEMM.
+    // Q8_0 once the disk pipeline drains (see NeedsQ8Conversion). Gate/up
+    // call sites pass `native_routed` for storages listed by kernels.hpp's
+    // RoutedNativeWMMA, keeping their disk bytes — IQ4_NL today. The down
+    // call site does not: it dispatches through the MMQ vec/tiled family,
+    // which knows no IQ formats, so it keeps the Q8_0 conversion.
     const bool convert_q8 =
         NeedsQ8Conversion(t.type) &&
-        !(t.experts > 1 && t.type == core::GgmlType::kIQ4_NL &&
-          t.name.find("ffn_down_exps") == std::string_view::npos);
+        !(native_routed && t.experts > 1 && RoutedNativeWMMA(t.type));
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
@@ -446,8 +444,8 @@ struct Uploader {
                        ? UpcastF32(l.ple_conv1d)
                        : Copy(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
-    d.ffn_gate_exps = Copy(l.ffn_gate_exps);
-    d.ffn_up_exps = Copy(l.ffn_up_exps);
+    d.ffn_gate_exps = Copy(l.ffn_gate_exps, true);
+    d.ffn_up_exps = Copy(l.ffn_up_exps, true);
     d.ffn_down_exps = Copy(l.ffn_down_exps);
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);

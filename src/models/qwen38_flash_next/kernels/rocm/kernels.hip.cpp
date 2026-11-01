@@ -5729,12 +5729,11 @@ __launch_bounds__(256) __global__
       if constexpr (kQ5K && !kPair) {
         s_high[(f_c * BM) + row] = f_high[u];
       }
-      if constexpr (kQ8) {
-      } else if constexpr (kIQ4) {
+      if constexpr (kIQ4) {
         // half2 (d, d): the codebook values carry the code itself, so only
         // the block scale remains; the affine bias is unused.
         scale_bias = f_live[u] ? (f_dm[u] | (f_dm[u] << 16)) : 0U;
-      } else {
+      } else if constexpr (!kQ8) {
         const int sb32 = f_sb32[u];
         // The first four scale/min bytes live in y/z. Their remaining
         // low nibbles share w; the high two bits reuse those same y/z bytes.
