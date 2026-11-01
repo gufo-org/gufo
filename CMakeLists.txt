@@ -750,6 +750,14 @@ endfunction()
   add_test(NAME arg_parser_test COMMAND arg_parser_test)
   set_tests_properties(arg_parser_test PROPERTIES LABELS "cpu;cli")
 
+  add_executable(transcribe_cli_test
+    tests/cli/transcribe_test.cpp
+    src/cli/transcribe/transcribe.cpp)
+  target_link_libraries(transcribe_cli_test PRIVATE gufo_core gufo_ext_runtime)
+  add_test(NAME transcribe_cli_test COMMAND transcribe_cli_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav")
+  set_tests_properties(transcribe_cli_test PROPERTIES LABELS "cpu;cli;audio")
+
   add_executable(json_constraint_test tests/core/json_constraint_test.cpp)
   target_link_libraries(json_constraint_test PRIVATE gufo_core)
   target_compile_definitions(json_constraint_test PRIVATE

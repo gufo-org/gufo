@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "gufo/ext/asr.hpp"
+#include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/core/json.hpp"
 
@@ -190,6 +191,8 @@ int RunTranscribe(std::span<const char* const> args) {
     return 1;
   }
 
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
   const ext::AsrProvider* provider = ext::ProbeAsrProvider(model.string());
   if (!provider) {
     provider = ext::FindAsrProvider("qwen3-asr");

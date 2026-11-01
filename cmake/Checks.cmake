@@ -14,7 +14,7 @@ set(gufo_pr_targets
   cache_tiered_test
   cache_retention_test
   extension_runtime_test extension_role_test
-  arg_parser_test json_test json_constraint_test gguf_reader_test qwen_config_test
+  arg_parser_test transcribe_cli_test json_test json_constraint_test gguf_reader_test qwen_config_test
   gguf_identity_test
   heap_placement_test
   platform_publish_test platform_prefault_test platform_mapped_file_test
