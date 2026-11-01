@@ -445,7 +445,7 @@ add_library(gufo_http STATIC
   # the engine library, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_minimax_h3 gufo_qwen3_tts gufo_qwen3_asr
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_minimax_h3 gufo_qwen3_tts gufo_qwen3_asr
   gufo_qwen_image_21
   gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
 
