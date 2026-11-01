@@ -457,21 +457,13 @@ float Iq4NlValue(const block_iq4_nl& block, std::size_t index) noexcept {
   return Fp16ToFloat(block.d) * static_cast<float>(kValuesIq4Nl[code]);
 }
 
-float Iq4XsValueRef(const block_iq4_xs& block, std::size_t index) noexcept {
-  const std::size_t ib = index / 32;  // 0..7 sub-block
-  const std::size_t within = index % 32;
-  const std::size_t lane = within % 16;
-  const bool high_nibble = within >= 16;
-  const std::uint8_t packed = block.qs[(ib * 16) + lane];
-  const std::uint8_t code = high_nibble ? (packed >> 4U) : (packed & 0x0FU);
-  const int ls =
-      static_cast<int>((block.scales_l[ib / 2] >> (4U * (ib % 2))) & 0x0FU) |
-      static_cast<int>(((block.scales_h >> (2U * ib)) & 0x03U) << 4U);
-  return Fp16ToFloat(block.d) * static_cast<float>(ls - 32) *
-         static_cast<float>(kValuesIq4Nl[code]);
-}
 
-float Iq3sValueRef(const block_iq3_s& block, std::size_t index) noexcept {
+
+}  // namespace
+
+// Public IQ3_S/IQ4_XS element accessors: the routed GPU kernels mirror these
+// semantics through the same public grid and sign tables.
+float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
   const std::size_t ib32 = index / 32;    // 0..7 sub-block
   const std::size_t within = index % 32;  // 0..31
   const std::size_t l = within / 8;       // 0..3 group of eight
@@ -503,23 +495,26 @@ float Iq3sValueRef(const block_iq3_s& block, std::size_t index) noexcept {
   return negate ? -db * magnitude : db * magnitude;
 }
 
-}  // namespace
+float Iq4XsValue(const block_iq4_xs& block, std::size_t index) noexcept {
+  const std::size_t ib = index / 32;  // 0..7 sub-block
+  const std::size_t within = index % 32;
+  const std::size_t lane = within % 16;
+  const bool high_nibble = within >= 16;
+  const std::uint8_t packed = block.qs[(ib * 16) + lane];
+  const std::uint8_t code = high_nibble ? (packed >> 4U) : (packed & 0x0FU);
+  const int ls =
+      static_cast<int>((block.scales_l[ib / 2] >> (4U * (ib % 2))) & 0x0FU) |
+      static_cast<int>(((block.scales_h >> (2U * ib)) & 0x03U) << 4U);
+  return Fp16ToFloat(block.d) * static_cast<float>(ls - 32) *
+         static_cast<float>(kValuesIq4Nl[code]);
+}
+
 
 const std::uint32_t* Iq3sGrid() noexcept {
   return kIq3sGrid;
 }
 
-// Public IQ3_S element accessor: the routed GPU kernels mirror this
-// reference semantics through the same grid and sign tables.
-float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
-  return Iq3sValueRef(block, index);
-}
 
-// Public IQ4_XS element accessor: the routed GPU kernel pre-multiplies
-// d * (ls - 32) per sub-block and rides the IQ4_NL codebook arm.
-float Iq4XsValue(const block_iq4_xs& block, std::size_t index) noexcept {
-  return Iq4XsValueRef(block, index);
-}
 
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k) {
   const auto* blocks = static_cast<const block_iq4_nl*>(src);
@@ -536,7 +531,7 @@ void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k) {
   const std::size_t nb = k / 256;
   for (std::size_t b = 0; b < nb; ++b) {
     for (std::size_t i = 0; i < 256; ++i) {
-      dst[(b * 256) + i] = Iq4XsValueRef(blocks[b], i);
+      dst[(b * 256) + i] = Iq4XsValue(blocks[b], i);
     }
   }
 }

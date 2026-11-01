@@ -121,24 +121,18 @@ struct WeightUpload::State {
     const void* payload = slot.buffer;
     std::error_code ec;
     bool read = false;
-    if (!platform::FileValid(shard.fd)) {
-      // Memory-backed synthetic region (no descriptor): the payload bytes are
-      // already resident, e.g. Q8_0 buffers materialized at bind time.
-      payload = static_cast<const std::uint8_t*>(shard.mapping) + task.offset;
-      read = true;
-    }
     // Each reader keeps an unbuffered description of the shard it reads, so
     // concurrent readers never queue on one synchronous handle: Windows
     // serializes synchronous I/O per file object, not per process.
-    if (!read && slot.direct_shard != task.shard) {
+    if (slot.direct_shard != task.shard) {
       platform::CloseFile(slot.direct);
       slot.direct = platform::kInvalidFile;
       slot.direct_shard = task.shard;
     }
-    if (!read && !platform::FileValid(slot.direct)) {
+    if (!platform::FileValid(slot.direct)) {
       slot.direct = platform::ReopenUnbuffered(shard.fd);
     }
-    if (!read && platform::FileValid(slot.direct)) {
+    if (platform::FileValid(slot.direct)) {
       const auto begin = task.offset & ~(kAlignment - 1);
       const auto skip = static_cast<std::size_t>(task.offset - begin);
       const auto length =
@@ -210,20 +204,8 @@ std::unique_ptr<WeightUpload> WeightUpload::Create(
     shard.fd = platform::DuplicateFile(region.file_descriptor);
     std::error_code ec;
     platform::FileInfo info{};
-    if (!platform::FileValid(shard.fd)) {
-      // Synthetic memory region without a backing descriptor (e.g. dense
-      // payloads converted to Q8_0 at bind time): bytes are already resident
-      // and Transfer reads them through `mapping`.
-      if (region.data == nullptr || region.size == 0) {
-        s.Fail("cannot read the mapped GGUF shard");
-        s.Status(error);
-        return nullptr;
-      }
-      shard.size = region.size;
-      shard.mapping = region.data;
-      continue;
-    }
-    if (!platform::Stat(shard.fd, &info, ec) || info.size == 0 ||
+    if (!platform::FileValid(shard.fd) ||
+        !platform::Stat(shard.fd, &info, ec) || info.size == 0 ||
         info.size != region.size) {
       s.Fail("cannot read the mapped GGUF shard");
       s.Status(error);
