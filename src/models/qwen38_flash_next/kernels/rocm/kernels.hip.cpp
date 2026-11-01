@@ -5416,6 +5416,7 @@ constexpr std::size_t kQ5KBlockBytes = 176;
 constexpr std::size_t kIq4NlBlockBytes = 18;
 constexpr std::size_t kIq3xxsBlockBytes = 98;
 constexpr std::size_t kIq3sBlockBytes = 110;
+constexpr std::size_t kIq2sBlockBytes = 82;
 
 template<WeightType kType>
 __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
@@ -5425,6 +5426,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kIQ4_NL ? (k / 32) * kIq4NlBlockBytes
          : kType == WeightType::kIQ3_XXS ? (k / 256) * kIq3xxsBlockBytes
          : kType == WeightType::kIQ3_S ? (k / 256) * kIq3sBlockBytes
+         : kType == WeightType::kIQ2_S ? (k / 256) * kIq2sBlockBytes
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -5480,6 +5482,7 @@ __launch_bounds__(256) __global__
   constexpr bool kIQ4 = kType == WeightType::kIQ4_NL;
   constexpr bool kIQ3X = kType == WeightType::kIQ3_XXS;
   constexpr bool kIQ3S = kType == WeightType::kIQ3_S;
+  constexpr bool kIQ2 = kType == WeightType::kIQ2_S;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
@@ -5513,8 +5516,10 @@ __launch_bounds__(256) __global__
   // IQ4_NL resolves its codebook through a half2 table indexed by the byte
   // pair that supplies a fragment word's two consecutive elements. It lives
   // past the shared stage/epilogue region so tile reuse never touches it.
-  constexpr std::size_t kLutBytes =
-      (kIQ4 ? 1024 : 0) + (kIQ3X ? 1024 : 0) + (kIQ3S ? 2048 : 0);
+  constexpr std::size_t kLutBytes = (kIQ4 ? 1024 : 0) +
+                                    (kIQ3X ? 1024 : 0) +
+                                    (kIQ3S ? 2048 : 0) +
+                                    (kIQ2 ? 8192 : 0);
   __shared__ __attribute__((aligned(16)))
       std::uint8_t lds[kLdsBytes + kLutBytes];
   auto* s_codes = reinterpret_cast<uint4*>(lds);
@@ -5524,6 +5529,7 @@ __launch_bounds__(256) __global__
   auto* s_act =
       reinterpret_cast<uint4*>(lds + kCodeBytes + kHighBytes + kScaleBytes);
   auto* s_lut = reinterpret_cast<std::uint32_t*>(lds + kLdsBytes);
+  auto* s_lut64 = reinterpret_cast<std::uint64_t*>(lds + kLdsBytes);
 
   const std::int32_t tile = tiles[blockIdx.y];
   const int expert = tile & 0xFFFF;
@@ -5685,6 +5691,32 @@ __launch_bounds__(256) __global__
               q32.x, q32.y, signs,
               f_live[u] ? dh16 | (nib1 << 16) | (qh << 24) : 0U);
         }
+      } else if constexpr (kIQ2) {
+        // block_iq2_s is 82 bytes. Stage one 32-element sub-block per
+        // chunk: the four grid-index bytes (x), the four sign bytes that
+        // physically overlap qs (y), the qh high-bit byte (z), and the
+        // two sub-block scales (low nibble for groups 0-1, high nibble
+        // for 2-3) pre-multiplied into d as an half2 pair (w).
+        const auto* blk = f_ptr[u] + (((kb0 + f_c) >> 3) * kIq2sBlockBytes);
+        const int ib32 = (kb0 + f_c) & 7;
+        const std::uint32_t dh16 = *reinterpret_cast<const std::uint16_t*>(blk);
+        const float d = __half2float(
+            __builtin_bit_cast(__half, static_cast<std::uint16_t>(dh16)));
+        std::uint32_t qs4 = 0;
+        std::uint32_t sn4 = 0;
+        __builtin_memcpy(&qs4, blk + 2 + 4 * ib32, 4);
+        __builtin_memcpy(&sn4, blk + 34 + 4 * ib32, 4);
+        const std::uint32_t sc = blk[74 + ib32];
+        const std::uint32_t qh = blk[66 + ib32];
+        const __half db_lo = __float2half_rn(d * (0.5F + (sc & 0xFU)) * 0.25F);
+        const __half db_hi = __float2half_rn(d * (0.5F + (sc >> 4)) * 0.25F);
+        f_codes[u] = make_uint4(
+            qs4, sn4, qh,
+            f_live[u]
+                ? static_cast<std::uint32_t>(__half_as_ushort(db_lo)) |
+                      (static_cast<std::uint32_t>(__half_as_ushort(db_hi))
+                       << 16)
+                : 0U);
       } else if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
@@ -5776,7 +5808,7 @@ __launch_bounds__(256) __global__
         // half2 (d, d): the codebook values carry the code itself, so only
         // the block scale remains; the affine bias is unused.
         scale_bias = f_live[u] ? (f_dm[u] | (f_dm[u] << 16)) : 0U;
-      } else if constexpr (kIQ3X || kIQ3S) {
+      } else if constexpr (kIQ3X || kIQ3S || kIQ2) {
         // The sub-block scale travels inside the staged word itself
         // (w), so the shared scale slot stays zero.
         scale_bias = 0U;
@@ -5906,7 +5938,7 @@ __launch_bounds__(256) __global__
             q5_lo = *reinterpret_cast<const uint2*>(blk + 8);
             q5_hi = *reinterpret_cast<const uint2*>(blk + 16);
             scale_bias = r_block + row < m_i ? q5_head.x : 0U;
-          } else if constexpr (!kIQ3X && !kIQ3S) {
+          } else if constexpr (!kIQ3X && !kIQ3S && !kIQ2) {
             scale_bias = s_scale[(kb * BM) + row];
           }
           const __half2 sb = __builtin_bit_cast(__half2, scale_bias);
@@ -5992,6 +6024,42 @@ __launch_bounds__(256) __global__
                                       1U) != 0U
                                    : (((z >> (8 * l)) >> j) & 1U) != 0U;
               v[e] = neg ? -db * mag : db * mag;
+            }
+            __half2 h[16];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+              h[2 * i] = __floats2half2_rn(v[4 * i], v[4 * i + 1]);
+              h[2 * i + 1] = __floats2half2_rn(v[4 * i + 2], v[4 * i + 3]);
+              h[8 + 2 * i] =
+                  __floats2half2_rn(v[16 + 4 * i], v[16 + 4 * i + 1]);
+              h[8 + 2 * i + 1] =
+                  __floats2half2_rn(v[16 + 4 * i + 2], v[16 + 4 * i + 3]);
+            }
+            __builtin_memcpy(&a_lo[u], &h[0], 32);
+            __builtin_memcpy(&a_hi[u], &h[8], 32);
+          } else if constexpr (kIQ2) {
+            // IQ2_S: ten-bit grid index (qs byte plus two qh high bits per
+            // group) selects eight byte magnitudes; signs are one bit per
+            // element in the overlapping y word; the sub-block scale was
+            // pre-multiplied into d at fetch time.
+            const std::uint32_t x = raw[u][kb].x;
+            const std::uint32_t sn = raw[u][kb].y;
+            const std::uint32_t qh = raw[u][kb].z;
+            const __half2 dbs = __builtin_bit_cast(__half2, raw[u][kb].w);
+            float v[32];
+#pragma unroll
+            for (int e = 0; e < 32; ++e) {
+              const int l = (e >> 3) & 3;
+              const int j = e & 7;
+              const std::uint32_t gi = (x >> (8 * l)) & 0xFFU;
+              const std::uint32_t idx =
+                  gi | (((qh << (8 - 2 * l)) & 0x300U));
+              const float mag = static_cast<float>(
+                  (s_lut64[idx] >> (8 * static_cast<std::size_t>(j))) & 0xFFU);
+              const float db =
+                  __half2float(l < 2 ? __low2half(dbs) : __high2half(dbs));
+              v[e] = (((sn >> (8 * l)) >> j) & 1U) != 0U ? -db * mag
+                                                         : db * mag;
             }
             __half2 h[16];
 #pragma unroll
@@ -6118,6 +6186,11 @@ __launch_bounds__(256) __global__
   }
   if constexpr (kIQ3S) {
     for (int i = tid; i < 512; i += 256) s_lut[i] = quant::kIq3sGrid[i];
+  }
+  // IQ2_S: the 1024-entry uint64 grid; each entry supplies the eight
+  // byte magnitudes of one four-bit-plus-two-high-bits index group.
+  if constexpr (kIQ2) {
+    for (int i = tid; i < 1024; i += 256) s_lut64[i] = quant::kIq2sGrid[i];
   }
   fetch_stage(0, 0);
   if constexpr (kPair) {
@@ -6920,6 +6993,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
     case WeightType::kIQ3_S:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kIQ3_S, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
+    case WeightType::kIQ2_S:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ2_S, kBM, BN, kBK>), grid,
           dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
           rows_out, swiglu_gate, out, out_half, m, k, nullptr);
       return true;

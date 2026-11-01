@@ -341,6 +341,29 @@ Experts MakeIQ3_S(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+Experts MakeIQ2_S(std::size_t e, std::size_t m, std::size_t k,
+                  std::uint32_t seed) {
+  Experts w;
+  const std::size_t blocks = e * m * (k / 256);
+  w.packed.resize(blocks * 82);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    auto* blk = reinterpret_cast<gufo::quant::block_iq2_s*>(
+        w.packed.data() + b * 82);
+    const __half ds = __float2half(Uniform(&seed, 0.02F) + 0.03F);
+    std::memcpy(&blk->d, &ds, sizeof(blk->d));
+    for (std::uint8_t& q : blk->qs)
+      q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (std::uint8_t& q : blk->qh)
+      q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (std::uint8_t& s : blk->scales)
+      s = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (int i = 0; i < 256; ++i)
+      w.values[b * 256 + i] = gufo::quant::Iq2SValue(*blk, i);
+  }
+  return w;
+}
+
 struct Result {
   double vs_mmq;
   double vs_ref;
@@ -358,7 +381,9 @@ const char* TypeName(q::WeightType type) {
              ? "IQ4_NL"
              : type == q::WeightType::kIQ3_XXS
                    ? "IQ3_XXS"
-                   : type == q::WeightType::kIQ3_S ? "IQ3_S" : "Q8_0";
+                   : type == q::WeightType::kIQ3_S
+                         ? "IQ3_S"
+                         : type == q::WeightType::kIQ2_S ? "IQ2_S" : "Q8_0";
 }
 
 /// Runs the MMQ tier and the F16 route over the same routing and reports
@@ -379,7 +404,9 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                 ? MakeIQ3_XXS(experts, m, k, seed)
                 : type == q::WeightType::kIQ3_S
                       ? MakeIQ3_S(experts, m, k, seed)
-                      : MakeQ8_0(experts, m, k, seed);
+                      : type == q::WeightType::kIQ2_S
+                            ? MakeIQ2_S(experts, m, k, seed)
+                            : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
   std::vector<std::int32_t> ids(slots);
@@ -427,7 +454,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   // oracle.
   const bool has_mmq = type != q::WeightType::kIQ4_NL &&
                        type != q::WeightType::kIQ3_XXS &&
-                       type != q::WeightType::kIQ3_S;
+                       type != q::WeightType::kIQ3_S &&
+                       type != q::WeightType::kIQ2_S;
   const auto mmq_raw = type == q::WeightType::kQ4_K   ? qfn_mmq_q4_K_moe_raw
                        : type == q::WeightType::kQ5_K ? qfn_mmq_q5_K_moe_raw
                        : type == q::WeightType::kQ5_1 ? qfn_mmq_q5_1_moe_raw
@@ -1384,6 +1412,13 @@ int main() {
                 64)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ3_S, 97, 1, 8, 129, 512, 0x7103B003U, 64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ2_S, 300, 10, 64, 640, 2560, 0x7104A001U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ2_S, 3000, 1, 64, 2560, 768, 0x7104A002U,
+                64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ2_S, 97, 1, 8, 129, 512, 0x7104A003U, 64)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
