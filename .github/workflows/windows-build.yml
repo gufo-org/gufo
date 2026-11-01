@@ -11,6 +11,16 @@ on:
         required: false
         default: ''
         type: string
+      extension-repo:
+        description: External extension repository to build (owner/repo)
+        required: false
+        default: ''
+        type: string
+      extension-ref:
+        description: External extension git ref/commit to check out
+        required: false
+        default: 'main'
+        type: string
     outputs:
       bundle-id:
         description: Windows bundle artifact for model validation
@@ -217,12 +227,26 @@ jobs:
           New-Item -ItemType Directory -Force build/windows-release | Out-Null
           Copy-Item $runtime build/windows-release
 
+      - name: Check out external extension
+        if: ${{ inputs.extension-repo != '' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.extension-repo }}
+          ref: ${{ inputs.extension-ref }}
+          path: external-extension
+          persist-credentials: false
+
       - name: Configure Windows build
         id: configure
+        env:
+          EXTERNAL_EXTENSION_REPO: ${{ inputs.extension-repo }}
         run: |
           $identity = @("-DGUFO_EXTENSIONS_FROM_LOCK=OFF")
           if ($env:GUFO_RELEASE_VERSION) {
             $identity = @("-DGUFO_RELEASE_VERSION=$env:GUFO_RELEASE_VERSION", "-DGUFO_REVISION=$env:GUFO_REVISION", "-DGUFO_EXTENSIONS_FROM_LOCK=ON")
+          }
+          if ($env:EXTERNAL_EXTENSION_REPO) {
+            $identity += "-DGUFO_EXTENSION_DIRS=$PWD/external-extension"
           }
           # ccache cannot cache objects that write a shared /Zi PDB: embed
           # the debug info in each object instead (/Z7).

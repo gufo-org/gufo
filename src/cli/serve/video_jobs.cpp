@@ -24,12 +24,49 @@
 #include <vector>
 
 #include "src/cli/serve/logging.hpp"
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/core/platform/os_info.hpp"
-#include "src/models/minimax_h3/sha256.hpp"
+#include "src/ext/video.hpp"
 
 namespace gufo::server {
 namespace {
+
+std::optional<int> ResolveDurationFrames(std::string_view seconds,
+                                         std::string* error = nullptr) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->resolve_duration_frames) {
+    return provider->resolve_duration_frames(seconds, error);
+  }
+  return std::nullopt;
+}
+
+bool ValidateGenerationParameters(const ext::VideoParameters& parameters,
+                                  std::string* error = nullptr) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->validate_parameters) {
+    return provider->validate_parameters(parameters, error);
+  }
+  return false;
+}
+
+std::string GenerationParametersJson(const ext::VideoParameters& parameters,
+                                     std::uint64_t seed,
+                                     std::string_view prompt_sha256) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->parameters_json) {
+    return provider->parameters_json(parameters, seed, prompt_sha256);
+  }
+  return "{}";
+}
+
+std::string GenerationTelemetryJson(const ext::VideoTelemetry& telemetry) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->telemetry_json) {
+    return provider->telemetry_json(telemetry);
+  }
+  return "{}";
+}
 
 bool IsH3Model(std::string_view model) {
   return model == "minimax-h3" || model == "minimax-h3-exact" ||
@@ -50,7 +87,7 @@ bool ModelMatchesPreset(std::string_view model, std::string_view preset) {
 
 bool MatchesOutputContract(const VideoJobRequest& request) {
   const auto& parameters = request.parameters;
-  const auto frames = minimax_h3::ResolveDurationFrames(request.seconds);
+  const auto frames = ResolveDurationFrames(request.seconds);
   if (!frames || parameters.frames != *frames ||
       !ModelMatchesPreset(request.model, parameters.preset)) {
     return false;
@@ -278,7 +315,7 @@ struct VideoJobService::Impl {
     std::filesystem::path directory;
     std::filesystem::path content_path;
     std::string media_type;
-    minimax_h3::CancellationToken cancellation;
+    std::atomic<bool> cancelled{false};
     bool deleted{false};
     std::string logged_phase;
     int logged_bucket{-1};
@@ -293,7 +330,25 @@ struct VideoJobService::Impl {
       options.now = UnixNow;
     }
     if (!options.runner) {
-      options.runner = minimax_h3::GenerateTextVideo;
+      const auto* provider = ext::FindVideoProvider("minimax-h3");
+      if (provider && provider->create) {
+        std::string create_err;
+        auto video_runner =
+            provider->create(options.model_root.string(), &create_err);
+        if (video_runner) {
+          std::shared_ptr<ext::VideoRunner> shared_runner =
+              std::move(video_runner);
+          options.runner = [shared_runner](const ext::VideoRequest& req,
+                                           const ext::CancellationCheck& check,
+                                           ext::VideoProgress progress,
+                                           void* progress_opaque,
+                                           ext::VideoTelemetry* telem,
+                                           std::string* err) {
+            return shared_runner->Generate(req, check, progress,
+                                           progress_opaque, telem, err);
+          };
+        }
+      }
     }
     if (options.model_root.empty() || options.source_manifest.empty() ||
         options.storage_root.empty() || options.queue_capacity == 0 ||
@@ -310,11 +365,16 @@ struct VideoJobService::Impl {
     }
 #endif
     if (options.validate_model_inventory) {
-      std::string inspection_error;
-      if (!minimax_h3::ModelInventory::Inspect(
-               options.model_root, options.source_manifest, &inspection_error)
-               .has_value()) {
-        initialization_error = std::move(inspection_error);
+      const auto* provider = ext::FindVideoProvider("minimax-h3");
+      std::string resolve_error;
+      if (provider == nullptr ||
+          (provider->resolve &&
+           !provider->resolve(options.model_root.string(),
+                              options.source_manifest.string(),
+                              &resolve_error))) {
+        initialization_error = resolve_error.empty()
+                                   ? "MiniMax H3 model not resolved"
+                                   : std::move(resolve_error);
         return;
       }
     }
@@ -352,10 +412,10 @@ struct VideoJobService::Impl {
       {
         const std::lock_guard<std::mutex> lock(mutex);
         if (active != nullptr) {
-          active->cancellation.Cancel();
+          active->cancelled.store(true, std::memory_order_relaxed);
         }
         for (const auto& job : queue) {
-          job->cancellation.Cancel();
+          job->cancelled.store(true, std::memory_order_relaxed);
           WipeString(&job->request.prompt);
         }
       }
@@ -450,9 +510,8 @@ struct VideoJobService::Impl {
         if (value.member_str("schema") != "gufo.video-job.v1" ||
             !IsVideoId(job->snapshot.id) || job->snapshot.id != directory_id ||
             !IsH3Model(job->snapshot.model) ||
-            !minimax_h3::ResolveDurationFrames(job->snapshot.seconds) ||
-            !valid_output || !valid_numbers ||
-            expires_at <= static_cast<double>(now_value) ||
+            !ResolveDurationFrames(job->snapshot.seconds) || !valid_output ||
+            !valid_numbers || expires_at <= static_cast<double>(now_value) ||
             value.member_str("status") != "completed") {
           std::filesystem::remove_all(entry.path(), filesystem_error);
           filesystem_error.clear();
@@ -582,7 +641,7 @@ struct VideoJobService::Impl {
               " steps=" + std::to_string(job->request.parameters.evaluations) +
               " seed=" + std::to_string(job->request.seed) + " " +
               Logger::MemoryStatus());
-      minimax_h3::GenerationRequest generation{
+      ext::VideoRequest generation{
           .model_root = options.model_root,
           .source_manifest = options.source_manifest,
           .output_path = job->directory / "output.mp4",
@@ -600,15 +659,15 @@ struct VideoJobService::Impl {
         generation.prompt = std::move(job->request.prompt);
         WipeString(&job->request.prompt);
       }
-      const std::string prompt_hash = minimax_h3::Sha256(std::span(
-          reinterpret_cast<const unsigned char*>(generation.prompt.data()),
-          generation.prompt.size()));
+      const std::string prompt_hash =
+          crypto::Sha256Hex(std::span<const std::uint8_t>(
+              reinterpret_cast<const std::uint8_t*>(generation.prompt.data()),
+              generation.prompt.size()));
       std::string metadata_error;
-      if (!WriteAtomic(
-              job->directory / "parameters.json",
-              minimax_h3::GenerationParametersJson(
-                  job->request.parameters, job->request.seed, prompt_hash),
-              &metadata_error)) {
+      if (!WriteAtomic(job->directory / "parameters.json",
+                       GenerationParametersJson(job->request.parameters,
+                                                job->request.seed, prompt_hash),
+                       &metadata_error)) {
         WipeString(&generation.prompt);
         const std::lock_guard<std::mutex> lock(mutex);
         active.reset();
@@ -623,26 +682,29 @@ struct VideoJobService::Impl {
         continue;
       }
       ProgressContext progress{this, job};
-      minimax_h3::GenerationTelemetry telemetry;
+      ext::VideoTelemetry telemetry;
       std::string error;
       bool success = false;
       try {
-        success = options.runner(generation, &job->cancellation, Progress,
-                                 &progress, &telemetry, &error);
+        success = options.runner(
+            generation,
+            [&] { return job->cancelled.load(std::memory_order_relaxed); },
+            Progress, &progress, &telemetry, &error);
       } catch (const std::exception& exception) {
         error = exception.what();
       } catch (...) {
         error = "video generation backend failed unexpectedly";
       }
       WipeString(&generation.prompt);
-      if (!success && !job->cancellation.IsCancelled()) {
+      if (!success && !job->cancelled.load(std::memory_order_relaxed)) {
         Logger::Error("video", "job=" + job->snapshot.id +
                                    " event=backend_failed detail=" + error);
       }
 
       std::filesystem::path content_path;
       std::string media_type;
-      bool output_ready = success && !job->cancellation.IsCancelled();
+      bool output_ready =
+          success && !job->cancelled.load(std::memory_order_relaxed);
       if (output_ready && job->request.output_format == "mp4") {
         content_path = job->directory / "output.mp4";
         media_type = "video/mp4";
@@ -670,7 +732,7 @@ struct VideoJobService::Impl {
       if (output_ready) {
         std::string telemetry_error;
         if (!WriteAtomic(job->directory / "telemetry.json",
-                         minimax_h3::GenerationTelemetryJson(telemetry),
+                         GenerationTelemetryJson(telemetry),
                          &telemetry_error)) {
           output_ready = false;
           storage_failure = true;
@@ -691,7 +753,7 @@ struct VideoJobService::Impl {
           if (output_ready) {
             snapshot.status = VideoJobStatus::kCompleted;
             snapshot.progress = 100;
-          } else if (job->cancellation.IsCancelled()) {
+          } else if (job->cancelled.load(std::memory_order_relaxed)) {
             snapshot.status = VideoJobStatus::kCancelled;
             snapshot.error_code = "cancelled";
             snapshot.error_message = "video generation was cancelled";
@@ -783,7 +845,7 @@ VideoJobCreateResult VideoJobService::Create(const VideoJobRequest& request) {
   if (!IsH3Model(request.model) || request.prompt.empty() ||
       request.prompt.find('\0') != std::string::npos ||
       (request.output_format != "mp4" && request.output_format != "ppm") ||
-      !minimax_h3::ValidateGenerationParameters(request.parameters, nullptr) ||
+      !ValidateGenerationParameters(request.parameters, nullptr) ||
       !MatchesOutputContract(request)) {
     return {.result = VideoJobResult::kInvalid,
             .job = std::nullopt,
@@ -930,7 +992,7 @@ VideoJobLookupResult VideoJobService::Delete(std::string_view id) {
     job = iterator->second;
     snapshot = job->snapshot;
     job->deleted = true;
-    job->cancellation.Cancel();
+    job->cancelled.store(true, std::memory_order_relaxed);
     WipeString(&job->request.prompt);
     was_active = impl_->active == job;
     std::erase(impl_->queue, job);

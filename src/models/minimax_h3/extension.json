@@ -21,13 +21,18 @@
       "model_ids": [
         "minimax-h3"
       ],
-      "target": "gufo_minimax_h3",
+      "target": "gufo_minimax_h3_hip",
       "entry": "minimax_h3_provider_register"
     }
   ],
   "targets": {
     "gufo_minimax_h3": {
       "requires": []
+    },
+    "gufo_minimax_h3_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "packages": [

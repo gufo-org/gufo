@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "src/models/qwen3_asr/audio.hpp"
+#include "src/models/qwen3_asr/transcription.hpp"
 #include "tests/support/model_api_test_support.hpp"
 
 namespace {

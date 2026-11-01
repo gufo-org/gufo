@@ -316,7 +316,7 @@ void TestToolReasoningCheckpoint() {
               {ChatRole::kUser, "Read the fixture."},
               {ChatRole::kAssistant, "", "", thought},
               {ChatRole::kTool, "The fixture is ready."}};
-          messages[1].tool_calls.push_back({"call", "read_fixture", {}});
+          messages[1].tool_calls.push_back({"call", "read_fixture", {}, {}});
           if (images)
             messages[0].images.push_back({0, pixels});
           ChatTemplateOptions options;

@@ -3,6 +3,8 @@
 import copy
 import json
 import os
+import shutil
+import stat
 from pathlib import Path
 import subprocess
 import tempfile
@@ -254,6 +256,214 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         self.configure("-DGUFO_EXTENSIONS=beta", error=f"unavailable on {host}")
         self.lock(["beta"])
         self.configure("-DGUFO_EXTENSIONS=*", "-DGUFO_EXTENSIONS_FROM_LOCK=ON", error=f"unavailable on {host}")
+
+    def test_external_extension_discovery(self):
+        external_dir = Path(self.temporary.name) / "external_model"
+        external_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema": 1,
+            "name": "external_model",
+            "version": "1.0.0",
+            "api_version": ">= 0.1.0",
+            "entry": "external_model_register",
+            "registration_target": "gufo_external_model",
+            "depends": [],
+            "platforms": ["linux", "windows"],
+            "providers": [
+                {
+                    "id": "external-provider",
+                    "capability": "embeddings",
+                    "keys": ["safetensors:external"],
+                    "model_ids": ["external-model"],
+                    "target": "gufo_external_model",
+                    "entry": "external_model_provider_register",
+                }
+            ],
+            "options": [],
+            "targets": {"gufo_external_model": {"requires": []}},
+        }
+        (external_dir / "extension.json").write_text(json.dumps(manifest))
+        (external_dir / "src").mkdir(exist_ok=True)
+        (external_dir / "src/external.cpp").write_text("""#include "gufo/ext/registry.hpp"
+void external_model_provider_register(gufo::ext::Registry&) {}
+void external_model_register(gufo::ext::Registry&) {}
+""")
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_external_model
+  SOURCES src/external.cpp
+  LINK_LIBRARIES gufo_ext_runtime
+)
+""")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}")
+        report = self.run_fixture()
+        self.assertIn("external_model", [e["name"] for e in report["builtExtensions"]])
+
+    def test_external_extension_allowlist_violation(self):
+        external_dir = Path(self.temporary.name) / "bad_ext"
+        external_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema": 1,
+            "name": "bad_ext",
+            "version": "1.0.0",
+            "api_version": ">= 0.1.0",
+            "entry": "bad_ext_register",
+            "registration_target": "gufo_bad_ext",
+            "depends": [],
+            "platforms": ["linux", "windows"],
+            "providers": [
+                {
+                    "id": "bad-provider",
+                    "capability": "embeddings",
+                    "keys": ["safetensors:bad"],
+                    "model_ids": ["bad-model"],
+                    "target": "gufo_bad_ext",
+                    "entry": "bad_ext_provider_register",
+                }
+            ],
+            "options": [],
+            "targets": {"gufo_bad_ext": {"requires": []}},
+        }
+        (external_dir / "extension.json").write_text(json.dumps(manifest))
+        (external_dir / "bad.cpp").write_text("""extern "C" {
+void bad_ext_provider_register(void*) {}
+void bad_ext_register(void*) {}
+}
+""")
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_bad_ext
+  SOURCES bad.cpp
+  LINK_LIBRARIES gufo_core
+)
+""")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}", error="links prohibited target 'gufo_core'")
+
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_bad_ext
+  SOURCES bad.cpp
+  LINK_LIBRARIES gufo_ext_runtime
+)
+target_include_directories(gufo_bad_ext PRIVATE "${PROJECT_SOURCE_DIR}/src")
+""")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}", error="violates include allowlist")
+
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_bad_ext
+  SOURCES bad.cpp
+  LINK_LIBRARIES gufo_ext_runtime
+)
+target_link_libraries(gufo_bad_ext PRIVATE gufo_core)
+""")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}", error="violates allowlist: links prohibited target 'gufo_core'")
+
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_bad_ext
+  SOURCES bad.cpp
+  LINK_LIBRARIES gufo_ext_runtime
+)
+target_compile_options(gufo_bad_ext PRIVATE "-I${PROJECT_SOURCE_DIR}/src/core")
+""")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}", error="violates include allowlist")
+
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_bad_ext
+  SOURCES bad.cpp
+  LINK_LIBRARIES gufo_ext_runtime
+)
+add_library(intermediate STATIC bad.cpp)
+target_link_libraries(intermediate PUBLIC gufo_core)
+target_link_libraries(gufo_bad_ext PRIVATE intermediate)
+""")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}", error="violates allowlist: links prohibited target 'gufo_core'")
+
+    def template(self):
+        external = self.source / "external template"
+        shutil.copytree(ROOT / "examples/extension_template", external)
+        # Nix store fixtures are read-only; the tests mutate their local copy.
+        for path in [external, *external.rglob("*")]:
+            path.chmod(path.stat().st_mode | stat.S_IWUSR)
+        return external
+
+    def test_external_template_public_headers(self):
+        external = self.template()
+        # Exercise forwarding headers with the root include absent.
+        source = external / "src/template_model.cpp"
+        source.write_text('#include <gufo/ext/cache.hpp>\n'
+                          '#include <gufo/ext/json.hpp>\n'
+                          '#include <gufo/ext/platform/fs.hpp>\n' + source.read_text())
+        with (external / "extension.cmake").open("a") as out:
+            out.write('\ntarget_compile_options(gufo_template_model PRIVATE "$<$<CONFIG:Debug>:-Wall>")\n'
+                      'target_include_directories(gufo_template_model PRIVATE '
+                      '"$<BUILD_INTERFACE:${GUFO_EXTENSION_BUILD_ROOT}/src>" '
+                      '"$<INSTALL_INTERFACE:${PROJECT_SOURCE_DIR}/src>")\n')
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
+        self.run_fixture()
+        commands = json.loads((self.build / "compile_commands.json").read_text())
+        # CMake uses forward slashes even when Python spells Windows paths with
+        # backslashes. Resolve relative database paths against their build dir.
+        command = next(c["command"] for c in commands
+                       if (Path(c["directory"]) / c["file"]).resolve() == source.resolve())
+        self.assertNotIn(f'-I{ROOT} ', command)
+        self.assertNotIn(f'-I{self.source} ', command)
+        # A private header outside the API SURFACE must fail to compile.
+        source.write_text('#include "src/core/logging/trace.hpp"\n' + source.read_text())
+        result = subprocess.run(["cmake", "--build", str(self.build), "--target", "gufo_template_model"],
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("src/core/logging/trace.hpp", result.stdout)
+
+    def test_external_settings_validation(self):
+        external = self.template()
+        manifest = external / "extension.cmake"
+        original = manifest.read_text()
+        target = "gufo_template_model"
+        cases = [
+            (f'target_link_libraries({target} PRIVATE "$<LINK_ONLY:gufo_core>")', "links prohibited target"),
+            (f'target_link_libraries({target} PRIVATE "$<BUILD_INTERFACE:$<LINK_ONLY:gufo_core>>")', "links prohibited target"),
+            (f'target_link_libraries({target} PRIVATE "$<$<CONFIG:Release>:gufo_core>")', "links prohibited target"),
+            (f'target_link_libraries({target} PRIVATE "$<TARGET_NAME_IF_EXISTS:gufo_core>")', "unvalidated generator expression"),
+            (f'target_include_directories({target} PRIVATE "$<BUILD_INTERFACE:${{PROJECT_SOURCE_DIR}}/src>")', "violates include allowlist"),
+            (f'target_include_directories({target} PRIVATE "$<$<CONFIG:Debug>:${{PROJECT_SOURCE_DIR}}>")', "violates include allowlist"),
+            (rf'target_compile_options({target} PRIVATE "SHELL:-isystem \"${{PROJECT_SOURCE_DIR}}/src\"")', "violates include allowlist"),
+            (f'target_compile_options({target} PRIVATE -I "${{PROJECT_SOURCE_DIR}}/src")', "violates include allowlist"),
+            (f'target_compile_options({target} PRIVATE "/external:I${{PROJECT_SOURCE_DIR}}/src")', "violates include allowlist"),
+            (f'target_compile_options({target} PRIVATE "/clang:-I${{PROJECT_SOURCE_DIR}}/src")', "violates include allowlist"),
+            (r'set(CMAKE_CXX_FLAGS "-I\"${PROJECT_SOURCE_DIR}/src\"")', "violates include allowlist"),
+            (r'set(CMAKE_CXX_FLAGS_RELEASE "-isystem \"${PROJECT_SOURCE_DIR}/src\"")', "violates include allowlist"),
+            ('set(CMAKE_HIP_FLAGS_CUSTOM "-I${PROJECT_SOURCE_DIR}/src")', "violates include allowlist"),
+            ('set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/src")', "violates include allowlist"),
+            (f'set_target_properties({target} PROPERTIES COMPILE_FLAGS "-Wall -I${{PROJECT_SOURCE_DIR}}/src")', "violates include allowlist"),
+            ('set_source_files_properties("${GUFO_EXTENSION_BUILD_ROOT}/src/template_model.cpp" PROPERTIES COMPILE_OPTIONS "-I${PROJECT_SOURCE_DIR}/src")', "violates include allowlist"),
+            ('set_source_files_properties("${GUFO_EXTENSION_BUILD_ROOT}/src/template_model.cpp" PROPERTIES COMPILE_FLAGS "-Wall -I${PROJECT_SOURCE_DIR}/src")', "violates include allowlist"),
+            ('set_source_files_properties("${GUFO_EXTENSION_BUILD_ROOT}/src/template_model.cpp" PROPERTIES INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}")', "violates include allowlist"),
+            (f'add_library(helper INTERFACE)\ntarget_include_directories(helper INTERFACE "${{PROJECT_SOURCE_DIR}}")\ntarget_link_libraries({target} PRIVATE helper)', "violates include allowlist"),
+            (f'add_library(helper INTERFACE)\ntarget_compile_options(helper INTERFACE "-I${{PROJECT_SOURCE_DIR}}/src")\ntarget_link_libraries({target} PRIVATE helper)', "violates include allowlist"),
+            (f'add_library(gufo_core INTERFACE)\nadd_library(hidden_core ALIAS gufo_core)\ntarget_link_libraries({target} PRIVATE hidden_core)', "links prohibited target"),
+            ('add_library(helper STATIC "${GUFO_EXTENSION_BUILD_ROOT}/src/template_model.cpp")\ntarget_include_directories(helper PRIVATE "${PROJECT_SOURCE_DIR}/src")', "violates include allowlist"),
+            (f'target_include_directories({target} PRIVATE "${{PROJECT_SOURCE_DIR}}/src/../src/core")', "violates include allowlist"),
+        ]
+        if os.name != "nt":
+            (self.source / "private-link").symlink_to(self.source / "src", target_is_directory=True)
+            cases.append((f'target_include_directories({target} PRIVATE "${{PROJECT_SOURCE_DIR}}/private-link")',
+                          "violates include allowlist"))
+        relative = os.path.relpath(self.source / "src", self.build).replace(os.sep, "/")
+        cases.append((f'target_compile_options({target} PRIVATE "-I{relative}")', "violates include allowlist"))
+        for cmake, error in cases:
+            with self.subTest(cmake=cmake):
+                manifest.write_text(original + "\n" + cmake + "\n")
+                self.configure(f"-DGUFO_EXTENSION_DIRS={external}", error=error)
+
+    def test_external_parent_flags_and_late_mutations(self):
+        external = self.template()
+        for flag in ("CMAKE_CXX_FLAGS", "CMAKE_CXX_FLAGS_DEBUG"):
+            with self.subTest(flag=flag):
+                self.configure(f"-DGUFO_EXTENSION_DIRS={external}",
+                               f"-D{flag}=-I{self.source}/src", error="violates include allowlist")
+                # Each flag is inherited from the cache; clear it for the next case.
+                self.configure(f"-D{flag}=")
+        with (self.source / "CMakeLists.txt").open("a") as out:
+            out.write('\ntarget_include_directories(gufo_template_model PRIVATE "${PROJECT_SOURCE_DIR}")\n')
+        self.configure(error="violates include allowlist")
+
 
 
 if __name__ == "__main__":

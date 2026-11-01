@@ -510,6 +510,17 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
               "video overflow_strategy must be uniform or truncate",
               "invalid_video_options");
         options.video.truncate_overflow = value.str() == "truncate";
+      } else if (key == "max_soft_tokens") {
+        const auto budget = value.as_size(0);
+        if (!value.is_number() ||
+            value.as_double() != static_cast<double>(budget) ||
+            !(budget == 70 || budget == 140 || budget == 280 || budget == 560 ||
+              budget == 1120))
+          return BadRequest(
+              "video max_soft_tokens must be one of 70, 140, 280, 560, or "
+              "1120",
+              "invalid_video_options");
+        options.video.max_soft_tokens = static_cast<std::uint32_t>(budget);
       } else
         return BadRequest("unsupported video option: " + key,
                           "invalid_video_options");

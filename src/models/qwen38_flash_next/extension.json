@@ -23,7 +23,7 @@
       "speculative": [
         "mtp"
       ],
-      "target": "gufo_qwen38_flash_next",
+      "target": "gufo_qwen38_flash_next_hip",
       "entry": "qwen38_flash_next_provider_register"
     }
   ],
@@ -45,6 +45,11 @@
   "targets": {
     "gufo_qwen38_flash_next": {
       "requires": []
+    },
+    "gufo_qwen38_flash_next_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "production_paths": {

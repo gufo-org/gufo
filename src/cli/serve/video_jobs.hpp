@@ -11,7 +11,7 @@
 #include <string>
 #include <string_view>
 
-#include "src/models/minimax_h3/generation.hpp"
+#include "src/ext/video.hpp"
 
 namespace gufo::server {
 
@@ -41,7 +41,7 @@ struct VideoJobRequest {
   std::string size{"512x512"};
   std::string seconds{"1"};
   std::string output_format{"mp4"};
-  minimax_h3::GenerationParameters parameters;
+  ext::VideoParameters parameters;
   std::uint64_t seed{42};
 };
 
@@ -75,10 +75,9 @@ struct VideoJobServiceOptions {
   bool validate_model_inventory{true};
   std::function<std::string()> id_factory;
   std::function<std::int64_t()> now;
-  std::function<bool(const minimax_h3::GenerationRequest&,
-                     const minimax_h3::CancellationToken*,
-                     minimax_h3::GenerationProgress, void*,
-                     minimax_h3::GenerationTelemetry*, std::string*)>
+  std::function<bool(const ext::VideoRequest&, const ext::CancellationCheck&,
+                     ext::VideoProgress, void*, ext::VideoTelemetry*,
+                     std::string*)>
       runner;
 };
 

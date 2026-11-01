@@ -80,29 +80,10 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  if (runner.InitialOutputState(request) ==
-      TextGenerationBackend::InitialOutputState::kReasoning)
+  if (runner.InitialOutputState(request) == ext::InitialOutputState::kReasoning)
     grammar = sampling::JsonConstraint::WithReasoning(grammar);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
-}
-
-std::optional<TextRunnerRamCacheOptions> ParseRamCacheOption(
-    std::string_view text, std::string* error) {
-  if (text == "off")
-    return TextRunnerRamCacheOptions{.enabled = false};
-  std::size_t bytes = 0;
-  const auto end = text.data() + text.size();
-  const auto parsed = std::from_chars(text.data(), end, bytes);
-  if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != end) {
-    if (error)
-      *error =
-          "--cache-ram-bytes must be off or a byte count (0 = auto), "
-          "not '" +
-          std::string(text) + "'";
-    return std::nullopt;
-  }
-  return TextRunnerRamCacheOptions{.capacity_bytes = bytes};
 }
 
 namespace {
@@ -433,109 +414,6 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
 
 }  // namespace
 
-void TextModelRunner::AdvanceBatch(
-    std::span<const TextRunnerAdvance> advances) const {
-  for (const auto& advance : advances) {
-    try {
-      Advance(advance.state.get(), advance.token);
-    } catch (...) {
-      if (!advance.failure)
-        throw;
-      *advance.failure = std::current_exception();
-    }
-  }
-}
-
-TextDecodeStep TextModelRunner::DecodeStep(
-    TextRunnerState& state, std::size_t max_tokens,
-    sampling::SamplerState& sampler) const {
-  if (max_tokens == 0) {
-    throw std::invalid_argument(
-        "text runner decode step budget must be at least one token");
-  }
-  auto selection = SelectNext(state, sampler);
-  if (selection.stop) {
-    return {
-        .selections = {},
-        .draft_tokens = 0,
-        .draft_accepted_tokens = 0,
-        .stop = true,
-        .terminal_logprobs = std::move(selection.logprobs),
-    };
-  }
-  const TextRunnerToken token = selection.token;
-  Advance(state, token);
-  return {
-      .selections = {std::move(selection)},
-  };
-}
-
-std::vector<TextDecodeStep> TextModelRunner::DecodeBatch(
-    std::span<const TextRunnerDecode> decodes) const {
-  std::vector<TextDecodeStep> steps;
-  steps.reserve(decodes.size());
-  for (const auto& decode : decodes) {
-    try {
-      steps.push_back(DecodeStep(decode.state.get(), decode.max_tokens,
-                                 decode.sampler.get()));
-    } catch (...) {
-      TextDecodeStep failed;
-      failed.failure = std::current_exception();
-      steps.push_back(std::move(failed));
-    }
-  }
-  return steps;
-}
-
-std::unique_ptr<TextRunnerSnapshot> TextModelRunner::Snapshot(
-    const TextRunnerState&) const {
-  throw std::logic_error("text runner does not support snapshots");
-}
-
-std::unique_ptr<TextRunnerSnapshot> TextModelRunner::SnapshotForPersistence(
-    const TextRunnerState& state) const {
-  return Snapshot(state);
-}
-
-std::size_t TextModelRunner::SnapshotPayloadBytes(
-    const TextRunnerState&) const {
-  throw std::logic_error("text runner does not support snapshot sizing");
-}
-
-void TextModelRunner::RestoreOrFork(TextRunnerState&,
-                                    const TextRunnerSnapshot&) const {
-  throw std::logic_error("text runner does not support snapshot restore/fork");
-}
-
-std::size_t TextModelRunner::PersistentSnapshotPayloadBytes(
-    const TextRunnerSnapshot&) const {
-  throw std::logic_error("text runner does not support persistent snapshots");
-}
-
-std::size_t TextModelRunner::SerializePersistentSnapshot(
-    const TextRunnerSnapshot&, std::span<std::uint8_t>) const {
-  throw std::logic_error("text runner does not support persistent snapshots");
-}
-
-void TextModelRunner::RestorePersistentSnapshot(
-    TextRunnerState&, std::span<const std::uint8_t>) const {
-  throw std::logic_error("text runner does not support persistent snapshots");
-}
-
-std::unique_ptr<ComponentCacheResources>
-TextModelRunner::CreateComponentCacheResources(cache::ResourceLedger&,
-                                               std::size_t) const {
-  throw std::logic_error("text runner has no component cache provider");
-}
-std::unique_ptr<TextRunnerState> TextModelRunner::BindComponentState(
-    cache::Adapter&, cache::Slot&) const {
-  throw std::logic_error("text runner has no component execution facade");
-}
-void TextModelRunner::ReconcileComponentState(TextRunnerState&,
-                                              std::size_t) const {
-  throw std::logic_error("text runner has no component position binding");
-}
-
 struct TextRunnerPool::Impl {
   static constexpr std::size_t kIntermediateCheckpoints = 4;
   Impl(std::shared_ptr<TextModelRunner> model_runner, std::size_t state_count,
@@ -632,91 +510,6 @@ struct TextRunnerPool::Impl {
   std::size_t shared_prefix_min_tokens{0};
   std::size_t shared_prefix_max_boundaries{0};
 };
-
-std::shared_ptr<const sampling::TokenConstraint>
-TextModelRunner::BindConstraint(
-    std::shared_ptr<const sampling::JsonConstraint> grammar) const {
-  const std::lock_guard lock(constraint_mutex_);
-  for (const auto& binding : constraints_)
-    if (binding->grammar == grammar)
-      return binding;
-  if (!constraint_vocabulary_)
-    constraint_vocabulary_ = BuildConstraintVocabulary();
-  if (!constraint_vocabulary_)
-    throw std::invalid_argument("model does not support structured output");
-  auto binding = std::make_shared<sampling::TokenConstraint>();
-  binding->grammar = std::move(grammar);
-  binding->vocabulary = constraint_vocabulary_;
-  if (constraints_.size() >= 4)
-    constraints_.erase(constraints_.begin());
-  constraints_.push_back(binding);
-  return binding;
-}
-
-std::size_t TextModelRunner::PrepareConstraintVocabulary() const {
-  const std::lock_guard lock(constraint_mutex_);
-  if (!constraint_vocabulary_)
-    constraint_vocabulary_ = BuildConstraintVocabulary();
-  return constraint_vocabulary_ ? constraint_vocabulary_->size() : 0;
-}
-
-std::shared_ptr<const sampling::ReasoningBudget>
-TextModelRunner::BuildReasoningBudget(
-    std::size_t tokens, std::span<const TextRunnerToken> prompt) const {
-  const auto tags = ReasoningBudgetTags();
-  const auto start = TokenizeControl(tags.start);
-  auto forced = TokenizeControl(tags.forced_end);
-  if (start.size() != 1 || forced.empty())
-    return nullptr;
-  auto budget = std::make_shared<sampling::ReasoningBudget>();
-  budget->tokens = tokens;
-  budget->forced.assign(forced.begin(), forced.end());
-  for (const auto end : tags.ends) {
-    const auto token = TokenizeControl(end);
-    if (token.size() != 1)
-      return nullptr;
-    budget->ends.push_back(token.front());
-  }
-  // llama.cpp counts the generation prompt after the start tag, such as the
-  // newline after Qwen's <think>.
-  const auto opened =
-      std::ranges::find(prompt.rbegin(), prompt.rend(), start.front());
-  if (opened != prompt.rend())
-    budget->prompt.assign(opened.base(), prompt.end());
-  const std::lock_guard lock(constraint_mutex_);
-  if (!partial_utf8_ && VocabularySize() != 0) {
-    auto partial = std::make_shared<std::vector<bool>>(VocabularySize());
-    for (TextRunnerToken token = 0; token < partial->size(); ++token) {
-      // As llama.cpp common_utf8_is_complete: the last lead byte within the
-      // final four bytes must have all of its continuation bytes.
-      const auto text = Decode(std::span(&token, 1));
-      bool complete = text.empty();
-      for (std::size_t i = 1; i <= std::min<std::size_t>(4, text.size()); ++i) {
-        const auto byte = static_cast<unsigned char>(text[text.size() - i]);
-        if ((byte & 0xC0U) != 0x80U) {
-          complete = i >= (byte >= 0xF0U   ? 4U
-                           : byte >= 0xE0U ? 3U
-                           : byte >= 0xC0U ? 2U
-                                           : 1U);
-          break;
-        }
-      }
-      (*partial)[token] = !complete;
-    }
-    partial_utf8_ = std::move(partial);
-  }
-  budget->partial_utf8 = partial_utf8_;
-  return budget;
-}
-
-void TextModelRunner::StreamPersistentSnapshot(
-    const TextRunnerSnapshot& snapshot, const SnapshotSink& sink) const {
-  std::vector<std::uint8_t> payload(PersistentSnapshotPayloadBytes(snapshot));
-  if (SerializePersistentSnapshot(snapshot, payload) != payload.size()) {
-    throw std::runtime_error("persistent snapshot byte count mismatch");
-  }
-  sink(payload);
-}
 
 struct TextRunnerPool::Request::Impl {
   Impl(std::shared_ptr<TextModelRunner> model_runner,

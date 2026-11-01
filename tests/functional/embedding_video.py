@@ -137,6 +137,15 @@ def main():
                 vec = body['data'][0]['embedding']
                 assert len(vec) == dimensions and abs(sum(v*v for v in vec)-1) < 1e-5
                 assert cosine(vec, cases['short']['embedding'][:dimensions]) >= 0.9999
+            # Matryoshka truncation at a non-default video budget.
+            budgeted = cases['budget_560']
+            for dimensions in (128, 256, 512):
+                status, body = post([content(budgeted)], dimensions=dimensions,
+                                    video_options=budgeted['options'])
+                assert status == 200, body
+                vec = body['data'][0]['embedding']
+                assert len(vec) == dimensions and abs(sum(v*v for v in vec)-1) < 1e-5
+                assert cosine(vec, budgeted['embedding'][:dimensions]) >= 0.9999
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 replies = list(pool.map(lambda _: post([content(cases['short'])]), range(2)))
             for status, body in replies:
@@ -167,6 +176,11 @@ def main():
                 assert status == 400 and body['error']['code'] == 'invalid_video_input', (name, body)
             limited = {'content': [content(cases['overflow'])['content'][0]] * 3}
             status, body = post([limited])
+            assert status == 400 and body['error']['code'] == 'invalid_video_input', body
+            # 32 frames at the 1120-token budget exceed the request's 8,960
+            # video soft tokens, though they are within the 64-frame cap.
+            status, body = post([content(cases['overflow'])],
+                                video_options={'max_soft_tokens': 1120})
             assert status == 400 and body['error']['code'] == 'invalid_video_input', body
             too_long = content(cases['overflow'])
             too_long['content'].insert(0, {'type': 'text', 'text': 'hello '*8500})

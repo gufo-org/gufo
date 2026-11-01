@@ -10,8 +10,11 @@
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/core/gguf_identity.hpp"
 #include "src/core/image.hpp"
+#include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/runner.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/runner.hpp"
 #include "tests/support/temporary_directory.hpp"
 
 namespace {
@@ -394,10 +397,29 @@ int main(int argc, char** argv) {
       auto mode_cache = cache;
       if (!use_spec)
         mode_cache.draft_model_artifact_fingerprint.clear();
-      const bool loaded = flash ? backend->load(qfn, &error, context, 4, {}, {},
-                                                mode, mode_cache)
-                                : backend->load(qwen, &error, context, 4, {},
-                                                {}, mode, mode_cache);
+      std::shared_ptr<ext::TextModelRunner> runner;
+      if (flash) {
+        runner = models::qwen38_flash_next::CreateQwenFlashNextTextRunner(
+            qfn, context, mode, mode_cache.model_artifact_fingerprint,
+            mode_cache.draft_model_artifact_fingerprint, 4);
+      } else {
+        std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;
+        speculative::SpeculativeOptions spec_opts;
+        if (mode.backend == server::TextSpeculativeBackend::kDFlash) {
+          std::string err;
+          dflash_model =
+              hip::QwenDFlashGpuModel::Open(mode.draft_model_path, &err);
+          Require(dflash_model != nullptr, err);
+          spec_opts.max_draft_tokens = mode.max_draft_tokens;
+          spec_opts.min_draft_tokens = mode.min_draft_tokens;
+        }
+        runner = models::qwen::CreateQwenTextRunner(
+            qwen, context, dflash_model, spec_opts, mode.dflash_policy,
+            mode_cache.model_artifact_fingerprint,
+            mode_cache.draft_model_artifact_fingerprint);
+      }
+      Require(runner != nullptr, "failed to create runner");
+      const bool loaded = backend->load(runner, &error, 4, {}, {}, mode_cache);
       Require(loaded, error);
       return backend;
     };

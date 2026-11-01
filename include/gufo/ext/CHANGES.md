@@ -1,5 +1,69 @@
 # Extension API changes
 
+## 0.1.10
+
+Support external extension source trees and build sandboxing (Card 23):
+- Out-of-tree discovery: `GUFO_EXTENSION_DIRS` CMake discovery and Nix `extensions` argument.
+- Configure-time include allowlist: external extension targets are isolated to public headers under `<gufo/ext/...>` and prohibited from linking internal private libraries or including private repository paths.
+- Runtime usage requirements expose only public headers and their audited `SURFACE` closure, without a repository-root include. External validation also checks inherited language/configuration flags, source settings, dependency interfaces, aliases and supported generator expressions; unvalidated expressions are rejected.
+- Template blueprint: `examples/extension_template/` provides reference manifests and source layout.
+
+## 0.1.9
+
+Embeddings (`embeddings.hpp`): `EmbeddingVideoOptions` gains
+`max_soft_tokens`, the per-frame vision budget (default
+`kDefaultVideoSoftTokens`, 140), and `kMaxVideoSoftTokens` bounds a request's
+video soft tokens. Additive; extensions that aggregate-initialize
+`EmbeddingVideoOptions` positionally keep the default.
+
+## 0.1.8
+
+Publish capability-neutral text generation contracts and registries:
+- Runner descriptors declare their sampling preset so omitted HTTP settings
+  retain model-specific defaults after extension loading.
+- Text (`include/gufo/ext/text.hpp`, `src/ext/text.hpp`):
+  `TextRunnerToken`, `TextPromptContext`, `TextPreparedPrompt`,
+  `TextRunnerRamCacheOptions`, `TextRunnerDiskCacheOptions`,
+  `TextExecutionPlanKind`, `TextExecutionPlan`, `TextRunnerCapabilities`,
+  `TextRunnerPersistenceDescriptor`, `TextRunnerDescriptor`,
+  `TextRunnerResourceClaim`, `TextRunnerMeasuredResources`,
+  `TextPrefillStep`, `TextRunnerNgramRows`, `TextDecodeSelection`,
+  `TextDecodeStep`, `TextRunnerState`, `TextRunnerSnapshot`,
+  `TextRunnerAdvance`, `TextRunnerDecode`, `InitialOutputState`,
+  `ChatRole`, `ChatMessage`, `ChatTool`, `ChatRequest`,
+  `TextModelRunner`, `TextRunner`, `HipTextModelRunner`,
+  `TextRunnerOptions`, `TextProvider`,
+  `RegisterTextProvider`, `FindTextProvider`, `ProbeTextProvider`,
+  `Registry::AddTextProvider`.
+- Tool Dialect (`src/ext/text.hpp`):
+  `ToolDialect`, `RegisterToolDialect`, `FindToolDialect`, `AllToolDialects`.
+- Extension migrations for Cards 20–22: Qwen 27B (`qwen`),
+  Qwen3.8 Flash-Next (`qwen38_flash_next`), and DeepSeek V4 Flash (`deepseek_v4_flash`).
+
+## 0.1.7
+
+Sampling (`sampling.hpp`): `SamplerState` keeps a private `LogitRowScratch`
+for the block-maxima top-p/top-k sampler. Source compatible; extensions that
+embed `SamplerState` rebuild.
+
+## 0.1.6
+
+Publish capability-neutral contracts and provider registries:
+- ASR (`include/gufo/ext/asr.hpp`): `AsrSegment`, `AsrProgress`, `AsrRunner`, `AsrProvider`,
+  `RegisterAsrProvider`, `FindAsrProvider`, `ProbeAsrProvider`, `Registry::AddAsrProvider`.
+- TTS (`include/gufo/ext/tts.hpp`): `TtsAudioFormat`, `TtsAudioChunk`, `TtsProgress`,
+  `TtsRunner`, `TtsProvider`, `RegisterTtsProvider`, `FindTtsProvider`, `ProbeTtsProvider`,
+  `Registry::AddTtsProvider`.
+- Video (`include/gufo/ext/video.hpp`): `VideoParameters`, `VideoRequest`, `VideoTelemetry`,
+  `VideoRunner`, `VideoProvider`, `RegisterVideoProvider`, `FindVideoProvider`, `ProbeVideoProvider`,
+  `Registry::AddVideoProvider`.
+- Image (`include/gufo/ext/image.hpp`): Provider registration and discovery functions
+  `RegisterImageProvider`, `FindImageProvider`, `ProbeImageProvider`, `Registry::AddImageProvider`.
+- Platform Process (`include/gufo/ext/platform/process.hpp`): Subprocess execution contracts
+  `RunMediaMux`, `RunCapture`.
+- Extension migrations for Cards 15–18: Qwen3-ASR (`qwen3_asr`), Qwen3-TTS (`qwen3_tts`),
+  Qwen-Image-2.1 (`qwen_image_21`), MiniMax H3 (`minimax_h3`).
+
 ## 0.1.5
 
 Accept every GGML block format (`gguf_reader.hpp`, `experimental/ggml_dequant.hpp`):
@@ -15,7 +79,6 @@ Accept every GGML block format (`gguf_reader.hpp`, `experimental/ggml_dequant.hp
 Discover metadata-only extensions without selecting them for builds when
 `extension.cmake` is absent. Explicit selection still requires that file;
 excluded extension provenance reports `metadata only`.
-
 ## 0.1.3
 
 Publish capability-neutral embedding contracts (`include/gufo/ext/embeddings.hpp`):

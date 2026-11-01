@@ -1,0 +1,239 @@
+Cards 19–22 Verification Evidence: Build and Tests
+Executed on: Linux x86_64 Strix Halo gfx1151
+Workspace: /home/mixer/gufo
+
+================================================================================
+Gate 1: Infrastructure Generator Check
+================================================================================
+Command:
+python3 tools/ci/generate-infrastructure.py --check
+
+Output:
+PASS: Infrastructure files are up to date with model metadata.
+
+Exit Code: 0
+Disposition: PASS
+
+================================================================================
+Gate 2: Infrastructure Generator Unit Tests
+================================================================================
+Command:
+python3 -m unittest tests/tools/generate_infrastructure_test.py
+
+Output:
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.032s
+
+OK
+
+Exit Code: 0
+Disposition: PASS (9/9 tests passed)
+
+================================================================================
+Gate 3: Extension Manifest Schema Validation
+================================================================================
+Command:
+nix develop -c python3 tests/extensions/metadata_test.py --schema
+
+Output:
+test_full_schema (__main__.SchemaTests.test_full_schema) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.081s
+
+OK
+
+Exit Code: 0
+Disposition: PASS
+
+================================================================================
+Gate 4: Documentation Check
+================================================================================
+Command:
+python3 tools/ci/check-docs.py
+
+Output:
+[check-docs] PASSED: 323 markdown files and 1609 local links/anchors verified with zero broken links or invalid JSON blocks.
+
+Exit Code: 0
+Disposition: PASS
+
+================================================================================
+Gate 5: Code Formatting Check
+================================================================================
+Command:
+nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+
+Output:
+PASS: Checked 848 C++ files
+
+Exit Code: 0
+Disposition: PASS
+
+================================================================================
+Gate 6: Extension Isolation Unit Tests
+================================================================================
+Command:
+python3 -m unittest tests/tools/check_extension_isolation_test.py
+
+Output:
+...........................
+----------------------------------------------------------------------
+Ran 27 tests in 23.169s
+
+OK
+
+Exit Code: 0
+Disposition: PASS (27/27 tests passed)
+
+================================================================================
+Gate 7: Extension Isolation Static Boundary Check
+================================================================================
+Command:
+python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes
+
+Output:
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: model core boundary (no production src/models -> src/core|src/cache includes)
+[check-extension-isolation] PASS: extension boundary (no src/cli -> migrated extension includes)
+
+Exit Code: 0
+Disposition: PASS (0 boundary violations)
+
+================================================================================
+Gate 8: Continuation Identity Unit Tests
+================================================================================
+Command:
+nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure
+
+Output:
+Test project /home/mixer/gufo/build/cpu-test
+    Start 141: qwen27b_continuation_identity_test
+1/3 Test #141: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 155: deepseek_v4_flash_continuation_identity_test
+2/3 Test #155: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 161: qwen38_flash_next_continuation_identity_test
+3/3 Test #161: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 3
+
+Exit Code: 0
+Disposition: PASS (3/3 tests passed)
+
+================================================================================
+Gate 9: Hosted PR Test Suite (`check-pr`)
+================================================================================
+Command:
+nix develop -c cmake --build --preset cpu-test --target check-pr
+
+Output:
+100% tests passed out of 96
+
+Total Test time (real) = 169.00 sec
+
+Exit Code: 0
+Disposition: PASS (96/96 tests passed)
+
+================================================================================
+Gate 10: Hermetic Hosted CPU & Repository Checks (`.#checks.x86_64-linux.pr`)
+================================================================================
+Command:
+nix build .#checks.x86_64-linux.pr --no-link
+
+Output:
+these 4 derivations will be built:
+  /nix/store/flwmf7s77af4wcq8g0dx9zxfy4ncmsj0-check-format.drv
+  /nix/store/rglv2gl82rfm7w8frfxr36vxy0bgdfwx-check-pr-tests.drv
+  /nix/store/sk2w82vc9wfwdl6f5radxi99yn63578i-check-docs.drv
+  /nix/store/4pn5m8j2jmk1bkr5yzxij7zzgjzr2axr-check-pr.drv
+
+Exit Code: 0
+Disposition: PASS (4/4 derivations built successfully)
+
+================================================================================
+Gate 11: Production Package Build & Device Diagnostics (`nix build`)
+================================================================================
+Command:
+nix build && ./result/bin/gufo diagnose
+
+Output:
+  ,___,   gufo development
+  (◉,◉)   Fast LLM & DiT inference · gfx1151
+=== Gufo Diagnostics ===
+Engine Revision : 0.1.0
+Schema Version  : 1.0.0
+Timestamp       : 2026-11-01T17:15:19Z
+Overall Status  : [PASS]
+
+=== Machine Fingerprint ===
+Fingerprint ID      : 80a06f3fcc3e8535b201f8261de2610a10506a9be76602e1e51062703e984f0a
+Target Platform     : x86_64-linux (Linux 7.2.9)
+CPU Model           : AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (32 threads)
+GPU Architecture    : AMD Radeon 8060S Graphics [gfx1151, 20 CUs]
+Pinned Toolchain    : ROCm 10.1.0
+
+=== Hardware and Software Inventory ===
+
+CPU Model           : AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (32 threads, x86_64)
+System Memory       : 125 GiB (LPDDR5X (Unified))
+GPU Model           : AMD Radeon 8060S Graphics [gfx1151, 20 CUs] (available)
+Linux Kernel        : 7.2.9
+ROCm Version        : 10.1.0
+
+=== Compatibility Verdict: [supported] ===
+
+  - platform [supported]
+      Detected   : x86_64-linux
+      Required   : x86_64-linux or x86_64-windows
+  - gpu [supported]
+      Detected   : gfx1151
+      Required   : gfx1151
+  - kernel_driver [supported]
+      Detected   : amdgpu: loaded
+      Required   : amdgpu: loaded
+
+--- Checks ---
+  [PASS] platform: Supported architecture: Linux x86-64
+      - targetArchitecture: x86_64-linux
+  [PASS] system: Host operating system and kernel identified
+      - kernelRelease: 7.2.9
+      - osName: Linux
+  [PASS] cpu: CPU processor topology queried
+      - logicalCores: 32
+      - modelName: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+      - physicalCores: 16
+  [PASS] memory: Host unified memory pool identified
+      - availableBytes: 117430333440
+      - memoryType: LPDDR5X (Unified)
+      - totalBytes: 134309642240
+  [PASS] gpu: Detected AMD Strix Halo GPU (gfx1151)
+      - architecture: gfx1151
+      - computeUnits: 20
+      - driverName: amdgpu
+      - name: AMD Radeon 8060S Graphics
+      - pciId: 1002:1586
+      - powerMode: auto
+  [PASS] toolchain: Toolchain and driver stack verified
+      - amdgpuStatus: loaded
+      - kernelRelease: 7.2.9
+      - rocmVersion: 10.1.0
+Extension API: 0.1.6
+Extension selection: discovery
+Built extensions:
+  deepseek_v4_flash 0.1.0 (src/models/deepseek_v4_flash)
+  embedding_gemma2 0.1.0 (src/models/embedding_gemma2)
+  minimax_h3 0.1.0 (src/models/minimax_h3)
+  qwen 0.1.0 (src/models/qwen)
+  qwen38_flash_next 0.1.0 (src/models/qwen38_flash_next)
+  qwen3_asr 0.1.0 (src/models/qwen3_asr)
+  qwen3_tts 0.1.0 (src/models/qwen3_tts)
+  qwen_image_21 0.1.0 (src/models/qwen_image_21)
+  provider embeddinggemma-2: available
+  provider minimax-h3: available
+  provider qwen3-asr: available
+  provider qwen3-tts: available
+  provider qwen-image-21: available
+
+Exit Code: 0
+Disposition: PASS

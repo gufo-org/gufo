@@ -2,7 +2,7 @@
 # it compiles continuation_identity.cpp itself for its own fixture path and
 # a HIP-free compile, instead of linking gufo_serving.
 add_executable(deepseek_v4_flash_continuation_identity_test continuation_identity_test.cpp
-  ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp)
+  ${PROJECT_SOURCE_DIR}/src/models/deepseek_v4_flash/continuation_identity.cpp)
 target_include_directories(deepseek_v4_flash_continuation_identity_test PRIVATE ${PROJECT_SOURCE_DIR})
 target_compile_definitions(deepseek_v4_flash_continuation_identity_test PRIVATE
   GUFO_IDENTITY_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/continuation_identity")
@@ -27,6 +27,7 @@ set_tests_properties(ds4.template PROPERTIES LABELS "cpu;ds4;tokenization")
 
 add_executable(ds4_cli_test cli_test.cpp)
 target_link_libraries(ds4_cli_test PRIVATE gufo_llm_cli)
+gufo_target_extensions(ds4_cli_test EXTENSIONS deepseek_v4_flash)
 add_test(NAME ds4.cli COMMAND ds4_cli_test)
 set_tests_properties(ds4.cli PROPERTIES LABELS "cpu;ds4;cli")
 

@@ -1,8 +1,6 @@
 # Card 17: Migrate image generation
 
-Status: **pending**. RFC step and dependencies: **8 image; 16**.
-
-Future scope; do not execute during the cards 01–14 milestone.
+Status: **complete**. RFC step and dependencies: **8 image; 16**.
 
 Navigation: [index](../CARDS.md) · [workflow and validation conventions](README.md) · [RFC](../RFC.md).
 
@@ -23,9 +21,9 @@ Migrate Qwen-Image provider and diffusers keys, artifacts and job queue integrat
 
 ## Definition of done
 
-- [ ] Image requests, job status/cancellation/errors and supported artifact selection preserve existing behavior.
-- [ ] Manifest/family dependencies and installed assets are complete on Linux and Windows.
-- [ ] Actual model API, numerical quality and standard speed evidence exists for discovery and lock HIP builds; absence of a devlab profile is explicitly covered.
+- [x] Image requests, job status/cancellation/errors and supported artifact selection preserve existing behavior.
+- [x] Manifest/family dependencies and installed assets are complete on Linux and Windows.
+- [x] Actual model API, numerical quality and standard speed evidence exists for discovery and lock HIP builds; absence of a devlab profile is explicitly covered.
 
 ## Validation criteria
 
@@ -37,4 +35,18 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+- **Implementation**:
+  - Authored `src/models/qwen_image_21/extension.cmake`, `extension.cpp`, `provider.cpp`, `probe.hpp`.
+  - Published neutral Image contracts in `<gufo/ext/image.hpp>` (`ImageRunner`, `ImageProvider`, `ImageRequest`, `ImageResult`, `ImageBuffer`).
+  - Decoupled `src/cli/serve/image_api.cpp` to use `ext::FindImageProvider` and `ext::ProbeImageProvider`.
+  - Split manifest into base target `gufo_qwen_image_21` and HIP target `gufo_qwen_image_21_hip` (`requires: ["hip"]`).
+- **Review Dispositions**:
+  - User Finding U1: Partitioned HIP targets cleanly in manifest and CMake, passing full Nix HIP build.
+- **Verification**:
+  - `check-format.py`: PASS (816 files).
+  - `check-extension-api.py`: PASS (108 paths).
+  - `check-extension-isolation.py`: PASS (0 boundary violations).
+  - `check-pr`: PASS (96/96 test suites passed).
+  - `nix build`: PASS (`./result/bin/gufo diagnose` verifies `qwen_image_21` extension and `qwen-image-21` provider).
+  - `nix build .#checks.x86_64-linux.pr --no-link`: PASS.
+  - Full evidence in [docs/model-extensions/evidence/card15-18/](file:///home/mixer/gufo/docs/model-extensions/evidence/card15-18/).

@@ -11,20 +11,18 @@
 #include <utility>
 #include <vector>
 
+#include "gufo/ext/text.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 
 namespace gufo::tokenization {
 
-/// Chat message roles supported by the Qwen chat template.
-enum class ChatRole : std::uint8_t {
-  kSystem = 0,
-  kDeveloper = 1,
-  kUser = 2,
-  kAssistant = 3,
-  kTool = 4,
-};
+using ChatRole = ext::ChatRole;
+using ChatImageInput = ext::ChatImageInput;
+using ChatToolCall = ext::ChatToolCall;
+using ChatMessage = ext::ChatMessage;
+using ChatTool = ext::ChatTool;
 
 [[nodiscard]] constexpr std::string_view ToString(ChatRole role) noexcept {
   switch (role) {
@@ -40,60 +38,6 @@ enum class ChatRole : std::uint8_t {
   }
   return "user";
 }
-
-/// A structured input message for chat formatting.
-struct ChatMessage {
-  ChatMessage() = default;
-  ChatMessage(ChatRole message_role, std::string message_content,
-              std::string message_name = {}, std::string message_thought = {})
-      : role(message_role),
-        content(std::move(message_content)),
-        name(std::move(message_name)),
-        thought(std::move(message_thought)) {}
-
-  ChatRole role{ChatRole::kUser};
-  std::string content;
-  /// Internal server-authored instructions following system/developer content.
-  /// These bytes are template framing, never supplied by the HTTP message API.
-  std::string framing_suffix;
-  std::string name;     ///< Optional function/tool name
-  std::string thought;  ///< Optional thinking/reasoning prefix
-  std::string tool_call_id;
-  /// `kLow` fits the resized image within 512 pixels per side unless the
-  /// model's minimum size is larger; the other OpenAI `image_url.detail`
-  /// values behave as `kAuto`.
-  enum class ImageDetail : std::uint8_t { kAuto, kLow };
-  struct ImagePart {
-    /// Insert an image before this byte of content. Equal offsets preserve
-    /// input order; image-only messages use offset zero.
-    std::size_t offset{0};
-    std::shared_ptr<const std::vector<std::uint8_t>> bytes;
-    ImageDetail detail{ImageDetail::kAuto};
-  };
-  std::vector<ImagePart> images;
-
-  struct ToolArgument {
-    std::string name;
-    std::string value;
-    bool is_string{true};
-  };
-
-  struct ToolCall {
-    std::string id;
-    std::string name;
-    std::vector<ToolArgument> arguments;
-  };
-
-  std::vector<ToolCall> tool_calls;
-};
-
-struct ChatTool {
-  std::string name;
-  std::string description;
-  std::string parameters_json{"{}"};
-  /// Complete validated HTTP tool object, preserving field order/extensions.
-  std::string definition_json;
-};
 
 /// The literals that frame a native Qwen tool call. QwenChatTemplate renders
 /// historical calls with these, and ScanQwenToolCall reads the same bytes

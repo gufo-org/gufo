@@ -1,6 +1,6 @@
 include_guard(GLOBAL)
 include(CMakeParseArguments)
-set(GUFO_EXTENSION_API_VERSION "0.1.5")
+set(GUFO_EXTENSION_API_VERSION "0.1.10")
 
 # Production validation is pure CMake 3.21. Hosted checks additionally apply
 # the complete JSON schema (including packaging/docs/CI-only metadata).
@@ -430,6 +430,12 @@ function(gufo_extension_target)
     add_executable(${ARG_NAME} ${ARG_SOURCES})
   else()
     add_library(${ARG_NAME} STATIC ${ARG_SOURCES})
+  endif()
+  get_property(owner GLOBAL PROPERTY "GUFO_EXT_TARGET_${ARG_NAME}_OWNER")
+  get_property(is_external GLOBAL PROPERTY "GUFO_EXT_${owner}_IS_EXTERNAL")
+  if(is_external)
+    target_include_directories(${ARG_NAME} BEFORE PRIVATE "${GUFO_EXTENSION_BUILD_ROOT}")
+    target_include_directories(${ARG_NAME} SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/include")
   endif()
   foreach(dependency IN LISTS ARG_LINK_LIBRARIES)
     get_property(declared GLOBAL PROPERTY "GUFO_EXT_TARGET_${dependency}_OWNER" SET)

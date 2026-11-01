@@ -10,52 +10,29 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/text.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
-#include "src/models/qwen/dflash_policy.hpp"
-
-namespace gufo::hip {
-class QwenGpuModel;
-}
-
-namespace gufo::models::deepseek_v4_flash {
-class Model;
-}
-
-namespace gufo::models::qwen38_flash_next {
-class Model;
-}
-
-namespace gufo::tokenization {
-class QwenTokenizer;
-}
 
 namespace gufo::server {
 
-enum class TextSpeculativeBackend : std::uint8_t {
-  kDisabled,
-  kDFlash,
-  kDSpark,
-  kMtp,  ///< Qwen MTP draft block
-};
+using TextSpeculativeBackend = ext::TextSpeculativeBackend;
+using TextDFlashDraftPolicy = ext::TextDFlashDraftPolicy;
+using TextSpeculativeConfig = ext::TextSpeculativeConfig;
+using TextDiskCacheConfig = ext::TextDiskCacheConfig;
 
-struct TextSpeculativeConfig {
-  TextSpeculativeBackend backend{TextSpeculativeBackend::kDisabled};
-  std::string draft_model_path;
-  std::uint32_t max_draft_tokens{7};
-  std::uint32_t min_draft_tokens{1};
-  speculative::DFlashDraftPolicy dflash_policy{
-      speculative::DFlashDraftPolicy::kAdaptive};
-};
-
-struct TextDiskCacheConfig {
-  std::filesystem::path directory;
-  std::size_t capacity_bytes{TextRunnerDiskCacheOptions::kDefaultCapacityBytes};
-  /// Zero selects the automatic host RAM budget after session allocation.
-  std::size_t staging_capacity_bytes{0};
-  std::string model_artifact_fingerprint;
-  std::string draft_model_artifact_fingerprint;
-};
+namespace speculative {
+using ext::ParseTextDFlashDraftPolicy;
+using ext::TextDFlashDraftPolicyName;
+[[nodiscard]] inline ext::TextDFlashDraftPolicy ParseDFlashDraftPolicy(
+    std::string_view value) {
+  return ext::ParseTextDFlashDraftPolicy(value);
+}
+[[nodiscard]] inline std::string_view DFlashDraftPolicyName(
+    ext::TextDFlashDraftPolicy policy) {
+  return ext::TextDFlashDraftPolicyName(policy);
+}
+}  // namespace speculative
 
 /// Thread-safe HTTP inference facade over shared immutable GPU model resources
 /// and a bounded pool of request-owned executor sessions.
@@ -86,38 +63,13 @@ public:
             TextRunnerRamCacheOptions ram_cache_config = {},
             bool enable_yarn = false);
 
-#if defined(ENGINE_ENABLE_HIP)
-  /// Installs a previously loaded model without duplicating mapped weights.
-  bool load(std::shared_ptr<const hip::QwenGpuModel> model, std::string* error,
-            std::uint32_t max_context = 0, std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
-            TextRunnerRamCacheOptions ram_cache_config = {});
-
-  /// Installs a previously loaded DeepSeek model with request-owned sessions.
-  bool load(std::shared_ptr<models::deepseek_v4_flash::Model> model,
-            std::string* error, std::uint32_t max_context = 0,
+  /// Installs a previously prepared runner with request-owned sessions.
+  bool load(std::shared_ptr<ext::TextModelRunner> runner, std::string* error,
             std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
+            const TextDiskCacheConfig& disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
-
-  /// Installs a previously loaded Qwen3.8-Flash-Next model with
-  /// request-owned sessions, the model's tokenizer, and host-memory
-  /// continuation snapshots.
-  bool load(std::shared_ptr<models::qwen38_flash_next::Model> model,
-            std::string* error, std::uint32_t max_context = 0,
-            std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
-            TextRunnerRamCacheOptions ram_cache_config = {});
-#endif
 
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;

@@ -1,8 +1,6 @@
 # Card 16: Migrate speech synthesis
 
-Status: **pending**. RFC step and dependencies: **8 TTS; 15**.
-
-Future scope; do not execute during the cards 01–14 milestone.
+Status: **complete**. RFC step and dependencies: **8 TTS; 15**.
 
 Navigation: [index](../CARDS.md) · [workflow and validation conventions](README.md) · [RFC](../RFC.md).
 
@@ -23,9 +21,9 @@ Migrate TTS, provider request validation and voice variants; move DecodeBase64Wa
 
 ## Definition of done
 
-- [ ] Voice variants and unsupported-request validation are provider-owned and preserve existing responses.
-- [ ] Seeded buffered/PCM/SSE audio behavior, cancellation and post-error recovery are proven.
-- [ ] Independent evaluator provenance and required assets are recorded; Linux/Windows/default/lock quality and speed gates are complete.
+- [x] Voice variants and unsupported-request validation are provider-owned and preserve existing responses.
+- [x] Seeded buffered/PCM/SSE audio behavior, cancellation and post-error recovery are proven.
+- [x] Independent evaluator provenance and required assets are recorded; Linux/Windows/default/lock quality and speed gates are complete.
 
 ## Validation criteria
 
@@ -37,4 +35,21 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+- **Implementation**:
+  - Authored `src/models/qwen3_tts/extension.cmake`, `extension.cpp`, `provider.cpp`, `probe.hpp`.
+  - Published neutral TTS contracts in `<gufo/ext/tts.hpp>` (`TtsRunner`, `TtsProvider`, `SynthesisRequest`, `SynthesisResult`).
+  - Decoupled `src/cli/serve/tts_service.cpp` and `tts_websocket.cpp` to use extension registry providers.
+  - Consolidated streaming logic: moved `TakeSpeechSegments` to `src/cli/serve/text_stream.hpp`.
+  - Split manifest into base target `gufo_qwen3_tts` and HIP target `gufo_qwen3_tts_hip` (`requires: ["hip"]`).
+- **Review Dispositions**:
+  - Finding M1: Removed dead duplicate `DecodeBase64Wav` from `audio.hpp`/`audio.cpp`.
+  - Finding M3: Deleted duplicate `src/models/qwen3_tts/text_stream.hpp`; updated `audio_api_test.cpp` to include serving text stream.
+  - User Finding U1: Correctly partitioned HIP targets in manifest and CMake, passing full Nix HIP build.
+- **Verification**:
+  - `check-format.py`: PASS (816 files).
+  - `check-extension-api.py`: PASS (108 paths).
+  - `check-extension-isolation.py`: PASS (0 boundary violations).
+  - `check-pr`: PASS (96/96 test suites passed).
+  - `nix build`: PASS (`./result/bin/gufo diagnose` verifies `qwen3_tts` extension and `qwen3-tts` provider).
+  - `nix build .#checks.x86_64-linux.pr --no-link`: PASS.
+  - Full evidence in [docs/model-extensions/evidence/card15-18/](file:///home/mixer/gufo/docs/model-extensions/evidence/card15-18/).

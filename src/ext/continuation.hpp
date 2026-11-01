@@ -3,9 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace gufo::ext {
+
+/// Scheme tag for full-content GGUF identities.
+inline constexpr std::string_view kGgufIdentityScheme = "gguf-sha256-v1";
 
 /// Token identifier shared by runners and the continuation cache.
 using ContinuationToken = std::uint32_t;

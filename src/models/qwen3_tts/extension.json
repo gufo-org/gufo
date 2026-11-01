@@ -21,13 +21,18 @@
       "model_ids": [
         "qwen3-tts"
       ],
-      "target": "gufo_qwen3_tts",
+      "target": "gufo_qwen3_tts_hip",
       "entry": "qwen3_tts_provider_register"
     }
   ],
   "targets": {
     "gufo_qwen3_tts": {
       "requires": []
+    },
+    "gufo_qwen3_tts_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "production_paths": {

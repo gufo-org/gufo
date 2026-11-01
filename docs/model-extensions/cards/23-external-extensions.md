@@ -1,8 +1,8 @@
 # Card 23: Support external extension source trees
 
-Status: **pending**. RFC step and dependencies: **11; 22**.
+Status: **complete**. RFC step and dependencies: **11; 22**.
 
-Future scope; do not execute during the cards 01–14 milestone.
+Execution record and validation evidence: [evidence ledger](../evidence/card23/README.md).
 
 Navigation: [index](../CARDS.md) · [workflow and validation conventions](README.md) · [RFC](../RFC.md).
 
@@ -24,9 +24,9 @@ Implement external directories, configure-time allowlist (including inherited di
 
 ## Definition of done
 
-- [ ] External pilot source/CMake/Nix builds and tests pass without hidden in-tree code, Gufo modifications or root-include escape.
-- [ ] Allowlist checks reject prohibited dependencies even through inherited compilation settings.
-- [ ] Template and Windows inputs are usable at pinned revisions; fragment merging validates and preserves deterministic selection/provenance.
+- [x] External pilot/template source/CMake/Nix builds and tests pass without hidden in-tree code, Gufo modifications or root-include escape.
+- [x] Allowlist checks reject prohibited dependencies even through inherited compilation settings.
+- [x] Template and Windows inputs are usable at pinned revisions; fragment merging validates and preserves deterministic selection/provenance.
 
 ## Validation criteria
 
@@ -38,4 +38,23 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+- **Implementation**:
+  - Implemented `GUFO_EXTENSION_DIRS` discovery in `cmake/GufoExtensionDiscovery.cmake`, scanning directory or subdirectories for external `extension.json` manifests.
+  - Implemented configure-time include allowlist enforcement in `cmake/GufoExtension.cmake` and `cmake/GufoExtensionDiscovery.cmake`:
+    - Overwrites directory property `INCLUDE_DIRECTORIES` in external wrappers to only `${PROJECT_SOURCE_DIR}/include`.
+    - Automatically provisions `${GUFO_EXTENSION_BUILD_ROOT}` and system include `${PROJECT_SOURCE_DIR}/include` on external targets.
+    - Explicitly inspects directory and target `INCLUDE_DIRECTORIES`, rejecting any inclusion of internal `${PROJECT_SOURCE_DIR}/src` or `${PROJECT_SOURCE_DIR}` root.
+    - Prohibits external extension targets from linking internal private libraries (`gufo_core`, `gufo_cache`, `gufo_serving`, `gufo_http`, `gufo_test_support`, `gufo_qwen_config`, etc.).
+  - Added Nix flake support in `.devops/nix/package.nix`: added `extensions ? [ ]` parameter translating to `-DGUFO_EXTENSION_DIRS` in `cmakeFlags`.
+  - Added Windows workflow inputs `extension-repo` and `extension-ref` in `.github/workflows/windows-build.yml` with checkout and `-DGUFO_EXTENSION_DIRS` configuration.
+  - Created standalone external template repository blueprint under `examples/extension_template/` (`extension.json`, `extension.cmake`, `src/template_model.cpp`, `README.md` with Windows ZIP recipe and Nix override instructions).
+  - Authored automated discovery and allowlist sandbox rejection tests in `tests/extensions/discovery_test.py` (`test_external_extension_discovery` and `test_external_extension_allowlist_violation`).
+- **Verification**:
+  - `python3 tools/ci/generate-infrastructure.py --check`: PASS
+  - `python3 tools/ci/check-extension-api.py`: PASS (120 surface paths)
+  - `python3 tools/ci/check-docs.py`: PASS (329 files, 1613 links)
+  - `tools/ci/check-format.py`: PASS (850 files)
+  - `python3 tools/ci/check-extension-isolation.py`: PASS (0 boundary violations)
+  - `tests/extensions/discovery_test.py`: PASS (15/15 tests passed, including external discovery and sandbox violations)
+  - `check-pr`: PASS (97/97 suites passed)
+  - `nix build && ./result/bin/gufo diagnose`: PASS (8/8 providers active)

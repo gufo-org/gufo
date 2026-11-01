@@ -3,9 +3,9 @@
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/text_stream.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
-#include "src/models/qwen3_tts/text_stream.hpp"
 
 namespace gufo::server {
 
@@ -140,10 +140,9 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
             } else if (name == "task_type") {
               const auto variant = service.variant();
               const std::string expected =
-                  variant == models::qwen3_tts::ModelVariant::kBase ? "Base"
-                  : variant == models::qwen3_tts::ModelVariant::kVoiceDesign
-                      ? "VoiceDesign"
-                      : "CustomVoice";
+                  variant == ext::TtsVariant::kBase          ? "Base"
+                  : variant == ext::TtsVariant::kVoiceDesign ? "VoiceDesign"
+                                                             : "CustomVoice";
               if (!value.is_string() || value.str() != expected)
                 throw std::invalid_argument(
                     "task_type does not match the loaded checkpoint");
@@ -181,8 +180,7 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
           input_bytes += text->str().size();
           in_utterance = true;
           pending.append(text->str());
-          for (auto& part : models::qwen3_tts::TakeSpeechSegments(
-                   &pending, granularity, false))
+          for (auto& part : TakeSpeechSegments(&pending, granularity, false))
             if (!synthesize(std::move(part))) {
               socket.Close(1011);
               return;
@@ -190,8 +188,7 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
         } else if (type == "input.done") {
           if (!configured)
             throw std::invalid_argument("send session.config first");
-          for (auto& part : models::qwen3_tts::TakeSpeechSegments(
-                   &pending, granularity, true))
+          for (auto& part : TakeSpeechSegments(&pending, granularity, true))
             if (!synthesize(std::move(part))) {
               socket.Close(1011);
               return;

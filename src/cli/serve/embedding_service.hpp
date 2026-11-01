@@ -28,6 +28,7 @@ using ext::kMaxImageSoftTokens;
 using ext::kMaxInputTokens;
 using ext::kMaxVideoFrames;
 using ext::kMaxVideos;
+using ext::kMaxVideoSoftTokens;
 
 struct EmbeddingServiceOptions {
   using Runner =
@@ -72,6 +73,7 @@ public:
   static constexpr std::size_t kMaxAudio = ext::kMaxAudio;
   static constexpr std::size_t kMaxVideos = ext::kMaxVideos;
   static constexpr std::size_t kMaxVideoFrames = ext::kMaxVideoFrames;
+  static constexpr std::size_t kMaxVideoSoftTokens = ext::kMaxVideoSoftTokens;
 
   explicit EmbeddingService(EmbeddingServiceOptions options);
   ~EmbeddingService();

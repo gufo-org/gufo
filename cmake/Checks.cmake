@@ -14,7 +14,7 @@ set(gufo_pr_targets
   cache_tiered_test
   cache_retention_test
   extension_runtime_test extension_role_test
-  arg_parser_test json_test json_constraint_test gguf_reader_test qwen_config_test
+  arg_parser_test transcribe_cli_test json_test json_constraint_test gguf_reader_test qwen_config_test
   gguf_identity_test
   heap_placement_test
   platform_publish_test platform_prefault_test platform_mapped_file_test
@@ -25,7 +25,7 @@ set(gufo_pr_targets
   audio_websocket_test
   text_generation_scheduler_test
   component_text_cache_test text_model_runner_test continuation_disk_store_test
-  bench_cli_test prompt_cli_test eval_http_client_test
+  bench_cli_test prompt_cli_test text_cli_dispatch_test eval_http_client_test
   # BEGIN GENERATED MODEL PR TARGETS
   deepseek_v4_flash_continuation_identity_test ds4_chat_template_test ds4_cli_test
   ds4_sampling_test embedding_gemma2_batch_scheduler_test embedding_gemma2_config_test
@@ -40,6 +40,8 @@ set(gufo_pr_targets
   # END GENERATED MODEL PR TARGETS
 )
 set(gufo_pr_tests ${gufo_pr_targets})
+list(REMOVE_ITEM gufo_pr_tests text_cli_dispatch_test)
+list(APPEND gufo_pr_tests text_cli_dispatch_prompt text_cli_dispatch_chat text_cli_dispatch_bench)
 if(NOT WIN32)
   list(APPEND gufo_pr_tests platform_library_relocated_test extension_schema_test)
 endif()

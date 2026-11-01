@@ -7,7 +7,7 @@
 #include <mutex>
 #include <string>
 
-#include "src/models/qwen_image_21/model.hpp"
+#include "src/ext/image.hpp"
 
 namespace gufo::server {
 
@@ -16,9 +16,9 @@ struct HttpResponse;
 
 class ImageService {
 public:
-  using Request = models::qwen_image_21::Request;
-  using Result = models::qwen_image_21::Result;
-  using CancellationCheck = models::qwen_image_21::CancellationCheck;
+  using Request = ext::ImageRequest;
+  using Result = ext::ImageResult;
+  using CancellationCheck = ext::CancellationCheck;
   using Runner =
       std::function<Result(const Request&, const CancellationCheck&)>;
 
@@ -32,7 +32,7 @@ public:
 private:
   std::string model_id_;
   Runner runner_;
-  std::unique_ptr<models::qwen_image_21::Model> model_;
+  std::shared_ptr<ext::ImageRunner> model_;
   std::timed_mutex gate_;
 };
 

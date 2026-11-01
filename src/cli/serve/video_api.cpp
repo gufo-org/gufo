@@ -16,9 +16,43 @@
 #include <vector>
 
 #include "src/core/json.hpp"
+#include "src/ext/video.hpp"
 
 namespace gufo::server {
 namespace {
+
+std::optional<int> ResolveDurationFrames(std::string_view seconds,
+                                         std::string* error = nullptr) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->resolve_duration_frames) {
+    return provider->resolve_duration_frames(seconds, error);
+  }
+  if (error)
+    *error = "video provider 'minimax-h3' not available";
+  return std::nullopt;
+}
+
+std::optional<ext::VideoParameters> ResolveGenerationPreset(
+    std::string_view preset, std::string* error = nullptr) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->resolve_preset) {
+    return provider->resolve_preset(preset, error);
+  }
+  if (error)
+    *error = "video provider 'minimax-h3' not available";
+  return std::nullopt;
+}
+
+bool ValidateGenerationParameters(const ext::VideoParameters& parameters,
+                                  std::string* error = nullptr) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->validate_parameters) {
+    return provider->validate_parameters(parameters, error);
+  }
+  if (error)
+    *error = "video provider 'minimax-h3' not available";
+  return false;
+}
 
 constexpr std::string_view kVideosPath = "/v1/videos";
 constexpr double kMaximumExactJsonInteger = 9007199254740991.0;
@@ -447,8 +481,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
                  "missing_required_parameter");
   }
   std::string duration_error;
-  const auto duration_frames =
-      minimax_h3::ResolveDurationFrames(seconds, &duration_error);
+  const auto duration_frames = ResolveDurationFrames(seconds, &duration_error);
   if (!duration_frames) {
     return Error(400, "Bad Request", duration_error, "invalid_seconds");
   }
@@ -531,7 +564,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   }
 
   std::string preset_error;
-  auto parameters = minimax_h3::ResolveGenerationPreset(preset, &preset_error);
+  auto parameters = ResolveGenerationPreset(preset, &preset_error);
   if (!parameters.has_value()) {
     return Error(400, "Bad Request", preset_error, "invalid_preset");
   }
@@ -557,8 +590,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
                  "invalid_output_format");
   }
   std::string parameter_error;
-  if (!minimax_h3::ValidateGenerationParameters(*parameters,
-                                                &parameter_error)) {
+  if (!ValidateGenerationParameters(*parameters, &parameter_error)) {
     return Error(400, "Bad Request", parameter_error, "invalid_frames");
   }
   if (parameters->frames != *duration_frames) {

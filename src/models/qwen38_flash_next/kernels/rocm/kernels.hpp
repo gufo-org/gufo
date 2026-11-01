@@ -145,6 +145,43 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
                    std::uint32_t inject_parts, const float* gamma, float* xn,
                    void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                    std::uint32_t streams, float eps, hipStream_t stream);
+/// Operands of HcMixQ8Fused: the decode combine HcCombineQ8_1 would run
+/// (res, block_out, inject, gamma, xn, xn_q8), the next mixer's Q8_0
+/// projections with its SiluScaleQ8_1 rows (lo, lo_q8 of `lo_q8_cols`), and
+/// HcMixEpilogue's outputs; a null `inject_w` writes no inject partials.
+struct HcFusedMix {
+  const void* down;  ///< Q8_0 [rank][streams * hidden]
+  const void* up;    ///< Q8_0 [streams * hidden][rank]
+  float* res;
+  const float* block_out;
+  const float* inject;
+  std::uint32_t inject_parts;
+  const float* gamma;
+  float* xn;
+  void* xn_q8;
+  float* lo;
+  void* lo_q8;
+  std::uint32_t lo_q8_cols;
+  const float* inject_w;
+  float* mixed;
+  void* mixed_q8;     ///< optional Q8_1 rows of mixed
+  float* inject_out;  ///< HcInjectParts(hidden) partials per logit
+  std::uint32_t hidden;
+  std::uint32_t streams;
+  std::uint32_t rank;
+  float eps;
+  float scale;  ///< the SiLU input scale, 1 / streams
+};
+/// Device bytes of HcMixQ8Fused's counters and intermediates. Allocate them
+/// zeroed once; every launch leaves its counters zero again, so captured
+/// graphs replay it. Launches sharing one state must be stream-ordered.
+std::size_t HcMixQ8FusedStateBytes();
+/// A decode batch's (1..8 tokens) HcCombineQ8_1, down projection, SiLU
+/// scale, up projection and HcMixEpilogue in one launch, byte for byte their
+/// outputs (the up projection's gate rows are not stored). Only the model's
+/// 4 x 2560 streams and rank 320; false, with nothing launched, otherwise.
+bool HcMixQ8Fused(void* state, const HcFusedMix& mix, std::uint32_t n_tokens,
+                  hipStream_t stream);
 /// HcCombine writing the normalized output as F16, the width the next
 /// mixer's projection and epilogue consume on the F16 mixer input route.
 /// A non-null `xn_q8` also receives the norm quantized into the tiled Q8
@@ -419,7 +456,9 @@ struct GdnCheckpoint {
 /// ([n_tokens-1][(kernel-1)*channels]), when populated, receive the state after
 /// each proper prefix. The live state already holds the full batch.
 /// Scratch: `conv_scratch` ((n_tokens + kernel) * channels), `qn`/`kn`
-/// (n_tokens * k_heads * d), `raw` (n_tokens * v_heads * d).
+/// (n_tokens * k_heads * d), `raw` (n_tokens * v_heads * d). The `row_split`
+/// route for 128-wide heads without snapshots (prefill) runs as one fused
+/// launch and leaves `qn`, `kn` and `raw` untouched.
 /// `qkv` rows are `qkv_stride` floats apart and `z` rows `z_stride`, so a
 /// stacked [qkv|z] projection feeds both without unpacking. A non-null
 /// `out_q8` receives the rows quantized into the W8A8 tiled layout
