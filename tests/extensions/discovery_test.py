@@ -398,7 +398,10 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
         self.configure(f"-DGUFO_EXTENSION_DIRS={external}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
         self.run_fixture()
         commands = json.loads((self.build / "compile_commands.json").read_text())
-        command = next(c["command"] for c in commands if c["file"] == str(source))
+        # CMake uses forward slashes even when Python spells Windows paths with
+        # backslashes. Resolve relative database paths against their build dir.
+        command = next(c["command"] for c in commands
+                       if (Path(c["directory"]) / c["file"]).resolve() == source.resolve())
         self.assertNotIn(f'-I{ROOT} ', command)
         self.assertNotIn(f'-I{self.source} ', command)
         # A private header outside the API SURFACE must fail to compile.
