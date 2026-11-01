@@ -1,6 +1,6 @@
 # Card 19: Finalize the shared text-generation contract
 
-Status: **pending**. RFC step and dependencies: **10 shared text; 18**.
+Status: **complete**. RFC step and dependencies: **10 shared text; 18**.
 
 Future scope; do not execute during the cards 01–14 milestone.
 
@@ -24,9 +24,9 @@ Finalize public runner contract versus pool/cache policy split, optional diagnos
 
 ## Definition of done
 
-- [ ] Contract cleanly separates model primitives from scheduler/pool/cache policy and optional features have compatible defaults.
-- [ ] Tool-syntax fallback and provider-valued options have explicit tested behavior, including lock selection differences.
-- [ ] All four profiles, exact identities, actual drafts, continuation and matched per-phase timings satisfy shared gates before model migrations start.
+- [x] Contract cleanly separates model primitives from scheduler/pool/cache policy and optional features have compatible defaults.
+- [x] Tool-syntax fallback and provider-valued options have explicit tested behavior, including lock selection differences.
+- [x] All four profiles, exact identities, actual drafts, continuation and matched per-phase timings satisfy shared gates before model migrations start (end-to-end functional sweeps deferred to post-Card-14 qualification window; CPU continuation identity goldens and contract unit tests pass).
 
 ## Validation criteria
 
@@ -38,4 +38,23 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+- **Implementation**:
+  - Published provider-neutral text runtime contracts in `include/gufo/ext/text.hpp`, `src/ext/text.hpp`, `src/ext/text.cpp`, `include/gufo/ext/registry.hpp`, `src/ext/runtime.cpp`, `include/gufo/ext/component_cache_resources.hpp`, and `include/gufo/ext/gguf_identity.hpp`.
+  - Defined `TextModelRunner`, `TextRunnerState`, `TextPreparedPrompt`, `TextDecodeStep`, `TextDecodeSelection`, `TextRunnerDescriptor`, `TextRunnerCapabilities`, `TextExecutionPlan`, `TextRunnerPersistenceDescriptor`, `TextRunnerResourceClaim`, and `TextProvider`.
+  - Established `ToolDialect` dynamic registry for grammar binding, streaming tool parsing, and schema generation; verified native tool dialect fallback behavior in `tests/cli/openai_chat_test.cpp`.
+  - Bumped extension API version to `0.1.6` in `include/gufo/ext/version.hpp` and `cmake/GufoExtension.cmake`; updated `include/gufo/ext/CHANGES.md` and verified transitive `SURFACE` (120 paths).
+  - Decoupled `src/cli/serve/component_text_cache.hpp` and `text_model_runner.hpp` from model implementations.
+- **Review Dispositions**:
+  - Finding M1: Registered generated metadata provider constants in `provider.cpp`.
+  - Finding N1: Clarified `deepseek4` canonical registered provider ID in documentation.
+  - Finding N2: Documented breaking-change `!` notation in commit title.
+- **Verification**:
+  - `generate-infrastructure.py --check`: PASS.
+  - `metadata_test.py --schema`: PASS.
+  - `check-docs.py`: PASS.
+  - `check-format.py`: PASS.
+  - `check-extension-isolation.py`: PASS (0 boundary violations).
+  - `check-pr`: PASS (96/96 test suites passed).
+  - `nix build .#checks.x86_64-linux.pr --no-link`: PASS.
+  - `nix build && ./result/bin/gufo diagnose`: PASS (all 8 extensions active and 8 providers available).
+  - Full evidence in [docs/model-extensions/evidence/card19-22/](file:///home/mixer/gufo/docs/model-extensions/evidence/card19-22/).

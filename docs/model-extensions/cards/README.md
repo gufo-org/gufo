@@ -96,9 +96,13 @@ passed all 8 affected verification gates including `check-pr` (96/96 passed, 100
 of which it claims — are the deferred functional harness runs and speed benchmark sweeps, which are
 now ready for the consolidated post-Card-14 qualification window. See its
 [execution record](14-generated-infrastructure.md#execution-record).
-Cards 15–29 remain pending. The authorized implementation milestone stops after Card 14;
-cards 15–29 document later scope only. This split is documentation work and does not itself
-advance any implementation status.
+Cards 15–18 migrated all speech, audio, image, and video models (`qwen3_asr`, `qwen3_tts`,
+`qwen_image_21`, `minimax_h3`) to modular extensions with dedicated HIP targets, published
+neutral capability contracts (`<gufo/ext/{asr,tts,image,video}.hpp>`), and decoupled host serving.
+Cards 19–22 finalized the shared text-generation contracts (`<gufo/ext/text.hpp>`, `ToolDialect`)
+and migrated all three text models (`qwen`, `qwen38_flash_next`, `deepseek_v4_flash`) to modular
+extensions with zero direct model includes in host serving or CLI tools. All 8 repository models
+are now migrated and active in `extensions.lock`. Cards 23–29 remain pending.
 
 ## Card-by-card workflow
 

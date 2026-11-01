@@ -1472,7 +1472,7 @@ int RunServe(std::span<const char* const> args) {
           speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
         throw std::invalid_argument("--draft-policy requires DFlash2");
       speculative_config.dflash_policy =
-          speculative::ParseDFlashDraftPolicy(draft_policy);
+          server::speculative::ParseDFlashDraftPolicy(draft_policy);
     } catch (const std::invalid_argument& exception) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;

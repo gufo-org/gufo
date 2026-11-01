@@ -6,6 +6,7 @@
 #include "gufo/ext/host.hpp"
 #include "gufo/ext/image.hpp"
 #include "gufo/ext/registry.hpp"
+#include "gufo/ext/text.hpp"
 #include "gufo/ext/tts.hpp"
 #include "gufo/ext/version.hpp"
 #include "gufo/ext/video.hpp"
@@ -261,5 +262,9 @@ const VideoProvider* ProbeVideoProvider(std::string_view model_root) {
 
 void Registry::AddVideoProvider(VideoProvider provider) {
   RegisterVideoProvider(std::move(provider));
+}
+
+void Registry::AddTextProvider(TextProvider provider) {
+  RegisterTextProvider(std::move(provider));
 }
 }  // namespace gufo::ext

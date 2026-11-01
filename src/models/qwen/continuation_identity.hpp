@@ -1,5 +1,4 @@
-#ifndef GUFO_CLI_SERVE_CONTINUATION_IDENTITY_HPP_
-#define GUFO_CLI_SERVE_CONTINUATION_IDENTITY_HPP_
+#pragma once
 
 #include <cstdint>
 #include <string_view>
@@ -12,12 +11,8 @@ namespace gufo::speculative {
 struct SpeculativeOptions;
 }
 
-namespace gufo::server {
+namespace gufo::models::qwen {
 
-// Temporary serving seam for pre-migration byte goldens. Each writer moves with
-// its owning model in cards 20–22; this is not a public extension API.
-inline constexpr std::string_view kDeepSeekStateAbi =
-    "deepseek-v4-flash-gfx1151-state-v4";
 inline constexpr std::uint32_t kQwenComponentPayloadVersion = 2;
 
 inline constexpr std::string_view QwenStateAbi(
@@ -42,15 +37,6 @@ inline constexpr std::string_view QwenStateAbi(
 
 bool IsSha256Hex(std::string_view value) noexcept;
 
-std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
-    std::string_view artifact_fingerprint, std::string_view support_fingerprint,
-    std::uint32_t max_context, std::uint32_t max_draft_tokens);
-
-std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
-    std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
-    bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
-    std::uint32_t decode_concurrency, std::string_view position_policy);
-
 std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view artifact_fingerprint,
     std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
@@ -61,9 +47,12 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
 std::vector<std::uint8_t> QwenProcessIdentity(const void* model,
                                               const void* draft,
                                               std::uint32_t max_context);
-std::vector<std::uint8_t> QwenFlashNextProcessIdentity(
-    const void* model, std::uint32_t max_context, bool use_mtp,
-    std::uint32_t max_draft_tokens, std::uint32_t decode_concurrency);
 
+}  // namespace gufo::models::qwen
+
+namespace gufo::server {
+using models::qwen::kQwenComponentPayloadVersion;
+using models::qwen::QwenCompatibilityIdentity;
+using models::qwen::QwenProcessIdentity;
+using models::qwen::QwenStateAbi;
 }  // namespace gufo::server
-#endif  // GUFO_CLI_SERVE_CONTINUATION_IDENTITY_HPP_

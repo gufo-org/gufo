@@ -713,10 +713,13 @@ def model_core_boundary_violations(report):
 
 
 MIGRATED_EXTENSIONS = (
+    "src/models/deepseek_v4_flash/",
     "src/models/embedding_gemma2/",
     "src/models/minimax_h3/",
+    "src/models/qwen/",
     "src/models/qwen3_asr/",
     "src/models/qwen3_tts/",
+    "src/models/qwen38_flash_next/",
     "src/models/qwen_image_21/",
 )
 

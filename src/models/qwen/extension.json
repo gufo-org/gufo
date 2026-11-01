@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "api_version": ">= 0.1.0",
   "entry": "qwen_register",
-  "registration_target": "gufo_qwen27b",
+  "registration_target": "gufo_qwen",
   "depends": [],
   "platforms": [
     "linux",
@@ -23,7 +23,7 @@
       "speculative": [
         "dflash2"
       ],
-      "target": "gufo_qwen27b",
+      "target": "gufo_qwen_hip",
       "entry": "qwen_provider_register"
     }
   ],
@@ -43,8 +43,13 @@
     }
   ],
   "targets": {
-    "gufo_qwen27b": {
+    "gufo_qwen": {
       "requires": []
+    },
+    "gufo_qwen_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "production_paths": {

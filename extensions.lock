@@ -1,10 +1,13 @@
 {
   "schema": 1,
   "extensions": [
+    "deepseek_v4_flash",
     "embedding_gemma2",
     "minimax_h3",
+    "qwen",
     "qwen3_asr",
     "qwen3_tts",
+    "qwen38_flash_next",
     "qwen_image_21"
   ]
 }

@@ -9,6 +9,7 @@
 #include "gufo/ext/embeddings.hpp"
 #include "gufo/ext/image.hpp"
 #include "gufo/ext/options.hpp"
+#include "gufo/ext/text.hpp"
 #include "gufo/ext/tts.hpp"
 #include "gufo/ext/video.hpp"
 
@@ -55,6 +56,7 @@ public:
   void AddTtsProvider(TtsProvider provider);
   void AddImageProvider(ImageProvider provider);
   void AddVideoProvider(VideoProvider provider);
+  void AddTextProvider(TextProvider provider);
   std::span<const ExcludedExtension> Excluded() const { return excluded_; }
   // Empty means the key was not found among excluded extensions.
   std::string ExcludedKeyDiagnostic(std::string_view key) const;

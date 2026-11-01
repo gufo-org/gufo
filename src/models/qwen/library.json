@@ -4,19 +4,9 @@
   "target": "gufo_qwen27b",
   "kind": "static",
   "purpose": "Qwen27B and Qwen3-8B-Flash serving model over the Qwen family libraries: ROCm runtime, speculative decoding and the model-private kernels.",
-  "consumers": [
-    "gufo_http",
-    "gufo_llm_cli",
-    "gufo_serving"
-  ],
+  "consumers": [],
   "checks": [
     "exact_token_test",
-    "hipblaslt_runtime_cache_test",
-    "openai_chat_test",
-    "persistent_deltanet_test",
-    "text_model_runner_test"
-  ],
-  "tools": [
-    "gufo-kernel-bench"
+    "persistent_deltanet_test"
   ]
 }

@@ -7,7 +7,7 @@ target_compile_features(gufo_logging PUBLIC cxx_std_20)
 target_link_libraries(gufo_logging PUBLIC gufo_platform)
 
 add_library(gufo_ext_runtime STATIC runtime.cpp options.cpp host_budget.cpp
-  device_probe.cpp)
+  device_probe.cpp text.cpp)
 target_include_directories(gufo_ext_runtime PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(gufo_ext_runtime PUBLIC cxx_std_20)
 target_link_libraries(gufo_ext_runtime PUBLIC gufo_logging)

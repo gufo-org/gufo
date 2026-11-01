@@ -170,12 +170,6 @@ function(gufo_stage_hip_runtime target)
   endif()
 endfunction()
 
-if (ENGINE_ENABLE_HIP)
-  add_subdirectory(src/models/deepseek_v4_flash)
-endif()
-
-# Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
-add_subdirectory(src/models/qwen38_flash_next)
 
 
 # Compiler warnings and sanitizers
@@ -320,13 +314,6 @@ target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
 # Family libraries come before the model that needs them; they may depend on
 # gufo_core and on each other, never on a model directory.
 add_subdirectory(src/families/qwen)
-add_subdirectory(src/models/qwen)
-
-if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_qwen38_flash_next PUBLIC
-    gufo_qwen_text gufo_qwen_vision)
-  target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_core)
-endif()
 
 find_package(OpenMP)
 if (OpenMP_CXX_FOUND)
@@ -363,32 +350,13 @@ endif()
 # environment they had inside gufo_core.
 add_subdirectory(src/testing/compare)
 add_subdirectory(src/eval)
-# The CPU-only DeepSeek text tier is registered next to them because it must
-# keep that warning/sanitizer environment; the model directory itself is added
-# above, before the block, and links this library instead of compiling the two
-# text sources again.
-add_subdirectory(src/models/deepseek_v4_flash/text)
 
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
-# The interim edges the RFC allows between steps 5 and 6: prompt/bench still
-# reach the Qwen executor and generators directly, so the CLI library links the
-# Qwen model and family libraries instead of getting them through gufo_core.
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_qwen38_flash_next
-  gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
-if(ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
-endif()
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_ext_runtime)
 
 add_subdirectory(src/ext)
-
-# The imported DeepSeek V4 Flash runtime routes its informational messages
-# through the shared logger instead of writing to stderr directly, so it needs
-# the threshold that `--log-level` arms.
-if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
-endif()
 
 # RFC step 6: the text-serving tier the gufo executable used to compile into
 # itself. Scheduler, runner pool, component text cache and InferenceBackend
@@ -400,7 +368,6 @@ add_library(gufo_serving STATIC
   src/cli/serve/component_text_cache.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
-  src/cli/serve/continuation_identity.cpp
   src/cli/serve/inference_backend.cpp)
 target_link_libraries(gufo_serving PUBLIC gufo_ext_runtime gufo_logging
   gufo_core gufo_cache)
@@ -416,12 +383,7 @@ if (BUILD_TESTING)
   endif()
 endif()
 if (ENGINE_ENABLE_HIP)
-  # Interim edges the RFC allows between steps 5 and 6: the concrete text
-  # runners and the model-specific identity lines still compile in these
-  # sources, so the library links the models until step 10 moves them out.
-  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip hip::host
-    gufo_deepseek_v4_flash gufo_qwen38_flash_next ${GUFO_QWEN_LIBRARIES}
-    gufo_qwen_vision)
+  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip hip::host)
 endif()
 
 add_library(gufo_http STATIC
@@ -440,12 +402,8 @@ add_library(gufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
-  # The DeepSeek tool-call scanner lives with its model; its renderer stays in
-  # the engine library, so no translation unit is linked twice.
-  src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core
-  gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -472,7 +430,7 @@ target_compile_definitions(gufo PRIVATE
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
+  target_link_libraries(gufo PRIVATE gufo_cache_hip)
 endif()
 
 if (NOT WIN32)
@@ -991,7 +949,7 @@ endfunction()
   add_executable(bench_cli_test
     tests/cli/bench_test.cpp
   )
-  target_link_libraries(bench_cli_test PRIVATE gufo_llm_cli)
+  target_link_libraries(bench_cli_test PRIVATE gufo_llm_cli gufo_qwen38_flash_next)
 
   add_test(NAME bench_cli_test COMMAND bench_cli_test)
   set_tests_properties(bench_cli_test PROPERTIES LABELS "cpu;server;cli")

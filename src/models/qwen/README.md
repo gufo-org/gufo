@@ -36,7 +36,7 @@ implementations are model-private.
 | [`../families/qwen/config/qwen_config.*`](../../families/qwen/config/qwen_config.hpp) | CPU-only Qwen GGUF configuration extraction used by the shape check, weight binding, the MTP reference and `prompt`. |
 | [`../families/qwen/vision/`](../../families/qwen/vision/) | Vision encoder, device image input, image prompt expansion and image cache. |
 | [`oracles.*`](oracles.hpp) | Independent reference helpers used for correctness comparison. |
-| [`CMakeLists.txt`](CMakeLists.txt) | Explicit Qwen production source registration and HIP source ownership. |
+| [`extension.cmake`](extension.cmake) | Explicit Qwen production source registration and HIP source ownership. |
 
 ## State and arithmetic
 

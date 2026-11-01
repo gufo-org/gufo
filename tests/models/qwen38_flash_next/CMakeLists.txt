@@ -2,7 +2,7 @@
 # it compiles continuation_identity.cpp itself for its own fixture path and
 # a HIP-free compile, instead of linking gufo_serving.
 add_executable(qwen38_flash_next_continuation_identity_test continuation_identity_test.cpp
-  ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_identity.cpp)
+  ${PROJECT_SOURCE_DIR}/src/models/qwen38_flash_next/continuation_identity.cpp)
 target_include_directories(qwen38_flash_next_continuation_identity_test PRIVATE ${PROJECT_SOURCE_DIR})
 target_compile_definitions(qwen38_flash_next_continuation_identity_test PRIVATE
   GUFO_IDENTITY_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/continuation_identity")

@@ -3,6 +3,7 @@ include/gufo/ext/adapter.hpp
 include/gufo/ext/asr.hpp
 include/gufo/ext/cache.hpp
 include/gufo/ext/cancellable_gate.hpp
+include/gufo/ext/component_cache_resources.hpp
 include/gufo/ext/continuation.hpp
 include/gufo/ext/core_options.def
 include/gufo/ext/crypto.hpp
@@ -23,6 +24,7 @@ include/gufo/ext/experimental/snapshot_copy.hpp
 include/gufo/ext/experimental/snapshot_transfer.hpp
 include/gufo/ext/experimental/transfer_pool.hpp
 include/gufo/ext/experimental/weight_upload.hpp
+include/gufo/ext/gguf_identity.hpp
 include/gufo/ext/gguf_reader.hpp
 include/gufo/ext/host.hpp
 include/gufo/ext/host_budget.hpp
@@ -47,6 +49,7 @@ include/gufo/ext/sampling.hpp
 include/gufo/ext/session_mode.hpp
 include/gufo/ext/sha256.hpp
 include/gufo/ext/speculative_verifier.hpp
+include/gufo/ext/text.hpp
 include/gufo/ext/text_contracts.hpp
 include/gufo/ext/tts.hpp
 include/gufo/ext/types.hpp
@@ -54,14 +57,21 @@ include/gufo/ext/utf8.hpp
 include/gufo/ext/version.hpp
 include/gufo/ext/video.hpp
 src/cache/adapter.hpp
+src/cache/checkpoint.hpp
 src/cache/completion.hpp
+src/cache/component_resources.hpp
+src/cache/disk.hpp
 src/cache/identity.hpp
 src/cache/ledger.hpp
+src/cache/slot.hpp
 src/cache/stream.hpp
+src/cache/streaming.hpp
 src/cache/types.hpp
 src/core/cancellable_gate.hpp
 src/core/crypto/sha256.hpp
+src/core/gguf_identity.hpp
 src/core/gguf_reader.hpp
+src/core/hip/component_cache_resources.hpp
 src/core/hip/detail/dispatch_telemetry.hpp
 src/core/hip/detail/gemv_dispatcher.hpp
 src/core/hip/detail/hip_graph_decode_executor.hpp
@@ -97,6 +107,7 @@ src/core/session_mode.hpp
 src/core/speculative/draft_backend.hpp
 src/core/speculative/prompt_lookup.hpp
 src/core/speculative/speculative_verifier.hpp
+src/core/text_sampling_defaults.hpp
 src/core/utf8.hpp
 src/ext/asr.hpp
 src/ext/continuation.hpp
@@ -104,6 +115,7 @@ src/ext/device_probe.hpp
 src/ext/embeddings.hpp
 src/ext/host_budget.hpp
 src/ext/image.hpp
+src/ext/text.hpp
 src/ext/text_contracts.hpp
 src/ext/tts.hpp
 src/ext/video.hpp

@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "gufo/ext/text.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/quote_tracker.hpp"
 #include "src/cli/serve/response_format.hpp"
@@ -33,8 +34,6 @@
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
-#include "src/models/deepseek_v4_flash/chat_template.hpp"
-#include "src/models/deepseek_v4_flash/tool_calls.hpp"
 
 namespace gufo::server {
 
@@ -123,7 +122,7 @@ void RebaseTextSpans(ParsedGeneration& parsed, std::size_t offset) {
 constexpr std::array<std::string_view, 7> kToolMarkers{
     tokenization::QwenToolSyntax::kCallOpen,
     "<｜DSML｜tool_calls｜>",
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen,
+    "<｜DSML｜tool_calls>",
     "<DSML｜tool_calls｜>",
     "<DSML｜tool_calls>",
     "<tool_calls｜>",
@@ -140,8 +139,7 @@ ToolMarkerSet ToolMarkers(
   // common/parsers/deepseek.cpp (TC_SEPARATOR + FC_START), that separator is
   // framing: returning it as content would double it when history is replayed.
   static constexpr std::array<std::string_view, 2> deepseek{
-      models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpenWithSeparator,
-      models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen};
+      "\n\n<｜DSML｜tool_calls>", "<｜DSML｜tool_calls>"};
   // The JSON fallback has no native counterpart in llama.cpp. Its grammar
   // leaves text before <tool_call> unconstrained, where models still write
   // their native call syntax; keep recognizing every opener there.
@@ -159,15 +157,12 @@ ToolMarkerSet ReasoningToolMarkers(ToolMarkerSet markers) {
   static constexpr std::array<std::string_view, 1> qwen{
       tokenization::QwenToolSyntax::kNativeCallOpen};
   static constexpr std::array<std::string_view, 2> deepseek{
-      models::deepseek_v4_flash::DeepSeekToolSyntax::
-          kNativeCallOpenWithSeparator,
-      models::deepseek_v4_flash::DeepSeekToolSyntax::kNativeCallOpen};
+      "\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"",
+      "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\""};
   if (markers.size() == 1 &&
       markers.front() == tokenization::QwenToolSyntax::kCallOpen)
     return qwen;
-  if (markers.size() == 2 &&
-      markers.back() ==
-          models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsOpen)
+  if (markers.size() == 2 && markers.back() == "<｜DSML｜tool_calls>")
     return deepseek;
   return {};
 }
@@ -192,9 +187,9 @@ constexpr std::array<std::string_view, 9> kToolClosers{
     "</function_results>",
     "</tool_calls>",
     // Model-native dialects, which this fallback admits like any other opener.
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kParameterCloses[0],
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kInvokeCloses[0],
-    models::deepseek_v4_flash::DeepSeekToolSyntax::kCallsClose,
+    "</｜DSML｜parameter>",
+    "</｜DSML｜invoke>",
+    "</｜DSML｜tool_calls>",
 };
 using ToolCloserSet = std::span<const std::string_view>;
 
@@ -1722,8 +1717,7 @@ void ParseQwenCalls(
 // unknown parameters stay as the dialect wrote them.
 std::size_t DeepSeekAcceptedArgumentCount(
     std::span<const tokenization::ChatTool> tools, std::string_view name,
-    std::span<const models::deepseek_v4_flash::ChatMessage::ToolArgument>
-        arguments) {
+    std::span<const ext::ScannedToolArgument> arguments) {
   const auto tool =
       std::ranges::find(tools, name, &tokenization::ChatTool::name);
   if (tool == tools.end())
@@ -1751,8 +1745,7 @@ std::size_t DeepSeekAcceptedArgumentCount(
 
 // Converts a scanned DeepSeek argument list to the shared API form.
 std::vector<tokenization::ChatMessage::ToolArgument> DeepSeekArguments(
-    std::span<const models::deepseek_v4_flash::ChatMessage::ToolArgument>
-        arguments) {
+    std::span<const ext::ScannedToolArgument> arguments) {
   std::vector<tokenization::ChatMessage::ToolArgument> converted;
   converted.reserve(arguments.size());
   for (const auto& argument : arguments)
@@ -1776,9 +1769,12 @@ void ParseDsmlCalls(
     if (marker != tokenization::QwenToolSyntax::kCallOpen)
       dialect_markers.push_back(marker);
   }
-  std::vector<models::deepseek_v4_flash::ScannedToolCall> scanned;
-  models::deepseek_v4_flash::ScanDeepSeekToolCalls(text, dialect_markers,
-                                                   &scanned, spans, partial);
+  const auto* dialect =
+      ext::FindToolDialect(sampling::JsonConstraint::ToolFormat::kDeepSeek);
+  if (dialect == nullptr || dialect->scan_tool_calls == nullptr)
+    return;
+  std::vector<ext::ScannedToolCall> scanned;
+  dialect->scan_tool_calls(text, dialect_markers, &scanned, spans, partial);
   for (auto& invocation : scanned) {
     const auto accepted = DeepSeekAcceptedArgumentCount(tools, invocation.name,
                                                         invocation.arguments);

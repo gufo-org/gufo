@@ -1,4 +1,4 @@
-#include "src/cli/serve/continuation_identity.hpp"
+#include "src/models/qwen38_flash_next/continuation_identity.hpp"
 
 #include <sstream>
 

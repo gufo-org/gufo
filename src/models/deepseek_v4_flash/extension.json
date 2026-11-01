@@ -23,7 +23,7 @@
       "speculative": [
         "dspark"
       ],
-      "target": "gufo_deepseek_v4_flash",
+      "target": "gufo_deepseek_v4_flash_hip",
       "entry": "deepseek_v4_flash_provider_register"
     }
   ],
@@ -45,6 +45,11 @@
   "targets": {
     "gufo_deepseek_v4_flash": {
       "requires": []
+    },
+    "gufo_deepseek_v4_flash_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "licenses": [
