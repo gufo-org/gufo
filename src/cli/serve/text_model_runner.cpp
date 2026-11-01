@@ -592,7 +592,9 @@ struct TextRunnerPool::Request::Impl {
       count = prompt.size();
     // Capture the aligned boundary at or before each later target instead:
     // only it continues the prompt exactly (prefill_alignment). A reused
-    // frontier is already the state this request continues.
+    // frontier is already the state this request continues. The complete
+    // prompt stays exact: an unchanged retry continues it without prefill,
+    // and a longer prompt never restores it (ComponentTextCache::Acquire).
     if (alignment > 1) {
       for (auto& position : boundaries)
         position = Aligned(position);
@@ -604,7 +606,7 @@ struct TextRunnerPool::Request::Impl {
       stable_prefix_position = Aligned(stable_prefix_position);
       if (stable_prefix_position <= prefill_offset)
         stable_prefix_position = 0;
-      if (count > prefill_offset)
+      if (count > prefill_offset && count < prompt.size())
         count = std::max(Aligned(count), prefill_offset);
     }
     snapshot_tokens.reserve(prompt.size());
@@ -664,10 +666,6 @@ struct TextRunnerPool::Request::Impl {
   [[nodiscard]] std::size_t Aligned(std::size_t position) const noexcept {
     return position - position % alignment;
   }
-  /// The complete prompt's checkpoint: its last aligned position.
-  [[nodiscard]] std::size_t PromptEnd() const noexcept {
-    return Aligned(prompt.size());
-  }
 
   ~Impl() {
     // The worker borrows this lease's state; join before any field is
@@ -722,12 +720,8 @@ struct TextRunnerPool::Request::Impl {
       snapshot_tokens.assign(prompt.begin(),
                              prompt.begin() + stable_prefix_position);
       stable_prefix_position = 0;
-    } else if (PromptEnd() > fallback_position) {
-      snapshot_tokens.assign(prompt.begin(), prompt.begin() + PromptEnd());
     } else {
-      // The aligned prompt end was this capture; nothing follows it.
-      prompt_snapshot_attempted = true;
-      return;
+      snapshot_tokens = prompt;
     }
     prompt_snapshot_attempted = false;
   }
@@ -779,9 +773,9 @@ struct TextRunnerPool::Request::Impl {
     try {
       retain_snapshot = lease.TryReserveSnapshot(
           snapshot_bytes, snapshot_tokens.size(),
-          retain_fallback &&
-              (fallback_position == 0 || snapshot_tokens.size() == PromptEnd()),
-          retain_fallback && snapshot_tokens.size() == PromptEnd()
+          retain_fallback && (fallback_position == 0 ||
+                              snapshot_tokens.size() == prompt.size()),
+          retain_fallback && snapshot_tokens.size() == prompt.size()
               ? SnapshotPurpose::kRetry
               : SnapshotPurpose::kContinuation,
           snapshot_tokens);

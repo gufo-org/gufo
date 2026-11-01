@@ -10,18 +10,21 @@ server could split there: a turn's stable boundary, shared and in-pass
 checkpoints and budget-limited passes beside decoders can end anywhere. The
 model now reports `TextRunnerCapabilities::prefill_alignment` (the compress
 ratio, 4): budget-limited passes end on a multiple of four (a budget below
-four runs to the next one), and the stable final-user-turn boundary, grid,
-shared and complete-prompt checkpoints are rounded down to it, so a restore
-re-prefills at most three tokens. `Session::Feed` aligns its own passes the
-same way. An unaligned prefill frontier is not kept as a live continuation;
+four runs to the next one), and the stable final-user-turn boundary, grid
+and shared checkpoints are rounded down to it, so a restore re-prefills at
+most three tokens. The complete-prompt checkpoint keeps its exact end: an
+unchanged retry continues it without prefill, and `ComponentTextCache`
+never restores an unaligned checkpoint for a longer prompt.
+`Session::Feed` aligns its own passes the same way. An unaligned prefill frontier is not kept as a live continuation;
 decoded frontiers are. `TextRunnerPool::Request::Prefill` asserts that every
 step after a request's first starts aligned. The snapshot payload version
 is 19.
 
 - `component_text_cache_test` checks the planning with a fake runner of
   alignment 4: pass ends 8/16/24/32/41 for a 41-token prompt at budget 10,
-  an in-pass capture at 40, restores at 32 and 40, and a budget of 3 running
-  to the next multiple of four.
+  restores at 32 for edits and for a longer prompt, an unchanged retry from
+  all 41 tokens without prefill, and a budget of 3 running to the next
+  multiple of four.
 - `tests/functional/cache_alignment_qwen38.py` (`--sessions 2 --context
   40960`, 4 GiB RAM cache): four conversations whose final user turn ends at
   2,944–2,947 tokens (all four residues). A seeds the cache, B continues it;

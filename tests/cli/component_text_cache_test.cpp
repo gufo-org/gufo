@@ -332,8 +332,9 @@ void InPassCapturePreservesBoundaryAndLiveTail() {
 }
 // A runner whose prefill continues a prompt exactly only from multiples of
 // four (Flash-Next's sparse tiles) ends every step but the last there and
-// rounds its stable, intermediate and complete-prompt checkpoints down. A
-// restore then starts on that boundary and re-prefills the rest.
+// rounds its stable and intermediate checkpoints down. A restore then starts
+// on that boundary and re-prefills the rest. The complete prompt is kept
+// exact for an unchanged retry, but a longer prompt never continues it.
 void AlignedPrefillKeepsAlignedBoundaries() {
   std::vector<TextRunnerToken> prompt(41);
   std::iota(prompt.begin(), prompt.end(), 10);
@@ -353,11 +354,11 @@ void AlignedPrefillKeepsAlignedBoundaries() {
   while (!seed.prefill_complete())
     (void)seed.Prefill(10);
   assert((runner->pass_ends == std::vector<std::size_t>{8, 16, 24, 32, 41}));
-  assert((runner->in_pass_points == std::vector<std::size_t>{40}));
+  assert(runner->in_pass_points.empty());
   const auto expected = Generate(seed);
   (void)seed.Commit();
   for (const auto [edit, cached] :
-       {std::pair{40U, 40U}, std::pair{36U, 32U}, std::pair{33U, 32U}}) {
+       {std::pair{40U, 32U}, std::pair{36U, 32U}, std::pair{33U, 32U}}) {
     auto branch = prompt;
     branch[edit] = 999;
     runner->pass_ends.clear();
@@ -372,11 +373,23 @@ void AlignedPrefillKeepsAlignedBoundaries() {
     (void)Generate(restored);
     restored.Invalidate();
   }
-  // An unchanged retry restores the aligned prompt end and replays the tail.
+  // A longer prompt restores the aligned boundary, not the complete prompt.
+  auto longer = prompt;
+  longer.insert(longer.end(), {7, 8, 9});
+  runner->pass_ends.clear();
+  auto extended =
+      pool.Acquire(longer, sampling::SamplingConfig{}, {}, {}, true, 35);
+  assert(extended.cached_prompt_tokens() == 32);
+  while (!extended.prefill_complete())
+    (void)extended.Prefill(3);
+  assert(aligned(runner->pass_ends, longer.size()));
+  (void)Generate(extended);
+  extended.Invalidate();
+  // An unchanged retry restores the complete prompt without prefill.
   auto retry =
       pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
-  assert(retry.cached_prompt_tokens() == 40);
-  Prefill(retry);
+  assert(retry.cached_prompt_tokens() == prompt.size());
+  assert(retry.prefill_complete());
   assert(Generate(retry) == expected);
   retry.Invalidate();
 }
