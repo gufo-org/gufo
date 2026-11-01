@@ -13,7 +13,7 @@ add_library(gufo_ext_runtime STATIC runtime.cpp options.cpp host_budget.cpp
 set(public_include "${CMAKE_CURRENT_BINARY_DIR}/public-include")
 file(STRINGS "${PROJECT_SOURCE_DIR}/include/gufo/ext/SURFACE" public_headers
   REGEX "^[^#].+")
-set(published_headers)
+set(published_headers "${public_include}/gufo/ext/detail/api_version.hpp")
 foreach(header IN LISTS public_headers)
   if(header MATCHES "^include/")
     continue()
@@ -30,6 +30,9 @@ foreach(header IN LISTS previous_headers)
     file(REMOVE "${header}")
   endif()
 endforeach()
+include(${PROJECT_SOURCE_DIR}/cmake/GufoExtensionVersion.cmake)
+configure_file("${PROJECT_SOURCE_DIR}/cmake/GufoExtensionVersion.hpp.in"
+  "${public_include}/gufo/ext/detail/api_version.hpp" @ONLY)
 target_include_directories(gufo_ext_runtime
   PUBLIC "${PROJECT_SOURCE_DIR}/include" "${public_include}"
   PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include")

@@ -125,9 +125,8 @@ Gufo's CLI, HTTP API and existing public flake outputs retain the release
 compatibility rules above. The separately versioned source extension API and
 the future experimental flake `extensions` argument are outside that surface.
 A source extension API break alone does not require `!`; a CLI/HTTP/public flake
-break made during migration does. Ordinary PRs may update the extension API
-version and [its change log](../include/gufo/ext/CHANGES.md), independently of
-release automation's ownership of Gufo's version/changelog.
+break made during migration does. Extension API versioning and its generated change log
+remain independent of release automation's ownership of Gufo's version/changelog.
 
 Before 1.0, the API version is `0.MINOR.REVISION`: a minor bump may break source
 compatibility, while revision bumps are additive. Extensions request a revision
@@ -146,8 +145,51 @@ compatibility. No 1.0 stability claim is made today.
 Every declaration/contract change in the generated
 [SURFACE](../include/gufo/ext/SURFACE) transitive closure, including forwarded
 core/cache headers, and every public CMake/schema contract change requires the
-`ext-api` PR label, an increased extension API version and a matching change-log
-entry. The PR workflow runs `tools/ci/check-extension-api.py --base <base-sha>
+`ext-api` PR label and a new, uniquely named Markdown change record under
+`include/gufo/ext/changes/<major>.<minor>/` (for example `938-video-options.md`).
+Describe the concrete declaration or contract change. Additive API PRs do not
+edit version constants or a shared changelog. Existing records must never be
+modified, renamed or removed, including after a release.
+
+[api-series.json](../include/gufo/ext/api-series.json) defines `major`, `minor`
+and `revision_base`. The revision is `revision_base + number of revision records in the
+active series`; CMake generates the public version constants and uses the same
+value for manifest compatibility checks. The baseline is fixed within a series.
+For the initial migration, the baseline remains 0.1.0 and is documented in
+[0.md](../include/gufo/ext/changes/0.1/0.md). That record describes the
+baseline itself and is excluded from the revision count. Revisions 0.1.1 through
+0.1.10 have individually versioned `1.md` through `10.md` records, preserving their
+original descriptions and assignments. Those ten revision records plus the new
+migration record compute 0.1.11, without resetting or recounting any version.
+New additive PRs use descriptive unique filenames rather than assigning numbers.
+Records in older series remain permanent but do not count toward the active series.
+A breaking change explicitly advances the compatibility series, sets its initial
+baseline, and adds a record in that series. Review the compatibility transition;
+it is not inferred from a record's prose.
+
+Two parallel additive PRs each add a different record. Their merge automatically
+counts both, advancing the revision twice without editing a shared counter.
+Branch revisions are provisional until merged; numeric revision floors promise
+compatibility along the canonical main history, not between divergent branches.
+An extension using an API available only on a branch must pin that Gufo source
+revision, then choose its minimum API version from main after the feature merges.
+Older minimum requirements in existing manifests remain valid and need no bump.
+Source archives and Nix builds compute the same version without Git metadata.
+
+Generate a combined changelog with:
+
+```sh
+python3 tools/ci/check-extension-api.py --changelog /tmp/gufo-extension-api-changes.md
+```
+
+The generated log groups all records by series and preserves the assigned
+headings of converted historical revisions. New record ordering does not assign
+per-record revision numbers. CMake regenerates
+its version header automatically when records are added. The generated header
+is provided through the extension runtime's public include requirements; build
+extensions through CMake rather than using the source include directory alone.
+
+The PR workflow runs `tools/ci/check-extension-api.py --base <base-sha>
 --labels <json-label-list>`; the hosted suite checks inventory drift and policy
 fixtures. The initial token check conservatively includes inline bodies,
 initializers and CMake/schema statements; comments/whitespace do not trigger it.

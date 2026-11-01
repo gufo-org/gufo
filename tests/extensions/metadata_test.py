@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +15,11 @@ FIXTURES = ROOT / "tests/extensions/fixture"
 BASE = [json.loads((FIXTURES / f"{name}.json").read_text()) for name in ("alpha", "beta", "base")]
 MODULE = ROOT / "cmake/GufoExtension.cmake"
 DIAGNOSTICS = []
+spec = importlib.util.spec_from_file_location("extension_api", ROOT / "tools/ci/check-extension-api.py")
+api = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(api)
+API_VERSION = api.version_for_root(ROOT)
+
 
 
 class ConfigureTests(unittest.TestCase):
@@ -184,13 +190,18 @@ class ConfigureTests(unittest.TestCase):
 
     def test_dependencies_and_version(self):
         self.configure(BASE)
-        current = copy.deepcopy(BASE)
-        current[0]["api_version"] = ">= 0.1.10"
-        self.configure(current)
+        major, minor, revision = map(int, API_VERSION.split("."))
+        # Existing extension floors must remain accepted after the migration.
+        for floor in range(revision + 1):
+            current = copy.deepcopy(BASE)
+            current[0]["api_version"] = f">= {major}.{minor}.{floor}"
+            with self.subTest(accepted_api=current[0]["api_version"]):
+                self.configure(current)
         self.invalid(lambda m: m[0].update(depends=["absent"]), "missing dependency absent")
         self.invalid(lambda m: m[2].update(depends=["alpha"]), "cyclic dependency")
         self.invalid(lambda m: m[2].update(platforms=["linux"]), "unsatisfiable dependency platforms")
-        for api in (">= 0.2.0", ">= 0.1.11", ">= 1.0.0", "0.1", ">= 0.01.0"):
+        for api in (f">= {major}.{minor + 1}.0", f">= {major}.{minor}.{revision + 1}",
+                    f">= {major + 1}.0.0", "0.1", ">= 0.01.0"):
             with self.subTest(api=api):
                 self.invalid(lambda m: m[0].update(api_version=api), "API" if api.startswith(">= ") else "api_version")
 
