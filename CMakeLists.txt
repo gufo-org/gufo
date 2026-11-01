@@ -942,6 +942,7 @@ endfunction()
     tests/cli/prompt_test.cpp
   )
   target_link_libraries(prompt_cli_test PRIVATE gufo_llm_cli)
+  gufo_target_extensions(prompt_cli_test EXTENSIONS ${gufo_selected_extensions})
 
   add_test(NAME prompt_cli_test COMMAND prompt_cli_test)
   set_tests_properties(prompt_cli_test PROPERTIES LABELS "cpu;server;cli")
@@ -950,9 +951,18 @@ endfunction()
     tests/cli/bench_test.cpp
   )
   target_link_libraries(bench_cli_test PRIVATE gufo_llm_cli gufo_qwen38_flash_next)
+  gufo_target_extensions(bench_cli_test EXTENSIONS ${gufo_selected_extensions})
 
   add_test(NAME bench_cli_test COMMAND bench_cli_test)
   set_tests_properties(bench_cli_test PROPERTIES LABELS "cpu;server;cli")
+
+  add_executable(text_cli_dispatch_test tests/cli/text_cli_dispatch_test.cpp)
+  target_link_libraries(text_cli_dispatch_test PRIVATE gufo_llm_cli)
+  foreach(command prompt chat bench)
+    add_test(NAME text_cli_dispatch_${command}
+      COMMAND text_cli_dispatch_test ${command})
+    set_tests_properties(text_cli_dispatch_${command} PROPERTIES LABELS "cpu;cli;extensions")
+  endforeach()
 
   # H3 host contracts share an object with generation. In HIP builds that
   # object references the backend implementations, so tests need both tiers.

@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/registry.hpp"
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
@@ -371,6 +372,8 @@ int RunPrompt(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
   if (provider == nullptr || provider->prompt_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for prompt\n";
@@ -412,6 +415,8 @@ int RunChat(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
   if (provider == nullptr || provider->chat_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for chat\n";
