@@ -231,6 +231,9 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
       break;
+    case core::GgmlType::kQ2_0:
+      block_bytes = sizeof(block_q2_0);
+      break;
     default:
       return 0;
   }
