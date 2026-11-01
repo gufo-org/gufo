@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/embeddings.hpp"
 #include "gufo/ext/options.hpp"
 
 namespace gufo::ext {
@@ -45,6 +46,7 @@ public:
   void BeginExtension(ExtensionInfo extension);
   void AddProvider(ProviderInfo provider);
   void AddExcluded(ExcludedExtension extension);
+  void AddEmbeddingProvider(EmbeddingProvider provider);
   std::span<const ExcludedExtension> Excluded() const { return excluded_; }
   // Empty means the key was not found among excluded extensions.
   std::string ExcludedKeyDiagnostic(std::string_view key) const;

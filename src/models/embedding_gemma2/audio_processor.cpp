@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/audio_processor.hpp"
+#include "audio_processor.hpp"
 
 #include <algorithm>
 #include <array>

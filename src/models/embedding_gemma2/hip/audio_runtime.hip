@@ -11,8 +11,8 @@
 #include <vector>
 
 #include <gufo/ext/experimental/hip_utils.hpp>
-#include "src/models/embedding_gemma2/hip/audio_runtime.hpp"
-#include "src/models/embedding_gemma2/loader.hpp"
+#include "audio_runtime.hpp"
+#include "loader.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 namespace {

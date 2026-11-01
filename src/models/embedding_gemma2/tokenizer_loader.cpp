@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "src/models/embedding_gemma2/tokenizer.hpp"
+#include "tokenizer.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

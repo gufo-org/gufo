@@ -183,9 +183,6 @@ add_subdirectory(src/models/qwen3_tts)
 # Qwen3-ASR — model-private 1.7B speech recognition runtime.
 add_subdirectory(src/models/qwen3_asr)
 
-# EmbeddingGemma 2 is a model-private BF16 text/image embedding runtime.
-add_subdirectory(src/models/embedding_gemma2)
-
 # Compiler warnings and sanitizers
 option(GUFO_ENABLE_WARNINGS "Enable compiler warnings" ON)
 option(GUFO_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -449,7 +446,7 @@ add_library(gufo_http STATIC
   src/models/deepseek_v4_flash/tool_calls.cpp
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_minimax_h3 gufo_qwen3_tts gufo_qwen3_asr
-  gufo_qwen_image_21 gufo_embedding_gemma2
+  gufo_qwen_image_21
   gufo_qwen27b gufo_qwen_vision gufo_qwen_text)
 
 add_executable(gufo
@@ -479,7 +476,7 @@ target_compile_definitions(gufo PRIVATE
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
 endif()
-target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2)
+target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
 
 if (NOT WIN32)
   add_custom_target(gufo-server ALL

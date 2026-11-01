@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/config.hpp"
+#include "config.hpp"
 
 #include <charconv>
 #include <filesystem>

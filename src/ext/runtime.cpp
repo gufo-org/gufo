@@ -88,4 +88,38 @@ std::string Registry::ExcludedKeyDiagnostic(std::string_view key) const {
   }
   return message;
 }
+
+static std::vector<EmbeddingProvider> g_embedding_providers;
+
+void RegisterEmbeddingProvider(EmbeddingProvider provider) {
+  for (auto& existing : g_embedding_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_embedding_providers.push_back(std::move(provider));
+}
+
+const EmbeddingProvider* FindEmbeddingProvider(std::string_view id) {
+  for (const auto& provider : g_embedding_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const EmbeddingProvider* ProbeEmbeddingProvider(std::string_view model_root) {
+  for (const auto& provider : g_embedding_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddEmbeddingProvider(EmbeddingProvider provider) {
+  RegisterEmbeddingProvider(std::move(provider));
+}
 }  // namespace gufo::ext

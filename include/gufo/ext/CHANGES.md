@@ -1,5 +1,15 @@
 # Extension API changes
 
+## 0.1.3
+
+Publish capability-neutral embedding contracts (`include/gufo/ext/embeddings.hpp`):
+- `EmbeddingBatch`, `EmbeddingInput`, `EmbeddingPart`, `EmbeddingStatus`,
+  `EmbeddingVideoOptions`, `EmbeddingRequestOptions`.
+- `EmbeddingRunner` abstract execution interface.
+- `EmbeddingProvider` registration and discovery (`RegisterEmbeddingProvider`,
+  `FindEmbeddingProvider`, `ProbeEmbeddingProvider`, `Registry::AddEmbeddingProvider`).
+- Pilot model migration for EmbeddingGemma 2 (Card 13).
+
 ## 0.1.2
 
 Publish public forwarding headers under `include/gufo/ext/` per the model-used

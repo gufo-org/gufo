@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/image_processor.hpp"
+#include "image_processor.hpp"
 
 #include <algorithm>
 #include <cmath>

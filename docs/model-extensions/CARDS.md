@@ -118,7 +118,7 @@ the current implementation milestone stops after Card 14.
 | 10 | 7; 09 | [Publish and measure the public extension API](cards/10-public-api-surface.md) | complete |
 | 11 | 7; 10 | [Migrate models to public extension headers](cards/11-public-header-migrations.md) | complete |
 | 12 | 7b; 11 | [Add in-tree model API test support](cards/12-model-api-test-support.md) | complete |
-| 13 | 8 embeddings; 12 | [Migrate the EmbeddingGemma pilot](cards/13-embeddinggemma-pilot.md) | pending |
+| 13 | 8 embeddings; 12 | [Migrate the EmbeddingGemma pilot](cards/13-embeddinggemma-pilot.md) | complete |
 | 14 | 9; 13 | [Generate infrastructure from model metadata](cards/14-generated-infrastructure.md) | pending |
 | 15 | 8 ASR; 14 | [Migrate speech recognition](cards/15-speech-recognition.md) | pending |
 | 16 | 8 TTS; 15 | [Migrate speech synthesis](cards/16-speech-synthesis.md) | pending |
@@ -140,7 +140,7 @@ the current implementation milestone stops after Card 14.
 
 Card-specific records now live with their plans. Completed records describe
 historical evidence and limitations; they are not instructions to redo completed
-work. Cards 01–11 have now been through implementation, independent review and
+work. Cards 01–12 have now been through implementation, independent review and
 review integration. See the
 [three-agent workflow](cards/README.md#card-by-card-workflow) before continuing.
 
@@ -254,4 +254,22 @@ without leaking test machinery; proved exclusion under `BUILD_TESTING=OFF`; and 
 CPU/GPU tests, continuation identity goldens, and format checks. Its unresolved gates — none of
 which it claims — are the deferred functional/performance half (deferred to post-Card-14 qualification
 window) and remaining CLI text runner coupling in text model integration harnesses.
+
+### Card 13
+
+See [Card 13: execution record](cards/13-embeddinggemma-pilot.md#execution-record).
+It migrated `src/models/embedding_gemma2` from a hardwired core dependency to an
+isolated, discovered extension; published neutral multimodal embedding contracts
+in `<gufo/ext/embeddings.hpp>` and `registry.hpp` (`EmbeddingRunner`, `EmbeddingProvider`);
+bumped extension API version to `0.1.3` (revision 3); updated `SURFACE` (99 paths);
+decoupled serving completely (`src/cli/serve/` has 0 includes of `src/models/embedding_gemma2`);
+converted all 24 internal model includes to extension-relative; authored `extension.json`
+(schema 1) and `extension.cmake`; added pure artifact probe (`ProbeEmbeddingGemma2`);
+enforced `--fail-on-extension-boundary` in `tools/ci/check-extension-isolation.py`;
+added `"embedding_gemma2"` to `extensions.lock`; verified discovery mode, lock mode
+(`-DGUFO_EXTENSIONS_FROM_LOCK=ON`), and explicit excluded mode (`-DGUFO_EXTENSIONS=""`);
+and passed bounded CTests (9 passed, 6 skipped missing external weights), continuation
+identity goldens, and formatting checks. Its unresolved gates — none of which it claims —
+are the deferred functional/performance half (deferred to post-Card-14 qualification window).
+
 

@@ -1,5 +1,9 @@
 # EmbeddingGemma 2 tests. Only the HIP and external-model checks need weights.
 
+if (NOT TARGET gufo_embedding_gemma2)
+  return()
+endif()
+
 add_executable(embedding_gemma2_config_test config_test.cpp)
 target_link_libraries(embedding_gemma2_config_test PRIVATE gufo_embedding_gemma2)
 add_test(NAME embedding_gemma2_config_test
@@ -15,10 +19,10 @@ set_tests_properties(embedding_gemma2_loader_test PROPERTIES
   LABELS "cpu;models;embedding-gemma2;loader;safetensors;external-model"
   SKIP_RETURN_CODE 77)
 
-if (ENGINE_ENABLE_HIP)
+if (ENGINE_ENABLE_HIP AND TARGET gufo_embedding_gemma2_hip)
   add_executable(embedding_gemma2_attention_hip_test attention_hip_test.cpp)
   target_link_libraries(embedding_gemma2_attention_hip_test PRIVATE
-    gufo_embedding_gemma2 hip::host)
+    gufo_embedding_gemma2_hip hip::host)
   add_test(NAME embedding_gemma2_attention_hip_test
     COMMAND embedding_gemma2_attention_hip_test)
   set_tests_properties(embedding_gemma2_attention_hip_test PROPERTIES
@@ -28,7 +32,7 @@ if (ENGINE_ENABLE_HIP)
 
   add_executable(embedding_gemma2_encoder_hip_test encoder_hip_test.cpp)
   target_link_libraries(embedding_gemma2_encoder_hip_test PRIVATE
-    gufo_embedding_gemma2 gufo_embedding_gemma2_reference hip::host)
+    gufo_embedding_gemma2_hip gufo_embedding_gemma2_reference hip::host)
   add_test(NAME embedding_gemma2_encoder_hip_test
     COMMAND embedding_gemma2_encoder_hip_test)
   set_tests_properties(embedding_gemma2_encoder_hip_test PROPERTIES
@@ -39,7 +43,7 @@ if (ENGINE_ENABLE_HIP)
   add_executable(embedding_gemma2_embedding_golden_hip_test
     embedding_golden_hip_test.cpp)
   target_link_libraries(embedding_gemma2_embedding_golden_hip_test PRIVATE
-    gufo_embedding_gemma2 hip::host)
+    gufo_embedding_gemma2_hip hip::host)
   target_compile_definitions(embedding_gemma2_embedding_golden_hip_test PRIVATE
     GUFO_EMBEDDING_GEMMA2_EMBEDDING_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/embedding_golden.json")
   add_test(NAME embedding_gemma2_embedding_golden_hip_test
@@ -51,7 +55,7 @@ if (ENGINE_ENABLE_HIP)
 
   add_executable(embedding_gemma2_gemm_bench_hip_test gemm_bench_hip_test.cpp)
   target_link_libraries(embedding_gemma2_gemm_bench_hip_test PRIVATE
-    gufo_embedding_gemma2 hip::host roc::hipblaslt)
+    gufo_embedding_gemma2_hip hip::host roc::hipblaslt)
   add_test(NAME embedding_gemma2_gemm_bench_hip_test
     COMMAND embedding_gemma2_gemm_bench_hip_test)
   set_tests_properties(embedding_gemma2_gemm_bench_hip_test PROPERTIES
@@ -102,10 +106,10 @@ add_test(NAME embedding_gemma2_image_processor_test
 set_tests_properties(embedding_gemma2_image_processor_test PROPERTIES
   LABELS "cpu;models;embedding-gemma2;image;quality")
 
-if (ENGINE_ENABLE_HIP)
+if (ENGINE_ENABLE_HIP AND TARGET gufo_embedding_gemma2_hip)
   add_executable(embedding_gemma2_image_golden_hip_test image_golden_test.cpp)
   target_link_libraries(embedding_gemma2_image_golden_hip_test PRIVATE
-    gufo_embedding_gemma2 gufo_core hip::host)
+    gufo_embedding_gemma2_hip gufo_core hip::host)
   target_compile_definitions(embedding_gemma2_image_golden_hip_test PRIVATE
     GUFO_IMAGE_TEST_GPU=1
     GUFO_EMBEDDING_GEMMA2_IMAGE_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/image_golden.json")
@@ -127,10 +131,10 @@ add_test(NAME embedding_gemma2_audio_processor_test
 set_tests_properties(embedding_gemma2_audio_processor_test PROPERTIES
   LABELS "cpu;models;embedding-gemma2;audio;quality")
 
-if (ENGINE_ENABLE_HIP)
+if (ENGINE_ENABLE_HIP AND TARGET gufo_embedding_gemma2_hip)
   add_executable(embedding_gemma2_audio_golden_hip_test audio_golden_hip_test.cpp)
   target_link_libraries(embedding_gemma2_audio_golden_hip_test PRIVATE
-    gufo_embedding_gemma2 hip::host)
+    gufo_embedding_gemma2_hip hip::host)
   target_compile_definitions(embedding_gemma2_audio_golden_hip_test PRIVATE
     GUFO_EMBEDDING_GEMMA2_SPEECH_WAV="${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav"
     GUFO_EMBEDDING_GEMMA2_AUDIO_EMBEDDING_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/audio_embedding_golden.json")

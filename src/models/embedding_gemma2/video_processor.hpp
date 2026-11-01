@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "src/models/embedding_gemma2/image_processor.hpp"
+#include "image_processor.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 struct VideoOptions {

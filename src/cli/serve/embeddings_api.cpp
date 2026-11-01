@@ -539,9 +539,9 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
                           "invalid_mm_processor_kwargs");
       }
       const auto budget = value.as_size(0);
-      if (budget > models::embedding_gemma2::kMaxImageSoftTokens ||
-          !models::embedding_gemma2::SupportedImageSoftTokens(
-              static_cast<std::uint32_t>(budget))) {
+      if (budget > kMaxImageSoftTokens ||
+          !(budget == 70 || budget == 140 || budget == 280 || budget == 560 ||
+            budget == 1120)) {
         return BadRequest(
             "'max_soft_tokens' must be one of 70, 140, 280, 560, or 1120",
             "invalid_mm_processor_kwargs");

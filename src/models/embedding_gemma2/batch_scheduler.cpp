@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/batch_scheduler.hpp"
+#include "batch_scheduler.hpp"
 
 #include <cassert>
 #include <exception>

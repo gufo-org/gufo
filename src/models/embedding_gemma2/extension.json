@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "embedding_gemma2",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.0",
+  "entry": "embedding_gemma2_register",
+  "registration_target": "gufo_embedding_gemma2",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "embeddinggemma-2",
+      "capability": "embeddings",
+      "keys": [
+        "safetensors:embedding_gemma2",
+        "safetensors:EmbeddingGemma2Model"
+      ],
+      "model_ids": [
+        "embeddinggemma-2"
+      ],
+      "target": "gufo_embedding_gemma2_hip",
+      "entry": "embedding_gemma2_provider_register"
+    }
+  ],
+  "options": [
+    {
+      "name": "--default-prompt-name",
+      "type": "string",
+      "commands": [
+        "serve"
+      ],
+      "providers": [
+        "embeddinggemma-2"
+      ],
+      "help": "Checkpoint prompt for text inputs without prompt_name (default: none)"
+    }
+  ],
+  "targets": {
+    "gufo_embedding_gemma2": {
+      "requires": []
+    },
+    "gufo_embedding_gemma2_hip": {
+      "requires": [
+        "hip"
+      ]
+    }
+  }
+}

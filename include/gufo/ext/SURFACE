@@ -7,6 +7,7 @@ include/gufo/ext/core_options.def
 include/gufo/ext/crypto.hpp
 include/gufo/ext/device_probe.hpp
 include/gufo/ext/draft_backend.hpp
+include/gufo/ext/embeddings.hpp
 include/gufo/ext/experimental/dispatch_telemetry.hpp
 include/gufo/ext/experimental/gemv_dispatcher.hpp
 include/gufo/ext/experimental/ggml_dequant.hpp
@@ -94,5 +95,6 @@ src/core/speculative/speculative_verifier.hpp
 src/core/utf8.hpp
 src/ext/continuation.hpp
 src/ext/device_probe.hpp
+src/ext/embeddings.hpp
 src/ext/host_budget.hpp
 src/ext/text_contracts.hpp

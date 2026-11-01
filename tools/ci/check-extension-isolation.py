@@ -712,12 +712,155 @@ def model_core_boundary_violations(report):
     return sorted(violations)
 
 
+def extension_boundary_violations(report):
+    """Return src/cli/** includes of migrated model extensions.
+
+    Card 13 migrated EmbeddingGemma 2 to the neutral extension runtime.
+    The CLI and serving layer must not include headers from migrated extensions
+    (currently src/models/embedding_gemma2/**), interacting only via ext::Registry
+    and neutral extension interfaces.
+    """
+    violations = []
+    for edge in report["includes"]:
+        path = edge["path"]
+        if not path.startswith("src/cli/"):
+            continue
+        inc = edge["include"]
+        target = edge["resolved"] or posixpath.normpath(
+            posixpath.join(posixpath.dirname(path), inc))
+        if (target.startswith("src/models/embedding_gemma2/")
+                or inc.startswith("src/models/embedding_gemma2/")):
+            violations.append(f"{path}:{edge['line']}: {inc}")
+    return sorted(violations)
+
+
+def model_name_from_path(owner):
+    """Extract model directory name from an owner string."""
+    if owner.startswith("models/"):
+        return owner[len("models/"):]
+    if owner.startswith("tests/models/"):
+        sub = owner[len("tests/models/"):]
+        if sub.startswith("minimax_h3"):
+            return "minimax_h3"
+        if "/" in sub:
+            return sub.split("/")[0]
+        return sub
+    return None
+
+
+def classify_edge(owner, dep, root=None):
+    """Classify an include edge between owners.
+
+    Returns (status, icon, reason) where status is:
+      - 'FAIL': An active architectural boundary violation that violates a CI ratchet.
+      - 'WARN': Legacy coupling or cross-model coupling tracked for RFC migration.
+      - 'OK':   An architecturally compliant and expected dependency.
+    """
+    # Detect migrated extensions with manifests
+    migrated = set()
+    if root is not None:
+        try:
+            for manifest in (Path(root) / "src/models").glob("*/extension.json"):
+                migrated.add(manifest.parent.name)
+        except Exception:
+            pass
+    if not migrated:
+        migrated.add("embedding_gemma2")
+
+    m_owner = model_name_from_path(owner)
+    m_dep = model_name_from_path(dep)
+
+    # 1. STRICT BOUNDARY VIOLATIONS
+    if owner == "src/core" and (dep.startswith("models/") or dep.startswith("families/")):
+        return ("FAIL", "❌", "core boundary violation (core includes model/family)")
+    if (owner.startswith(("models/", "families/", "src/cache", "src/ext")) or owner.startswith("include/gufo/ext")) and dep == "src/cli":
+        return ("FAIL", "❌", "serving boundary violation (engine/extension includes CLI)")
+    if owner.startswith("models/") and dep in {"src/core", "src/cache"}:
+        return ("FAIL", "❌", "model core boundary violation (production model includes core/cache)")
+    if owner == "src/cli" and m_dep in migrated:
+        return ("FAIL", "❌", f"extension boundary violation (CLI includes migrated extension {m_dep})")
+
+    # 2. LEGACY COUPLING / PENDING RFC MIGRATION
+    if owner == "src/cli" and dep.startswith("models/"):
+        return ("WARN", "⚠️ ", "legacy model in CLI (pending RFC migration)")
+    if owner.startswith("models/") and dep.startswith("models/") and m_owner != m_dep:
+        return ("WARN", "⚠️ ", "cross-model include (unisolated model boundary)")
+    if owner.startswith("tests/models/") and dep.startswith("models/") and m_owner != m_dep:
+        if m_owner == "qwen27b" and m_dep == "qwen":
+            return ("WARN", "⚠️ ", "cross-model test coupling (qwen27b tests reuse base qwen)")
+        return ("WARN", "⚠️ ", f"cross-model test coupling ({m_owner} tests include {m_dep})")
+    if owner.startswith("tests/models/") and dep.startswith("tests/models/") and m_owner != m_dep:
+        return ("WARN", "⚠️ ", f"cross-model test coupling ({owner} includes {dep})")
+    if owner == "tests/cli" and dep.startswith("models/"):
+        return ("WARN", "⚠️ ", "CLI test depends directly on unmigrated model")
+    if owner == "tests/support" and dep == "src/cli":
+        return ("WARN", "⚠️ ", "test support includes CLI headers")
+    if owner == "src/core" and dep == "src/cache":
+        return ("WARN", "⚠️ ", "core depends on cache")
+
+    # 3. EXPECTED / COMPLIANT
+    if m_owner and m_dep and m_owner == m_dep:
+        return ("OK", "✅", "test -> own model")
+    if owner.startswith("models/") and dep.startswith("families/"):
+        return ("OK", "✅", "model -> shared family library")
+    if owner.startswith("tests/") and dep in {"tests/support", "tests/fixtures", "tests/testing"}:
+        return ("OK", "✅", "test -> test support")
+    if owner.startswith("tests/") and "golden_helpers" in dep:
+        return ("OK", "✅", "test -> shared golden helper")
+    if owner == "src/cli" and dep in {"src/core", "src/cache", "src/ext", "src/eval", "src/testing", "configuration", "families/qwen"}:
+        return ("OK", "✅", "serving -> engine/infra")
+    if owner in {"src/cache", "src/ext", "src/eval"} and dep in {"src/core", "configuration"}:
+        return ("OK", "✅", "engine layer -> core")
+    if owner.startswith("tests/") and dep in {"src/core", "src/cache", "src/cli", "src/ext", "src/eval", "src/testing", "families/qwen"}:
+        return ("OK", "✅", "test -> engine component")
+    if owner == "configuration" or dep == "configuration":
+        return ("OK", "✅", "build/manifest reference")
+    if owner.startswith("tools/"):
+        return ("OK", "✅", "tooling dependency")
+    if owner.startswith("families/") and dep == "src/core":
+        return ("OK", "✅", "family library -> core")
+
+    return ("OK", "✅", "internal layer dependency")
+
+
+def print_cross_owner_report(cross_owner_counts, root=None):
+    """Print classified, grouped cross-owner include mappings with status emojis."""
+    by_status = {"FAIL": [], "WARN": [], "OK": []}
+    for mapping, count in cross_owner_counts.items():
+        owner, dep = mapping.split(" -> ", 1)
+        status, icon, reason = classify_edge(owner, dep, root)
+        by_status[status].append((icon, status, mapping, count, reason))
+
+    print("\n[check-extension-isolation] Cross-Layer Include Mappings:")
+    if by_status["FAIL"]:
+        print(f"  ─── Strict Boundary Violations ({len(by_status['FAIL'])}) " + "─" * 40)
+        for icon, status, mapping, count, reason in by_status["FAIL"]:
+            print(f"  {icon} [{status}] {mapping}: {count} ({reason})")
+    else:
+        print("  ─── Strict Boundary Violations (0) ──────────────────────────────────")
+        print("  ✅ [OK] No active boundary violations.")
+
+    print(f"\n  ─── Pending RFC Migrations / Legacy Coupling ({len(by_status['WARN'])}) " + "─" * 28)
+    if by_status["WARN"]:
+        for icon, status, mapping, count, reason in by_status["WARN"]:
+            print(f"  {icon} [{status}] {mapping}: {count} ({reason})")
+    else:
+        print("  ✅ [OK] Zero legacy couplings remaining.")
+
+    print(f"\n  ─── Expected & Compliant Dependencies ({len(by_status['OK'])}) " + "─" * 33)
+    for icon, status, mapping, count, reason in by_status["OK"]:
+        print(f"  {icon} [{status}] {mapping}: {count} ({reason})")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--mode", choices=["report"], default="report")
     parser.add_argument("--json-report", type=Path, help="Write complete deterministic inventory")
     parser.add_argument("--details", action="store_true", help="Print the full JSON inventory")
+    parser.add_argument("--legacy-counts", action="store_true",
+                        help="Print legacy unclassified flat cross-owner counts")
     parser.add_argument("--fail-on-core-model-includes", action="store_true",
                         help="Fail if any src/core file includes a model or family header")
     parser.add_argument("--fail-on-family-graph", action="store_true",
@@ -728,6 +871,9 @@ def main():
                              "public-API file includes a src/cli serving or HTTP header")
     parser.add_argument("--fail-on-model-core-includes", action="store_true",
                         help="Fail if any production model file includes a core or cache header")
+    parser.add_argument("--fail-on-extension-boundary", "--fail-on-cli-model-includes",
+                        dest="fail_on_extension_boundary", action="store_true",
+                        help="Fail if any src/cli file includes a migrated extension (src/models/embedding_gemma2)")
     parser.add_argument("--fail-on-target-ownership", action="store_true",
                         help="Fail unless every model directory has a manifest and every "
                              "target that links, compiles or includes a library claims it")
@@ -744,8 +890,11 @@ def main():
         print("[check-extension-isolation] REPORT ONLY (coupling does not fail this check)")
         for key, value in report["summary"].items():
             print(f"  {key}: {value}")
-        for key, count in report["cross_owner_counts"].items():
-            print(f"  {key}: {count}")
+        if args.legacy_counts:
+            for key, count in report["cross_owner_counts"].items():
+                print(f"  {key}: {count}")
+        else:
+            print_cross_owner_report(report["cross_owner_counts"], args.root.resolve())
         for violation in report["family_violations"]:
             print(f"  family: {violation}")
         for limitation in report["limitations"]:
@@ -782,6 +931,16 @@ def main():
             return 1
         print("[check-extension-isolation] PASS: model core boundary "
               "(no production src/models -> src/core|src/cache includes)")
+    if args.fail_on_extension_boundary:
+        violations = extension_boundary_violations(report)
+        if violations:
+            print("[check-extension-isolation] EXTENSION BOUNDARY VIOLATED "
+                  "(src/cli must not include migrated extension headers):")
+            for violation in violations:
+                print(f"  {violation}")
+            return 1
+        print("[check-extension-isolation] PASS: extension boundary "
+              "(no src/cli -> src/models/embedding_gemma2 includes)")
     if args.fail_on_target_ownership or args.target_ownership_report:
         libraries, edges, violations = target_ownership(args.root.resolve())
         if args.target_ownership_report:

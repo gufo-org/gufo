@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/video_processor.hpp"
+#include "video_processor.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -20,7 +20,7 @@ extern "C" {
 #include <memory>
 #include <stdexcept>
 
-#include "src/models/embedding_gemma2/config.hpp"
+#include "config.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

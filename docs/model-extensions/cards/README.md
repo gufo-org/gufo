@@ -66,7 +66,19 @@ and passed all bounded CPU/GPU CTests, continuation identity goldens, and format
 Its unresolved gates — none of which it claims — are the deferred functional/performance half
 and remaining CLI text runner coupling in text model integration harnesses. See its
 [execution record](12-model-api-test-support.md#execution-record).
-Cards 13–29 are pending.
+Card 13 is complete for its in-card gates: migrated `src/models/embedding_gemma2` to an
+isolated, discovered extension; published `<gufo/ext/embeddings.hpp>` and runtime registry
+contracts; bumped extension API version to `0.1.3` in `version.hpp` and `GufoExtension.cmake`;
+verified `SURFACE` closure (99 paths); completely eradicated serving layer includes of
+`src/models/embedding_gemma2`; converted internal model includes to extension-relative;
+authored `extension.json` (schema 1) and `extension.cmake`; implemented HIP-free pure artifact
+probe; added `"embedding_gemma2"` to `extensions.lock`; added `--fail-on-extension-boundary`
+to `tools/ci/check-extension-isolation.py` (with negative unit test proof); verified discovery,
+lock, and explicit exclusion modes; and passed all bounded CTests, continuation identity
+goldens, and format checks. Its unresolved gates — none of which it claims — are the deferred
+functional/performance half (deferred to post-Card-14 qualification window). See its
+[execution record](13-embeddinggemma-pilot.md#execution-record).
+Cards 14–29 are pending.
 The authorized implementation milestone ends after Card 14 is
 verified and committed; cards 15–29 document later scope only. This split is
 documentation work and does not itself advance any implementation status.

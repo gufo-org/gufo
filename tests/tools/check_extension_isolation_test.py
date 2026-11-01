@@ -590,6 +590,66 @@ qwen::Real real;
             ISOLATION.inventory(ROOT))
         self.assertEqual(violations, [])
 
+    def test_extension_boundary_blocks_cli_includes_of_migrated_extensions(self):
+        files = {
+            "src/models/embedding_gemma2/config.hpp": "struct Config {};\n",
+            "src/models/embedding_gemma2/loader.hpp": "struct Loader {};\n",
+            "src/cli/serve/bad_service.hpp": '#include "src/models/embedding_gemma2/config.hpp"\n',
+            "src/cli/serve/bad_handler.cpp": '#include "src/models/embedding_gemma2/loader.hpp"\n',
+            "src/cli/serve/good_service.hpp": '#include <gufo/ext/embeddings.hpp>\n',
+            "include/gufo/ext/embeddings.hpp": "struct Embeddings {};\n",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            violations = ISOLATION.extension_boundary_violations(
+                ISOLATION.inventory(root))
+        self.assertEqual(violations, [
+            "src/cli/serve/bad_handler.cpp:1: src/models/embedding_gemma2/loader.hpp",
+            "src/cli/serve/bad_service.hpp:1: src/models/embedding_gemma2/config.hpp",
+        ])
+
+    def test_repository_satisfies_the_extension_boundary(self):
+        # Card 13 migrated EmbeddingGemma 2 to the neutral extension runtime.
+        # If this fails, a CLI or serving source started including a migrated
+        # model extension header directly; use ext::Registry and neutral
+        # extension interfaces instead.
+        violations = ISOLATION.extension_boundary_violations(
+            ISOLATION.inventory(ROOT))
+        self.assertEqual(violations, [])
+
+    def test_edge_classification(self):
+        # Strict boundary violations
+        status, icon, _ = ISOLATION.classify_edge("src/core", "models/qwen")
+        self.assertEqual((status, icon), ("FAIL", "❌"))
+        status, icon, _ = ISOLATION.classify_edge("models/qwen", "src/cli")
+        self.assertEqual((status, icon), ("FAIL", "❌"))
+        status, icon, _ = ISOLATION.classify_edge("models/qwen", "src/core")
+        self.assertEqual((status, icon), ("FAIL", "❌"))
+        status, icon, _ = ISOLATION.classify_edge("src/cli", "models/embedding_gemma2")
+        self.assertEqual((status, icon), ("FAIL", "❌"))
+
+        # Legacy coupling / pending migrations
+        status, icon, _ = ISOLATION.classify_edge("src/cli", "models/qwen")
+        self.assertEqual((status, icon), ("WARN", "⚠️ "))
+        status, icon, _ = ISOLATION.classify_edge("tests/models/qwen38_flash_next", "tests/models/qwen27b")
+        self.assertEqual((status, icon), ("WARN", "⚠️ "))
+        status, icon, _ = ISOLATION.classify_edge("tests/cli", "models/deepseek_v4_flash")
+        self.assertEqual((status, icon), ("WARN", "⚠️ "))
+
+        # Compliant / expected
+        status, icon, _ = ISOLATION.classify_edge("tests/models/qwen3_tts", "models/qwen3_tts")
+        self.assertEqual((status, icon), ("OK", "✅"))
+        status, icon, _ = ISOLATION.classify_edge("models/qwen", "families/qwen")
+        self.assertEqual((status, icon), ("OK", "✅"))
+        status, icon, _ = ISOLATION.classify_edge("src/cli", "src/core")
+        self.assertEqual((status, icon), ("OK", "✅"))
+        status, icon, _ = ISOLATION.classify_edge("tests/models/qwen38_flash_next", "tests/support")
+        self.assertEqual((status, icon), ("OK", "✅"))
+
 
 if __name__ == "__main__":
     unittest.main()

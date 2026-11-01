@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/loader.hpp"
+#include "loader.hpp"
 
 #include <cstddef>
 #include <cstdint>

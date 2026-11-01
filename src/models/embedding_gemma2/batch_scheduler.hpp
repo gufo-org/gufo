@@ -10,9 +10,9 @@
 #include <string>
 #include <vector>
 
-#include "src/models/embedding_gemma2/audio_processor.hpp"
-#include "src/models/embedding_gemma2/config.hpp"
-#include "src/models/embedding_gemma2/image_processor.hpp"
+#include "audio_processor.hpp"
+#include "config.hpp"
+#include "image_processor.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 

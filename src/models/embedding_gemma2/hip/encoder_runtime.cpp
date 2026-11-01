@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/hip/encoder_runtime.hpp"
+#include "encoder_runtime.hpp"
 
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
@@ -13,13 +13,13 @@
 #include <string>
 #include <utility>
 
-#include "src/models/embedding_gemma2/batch_scheduler.hpp"
-#include "src/models/embedding_gemma2/hip/audio_runtime.hpp"
-#include "src/models/embedding_gemma2/hip/blas.hpp"
-#include "src/models/embedding_gemma2/hip/ops.hpp"
-#include "src/models/embedding_gemma2/hip/vision_ops.hpp"
-#include "src/models/embedding_gemma2/image_processor.hpp"
-#include "src/models/embedding_gemma2/loader.hpp"
+#include "audio_runtime.hpp"
+#include "batch_scheduler.hpp"
+#include "blas.hpp"
+#include "image_processor.hpp"
+#include "loader.hpp"
+#include "ops.hpp"
+#include "vision_ops.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 namespace {
