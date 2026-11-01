@@ -59,14 +59,23 @@ enum class WeightType : std::uint32_t {
 /// authoritative list. At bind time it keeps gate/up tensors in their
 /// disk encoding (`DeviceModel::Copy`'s `native_routed` argument), and
 /// the Executor only launches WMMA for layers whose three matrices all
-/// appear here; the down projection is excluded at the call site because
-/// it dispatches through the MMQ vec/tiled family instead. A new storage
-/// (IQ3/IQ2 kernels, later) flips here once a WMMA launcher exists — the
-/// host launch switches in kernels.hip.cpp must grow the matching case.
+/// appear here. A new storage (IQ2 kernels, later) flips here once a
+/// WMMA launcher exists — the host launch switches in kernels.hip.cpp
+/// must grow the matching case.
 constexpr bool RoutedNativeWMMA(core::GgmlType t) noexcept {
   return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
          t == core::GgmlType::kQ5_1 || t == core::GgmlType::kQ8_0 ||
-         t == core::GgmlType::kIQ4_NL;
+         t == core::GgmlType::kIQ4_NL || t == core::GgmlType::kIQ3_XXS ||
+         t == core::GgmlType::kIQ3_S;
+}
+
+/// Storages the vendored MMQ vec/tiled family dequantizes natively. A
+/// routed matrix outside this set must take the WMMA route at every
+/// batch size, because no MMQ kernel can read it; the Executor forces
+/// the WMMA route in that case instead of relying on matrix-sized tiles.
+constexpr bool RoutedMmqCapable(core::GgmlType t) noexcept {
+  return t == core::GgmlType::kQ4_K || t == core::GgmlType::kQ5_K ||
+         t == core::GgmlType::kQ5_1 || t == core::GgmlType::kQ8_0;
 }
 
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).

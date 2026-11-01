@@ -467,7 +467,7 @@ float Iq4XsValue(const block_iq4_xs& block, std::size_t index) noexcept {
          static_cast<float>(kValuesIq4Nl[code]);
 }
 
-float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
+float Iq3sValueRef(const block_iq3_s& block, std::size_t index) noexcept {
   const std::size_t ib32 = index / 32;    // 0..7 sub-block
   const std::size_t within = index % 32;  // 0..31
   const std::size_t l = within / 8;       // 0..3 group of eight
@@ -503,6 +503,12 @@ float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
 
 const std::uint32_t* Iq3sGrid() noexcept {
   return kIq3sGrid;
+}
+
+// Public IQ3_S element accessor: the routed GPU kernels mirror this
+// reference semantics through the same grid and sign tables.
+float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
+  return Iq3sValueRef(block, index);
 }
 
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k) {

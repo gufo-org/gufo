@@ -446,7 +446,7 @@ struct Uploader {
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps, true);
     d.ffn_up_exps = Copy(l.ffn_up_exps, true);
-    d.ffn_down_exps = Copy(l.ffn_down_exps);
+    d.ffn_down_exps = Copy(l.ffn_down_exps, true);
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);
     d.shexp_down = Copy(l.shexp_down);

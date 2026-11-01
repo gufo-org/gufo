@@ -776,6 +776,14 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
 /// magnitudes).
 [[nodiscard]] const std::uint32_t* Iq3sGrid() noexcept;
 
+/// Element `index` of one IQ3_XXS / IQ3_S block, following the reference
+/// llama.cpp dequantizers bit for bit (the GPU routed kernels mirror these
+/// semantics through the same public grid and sign tables).
+[[nodiscard]] float Iq3XxsValue(const block_iq3_xxs& block,
+                                std::size_t index) noexcept;
+[[nodiscard]] float Iq3sValue(const block_iq3_s& block,
+                              std::size_t index) noexcept;
+
 // Compute dot product of Q8_0 quantized row with FP32 vector
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
                      std::size_t k);

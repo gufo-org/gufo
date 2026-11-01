@@ -2796,9 +2796,15 @@ bool Executor::JoinSide(std::string* error_msg) const {
 bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
   const Config& c = config();
   // Every storage the F16 WMMA family runs natively (kernels.hpp's
-  // RoutedNativeWMMA): the original checkpoint's K-quants plus the
-  // pruned checkpoints' IQ4_NL experts.
-  return ExpertMatrixRows(n_tokens) && RoutedNativeWMMA(l.ffn_gate_exps.type) &&
+  // RoutedNativeWMMA): the original checkpoint's K-quants plus the pruned
+  // checkpoints' IQ codebook experts. A storage no MMQ kernel can read
+  // must keep the WMMA route at every batch size, not just on
+  // matrix-shaped tiles.
+  const bool mmq_blocked = !RoutedMmqCapable(l.ffn_gate_exps.type) ||
+                           !RoutedMmqCapable(l.ffn_up_exps.type) ||
+                           !RoutedMmqCapable(l.ffn_down_exps.type);
+  return (ExpertMatrixRows(n_tokens) || mmq_blocked) &&
+         RoutedNativeWMMA(l.ffn_gate_exps.type) &&
          RoutedNativeWMMA(l.ffn_up_exps.type) &&
          RoutedNativeWMMA(l.ffn_down_exps.type) && c.hidden_size % 256 == 0 &&
          c.expert_ff % 64 == 0;

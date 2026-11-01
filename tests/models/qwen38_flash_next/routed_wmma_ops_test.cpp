@@ -288,6 +288,59 @@ Experts MakeIQ4_NL(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+/// Random IQ3_XXS blocks: grid indices, aux sign/scale words and the F16
+/// block scale, decoded through the reference element accessor.
+Experts MakeIQ3_XXS(std::size_t e, std::size_t m, std::size_t k,
+                    std::uint32_t seed) {
+  Experts w;
+  const std::size_t blocks = e * m * (k / 256);
+  w.packed.resize(blocks * 98);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    auto* blk = reinterpret_cast<gufo::quant::block_iq3_xxs*>(
+        w.packed.data() + b * 98);
+    const __half ds = __float2half(Uniform(&seed, 0.02F) + 0.03F);
+    std::memcpy(&blk->d, &ds, sizeof(blk->d));
+    for (std::uint8_t& q : blk->qs)
+      q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (std::size_t w = 0; w < 8; ++w) {
+      std::uint32_t aux = NextRandom(&seed);
+      std::memcpy(blk->scales_and_signs + 4 * w, &aux, sizeof(aux));
+    }
+    for (int i = 0; i < 256; ++i)
+      w.values[b * 256 + i] = gufo::quant::Iq3XxsValue(*blk, i);
+  }
+  return w;
+}
+
+/// Random IQ3_S blocks: grid indices plus the qh high bits, per-group
+/// sign bytes and per-sub-block scale nibbles, decoded through the
+/// reference element accessor.
+Experts MakeIQ3_S(std::size_t e, std::size_t m, std::size_t k,
+                  std::uint32_t seed) {
+  Experts w;
+  const std::size_t blocks = e * m * (k / 256);
+  w.packed.resize(blocks * 110);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    auto* blk = reinterpret_cast<gufo::quant::block_iq3_s*>(
+        w.packed.data() + b * 110);
+    const __half ds = __float2half(Uniform(&seed, 0.02F) + 0.03F);
+    std::memcpy(&blk->d, &ds, sizeof(blk->d));
+    for (std::uint8_t& q : blk->qs)
+      q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (std::uint8_t& q : blk->qh)
+      q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (std::uint8_t& s : blk->signs)
+      s = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (std::uint8_t& s : blk->scales)
+      s = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFFU);
+    for (int i = 0; i < 256; ++i)
+      w.values[b * 256 + i] = gufo::quant::Iq3sValue(*blk, i);
+  }
+  return w;
+}
+
 struct Result {
   double vs_mmq;
   double vs_ref;
@@ -303,7 +356,9 @@ const char* TypeName(q::WeightType type) {
          : type == q::WeightType::kQ5_1 ? "Q5_1"
          : type == q::WeightType::kIQ4_NL
              ? "IQ4_NL"
-             : "Q8_0";
+             : type == q::WeightType::kIQ3_XXS
+                   ? "IQ3_XXS"
+                   : type == q::WeightType::kIQ3_S ? "IQ3_S" : "Q8_0";
 }
 
 /// Runs the MMQ tier and the F16 route over the same routing and reports
@@ -320,7 +375,11 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       : type == q::WeightType::kQ5_1 ? MakeQ5_1(experts, m, k, seed)
       : type == q::WeightType::kIQ4_NL
           ? MakeIQ4_NL(experts, m, k, seed)
-          : MakeQ8_0(experts, m, k, seed);
+          : type == q::WeightType::kIQ3_XXS
+                ? MakeIQ3_XXS(experts, m, k, seed)
+                : type == q::WeightType::kIQ3_S
+                      ? MakeIQ3_S(experts, m, k, seed)
+                      : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
   std::vector<std::int32_t> ids(slots);
@@ -363,9 +422,12 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   std::vector<float> zero_out(slots * m, 0.0F);
   float* d_mmq = Upload(zero_out);
 
-  // IQ4_NL has no MMQ counterpart: the vendored tier covers the original
-  // checkpoint's storages only, so the F64 reference is the oracle.
-  const bool has_mmq = type != q::WeightType::kIQ4_NL;
+  // IQ storages have no MMQ counterpart: the vendored tier covers the
+  // original checkpoint's storages only, so the F64 reference is the
+  // oracle.
+  const bool has_mmq = type != q::WeightType::kIQ4_NL &&
+                       type != q::WeightType::kIQ3_XXS &&
+                       type != q::WeightType::kIQ3_S;
   const auto mmq_raw = type == q::WeightType::kQ4_K   ? qfn_mmq_q4_K_moe_raw
                        : type == q::WeightType::kQ5_K ? qfn_mmq_q5_K_moe_raw
                        : type == q::WeightType::kQ5_1 ? qfn_mmq_q5_1_moe_raw
@@ -472,12 +534,17 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
     }
     CheckHip(hipFree(d_narrow_tiles), "free reference tiles");
   }
-  for (std::size_t i = 0; i < slots * m; ++i) {
+  int nmm = 0;
+  for (std::size_t i = 0; i < slots * m && nmm < 6; ++i) {
     const __half expected = __float2half(f16[i]);
     if (std::memcmp(&expected, &f16_half[i], sizeof(__half)) != 0) {
-      throw std::runtime_error("routed F16 output changed rounding");
+      ++nmm;
+      std::printf("  rounding mismatch at %zu (row %zu): f32=%g half=%04x expected=%04x\n",
+                  i, i % m, f16[i], (unsigned)*(std::uint16_t*)&f16_half[i],
+                  (unsigned)*(std::uint16_t*)&expected);
     }
   }
+  if (nmm != 0) throw std::runtime_error("routed F16 output changed rounding");
   const auto half_tail = Download(d_f16_half + slots * m, kHalfGuard);
   for (__half value : half_tail) {
     if (std::memcmp(&value, &half_guard, sizeof(__half)) != 0)
@@ -1298,6 +1365,25 @@ int main() {
     ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x19E4C0DFU, 64)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x19E4C0E0U, 64)) &&
+         ok;
+    // IQ3_XXS / IQ3_S: the pruned checkpoints' narrower expert storages.
+    // k stays a multiple of 256: GGUF never stores an IQ3 tensor with a
+    // ragged trailing block (down projections at k=640 carry 32/64-block
+    // storages only), and the kernel's row stride assumes full blocks.
+    std::printf("== routed IQ3 (pruned-checkpoint experts; F64 oracle)\n");
+    ok = Ok(Run(q::WeightType::kIQ3_XXS, 300, 10, 64, 640, 2560, 0x7103A001U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ3_XXS, 3000, 1, 64, 2560, 768, 0x7103A002U,
+                64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ3_XXS, 97, 1, 8, 129, 512, 0x7103A003U, 64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ3_S, 300, 10, 64, 640, 2560, 0x7103B001U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ3_S, 3000, 1, 64, 2560, 768, 0x7103B002U,
+                64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ3_S, 97, 1, 8, 129, 512, 0x7103B003U, 64)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
