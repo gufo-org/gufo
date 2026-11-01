@@ -692,14 +692,14 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     // only have to close per expert slab — k alone may legitimately be a
     // non-multiple (k=640 with a 256-element block), matching llama.cpp's
     // numel % block rule.
-    const bool aligned = block == 0 ||
-                         (info.dimensions.size() == 2
-                              ? info.dimensions.front() % block == 0
-                              : static_cast<std::size_t>(info.dimensions[0]) *
-                                        (info.dimensions.size() > 1
-                                             ? info.dimensions[1]
-                                             : 1) %
-                                    block == 0);
+    const bool aligned =
+        block == 0 ||
+        (info.dimensions.size() == 2
+             ? info.dimensions.front() % block == 0
+             : static_cast<std::size_t>(info.dimensions[0]) *
+                       (info.dimensions.size() > 1 ? info.dimensions[1] : 1) %
+                       block ==
+                   0);
     if (!info.size_bytes || !aligned) {
       if (error_msg)
         *error_msg = "Invalid GGUF tensor shape or unsupported storage type: " +

@@ -793,8 +793,8 @@ void DequantizeIQ2_S(const void* src, float* dst, std::size_t k) {
         const std::uint32_t index =
             qs[l] |
             ((static_cast<std::uint32_t>(qh[ib32]) << (8 - 2 * l)) & 0x300U);
-        const auto* grid =
-            reinterpret_cast<const std::uint8_t*>(&gufo::quant::kIq2sGrid[index]);
+        const auto* grid = reinterpret_cast<const std::uint8_t*>(
+            &gufo::quant::kIq2sGrid[index]);
         for (int j = 0; j < 8; ++j)
           y[j] = dl * static_cast<float>(grid[j]) * SignOf(signs[l], j);
         y += 8;
@@ -820,10 +820,10 @@ void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k) {
       const float db = d * (0.5F + static_cast<float>(aux >> 28)) * 0.5F;
       for (int l = 0; l < 4; ++l) {
         const std::uint8_t signs = kKsignsIq2xs[(aux >> (7 * l)) & 127U];
-        const auto* grid1 =
-            reinterpret_cast<const std::uint8_t*>(&gufo::quant::kIq3xxsGrid[qs[2 * l]]);
-        const auto* grid2 =
-            reinterpret_cast<const std::uint8_t*>(&gufo::quant::kIq3xxsGrid[qs[2 * l + 1]]);
+        const auto* grid1 = reinterpret_cast<const std::uint8_t*>(
+            &gufo::quant::kIq3xxsGrid[qs[2 * l]]);
+        const auto* grid2 = reinterpret_cast<const std::uint8_t*>(
+            &gufo::quant::kIq3xxsGrid[qs[2 * l + 1]]);
         for (int j = 0; j < 4; ++j) {
           y[j] = db * static_cast<float>(grid1[j]) * SignOf(signs, j);
           y[j + 4] = db * static_cast<float>(grid2[j]) * SignOf(signs, j + 4);
@@ -1006,8 +1006,8 @@ float Iq3XxsValue(const block_iq3_xxs& block, std::size_t index) noexcept {
   const float d = Fp16ToFloat(block.d);
   const float db = d * (0.5f + static_cast<float>(aux32 >> 28)) * 0.5f;
   const std::uint8_t grid_index = block.qs[8 * ib32 + 2 * l + (j >= 4 ? 1 : 0)];
-  const std::uint8_t magnitude =
-      static_cast<std::uint8_t>(gufo::quant::kIq3xxsGrid[grid_index] >> (8 * (j % 4)));
+  const std::uint8_t magnitude = static_cast<std::uint8_t>(
+      gufo::quant::kIq3xxsGrid[grid_index] >> (8 * (j % 4)));
   const std::uint8_t signs = kSignsIq2xs[(aux32 >> (7 * l)) & 127];
   return db * static_cast<float>(magnitude) *
          ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0f : 1.0f);
@@ -1051,8 +1051,8 @@ float Q6KValue(const block_q6_K& block, std::size_t index) noexcept {
   const std::size_t within = index % 128;
   const std::size_t seg = within / 32;
   const std::size_t lane = within % 32;
-  const std::uint8_t qbyte = block.ql[(seg & 1U) ? h * 64 + 32 + lane
-                                                 : h * 64 + lane];
+  const std::uint8_t qbyte =
+      block.ql[(seg & 1U) ? h * 64 + 32 + lane : h * 64 + lane];
   const std::uint8_t low = (seg & 2U) ? (qbyte >> 4U) : (qbyte & 0x0FU);
   const std::uint8_t high = (block.qh[h * 32 + lane] >> (2 * seg)) & 0x3U;
   const std::int8_t s = block.scales[h * 8 + lane / 16 + seg * 2];

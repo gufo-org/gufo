@@ -6,9 +6,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/sampling.hpp>
 
-#include <gufo/ext/gguf_reader.hpp>
 #include "src/families/qwen/hip_common/rope.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
@@ -88,9 +88,8 @@ void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
 /// projection feeds RoutedF16Gemm: `tiles` gets ceil(n / tile_rows) tile
 /// entries, `bounds` the single bucket's [begin, end), and `rows` the
 /// identity token rows. All three buffers are device-side.
-void DenseGemmMap(std::int32_t* tiles, std::int32_t* bounds,
-                  std::int32_t* rows, std::uint32_t n, std::uint32_t tile_rows,
-                  hipStream_t stream);
+void DenseGemmMap(std::int32_t* tiles, std::int32_t* bounds, std::int32_t* rows,
+                  std::uint32_t n, std::uint32_t tile_rows, hipStream_t stream);
 
 /// out[t][d] = rmsnorm(x[t][d]) * gamma[d]; `groups` independent norms of
 /// `dim/groups` elements each share the gamma row. gamma may be null.

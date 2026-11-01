@@ -187,8 +187,7 @@ struct Uploader {
     }
     allocations.push_back(f32);
     bytes += count * sizeof(float) + kTailMargin;
-    conversions.push_back(
-        {src.data, f32, count, false, t.SizeBytes(), true});
+    conversions.push_back({src.data, f32, count, false, t.SizeBytes(), true});
     (void)hipMemsetAsync(static_cast<std::uint8_t*>(f32) + count * 4, 0,
                          kTailMargin, nullptr);
     DeviceTensor d = src;
@@ -304,8 +303,7 @@ struct Uploader {
       for (const TensorRef* t : parts) {
         if (t->type == core::GgmlType::kBF16) {
           conversions.push_back({static_cast<std::uint8_t*>(ptr) + offset,
-                                 nullptr, t->rows * t->cols, false, 0,
-                                 false});
+                                 nullptr, t->rows * t->cols, false, 0, false});
         }
         offset += t->rows * t->cols * sizeof(float);
       }
@@ -499,14 +497,11 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   // bounded by device memory. (The Q6_K blanket rejection this replaces
   // predated the native Q6_K loaders.)
   const auto supported = [&](const TensorRef& t) {
-    const bool ok = t.type == core::GgmlType::kF32 ||
-                    t.type == core::GgmlType::kBF16 ||
-                    t.type == core::GgmlType::kF16 ||
-                    t.type == core::GgmlType::kQ8_0 ||
-                    t.type == core::GgmlType::kQ4_K ||
-                    t.type == core::GgmlType::kQ5_K ||
-                    t.type == core::GgmlType::kQ6_K ||
-                    RoutedNativeWMMA(t.type);
+    const bool ok =
+        t.type == core::GgmlType::kF32 || t.type == core::GgmlType::kBF16 ||
+        t.type == core::GgmlType::kF16 || t.type == core::GgmlType::kQ8_0 ||
+        t.type == core::GgmlType::kQ4_K || t.type == core::GgmlType::kQ5_K ||
+        t.type == core::GgmlType::kQ6_K || RoutedNativeWMMA(t.type);
     if (!ok && error_msg != nullptr)
       *error_msg = "unsupported HIP tensor format: " + std::string(t.name);
     return ok;
@@ -524,12 +519,10 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   // RowElement scalar mirrors; a format outside that set would silently
   // compute zero-stride rows, so reject it at load instead.
   const auto embed_supported = [&](const TensorRef& t) {
-    const bool ok = t.type == core::GgmlType::kF32 ||
-                    t.type == core::GgmlType::kBF16 ||
-                    t.type == core::GgmlType::kF16 ||
-                    t.type == core::GgmlType::kQ8_0 ||
-                    t.type == core::GgmlType::kQ6_K ||
-                    t.type == core::GgmlType::kIQ4_XS;
+    const bool ok =
+        t.type == core::GgmlType::kF32 || t.type == core::GgmlType::kBF16 ||
+        t.type == core::GgmlType::kF16 || t.type == core::GgmlType::kQ8_0 ||
+        t.type == core::GgmlType::kQ6_K || t.type == core::GgmlType::kIQ4_XS;
     if (!ok && error_msg != nullptr)
       *error_msg = "embedding/logits gather has no scalar mirror for " +
                    std::string(t.name);
@@ -616,8 +609,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
                                     hipMemcpyDeviceToDevice);
         }
         if (scratchStatus == hipSuccess) {
-          UpcastBf16(scratch, static_cast<float*>(c.source), c.count,
-                     nullptr);
+          UpcastBf16(scratch, static_cast<float*>(c.source), c.count, nullptr);
         }
         (void)hipFree(scratch);
         if (scratchStatus != hipSuccess) {

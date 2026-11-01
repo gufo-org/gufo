@@ -261,7 +261,6 @@ void DequantizeIQ1_M(const void* src, float* dst, std::size_t k);
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
                      std::size_t k);
 
-
 // Device-visible GGML codebook tables (verbatim llama.cpp ggml-common.h,
 // MIT). inline constexpr so the ROCm tile loaders and the CPU dequantizer
 // oracle read one definition; the CPU oracle is what pins their contents.
@@ -791,16 +790,23 @@ inline constexpr std::uint64_t kIq2sGrid[1024] = {
 };
 // Public per-element IQ accessors: definitions live in ggml_dequant.cpp;
 // the device parity harness consumes them.
-[[nodiscard]] float Iq4NlValue(const block_iq4_nl& block, std::size_t index) noexcept;
-[[nodiscard]] float Iq4XsValue(const block_iq4_xs& block, std::size_t index) noexcept;
-[[nodiscard]] float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept;
-[[nodiscard]] float Iq3XxsValue(const block_iq3_xxs& block, std::size_t index) noexcept;
-[[nodiscard]] float Iq2SValue(const block_iq2_s& block, std::size_t index) noexcept;
-[[nodiscard]] float Q2_0Value(const block_q2_0& block, std::size_t index) noexcept;
+[[nodiscard]] float Iq4NlValue(const block_iq4_nl& block,
+                               std::size_t index) noexcept;
+[[nodiscard]] float Iq4XsValue(const block_iq4_xs& block,
+                               std::size_t index) noexcept;
+[[nodiscard]] float Iq3sValue(const block_iq3_s& block,
+                              std::size_t index) noexcept;
+[[nodiscard]] float Iq3XxsValue(const block_iq3_xxs& block,
+                                std::size_t index) noexcept;
+[[nodiscard]] float Iq2SValue(const block_iq2_s& block,
+                              std::size_t index) noexcept;
+[[nodiscard]] float Q2_0Value(const block_q2_0& block,
+                              std::size_t index) noexcept;
 
 /// Q6_K: 256 elements per 210-byte block ({ql, qh, scales, d}); one scalar
 /// reference reader, mirroring the device loader's decoded value exactly.
-[[nodiscard]] float Q6KValue(const block_q6_K& block, std::size_t index) noexcept;
+[[nodiscard]] float Q6KValue(const block_q6_K& block,
+                             std::size_t index) noexcept;
 
 }  // namespace gufo::quant
 

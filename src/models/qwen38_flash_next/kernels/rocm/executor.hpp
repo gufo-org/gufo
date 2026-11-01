@@ -614,7 +614,7 @@ private:
   // Scratch, sized for max_batch tokens. Names follow reference.cpp.
   struct Scratch {
     std::int32_t* tokens;
-    void* x_half;   ///< activations narrowed to the weight's 16-bit type
+    void* x_half;  ///< activations narrowed to the weight's 16-bit type
     /// Tile map for native-quantized dense projections (DenseGemmMap):
     /// ceil(T/16) tile entries, two bucket bounds, T identity rows.
     std::int32_t* dense_map;

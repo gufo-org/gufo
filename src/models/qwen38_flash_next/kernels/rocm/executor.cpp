@@ -1782,13 +1782,12 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
           rows > 48 && w.type != GgmlType::kQ4_K && w.type != GgmlType::kQ5_K
               ? 64
               : (rows > 16 ? 48 : 16);
-      PrepareHalfInput(x + static_cast<std::size_t>(r0) * w.cols, rows,
-                       w.cols);
+      PrepareHalfInput(x + static_cast<std::size_t>(r0) * w.cols, rows, w.cols);
       DenseGemmMap(tiles, bounds, map_rows, rows, tile_rows, stream_);
       if (!RoutedF16Gemm(w.data, SmallType(w.type),
                          static_cast<const __half*>(s_.x_half), tiles,
-                         (rows + tile_rows - 1) / tile_rows, tile_rows,
-                         bounds, map_rows, map_rows, nullptr,
+                         (rows + tile_rows - 1) / tile_rows, tile_rows, bounds,
+                         map_rows, map_rows, nullptr,
                          out + static_cast<std::size_t>(r0) * w.rows, nullptr,
                          w.rows, w.cols, stream_)) {
         AssignError(error_msg, "dense WMMA GEMM failed");
@@ -2777,8 +2776,8 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
                                 c.num_experts * sizeof(std::uint32_t),
                                 hipMemcpyDeviceToHost, stream_),
                  "expert counts download", error_msg) ||
-          !Check(hipEventRecord(counts_ready_, stream_),
-                 "expert counts event", error_msg)) {
+          !Check(hipEventRecord(counts_ready_, stream_), "expert counts event",
+                 error_msg)) {
         return false;
       }
     }
@@ -2902,10 +2901,9 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // The 128-row wide prefill map only serves the paired gate/up kernel,
   // which exists for the K-quant nibble layout; codebook layouts take the
   // standard-height map instead.
-  const bool wide_pairable =
-      l.ffn_gate_exps.type == l.ffn_up_exps.type &&
-      (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
-       l.ffn_gate_exps.type == GgmlType::kQ5_K);
+  const bool wide_pairable = l.ffn_gate_exps.type == l.ffn_up_exps.type &&
+                             (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
+                              l.ffn_gate_exps.type == GgmlType::kQ5_K);
   if (!RouteHints(n_tokens, error_msg, wmma_experts, wide_pairable)) {
     return false;
   }
@@ -2963,12 +2961,11 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     // Q5_1/Q8_0 keep the historical collapse (it is what every baseline
     // file stores); anything else runs in its own encoding, which the
     // WMMA launcher covers exactly for the RoutedNativeWMMA set.
-    const WeightType down_type = l.ffn_down_exps.type == GgmlType::kQ8_0
-                                     ? WeightType::kQ8_0
-                                 : l.ffn_down_exps.type == GgmlType::kQ5_1
-                                     ? WeightType::kQ5_1
-                                     : static_cast<WeightType>(
-                                           l.ffn_down_exps.type);
+    const WeightType down_type =
+        l.ffn_down_exps.type == GgmlType::kQ8_0 ? WeightType::kQ8_0
+        : l.ffn_down_exps.type == GgmlType::kQ5_1
+            ? WeightType::kQ5_1
+            : static_cast<WeightType>(l.ffn_down_exps.type);
     // Prefill takes the gate/up map's 128-token tiles: each wave decodes its
     // rows' weights once for up to 128 tokens.
     const bool wide_down = routed_wide_tiles_ != 0;
