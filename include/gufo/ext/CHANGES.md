@@ -1,5 +1,11 @@
 # Extension API changes
 
+## 0.1.4
+
+Discover metadata-only extensions without selecting them for builds when
+`extension.cmake` is absent. Explicit selection still requires that file;
+excluded extension provenance reports `metadata only`.
+
 ## 0.1.3
 
 Publish capability-neutral embedding contracts (`include/gufo/ext/embeddings.hpp`):
