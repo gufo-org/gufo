@@ -493,14 +493,24 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
+  // Every bound storage must be executable by a kernel as stored: the
+  // accepted set is exactly what the dense/embedding WMMA loaders and the
+  // routed MMQ/WMMA families read. Anything else is rejected here — never
+  // inflated into a wider type to make it load, since local inference is
+  // bounded by device memory. (The Q6_K blanket rejection this replaces
+  // predated the native Q6_K loaders.)
   const auto supported = [&](const TensorRef& t) {
-    if (t.type != core::GgmlType::kQ6_K)
-      return true;
-    if (error_msg != nullptr)
-      *error_msg = "unsupported HIP tensor format Q6_K: " + std::string(t.name);
-    return false;
+    const bool ok = t.type == core::GgmlType::kF32 ||
+                    t.type == core::GgmlType::kBF16 ||
+                    t.type == core::GgmlType::kF16 ||
+                    t.type == core::GgmlType::kQ8_0 ||
+                    t.type == core::GgmlType::kQ4_K ||
+                    t.type == core::GgmlType::kQ5_K ||
+                    t.type == core::GgmlType::kQ6_K ||
+                    RoutedNativeWMMA(t.type);
+    if (!ok && error_msg != nullptr)
+      *error_msg = "unsupported HIP tensor format: " + std::string(t.name);
+    return ok;
   };
   const auto layer_supported = [&](const LayerWeights& l) {
     return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&

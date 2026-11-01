@@ -1601,6 +1601,14 @@ int main() {
     ok = Ok(Run(q::WeightType::kQ6_K, 300, 1, 1, 640, 2560, 0x7406A012U)) && ok;
     ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 1, 1, 640, 2560, 0x7404C013U)) &&
          ok;
+    // Prefill pieces above 48 tokens launch Q6_K/IQ storages at 64-row
+    // tiles (only Q4_K/Q5_K clamp to 48); pin that arm on the dense view.
+    ok = Ok(Run(q::WeightType::kQ6_K, 300, 1, 1, 640, 2560, 0x7406A014U, 64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 300, 1, 1, 640, 2560, 0x7404A015U, 64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ2_S, 300, 1, 1, 640, 2560, 0x7402A016U, 64)) &&
+         ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
                 64)) &&

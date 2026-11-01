@@ -1773,7 +1773,13 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     std::int32_t* map_rows = bounds + 2;
     for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
       const std::uint32_t rows = std::min(piece, n_tokens - r0);
-      const std::uint32_t tile_rows = rows > 48 ? 64 : (rows > 16 ? 48 : 16);
+      // Q4_K/Q5_K WMMA arms are instantiated up to 48-row tiles (the
+      // baseline ships those storages through MMQ, so the 64-row arm never
+      // ran in production); every other native storage launches at 64.
+      const std::uint32_t tile_rows =
+          rows > 48 && w.type != GgmlType::kQ4_K && w.type != GgmlType::kQ5_K
+              ? 64
+              : (rows > 16 ? 48 : 16);
       PrepareHalfInput(x + static_cast<std::size_t>(r0) * w.cols, rows,
                        w.cols);
       DenseGemmMap(tiles, bounds, map_rows, rows, tile_rows, stream_);
