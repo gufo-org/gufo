@@ -29,6 +29,7 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/embeddings_api.hpp"
 #include "src/cli/serve/image_api.hpp"
@@ -246,6 +247,25 @@ bool IsAuthorized(const HttpRequest& request, const std::string& key_hash) {
       }
       found = true;
       credential = value;
+    }
+  }
+  if (!found) {
+    // Browsers cannot set headers on a WebSocket: Realtime clients pass the
+    // key as the subprotocol "openai-insecure-api-key.<key>".
+    constexpr std::string_view kPrefix = "openai-insecure-api-key.";
+    const auto protocols = request.header("Sec-WebSocket-Protocol");
+    std::string_view offered = protocols;
+    while (!offered.empty()) {
+      const auto comma = offered.find(',');
+      auto token = offered.substr(0, comma);
+      while (token.starts_with(' '))
+        token.remove_prefix(1);
+      while (token.ends_with(' '))
+        token.remove_suffix(1);
+      if (token.starts_with(kPrefix) && IsWebSocketUpgrade(request))
+        return CredentialHash(token.substr(kPrefix.size())) == key_hash;
+      offered = comma == std::string_view::npos ? std::string_view{}
+                                                : offered.substr(comma + 1);
     }
   }
   const auto space = credential.find(' ');
@@ -758,7 +778,8 @@ HttpResponse ListModels(TextGenerationBackend* backend,
                         const VideoJobService* video_jobs,
                         const TtsService* tts, const AsrService* asr,
                         const ImageService* images,
-                        const EmbeddingService* embeddings) {
+                        const EmbeddingService* embeddings,
+                        const DecisionService* decisions) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
@@ -836,6 +857,24 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["created"] = Now();
     model["owned_by"] = "operator-supplied-gemma";
     model["capability"] = "embedding";
+    data.push_back(std::move(model));
+  }
+  if (decisions) {
+    auto model = json::Value::object();
+    model["id"] = decisions->model_id;
+    model["object"] = "model";
+    model["created"] = Now();
+    model["owned_by"] = "gufo";
+    model["capability"] = "decision";
+    auto modalities = json::Value::array();
+    modalities.push_back("text");
+    if (decisions->multimodal) {
+      modalities.push_back("image");
+      modalities.push_back("audio");
+    }
+    auto architecture = json::Value::object();
+    architecture["input_modalities"] = modalities;
+    model["architecture"] = architecture;
     data.push_back(std::move(model));
   }
   resp["data"] = std::move(data);
@@ -1890,7 +1929,8 @@ HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<AsrService> asr,
                        HttpServerOptions options,
                        std::shared_ptr<ImageService> images,
-                       std::shared_ptr<EmbeddingService> embeddings)
+                       std::shared_ptr<EmbeddingService> embeddings,
+                       std::shared_ptr<DecisionService> decisions)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
@@ -1899,6 +1939,7 @@ HttpServer::HttpServer(std::string host, int port,
       asr_(std::move(asr)),
       images_(std::move(images)),
       embeddings_(std::move(embeddings)),
+      decisions_(std::move(decisions)),
       options_(std::move(options)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
@@ -2156,6 +2197,16 @@ void HttpServer::reap_workers() {
 }
 
 HttpResponse HttpServer::handle_request(const HttpRequest& req) {
+  // The voice page holds no data; it asks for the API key itself and sends
+  // it with its WebSocket.
+  if (req.method == "GET" && req.path == "/voice" && asr_ &&
+      asr_->supports_voice()) {
+    HttpResponse page{
+        .status = 200, .reason = "OK", .body = std::string(VoicePage())};
+    page.headers.emplace_back("Content-Type", "text/html; charset=utf-8");
+    page.headers.emplace_back("Cache-Control", "no-store");
+    return page;
+  }
   if (!IsAuthorized(req, api_key_hash_)) {
     auto response = Err(401, "Unauthorized", "missing or invalid API key",
                         "authentication_error", "invalid_api_key");
@@ -2183,7 +2234,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                        (tts_ != nullptr && tts_->ready()) ||
                        (asr_ != nullptr && asr_->ready()) ||
                        (embeddings_ != nullptr && embeddings_->ready()) ||
-                       images_ != nullptr;
+                       images_ != nullptr || decisions_ != nullptr;
     if (!ready) {
       return Err(503, "Service Unavailable", "model service is not ready",
                  "server_error", "not_ready");
@@ -2198,6 +2249,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       body["model"] = tts_->model_id();
     } else if (embeddings_ != nullptr && embeddings_->ready()) {
       body["model"] = embeddings_->model_id();
+    } else if (decisions_ != nullptr) {
+      body["model"] = decisions_->model_id;
     } else if (images_ != nullptr) {
       body["model"] = images_->model_id();
     } else {
@@ -2208,7 +2261,39 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
-                      images_.get(), embeddings_.get());
+                      images_.get(), embeddings_.get(), decisions_.get());
+  }
+  if (req.path == "/v1/systemone") {
+    if (req.method != "POST")
+      return Err(405, "Method Not Allowed", "use POST", "invalid_request_error",
+                 "method_not_allowed");
+    if (!decisions_ || !decisions_->decide)
+      return Err(503, "Service Unavailable",
+                 "decision service is not configured", "server_error",
+                 "decision_service_unavailable");
+    json::Value payload;
+    try {
+      payload = json::parse(req.body);
+    } catch (const std::exception& e) {
+      return Err(400, "Bad Request", e.what(), "invalid_request_error",
+                 "invalid_json");
+    }
+    try {
+      if (const auto* model = payload.find("model");
+          model &&
+          (!model->is_string() || model->str() != decisions_->model_id))
+        return Err(404, "Not Found", "unknown decision model",
+                   "invalid_request_error", "model_not_found");
+      auto result = decisions_->decide(payload);
+      result["model"] = decisions_->model_id;
+      return Ok(result);
+    } catch (const std::invalid_argument& e) {
+      return Err(400, "Bad Request", e.what(), "invalid_request_error",
+                 "invalid_request");
+    } catch (const std::exception& e) {
+      return Err(500, "Internal Server Error", e.what(), "server_error",
+                 "decision_failed");
+    }
   }
   if (req.path == "/v1/images/generations" || req.path == "/v1/images/edits") {
     if (!images_)

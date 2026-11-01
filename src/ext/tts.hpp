@@ -77,7 +77,53 @@ public:
   [[nodiscard]] virtual TtsVariant Variant() const {
     return TtsVariant::kCustomVoice;
   }
+  /// Public model ID when the service names none; empty keeps the core
+  /// default.
+  [[nodiscard]] virtual std::string ModelId() const { return {}; }
+  /// The runner admits concurrent Synthesize calls itself (for example by
+  /// batching them), so the service does not serialize requests.
+  [[nodiscard]] virtual bool Concurrent() const { return false; }
 };
+
+/// Model artifacts and capacity for a TTS runner. projector_path is an
+/// explicit sidecar (for example an mmproj GGUF); empty lets the provider
+/// resolve its own.
+struct TtsRunnerOptions {
+  std::string model_root;
+  std::size_t maximum_context_tokens{4096};
+  std::string projector_path;
+};
+
+/// `gufo speak`: synthesis (mode "tts"), or an answer to a written or spoken
+/// message in interleaved text and speech ("chat") or in text ("text").
+struct SpeakOptions {
+  std::string model;
+  std::string projector_path;
+  std::string text;
+  /// WAV file of a spoken message (chat and text modes).
+  std::string audio_path;
+  std::string mode{"tts"};
+  /// Replaces the model's default instructions (chat and text modes).
+  std::string system;
+  /// JSON file with an array of OpenAI function tools.
+  std::string tools_path;
+  bool reasoning{false};
+  std::string language{"en"};
+  std::string voice;
+  /// 24 kHz WAV output (tts and chat modes).
+  std::string output_path;
+  /// "text" or "json" report.
+  std::string format{"text"};
+  std::size_t max_frames{3000};
+  std::size_t context{4096};
+  std::uint64_t seed{0};
+  float temperature{1.0F};
+  int top_k{128};
+  /// Polled during generation; true stops it.
+  std::function<bool()> cancelled;
+};
+/// Returns the process exit status.
+using TtsSpeakDriver = int (*)(const SpeakOptions& options);
 
 using TtsProbe = bool (*)(std::string_view model_root);
 using TtsArtifactResolver = bool (*)(std::string_view model_root,
@@ -85,12 +131,17 @@ using TtsArtifactResolver = bool (*)(std::string_view model_root,
 using TtsRunnerFactory = std::unique_ptr<TtsRunner> (*)(
     const std::string& model_root, std::size_t maximum_context_tokens,
     std::string* error);
+using TtsRunnerOptionsFactory = std::unique_ptr<TtsRunner> (*)(
+    const TtsRunnerOptions& options, std::string* error);
 
 struct TtsProvider {
   std::string id;
   TtsProbe probe = nullptr;
   TtsArtifactResolver resolve = nullptr;
   TtsRunnerFactory create = nullptr;
+  /// Preferred over create when set; receives the projector path.
+  TtsRunnerOptionsFactory create_with_options = nullptr;
+  TtsSpeakDriver speak_driver = nullptr;
 };
 
 void RegisterTtsProvider(TtsProvider provider);

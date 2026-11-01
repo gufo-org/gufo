@@ -34,6 +34,8 @@ struct TtsServiceOptions {
                                     ext::SynthesisResult*, std::string*)>;
 
   std::filesystem::path model_root;
+  /// Explicit model sidecar, such as an audio mmproj GGUF.
+  std::filesystem::path projector_path;
   std::size_t native_context_tokens{4096};
   bool validate_model{true};
   ext::TtsVariant variant{ext::TtsVariant::kCustomVoice};
@@ -41,6 +43,9 @@ struct TtsServiceOptions {
   std::vector<std::string> voices;
   std::map<std::string, TtsVoicePreset> voice_presets;
   Runner runner;
+  /// The runner admits concurrent requests itself (for example by batching
+  /// them); requests then skip the service's one-at-a-time gate.
+  bool concurrent{false};
 };
 
 /// Synchronous, bounded native HIP Qwen3-TTS service.
