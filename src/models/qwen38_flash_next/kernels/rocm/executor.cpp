@@ -4,7 +4,9 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -79,6 +81,10 @@ WeightType SmallType(GgmlType type) {
 // The tier's tiled kernels compute whole column tiles; below this width the
 // matrix-vector kernels read each weight once per row and win outright.
 constexpr std::uint32_t kVecBatch = 8;
+// Eager passes of at least this many rows wait for the GPU in WaitAsleep:
+// one of their layers keeps the GPU busy for milliseconds, far longer than
+// the interrupt-driven wake-up.
+constexpr std::uint32_t kAsleepWaitRows = 2048;
 // Keep prompt arithmetic independent of chunk width. A scoped, per-thread
 // policy also lets the output head retain its existing logits-row arithmetic.
 thread_local bool prefill_phase = false;
@@ -934,8 +940,13 @@ Executor::~Executor() {
   if (blas_ != nullptr) {
     (void)hipblasDestroy(blas_);
   }
-  if (counts_ready_ != nullptr) {
-    (void)hipEventDestroy(counts_ready_);
+  if (notify_stream_ != nullptr) {
+    (void)hipStreamSynchronize(notify_stream_);
+    (void)hipStreamDestroy(notify_stream_);
+  }
+  for (hipEvent_t event : {counts_ready_, pass_done_}) {
+    if (event != nullptr)
+      (void)hipEventDestroy(event);
   }
   for (hipEvent_t event : {side_start_, side_done_}) {
     if (event != nullptr)
@@ -977,6 +988,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   }
   if (!Check(hipEventCreateWithFlags(&e->counts_ready_, hipEventDisableTiming),
              "expert counts event", error_msg) ||
+      !Check(hipEventCreateWithFlags(&e->pass_done_, hipEventDisableTiming),
+             "pass event", error_msg) ||
+      !Check(hipStreamCreateWithFlags(&e->notify_stream_, hipStreamNonBlocking),
+             "notify stream", error_msg) ||
       !Check(hipStreamCreate(&e->side_stream_), "side stream", error_msg) ||
       !Check(hipEventCreateWithFlags(&e->side_start_, hipEventDisableTiming),
              "side stream fork event", error_msg) ||
@@ -1820,7 +1835,10 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   if (!ExpertMatrixRows(n_tokens)) {
     return true;
   }
-  if (!Check(hipEventSynchronize(counts_ready_), "expert counts", error_msg)) {
+  if (!(n_tokens >= kAsleepWaitRows
+            ? WaitAsleep(counts_ready_, "expert counts", error_msg)
+            : Check(hipEventSynchronize(counts_ready_), "expert counts",
+                    error_msg))) {
     return false;
   }
   // The F16 expert GEMM launches one block per (expert, row tile of its
@@ -3067,9 +3085,56 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
   return true;
 }
 
+namespace {
+
+void NotifyHost(void* data) {
+  auto* wake = static_cast<HostWake*>(data);
+  {
+    const std::lock_guard lock(wake->mutex);
+    ++wake->done;
+  }
+  wake->ready.notify_one();
+}
+
+}  // namespace
+
+bool Executor::WaitAsleep(hipEvent_t event, const char* what,
+                          std::string* error_msg) const {
+  hipError_t status = hipEventQuery(event);
+  if (status != hipErrorNotReady)
+    return Check(status, what, error_msg);
+  // HIP's event and stream waits spin a core unless the whole device runs
+  // in blocking-sync mode, and its marker signals raise no interrupt. A host
+  // function behind the event on a separate stream completes on the
+  // runtime's interrupt-driven callback thread; the work stream never waits
+  // for it.
+  // Only this executor's thread queues host functions: a ticket counts the
+  // ones actually queued, so a failed launch leaves no wait behind.
+  const std::uint64_t ticket = wake_.armed + 1;
+  if (!Check(hipStreamWaitEvent(notify_stream_, event, 0), what, error_msg) ||
+      !Check(hipLaunchHostFunc(notify_stream_, NotifyHost, &wake_), what,
+             error_msg)) {
+    return false;
+  }
+  wake_.armed = ticket;
+  std::unique_lock lock(wake_.mutex);
+  while (wake_.done < ticket) {
+    // A faulted device never runs the host function: look every second.
+    if (wake_.ready.wait_for(lock, std::chrono::seconds(1)) ==
+        std::cv_status::timeout) {
+      lock.unlock();
+      status = hipEventQuery(event);
+      if (status != hipErrorNotReady && status != hipSuccess)
+        return Check(status, what, error_msg);
+      lock.lock();
+    }
+  }
+  return true;
+}
+
 bool Executor::Run(Session& session, std::uint64_t key, bool graph,
                    const std::function<bool()>& body, std::string* error_msg,
-                   bool synchronize) const {
+                   bool synchronize, bool asleep) const {
   // A batch shape runs eagerly once before it is captured: the first pass
   // grows the GEMM tier's arena, which capture forbids.
   if (graph && session.warmed_.contains(key)) {
@@ -3134,6 +3199,11 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
       return false;
     }
     session.warmed_.insert(key);
+  }
+  if (synchronize && asleep) {
+    return Check(hipEventRecord(pass_done_, stream_), "pass event",
+                 error_msg) &&
+           WaitAsleep(pass_done_, "forward", error_msg);
   }
   return !synchronize ||
          Check(hipStreamSynchronize(stream_), "forward", error_msg);
@@ -3287,7 +3357,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   if (graph && ple_pending_ && !WaitPle(error_msg)) {
     return false;
   }
-  if (!Run(session, key, graph, body, error_msg)) {
+  if (!Run(session, key, graph, body, error_msg, true, n >= kAsleepWaitRows)) {
     return false;
   }
   if (n_logits > 0 && logits != nullptr) {
@@ -4501,7 +4571,7 @@ bool Executor::MtpForward(Session& session,
                    graph ? graph_pool : pool, hidden_source, output.trace,
                    output.kv_only, subset);
   };
-  if (!Run(session, key, graph, body, error_msg)) {
+  if (!Run(session, key, graph, body, error_msg, true, n >= kAsleepWaitRows)) {
     return false;
   }
   if (output.token != nullptr) {

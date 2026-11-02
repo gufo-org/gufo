@@ -5,6 +5,7 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -28,6 +29,14 @@
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
+
+/// Completion count of Executor::WaitAsleep's host functions.
+struct HostWake {
+  std::mutex mutex;
+  std::condition_variable ready;
+  std::uint64_t armed{0};  ///< host functions queued (waiting thread only)
+  std::uint64_t done{0};   ///< host functions run
+};
 
 class Executor;
 class SnapshotAllocator;
@@ -596,10 +605,18 @@ private:
                bool draft_subset) const;
   /// Runs `body` eagerly, or as the session's captured graph for `key`
   /// when `graph` is set. A prefix may leave its work queued so the host
-  /// can wait for disk reads while the GPU computes it.
+  /// can wait for disk reads while the GPU computes it. `asleep` waits for
+  /// a long pass in WaitAsleep instead of HIP's spinning wait.
   bool Run(Session& session, std::uint64_t key, bool graph,
            const std::function<bool()>& body, std::string* error_msg,
-           bool synchronize = true) const;
+           bool synchronize = true, bool asleep = false) const;
+  /// Waits for `event` without spinning: the thread sleeps until a host
+  /// function queued behind the event runs on HIP's callback thread, which
+  /// the GPU's completion interrupt wakes. On Strix Halo the CPU cores and
+  /// the GPU share one package power limit, so a core spinning through a
+  /// long prompt pass takes power from the GPU.
+  bool WaitAsleep(hipEvent_t event, const char* what,
+                  std::string* error_msg) const;
 
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
@@ -616,6 +633,10 @@ private:
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
   hipEvent_t counts_ready_{nullptr};
+  hipEvent_t pass_done_{nullptr};  ///< end of a long eager pass
+  /// Runs WaitAsleep's host functions beside the work stream.
+  hipStream_t notify_stream_{nullptr};
+  mutable HostWake wake_;
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;
 
