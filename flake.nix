@@ -545,6 +545,7 @@
 
           mkServeCheck =
             let
+              evaluationTests = import ./.devops/nix/mk-serve-tests.nix { lib = pkgsSys.lib; };
               # Test command rendering without realizing the GPU package.
               mkServe = args: self.lib.${system}.mkGufoServe (args // { gufo = "/gufo-test"; });
               ttsCmd = mkServe {
@@ -682,7 +683,18 @@
               echo "$image_str" | grep -F -- "--max-request-bytes 33554432"
               echo "$image_str" | grep -F -- "image --model /var/models/qwen-image --served-model-name qwen-image-test"
               mkdir -p $out
-              echo "PASS: mkGufoServe CLI string check passed" > $out/result.txt
+              echo "PASS: mkGufoServe CLI string check passed; ${toString (builtins.length evaluationTests.passed)} metadata evaluation cases" > $out/result.txt
+            '';
+
+          mkServeNixosCheck =
+            assert import ./.devops/nix/mk-serve-nixos-tests.nix {
+              pkgs = pkgsSys;
+              defaultPackage = self.packages.${system}.default;
+              releasePackage = self.packages.${system}.release;
+            };
+            pkgsSys.runCommand "check-mk-serve-nixos" { } ''
+              mkdir -p $out
+              echo "PASS: default/release mkServe NixOS service evaluation" > $out/result.txt
             '';
 
           # The hosted runner builds CPU contracts only. GPU compilation,
@@ -693,7 +705,8 @@
                 ${dependencyInventoryCheck}/result.txt \
                 ${docsCheck}/result.txt \
                 ${prTestCheck}/result.txt \
-                ${mkServeCheck}/result.txt > $out/pr-summary.txt
+                ${mkServeCheck}/result.txt \
+                ${mkServeNixosCheck}/result.txt > $out/pr-summary.txt
             cat $out/pr-summary.txt
           '';
         in
@@ -708,6 +721,7 @@
           tests = testCheck;
           pr-tests = prTestCheck;
           mk-serve = mkServeCheck;
+          mk-serve-nixos = mkServeNixosCheck;
           pr = prCheck;
         }
       );

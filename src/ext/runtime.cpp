@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "gufo/ext/asr.hpp"
+#include "gufo/ext/decision.hpp"
 #include "gufo/ext/host.hpp"
 #include "gufo/ext/image.hpp"
 #include "gufo/ext/registry.hpp"
@@ -266,5 +267,39 @@ void Registry::AddVideoProvider(VideoProvider provider) {
 
 void Registry::AddTextProvider(TextProvider provider) {
   RegisterTextProvider(std::move(provider));
+}
+
+static std::vector<DecisionProvider> g_decision_providers;
+
+void RegisterDecisionProvider(DecisionProvider provider) {
+  for (auto& existing : g_decision_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_decision_providers.push_back(std::move(provider));
+}
+
+const DecisionProvider* FindDecisionProvider(std::string_view id) {
+  for (const auto& provider : g_decision_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const DecisionProvider* ProbeDecisionProvider(std::string_view model_root) {
+  for (const auto& provider : g_decision_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddDecisionProvider(DecisionProvider provider) {
+  RegisterDecisionProvider(std::move(provider));
 }
 }  // namespace gufo::ext

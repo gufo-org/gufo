@@ -22,7 +22,10 @@
         "qwen3-tts"
       ],
       "target": "gufo_qwen3_tts_hip",
-      "entry": "qwen3_tts_provider_register"
+      "entry": "qwen3_tts_provider_register",
+      "serving": {
+        "voices": true
+      }
     }
   ],
   "targets": {

@@ -29,5 +29,8 @@
     "gufo_template_model": {
       "requires": []
     }
-  }
+  },
+  "licenses": [
+    "LICENSE"
+  ]
 }

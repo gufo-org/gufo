@@ -136,3 +136,10 @@ all three agents, review dispositions and actual commands/results.
 This throwaway experiment does not qualify other
 models, final public API, Windows, exclusion builds or a shipped lock-mode HIP
 artifact. No pending run or missing model counts as a pass.
+
+## Card 25 canonical draft-option decision
+
+Keep `--dflash-model`, `--dspark-model` and `--mtp-model` as distinct
+provider-owned canonical options. Generate their existing Nix arguments
+(`dflashModel`, `dsparkModel`, `mtpModel`) from manifests. No aliases or
+public argument rename are introduced. See [Nix serving](serving.md).

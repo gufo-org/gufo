@@ -2,10 +2,12 @@
 
 ## 1. Summary
 
+**Status: complete** for the `lfm3-gufo-extension` text-generation evidence recorded here.
+
 - **External Repository**: `git@github.com:gufo-org/lfm3-gufo-extension.git` (`lfm3-gufo-extension`, commit `6360b0fceacc7e98910c6d686c29984dc90374ea`)
 - **Capability Covered**: `text_generation` (genuine external model port of Liquid LFM3 1.7B (`gguf:lfm3`, model IDs `["LFM3-1.7B", "lfm3-1.7b"]`) extracted from the `lfm3` branch and adapted to `<gufo/ext/...>` public headers).
 - **Zero-Core-Diff Proof**: Building, testing, probing, benchmarking, and serving `lfm3-gufo-extension` via `-DGUFO_EXTENSION_DIRS=/home/mixer/gufo/lfm3-gufo-extension` required **zero** changes to Gufo core, build, preset, workflow, Nix, or registry source files (`jj diff` across `src/`, `include/`, `cmake/`, `flake.nix`, `CMakeLists.txt`, `CMakePresets.json`, and `extensions.lock` is empty).
-- **Remaining Scope**: External second providers for non-text capabilities (`embeddings`, `speech_recognition`, `speech_synthesis`, `image_generation`, `video_generation`) and the full any-single-extension-excluded build matrix remain pending.
+- **Scope**: All LFM3 build, numerical, CLI, HTTP serving, and HIP-free CPU checks documented below are complete and passed. Broader capability coverage and exclusion-matrix requirements are tracked in [Card 24](../../cards/24-second-provider-conformance.md); this record establishes the external `text_generation` second-provider result.
 
 ## 2. Capability-by-Provider Matrix (Current Status)
 

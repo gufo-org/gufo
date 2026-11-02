@@ -1,6 +1,7 @@
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <gufo/ext/sha256.hpp>
@@ -22,6 +23,12 @@ constexpr std::string_view kUser = "<｜User｜>";
 constexpr std::string_view kAssistant = "<｜Assistant｜>";
 constexpr std::string_view kThinkStart = "<think>";
 constexpr std::string_view kThinkEnd = "</think>";
+constexpr std::string_view kDsml = "｜DSML｜";
+
+// Ordered as the runtime tokenizer's rendered-chat table: the first spelling
+// that matches at a position wins.
+constexpr std::array<std::string_view, kControlTokenCount> kControlTokens{
+    kBos, kEos, kUser, kAssistant, kThinkStart, kThinkEnd, kDsml};
 
 constexpr std::string_view kHighReasoningPrompt =
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
@@ -89,6 +96,21 @@ void AssignError(std::string* error_msg, std::string message) {
   }
 }
 
+// Records the text appended since `begin` as caller-supplied.
+void MarkContent(const std::string& output, std::size_t begin,
+                 std::vector<ContentSpan>* spans) {
+  if (spans != nullptr && output.size() > begin) {
+    spans->push_back({begin, output.size() - begin});
+  }
+}
+
+void AppendContent(std::string& output, std::string_view text,
+                   std::vector<ContentSpan>* spans) {
+  const std::size_t begin = output.size();
+  output.append(text);
+  MarkContent(output, begin, spans);
+}
+
 void AppendJsonString(std::string& output, std::string_view value) {
   output.push_back('"');
   for (const unsigned char character : value) {
@@ -148,7 +170,8 @@ std::string PythonJsonSpacing(std::string_view value) {
   return output;
 }
 
-void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools) {
+void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools,
+                       std::vector<ContentSpan>* spans) {
   if (tools.empty()) {
     return;
   }
@@ -195,19 +218,25 @@ void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools) {
   for (std::size_t index = 0; index < tools.size(); ++index) {
     const auto& tool = tools[index];
     if (!tool.definition_json.empty()) {
-      output.append(PythonJsonSpacing(tool.definition_json));
+      AppendContent(output, PythonJsonSpacing(tool.definition_json), spans);
       if (index + 1 < tools.size())
         output.push_back('\n');
       continue;
     }
     output.append("{\"name\": ");
+    std::size_t begin = output.size();
     AppendJsonString(output, tool.name);
+    MarkContent(output, begin, spans);
     output.append(", \"description\": ");
+    begin = output.size();
     AppendJsonString(output, tool.description);
+    MarkContent(output, begin, spans);
     output.append(", \"parameters\": ");
-    output.append(tool.parameters_json.empty()
-                      ? "{}"
-                      : PythonJsonSpacing(tool.parameters_json));
+    if (tool.parameters_json.empty()) {
+      output.append("{}");
+    } else {
+      AppendContent(output, PythonJsonSpacing(tool.parameters_json), spans);
+    }
     output.push_back('}');
     if (index + 1 < tools.size()) {
       output.push_back('\n');
@@ -219,7 +248,8 @@ void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools) {
 }
 
 void AppendToolCalls(std::string& output,
-                     std::span<const ChatMessage::ToolCall> calls) {
+                     std::span<const ChatMessage::ToolCall> calls,
+                     std::vector<ContentSpan>* spans) {
   if (calls.empty()) {
     return;
   }
@@ -231,7 +261,7 @@ void AppendToolCalls(std::string& output,
     output.append(DeepSeekToolSyntax::kInvokeOpens[0]);
     output.push_back(' ');
     output.append(DeepSeekToolSyntax::kNameAttribute);
-    output.append(call.name);
+    AppendContent(output, call.name, spans);
     output.append("\">\n");
     for (std::size_t argument_index = 0; argument_index < call.arguments.size();
          ++argument_index) {
@@ -239,12 +269,12 @@ void AppendToolCalls(std::string& output,
       output.append(DeepSeekToolSyntax::kParameterOpens[0]);
       output.push_back(' ');
       output.append(DeepSeekToolSyntax::kNameAttribute);
-      output.append(argument.name);
+      AppendContent(output, argument.name, spans);
       output.append("\" ");
       output.append(DeepSeekToolSyntax::kStringAttribute);
       output.append(argument.is_string ? "true" : "false");
       output.append("\">");
-      output.append(argument.value);
+      AppendContent(output, argument.value, spans);
       output.append(DeepSeekToolSyntax::kParameterCloses[0]);
       if (argument_index + 1 < call.arguments.size()) {
         output.push_back('\n');
@@ -291,6 +321,13 @@ std::string RenderChat(std::span<const ChatMessage> messages,
 std::string RenderChat(std::span<const ChatMessage> messages,
                        std::span<const ChatTool> tools,
                        const ChatTemplateOptions& options) {
+  return RenderChat(messages, tools, options, nullptr);
+}
+
+std::string RenderChat(std::span<const ChatMessage> messages,
+                       std::span<const ChatTool> tools,
+                       const ChatTemplateOptions& options,
+                       std::vector<ContentSpan>* content_spans) {
   std::string output(kBos);
   if (options.enable_thinking) {
     AppendEffortPrompt(output, options.reasoning_effort);
@@ -317,7 +354,7 @@ std::string RenderChat(std::span<const ChatMessage> messages,
       }
     }
     if (tool_host_index == messages.size()) {
-      AppendToolsPrompt(output, tools);
+      AppendToolsPrompt(output, tools, content_spans);
     }
   }
 
@@ -326,12 +363,12 @@ std::string RenderChat(std::span<const ChatMessage> messages,
     const auto& message = messages[index];
     const std::string_view role = message.role;
     if (role == "system") {
-      output.append(message.content);
+      AppendContent(output, message.content, content_spans);
       if (index == tool_host_index) {
         if (!message.content.empty()) {
           output.append("\n\n");
         }
-        AppendToolsPrompt(output, tools);
+        AppendToolsPrompt(output, tools, content_spans);
       }
       continue;
     }
@@ -341,12 +378,12 @@ std::string RenderChat(std::span<const ChatMessage> messages,
         continue;
       }
       output.append(kUser);
-      output.append(message.content);
+      AppendContent(output, message.content, content_spans);
       if (index == tool_host_index) {
         if (!message.content.empty()) {
           output.append("\n\n");
         }
-        AppendToolsPrompt(output, tools);
+        AppendToolsPrompt(output, tools, content_spans);
       }
       continue;
     }
@@ -381,10 +418,11 @@ std::string RenderChat(std::span<const ChatMessage> messages,
           output.append("\n\n");
         }
         if (messages[index].role == "user") {
-          output.append(messages[index].content);
+          AppendContent(output, messages[index].content, content_spans);
         } else {
           output.append("<tool_result>");
-          output.append(tool_results[result_index++]->content);
+          AppendContent(output, tool_results[result_index++]->content,
+                        content_spans);
           output.append("</tool_result>");
         }
         first_block = false;
@@ -405,13 +443,13 @@ std::string RenderChat(std::span<const ChatMessage> messages,
       if (options.enable_thinking &&
           (preserve_thinking || index > last_user_index)) {
         output.append(kThinkStart);
-        output.append(message.reasoning_content);
+        AppendContent(output, message.reasoning_content, content_spans);
         output.append(kThinkEnd);
       } else {
         output.append(kThinkEnd);
       }
-      output.append(message.content);
-      AppendToolCalls(output, message.tool_calls);
+      AppendContent(output, message.content, content_spans);
+      AppendToolCalls(output, message.tool_calls, content_spans);
       output.append(kEos);
       continue;
     }
@@ -429,6 +467,54 @@ std::string RenderChat(std::span<const ChatMessage> messages,
 
 std::string_view GenerationPrompt(bool enable_thinking) {
   return enable_thinking ? "<｜Assistant｜><think>" : "<｜Assistant｜></think>";
+}
+
+std::string_view ControlTokenText(ControlToken token) noexcept {
+  return kControlTokens[static_cast<std::size_t>(token)];
+}
+
+std::vector<PromptPiece> SplitControlTokens(
+    std::string_view rendered, std::span<const ContentSpan> content_spans) {
+  std::vector<PromptPiece> pieces;
+  std::size_t text_begin = 0;
+  std::size_t position = 0;
+  std::size_t span = 0;
+  while (position < rendered.size()) {
+    std::size_t match = kControlTokens.size();
+    for (std::size_t index = 0; index < kControlTokens.size(); ++index) {
+      if (rendered.substr(position).starts_with(kControlTokens[index])) {
+        match = index;
+        break;
+      }
+    }
+    if (match == kControlTokens.size()) {
+      ++position;
+      continue;
+    }
+    const std::size_t end = position + kControlTokens[match].size();
+    while (
+        span < content_spans.size() &&
+        (content_spans[span].size == 0 ||
+         content_spans[span].offset + content_spans[span].size <= position)) {
+      ++span;
+    }
+    if (span < content_spans.size() && content_spans[span].offset < end) {
+      ++position;  // Caller-supplied spelling: ordinary text.
+      continue;
+    }
+    if (position > text_begin) {
+      pieces.push_back(
+          {rendered.substr(text_begin, position - text_begin), std::nullopt});
+    }
+    pieces.push_back({rendered.substr(position, end - position),
+                      static_cast<ControlToken>(match)});
+    position = end;
+    text_begin = end;
+  }
+  if (text_begin < rendered.size()) {
+    pieces.push_back({rendered.substr(text_begin), std::nullopt});
+  }
+  return pieces;
 }
 
 bool ValidateGgufTemplate(const core::GgufReader& reader,

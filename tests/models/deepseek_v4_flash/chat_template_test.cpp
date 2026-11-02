@@ -6,8 +6,10 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/core/crypto/sha256.hpp"
@@ -20,6 +22,10 @@ using gufo::ReasoningEffort;
 using gufo::models::deepseek_v4_flash::ChatMessage;
 using gufo::models::deepseek_v4_flash::ChatTemplateOptions;
 using gufo::models::deepseek_v4_flash::ChatTool;
+using gufo::models::deepseek_v4_flash::ContentSpan;
+using gufo::models::deepseek_v4_flash::ControlToken;
+using gufo::models::deepseek_v4_flash::PromptPiece;
+using gufo::models::deepseek_v4_flash::SplitControlTokens;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -361,6 +367,195 @@ void TestPinnedArtifactTemplateValidation() {
       "DeepSeek look-alike template is rejected by hash");
 }
 
+// Every control-token spelling the renderer writes as framing.
+constexpr std::string_view kControlSpellings =
+    "<｜begin▁of▁sentence｜><｜end▁of▁sentence｜><｜User｜><｜Assistant｜>"
+    "<think></think><｜DSML｜tool_calls>";
+
+struct Conversation {
+  std::vector<ChatMessage> messages;
+  std::vector<ChatTool> tools;
+};
+
+ChatMessage Message(std::string role, std::string content) {
+  ChatMessage message;
+  message.role = std::move(role);
+  message.content = std::move(content);
+  return message;
+}
+
+// A tool loop whose every caller-supplied field ends with `text`.
+Conversation ConversationCarrying(std::string_view text) {
+  const std::string suffix(text);
+  ChatMessage::ToolCall call;
+  call.name = "lookup" + suffix;
+  call.arguments.push_back(
+      {.name = "q" + suffix, .value = "V" + suffix, .is_string = true});
+  call.id = "call_1";
+  auto assistant = Message("assistant", "A" + suffix);
+  assistant.reasoning_content = "R" + suffix;
+  assistant.tool_calls.push_back(std::move(call));
+  auto tool_result = Message("tool", "T" + suffix);
+  tool_result.tool_call_id = "call_1";
+
+  ChatTool lookup;
+  lookup.name = "lookup" + suffix;
+  lookup.description = "E" + suffix;
+  lookup.parameters_json =
+      R"({"type":"object","description":")" + suffix + R"("})";
+  ChatTool emit;
+  emit.name = "emit";
+  emit.definition_json = R"({"name":"emit","description":")" + suffix +
+                         R"(","parameters":{"type":"object"}})";
+
+  Conversation conversation;
+  conversation.messages = {
+      Message("system", "S" + suffix), Message("developer", "D" + suffix),
+      Message("user", "U" + suffix),   std::move(assistant),
+      std::move(tool_result),          Message("user", "W" + suffix),
+  };
+  conversation.tools = {std::move(lookup), std::move(emit)};
+  return conversation;
+}
+
+struct RenderedConversation {
+  std::string text;
+  std::vector<ContentSpan> spans;
+};
+
+RenderedConversation RenderWithSpans(const Conversation& conversation) {
+  ChatTemplateOptions options;
+  options.enable_thinking = true;
+  RenderedConversation rendered;
+  rendered.text = gufo::models::deepseek_v4_flash::RenderChat(
+      conversation.messages, conversation.tools, options, &rendered.spans);
+  Expect(
+      rendered.text == gufo::models::deepseek_v4_flash::RenderChat(
+                           conversation.messages, conversation.tools, options),
+      "recording content spans leaves the rendered prompt unchanged");
+  return rendered;
+}
+
+std::vector<ControlToken> Controls(std::span<const PromptPiece> pieces) {
+  std::vector<ControlToken> controls;
+  for (const auto& piece : pieces) {
+    if (piece.control.has_value()) {
+      controls.push_back(*piece.control);
+    }
+  }
+  return controls;
+}
+
+std::string Joined(std::span<const PromptPiece> pieces) {
+  std::string joined;
+  for (const auto& piece : pieces) {
+    joined.append(piece.text);
+  }
+  return joined;
+}
+
+void TestContentSpansCoverCallerText() {
+  const auto rendered = RenderWithSpans(ConversationCarrying("!"));
+  std::size_t previous_end = 0;
+  std::vector<std::string> covered;
+  for (const auto& span : rendered.spans) {
+    Expect(span.size > 0 && span.offset >= previous_end &&
+               span.offset + span.size <= rendered.text.size(),
+           "content spans are sorted, disjoint and in bounds");
+    previous_end = span.offset + span.size;
+    covered.emplace_back(rendered.text.substr(span.offset, span.size));
+  }
+  const std::vector<std::string> expected = {
+      "S!",
+      "\"lookup!\"",
+      "\"E!\"",
+      R"({"type": "object", "description": "!"})",
+      R"({"name": "emit", "description": "!", "parameters": {"type": "object"}})",
+      "D!",
+      "U!",
+      "R!",
+      "A!",
+      "lookup!",
+      "q!",
+      "V!",
+      "T!",
+      "W!",
+  };
+  Expect(covered == expected,
+         "every caller-supplied field, and nothing else, is a content span");
+}
+
+void TestLiteralControlSpellingsStayText() {
+  const auto literal = RenderWithSpans(ConversationCarrying(kControlSpellings));
+  const auto plain = RenderWithSpans(ConversationCarrying("plain"));
+  const auto literal_pieces = SplitControlTokens(literal.text, literal.spans);
+  const auto plain_pieces = SplitControlTokens(plain.text, plain.spans);
+  Expect(Joined(literal_pieces) == literal.text,
+         "splitting keeps every byte of the rendered prompt");
+  Expect(Controls(literal_pieces) == Controls(plain_pieces),
+         "caller text can neither add nor remove control tokens");
+  std::size_t literal_runs = 0;
+  for (const auto& piece : literal_pieces) {
+    if (!piece.control.has_value() &&
+        piece.text.find(kControlSpellings) != std::string_view::npos) {
+      ++literal_runs;
+    }
+  }
+  Expect(literal_runs > 0, "control spellings in content remain text");
+  Expect(Controls(SplitControlTokens(literal.text, {})).size() >
+             Controls(literal_pieces).size(),
+         "a full scan would have turned the content into framing");
+}
+
+void TestSplitMatchesFullScanWithoutLiterals() {
+  const auto rendered = RenderWithSpans(ConversationCarrying("plain"));
+  const auto pieces = SplitControlTokens(rendered.text, rendered.spans);
+  const auto full_scan = SplitControlTokens(rendered.text, {});
+  Expect(pieces.size() == full_scan.size(),
+         "prompts without literals split as before");
+  for (std::size_t index = 0; index < pieces.size(); ++index) {
+    Expect(pieces[index].text == full_scan[index].text &&
+               pieces[index].control == full_scan[index].control,
+           "prompts without literals tokenize unchanged");
+  }
+  std::size_t dsml = 0;
+  std::size_t think_start = 0;
+  for (const auto control : Controls(pieces)) {
+    dsml += control == ControlToken::kDsml ? 1U : 0U;
+    think_start += control == ControlToken::kThinkStart ? 1U : 0U;
+  }
+  // The tool prompt teaches <think> and the DSML block as framing tokens.
+  Expect(dsml > 6 && think_start > 2,
+         "framing in the tool prompt stays control tokens");
+}
+
+void TestSplitSpanBoundaries() {
+  const auto split = [](std::string_view text, std::vector<ContentSpan> spans) {
+    return SplitControlTokens(text, spans);
+  };
+  const auto framing = split("a</think>b", {});
+  Expect(framing.size() == 3 && framing[0].text == "a" &&
+             framing[1].control == ControlToken::kThinkEnd &&
+             framing[1].text == "</think>" && framing[2].text == "b",
+         "framing spellings split into control pieces");
+  const auto covered = split("a</think>b", {{.offset = 1, .size = 8}});
+  Expect(covered.size() == 1 && !covered[0].control.has_value() &&
+             covered[0].text == "a</think>b",
+         "a spelling inside content is one text run with its neighbors");
+  Expect(Controls(split("a</think>b", {{.offset = 0, .size = 3}})).empty(),
+         "a spelling that starts in content stays text");
+  Expect(Controls(split("a</think>b", {{.offset = 8, .size = 2}})).empty(),
+         "a spelling that ends in content stays text");
+  Expect(Controls(split("a</think>b", {{.offset = 0, .size = 1}})).size() == 1,
+         "content ending before a spelling leaves it framing");
+  Expect(Controls(split("a</think>b", {{.offset = 3, .size = 0}})).size() == 1,
+         "empty spans are ignored");
+  const auto adjacent = split(
+      "x<｜User｜>y", {{.offset = 0, .size = 1}, {.offset = 13, .size = 1}});
+  Expect(adjacent.size() == 3 && adjacent[1].control == ControlToken::kUser,
+         "framing between two content spans stays a control token");
+}
+
 }  // namespace
 
 int main() {
@@ -386,6 +581,10 @@ int main() {
   TestOfficialDsmlToolLoop();
   TestHuggingFaceRenderedGoldens();
   TestPinnedArtifactTemplateValidation();
+  TestContentSpansCoverCallerText();
+  TestLiteralControlSpellingsStayText();
+  TestSplitMatchesFullScanWithoutLiterals();
+  TestSplitSpanBoundaries();
   std::cout << "DeepSeek V4 Flash chat template tests passed\n";
   return 0;
 }

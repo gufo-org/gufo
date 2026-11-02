@@ -24,7 +24,12 @@
         "dflash2"
       ],
       "target": "gufo_qwen_hip",
-      "entry": "qwen_provider_register"
+      "entry": "qwen_provider_register",
+      "serving": {
+        "draft_options": {
+          "dflash2": "--dflash-model"
+        }
+      }
     }
   ],
   "options": [

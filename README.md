@@ -97,6 +97,8 @@ DeepSeek's 8-user cell is the AR rate because DSpark is slower there.
 | [MiniMax H3](docs/models/minimax-h3/README.md) | Text to video and audio | [MiniMax H3 Community (not for the US, EU, UK or Korea)](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE) | In progress |
 <!-- END GENERATED README TABLE: Video generation -->
 
+To add or maintain a model, start with the [source extension guide](docs/extensions.md).
+
 ## Philosophy
 
 - Contributions are welcome! We need the help of Strix Halo community to keep improving gufo!

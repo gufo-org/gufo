@@ -146,29 +146,29 @@ Every declaration/contract change in the generated
 [SURFACE](../include/gufo/ext/SURFACE) transitive closure, including forwarded
 core/cache headers, and every public CMake/schema contract change requires the
 `ext-api` PR label and a new, uniquely named Markdown change record under
-`include/gufo/ext/changes/<major>.<minor>/` (for example `938-video-options.md`).
+`include/gufo/ext/changes/<major>.<minor>/` (for example `serving-metadata.md`).
+Use a descriptive filename and heading without an assigned API version; see the
+[record instructions](../include/gufo/ext/changes/README.md).
 Describe the concrete declaration or contract change. Additive API PRs do not
 edit version constants or a shared changelog. Existing records must never be
-modified, renamed or removed, including after a release.
+modified, renamed or removed, including after a release. The one-time
+normalization of the original numbered records removes assigned versions while
+preserving their contract descriptions and the computed API revision.
 
 [api-series.json](../include/gufo/ext/api-series.json) defines `major`, `minor`
 and `revision_base`. The revision is `revision_base + number of revision records in the
 active series`; CMake generates the public version constants and uses the same
 value for manifest compatibility checks. The baseline is fixed within a series.
-For the initial migration, the baseline remains 0.1.0 and is documented in
-[0.md](../include/gufo/ext/changes/0.1/0.md). That record describes the
-baseline itself and is excluded from the revision count. Revisions 0.1.1 through
-0.1.10 have individually versioned `1.md` through `10.md` records, preserving their
-original descriptions and assignments. Those ten revision records plus the new
-migration record compute 0.1.11, without resetting or recounting any version.
-New additive PRs use descriptive unique filenames rather than assigning numbers.
-Records in older series remain permanent but do not count toward the active series.
-A breaking change explicitly advances the compatibility series, sets its initial
-baseline, and adds a record in that series. Review the compatibility transition;
-it is not inferred from a record's prose.
+[baseline.md](../include/gufo/ext/changes/0.1/baseline.md) describes the initial
+contracts and is excluded from the revision count. Records in older series
+remain permanent but do not count toward the active series. A breaking change
+explicitly advances the compatibility series, sets its initial baseline, and
+adds a record in that series. Review the compatibility transition; it is not
+inferred from a record's prose.
 
-Two parallel additive PRs each add a different record. Their merge automatically
-counts both, advancing the revision twice without editing a shared counter.
+Two parallel additive PRs each add a different, descriptively named record.
+Their merge counts both, advancing the revision twice without editing a shared
+counter or reconciling assigned versions in filenames or headings.
 Branch revisions are provisional until merged; numeric revision floors promise
 compatibility along the canonical main history, not between divergent branches.
 An extension using an API available only on a branch must pin that Gufo source

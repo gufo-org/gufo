@@ -60,6 +60,37 @@ class ConfigureTests(unittest.TestCase):
             with self.subTest(option_field=field):
                 self.invalid(lambda m: m[0]["options"][0].pop(field), field)
 
+    def test_decision_capability(self):
+        manifests = copy.deepcopy(BASE)
+        manifests[0]["providers"][0]["capability"] = "decision"
+        self.configure(manifests)
+
+    def test_serving_metadata(self):
+        manifests = copy.deepcopy(BASE)
+        provider = manifests[0]["providers"][0]
+        provider["serving"] = {"draft_options": {"draft": "--alpha-path"}}
+        manifests[0]["options"][1]["commands"].append("serve")
+        self.configure(manifests)
+        invalid = copy.deepcopy(manifests)
+        invalid[0]["providers"][0]["serving"]["draft_options"] = {"unknown": "--alpha-path"}
+        self.configure(invalid, "serving draft mode is not advertised")
+        for change in ("missing", "wrong-type", "wrong-owner", "wrong-command"):
+            invalid = copy.deepcopy(manifests)
+            option = invalid[0]["options"][1]
+            if change == "missing":
+                option["name"] = "--other-path"
+            elif change == "wrong-type":
+                option["type"] = "string"
+            elif change == "wrong-owner":
+                option["providers"] = ["alpha-hip"]
+            else:
+                option["commands"] = ["prompt"]
+            with self.subTest(change=change):
+                self.configure(invalid, "serving draft option must declare a provider-owned serve path")
+        invalid = copy.deepcopy(BASE)
+        invalid[0]["providers"][0]["serving"] = {"voices": True}
+        self.configure(invalid, "serving voices requires speech_synthesis")
+
     def test_names_and_collisions(self):
         cases = [
             (lambda m: m[0].update(name="Bad-name"), "invalid extension name"),
@@ -271,6 +302,13 @@ class ConfigureTests(unittest.TestCase):
 
 
 class SchemaTests(unittest.TestCase):
+    def test_decision_capability(self):
+        import jsonschema
+        decision = copy.deepcopy(BASE[0])
+        decision["providers"][0]["capability"] = "decision"
+        schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
+        jsonschema.Draft202012Validator(schema).validate(decision)
+
     def test_readme_schema(self):
         import jsonschema
         schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())

@@ -1631,7 +1631,7 @@
   },
   "configurations": {
     "cache-stalls": {
-      "context": 262144,
+      "context": 131072,
       "sessions": 2
     },
     "standard": {

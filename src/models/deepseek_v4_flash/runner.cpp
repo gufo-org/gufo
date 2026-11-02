@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -872,6 +873,16 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     return nullptr;
   }
   std::uint32_t max_context = options.max_context;
+  if (max_context == 0) {
+    const std::uint64_t native =
+        reader->GetMetadataUint64("deepseek4.context_length").value_or(0);
+    if (native < 2 || native > std::numeric_limits<std::uint32_t>::max()) {
+      if (error)
+        *error = "GGUF has no valid native context length; specify --context";
+      return nullptr;
+    }
+    max_context = static_cast<std::uint32_t>(native);
+  }
   auto model = Model::Load(
       options.model_path,
       ModelOptions{
@@ -884,9 +895,6 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     if (error)
       *error = "Failed to load DeepSeek model: " + load_error;
     return nullptr;
-  }
-  if (max_context == 0) {
-    max_context = model->MaxContext();
   }
   std::string model_fingerprint = options.disk_cache.model_artifact_fingerprint;
   if (!options.disk_cache.directory.empty() && model_fingerprint.empty()) {

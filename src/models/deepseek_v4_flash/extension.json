@@ -24,7 +24,12 @@
         "dspark"
       ],
       "target": "gufo_deepseek_v4_flash_hip",
-      "entry": "deepseek_v4_flash_provider_register"
+      "entry": "deepseek_v4_flash_provider_register",
+      "serving": {
+        "draft_options": {
+          "dspark": "--dspark-model"
+        }
+      }
     }
   ],
   "options": [

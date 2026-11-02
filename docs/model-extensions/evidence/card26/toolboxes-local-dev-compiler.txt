@@ -1,0 +1,9 @@
+/nix/store/al4qwi7jfyrdkyb25xsri8b00b1agj1r-clr-10.1/bin/amdclang++
+/nix/store/al4qwi7jfyrdkyb25xsri8b00b1agj1r-clr-10.1/llvm/bin/clang
+/nix/store/al4qwi7jfyrdkyb25xsri8b00b1agj1r-clr-10.1/llvm/bin/clang++
+HIP version: 7.16.0-0000000
+nixpkgs-AMD clang version 24.0.0 (https://github.com/ROCm/llvm-project/tree/therock-10.1 therock-10.1)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /nix/store/92bpbb2rmrkszhw83x63x7qzj9jsz324-rocm-toolchain/bin
+Configuration file: /nix/store/92bpbb2rmrkszhw83x63x7qzj9jsz324-rocm-toolchain/bin/x86_64-unknown-linux-gnu.cfg

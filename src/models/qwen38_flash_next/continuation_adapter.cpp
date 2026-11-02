@@ -111,7 +111,7 @@ public:
     return !restoring && !failed && (guarding || session->IsValid());
   }
   void BeforeExecution() override {
-    if (!IsValid() || pending || checkpoint)
+    if (!IsValid() || pending || at_boundary)
       throw std::logic_error("Flash-Next slot is not ready for execution");
   }
   void BeforeWrite(bool draft, std::uint32_t first, std::uint32_t end,
@@ -120,7 +120,7 @@ public:
     // Model execution temporarily disables its public validity flag. The
     // adapter's restore/failure status and outstanding transfers still gate
     // every native write, including graph replay and speculative rollback.
-    if (restoring || failed || pending || checkpoint)
+    if (restoring || failed || pending || at_boundary)
       throw std::logic_error("Flash-Next slot is not ready for mutation");
     CaptureDuringGuard readable(*this);
     for (const auto& component : adapter.layout_.Components()) {
@@ -136,7 +136,7 @@ public:
   void BeforeReset() override {
     if (invalidating)
       return;
-    if (restoring || pending || checkpoint)
+    if (restoring || pending || at_boundary)
       throw std::logic_error("cannot reset a busy Flash-Next slot");
     GuardAll();
   }
@@ -172,7 +172,10 @@ public:
   ContinuationAdapter& adapter;
   cache::MutationGuard& guard;
   std::unique_ptr<Session> session;
+  /// The in-pass checkpoint a boundary capture reads; null when it reads
+  /// the live session at the boundary.
   const rocm::PrefillCheckpoint* checkpoint{};
+  bool at_boundary{false};
   rocm::Session& CaptureState() const {
     return checkpoint ? *checkpoint->state : *session->session_;
   }
@@ -257,13 +260,14 @@ void ContinuationAdapter::PrefillThrough(cache::Slot& slot,
   if (!capture)
     throw std::invalid_argument("missing component checkpoint consumer");
   std::string error;
-  const auto consume = [&](const rocm::PrefillCheckpoint& checkpoint) {
+  const auto consume = [&](const rocm::PrefillCheckpoint* checkpoint) {
     struct BoundaryScope {
       State& state;
       bool guarding;
-      BoundaryScope(State& state, const rocm::PrefillCheckpoint& checkpoint)
+      BoundaryScope(State& state, const rocm::PrefillCheckpoint* checkpoint)
           : state(state), guarding(std::exchange(state.guarding, true)) {
-        state.checkpoint = &checkpoint;
+        state.checkpoint = checkpoint;
+        state.at_boundary = true;
       }
       ~BoundaryScope() {
         // The checkpoint arena may be reused by the next native pass. Even a
@@ -274,6 +278,7 @@ void ContinuationAdapter::PrefillThrough(cache::Slot& slot,
             (void)job->Wait();
         }
         state.checkpoint = nullptr;
+        state.at_boundary = false;
         state.guarding = guarding;
       }
     } scope(state, checkpoint);
@@ -331,7 +336,7 @@ std::vector<cache::ComponentPosition>
 ContinuationAdapter::PrefillCheckpointPositions(const cache::Slot& slot,
                                                 Rows boundary) const {
   const auto& state = As(slot);
-  if (!state.IsValid() || state.pending || state.checkpoint)
+  if (!state.IsValid() || state.pending || state.at_boundary)
     throw std::logic_error(
         "Flash-Next slot is not ready for checkpoint planning");
   if (boundary <= state.session->Position() || boundary > context_ ||
@@ -559,9 +564,12 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     metadata.draft = native.mtp_.position;
     metadata.blocks = native.blocks_;
     metadata.draft_blocks = native.mtp_.blocks;
+    // A boundary capture stores the base a restore rebuilds from its kept
+    // rows (none without MTP), whether it reads the arena or the live session.
     metadata.hidden_base =
-        state.checkpoint ? native.position_ - state.checkpoint->hidden_rows
-                         : session.hidden_base_;
+        state.checkpoint    ? native.position_ - state.checkpoint->hidden_rows
+        : state.at_boundary ? native.position_ - session.KeptHiddenRows()
+                            : session.hidden_base_;
     metadata.residual_valid = native.mtp_.residual_valid;
     metadata.ngram = native.ngram_;
     metadata.policy = session.draft_length_.State();
@@ -844,7 +852,7 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
   State* resetting = nullptr;
   try {
     auto& state = As(slot);
-    if (state.pending || state.checkpoint)
+    if (state.pending || state.at_boundary)
       return false;
     resetting = &state;
     state.BeforeRelease();

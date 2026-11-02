@@ -10,19 +10,18 @@ namespace gufo::server {
 
 struct AsrService::Impl {
   explicit Impl(AsrServiceOptions supplied) : options(std::move(supplied)) {
-    if (options.model_id.empty()) {
-      options.model_id = "qwen3-asr-1.7b";
-    }
+    const std::string requested_id =
+        options.model_id.empty() ? "qwen3-asr-1.7b" : options.model_id;
 
     const ext::AsrProvider* provider = nullptr;
     if (!options.model_root.empty()) {
       provider = ext::ProbeAsrProvider(options.model_root.string());
     }
-    if (!provider && !options.model_id.empty()) {
-      provider = ext::FindAsrProvider(options.model_id);
-      if (!provider && options.model_id == "qwen3-asr-1.7b") {
+    if (!provider) {
+      provider = ext::FindAsrProvider(requested_id);
+      if (!provider && requested_id == "qwen3-asr-1.7b") {
         provider = ext::FindAsrProvider("qwen3-asr");
-      } else if (!provider && options.model_id == "qwen3-asr") {
+      } else if (!provider && requested_id == "qwen3-asr") {
         provider = ext::FindAsrProvider("qwen3-asr-1.7b");
       }
     }
@@ -37,17 +36,37 @@ struct AsrService::Impl {
     }
 
     if (!options.runner) {
-      if (!provider || !provider->create) {
+      if (!provider || (!provider->create && !provider->create_with_options)) {
         initialization_error = "ASR provider not available for model: " +
                                options.model_root.string();
         return;
       }
-      native_runtime = provider->create(options.model_root.string(),
-                                        options.native_context_tokens,
-                                        &initialization_error);
+      if (provider->create_with_options)
+        native_runtime = provider->create_with_options(
+            {.model_root = options.model_root.string(),
+             .maximum_context_tokens = options.native_context_tokens,
+             .projector_path = options.projector_path.string()},
+            &initialization_error);
+      else if (!options.projector_path.empty())
+        initialization_error =
+            "this ASR model does not take a projector sidecar";
+      else
+        native_runtime = provider->create(options.model_root.string(),
+                                          options.native_context_tokens,
+                                          &initialization_error);
       if (native_runtime == nullptr) {
         return;
       }
+      if (options.model_id.empty())
+        options.model_id = native_runtime->ModelId();
+      if (!options.live && native_runtime->SupportsLiveTranscription())
+        options.live = [this](std::uint32_t rate, std::string* error) {
+          return native_runtime->CreateLiveTranscription(rate, error);
+        };
+      if (!options.voice && native_runtime->SupportsVoiceConversation())
+        options.voice = [this](std::uint32_t rate, std::string* error) {
+          return native_runtime->CreateVoiceConversation(rate, error);
+        };
       options.runner = [this](const ext::TranscriptionRequest& request,
                               const ext::CancellationCheck& is_cancelled,
                               ext::TranscriptionResult* result,
@@ -55,6 +74,8 @@ struct AsrService::Impl {
         return native_runtime->Transcribe(request, is_cancelled, result, error);
       };
     }
+    if (options.model_id.empty())
+      options.model_id = requested_id;
     ready = true;
   }
 
@@ -107,6 +128,32 @@ bool AsrService::Transcribe(const ext::TranscriptionRequest& request,
     return false;
   }
   return impl_->options.runner(request, is_cancelled, result, error);
+}
+
+bool AsrService::supports_live() const noexcept {
+  return impl_->ready && bool(impl_->options.live);
+}
+
+std::unique_ptr<LiveTranscription> AsrService::CreateLiveTranscription(
+    std::uint32_t rate, std::string* error) {
+  if (!supports_live()) {
+    *error = "live transcription is not supported by this model";
+    return nullptr;
+  }
+  return impl_->options.live(rate, error);
+}
+
+bool AsrService::supports_voice() const noexcept {
+  return impl_->ready && bool(impl_->options.voice);
+}
+
+std::unique_ptr<VoiceConversation> AsrService::CreateVoiceConversation(
+    std::uint32_t rate, std::string* error) {
+  if (!supports_voice()) {
+    *error = "spoken conversations are not supported by this model";
+    return nullptr;
+  }
+  return impl_->options.voice(rate, error);
 }
 
 }  // namespace gufo::server

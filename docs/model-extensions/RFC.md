@@ -1177,7 +1177,7 @@ releases.
 | Tier | Where | Requirements |
 | --- | --- | --- |
 | Core | In-tree, maintained | Current repository rules: numerical quality tests, benchmarks, functional suites, release gate. |
-| Community | Out-of-tree (in-tree acceptance is an open question) | Conformance suite for its capability; documented quality evidence; no release gate on speed. |
+| Community | Out-of-tree until promotion to core | Conformance suite for its capability; documented quality evidence; no release gate on speed. |
 
 The conformance suite is assembled from existing functional suites per
 capability: text generation includes correctness, tool calls (including
@@ -1328,8 +1328,9 @@ each model, and for `gufo_core`, in the PR that migrates it.
 - Whether out-of-tree extensions may depend on in-tree family libraries, and
   whether family libraries then fall under the stability policy.
 - The name: "extension", "model module" or "plugin".
-- Whether a community-tier extension can be accepted in-tree, and who
-  maintains it when the original author leaves.
+- Resolved: community and niche extensions remain out-of-tree until promotion
+  to core with a named maintainer. Abandoned core extensions require a reviewed
+  replacement/retirement decision; see [distribution policy](DISTRIBUTION.md).
 - Whether draft models from a different architecture (for example a DFlash
   draft) are ever loaded by a different extension than the target; the
   current answer is no.

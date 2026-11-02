@@ -406,6 +406,9 @@ add_library(gufo_http STATIC
   src/cli/serve/http_server.cpp
   src/cli/serve/websocket.cpp
   src/cli/serve/asr_websocket.cpp
+  src/cli/serve/voice_websocket.cpp
+  src/cli/serve/voice_page.cpp
+  src/cli/serve/decision_service.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
 )
@@ -417,12 +420,17 @@ add_executable(gufo
   src/cli/banner.cpp
   src/cli/eval/eval.cpp
   src/cli/transcribe/transcribe.cpp
+  src/cli/speak/speak.cpp
+  src/cli/decide/decide.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
   src/eval/http_client.cpp
 )
 target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_eval
   gufo_llm_cli gufo_http gufo_serving CURL::libcurl)
+# Extension directories register their own tests, so CTest is enabled before
+# they are added.
+include(CTest)
 gufo_build_discovered_extensions()
 get_property(gufo_selected_extensions GLOBAL PROPERTY GUFO_SELECTED_EXTENSIONS)
 gufo_target_extensions(gufo EXTENSIONS ${gufo_selected_extensions})
@@ -484,14 +492,10 @@ endif()
 
 install(TARGETS gufo DESTINATION bin)
 install(FILES
-  src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
-  DESTINATION share/gufo/models/minimax_h3)
-install(FILES
   tests/fixtures/eval/antirez-ds4.json
   DESTINATION share/gufo/eval)
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
-install(FILES src/models/deepseek_v4_flash/LICENSE.ds4 DESTINATION share/licenses/gufo/third-party)
 if (NOT WIN32)
 install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
 else()
@@ -727,7 +731,8 @@ endfunction()
 
   add_executable(transcribe_cli_test
     tests/cli/transcribe_test.cpp
-    src/cli/transcribe/transcribe.cpp)
+    src/cli/transcribe/transcribe.cpp
+    src/cli/serve/audio_buffer.cpp)
   target_link_libraries(transcribe_cli_test PRIVATE gufo_core gufo_ext_runtime)
   add_test(NAME transcribe_cli_test COMMAND transcribe_cli_test
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav")
@@ -859,6 +864,11 @@ endfunction()
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_pr_title_test.py)
   set_tests_properties(check_pr_title_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
+
+  add_test(NAME extension_distribution_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/extension_distribution_test.py)
+  set_tests_properties(extension_distribution_test PROPERTIES LABELS "cpu;repository;extensions" TIMEOUT 30)
 
   add_test(NAME generate_infrastructure_test
     COMMAND ${Python3_EXECUTABLE}

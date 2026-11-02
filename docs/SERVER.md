@@ -493,6 +493,9 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/embeddings`, `/embedding` | llama.cpp's non-OpenAI embeddings form, on the same `gufo serve embedding` process; other servers answer 404 |
 | `POST` | `/v1/audio/transcriptions` | An STT implementation is compiled and loaded |
 | `POST` | `/v1/audio/speech` | A TTS implementation is compiled and loaded |
+| `GET` | `/v1/realtime` | `serve asr`: transcription sessions, and spoken conversations for models that hear and speak |
+| `GET` | `/voice` | `serve asr` with a conversational model: a browser client of `/v1/realtime` |
+| `POST` | `/v1/systemone` | A decision model is configured with `gufo serve decision` |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/videos` | A validated operator-supplied MiniMax H3 checkpoint is configured |
@@ -617,6 +620,24 @@ the same bearer authentication and connection limits as HTTP. Messages are
 bounded to 4 MiB, queued input to 8 MiB/128 messages, and unconsumed output to
 a five-second socket timeout. Native generation observes close/disconnect;
 no per-server streaming flag or extra model is required.
+
+Models with live transcription stream text deltas while audio is still being
+appended, and `turn_detection: {"type": "server_vad"}` lets the server find
+turns (`input_audio_buffer.speech_started`/`speech_stopped`, then the
+commit). Without `intent`, models that hear and speak hold an OpenAI Realtime
+conversation on the same path: audio and text input, streamed text and 24 kHz
+speech replies, function tools, `response.cancel`, interruption by user
+speech and `conversation.item.truncate`. Browsers, which cannot set WebSocket
+headers, may pass the API key as the subprotocol
+`openai-insecure-api-key.<key>` beside `realtime`. `GET /voice`, served
+without authentication when the model holds conversations, is a browser
+client that asks for the key itself. Event-level behavior is documented by
+the model's provider (for example the LFM3-Audio extension).
+
+`POST /v1/systemone` (`gufo serve decision`) answers one JSON decision
+request with the loaded model; a `model` field, when present, must name it.
+Malformed JSON and requests the model rejects return 400, and requests are
+serialized over the one loaded model.
 
 The MiniMax H3 subset follows the asynchronous OpenAI-style video resource
 shape and is versioned independently as `gufo.video-api.v1`. Its supported
@@ -1211,6 +1232,41 @@ Use appropriate HTTP status codes:
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
+
+## llama-swap
+
+[llama-swap](https://github.com/mostlygeek/llama-swap) can launch Gufo on
+demand. Use the model readiness endpoint for its startup check:
+
+```yaml
+models:
+  gufo-model:
+    cmd: >
+      /path/to/gufo serve --host 127.0.0.1 --port ${PORT} llm
+      --model /path/to/model.gguf --served-model-name gufo-model
+    checkEndpoint: /ready
+```
+
+Replace the executable and model paths. llama-swap assigns `${PORT}` and
+waits for `/ready` to return HTTP 200 before forwarding the triggering
+request. Gufo returns 503 while the model loads. The served model name
+matches the llama-swap model ID, so clients can request `gufo-model`
+through the proxy. For long cold starts, increase llama-swap's
+`healthCheckTimeout` to cover model and disk-cache loading.
+
+To load the model without generating a response, request its readiness
+endpoint through llama-swap (assuming the router listens on port 8080):
+
+```sh
+curl --fail-with-body http://127.0.0.1:8080/upstream/gufo-model/ready
+```
+
+In llama-swap v262, the browser Load action and startup preloading trigger
+a request to the upstream root `/`. Unmodified Gufo does not serve that
+path, so these actions can report HTTP 404 after the model has become
+ready. `checkEndpoint` controls readiness polling, not the triggering
+request. Use the explicit readiness request above or a normal inference
+request to load the model.
 
 ## Authentication and Exposure
 

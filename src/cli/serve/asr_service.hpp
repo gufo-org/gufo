@@ -2,12 +2,14 @@
 #define GUFO_SERVER_ASR_SERVICE_HPP_
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
 
 #include "gufo/ext/asr.hpp"
+#include "src/cli/serve/realtime_audio.hpp"
 
 namespace gufo::server {
 
@@ -17,10 +19,18 @@ struct AsrServiceOptions {
                                     ext::TranscriptionResult*, std::string*)>;
 
   std::filesystem::path model_root;
+  /// Explicit model sidecar, such as an audio mmproj GGUF.
+  std::filesystem::path projector_path;
   std::size_t native_context_tokens{1024};
   bool validate_model{true};
   std::string model_id;
   Runner runner;
+  /// Optional realtime streams of models that support them; rate is the
+  /// input sample rate.
+  std::function<std::unique_ptr<LiveTranscription>(std::uint32_t, std::string*)>
+      live;
+  std::function<std::unique_ptr<VoiceConversation>(std::uint32_t, std::string*)>
+      voice;
 };
 
 /// Synchronous, bounded native HIP Qwen3-ASR-1.7B service.
@@ -43,6 +53,15 @@ public:
                                 const ext::CancellationCheck& is_cancelled,
                                 ext::TranscriptionResult* result,
                                 std::string* error = nullptr);
+
+  /// Live transcription while audio arrives, when the model supports it.
+  [[nodiscard]] bool supports_live() const noexcept;
+  [[nodiscard]] std::unique_ptr<LiveTranscription> CreateLiveTranscription(
+      std::uint32_t rate, std::string* error);
+  /// Spoken conversations, when the model hears and speaks.
+  [[nodiscard]] bool supports_voice() const noexcept;
+  [[nodiscard]] std::unique_ptr<VoiceConversation> CreateVoiceConversation(
+      std::uint32_t rate, std::string* error);
 
 private:
   struct Impl;

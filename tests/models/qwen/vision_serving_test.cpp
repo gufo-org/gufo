@@ -10,6 +10,7 @@
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/core/gguf_identity.hpp"
 #include "src/core/image.hpp"
+#include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/runner.hpp"
@@ -370,7 +371,7 @@ int main(int argc, char** argv) {
     speculative.draft_model_path = draft;
     // Exact C1/C4 proposal accounting needs a fixed width. The adaptive
     // greedy controller is allowed to choose a different width for each batch.
-    speculative.dflash_policy = speculative::DFlashDraftPolicy::kFixed;
+    speculative.dflash_policy = ext::TextDFlashDraftPolicy::kFixed;
     std::shared_ptr<const hip::QwenGpuModel> qwen;
     std::shared_ptr<models::qwen38_flash_next::Model> qfn;
     if (flash) {
@@ -401,20 +402,26 @@ int main(int argc, char** argv) {
       if (flash) {
         runner = models::qwen38_flash_next::CreateQwenFlashNextTextRunner(
             qfn, context, mode, mode_cache.model_artifact_fingerprint,
-            mode_cache.draft_model_artifact_fingerprint, 4);
+            mode_cache.draft_model_artifact_fingerprint);
       } else {
         std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;
         speculative::SpeculativeOptions spec_opts;
         if (mode.backend == server::TextSpeculativeBackend::kDFlash) {
           std::string err;
-          dflash_model =
-              hip::QwenDFlashGpuModel::Open(mode.draft_model_path, &err);
+          auto draft_reader = std::shared_ptr<const core::GgufReader>(
+              core::GgufReader::OpenFile(mode.draft_model_path, &err));
+          Require(draft_reader != nullptr, err);
+          dflash_model = hip::QwenDFlashGpuModel::Create(
+              std::move(draft_reader), qwen, &err);
           Require(dflash_model != nullptr, err);
           spec_opts.max_draft_tokens = mode.max_draft_tokens;
           spec_opts.min_draft_tokens = mode.min_draft_tokens;
         }
         runner = models::qwen::CreateQwenTextRunner(
-            qwen, context, dflash_model, spec_opts, mode.dflash_policy,
+            qwen, context, dflash_model, spec_opts,
+            mode.dflash_policy == ext::TextDFlashDraftPolicy::kFixed
+                ? speculative::DFlashDraftPolicy::kFixed
+                : speculative::DFlashDraftPolicy::kAdaptive,
             mode_cache.model_artifact_fingerprint,
             mode_cache.draft_model_artifact_fingerprint);
       }

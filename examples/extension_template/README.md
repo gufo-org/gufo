@@ -1,6 +1,8 @@
 # Gufo Extension Template
 
 This repository template provides the blueprint for authoring an out-of-tree model extension for Gufo.
+Start with the [extension author guide](../../docs/extensions.md), including the
+LFM3 example and ongoing maintenance workflow.
 
 ## Overview
 
@@ -14,11 +16,20 @@ Gufo uses build-time source extensions. An out-of-tree extension provides:
 ```text
 extension_template/
 ├── README.md             # This document
+├── LICENSE               # Preserve the source license
+├── flake.nix             # Pinned Gufo package with this external source
+├── flake.lock            # Pinned transitive inputs
 ├── extension.json        # Extension metadata manifest
 ├── extension.cmake       # Gufo build manifest
 └── src/
     └── template_model.cpp # Extension registration entrypoint
 ```
+
+The template registers metadata only. Implement an actual capability runner and
+independent model tests before claiming inference support or conformance.
+Community and niche models stay out-of-tree until promotion; see
+[distribution/support policy](../../docs/model-extensions/DISTRIBUTION.md) and
+[capability conformance](../../docs/model-extensions/CONFORMANCE.md).
 
 ## Include Boundary Policy
 
@@ -42,7 +53,9 @@ cmake --build build --target gufo
 
 ### Using Nix
 
-In `flake.nix` or an expression:
+Copy this template into an independent repository and run `nix build`. Its
+`flake.nix` and `flake.lock` pin Gufo and the toolchain inputs; update that pin
+intentionally after conformance checks. In another package expression:
 
 ```nix
 gufo.override {
@@ -54,6 +67,10 @@ gufo.override {
 }
 ```
 
+The serving helper reads the overridden package's manifests automatically; see
+[Nix serving from extension metadata](../../docs/model-extensions/serving.md)
+for provider validation, draft paths, voices and lock selection.
+
 ## Windows Packaging (ZIP Recipe)
 
 Third-party Windows extension distributions package:
@@ -62,7 +79,9 @@ Third-party Windows extension distributions package:
 3. `THIRD_PARTY_NOTICES.md` or `LICENSE`.
 4. Precompiled dependencies (if using vcpkg or prebuilt binaries).
 
-To package a ZIP from PowerShell:
+This is a source ZIP. For an executable ZIP, follow the dependency, installation,
+runtime closure and fresh-extraction checks in the distribution guide above.
+To package the source ZIP from PowerShell:
 ```powershell
-Compress-Archive -Path extension.json, extension.cmake, src, README.md -DestinationPath template_extension-windows.zip
+Compress-Archive -Path extension.json, extension.cmake, src, README.md, LICENSE, flake.nix, flake.lock -DestinationPath template_extension-windows.zip
 ```

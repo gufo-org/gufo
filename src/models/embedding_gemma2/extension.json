@@ -57,7 +57,7 @@
     {
       "pkg_config": "soxr",
       "nix": "soxr",
-      "windows": "libsoxr"
+      "windows": "soxr"
     },
     {
       "pkg_config": "libavformat",
@@ -72,7 +72,7 @@
     {
       "pkg_config": "libavutil",
       "nix": "ffmpeg-headless",
-      "windows": "ffmpeg[avutil]"
+      "windows": "ffmpeg"
     },
     {
       "pkg_config": "libswscale",
