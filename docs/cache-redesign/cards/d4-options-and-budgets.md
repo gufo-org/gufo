@@ -205,7 +205,10 @@ at startup" and the rejected alternative above, for these measured reasons:
   it cannot push later session and scratch allocations onto managed memory.
   The pool measures `hipMemGetInfo` around each registration instead of
   assuming a charge. On the hosts probed for #781, registration took nothing
-  from the heap, so a tight heap no longer keeps the cache off.
+  from the heap, so a tight heap no longer keeps the cache off. Once one
+  registration takes at least half its size from the heap, the host charges
+  registered pages, and later segments are checked against the reserve before
+  they are committed rather than committed, registered and released.
 - Growth stops early while the host would keep less than 4 GiB available
   (`event=backing_limited`). A capture that finds no room in a growing pool
   reads the ledger's free backing first, and skips a scan of every committed

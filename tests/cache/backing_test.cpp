@@ -601,6 +601,14 @@ void HeapReserveSegments() {
                                         hip::kDispatchReserve - 1));
   // Heap freed concurrently does not refuse a registration.
   assert(hip::RegistrationKeepsReserve(tight_heap, tight_heap + 4096));
+  // A charge of at least half the segment marks a charging host; smaller
+  // drops and growth are taken as concurrent allocations.
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  assert(hip::RegistrationCharged(gib, 10 * gib, 9 * gib));
+  assert(hip::RegistrationCharged(gib, 10 * gib, 10 * gib - gib / 2));
+  assert(!hip::RegistrationCharged(gib, 10 * gib, 10 * gib - gib / 2 + 1));
+  assert(!hip::RegistrationCharged(gib, tight_heap, tight_heap));
+  assert(!hip::RegistrationCharged(gib, tight_heap, tight_heap + 4096));
   // A segment is kept unless its own registration took the device heap below
   // the dispatch reserve, however little of the heap was free before (#781).
   constexpr std::size_t capacity = 4 * block_bytes + metadata;

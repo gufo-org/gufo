@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "src/core/hip/committed_backing.hpp"
+#include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/hip/transfer_pool.hpp"
 
@@ -68,6 +69,9 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
       std::mutex mutex;
       std::chrono::steady_clock::time_point refused;
       bool active{};
+      // A registration was charged to the device heap; later segments are
+      // checked against the reserve before they are committed.
+      bool charged{};
     };
     const auto limited = std::make_shared<Limited>();
     // Pressure retries ask once per capture; recheck at most once a second
@@ -93,11 +97,21 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                       std::chrono::seconds(1))
                 return false;
               const auto ceiling = hooks.host_ceiling();
-              if (ceiling >= bytes)
+              if (ceiling < bytes)
+                return refuse(
+                    "host_reserve segment_bytes=" + std::to_string(bytes) +
+                    " host_headroom_bytes=" + std::to_string(ceiling));
+              if (!limited->charged)
+                return true;
+              // On a charging host, refuse before committing and registering
+              // a segment that would only be released again.
+              std::size_t heap_free = 0, heap_total = 0;
+              if (hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+                  hip::HeapFitsAboveReserve(heap_free, bytes))
                 return true;
               return refuse(
-                  "host_reserve segment_bytes=" + std::to_string(bytes) +
-                  " host_headroom_bytes=" + std::to_string(ceiling));
+                  "device_heap_reserve segment_bytes=" + std::to_string(bytes) +
+                  " device_heap_free_bytes=" + std::to_string(heap_free));
             },
             // Registered pages are charged to the device heap on some hosts
             // only. Where they are, keep its dispatch reserve so session and
@@ -105,6 +119,8 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
             [limited, refuse](std::size_t bytes, std::size_t heap_before,
                               std::size_t heap_after) {
               const std::lock_guard lock(limited->mutex);
+              if (hip::RegistrationCharged(bytes, heap_before, heap_after))
+                limited->charged = true;
               if (hip::RegistrationKeepsReserve(heap_before, heap_after)) {
                 limited->active = false;
                 return true;

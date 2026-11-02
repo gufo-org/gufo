@@ -27,6 +27,15 @@ namespace gufo::hip {
   return free_after >= std::min(free_before, kDispatchReserve);
 }
 
+/// True when registering `bytes` took at least half of them from the device
+/// heap, so this host charges registered pages. Smaller drops are taken as
+/// concurrent allocations rather than the registration itself.
+[[nodiscard]] inline bool RegistrationCharged(std::uint64_t bytes,
+                                              std::uint64_t free_before,
+                                              std::uint64_t free_after) {
+  return free_before > free_after && free_before - free_after >= bytes / 2;
+}
+
 namespace detail {
 struct BackingState;
 }
