@@ -67,7 +67,20 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
 
-  return std::shared_ptr<Model>(new Model(engine, options));
+  std::shared_ptr<Model> model(new Model(engine, options));
+  // The renderer and the runtime tokenizer must agree on every control token.
+  for (std::size_t index = 0; index < kControlTokenCount; ++index) {
+    const auto spelling = ControlTokenText(static_cast<ControlToken>(index));
+    const auto tokens = model->Tokenize(spelling, true);
+    if (tokens.size() != 1) {
+      AssignError(error_msg,
+                  "DeepSeek V4 Flash tokenizer has no control token for " +
+                      std::string(spelling));
+      return nullptr;
+    }
+    model->control_tokens_[index] = tokens.front();
+  }
+  return model;
 }
 
 std::unique_ptr<Session> Model::CreateSession(core::SessionMode mode,
@@ -214,8 +227,20 @@ std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
 std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
                                    std::span<const ChatTool> tools,
                                    const ChatTemplateOptions& options) const {
-  const std::string rendered = RenderChat(messages, tools, options);
-  return Tokenize(rendered, true);
+  std::vector<ContentSpan> content_spans;
+  const std::string rendered =
+      RenderChat(messages, tools, options, &content_spans);
+  std::vector<int> tokens;
+  for (const auto& piece : SplitControlTokens(rendered, content_spans)) {
+    if (piece.control.has_value()) {
+      tokens.push_back(
+          control_tokens_[static_cast<std::size_t>(*piece.control)]);
+      continue;
+    }
+    const auto text = Tokenize(piece.text);
+    tokens.insert(tokens.end(), text.begin(), text.end());
+  }
+  return tokens;
 }
 
 std::string Model::DecodeToken(int token) const {

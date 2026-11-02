@@ -1,8 +1,11 @@
 #ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
 #define GUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
 
+#include <cstddef>
+#include <cstdint>
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/reasoning.hpp>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -54,12 +57,55 @@ struct ChatTemplateOptions {
 
 [[nodiscard]] std::string_view GenerationPrompt(bool enable_thinking);
 
+/// A byte span of the rendered prompt that holds caller-supplied text: a
+/// message body, reasoning, a tool definition, or a historical tool call's
+/// name or argument. Such text is tokenized as text, never as framing: a
+/// `</think>` a client sends is the string the client wrote, as in DeepSeek's
+/// reference encoder (deepseek-ai/deepseek-recipe) and the Qwen renderer.
+struct ContentSpan {
+  std::size_t offset{0};
+  std::size_t size{0};
+};
+
 /// Renders the pinned DeepSeek V4 Flash 0731 conversation format.
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
                                      const ChatTemplateOptions& options = {});
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
                                      std::span<const ChatTool> tools,
                                      const ChatTemplateOptions& options = {});
+/// As above, and appends the sorted, disjoint spans of caller-supplied text.
+[[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
+                                     std::span<const ChatTool> tools,
+                                     const ChatTemplateOptions& options,
+                                     std::vector<ContentSpan>* content_spans);
+
+/// The control tokens the renderer writes as framing. The runtime tokenizer's
+/// rendered-chat table (runtime/tokenizer.cpp) holds the same spellings.
+enum class ControlToken : std::uint8_t {
+  kBeginOfSentence,
+  kEndOfSentence,
+  kUser,
+  kAssistant,
+  kThinkStart,
+  kThinkEnd,
+  kDsml,
+};
+inline constexpr std::size_t kControlTokenCount = 7;
+
+[[nodiscard]] std::string_view ControlTokenText(ControlToken token) noexcept;
+
+/// A run of ordinary text, or one control token.
+struct PromptPiece {
+  std::string_view text;
+  std::optional<ControlToken> control;
+};
+
+/// Splits a rendered prompt at control-token spellings, in the runtime
+/// tokenizer's order, except that a spelling overlapping a content span stays
+/// ordinary text. Text runs are delimited only by control tokens, so a prompt
+/// without such spellings in its content splits exactly as before.
+[[nodiscard]] std::vector<PromptPiece> SplitControlTokens(
+    std::string_view rendered, std::span<const ContentSpan> content_spans);
 
 /// Rejects DeepSeek artifacts whose embedded template is not the pinned
 /// converter version implemented by the compiled formatter.
