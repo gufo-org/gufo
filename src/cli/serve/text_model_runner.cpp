@@ -4,6 +4,7 @@
 #include <charconv>
 #include <chrono>
 #include <future>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -158,8 +159,28 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     const std::size_t per_request = *per_state_reservation;
     const std::size_t capacity = *resources.state_capacity_bytes;
     if (per_request != 0 && state_count > capacity / per_request) {
-      throw std::invalid_argument(
-          "text runner request-state claim exceeds state capacity");
+      const auto describe = [](std::size_t bytes) {
+        std::ostringstream text;
+        text << bytes << " bytes (" << std::fixed << std::setprecision(1)
+             << static_cast<double>(bytes) / static_cast<double>(1ULL << 30)
+             << " GiB)";
+        return text.str();
+      };
+      const std::size_t fitting = capacity / per_request;
+      std::ostringstream message;
+      message << "text runner request-state claim exceeds state capacity: "
+              << state_count << " sessions at " << descriptor.max_context
+              << "-token context need " << describe(per_request)
+              << " each, but only " << describe(capacity)
+              << " of device memory is available; ";
+      if (fitting == 0) {
+        message << "no session fits at this context, reduce --context";
+      } else {
+        message << "at most " << fitting
+                << (fitting == 1 ? " session fits" : " sessions fit")
+                << " at this context, reduce --sessions or --context";
+      }
+      throw std::invalid_argument(message.str());
     }
   }
 
