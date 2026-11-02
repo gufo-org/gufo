@@ -349,12 +349,13 @@ void TestValidationAndVoices() {
              R"({"model":"qwen3-tts","input":"x","voice":"vivian","seed":1.5})")
                 .status == 400,
         "fractional seed fails closed");
+  Check(runner.calls == 0, "invalid requests never invoke inference");
   Check(
       Send(service, "POST", "/v1/audio/speech",
            R"({"model":"qwen3-tts","input":"x","voice":"vivian","typo":true})")
-              .status == 400,
-      "unknown fields fail closed");
-  Check(runner.calls == 0, "invalid requests never invoke inference");
+                  .status == 200 &&
+          runner.calls == 1,
+      "unknown fields are ignored");
 }
 
 void TestVoiceDesignContract() {

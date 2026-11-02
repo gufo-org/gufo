@@ -315,10 +315,10 @@ void TestValidation(const std::filesystem::path& root) {
 
   const HttpResponse unknown = Send(
       service, "POST", "/v1/videos",
-      R"({"model":"minimax-h3","prompt":"x","seconds":"1","silent_typo":true})");
+      R"({"model":"minimax-h3","prompt":"x","size":512,"seconds":"1","silent_typo":true})");
   Check(unknown.status == 400 &&
-            unknown.body.find("unsupported_field") != std::string::npos,
-        "unknown top-level fields fail closed");
+            unknown.body.find("invalid_parameter_type") != std::string::npos,
+        "unknown top-level fields are ignored, as in other OpenAI servers");
 
   const HttpResponse duplicate_json = Send(
       service, "POST", "/v1/videos",
