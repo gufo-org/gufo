@@ -1,4 +1,4 @@
-# 0.1.6
+# Media provider contracts
 
 Publish capability-neutral contracts and provider registries:
 - ASR (`include/gufo/ext/asr.hpp`): `AsrSegment`, `AsrProgress`, `AsrRunner`, `AsrProvider`,

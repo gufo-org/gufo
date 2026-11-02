@@ -1,8 +1,8 @@
 # Card 25: Generate Nix serving arguments and validation
 
-Status: **pending**. RFC step and dependencies: **11b; 24**.
+Status: **implementing**. RFC step and dependencies: **11b; 24**.
 
-Future scope; do not execute during the cards 01–14 milestone.
+Implementation authorized after the cards 01–14 milestone.
 
 Navigation: [index](../CARDS.md) · [workflow and validation conventions](README.md) · [RFC](../RFC.md).
 
@@ -23,9 +23,9 @@ Generate mkServe model arguments and validation for drafts/modalities/speculatio
 
 ## Definition of done
 
-- [ ] No per-model draft/modality/speculation/voice lists remain hand-maintained in mkServe source.
-- [ ] Valid current configurations generate the expected CLI, invalid combinations fail with provider-specific diagnostics, and aliases are absent.
-- [ ] Public argument changes are documented, external extensions configure successfully and NixOS serving works with correct artifact selection.
+- [x] No per-model draft/modality/speculation/voice lists remain hand-maintained in mkServe source.
+- [x] Valid current configurations generate the expected CLI, invalid combinations fail with provider-specific diagnostics, and aliases are absent.
+- [x] Public argument changes are documented, external extensions configure successfully and NixOS serving works with correct artifact selection.
 
 ## Validation criteria
 
@@ -37,4 +37,27 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+### Implementation
+
+- Added manifest-driven Nix metadata discovery, following the selected package's
+  source root, external extension roots and discovery/lock selection.
+- Generated provider-owned argument names and types; removed hardcoded draft
+  paths and speculative mode inventories from `mkServe`.
+- Added provider-specific combination checks, required draft paths, voice
+  validation and rejection of options for incompatible modalities.
+- Recorded the canonical decision: retain the existing distinct draft option
+  names without aliases or public argument renames.
+- Added rendering/metadata fixtures, default/release NixOS service evaluation,
+  CMake/schema checks and a live external-LFM3 systemd/HTTP smoke.
+- Added change-record instructions with `AGENTS.md`/`CLAUDE.md` symlinks and
+  normalized existing records to descriptive names/headings without assigning
+  versions. CMake still derives the revision; `baseline.md` does not count.
+- Retained commands, results, initial smoke failure and limitations in
+  [Card 25 evidence](../evidence/card25/README.md). User documentation is in
+  [Nix serving](../serving.md).
+
+Both production package builds pass, with discovery/development identity for
+`default` and lock/release identity for `release`. The implementation gates above
+are verified and prepared for pull-request review; independent closing review
+remains pending. New external runtime controls still require CLI integration beyond Nix generation;
+the existing canonical controls and the external LFM3 provider are covered.

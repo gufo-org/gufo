@@ -1,4 +1,4 @@
-# 0.1.8
+# Text generation contracts
 
 Publish capability-neutral text generation contracts and registries:
 - Runner descriptors declare their sampling preset so omitted HTTP settings

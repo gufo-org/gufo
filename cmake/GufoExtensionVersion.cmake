@@ -22,6 +22,8 @@ file(GLOB _gufo_api_records CONFIGURE_DEPENDS
   "${_gufo_api_root}/changes/${GUFO_EXTENSION_API_major}.${GUFO_EXTENSION_API_minor}/*.md")
 # The baseline record documents that revision; subsequent records advance it.
 set(_gufo_api_revisions ${_gufo_api_records})
+list(FILTER _gufo_api_revisions EXCLUDE REGEX "/baseline[.]md$")
+# Legacy source fixtures may still use a numbered baseline record.
 list(FILTER _gufo_api_revisions EXCLUDE REGEX "/${GUFO_EXTENSION_API_revision_base}[.]md$")
 list(LENGTH _gufo_api_revisions _gufo_api_count)
 foreach(record IN LISTS _gufo_api_records)

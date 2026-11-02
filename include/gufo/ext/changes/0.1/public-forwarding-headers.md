@@ -1,4 +1,4 @@
-# 0.1.2
+# Public forwarding headers
 
 Publish public forwarding headers under `include/gufo/ext/` per the model-used
 header inventory (Card 10 of model-extensions RFC):

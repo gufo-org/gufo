@@ -130,7 +130,7 @@ the current implementation milestone stops after Card 14.
 | 22 | 10 DeepSeek; 21 | [Migrate DeepSeek text generation](cards/22-deepseek-extension.md) | complete |
 | 23 | 11; 22 | [Support external extension source trees](cards/23-external-extensions.md) | complete |
 | 24 | 11; 23 | [Prove capability extensibility with second providers](cards/24-second-provider-conformance.md) | implementing |
-| 25 | 11b; 24 | [Generate Nix serving arguments and validation](cards/25-generated-serve-module.md) | pending |
+| 25 | 11b; 24 | [Generate Nix serving arguments and validation](cards/25-generated-serve-module.md) | implementing |
 | 26 | distribution/conformance; 25 | [Complete distribution recipes and conformance policy](cards/26-distribution-and-policy.md) | pending |
 | 27 | success criteria; 26 | [Audit every RFC success criterion](cards/27-final-requirements-audit.md) | pending |
 | 28 | 12 preparation; 27 | [Pin external compatibility fixtures and stability evidence](cards/28-external-compatibility-ledger.md) | pending |

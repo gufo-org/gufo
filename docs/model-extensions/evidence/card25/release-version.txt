@@ -1,0 +1,20 @@
+gufo version 0.28.1 (13f6456-dirty)
+Extension API: 0.1.14
+Extension selection: lock
+Built extensions:
+  deepseek_v4_flash 0.1.0 (src/models/deepseek_v4_flash)
+  embedding_gemma2 0.1.0 (src/models/embedding_gemma2)
+  minimax_h3 0.1.0 (src/models/minimax_h3)
+  qwen 0.1.0 (src/models/qwen)
+  qwen38_flash_next 0.1.0 (src/models/qwen38_flash_next)
+  qwen3_asr 0.1.0 (src/models/qwen3_asr)
+  qwen3_tts 0.1.0 (src/models/qwen3_tts)
+  qwen_image_21 0.1.0 (src/models/qwen_image_21)
+  provider deepseek4: available
+  provider embeddinggemma-2: available
+  provider minimax-h3: available
+  provider qwen27-q4: available
+  provider flash-next-q4: available
+  provider qwen3-asr: available
+  provider qwen3-tts: available
+  provider qwen-image-21: available

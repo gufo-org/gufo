@@ -291,6 +291,22 @@
                 "xor_eq"
               ]
             }
+          },
+          "serving": {
+            "type": "object",
+            "properties": {
+              "draft_options": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^--[a-z][a-z0-9-]*$"
+                }
+              },
+              "voices": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "required": [

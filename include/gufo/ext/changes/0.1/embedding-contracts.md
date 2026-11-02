@@ -1,4 +1,4 @@
-# 0.1.3
+# Capability-neutral embedding contracts
 
 Publish capability-neutral embedding contracts (`include/gufo/ext/embeddings.hpp`):
 - `EmbeddingBatch`, `EmbeddingInput`, `EmbeddingPart`, `EmbeddingStatus`,
