@@ -82,6 +82,12 @@
   },
   "tests": [
     {
+      "target": "qwen38_flash_next_runner_options_test",
+      "ctest": "qwen38_flash_next\\.runner_options",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
       "target": "qwen38_flash_next_continuation_identity_test",
       "ctest": "qwen38_flash_next_continuation_identity_test",
       "check_pr": true,
