@@ -104,14 +104,19 @@ quality; successful optimizations become the default, without extra switches.
 - The source extension API is versioned independently from Gufo. Public headers
   under `include/gufo/ext/`, their transitive `SURFACE` closure (including
   forwarded core/cache headers), the metadata schema and public CMake contracts
-  require an `ext-api` PR label, an increased extension API version and a
-  `include/gufo/ext/CHANGES.md` entry when declarations/contracts change. Run
-  `python3 tools/ci/check-extension-api.py --write` after header/include changes;
-  the PR diff gate also checks forwarded declarations. Before 1.0, a minor bump
+  require an `ext-api` PR label and one new, uniquely named Markdown record under
+  `include/gufo/ext/changes/<major>.<minor>/` when declarations/contracts change.
+  Records are permanent and immutable. CMake derives the API revision from the
+  active series in `include/gufo/ext/api-series.json` plus its revision-record
+  count. The baseline's numbered record documents that revision without advancing
+  it. Do not manually bump versions for additive changes.
+  Run `python3 tools/ci/check-extension-api.py --write` after header/include
+  changes; the PR diff gate also checks forwarded declarations. Before 1.0, a minor bump
   may break extensions; revision bumps are additive. Fix in-tree users together.
   The guarantee is source compatibility after rebuilding, never binary ABI.
-  Ordinary PRs may update this API version/changelog. Extension API and the
-  future experimental flake `extensions` argument are excluded from Gufo's
+  Breaking changes explicitly advance the compatibility series in api-series.json
+  and add a record in the new series, retaining all historical records. Extension
+  API and the future experimental flake `extensions` argument are excluded from Gufo's
   release compatibility surface; CLI/HTTP/public existing flake breaks still
   require `!`. See [the release policy](docs/RELEASING.md).
 - Follow the user's remote workflow and preserve unrelated work.

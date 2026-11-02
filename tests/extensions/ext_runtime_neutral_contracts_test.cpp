@@ -178,13 +178,13 @@ void CheckDeviceProbe() {
 }
 
 void CheckExtensionApiVersion() {
-  Expect(gufo::ext::kApiMajor == 0 && gufo::ext::kApiMinor == 1 &&
-             gufo::ext::kApiRevision == 11,
-         "API numeric constants match 0.1.11");
-  Expect(gufo::ext::kApiVersion == "0.1.11",
-         "API version literal matches 0.1.11");
-  Expect(gufo::ext::RuntimeApiVersion() == "0.1.11",
-         "Runtime API version matches 0.1.11");
+  const auto version = std::to_string(gufo::ext::kApiMajor) + "." +
+                       std::to_string(gufo::ext::kApiMinor) + "." +
+                       std::to_string(gufo::ext::kApiRevision);
+  Expect(gufo::ext::kApiVersion == version,
+         "API version agrees with its numeric constants");
+  Expect(gufo::ext::RuntimeApiVersion() == version,
+         "linked runtime agrees with the public API version");
 }
 
 void CheckPlatformLeaves() {

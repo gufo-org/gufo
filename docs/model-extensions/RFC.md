@@ -1094,16 +1094,16 @@ The extension API version is independent of Gufo's own version.
    [release policy](../RELEASING.md) defines Gufo's compatibility surface as
    the CLI, the HTTP API and public flake outputs, so extension API breaks do
    not use `!`. A PR that changes declarations in a `SURFACE` file carries
-   an `ext-api` label and updates a checked `include/gufo/ext/CHANGES.md`
-   with the version change; its title keeps its normal scope (for example
+   an `ext-api` label and adds a permanent change record under
+   `include/gufo/ext/changes/<major>.<minor>/`; its title keeps its normal scope (for example
    `cache`), so core PRs that touch forwarded headers are not forced into
    one scope. This needs an
    amendment to `RELEASING.md` and `AGENTS.md`, made in step 3: the extension
    API and the flake `extensions` argument are outside Gufo's compatibility
-   surface, ordinary PRs may change the extension API version and its
-   changelog, and a check that receives the PR's diff requires the
-   `ext-api` label and a `CHANGES.md` entry when declarations in `SURFACE`
-   files change. User-facing
+   surface. Additive PRs add unique records; CMake derives the API revision
+   automatically and the combined changelog is generated from those records.
+   The diff gate requires the `ext-api` label and a new immutable record when
+   declarations in `SURFACE` files change. User-facing
    changes made during migration (option unification, stricter Qwen 27B
    selection) are CLI changes and do carry `!`.
 5. **In-tree canaries.** Every in-tree model uses only the public extension

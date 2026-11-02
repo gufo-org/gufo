@@ -3,7 +3,7 @@
 
 The token comparison is deliberately conservative: it also gates inline bodies,
 initializers, schema and public CMake contracts. Comments and whitespace alone do
-not require a bump. Card10 expands classification; no binary ABI is promised.
+not require a change record. Card10 expands classification; no binary ABI is promised.
 """
 import argparse
 import json
@@ -12,9 +12,11 @@ import re
 import subprocess
 
 SURFACE = "include/gufo/ext/SURFACE"
-CHANGES = "include/gufo/ext/CHANGES.md"
+SERIES = "include/gufo/ext/api-series.json"
+RECORDS = "include/gufo/ext/changes"
 VERSION = "include/gufo/ext/version.hpp"
-CONTRACTS = {"cmake/GufoExtension.cmake", "cmake/GufoExtensionDiscovery.cmake", "schemas/extension.schema.json"}
+CONTRACTS = {"cmake/GufoExtension.cmake", "cmake/GufoExtensionDiscovery.cmake", "schemas/extension.schema.json",
+             "cmake/GufoExtensionVersion.cmake", "cmake/GufoExtensionVersion.hpp.in"}
 INCLUDE = re.compile(r'^\s*#\s*include\s*["<]([^">]+)[">]', re.M)
 TOKEN = re.compile(r'R"(?P<raw>[^ ()\\\t\r\n]{0,16})\([\s\S]*?\)(?P=raw)"|' + r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\w+|[^\s]')
 
@@ -57,22 +59,113 @@ def api_version(text):
     return match[1]
 
 
-def check_diff(read_old, read_new, labels):
+def series_values(text):
+    value = json.loads(text)
+    fields = ("major", "minor", "revision_base")
+    if set(value) != set(fields) or any(type(value[k]) is not int or value[k] < 0 for k in fields):
+        raise ValueError("invalid api-series.json: expected nonnegative major, minor, revision_base")
+    return tuple(value[k] for k in fields)
+
+
+def record_errors(records):
+    errors = []
+    for path, body in records.items():
+        if not re.fullmatch(RECORDS + r"/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)/[a-z0-9][a-z0-9_-]*\.md", path):
+            errors.append(f"invalid extension API change record path: {path}")
+        if not body.strip(): errors.append(f"empty extension API change record: {path}")
+    return errors
+
+
+def computed_version(series, records):
+    major, minor, base = series_values(series)
+    count = sum(path.startswith(f"{RECORDS}/{major}.{minor}/") and Path(path).name != f"{base}.md"
+                for path in records)
+    return f"{major}.{minor}.{base + count}"
+
+
+def records_for_root(root):
+    return {p.relative_to(root).as_posix(): p.read_text()
+            for p in (root / RECORDS).rglob("*") if p.is_file()}
+
+
+def version_for_root(root):
+    records = records_for_root(root)
+    errors = record_errors(records)
+    if errors: raise ValueError("\n".join(errors))
+    return computed_version((root / SERIES).read_text(), records)
+
+
+def historical_revision(path, text):
+    series = path.split("/")[-2]
+    match = re.match(rf"# {re.escape(series)}\.(0|[1-9][0-9]*)\n", text)
+    return int(match[1]) if match else None
+
+
+def changelog(root):
+    records = records_for_root(root)
+    groups = sorted({p.split("/")[-2] for p in records}, key=lambda s: tuple(map(int, s.split('.'))), reverse=True)
+    result = ["# Extension API changes", "", f"Current API: {version_for_root(root)}", "",
+              "Historical headings preserve assigned versions; other records have no revision assignment.", ""]
+    def order(path):
+        revision = historical_revision(path, records[path])
+        return (1, -revision, path) if revision is not None else (0, 0, path)
+    for group in groups:
+        result.extend([f"## Series {group}", ""])
+        for path in sorted(records, key=order):
+            if path.split("/")[-2] != group: continue
+            body = records[path].strip()
+            if historical_revision(path, records[path]) is not None:
+                title, _, body = body.partition("\n")
+                title = title.removeprefix("# ")
+            else:
+                title = Path(path).stem
+            result.extend([f"### {title}", "", body.strip(), ""])
+    return "\n".join(result)
+
+
+def check_diff(read_old, read_new, labels, old_records=None, new_records=None):
+    old_records = old_records or {}
+    new_records = new_records or {}
+    errors = record_errors(new_records)
+    for path, body in old_records.items():
+        if new_records.get(path) != body:
+            errors.append(f"extension API change records are permanent and immutable: {path}")
     old_surface = {p for p in read_old(SURFACE).splitlines() if p and not p.startswith("#")}
     new_surface = {p for p in read_new(SURFACE).splitlines() if p and not p.startswith("#")}
     changed = sorted(path for path in old_surface | new_surface | CONTRACTS
                      if tokens(read_old(path), path) != tokens(read_new(path), path))
-    if not changed and old_surface == new_surface: return []
-    errors = []
+    series_changed = read_old(SERIES) != read_new(SERIES)
+    added = set(new_records) - set(old_records)
+    if not changed and old_surface == new_surface and not series_changed and not added: return errors
     if "ext-api" not in labels: errors.append("extension API changes require the ext-api PR label")
-    old_version = api_version(read_old(VERSION)) if read_old(VERSION) else None
-    version = api_version(read_new(VERSION))
-    if old_version == version: errors.append("extension API declarations/contracts changed without an API version bump")
-    elif old_version and tuple(map(int, version.split('.'))) <= tuple(map(int, old_version.split('.'))):
-        errors.append("extension API version must increase")
-    changes = read_new(CHANGES)
-    if changes == read_old(CHANGES) or f"## {version}\n" not in changes:
-        errors.append(f"extension API changes require a CHANGES.md entry for {version}")
+    if not added: errors.append("extension API changes require a new permanent change record")
+    try:
+        version = computed_version(read_new(SERIES), new_records)
+        # One-time transition from the old manually maintained version header.
+        old_version = (computed_version(read_old(SERIES), old_records) if read_old(SERIES)
+                       else api_version(read_old(VERSION)))
+        if tuple(map(int, version.split('.'))) <= tuple(map(int, old_version.split('.'))):
+            errors.append("extension API version must increase")
+        major, minor, base = series_values(read_new(SERIES))
+        if not read_old(SERIES):
+            old_major, old_minor, old_revision = map(int, old_version.split('.'))
+            if (major, minor) == (old_major, old_minor) and base < old_revision:
+                # A lower baseline is safe only when the preceding revisions
+                # have been converted into individually versioned records.
+                for revision in range(base, old_revision + 1):
+                    name = f"{revision}.md"
+                    path = f"{RECORDS}/{major}.{minor}/{name}"
+                    if historical_revision(path, new_records.get(path, "")) != revision:
+                        errors.append("migration must preserve the existing API revision: "
+                                      f"missing historical record for {major}.{minor}.{revision}")
+        if not any(path.startswith(f"{RECORDS}/{major}.{minor}/") for path in added):
+            errors.append("new extension API change record must belong to the active series")
+        if read_old(SERIES):
+            old_major, old_minor, old_base = series_values(read_old(SERIES))
+            if (major, minor) == (old_major, old_minor) and series_values(read_new(SERIES))[2] != old_base:
+                errors.append("revision_base is fixed within an extension API compatibility series")
+    except (ValueError, KeyError, TypeError) as exc:
+        errors.append(str(exc))
     print("Extension API changed paths: " + ", ".join(changed))
     return errors
 
@@ -83,18 +176,20 @@ def main():
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--base", help="base Git commit for a PR diff, independent of the working VCS")
     parser.add_argument("--labels", default="[]", help="JSON list of PR label names")
+    parser.add_argument("--changelog", type=Path, help="write a combined changelog without editing source records")
     args = parser.parse_args()
     root = args.root.resolve()
     expected = inventory(root)
     if args.write: (root / SURFACE).write_text(expected)
     if not (root / SURFACE).is_file() or (root / SURFACE).read_text() != expected:
         parser.exit(1, "extension SURFACE drift: run tools/ci/check-extension-api.py --write\n")
-    version = api_version((root / VERSION).read_text())
-    for field, number in zip(("Major", "Minor", "Revision"), version.split(".")):
-        if not re.search(rf'kApi{field}\s*=\s*{number}\s*;', (root / VERSION).read_text()):
-            parser.exit(1, "extension API numeric constants disagree with kApiVersion\n")
-    if f'GUFO_EXTENSION_API_VERSION "{version}"' not in (root / "cmake/GufoExtension.cmake").read_text():
-        parser.exit(1, "extension API CMake/runtime version mismatch\n")
+    try:
+        version = version_for_root(root)
+    except (ValueError, KeyError, TypeError) as exc:
+        parser.exit(1, f"extension API: {exc}\n")
+    if args.changelog:
+        args.changelog.parent.mkdir(parents=True, exist_ok=True)
+        args.changelog.write_text(changelog(root))
     if args.base:
         def old(path):
             result = subprocess.run(["git", "show", f"{args.base}:{path}"], cwd=root,
@@ -105,9 +200,12 @@ def main():
                        check=True, stdout=subprocess.DEVNULL)
         def new(path):
             return (root / path).read_text() if (root / path).is_file() else ""
-        errors = check_diff(old, new, json.loads(args.labels))
+        paths = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", args.base, "--", RECORDS],
+                                        cwd=root, text=True).splitlines()
+        old_records = {path: old(path) for path in paths}
+        errors = check_diff(old, new, json.loads(args.labels), old_records, records_for_root(root))
         if errors: parser.exit(1, "\n".join(errors) + "\n")
-    print(f"PASS: extension API surface ({len(closure(root))} paths)")
+    print(f"PASS: extension API {version}; surface ({len(closure(root))} paths)")
     return 0
 
 
