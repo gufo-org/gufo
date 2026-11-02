@@ -84,6 +84,10 @@ def run(evidence, url, model, voice, variant, audio_root, asr_binary, asr_model)
             assert a.result() == first and b.result() == second, 'request state leaked between peers'
         assert first != second, 'different texts produced identical audio'
 
+    with evidence.case('unknown-fields-ignored'):
+        # #724: as in vLLM and the other OpenAI-compatible servers.
+        assert synth('unknown-fields', client_tag='functional') == first
+
     with evidence.case('rejections-and-recovery'):
         for options, code in [({'model': 'unknown'}, 'invalid_model'),
                               ({'voice': 'unknown'}, 'invalid_voice'),

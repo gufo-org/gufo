@@ -87,13 +87,6 @@ HttpResponse Error(int status, std::string reason, std::string message,
   };
 }
 
-bool HasOnlyMembers(const json::Value& value,
-                    std::initializer_list<std::string_view> allowed) {
-  return std::ranges::all_of(value.members(), [&](const auto& member) {
-    return std::ranges::find(allowed, member.first) != allowed.end();
-  });
-}
-
 void AppendU16(std::string* output, std::uint16_t value) {
   output->push_back(static_cast<char>(value & 0xFFU));
   output->push_back(static_cast<char>((value >> 8U) & 0xFFU));
@@ -182,31 +175,11 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
     return Error(400, "Bad Request", "request body must be valid JSON",
                  "parse_error");
   }
-  if (!body.is_object() || !HasOnlyMembers(body, {"model",
-                                                  "input",
-                                                  "voice",
-                                                  "response_format",
-                                                  "speed",
-                                                  "language",
-                                                  "instructions",
-                                                  "seed",
-                                                  "max_new_tokens",
-                                                  "greedy",
-                                                  "reference_audio",
-                                                  "reference_text",
-                                                  "voice_clone_mode",
-                                                  "temperature",
-                                                  "top_k",
-                                                  "top_p",
-                                                  "repetition_penalty",
-                                                  "subtalker_dosample",
-                                                  "subtalker_temperature",
-                                                  "subtalker_top_k",
-                                                  "subtalker_top_p",
-                                                  "stream_format"})) {
-    return Error(400, "Bad Request",
-                 "request contains unsupported audio speech fields",
-                 "unsupported_field");
+  // As in vLLM and the other OpenAI-compatible servers, unknown members are
+  // ignored.
+  if (!body.is_object()) {
+    return Error(400, "Bad Request", "request body must be a JSON object",
+                 "invalid_body");
   }
   const json::Value* model = body.find("model");
   const json::Value* input = body.find("input");

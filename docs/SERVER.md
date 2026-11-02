@@ -503,6 +503,11 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
 | `DELETE` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 
+As in llama.cpp, vLLM, TEI and Ollama, these routes ignore request fields they
+do not know, so a client that adds one still works. Known fields whose behavior
+a route cannot provide, such as transcription timestamps or video image
+conditioning, are refused with 400 rather than dropped.
+
 Use `gufo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](models/qwen-image-2.1/README.md). Generation accepts JSON;
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
@@ -586,7 +591,7 @@ neither has anything to apply them to.
 `stream_format`, talker `temperature`/`top_k`/`top_p`/`repetition_penalty`, and
 predictor `subtalker_dosample`/`subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p`.
 Base additionally accepts `reference_audio`, `reference_text`, `voice_clone_mode`.
-Unknown fields are rejected. `response_format` supports buffered `wav` and
+Unknown fields are ignored. `response_format` supports buffered `wav` and
 streaming `pcm`; `stream_format: "sse"` emits OpenAI audio events with base64
 PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
 `max_new_tokens` at 8192 (default 3000). Output is 24 kHz mono 16-bit PCM.
@@ -611,7 +616,8 @@ Qwen3-ASR serving uses its own model process:
 `max_tokens`, and `stream`. The native route is deterministic (`temperature=0`)
 and supports `json`, `text`, and `verbose_json`. `stream=true` with JSON emits
 OpenAI transcript delta/done events. Long uploads are split within model
-capacity; `max_tokens` applies per chunk. Timestamp requests are rejected.
+capacity; `max_tokens` applies per chunk. Timestamp (`timestamp_granularities[]`)
+and logprobs (`include[]`) requests are rejected; unknown fields are ignored.
 
 `GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
 transcription WebSocket interface. [ASR streaming examples](models/qwen3-asr/README.md#streaming)
@@ -707,14 +713,15 @@ The response holds one embedding per input in request order:
 - `prompt_name` is optional; see task prefixes below.
 - `video_options` optionally selects video FPS, frame cap, overflow strategy, timestamps and the per-frame vision budget (`max_soft_tokens`: 70, 140, 280, 560 or 1120; 140 is the default); see [video inputs](models/embeddinggemma-2/README.md#video).
 - `mm_processor_kwargs` is optional, as in vLLM.  Its only key, `max_soft_tokens`, selects the image budget of the checkpoint's `Gemma4ImageProcessor` for every image of the request: 70, 140, 280 (the default), 560, or 1120 soft tokens.  Absent, null or empty `mm_processor_kwargs` keeps the default. Any other key or value returns 400 `invalid_mm_processor_kwargs`, and a non-object returns 400 `invalid_parameter_type`. Video frames keep their separate budget, `video_options.max_soft_tokens`. The 32-image request cap is a server resource limit across all inputs, independent of the selected budget; see [image limits and memory](models/embeddinggemma-2/README.md#images).
-- `truncate` is optional and `false` by default; see the token limit below.  A non-boolean `truncate` returns 400 `invalid_parameter_type`.  The server rejects other members with 400 `unsupported_field`.
+- `truncate` is optional and `false` by default; see the token limit below.  A non-boolean `truncate` returns 400 `invalid_parameter_type`.  As in llama.cpp, TEI and vLLM, the server ignores members it does not know.
+- As in llama.cpp, `embd_normalize` and `content` are accepted here too; see the native route below.  A request with `content` and no `input` gets the native response.
 - Every vector is mean-pooled and L2-normalized, so the dot product of two vectors is their cosine similarity.
 - Each input may hold at most 8192 tokens, counting the `<bos>` and `<eos>` markers the tokenizer adds.  By default the server refuses longer inputs instead of truncating them, with 400 `context_length_exceeded`, and the message names the input index.  With `"truncate": true` it keeps the first 8190 tokens of each longer input between the markers instead; only `--max-request-bytes` then limits a text input's length.  An input with images, video or audio is truncated only when all of its media tokens fit in the kept tokens; otherwise it is still refused.  `usage.prompt_tokens` and `usage.total_tokens` count every token embedded for every input, markers included.
 - Errors use the standard error object.  Other 400 codes are `too_many_videos`, `invalid_video_input`, `invalid_video_options`, `too_many_audio`, `invalid_audio_input`, `too_many_images`, `invalid_image_input`, `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, `invalid_mm_processor_kwargs`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`, and a request whose client disconnects before its next batch does not use the device again.  A failed encode returns 500 `embedding_failed` to every request with inputs in the failed batch.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual authentication, `--max-request-bytes`, and request logging apply.
 
 Typed items follow llama.cpp's form: `{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}},{"type":"text","text":"\n"}]}`. Each item produces one vector in the same space as text. Text parts retain their order and whitespace. PNG, JPEG and WebP use the existing image reader, including public-HTTPS checks and the shared 20 MiB / 15-second budget. Embeddings accept at most 32 images per request, 32 megapixels per image, and 32,768 pixels on either side. Image soft tokens and their markers count toward context and usage. A request with images runs in its own device batch, in arrival order, and its soft tokens count toward the 8,192-token batch. The first image request loads the vision weights in that batch. See [image embeddings](models/embeddinggemma-2/README.md#images) for exact preprocessing and index migration. Audio uses typed `input_audio` parts with raw base64, audio data URLs or public HTTPS URLs; WAV, FLAC, MP3 and Ogg are supported. Up to 32 clips of 30 seconds each share the image read budget. Actual subsampled audio tokens and their boundary markers count toward context and usage. See [audio embeddings](models/embeddinggemma-2/README.md#audio) for decoding, preprocessing, bounds and examples. Video uses typed `input_video` parts with raw base64, video data URLs or public HTTPS URLs, producing one jointly encoded vector per input. MP4/MOV and WebM/Matroska share the same media read budget. Defaults sample 1 FPS, uniformly capped at 32 frames with 140 soft tokens per frame; a request holds at most 64 selected frames and 8,960 video soft tokens. See [video embeddings](models/embeddinggemma-2/README.md#video) for `video_options`, timestamp framing, audio-track treatment and decoding limits.
 
-**llama.cpp's `POST /embeddings`.** Clients written for llama-server's non-OpenAI route, such as Frigate 0.18's semantic search, can use `POST /embeddings` (or its older alias `POST /embedding`) on the same process.  It shares the model, tokenization, image reader, pooling, limits and errors of `/v1/embeddings`, and differs in three ways:
+**llama.cpp's `POST /embeddings`.** Clients written for llama-server's non-OpenAI route, such as Frigate 0.18's semantic search, can use `POST /embeddings` (or its older alias `POST /embedding`) on the same process.  It shares the model, tokenization, image reader, pooling, limits and errors of `/v1/embeddings`, and differs in two ways:
 
 - The input is `input`, or llama.cpp's older `content` when `input` is absent.  Besides strings and typed content objects, an item may be `{"prompt_string": "...", "multimodal_data": ["<base64>", ...]}`: each `<__media__>` marker in the string stands for the next base64 file, in place.  As in llama.cpp, a file that starts like WAV, MP3 or FLAC is audio, as is Ogg here; anything else must be a PNG, JPEG or WebP image.  The number of markers must equal the number of files, or the request returns 400 `invalid_multimodal_data`.  Gufo always uses llama.cpp's default marker; it serves no `/props`, and clients such as Frigate fall back to that marker when `/props` is missing.
 - The response is llama.cpp's bare array, one item per input in request order, with the pooled vector nested in a one-element list and no `model` or `usage`:
@@ -723,7 +730,7 @@ Typed items follow llama.cpp's form: `{"content":[{"type":"image_url","image_url
   [{"index": 0, "embedding": [[0.0123, -0.0456, "..."]]}]
   ```
 
-- `embd_normalize` is accepted only as `2`, the Euclidean default that every EmbeddingGemma 2 vector already has; other values return 400 `unsupported_embd_normalize`.  As in llama.cpp, `encoding_format` is validated but the vectors are always floats.  `dimensions`, `mm_processor_kwargs`, `prompt_name`, `truncate` and `user` behave as on `/v1/embeddings`.  Token arrays and per-token (`--pooling none`) output stay unsupported, and other members return 400 `unsupported_field`.
+On both routes, `embd_normalize` is accepted only as `2`, the Euclidean default that every EmbeddingGemma 2 vector already has; other values return 400 `unsupported_embd_normalize`.  As in llama.cpp, the native form validates `encoding_format` but always returns floats.  `dimensions`, `mm_processor_kwargs`, `prompt_name`, `truncate` and `user` behave as on `/v1/embeddings`.  Token arrays and per-token (`--pooling none`) output stay unsupported, and unknown members are ignored.
 
 **Task prefixes.** EmbeddingGemma 2 was trained with short task prefixes, and by default the server does not add them, so clients must.  Queries use `task: search result | query: {text}`, and documents use `title: none | text: {text}`, or `title: {title} | text: {text}` when a title is known.  Omitting the prefixes still works but lowers retrieval quality.  Embed a query and its documents with matching conventions.  A client that cannot change its input can send `"prompt_name"` with a name from the checkpoint's `config_sentence_transformers.json` `prompts` (for example `query` or `document`), and `--default-prompt-name NAME` applies one to requests that name none.  As the model card advises, the default skips inputs without text, so images and audio alone embed unprefixed; a requested `prompt_name` prefixes every input, as in sentence-transformers.  An empty `prompt_name` applies none, even with a default.  An unknown name returns 400 `invalid_prompt_name`, and an unknown `--default-prompt-name` fails startup.  `usage` counts the prompt's tokens.
 

@@ -168,7 +168,8 @@ int main(int argc, char** argv) {
   http.path = "/v1/images/generations";
   http.headers = {{"Content-Type", "application/json"}};
   http.body =
-      R"({"model":"image-test","prompt":"a red cube","size":"256x256","n":2,"seed":41})";
+      R"({"model":"image-test","prompt":"a red cube","size":"256x256","n":2,"seed":41,"style":"vivid"})";
+  // Unknown members such as DALL-E 3's `style` are ignored.
   const auto response = gufo::server::HandleImageApiRequest(http, service);
   assert(response.status == 200 && calls == 2);
   const auto json = gufo::json::parse(response.body);
@@ -179,8 +180,7 @@ int main(int argc, char** argv) {
         R"({"prompt":"a red cube","n":0})",
         R"({"prompt":"a red cube","output_format":"webp"})",
         R"({"prompt":"a red cube","stream":true})",
-        R"({"prompt":"a red cube","size":"256x256junk"})",
-        R"({"prompt":"a red cube","unknown":true})"}) {
+        R"({"prompt":"a red cube","size":"256x256junk"})"}) {
     http.body = body;
     assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
   }

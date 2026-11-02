@@ -10,7 +10,6 @@
 #include <ctime>
 #include <map>
 #include <random>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -439,15 +438,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     const auto& fields = parsed.fields;
     if (!fields.is_object())
       throw std::invalid_argument("request must be a JSON object");
-    const std::set<std::string> allowed{
-        "prompt",        "model",   "n",          "size", "response_format",
-        "output_format", "quality", "background", "user", "seed",
-        "steps",         "stream"};
-    for (const auto& [name, value] : fields.members()) {
-      (void)value;
-      if (!allowed.contains(name))
-        throw std::invalid_argument("unsupported image parameter: " + name);
-    }
+    // As in the other OpenAI-compatible servers, unknown members are ignored.
     if (!fields.contains("prompt"))
       throw std::invalid_argument("prompt is required");
     const auto model = String(fields, "model", service.model_id().c_str());
