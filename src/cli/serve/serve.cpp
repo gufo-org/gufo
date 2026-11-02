@@ -28,6 +28,7 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
+#include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/image_api.hpp"
@@ -427,6 +428,7 @@ std::optional<ReasoningOptions> ResolveReasoningDefaults(
 
 struct SpeechOptions {
   std::filesystem::path model;
+  std::filesystem::path mmproj;
   std::size_t context;
   std::string served_model_name;
   std::vector<std::pair<std::string, std::string>> voice_specs;
@@ -435,10 +437,16 @@ struct SpeechOptions {
 };
 
 void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
-  parser.AddOption("-m", "--model", "DIR",
-                   tts ? "Qwen3-TTS 12Hz 1.7B model directory"
-                       : "Qwen3-ASR 1.7B model directory",
+  parser.AddOption("-m", "--model", "PATH",
+                   tts ? "Speech synthesis model (Qwen3-TTS 12Hz 1.7B "
+                         "directory, or an extension model's artifact)"
+                       : "Speech recognition model (Qwen3-ASR 1.7B "
+                         "directory, or an extension model's artifact)",
                    "Model", &options->model);
+  parser.AddOption("", "--mmproj", "GGUF",
+                   "Audio projector sidecar of models that take one (default: "
+                   "the model's own lookup)",
+                   "Model", &options->mmproj);
   parser.AddOption("-c", "--context", "N",
                    tts ? "Context capacity (default: 4096)"
                        : "Context capacity per audio chunk (default: 1024)",
@@ -514,10 +522,38 @@ void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
                    "Model", default_prompt_name);
 }
 
+void AddDecisionOptions(ArgParser& parser, std::filesystem::path* model,
+                        std::filesystem::path* mmproj, std::string* name,
+                        std::size_t* context) {
+  parser.AddOption("-m", "--model", "PATH", "Decision model artifact", "Model",
+                   model);
+  parser.AddOption("", "--mmproj", "GGUF",
+                   "Image/audio projector sidecar of models that take one",
+                   "Model", mmproj);
+  parser.AddOption("", "--served-model-name", "NAME",
+                   "Public API model ID (default: the model's own)", "Model",
+                   name);
+  parser.AddOption("-c", "--context", "N",
+                   "Longest complete decision prompt (default: 8192)", "Model",
+                   context);
+}
+
 }  // namespace
 
 void PrintServeHelp(std::string_view program_name,
                     std::string_view subcommand) {
+  if (subcommand == "decision") {
+    std::filesystem::path model, mmproj;
+    std::string name;
+    std::size_t context = 8192;
+    ArgParser parser(std::string(program_name) + " serve decision",
+                     "Serve decision models (/v1/systemone).");
+    AddDecisionOptions(parser, &model, &mmproj, &name, &context);
+    ServerOptionHelpTargets server_help;
+    AddServerOptionsForHelp(parser, &server_help, false);
+    parser.PrintHelp();
+    return;
+  }
   if (subcommand == "image") {
     std::filesystem::path model;
     std::string name = "Qwen-Image-2.1";
@@ -772,7 +808,8 @@ void PrintServeHelp(std::string_view program_name,
       << "  asr       Serve Qwen3-ASR transcription "
          "(/v1/audio/transcriptions)\n"
       << "  embedding Serve EmbeddingGemma 2 text, image and audio embeddings "
-         "(/v1/embeddings)\n\n"
+         "(/v1/embeddings)\n"
+      << "  decision  Serve decision models (/v1/systemone)\n\n"
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
@@ -869,7 +906,7 @@ int RunServe(std::span<const char* const> args) {
       continue;
     }
     if (arg == "llm" || arg == "video" || (arg == "tts" || arg == "asr") ||
-        arg == "image" || arg == "embedding") {
+        arg == "image" || arg == "embedding" || arg == "decision") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
@@ -877,7 +914,7 @@ int RunServe(std::span<const char* const> args) {
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
           topic != "tts" && topic != "asr" && topic != "image" &&
-          topic != "embedding") {
+          topic != "embedding" && topic != "decision") {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -962,8 +999,45 @@ int RunServe(std::span<const char* const> args) {
   std::shared_ptr<server::AsrService> asr;
   std::shared_ptr<server::ImageService> images;
   std::shared_ptr<server::EmbeddingService> embeddings;
+  std::shared_ptr<server::DecisionService> decisions;
 
-  if (subcommand == "embedding") {
+  if (subcommand == "decision") {
+    std::filesystem::path model, mmproj;
+    std::string name;
+    std::size_t context = 8192;
+    ArgParser parser("gufo serve decision",
+                     "Serve decision models (/v1/systemone).");
+    AddDecisionOptions(parser, &model, &mmproj, &name, &context);
+    add_server_options(parser, false);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
+      return 2;
+    }
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", "decision");
+      return 0;
+    }
+    if (!prepare_server_options())
+      return 2;
+    if (model.empty() || context == 0) {
+      std::cerr << "Error: --model and a positive --context are required for "
+                   "decision server\n";
+      return 2;
+    }
+    ModelLoadLog load_log("decision", model);
+    std::string error;
+    decisions =
+        server::CreateDecisionService({.model_root = model.string(),
+                                       .projector_path = mmproj.string(),
+                                       .maximum_context_tokens = context},
+                                      name, &error);
+    if (!decisions) {
+      std::cerr << "Error loading decision model: " << error << '\n';
+      return 1;
+    }
+    load_log.Complete("model=" + decisions->model_id +
+                      " context_tokens=" + std::to_string(context));
+  } else if (subcommand == "embedding") {
     std::filesystem::path model;
     std::string name = "embeddinggemma-2";
     std::string default_prompt_name;
@@ -1157,6 +1231,7 @@ int RunServe(std::span<const char* const> args) {
       try {
         tts = std::make_shared<server::TtsService>(server::TtsServiceOptions{
             .model_root = options.model,
+            .projector_path = options.mmproj,
             .native_context_tokens = options.context,
             .validate_model = true,
             .model_id = options.served_model_name,
@@ -1180,6 +1255,7 @@ int RunServe(std::span<const char* const> args) {
       try {
         asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{
             .model_root = options.model,
+            .projector_path = options.mmproj,
             .native_context_tokens = options.context,
             .validate_model = true,
             .model_id = options.served_model_name,
@@ -1609,7 +1685,7 @@ int RunServe(std::span<const char* const> args) {
                 ShutdownAfterDeviceLoss();
               },
       },
-      images, embeddings);
+      images, embeddings, decisions);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

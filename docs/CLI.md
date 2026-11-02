@@ -16,7 +16,8 @@ prompt caching.
 
 This is an exhaustive list of functionalities and features offered by the gufo cli, the mapping between features and flags is not documented here and should be discovered using the `--help` command to avoid divergences between the implementation and the documentation.
 
-The supported model types are LLM, image, video, audio (TTS, ASR), and text embeddings.
+The supported model types are LLM, image, video, audio (TTS, ASR), text
+embeddings and decision models.
 `gufo serve embedding` provides [EmbeddingGemma 2 text embeddings](SERVER.md#embeddings).
 `gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
 
@@ -163,6 +164,23 @@ per audio chunk, so long files do not require one enormous context. The
 standalone `gufo transcribe` command also uses `--model` and `--context`;
 `--prompt` supplies optional transcription hints.
 
+Models that take an audio projector sidecar (an mmproj GGUF) accept
+`--mmproj` on `serve tts`, `serve asr`, `transcribe` and `speak`; without it
+the model's provider looks up its own. `transcribe --live` feeds the audio
+in 100 ms pieces to models with live transcription and prints text as it is
+decoded. `gufo speak` synthesizes speech (`--mode tts`) or answers a written
+or spoken message in interleaved text and speech (`--mode chat`) or in text
+(`--mode text`, optionally `--reasoning` and `--tools`) with speech models
+that provide it.
+
+### Decisions
+
+`gufo serve decision --model PATH [--mmproj GGUF]` serves decision models
+at `POST /v1/systemone`; `gufo decide --model PATH --request request.json`
+(or `--jsonl` on standard input) answers the same requests without HTTP.
+`--context` bounds the complete decision prompt (default 8192). Request and
+response shapes belong to the model.
+
 **Voices**
 
 - `voices` — named voice presets built from reference WAVs. Each entry is
@@ -244,6 +262,8 @@ gufo eval
 gufo bench
 gufo video
 gufo transcribe
+gufo speak
+gufo decide
 gufo diagnose
 ```
 
@@ -251,7 +271,8 @@ gufo diagnose
 conversation. `prompt` executes one request and exits. `eval` grades the pinned
 DS4 capability questions through an already running OpenAI-compatible server.
 `bench` measures model execution, `video` runs MiniMax H3 generation,
-`transcribe` runs native Qwen3-ASR-1.7B speech recognition, and `diagnose` runs
+`transcribe` runs speech recognition, `speak` runs speech synthesis and voice
+chat, `decide` answers decision requests, and `diagnose` runs
 non-interactive system and hardware diagnostics.
 
 All commands support `--help` and `--version`. Unknown options and invalid

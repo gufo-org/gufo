@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/trace.hpp"
@@ -3337,6 +3338,51 @@ std::string EmbeddingPost(int port, std::string_view body,
                     "\r\n\r\n" + std::string(body)});
 }
 
+void TestDecisionService() {
+  auto service = std::make_shared<gufo::server::DecisionService>();
+  service->model_id = "d1-test";
+  service->multimodal = true;
+  int calls = 0;
+  service->decide = [&](const gufo::json::Value& request) {
+    ++calls;
+    if (!request.contains("questions"))
+      throw std::invalid_argument("questions required");
+    return gufo::json::parse(
+        R"({"answers":{"refund":{"type":"noul","noul":0.9}},"usage":{"input_tokens":38,"output_tokens":0}})");
+  };
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr,
+                    {.api_key = "test-secret"}, nullptr, nullptr, service);
+  std::string error;
+  assert(server.start(&error));
+  std::jthread worker([&] { server.run(false); });
+  const int port = server.port();
+  const auto post = [&](std::string_view body, bool authenticated = true) {
+    return EmbeddingPost(
+        port, body,
+        authenticated ? "Authorization: Bearer test-secret\r\n" : "",
+        "/v1/systemone");
+  };
+  ExpectStatus(post("{}", false), 401);
+  ExpectStatus(post("{"), 400);
+  ExpectStatus(post("{}"), 400);
+  ExpectStatus(post(R"({"model":"other","questions":{}})"), 404);
+  assert(calls == 1);
+  const auto answer = post(R"({"model":"d1-test","questions":{"refund":{}}})");
+  ExpectStatus(answer, 200);
+  assert(answer.find("\"noul\":0.9") != std::string::npos);
+  assert(answer.find("\"output_tokens\":0") != std::string::npos);
+  assert(answer.find("\"model\":\"d1-test\"") != std::string::npos);
+  for (const auto* path : {"/ready", "/v1/models"}) {
+    const auto reply =
+        SendParts("127.0.0.1", port,
+                  {"GET " + std::string(path) +
+                   " HTTP/1.1\r\nAuthorization: Bearer test-secret\r\n\r\n"});
+    ExpectStatus(reply, 200);
+    assert(reply.find("d1-test") != std::string::npos);
+  }
+  server.stop();
+}
+
 void TestEmbeddingService() {
   const std::string request = R"({"model":"embedding-test","input":"hi"})";
   {
@@ -3540,5 +3586,6 @@ int main() {
   TestDeferredStreamHeaders();
   TestAdmittedStreamHeaders();
   TestEmbeddingService();
+  TestDecisionService();
   std::cout << "HTTP transport checks passed.\n";
 }
