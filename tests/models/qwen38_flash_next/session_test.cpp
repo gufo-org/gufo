@@ -15,6 +15,7 @@
 #include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/runner.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"
 #include "tests/models/qwen38_flash_next/mtp_replay.hpp"
 
@@ -1680,7 +1681,9 @@ void CheckServingEos(const std::shared_ptr<qfn::Model>& model) {
   std::string error;
   server::TextSpeculativeConfig options;
   options.backend = server::TextSpeculativeBackend::kMtp;
-  Require(backend.load(model, &error, 128, 2, {}, {}, options), error);
+  Require(backend.load(qfn::CreateQwenFlashNextTextRunner(model, 128, options),
+                       &error, 2),
+          error);
   // Synthetic grammar pieces make the boundary deterministic: any ordinary
   // first token completes the empty JSON object; only stop tokens may follow.
   // Actual token IDs, EOS recognition, GPU execution and checkpoints stay real.
@@ -1777,10 +1780,13 @@ void CheckServingSampling(const std::shared_ptr<qfn::Model>& model) {
   using Backend = server::InferenceBackend;
   Backend ar, mtp;
   std::string error;
-  Require(ar.load(model, &error, 6145, 2), error);
+  Require(ar.load(qfn::CreateQwenFlashNextTextRunner(model, 6145), &error, 2),
+          error);
   server::TextSpeculativeConfig options;
   options.backend = server::TextSpeculativeBackend::kMtp;
-  Require(mtp.load(model, &error, 6145, 2, {}, {}, options), error);
+  Require(mtp.load(qfn::CreateQwenFlashNextTextRunner(model, 6145, options),
+                   &error, 2),
+          error);
   struct Reference {
     gufo::test::SamplingCase test;
     std::string prompt;
