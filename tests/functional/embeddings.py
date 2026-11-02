@@ -13,6 +13,8 @@ shapes. The SDK requests base64 by default, so the agreement check covers that
 encoding. With `"truncate": true` an over-length input must embed exactly like
 its longest prefix that fits the 8192-token limit unchanged. A
 `prompt_name` must embed like the same prompt written by the client.
+Unknown request members are ignored, as in llama.cpp, vLLM and TEI, and
+`/v1/embeddings` takes llama.cpp's `content` and `embd_normalize` too.
 """
 
 import argparse
@@ -107,6 +109,34 @@ def check_truncate(openai, client, model):
     check("truncate: a non-boolean value is refused")
     expect_error(openai, lambda: embed("hello", truncate="yes"), 400,
                  "invalid_parameter_type", "string truncate")
+
+
+def check_request_members(openai, client, model, texts, single):
+    """#724: unknown members are ignored, as in llama.cpp, vLLM, TEI and
+    Ollama; llama.cpp's `content` and `embd_normalize` work on this route."""
+    check("unknown request members are ignored")
+    extra = client.embeddings.create(
+        model=model, input=texts[0], encoding_format="float",
+        extra_body={"normalize": True, "client_tag": "functional"})
+    assert cosine(extra.data[0].embedding,
+                  single.data[0].embedding) > 0.99999
+
+    check("embd_normalize 2 is accepted and other values are refused")
+    euclidean = client.embeddings.create(
+        model=model, input=texts[0], encoding_format="float",
+        extra_body={"embd_normalize": 2})
+    assert cosine(euclidean.data[0].embedding,
+                  single.data[0].embedding) > 0.99999
+    expect_error(openai, lambda: client.embeddings.create(
+        model=model, input=texts[0], extra_body={"embd_normalize": 0}),
+        400, "unsupported_embd_normalize", "embd_normalize 0")
+
+    check("content without input returns llama.cpp's native form")
+    native = client.post("/embeddings", cast_to=object,
+                         body={"model": model, "content": texts[0]})
+    assert [item["index"] for item in native] == [0], native
+    assert cosine(native[0]["embedding"][0],
+                  single.data[0].embedding) > 0.99999
 
 
 def check_prompt_names(openai, client, model):
@@ -248,6 +278,7 @@ def main():
         expect_error(openai, lambda: client.embeddings.create(**kwargs),
                      status, code, name)
 
+    check_request_members(openai, client, args.model, texts, single)
     check_truncate(openai, client, args.model)
     check_prompt_names(openai, client, args.model)
 
