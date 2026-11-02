@@ -481,7 +481,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/responses` | Text/images, structured output, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
-| `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`) |
+| `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`, `/`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
 | `GET` | `/metrics` | Prometheus-format operational metrics (text LLM serving only) |
 
@@ -616,7 +616,7 @@ capacity; `max_tokens` applies per chunk. Timestamp requests are rejected.
 `GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
 transcription WebSocket interface. [ASR streaming examples](models/qwen3-asr/README.md#streaming)
 describe PCM format, append/commit/clear, event IDs and limits. WebSockets use
-the same bearer authentication and connection limits as HTTP. Messages are
+the same connection limits as HTTP. Messages are
 bounded to 4 MiB, queued input to 8 MiB/128 messages, and unconsumed output to
 a five-second socket timeout. Native generation observes close/disconnect;
 no per-server streaming flag or extra model is required.
@@ -627,12 +627,10 @@ turns (`input_audio_buffer.speech_started`/`speech_stopped`, then the
 commit). Without `intent`, models that hear and speak hold an OpenAI Realtime
 conversation on the same path: audio and text input, streamed text and 24 kHz
 speech replies, function tools, `response.cancel`, interruption by user
-speech and `conversation.item.truncate`. Browsers, which cannot set WebSocket
-headers, may pass the API key as the subprotocol
-`openai-insecure-api-key.<key>` beside `realtime`. `GET /voice`, served
-without authentication when the model holds conversations, is a browser
-client that asks for the key itself. Event-level behavior is documented by
-the model's provider (for example the LFM3-Audio extension).
+speech and `conversation.item.truncate`. The handshake selects the
+`realtime` subprotocol a client offers. `GET /voice`, served when the model
+holds conversations, is a browser client for it. Event-level behavior is
+documented by the model's provider (for example the LFM3-Audio extension).
 
 `POST /v1/systemone` (`gufo serve decision`) answers one JSON decision
 request with the loaded model; a `model` field, when present, must name it.
@@ -710,7 +708,7 @@ The response holds one embedding per input in request order:
 - `truncate` is optional and `false` by default; see the token limit below.  A non-boolean `truncate` returns 400 `invalid_parameter_type`.  The server rejects other members with 400 `unsupported_field`.
 - Every vector is mean-pooled and L2-normalized, so the dot product of two vectors is their cosine similarity.
 - Each input may hold at most 8192 tokens, counting the `<bos>` and `<eos>` markers the tokenizer adds.  By default the server refuses longer inputs instead of truncating them, with 400 `context_length_exceeded`, and the message names the input index.  With `"truncate": true` it keeps the first 8190 tokens of each longer input between the markers instead; only `--max-request-bytes` then limits a text input's length.  An input with images, video or audio is truncated only when all of its media tokens fit in the kept tokens; otherwise it is still refused.  `usage.prompt_tokens` and `usage.total_tokens` count every token embedded for every input, markers included.
-- Errors use the standard error object.  Other 400 codes are `too_many_videos`, `invalid_video_input`, `invalid_video_options`, `too_many_audio`, `invalid_audio_input`, `too_many_images`, `invalid_image_input`, `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, `invalid_mm_processor_kwargs`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`, and a request whose client disconnects before its next batch does not use the device again.  A failed encode returns 500 `embedding_failed` to every request with inputs in the failed batch.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual authentication, `--max-request-bytes`, and request logging apply.
+- Errors use the standard error object.  Other 400 codes are `too_many_videos`, `invalid_video_input`, `invalid_video_options`, `too_many_audio`, `invalid_audio_input`, `too_many_images`, `invalid_image_input`, `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, `invalid_mm_processor_kwargs`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`, and a request whose client disconnects before its next batch does not use the device again.  A failed encode returns 500 `embedding_failed` to every request with inputs in the failed batch.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual `--max-request-bytes` and request logging apply.
 
 Typed items follow llama.cpp's form: `{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}},{"type":"text","text":"\n"}]}`. Each item produces one vector in the same space as text. Text parts retain their order and whitespace. PNG, JPEG and WebP use the existing image reader, including public-HTTPS checks and the shared 20 MiB / 15-second budget. Embeddings accept at most 32 images per request, 32 megapixels per image, and 32,768 pixels on either side. Image soft tokens and their markers count toward context and usage. A request with images runs in its own device batch, in arrival order, and its soft tokens count toward the 8,192-token batch. The first image request loads the vision weights in that batch. See [image embeddings](models/embeddinggemma-2/README.md#images) for exact preprocessing and index migration. Audio uses typed `input_audio` parts with raw base64, audio data URLs or public HTTPS URLs; WAV, FLAC, MP3 and Ogg are supported. Up to 32 clips of 30 seconds each share the image read budget. Actual subsampled audio tokens and their boundary markers count toward context and usage. See [audio embeddings](models/embeddinggemma-2/README.md#audio) for decoding, preprocessing, bounds and examples. Video uses typed `input_video` parts with raw base64, video data URLs or public HTTPS URLs, producing one jointly encoded vector per input. MP4/MOV and WebM/Matroska share the same media read budget. Defaults sample 1 FPS, uniformly capped at 32 frames with 140 soft tokens per frame; a request holds at most 64 selected frames and 8,960 video soft tokens. See [video embeddings](models/embeddinggemma-2/README.md#video) for `video_options`, timestamp framing, audio-track treatment and decoding limits.
 
@@ -1199,9 +1197,13 @@ for text-only serving or `["text", "image"]` when a vision encoder is loaded.
 Image support reflects the loaded projector, not the model name; launching a
 vision-capable model without its projector advertises text only. Audio/video
 entries describe their capability. Send the returned model ID in requests.
-Repeat `--served-model-name` to list the text model under several IDs; the
-first is primary, and responses report the ID the request named. Text
-requests naming another model return 404.
+Repeat `--served-model-name` to serve one model under several IDs; the
+first is primary. Text routes report the ID the request named; the other
+modalities report the primary ID, with video aliases acting as the root
+`minimax-h3`. Every `gufo serve` modality accepts the repeated option, so
+llama-swap `aliases:` entries can reach the process unchanged (#957).
+Requests naming another model return 404, except on audio and video routes,
+which answer `400 invalid_model`.
 
 ## Errors
 
@@ -1221,7 +1223,6 @@ Return an OpenAI-style error object:
 Use appropriate HTTP status codes:
 
 - `400` invalid request or unsupported field
-- `401` missing or invalid configured bearer token
 - `404` unknown model or endpoint object
 - `409` incompatible session state
 - `413` request or prompt too large
@@ -1251,8 +1252,29 @@ Replace the executable and model paths. llama-swap assigns `${PORT}` and
 waits for `/ready` to return HTTP 200 before forwarding the triggering
 request. Gufo returns 503 while the model loads. The served model name
 matches the llama-swap model ID, so clients can request `gufo-model`
-through the proxy. For long cold starts, increase llama-swap's
+through the proxy. Gufo requires no credentials on any route, so llama-swap's
+default `/health` probe works too. For long cold starts, increase llama-swap's
 `healthCheckTimeout` to cover model and disk-cache loading.
+
+Gufo answers the names passed to `--served-model-name` plus its built-in
+identifiers: TTS also accepts `qwen3-tts`, ASR also accepts `qwen3-asr` and
+`qwen3-asr-1.7b`, and video always accepts the canonical `minimax-h3` and
+its preset names; requests naming another model return 404 (`400
+invalid_model` for audio and video). Repeat the option for each llama-swap
+`aliases:` entry — every `gufo serve` modality accepts the repeated option —
+or set `useModelName` so llama-swap rewrites the request's `model` field
+instead:
+
+```yaml
+models:
+  gufo-model:
+    aliases: [gufo-fast]
+    cmd: >
+      /path/to/gufo serve --host 127.0.0.1 --port ${PORT} llm
+      --model /path/to/model.gguf --served-model-name gufo-model
+      --served-model-name gufo-fast
+    checkEndpoint: /ready
+```
 
 To load the model without generating a response, request its readiness
 endpoint through llama-swap (assuming the router listens on port 8080):
@@ -1261,38 +1283,36 @@ endpoint through llama-swap (assuming the router listens on port 8080):
 curl --fail-with-body http://127.0.0.1:8080/upstream/gufo-model/ready
 ```
 
-In llama-swap v262, the browser Load action and startup preloading trigger
-a request to the upstream root `/`. Unmodified Gufo does not serve that
-path, so these actions can report HTTP 404 after the model has become
-ready. `checkEndpoint` controls readiness polling, not the triggering
-request. Use the explicit readiness request above or a normal inference
-request to load the model.
+The browser Load action and startup preloading (`hooks.onStartup.preload`)
+request the upstream root `/`. Gufo answers `GET /` with the `/health` body,
+503 while the model loads and 200 once ready, so both actions report success
+(#957). `checkEndpoint` controls readiness polling, not the triggering
+request.
 
-## Authentication and Exposure
+## Exposure
 
-The server binds to `127.0.0.1` by default. Set `--api-key` to require:
+The server binds to `127.0.0.1` by default and answers every route without
+credentials: it has no authentication layer (`--api-key` was removed for
+#957). Any process that can reach the listener can run inference and read
+metrics, so keep the bind local or place a reverse proxy in front. Select
+the listen address with `--host`; it must be a numeric IPv4 or IPv6 address,
+not a host name. `--host ::` is dual-stack: it accepts IPv6 clients and IPv4
+clients, and an IPv4 client keeps its IPv4 address as its client ID.
+`--host ::1` accepts only IPv6 loopback clients. TLS termination and any
+access control belong in a reverse proxy.
 
-```text
-Authorization: Bearer <local-token>
-```
+A stale `Authorization` header from an old client is accepted and ignored.
 
-Authentication covers every route, including health, metrics, audio, and video.
-CORS preflight (`OPTIONS`) does not require credentials. Select the listen
-address with `--host`; it must be a numeric IPv4 or IPv6 address, not a host
-name. `--host ::` is dual-stack: it accepts IPv6 clients and IPv4 clients, and
-an IPv4 client keeps its IPv4 address as its client ID. `--host ::1` accepts
-only IPv6 loopback clients. TLS termination belongs in a reverse proxy.
-
-Request bodies, prompts, generated text and credentials are not logged.
+Request bodies, prompts and generated text are not logged.
 
 Tool definitions and generated tool calls are treated as data. `gufo`
 never executes tools, shell commands, URLs, or generated code.
 
-The HTTP transport currently uses a wildcard CORS origin and the same listener
-and API key for inference and metrics.
+The HTTP transport currently uses a wildcard CORS origin and the same
+listener for inference and metrics.
 
-`gufo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`
-as the bearer credential when it is set.
+`gufo eval` sends `OPENAI_API_KEY` as a bearer credential to remote
+endpoints that require one; the Gufo server itself ignores credentials.
 
 ## Lifecycle and limits
 
@@ -1507,8 +1527,8 @@ with `GET /health` or `GET /ready`.
 
 The `debug` tier adds:
 
-- the resolved server options as `event=options` before the model opens, with
-  `api_key=set` rather than the key. This line and the `event=listening` banner
+- the resolved server options as `event=options` before the model opens.
+  This line and the `event=listening` banner
   are separate on purpose: the banner only appears once the model has loaded and
   the listener is accepting, so a load that fails or hangs leaves
   `event=options` as the sole record of what was asked for;
@@ -1533,7 +1553,7 @@ threshold rather than writing to stderr directly, so its informational startup
 lines (the ROCm model-cache and managed-KV lines, DSpark attachment, the shared
 batch workspace) are suppressed by `--log-level=warn`/`error` too.
 
-Prompt text, message bodies and API keys stay unlogged at every level, and debug
+Prompt text and message bodies stay unlogged at every level, and debug
 lines use the same escaping and redaction as the rest of the log. Only the
 opt-in [content trace](#content-trace), a separate file, records content. Client
 identity is the exception: scheduler admission lines name a client by the peer
@@ -1578,7 +1598,7 @@ Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
 
 A request that fails before generation, for example with invalid JSON, has
 no `generation` record. Requests refused before routing (malformed HTTP or an
-oversized body), unauthenticated requests and other routes are not traced.
+oversized body) and other routes are not traced.
 Malformed UTF-8 is replaced with U+FFFD. A record that cannot be written in
 full, for example on a full disk, is cut from the file and the first failure is
 logged as `event=trace_write_failed`; a file that cannot be cut back, such as a
@@ -1631,7 +1651,7 @@ lazily in the worker. Control characters are escaped in log lines.
 ## Focused checks
 
 - `json_test`: number precision, Unicode escapes, malformed input and depth limits.
-- `http_server_test`: transport framing, authentication, compatibility validation,
+- `http_server_test`: transport framing, compatibility validation,
   sampling forwarding, request logs at the default and debug tiers, and streaming
   failures without loading a model.
 - `serve_cli_test`: executable help, argument wiring and rejected configurations,

@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "src/ext/video.hpp"
 
@@ -72,6 +73,9 @@ struct VideoJobServiceOptions {
   std::filesystem::path storage_root;
   std::size_t queue_capacity{1};
   std::chrono::seconds artifact_ttl{std::chrono::hours(1)};
+  /// Additional IDs accepted from requests. They behave as the root
+  /// `minimax-h3` name; the preset-selecting variants stay fixed (#957).
+  std::vector<std::string> model_aliases;
   bool validate_model_inventory{true};
   std::function<std::string()> id_factory;
   std::function<std::int64_t()> now;
@@ -111,6 +115,12 @@ public:
 
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::string initialization_error() const;
+  /// True for a canonical `minimax-h3` name or a configured alias (#957).
+  [[nodiscard]] bool serves_model(std::string_view name) const;
+  /// The request name as a canonical model: aliases map to the root
+  /// `minimax-h3`, unknown names are returned unchanged for rejection.
+  [[nodiscard]] std::string normalize_model(std::string_view name) const;
+  [[nodiscard]] const std::vector<std::string>& model_aliases() const;
   [[nodiscard]] VideoJobCreateResult Create(const VideoJobRequest& request);
   [[nodiscard]] VideoJobLookupResult Get(std::string_view id);
   [[nodiscard]] VideoJobContentResult Content(std::string_view id);

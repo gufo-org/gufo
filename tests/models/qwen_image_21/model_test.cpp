@@ -156,13 +156,15 @@ int main(int argc, char** argv) {
   }
   int calls = 0;
   gufo::server::ImageService service(
-      {}, "image-test", [&](const Request& request, const CancellationCheck&) {
+      {}, "image-test",
+      [&](const Request& request, const CancellationCheck&) {
         ++calls;
         assert(request.prompt == "a red cube");
         assert(request.width == 256 && request.height == 256);
         assert(request.seed == static_cast<std::uint64_t>(calls + 40));
         return Result{.image = image, .metrics = {}};
-      });
+      },
+      {"image-alias"});
   gufo::server::HttpRequest http;
   http.method = "POST";
   http.path = "/v1/images/generations";
@@ -185,6 +187,14 @@ int main(int argc, char** argv) {
     assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
   }
   http.body = R"({"prompt":"a red cube","model":"unknown"})";
+  assert(gufo::server::HandleImageApiRequest(http, service).status == 404);
+  // A repeated --served-model-name alias generates and the response keeps
+  // the primary ID (#957).
+  http.body = R"({"prompt":"a red cube","model":"image-alias"})";
+  const auto aliased = gufo::server::HandleImageApiRequest(http, service);
+  assert(aliased.status == 200 &&
+         gufo::json::parse(aliased.body).member_str("model") == "image-test");
+  http.body = R"({"prompt":"a red cube","model":"image-typo"})";
   assert(gufo::server::HandleImageApiRequest(http, service).status == 404);
   http.path = "/v1/images/edits";
   http.headers = {

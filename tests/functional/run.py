@@ -296,8 +296,6 @@ def main():
                      "--cache-disk-staging-bytes"):
         if option(command, reserved) is not None:
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
-    if option(command, "--api-key") is not None:
-        parser.error("omit --api-key for the isolated loopback test server")
     if set(args.suite) & {"image-inputs", "image-count", "tool-images", "image-detail"} and option(command, "--mmproj") is None:
         parser.error("image-inputs, image-count, tool-images, and image-detail require --mmproj in the server command")
     selected = args.suite

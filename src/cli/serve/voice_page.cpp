@@ -61,8 +61,6 @@ form input { flex: 1; }
 <h1>Gufo voice</h1>
 <details>
 <summary>Settings</summary>
-<label for="key">API key (only if the server uses --api-key)</label>
-<input id="key" type="password" autocomplete="off">
 <label for="mode">Turns</label>
 <select id="mode">
 <option value="vad">Hands-free: the server hears when you start and stop</option>
@@ -101,7 +99,7 @@ let reply = null;            // {item, el, text, cut}
 let play = { item: null, start: 0, end: 0, sources: [] };
 const saved = (k) => { try { return sessionStorage.getItem(k) || ""; } catch (e) { return ""; } };
 const keep = (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) {} };
-for (const id of ["key", "mode", "output", "silence", "instructions", "tools"])
+for (const id of ["mode", "output", "silence", "instructions", "tools"])
   if (saved(id)) $(id).value = saved(id);
 $("duplex").checked = saved("duplex") === "1";
 
@@ -272,7 +270,7 @@ function handle(e) {
 
 async function connect() {
   if (ws) { ws.close(); return; }
-  for (const id of ["key", "mode", "output", "silence", "instructions", "tools"]) keep(id, $(id).value);
+  for (const id of ["mode", "output", "silence", "instructions", "tools"]) keep(id, $(id).value);
   keep("duplex", $("duplex").checked ? "1" : "");
   try {
     mic = await navigator.mediaDevices.getUserMedia({ audio: {
@@ -287,9 +285,8 @@ async function connect() {
   node = new AudioWorkletNode(captureCtx, "tap");
   node.port.onmessage = (m) => capture(m.data, captureCtx.sampleRate);
   captureCtx.createMediaStreamSource(mic).connect(node);
-  const key = $("key").value.trim();
   const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/v1/realtime";
-  ws = new WebSocket(url, key ? ["realtime", "openai-insecure-api-key." + key] : ["realtime"]);
+  ws = new WebSocket(url, ["realtime"]);
   status("Connecting…");
   ws.onmessage = (m) => handle(JSON.parse(m.data));
   ws.onopen = () => {

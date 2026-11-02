@@ -203,7 +203,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
     if (!model->is_string()) {
       return BadRequest("'model' must be a string", "invalid_parameter_type");
     }
-    if (model->str() != service.model_id()) {
+    if (!service.serves_model(model->str())) {
       return Error(404, "requested embedding model is not loaded",
                    "model_not_found");
     }

@@ -465,7 +465,9 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
                  "'model', 'prompt', and optional 'size' must be strings",
                  "invalid_parameter_type");
   }
-  const std::string model = model_value->str();
+  // Alias names behave as the root model; preset-selecting variant names
+  // stay canonical (#957).
+  const std::string model = service.normalize_model(model_value->str());
   const std::string prompt = prompt_value->str();
   const std::string size = body.member_str("size", "512x512");
   const json::Value* seconds_value = body.find("seconds");

@@ -136,6 +136,17 @@ std::string TtsService::model_id() const {
   return impl_->options.model_id;
 }
 
+bool TtsService::serves_model(std::string_view name) const {
+  return name == model_id() || name == "qwen3-tts" ||
+         std::find(impl_->options.model_aliases.begin(),
+                   impl_->options.model_aliases.end(),
+                   name) != impl_->options.model_aliases.end();
+}
+
+const std::vector<std::string>& TtsService::model_aliases() const {
+  return impl_->options.model_aliases;
+}
+
 std::string TtsService::backend_name() const {
   return "native-hip";
 }

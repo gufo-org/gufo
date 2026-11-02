@@ -218,7 +218,7 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
                  "string when supplied",
                  "invalid_parameter_type");
   }
-  if (model->str() != service.model_id() && model->str() != "qwen3-tts") {
+  if (!service.serves_model(model->str())) {
     return Error(400, "Bad Request", "unsupported audio speech model",
                  "invalid_model");
   }

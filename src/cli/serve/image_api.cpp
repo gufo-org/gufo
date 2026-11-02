@@ -379,8 +379,11 @@ std::string String(const json::Value& fields, const char* name,
 }  // namespace
 
 ImageService::ImageService(const std::filesystem::path& root,
-                           std::string model_id, Runner runner)
-    : model_id_(std::move(model_id)), runner_(std::move(runner)) {
+                           std::string model_id, Runner runner,
+                           std::vector<std::string> model_aliases)
+    : model_id_(std::move(model_id)),
+      model_aliases_(std::move(model_aliases)),
+      runner_(std::move(runner)) {
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
   if (!runner_) {
@@ -451,7 +454,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     if (!fields.contains("prompt"))
       throw std::invalid_argument("prompt is required");
     const auto model = String(fields, "model", service.model_id().c_str());
-    if (model != service.model_id())
+    if (!service.serves_model(model))
       return Error(404, "requested image model is not loaded",
                    "model_not_found");
     if (String(fields, "response_format", "b64_json") != "b64_json" ||

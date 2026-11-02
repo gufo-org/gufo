@@ -1,8 +1,11 @@
 #include "src/cli/serve/asr_service.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "src/core/cancellable_gate.hpp"
 
@@ -101,6 +104,18 @@ std::string AsrService::initialization_error() const {
 
 std::string AsrService::model_id() const {
   return impl_->options.model_id;
+}
+
+bool AsrService::serves_model(std::string_view name) const {
+  return name == model_id() || name == "qwen3-asr" ||
+         name == "qwen3-asr-1.7b" ||
+         std::find(impl_->options.model_aliases.begin(),
+                   impl_->options.model_aliases.end(),
+                   name) != impl_->options.model_aliases.end();
+}
+
+const std::vector<std::string>& AsrService::model_aliases() const {
+  return impl_->options.model_aliases;
 }
 
 std::string AsrService::backend_name() const {
