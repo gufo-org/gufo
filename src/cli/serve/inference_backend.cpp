@@ -214,7 +214,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+                            bool enable_yarn, std::size_t kv_cache_bytes) {
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
   if (reader_owner == nullptr) {
@@ -237,6 +237,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .disk_cache = disk_cache_config,
       .ram_cache = ram_cache_config,
       .enable_yarn = enable_yarn,
+      .kv_cache_bytes = kv_cache_bytes,
   };
   auto runner = provider->create(options, error);
   if (runner == nullptr) {
@@ -258,7 +259,7 @@ bool InferenceBackend::load(const std::string&, std::string* error,
                             std::uint32_t, std::size_t, TextPrefillPolicy,
                             TextSchedulerPolicy, const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
-                            TextRunnerRamCacheOptions, bool) {
+                            TextRunnerRamCacheOptions, bool, std::size_t) {
   SetError(error, "HIP engine is disabled");
   return false;
 }

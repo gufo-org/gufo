@@ -34,6 +34,12 @@ void RequireExact(std::span<const float> expected,
           message);
 }
 
+/// Allocated bytes apart from K/V rows, which stay backed for reuse after a
+/// reset until another session needs the memory.
+std::size_t StateBytes(const qfn::Session& session) {
+  return session.AllocatedBytes() - session.KvBytes();
+}
+
 void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model,
                                      bool warm_storage,
                                      bool protect_rows = false) {
@@ -114,7 +120,7 @@ void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
                       : gufo::core::SessionMode::kAutoregressive,
       4096, &error);
   Require(session != nullptr, error);
-  const auto initial_bytes = session->AllocatedBytes();
+  const auto initial_bytes = StateBytes(*session);
   const auto& c = model->config();
   const auto checkpoint_bytes =
       std::size_t{c.num_layers - c.num_layers / c.full_attention_interval} *
@@ -169,7 +175,7 @@ void CheckFailureRecovery(const std::shared_ptr<qfn::Model>& model) {
   Require(session->Sync(prompt, &error), error);
   RequireExact(expected, session->Logits(),
                "cancelled restore leaked device state");
-  Require(session->AllocatedBytes() == initial_bytes,
+  Require(StateBytes(*session) == initial_bytes,
           "reset retained rollback allocations");
   std::cout
       << "cancelled forward/restore recover exactly; rollback starts empty\n";
@@ -184,7 +190,7 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
                       : gufo::core::SessionMode::kAutoregressive,
       context, &error);
   Require(session != nullptr, error);
-  const auto empty_bytes = session->AllocatedBytes();
+  const auto empty_bytes = StateBytes(*session);
   Require(session->Sync(prompt, &error), error);
   sampling::SamplerState sampler(
       {.seed = 73},
@@ -192,7 +198,7 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
   qfn::Session::DecodeResult step;
   Require(session->DecodeStep(2, sampler, &step, &error, false), error);
   const auto warm_bytes = session->AllocatedBytes();
-  Require(warm_bytes > empty_bytes &&
+  Require(StateBytes(*session) > empty_bytes &&
               warm_bytes <= model->SessionBytes(
                                 gufo::core::SessionMode::kSpeculative, context),
           "rollback allocation exceeded its configured bound");
@@ -217,10 +223,10 @@ void CheckRollbackReuse(const std::shared_ptr<qfn::Model>& model) {
     Require(session->Evaluate(prompt.front(), &error), error);
   const auto full = session->SaveSnapshot(&error);
   Require(full && session->RestoreSnapshot(*full, &error), error);
-  Require(session->AllocatedBytes() == empty_bytes,
+  Require(StateBytes(*session) == empty_bytes,
           "restore kept rollback that the restored context cannot use");
   session->Reset();
-  Require(session->AllocatedBytes() == empty_bytes,
+  Require(StateBytes(*session) == empty_bytes,
           "explicit reset retained rollback");
   std::cout
       << "rollback restore is bounded, reuses warm rows and replays exactly\n";
@@ -837,10 +843,16 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
   for (std::size_t i = 0; i < serial.size(); ++i) {
     const auto a = serial[i]->SaveSnapshot(&error);
     const auto b = batched[i]->SaveSnapshot(&error);
-    Require(a && b &&
-                std::equal(a->bytes().begin(), a->bytes().end(),
-                           b->bytes().begin(), b->bytes().end()),
-            "batched snapshot state differs: " + std::to_string(i));
+    Require(a && b, error);
+    const auto x = a->bytes(), y = b->bytes();
+    if (!std::equal(x.begin(), x.end(), y.begin(), y.end())) {
+      const auto at = std::ranges::mismatch(x, y).in1 - x.begin();
+      Require(false, "batched snapshot state differs: " + std::to_string(i) +
+                         " at byte " + std::to_string(at) + " of " +
+                         std::to_string(x.size()) + "/" +
+                         std::to_string(y.size()) + " (" +
+                         std::to_string(x.size() - at) + " from the end)");
+    }
   }
   std::cout << "batch independent_state_exact=1\n" << std::flush;
 }
@@ -1602,9 +1614,12 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
   std::vector<std::int32_t> prompt(prompt_tokens);
   for (std::size_t i = 0; i < prompt.size(); ++i)
     prompt[i] = pattern[i % pattern.size()];
+  if (with_image && !model->VisionEncoder()) {
+    std::cout << "image execution modes: matching vision sidecar unavailable\n";
+    return;
+  }
   if (with_image) {
-    Require(model->VisionEncoder() != nullptr && prompt_tokens >= 4,
-            "image prefill requires its encoder and four image tokens");
+    Require(prompt_tokens >= 4, "image prefill requires four image tokens");
     auto image = std::make_shared<vision::Prompt>();
     const vision::ImageGrid grid{0, 2, 2};
     std::fill_n(prompt.begin(), 4, vision::kImageToken);

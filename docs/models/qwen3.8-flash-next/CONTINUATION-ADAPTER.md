@@ -15,7 +15,7 @@ stable for an adapter lifetime. Target and draft frontiers are independent.
 | State | Representation | Bytes for the retained model |
 | --- | --- | ---: |
 | Tokens | append rows, int32 | 4/target token |
-| Target attention K and V | separate f16 append components per attention layer | 1,024/row/component; 24,576/target token total |
+| Target attention K and V | separate 8-bit append components per attention layer: 512 int8 codes and 32 f16 scales per row (one per 16 values) | 576/row/component; 13,824/target token total |
 | Target pooled indexer | f16 append rows per completed compression block | 256/block/layer; 768/target token at ratio 4 |
 | Raw indexer ring | private chronological pending rows, zero padded to 2,048 rows | 1,048,576/attention layer |
 | Convolution history | private f32, per linear layer | 122,880/layer |
@@ -23,7 +23,7 @@ stable for an adapter lifetime. Target and draft frontiers are independent.
 | PLE convolution history | private f32 | 368,640 |
 | Next-step logits | private f32 | 993,280 |
 | Execution metadata | private, fixed ABI | 160 |
-| MTP K and V | separate f16 append components at draft frontier | 2,048/draft token |
+| MTP K and V | separate 8-bit append components at draft frontier | 1,152/draft token |
 | MTP pooled indexer | f16 append rows at draft completed-block frontier | 256/draft block |
 | MTP raw indexer ring | private, same canonical format as target | 1,048,576 |
 | MTP residual | private f32, zero when invalid | 40,960 |
@@ -38,9 +38,9 @@ reconstructed from the saved frontier and completed-block count. Completed
 pooled rows are shareable.
 
 At context >= 2,048, private state is 131,614,880 bytes (125.5177 MiB) in AR
-and 133,032,096 bytes (126.8693 MiB) in MTP. The slope is 25,348 bytes per
-target token, plus 2,048 bytes per draft token and 256 bytes per completed draft
-block. Fully caught-up MTP has a 27,460-byte/token slope. This includes token
+and 133,032,096 bytes (126.8693 MiB) in MTP. The slope is 14,596 bytes per
+target token, plus 1,152 bytes per draft token and 256 bytes per completed draft
+block. Fully caught-up MTP has a 15,812-byte/token slope. This includes token
 IDs. The fixed private representation reserves the largest pending raw window,
 which explains its additional space compared with the RFC's roughly 113.8 MiB
 legacy deep-context payload. Unused private bytes are serialized as zeros.

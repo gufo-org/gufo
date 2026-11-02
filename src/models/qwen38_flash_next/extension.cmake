@@ -74,6 +74,7 @@ gufo_extension_target(
     kernels/rocm/blaslt.cpp
     kernels/rocm/device_model.cpp
     kernels/rocm/executor.cpp
+    kernels/rocm/kv_memory.cpp
     kernels/rocm/batch.cpp
     engine.cpp
     runner.cpp

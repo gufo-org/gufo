@@ -120,19 +120,35 @@ int main(int argc, char** argv) try {
     const std::size_t kv_count = std::size_t{n_kv} * kKvHeads * kDim;
     float* d_q = Upload(Values(q_count, 0x1234ABCDU, 4.0F));
     float* d_gate = Upload(Values(q_count, 0x0BADF00DU, 3.0F));
-    std::vector<__half> kh(kv_count);
-    std::vector<__half> vh(kv_count);
+    std::vector<float> kh(kv_count);
+    std::vector<float> vh(kv_count);
     {
       std::uint32_t s = 0xBADC0FFEU;
       for (std::size_t i = 0; i < kv_count; ++i) {
-        kh[i] =
-            __float2half(static_cast<float>(Next(&s) % 2001) / 1000.0F - 1.0F);
-        vh[i] =
-            __float2half(static_cast<float>(Next(&s) % 2001) / 1000.0F - 1.0F);
+        kh[i] = static_cast<float>(Next(&s) % 2001) / 1000.0F - 1.0F;
+        vh[i] = static_cast<float>(Next(&s) % 2001) / 1000.0F - 1.0F;
       }
     }
-    __half* d_k = Upload(kh);
-    __half* d_v = Upload(vh);
+    // The production writer fills the 8-bit caches.
+    std::uint8_t* d_k = Upload(std::vector<std::uint8_t>(
+        std::size_t{n_kv} *
+        gufo::models::qwen38_flash_next::KvRowBytes(kKvHeads * kDim)));
+    std::uint8_t* d_v = Upload(std::vector<std::uint8_t>(
+        std::size_t{n_kv} *
+        gufo::models::qwen38_flash_next::KvRowBytes(kKvHeads * kDim)));
+    {
+      float* rows = Upload(kh);
+      std::uint32_t* zero = Upload(std::vector<std::uint32_t>{0});
+      q::StoreKv(rows, d_k, n_kv, kKvHeads * kDim, zero, nullptr);
+      CheckHip(hipDeviceSynchronize(), "store keys");
+      CheckHip(hipMemcpy(rows, vh.data(), vh.size() * sizeof(float),
+                         hipMemcpyHostToDevice),
+               "value rows");
+      q::StoreKv(rows, d_v, n_kv, kKvHeads * kDim, zero, nullptr);
+      CheckHip(hipDeviceSynchronize(), "store values");
+      CheckHip(hipFree(rows), "hipFree");
+      CheckHip(hipFree(zero), "hipFree");
+    }
     // Sixteen-query groups share a base selection; each query swaps a fifth
     // of it, so four packed queries select a union of roughly 1.6x 512.
     const std::uint32_t blocks = (n_kv + kRatio - 1) / kRatio;

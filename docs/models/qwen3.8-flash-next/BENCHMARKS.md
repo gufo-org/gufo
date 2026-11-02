@@ -106,3 +106,50 @@ C1, context capacity 133121, AR. Peak memory reported by HIP.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)
+
+## K/V memory (October 25, 2026)
+
+Production fork of this model (mixed K-quant recipe of the same checkpoint +
+shared-Q8_0 MTP), `serve` with
+`--cache-ram-bytes 4294967296`, Strix Halo 128 GB, ROCm 7.2.4. GPU memory
+from the loader's `gpu_device_used_mib` at readiness; host `MemAvailable`
+from the hypervisor host (the serving floor there is 12 GiB).
+
+| K/V | Sessions × context | GPU used at ready (MiB) | Host available at ready (GiB) |
+| --- | --- | ---: | ---: |
+| F16, preallocated | 8 × 40,960 | 91,199 | 23 |
+| 8-bit, preallocated | 8 × 40,960 | 87,871 | 28 |
+| 8-bit, growing | 8 × 40,960 | 82,463 | 34 |
+| 8-bit, growing | 8 × 262,144 | 82,463 | 34 |
+| F16, preallocated | 1 × 262,144 | 86,861 | — |
+| 8-bit, preallocated | 2 × 262,144 | 88,283 | 22 |
+
+With growing rows, eight concurrent 166K-token needle requests on
+8 × 262,144 (1.33M tokens held) answered 8/8 with host `MemAvailable` at
+least 14 GiB: about 15.6 KiB per held token including chunk rounding (8-bit
+K and V, pooled keys and draft rows; F16 needs about 27 KiB). A larger GGUF
+should cap the total with `--kv-cache-bytes`; production runs 8 × 262,144
+in a 20 GiB cap.
+The F16 build at 2 × 262,144 did not reach readiness.
+
+Speed, alternating rounds (F16; 8-bit preallocated; 8-bit growing with the
+stream drain later removed), an HTTP streaming probe at 4 × 40,960 and a
+single-client probe at depth on 2 × 163,840, tok/s:
+
+| Measure | F16 | 8-bit preallocated | 8-bit growing |
+| --- | ---: | ---: | ---: |
+| pp8192 | 1,651 / 1,633 | 1,612 / 1,685 | 1,622 / 1,625 |
+| pp32768 | 1,622 / 1,604 | 1,597 / 1,593 | 1,597 / 1,596 |
+| MTP decode 512 (prose) | 58.9 / 56.8 | 58.1 / 58.9 | 59.1 / 60.3 |
+| MTP code at 0 / 0.7 | 78.2, 76.3 / 78.0, 78.3 | 77.8, 80.0 / 77.3, 77.8 | 78.7, 77.5 / 78.7, 77.9 |
+| C1 / C4 / C8 MTP (sum of rates) | 60.3, 87.6, 177.3 / 58.6, 93.0, 180.0 | 52.4, 88.7, 176.7 / 58.1, 88.3, 177.0 | 53.7, 88.2, 165.7 / 58.2, 88.3, 180.8 |
+| AR prefill 25.7K / 102.6K | 1,727, 1,639 / 1,694, 1,645 | 1,685, 1,644 / 1,679, 1,679 | 1,678, 1,601 / 1,675, 1,632 |
+| AR decode after 25.7K / 102.6K | 37.75, 36.88 / 37.80, 36.85 | 37.83, 36.82 / 37.75, 37.08 | 37.62, 36.73 / 37.17, 37.29 |
+| 8-way replay of 40 long-context and code requests | 73.4 / 73.0 aggregate | 76.7 / 76.6 | 76.5 / 76.6 |
+
+Decode is unchanged. Prefill is within about 1.5% (32K) and noisy at 128K;
+in kernel traces the prefill kernels sum to −0.6% (25.7K) and +0.3% (102.6K)
+against F16, the only systematic cost being sparse WMMA attention (+3.6% /
++2.6% per call). The replay aggregates differ partly by output mix (KV8
+answers held more tokens); per-request decode rates are equal.
+
