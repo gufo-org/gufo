@@ -272,7 +272,7 @@ def main():
         parser.error("provide a production gufo serve llm command after --")
     if "--speculative" not in args.server:
         parser.error("select --speculative explicitly so loaded mode can be verified")
-    for option in ("--host", "--port", "--api-key", "--cache-disk"):
+    for option in ("--host", "--port", "--cache-disk"):
         if any(value == option or value.startswith(option + "=") for value in args.server):
             parser.error(f"the isolated fault runner does not accept {option}")
     args.fault_library = args.fault_library.resolve()

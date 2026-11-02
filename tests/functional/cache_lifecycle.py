@@ -328,7 +328,7 @@ def main():
     if len(command) < 3 or command[1:3] != ["serve", "llm"]:
         parser.error("pass a gufo serve llm command after --")
     for reserved in ("--host", "--port", "--cache-disk", "--cache-disk-bytes",
-                     "--cache-disk-staging-bytes", "--api-key"):
+                     "--cache-disk-staging-bytes"):
         if option(command, reserved) is not None:
             parser.error(f"the runner owns {reserved}")
     if int(option(command, "--context", "0")) < 32768:

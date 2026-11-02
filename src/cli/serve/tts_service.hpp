@@ -40,6 +40,9 @@ struct TtsServiceOptions {
   bool validate_model{true};
   ext::TtsVariant variant{ext::TtsVariant::kCustomVoice};
   std::string model_id;
+  /// Additional IDs accepted from requests; `model_id` stays primary in
+  /// listings and responses (#957).
+  std::vector<std::string> model_aliases;
   std::vector<std::string> voices;
   std::map<std::string, TtsVoicePreset> voice_presets;
   Runner runner;
@@ -62,6 +65,9 @@ public:
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::string initialization_error() const;
   [[nodiscard]] std::string model_id() const;
+  /// True for the primary ID, a built-in alias, or a configured alias.
+  [[nodiscard]] bool serves_model(std::string_view name) const;
+  [[nodiscard]] const std::vector<std::string>& model_aliases() const;
   [[nodiscard]] std::string backend_name() const;
   [[nodiscard]] std::vector<std::string> voices() const;
   /// Registered preset for `name`, or nullptr when `name` is not a preset.

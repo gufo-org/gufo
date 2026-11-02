@@ -175,7 +175,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
     parser.add_argument("--model", default="embeddinggemma-2")
-    parser.add_argument("--api-key", default="unused")
     parser.add_argument("--output", type=Path, help="Retain every response and request timing")
     args = parser.parse_args()
 
@@ -201,7 +200,7 @@ def main():
             if args.output:
                 args.output.write_text(json.dumps({"requests": requests}, indent=2) + "\n")
 
-    client = openai.OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0,
+    client = openai.OpenAI(base_url=args.base_url, api_key="unused", max_retries=0,
                           http_client=httpx.Client(timeout=120, trust_env=False,
                               event_hooks={"request": [started], "response": [completed]}))
     cases = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]

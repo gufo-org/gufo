@@ -32,8 +32,7 @@ class Client {
 public:
   Client(int port, std::string_view path, std::string first = {},
          std::string_view key = "dGhlIHNhbXBsZSBub25jZQ==",
-         std::string_view authorization = "Bearer test",
-         std::string_view extra = {}) {
+         std::string_view authorization = "", std::string_view extra = {}) {
     fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
     assert(net::SetSocketTimeouts(fd, 3'000));
@@ -134,6 +133,30 @@ private:
     }
   }
 };
+
+// The raw response to a JSON POST.
+std::string HttpPost(int port, std::string_view path, std::string_view body) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  assert(fd >= 0 && net::SetSocketTimeouts(fd, 3'000));
+  sockaddr_in address{.sin_family = AF_INET, .sin_port = htons(port)};
+  assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+  assert(::connect(fd, reinterpret_cast<sockaddr*>(&address),
+                   sizeof(address)) == 0);
+  const std::string request =
+      "POST " + std::string(path) +
+      " HTTP/1.1\r\nHost: localhost\r\n"
+      "Content-Type: application/json\r\nContent-Length: " +
+      std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" +
+      std::string(body);
+  assert(net::SendNoSignal(fd, request.data(), request.size()) ==
+         static_cast<long>(request.size()));
+  std::string response;
+  char buffer[4096];
+  for (ssize_t n; (n = ::recv(fd, buffer, sizeof(buffer), 0)) > 0;)
+    response.append(buffer, std::size_t(n));
+  net::CloseSocket(fd);
+  return response;
+}
 
 // The raw response to a plain GET.
 std::string HttpGet(int port, std::string_view path) {
@@ -351,8 +374,7 @@ void RealtimeStreams() {
             assert(rate == 24000);
             return std::unique_ptr<VoiceConversation>(new FakeVoice);
           }});
-  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, asr,
-                    {.api_key = "test"});
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, asr, {});
   std::string error;
   assert(server.start(&error));
   std::jthread worker([&] { server.run(); });
@@ -546,7 +568,8 @@ void RealtimeStreams() {
     assert(type == "conversation.item.input_audio_transcription.completed");
   }
   {
-    // Browsers pass the key as a subprotocol; the page needs no key.
+    // Browsers may keep offering the legacy key subprotocol; the handshake
+    // selects "realtime" and ignores the rest.
     Client browser(server.port(), "/v1/realtime", {},
                    "dGhlIHNhbXBsZSBub25jZQ==", "",
                    "Sec-WebSocket-Protocol: realtime, "
@@ -555,11 +578,6 @@ void RealtimeStreams() {
     assert(browser.headers.find("Sec-WebSocket-Protocol: realtime") !=
            std::string::npos);
     browser.Event("session.created");
-    Client wrong(server.port(), "/v1/realtime", {},
-                 "dGhlIHNhbXBsZSBub25jZQ==", "",
-                 "Sec-WebSocket-Protocol: realtime, "
-                 "openai-insecure-api-key.nope\r\n");
-    assert(wrong.headers.starts_with("HTTP/1.1 401"));
     const auto page = HttpGet(server.port(), "/voice");
     assert(page.starts_with("HTTP/1.1 200") &&
            page.find("text/html") != std::string::npos &&
@@ -577,6 +595,7 @@ int main() {
   std::atomic<bool> entered{false}, cancelled{false};
   auto tts = std::make_shared<TtsService>(TtsServiceOptions{
       .validate_model = false,
+      .model_aliases = {"tts-alias"},
       .voices = {"vivian"},
       .runner = [&](const auto& request, const auto& check, auto* result,
                     auto*) {
@@ -600,6 +619,7 @@ int main() {
       }});
   auto asr = std::make_shared<AsrService>(AsrServiceOptions{
       .validate_model = false,
+      .model_aliases = {"asr-alias"},
       .runner = [&](const auto& request, const auto&, auto* result, auto*) {
         ++asr_calls;
         assert(request.pcm16k.size() == 1600);
@@ -609,15 +629,11 @@ int main() {
         return !request.on_text ||
                (request.on_text("Hello") && request.on_text(result->text));
       }});
-  HttpServer server("127.0.0.1", 0, nullptr, nullptr, tts, asr,
-                    {.api_key = "test"});
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, tts, asr, {});
   std::string error;
   assert(server.start(&error));
   std::jthread worker([&] { server.run(); });
   {
-    Client denied(server.port(), "/v1/realtime", {},
-                  "dGhlIHNhbXBsZSBub25jZQ==", "");
-    assert(denied.headers.starts_with("HTTP/1.1 401"));
     Client invalid(server.port(), "/v1/realtime", {}, "bad");
     assert(invalid.headers.starts_with("HTTP/1.1 400"));
   }
@@ -715,6 +731,28 @@ int main() {
     client.Send(Client::Frame(std::string("\x03\xE8", 2), 8));
     const auto reply = client.Receive();
     assert(reply.first == 8 && reply.second == std::string("\x03\xE8", 2));
+  }
+  {
+    // Request-level aliases (#957): a configured alias synthesizes, an
+    // unserved name is refused, both aliases are listed, and the realtime
+    // handshake accepts the ASR alias.
+    const auto aliased =
+        HttpPost(server.port(), "/v1/audio/speech",
+                 R"({"model":"tts-alias","input":"Hi","voice":"vivian"})");
+    assert(aliased.starts_with("HTTP/1.1 200"));
+    assert(HttpPost(server.port(), "/v1/audio/speech",
+                    R"({"model":"tts-typo","input":"Hi","voice":"vivian"})")
+               .starts_with("HTTP/1.1 400"));
+    const auto models = HttpGet(server.port(), "/v1/models");
+    assert(models.find("\"id\":\"tts-alias\"") != std::string::npos);
+    assert(models.find("\"id\":\"asr-alias\"") != std::string::npos);
+    const auto asr_alias =
+        HttpGet(server.port(), "/v1/realtime?model=asr-alias");
+    // Without the upgrade headers the handshake cannot complete, but the
+    // model check must not reject the configured alias up front.
+    assert(asr_alias.find("invalid_model") == std::string::npos);
+    assert(HttpGet(server.port(), "/v1/realtime?model=asr-typo")
+               .find("invalid_model") != std::string::npos);
   }
   server.stop();
   worker.join();

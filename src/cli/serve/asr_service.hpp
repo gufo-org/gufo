@@ -7,6 +7,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "gufo/ext/asr.hpp"
 #include "src/cli/serve/realtime_audio.hpp"
@@ -24,6 +26,9 @@ struct AsrServiceOptions {
   std::size_t native_context_tokens{1024};
   bool validate_model{true};
   std::string model_id;
+  /// Additional IDs accepted from requests; `model_id` stays primary in
+  /// listings and responses (#957).
+  std::vector<std::string> model_aliases;
   Runner runner;
   /// Optional realtime streams of models that support them; rate is the
   /// input sample rate.
@@ -47,6 +52,9 @@ public:
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::string initialization_error() const;
   [[nodiscard]] std::string model_id() const;
+  /// True for the primary ID, a built-in alias, or a configured alias.
+  [[nodiscard]] bool serves_model(std::string_view name) const;
+  [[nodiscard]] const std::vector<std::string>& model_aliases() const;
   [[nodiscard]] std::string backend_name() const;
 
   [[nodiscard]] bool Transcribe(const ext::TranscriptionRequest& request,

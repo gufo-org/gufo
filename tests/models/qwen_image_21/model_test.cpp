@@ -156,13 +156,15 @@ int main(int argc, char** argv) {
   }
   int calls = 0;
   gufo::server::ImageService service(
-      {}, "image-test", [&](const Request& request, const CancellationCheck&) {
+      {}, "image-test",
+      [&](const Request& request, const CancellationCheck&) {
         ++calls;
         assert(request.prompt == "a red cube");
         assert(request.width == 256 && request.height == 256);
         assert(request.seed == static_cast<std::uint64_t>(calls + 40));
         return Result{.image = image, .metrics = {}};
-      });
+      },
+      {"image-alias"});
   gufo::server::HttpRequest http;
   http.method = "POST";
   http.path = "/v1/images/generations";
@@ -186,6 +188,14 @@ int main(int argc, char** argv) {
   }
   http.body = R"({"prompt":"a red cube","model":"unknown"})";
   assert(gufo::server::HandleImageApiRequest(http, service).status == 404);
+  // A repeated --served-model-name alias generates an image (#957).
+  http.body =
+      R"({"prompt":"a red cube","model":"image-alias","size":"256x256","seed":43})";
+  const auto aliased = gufo::server::HandleImageApiRequest(http, service);
+  assert(aliased.status == 200 && calls == 3);
+  assert(gufo::json::parse(aliased.body).find("data")->size() == 1);
+  http.body = R"({"prompt":"a red cube","model":"image-typo"})";
+  assert(gufo::server::HandleImageApiRequest(http, service).status == 404);
   http.path = "/v1/images/edits";
   http.headers = {
       {"Content-Type", "multipart/form-data; boundary=\"boundary\""}};
@@ -198,12 +208,12 @@ int main(int argc, char** argv) {
   for (const auto& [name, value] : {std::pair{"model", "image-test"},
                                     {"prompt", "a red cube"},
                                     {"size", "256x256"},
-                                    {"seed", "43"}})
+                                    {"seed", "44"}})
     http.body += "\r\n--boundary\r\nContent-Disposition: form-data; name=\"" +
                  std::string(name) + "\"\r\n\r\n" + value;
   http.body += "\r\n--boundary--\r\n";
   assert(gufo::server::HandleImageApiRequest(http, service).status == 200 &&
-         calls == 3);
+         calls == 4);
   http.body.resize(http.body.size() - 8);
   assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
   int turbo_calls = 0;

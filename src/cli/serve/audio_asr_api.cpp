@@ -238,8 +238,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
                  "missing_file");
   }
   const MultipartPart* model = Find(parts, "model");
-  if (model != nullptr && model->body != service.model_id() &&
-      model->body != "qwen3-asr" && model->body != "qwen3-asr-1.7b") {
+  if (model != nullptr && !service.serves_model(model->body)) {
     return Error(400, "Bad Request", "unsupported transcription model",
                  "invalid_model");
   }

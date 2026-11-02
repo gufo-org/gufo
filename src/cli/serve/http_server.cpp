@@ -43,7 +43,6 @@
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/serve/websocket.hpp"
-#include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/core/platform/net.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
@@ -229,58 +228,6 @@ bool ExpectsContinue(const HttpRequest& request) {
   });
 }
 
-std::string CredentialHash(std::string_view value) {
-  return crypto::Sha256Hex(std::span(
-      reinterpret_cast<const std::uint8_t*>(value.data()), value.size()));
-}
-
-bool IsAuthorized(const HttpRequest& request, const std::string& key_hash) {
-  if (key_hash.empty()) {
-    return true;
-  }
-  std::string_view credential;
-  bool found = false;
-  for (const auto& [name, value] : request.headers) {
-    if (ToLower(name) == "authorization") {
-      if (found) {
-        return false;
-      }
-      found = true;
-      credential = value;
-    }
-  }
-  if (!found) {
-    // Browsers cannot set headers on a WebSocket: Realtime clients pass the
-    // key as the subprotocol "openai-insecure-api-key.<key>".
-    constexpr std::string_view kPrefix = "openai-insecure-api-key.";
-    const auto protocols = request.header("Sec-WebSocket-Protocol");
-    std::string_view offered = protocols;
-    while (!offered.empty()) {
-      const auto comma = offered.find(',');
-      auto token = offered.substr(0, comma);
-      while (token.starts_with(' '))
-        token.remove_prefix(1);
-      while (token.ends_with(' '))
-        token.remove_suffix(1);
-      if (token.starts_with(kPrefix) && IsWebSocketUpgrade(request))
-        return CredentialHash(token.substr(kPrefix.size())) == key_hash;
-      offered = comma == std::string_view::npos ? std::string_view{}
-                                                : offered.substr(comma + 1);
-    }
-  }
-  const auto space = credential.find(' ');
-  if (space == std::string_view::npos ||
-      ToLower(credential.substr(0, space)) != "bearer") {
-    return false;
-  }
-  credential.remove_prefix(space + 1);
-  while (credential.starts_with(' ')) {
-    credential.remove_prefix(1);
-  }
-  // Comparing digests does not disclose matching prefixes of the API key.
-  return CredentialHash(credential) == key_hash;
-}
-
 bool HasHeader(const HttpResponse& response, std::string_view name) {
   const std::string lowered = ToLower(name);
   return std::ranges::any_of(response.headers, [&](const auto& header) {
@@ -340,6 +287,8 @@ std::string BuildResponseHead(const HttpResponse& resp,
   }
   out += "Access-Control-Allow-Origin: *\r\n";
   out += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
+  // Authorization is accepted (and ignored) so browser SDKs that always send
+  // it still pass their CORS preflight.
   out += "Access-Control-Allow-Headers: Content-Type, Authorization, Range\r\n";
   for (const auto& [name, value] : resp.headers) {
     out += name;
@@ -774,6 +723,14 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
 // Endpoint handlers
 // ---------------------------------------------------------------------------
 
+// The primary ID followed by its accepted aliases, in listing order.
+std::vector<std::string> ServedIds(const std::string& primary,
+                                   const std::vector<std::string>& aliases) {
+  std::vector<std::string> ids{primary};
+  ids.insert(ids.end(), aliases.begin(), aliases.end());
+  return ids;
+}
+
 HttpResponse ListModels(TextGenerationBackend* backend,
                         const VideoJobService* video_jobs,
                         const TtsService* tts, const AsrService* asr,
@@ -822,46 +779,70 @@ HttpResponse ListModels(TextGenerationBackend* backend,
       model["capability"] = "video";
       data.push_back(std::move(model));
     }
+    // Configured `--served-model-name` aliases of the root model (#957).
+    for (const auto& alias : video_jobs->model_aliases()) {
+      json::Value model = json::Value::object();
+      model["id"] = alias;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-minimax";
+      model["root"] = "minimax-h3";
+      model["capability"] = "video";
+      data.push_back(std::move(model));
+    }
   }
   if (tts != nullptr && tts->ready()) {
-    json::Value model = json::Value::object();
-    model["id"] = tts->model_id();
-    model["object"] = "model";
-    model["created"] = Now();
-    model["owned_by"] = "operator-supplied-qwen";
-    model["capability"] = "audio_tts";
-    data.push_back(std::move(model));
+    for (const auto& id : ServedIds(tts->model_id(), tts->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-qwen";
+      model["capability"] = "audio_tts";
+      data.push_back(std::move(model));
+    }
   }
   if (asr != nullptr && asr->ready()) {
-    json::Value model = json::Value::object();
-    model["id"] = asr->model_id();
-    model["object"] = "model";
-    model["created"] = Now();
-    model["owned_by"] = "operator-supplied-qwen";
-    model["capability"] = "audio_asr";
-    data.push_back(std::move(model));
+    for (const auto& id : ServedIds(asr->model_id(), asr->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-qwen";
+      model["capability"] = "audio_asr";
+      data.push_back(std::move(model));
+    }
   }
   if (images != nullptr) {
-    auto model = json::Value::object();
-    model["id"] = images->model_id();
-    model["object"] = "model";
-    model["created"] = Now();
-    model["owned_by"] = "operator-supplied-qwen";
-    model["capability"] = "image";
-    data.push_back(std::move(model));
+    for (const auto& id :
+         ServedIds(images->model_id(), images->model_aliases())) {
+      auto model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-qwen";
+      model["capability"] = "image";
+      data.push_back(std::move(model));
+    }
   }
   if (embeddings != nullptr && embeddings->ready()) {
-    json::Value model = json::Value::object();
-    model["id"] = embeddings->model_id();
-    model["object"] = "model";
-    model["created"] = Now();
-    model["owned_by"] = "operator-supplied-gemma";
-    model["capability"] = "embedding";
-    data.push_back(std::move(model));
+    for (const auto& id :
+         ServedIds(embeddings->model_id(), embeddings->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-gemma";
+      model["capability"] = "embedding";
+      data.push_back(std::move(model));
+    }
   }
-  if (decisions) {
+  for (const auto& decision_id :
+       decisions != nullptr
+           ? ServedIds(decisions->model_id, decisions->model_aliases)
+           : std::vector<std::string>{}) {
     auto model = json::Value::object();
-    model["id"] = decisions->model_id;
+    model["id"] = decision_id;
     model["object"] = "model";
     model["created"] = Now();
     model["owned_by"] = "gufo";
@@ -1944,9 +1925,6 @@ HttpServer::HttpServer(std::string host, int port,
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
   }
-  if (!options_.api_key.empty()) {
-    api_key_hash_ = CredentialHash(options_.api_key);
-  }
   register_routes();
 }
 
@@ -2089,7 +2067,6 @@ void HttpServer::run(bool handle_signals) {
           " address=http://" +
           (host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]") +
           ":" + std::to_string(port_) +
-          " auth=" + (options_.api_key.empty() ? "off" : "bearer") +
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
   while (!stopped_.load(std::memory_order_acquire)) {
@@ -2197,8 +2174,8 @@ void HttpServer::reap_workers() {
 }
 
 HttpResponse HttpServer::handle_request(const HttpRequest& req) {
-  // The voice page holds no data; it asks for the API key itself and sends
-  // it with its WebSocket.
+  // The voice page holds no data; it opens its WebSocket when the user
+  // connects.
   if (req.method == "GET" && req.path == "/voice" && asr_ &&
       asr_->supports_voice()) {
     HttpResponse page{
@@ -2207,17 +2184,13 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     page.headers.emplace_back("Cache-Control", "no-store");
     return page;
   }
-  if (!IsAuthorized(req, api_key_hash_)) {
-    auto response = Err(401, "Unauthorized", "missing or invalid API key",
-                        "authentication_error", "invalid_api_key");
-    response.headers.emplace_back("WWW-Authenticate", "Bearer");
-    return response;
-  }
   // `/health` and `/ready` are the native spelling and match llama-server's
   // `/health`. `/healthz` and `/readyz` are aliases so Kubernetes-style probe
-  // configuration works unmodified.
+  // configuration works unmodified. `GET /` answers like `/health` so
+  // llama-swap's Load button and startup preload, which request the upstream
+  // root, report success once the loading gate has released (#957).
   if (req.method == "GET" &&
-      (req.path == "/health" || req.path == "/v1/health" ||
+      (req.path == "/" || req.path == "/health" || req.path == "/v1/health" ||
        req.path == "/healthz")) {
     if (device_lost())
       return DeviceLost();
@@ -2281,7 +2254,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     try {
       if (const auto* model = payload.find("model");
           model &&
-          (!model->is_string() || model->str() != decisions_->model_id))
+          (!model->is_string() || !ServesModel(*decisions_, model->str())))
         return Err(404, "Not Found", "unknown decision model",
                    "invalid_request_error", "model_not_found");
       auto result = decisions_->decide(payload);
@@ -2553,9 +2526,7 @@ void HttpServer::handle_connection(int client_fd,
     } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
     } else {
-      // A client without the API key cannot write into the trace.
-      traced = Trace::Enabled() && IsTracedRoute(req) &&
-               IsAuthorized(req, api_key_hash_);
+      traced = Trace::Enabled() && IsTracedRoute(req);
       if (traced) {
         TraceRequest(req);
       }

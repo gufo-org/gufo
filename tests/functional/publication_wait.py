@@ -263,7 +263,7 @@ def main():
     if "reclaim" in (args.case or ()) and int(option(
             command, "--cache-ram-bytes", str(RECLAIM_RAM_BYTES))) != RECLAIM_RAM_BYTES:
         parser.error("the reclaim case requires --cache-ram-bytes 268435456")
-    for reserved in ("--host", "--port", "--cache-disk", "--cache-disk-bytes", "--api-key"):
+    for reserved in ("--host", "--port", "--cache-disk", "--cache-disk-bytes"):
         if option(command, reserved) is not None:
             parser.error(f"the runner owns {reserved}")
     if option(command, "--served-model-name") is None:

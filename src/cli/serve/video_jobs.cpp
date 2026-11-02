@@ -836,6 +836,23 @@ std::string VideoJobService::initialization_error() const {
                           : impl_->initialization_error;
 }
 
+bool VideoJobService::serves_model(std::string_view name) const {
+  return IsH3Model(name) ||
+         std::find(impl_->options.model_aliases.begin(),
+                   impl_->options.model_aliases.end(),
+                   std::string(name)) != impl_->options.model_aliases.end();
+}
+
+std::string VideoJobService::normalize_model(std::string_view name) const {
+  if (IsH3Model(name))
+    return std::string(name);
+  return serves_model(name) ? "minimax-h3" : std::string(name);
+}
+
+const std::vector<std::string>& VideoJobService::model_aliases() const {
+  return impl_->options.model_aliases;
+}
+
 VideoJobCreateResult VideoJobService::Create(const VideoJobRequest& request) {
   if (!ready()) {
     return {.result = VideoJobResult::kIoError,
