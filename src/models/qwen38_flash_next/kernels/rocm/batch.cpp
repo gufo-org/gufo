@@ -808,10 +808,24 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
 
 bool Executor::ForwardBatch(std::span<const BatchItem> items,
                             std::string* error) const {
+  return ForwardBatchImpl(items, false, error);
+}
+
+bool Executor::ForwardWide(Session& session,
+                           std::span<const std::int32_t> tokens,
+                           std::string* error) const {
+  const BatchItem item{&session, tokens, true};
+  return ForwardBatchImpl(std::span(&item, 1), true, error);
+}
+
+bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
+                                std::string* error) const {
   selected_logits_ = nullptr;
+  wide_rows_ = 0;
   DropReadyQ8();
   const Config& c = config();
-  if (items.empty() || items.size() > kBatchSessions) {
+  if (items.empty() || items.size() > kBatchSessions ||
+      (wide && items.size() != 1)) {
     return Fail(error, "decode batch must contain 1..8 sessions");
   }
   std::array<std::uint32_t, kBatchSessions> offsets{};
@@ -822,9 +836,13 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   for (std::size_t i = 0; i < items.size(); ++i) {
     const auto& item = items[i];
     if (item.session == nullptr || item.session->owner_ != this ||
-        item.tokens.empty() || item.tokens.size() > kDecodeRows ||
-        item.tokens.size() > options_.max_logit_rows ||
-        (item.speculative && item.tokens.size() > options_.max_speculative) ||
+        item.tokens.empty() ||
+        (wide ? item.tokens.size() > max_copy_rows() || !item.speculative ||
+                    !item.session->mtp_enabled_
+              : item.tokens.size() > kDecodeRows ||
+                    item.tokens.size() > options_.max_logit_rows ||
+                    (item.speculative &&
+                     item.tokens.size() > options_.max_speculative)) ||
         item.session->position_ + item.tokens.size() >
             item.session->max_context_) {
       return Fail(error, "invalid session or chain in decode batch");
@@ -867,9 +885,62 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       item.session->PreserveSnapshots(item.session->position_,
                                       item.session->mtp_.position);
     if (item.speculative &&
-        !EnsureRollback(*item.session, item.tokens.size() - 1, error))
+        !EnsureRollback(
+            *item.session,
+            static_cast<std::uint32_t>(
+                std::min<std::size_t>(item.tokens.size(), kDecodeRows) - 1),
+            error))
       return false;
   }
+  // A wide chain's later segments roll back through executor-owned rows.
+  const auto segment_count =
+      wide ? (static_cast<std::uint32_t>(items[0].tokens.size()) + kDecodeRows -
+              1) /
+                 kDecodeRows
+           : 1U;
+  if (wide) {
+    auto& session = *items[0].session;
+    if (session.ngram_snapshots_.size() < items[0].tokens.size() - 1)
+      session.ngram_snapshots_.resize(items[0].tokens.size() - 1);
+    if (!EnsureWideSegments(segment_count - 1, error))
+      return false;
+  }
+  // Segments of one item: the rows [offset, offset + count) start at
+  // position `start` with `blocks` pooled indexer blocks, exactly as
+  // consecutive verification passes of at most kDecodeRows would.
+  struct Segment {
+    std::uint32_t offset, count, start, blocks;
+    bool sparse;
+    std::uint32_t complete;
+    const std::uint32_t* position;
+    const std::uint32_t* first_block;
+  };
+  const auto segments_of = [&](std::size_t i) {
+    std::vector<Segment> out;
+    auto& session = *items[i].session;
+    const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
+    if (!wide) {
+      out.push_back({offsets[i], n, session.position_, session.blocks_,
+                     sparse[i], complete[i], &session.control_->position,
+                     &session.control_->blocks});
+      return out;
+    }
+    std::uint32_t blocks = session.blocks_;
+    for (std::uint32_t first = 0, s = 0; first < n; first += kDecodeRows, ++s) {
+      const auto count = std::min(kDecodeRows, n - first);
+      const auto start = session.position_ + first;
+      const auto end = start + count;
+      const bool seg_sparse = c.compress_ratio > 0 && end > c.indexer_top_k;
+      const auto seg_complete =
+          c.compress_ratio > 0 ? end / c.compress_ratio : 0;
+      auto* control = s == 0 ? session.control_ : wide_controls_ + s;
+      out.push_back({offsets[i] + first, count, start, blocks, seg_sparse,
+                     seg_complete, &control->position, &control->blocks});
+      if (seg_sparse)
+        blocks = seg_complete;
+    }
+    return out;
+  };
   if (!AllocateBatch(error)) {
     return false;
   }
@@ -949,6 +1020,21 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         return false;
       }
     }
+    if (wide) {
+      // Later segments read their own positions; their controls stage in
+      // the batch slots a single-session pass leaves unused.
+      const auto segs = segments_of(0);
+      for (std::size_t s = 1; s < segs.size(); ++s) {
+        batch_controls_[s] = batch_controls_[0];
+        batch_controls_[s].position = segs[s].start;
+        batch_controls_[s].blocks = segs[s].blocks;
+        if (!Check(hipMemcpyAsync(wide_controls_ + s, batch_controls_ + s,
+                                  sizeof(Session::Control),
+                                  hipMemcpyHostToDevice, stream_),
+                   error))
+          return false;
+      }
+    }
     if (!Check(hipMemcpyAsync(base.tokens, tokens_host_,
                               rows * sizeof(std::int32_t),
                               hipMemcpyHostToDevice, stream_),
@@ -974,11 +1060,32 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
         return false;
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
-        const auto n = static_cast<std::uint32_t>(item.tokens.size());
-        UseScratch(RowScratch(base, offsets[i]));
-        if (!item.session->Cancelled() && c.IsPleLayer(il) &&
-            !Ple(l, *item.session, n, s_.res, item.speculative, error, true)) {
-          return false;
+        if (item.session->Cancelled() || !c.IsPleLayer(il))
+          continue;
+        auto& session = *item.session;
+        const auto segs = segments_of(i);
+        for (std::size_t s = 0; s < segs.size(); ++s) {
+          UseScratch(RowScratch(base, segs[s].offset));
+          bool ok = true;
+          if (s == 0) {
+            ok = Ple(l, session, segs[s].count, s_.res, item.speculative, error,
+                     true);
+          } else {
+            // The segment starts from the history the previous one left;
+            // keep it for a rollback to this segment's first row.
+            auto& seg = wide_segments_[s - 1];
+            if (!Check(hipMemcpyAsync(seg.ple_start, session.ple_history_,
+                                      std::size_t{c.PleConvHistory()} *
+                                          c.HcDim() * sizeof(float),
+                                      hipMemcpyDeviceToDevice, stream_),
+                       error))
+              return false;
+            std::swap(session.ple_snapshots_, seg.ple);
+            ok = Ple(l, session, segs[s].count, s_.res, true, error, true);
+            std::swap(session.ple_snapshots_, seg.ple);
+          }
+          if (!ok)
+            return false;
         }
       }
       UseScratch(base);
@@ -1029,7 +1136,37 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
             return false;
           continue;
         }
-        if (l.linear) {
+        if (l.linear && wide) {
+          const auto segs = segments_of(i);
+          const std::size_t conv_bytes = std::size_t{c.ssm_conv_kernel - 1} *
+                                         c.SsmConvChannels() * sizeof(float);
+          const std::size_t state_bytes = std::size_t{c.ssm_num_v_heads} *
+                                          c.ssm_head_dim * c.ssm_head_dim *
+                                          sizeof(float);
+          for (std::size_t s = 0; s < segs.size(); ++s) {
+            UseScratch(RowScratch(base, segs[s].offset));
+            auto state = session.linear_[il];
+            if (s != 0) {
+              // Keep the segment's starting state for a rollback that keeps
+              // every row before it; its own rows snapshot the later ones.
+              auto& seg = wide_segments_[s - 1];
+              if (!Check(hipMemcpyAsync(seg.conv_start[il], state.conv_state,
+                                        conv_bytes, hipMemcpyDeviceToDevice,
+                                        stream_),
+                         error) ||
+                  !Check(hipMemcpyAsync(seg.state_start[il], state.state,
+                                        state_bytes, hipMemcpyDeviceToDevice,
+                                        stream_),
+                         error))
+                return false;
+              state.conv_snapshots = seg.conv[il];
+              state.state_snapshots = seg.state[il];
+            }
+            if (!LinearAttention(l, state, s_.mixed, s_.block_out,
+                                 segs[s].count, true, error, true, false))
+              return false;
+          }
+        } else if (l.linear) {
           if (batch_gdn) {
             const auto& state = session.linear_[il];
             batch_gdn_host_[il * kBatchSessions + i] = {
@@ -1048,6 +1185,23 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
                                       s_.block_out, n, item.speculative, error,
                                       true, false)) {
             return false;
+          }
+        } else if (wide) {
+          for (const auto& seg : segments_of(i)) {
+            auto seg_view = RowScratch(base, seg.offset);
+            if (l.attn_qkv.empty()) {
+              seg_view.qg = base.qg + static_cast<std::size_t>(seg.offset) * 2 *
+                                          c.AttentionQDim();
+            }
+            UseScratch(seg_view);
+            const auto pool = seg.sparse && seg.complete > seg.blocks
+                                  ? seg.complete - seg.blocks
+                                  : 0;
+            if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out,
+                           seg.count, seg.position, seg.first_block, seg.start,
+                           pool, session.max_context_, seg.sparse, error, false,
+                           true, false))
+              return false;
           }
         } else {
           const auto pool = sparse[i] && complete[i] > session.blocks_
@@ -1132,28 +1286,32 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     }
   }
   batch_rows_ = rows;
+  wide_rows_ = wide ? rows : 0;
   return true;
 }
 
 bool Executor::SelectBatchLogits(std::uint32_t offset, std::uint32_t rows,
                                  float* logits, std::string* error) const {
-  if (rows == 0 || rows > options_.max_logit_rows || offset > batch_rows_ ||
-      rows > batch_rows_ - offset) {
+  if (rows == 0 || rows > std::max(options_.max_logit_rows, wide_rows_) ||
+      offset > batch_rows_ || rows > batch_rows_ - offset) {
     return Fail(error, "logit rows outside the completed decode batch");
   }
-  const std::size_t count =
-      static_cast<std::size_t>(rows) * config().vocab_size;
-  selected_logits_ =
-      batch_logits_ + static_cast<std::size_t>(offset) * config().vocab_size;
-  if (logits != nullptr) {
-    if (!Check(hipMemcpyAsync(logits_host_, selected_logits_,
+  const std::size_t vocab = config().vocab_size;
+  selected_logits_ = batch_logits_ + static_cast<std::size_t>(offset) * vocab;
+  // The pinned staging buffer holds max_logit_rows rows; a wide
+  // verification's rows download through it in pieces.
+  for (std::uint32_t first = 0; logits != nullptr && first < rows;
+       first += options_.max_logit_rows) {
+    const std::size_t count =
+        std::min(options_.max_logit_rows, rows - first) * vocab;
+    if (!Check(hipMemcpyAsync(logits_host_, selected_logits_ + first * vocab,
                               count * sizeof(float), hipMemcpyDeviceToHost,
                               stream_),
                error) ||
         !Check(hipStreamSynchronize(stream_), error)) {
       return false;
     }
-    std::copy_n(logits_host_, count, logits);
+    std::copy_n(logits_host_, count, logits + first * vocab);
   }
   return true;
 }

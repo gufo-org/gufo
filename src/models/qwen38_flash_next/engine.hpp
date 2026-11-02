@@ -340,6 +340,13 @@ private:
   MtpLengthController draft_length_;
   /// Index of tokens_ for prompt lookup (single-session MTP drafts).
   speculative::PromptLookup<> lookup_;
+  /// Verification rows (anchor included) the next copy-only cycle of a
+  /// greedy session decoding alone may use; 0 before the first. A copy
+  /// accepted whole at this width doubles it up to max_copy_rows(); any
+  /// rejected copy returns it to the ordinary verifier width.
+  std::uint32_t copy_rows_{0};
+  /// Whole copies accepted in a row at copy_rows_ (two widen it).
+  std::uint32_t copy_streak_{0};
   SpeculativeStats stats_;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(
