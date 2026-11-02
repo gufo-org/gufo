@@ -37,6 +37,10 @@ std::atomic<int> fail_populate_after{-1};
 std::atomic<void*> failed_page{};
 bool pins_denied{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
+// When set, hipMemGetInfo reports this heap; registrations lower it while
+// heap_charges_registration is set, as on hosts that charge pinned pages.
+std::optional<std::size_t> fake_heap_free;
+bool heap_charges_registration{}, fail_heap_query{};
 int copies_before_failure{};
 thread_local bool fail_stream_new{}, observe_allocation_cleanup{};
 std::atomic<unsigned> allocation_cleanup_drains{};
@@ -83,7 +87,21 @@ hipError_t __wrap_hipMalloc(void** p, std::size_t n) {
 hipError_t __real_hipHostRegister(void*, std::size_t, unsigned);
 hipError_t __wrap_hipHostRegister(void* p, std::size_t n, unsigned flags) {
   ++allocations;
-  return fail_alloc ? hipErrorOutOfMemory : __real_hipHostRegister(p, n, flags);
+  if (fail_alloc)
+    return hipErrorOutOfMemory;
+  if (fake_heap_free && heap_charges_registration)
+    *fake_heap_free -= std::min(*fake_heap_free, n);
+  return __real_hipHostRegister(p, n, flags);
+}
+hipError_t __real_hipMemGetInfo(std::size_t*, std::size_t*);
+hipError_t __wrap_hipMemGetInfo(std::size_t* free, std::size_t* total) {
+  if (fail_heap_query)
+    return hipErrorInvalidValue;
+  if (!fake_heap_free)
+    return __real_hipMemGetInfo(free, total);
+  *free = *fake_heap_free;
+  *total = std::size_t{128} << 30;
+  return hipSuccess;
 }
 hipError_t __real_hipMallocManaged(void**, std::size_t, unsigned);
 hipError_t __wrap_hipMallocManaged(void** p, std::size_t n, unsigned flags) {
@@ -571,6 +589,63 @@ void OnDemandBacking() {
   exact.GrowAhead(std::numeric_limits<std::size_t>::max());
   exact.WaitForGrowth();
   assert(exact.BlockCount() == many);
+}
+void HeapReserveSegments() {
+  // #781: 2.9 GiB of heap free, where registered pages are not charged.
+  constexpr std::uint64_t tight_heap = 2912776192ull;
+  assert(hip::RegistrationKeepsReserve(tight_heap, tight_heap));
+  assert(!hip::RegistrationKeepsReserve(tight_heap, tight_heap - 4096));
+  assert(hip::RegistrationKeepsReserve(hip::kDispatchReserve + 100,
+                                       hip::kDispatchReserve));
+  assert(!hip::RegistrationKeepsReserve(hip::kDispatchReserve + 100,
+                                        hip::kDispatchReserve - 1));
+  // Heap freed concurrently does not refuse a registration.
+  assert(hip::RegistrationKeepsReserve(tight_heap, tight_heap + 4096));
+  // A charge of at least half the segment marks a charging host; smaller
+  // drops and growth are taken as concurrent allocations.
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  assert(hip::RegistrationCharged(gib, 10 * gib, 9 * gib));
+  assert(hip::RegistrationCharged(gib, 10 * gib, 10 * gib - gib / 2));
+  assert(!hip::RegistrationCharged(gib, 10 * gib, 10 * gib - gib / 2 + 1));
+  assert(!hip::RegistrationCharged(gib, tight_heap, tight_heap));
+  assert(!hip::RegistrationCharged(gib, tight_heap, tight_heap + 4096));
+  // A segment is kept unless its own registration took the device heap below
+  // the dispatch reserve, however little of the heap was free before (#781).
+  constexpr std::size_t capacity = 4 * block_bytes + metadata;
+  cache::ResourceLedger ledger(Limits(capacity));
+  std::vector<std::array<std::size_t, 3>> asked;
+  hip::CommittedBackingPool pool(
+      ledger, {capacity,
+               block_bytes,
+               metadata,
+               block_bytes,
+               {},
+               [&](std::size_t bytes, std::size_t before, std::size_t after) {
+                 asked.push_back({bytes, before, after});
+                 return hip::RegistrationKeepsReserve(before, after);
+               }});
+  const auto physical = allocations.load();
+  constexpr std::size_t tight = std::size_t{1} << 30;
+  fake_heap_free = tight;
+  auto kept = pool.TryAcquire(Category::kPrivateState);
+  assert(kept && pool.BlockCount() == 1 && allocations == physical + 1);
+  assert(asked.size() == 1 &&
+         asked.back() == (std::array{block_bytes, tight, tight}));
+  heap_charges_registration = true;
+  assert(!pool.TryAcquire(Category::kPrivateState));
+  assert(pool.BlockCount() == 1 && allocations == physical + 2);
+  assert(asked.size() == 2 && asked.back()[2] == tight - block_bytes);
+  assert(ledger.Snapshot().total_bytes == metadata + block_bytes);
+  fake_heap_free = hip::kDispatchReserve + block_bytes;
+  auto charged = pool.TryAcquire(Category::kPrivateState);
+  assert(charged && pool.BlockCount() == 2 &&
+         *fake_heap_free == hip::kDispatchReserve);
+  fail_heap_query = true;
+  assert(!pool.TryAcquire(Category::kPrivateState));
+  assert(pool.BlockCount() == 2 && allocations == physical + 3);
+  fail_heap_query = false;
+  heap_charges_registration = false;
+  fake_heap_free.reset();
 }
 void CaptureCapacity() {
   constexpr std::size_t pages = 6, headroom = 16 << 10;
@@ -1100,6 +1175,7 @@ int main(int argc, char** argv) {
   GroupedBacking();
   CheckpointLifetimes();
   OnDemandBacking();
+  HeapReserveSegments();
   CaptureCapacity();
   Transfers();
   BoundTransfers();
