@@ -1,0 +1,61 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+-- The C compiler identification is GNU 16.2.0
+-- The CXX compiler identification is GNU 16.2.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /nix/store/r5ri78axx1qggkjq3vawywlzglg70b5w-gcc-wrapper-16.2.0/bin/gcc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /nix/store/r5ri78axx1qggkjq3vawywlzglg70b5w-gcc-wrapper-16.2.0/bin/g++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- gufo: compiling C and CXX through /nix/store/j0yrxqvaka4xky3xca88jbnwzbp42lil-ccache-4.14.1/bin/ccache
+-- Found ICU: /nix/store/i8jf1bw06qbvb9w7apkz1zy796fnyizw-icu4c-78.3-dev/include (found version "78.3") found components: uc i18n
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Found CURL: /nix/store/p9i1b7jgfj4fl5bx557jnwbdsafl434i-curl-8.22.0/lib/libcurl.so (found version "8.22.0")
+-- Found ZLIB: /nix/store/ji36842higmp6b06hbbpmzbd59g1c07c-zlib-1.3.2/lib/libz.so (found version "1.3.2")
+-- Found PNG: /nix/store/f0x9fvndvxhjcr6ggbl0di49ba5alfzm-libpng-apng-1.6.59/lib/libpng.so (found version "1.6.59")
+-- Found JPEG: /nix/store/aliq9nclm4w66msq9mkjhhv2lg98al2c-libjpeg-turbo-3.2.0/lib/libjpeg.so (found version "62")
+-- Found PkgConfig: /nix/store/s70gz6bvz74c36xigh5m2ab2cqli08cv-pkg-config-wrapper-0.29.2/bin/pkg-config (found version "0.29.2")
+-- Checking for module 'libwebp'
+--   Found libwebp, version 1.6.0
+-- Checking for module 'sndfile'
+--   Found sndfile, version 1.2.2
+Package flac was not found in the pkg-config search path.
+Perhaps you should add the directory containing `flac.pc'
+to the PKG_CONFIG_PATH environment variable
+Package 'flac', required by 'sndfile', not found
+Package flac was not found in the pkg-config search path.
+Perhaps you should add the directory containing `flac.pc'
+to the PKG_CONFIG_PATH environment variable
+Package 'flac', required by 'sndfile', not found
+Package flac was not found in the pkg-config search path.
+Perhaps you should add the directory containing `flac.pc'
+to the PKG_CONFIG_PATH environment variable
+Package 'flac', required by 'sndfile', not found
+Package flac was not found in the pkg-config search path.
+Perhaps you should add the directory containing `flac.pc'
+to the PKG_CONFIG_PATH environment variable
+Package 'flac', required by 'sndfile', not found
+-- Checking for module 'soxr'
+--   Found soxr, version 0.1.3
+-- Checking for modules 'libavformat;libavcodec;libavutil;libswscale'
+--   Found libavformat, version 63.1.102
+--   Found libavcodec, version 63.1.102
+--   Found libavutil, version 61.1.102
+--   Found libswscale, version 10.1.102
+-- Found OpenSSL: /nix/store/lazac5vw20j0pyahzbaxz8z8hyf7m9zf-openssl-3.5.9/lib/libcrypto.so (found version "3.5.9") found components: Crypto
+-- gufo: unshipped discovered extension template_model
+-- gufo: extension mode=explicit; included=[template_model]; excluded=[deepseek_v4_flash;embedding_gemma2;minimax_h3;qwen;qwen38_flash_next;qwen3_asr;qwen3_tts;qwen_image_21]
+-- Found OpenMP_C: -fopenmp (found version "5.2")
+-- Found OpenMP_CXX: -fopenmp (found version "5.2")
+-- Found OpenMP: TRUE (found version "5.2")
+-- Configuring done (2.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/gufo-card26-build

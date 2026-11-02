@@ -383,6 +383,17 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
             path.chmod(path.stat().st_mode | stat.S_IWUSR)
         return external
 
+    def test_external_template_installs_license(self):
+        external = self.template()
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external}")
+        self.run_fixture()
+        prefix = self.source / "installed"
+        result = subprocess.run(["cmake", "--install", str(self.build), "--prefix", str(prefix)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        notice = prefix / "share/licenses/gufo/extensions/template_model/LICENSE"
+        self.assertEqual(notice.read_bytes(), (external / "LICENSE").read_bytes())
+
     def test_external_template_public_headers(self):
         external = self.template()
         # Exercise forwarding headers with the root include absent.
