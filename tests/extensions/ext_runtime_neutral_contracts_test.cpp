@@ -190,6 +190,21 @@ void CheckModalProviders() {
          "find video provider");
 }
 
+bool ClaimIfSuffix(const std::string& path) {
+  return std::string_view(path).ends_with(".claim");
+}
+
+void CheckFirstRefusalClaim() {
+  gufo::ext::RegisterTextProvider({.id = "plain-provider"});
+  gufo::ext::RegisterTextProvider(
+      {.id = "claiming-provider", .claim_file = &ClaimIfSuffix});
+  const auto* claimed = gufo::ext::ClaimTextProviderForFile("/models/x.claim");
+  Expect(claimed != nullptr && claimed->id == "claiming-provider",
+         "first-refusal claim selects the opted-in provider");
+  Expect(gufo::ext::ClaimTextProviderForFile("/models/x.gguf") == nullptr,
+         "no provider claims a path that none accepts");
+}
+
 }  // namespace
 
 int main() {
@@ -200,5 +215,6 @@ int main() {
   CheckExtensionApiVersion();
   CheckPlatformLeaves();
   CheckModalProviders();
+  CheckFirstRefusalClaim();
   return failures == 0 ? 0 : 1;
 }

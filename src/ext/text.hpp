@@ -759,10 +759,18 @@ using TextChatDriver =
     int (*)(const TextPromptOptions& options, const core::GgufReader& reader,
             std::chrono::steady_clock::time_point load_start);
 
+using TextFileClaim = bool (*)(const std::string& model_path);
+
 struct TextProvider {
   std::string id;
   TextProbe probe = nullptr;
   TextProbeGguf probe_gguf = nullptr;
+  /// Optional first-refusal claim on the raw artifact path, consulted
+  /// before core opens or inspects the file. A claiming provider owns
+  /// loading the file end to end (including GGUF layouts the core loader
+  /// rejects) and must not rely on a core-provided reader: runners and
+  /// drivers created for a claimed file receive an empty `reader`.
+  TextFileClaim claim_file = nullptr;
   TextRunnerFactory create = nullptr;
   TextBenchDriver bench_driver = nullptr;
   TextPromptDriver prompt_driver = nullptr;
@@ -774,6 +782,10 @@ void RegisterTextProvider(TextProvider provider);
 const TextProvider* FindTextProvider(std::string_view id);
 const TextProvider* ProbeTextProvider(std::string_view model_root);
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader);
+/// First-refusal claim over raw artifact paths, consulted before core
+/// opens a file. Returns the first provider whose optional claim_file
+/// callback accepts the path, or nullptr when no provider claims it.
+const TextProvider* ClaimTextProviderForFile(const std::string& model_path);
 
 void RegisterToolDialect(ToolDialect dialect);
 /// The registered dialect with this identity, or null.

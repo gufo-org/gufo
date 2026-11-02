@@ -272,13 +272,17 @@ bool InferenceBackend::load(
     TextRunnerRamCacheOptions ram_cache_config, bool enable_yarn,
     const PrepareRunnerOptions& prepare_runner_options) {
   std::string load_error;
-  auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
-  if (reader_owner == nullptr) {
-    SetError(error, "Failed to open GGUF: " + load_error);
-    return false;
+  std::shared_ptr<const core::GgufReader> reader;
+  const auto* provider = ext::ClaimTextProviderForFile(model_path);
+  if (provider == nullptr) {
+    auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
+    if (reader_owner == nullptr) {
+      SetError(error, "Failed to open GGUF: " + load_error);
+      return false;
+    }
+    reader = std::move(reader_owner);
+    provider = ext::ProbeTextProvider(*reader);
   }
-  const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
-  const auto* provider = ext::ProbeTextProvider(*reader);
   if (provider == nullptr || provider->create == nullptr) {
     SetError(error, "No text provider found for model architecture");
     return false;

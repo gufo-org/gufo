@@ -233,6 +233,15 @@ std::string TextModelRunner::ToolDialectId() const {
   return std::string(BuiltinToolDialectId(ToolFormat()));
 }
 
+const TextProvider* ClaimTextProviderForFile(const std::string& model_path) {
+  for (const auto& provider : g_text_providers) {
+    if (provider.claim_file != nullptr && provider.claim_file(model_path)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
 void RegisterToolDialect(ToolDialect dialect) {
   using Format = sampling::JsonConstraint::ToolFormat;
   if (dialect.id.empty())

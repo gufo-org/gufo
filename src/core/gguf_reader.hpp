@@ -178,6 +178,11 @@ public:
   GgufReader& operator=(GgufReader&& other) noexcept;
 
   /// Memory-maps a .gguf file from disk and parses metadata and tensor headers.
+  /// A valid but empty read-only view: no metadata, no tensors, no mapped
+  /// regions. Lets call sites that hold a reference express "no core-loaded
+  /// file", e.g. a model claimed by an extension before core parsing.
+  static const GgufReader& Empty();
+
   [[nodiscard]] static std::unique_ptr<GgufReader> OpenFile(
       const std::filesystem::path& path, std::string* error_msg = nullptr);
 

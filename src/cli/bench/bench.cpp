@@ -327,6 +327,12 @@ int RunBench(std::span<const char* const> args) {
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  if (const auto* claimed = ext::ClaimTextProviderForFile(opt.model_path);
+      claimed != nullptr && claimed->bench_driver != nullptr) {
+    return claimed->bench_driver(opt, nullptr, model_load_start);
+  }
   std::string err;
   auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {

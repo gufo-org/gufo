@@ -58,6 +58,11 @@ bool ReadString(const std::uint8_t* data, std::size_t size, std::size_t& offset,
 
 GgufReader::~GgufReader() = default;
 
+const GgufReader& GgufReader::Empty() {
+  static const GgufReader empty;
+  return empty;
+}
+
 GgufReader::GgufReader(GgufReader&& other) noexcept
     : data_(other.data_),
       size_(other.size_),
