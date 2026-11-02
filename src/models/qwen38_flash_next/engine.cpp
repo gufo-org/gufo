@@ -23,15 +23,12 @@ namespace gufo::models::qwen38_flash_next {
 namespace {
 
 // gfx1151, served repository prompts: 4096-token chunks prefill 24K-102K
-// tokens 6-11% faster than 2048 (pp4096 +5% at d0, +6% at d32K). 16,384
-// rows give each of the 512 routed experts about 320 rows instead of 80, so
-// the gate/up and down tiles decode each expert's weights for far more
-// tokens: 26.5K-token HTTP prompts +3%, about 4 GiB more scratch. The dense
-// GEMMs launch their tiles in 4,096-row groups (GroupedRasterTile) so their
-// activations stay cached. Each chunk's n-gram gather grows with it;
-// next-chunk prefetch overlaps that read. Prefill logits do not depend on
+// tokens 6-11% faster than 2048 (pp4096 +5% at d0, +6% at d32K). 16,384-row
+// passes prefill long prompts 3-5% faster, but their scratch holds 4.1 GiB
+// more device memory from load (#952). Each chunk's n-gram gather grows with
+// it; next-chunk prefetch overlaps that read. Prefill logits do not depend on
 // the chunk size (pre-budget queries always take the dense attention tiles).
-constexpr std::uint32_t kPrefillChunkTokens = 16384;
+constexpr std::uint32_t kPrefillChunkTokens = 4096;
 // A prompt ending this close past a chunk finishes in that chunk: a separate
 // tail pass costs about as much as this many more chunk rows.
 constexpr std::uint32_t kPrefillTailTokens = 128;
