@@ -46,6 +46,15 @@ if (ENGINE_ENABLE_HIP)
       select_ops snapshot_copy verification_sampling)
     add_qwen38_flash_next_test(${name} gufo_qwen38_flash_next "hip;gpu;gfx1151")
   endforeach()
+  # Post-migration the kernels live in the model's `_hip` extension target,
+  # and static-library PRIVATE edges carry no include directories: HIP tests
+  # must link it directly and pull the ROCm headers through hip::host.
+  foreach(name IN ITEMS mtp_ops blaslt_ops hc_mix_ops hc_route_ops gdn_ops
+      attention_ops moe_epilogue_ops moe_ids_ops projection_ops routed_wmma_ops
+      select_ops snapshot_copy verification_sampling)
+    target_link_libraries(qwen38_flash_next_${name}_test PRIVATE
+      gufo_qwen38_flash_next_hip gufo_qwen_vision hip::host)
+  endforeach()
   # The rope phase and RMS checks compare against the scalar CPU oracle.
   target_link_libraries(qwen38_flash_next_attention_ops_test PRIVATE
     gufo_qwen38_flash_next_reference)
