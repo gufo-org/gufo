@@ -104,7 +104,10 @@ def main():
         connection_class = (http.client.HTTPSConnection if url.scheme == "https"
                             else http.client.HTTPConnection)
         connection = connection_class(url.hostname, url.port, timeout=10)
-        body, content_type, path = encode(dict(fields, steps=100, size="1024x1024"))
+        # Keep the model's valid step count: Turbo cannot request 100 steps.
+        # A full-HD request is slow enough to distinguish real cancellation
+        # from simply waiting for an eight-step generation to finish.
+        body, content_type, path = encode(dict(fields, size="1920x1088"))
         connection.request("POST", url.path.rstrip("/") + path, body,
                            {"Content-Type": content_type})
         time.sleep(0.1)

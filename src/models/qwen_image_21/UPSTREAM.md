@@ -3,6 +3,14 @@
 Native implementation of the BF16 inference graph. Python is used only for
 offline evaluation; production loads safetensors directly.
 
+Qwen-Image-2.1-Turbo additionally pins
+[`Qwen/Qwen-Image-2.1-Turbo`](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b)
+at `fc13ba1986fcb905854dc8de2f52eee395f49b5b` and Diffusers at
+`aaf57d03a3edfbd9de457d2872417a92f149a91d` for its reference. Its eight
+checkpoint `sample_sigmas` replace base dynamic shifting; the base pins and
+numerical contracts below are unchanged. See the
+[Turbo quality checks](../../../docs/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo).
+
 | Source | Pinned revision |
 | --- | --- |
 | [Qwen checkpoint](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | `b3179ad355be050328e483a9dfdd9e60cd62adfa` |

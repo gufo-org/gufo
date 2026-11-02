@@ -227,7 +227,7 @@ void ValidateRequest(const ext::ImageRequest& request) {
     throw std::invalid_argument(
         "image size must be multiples of 32, at most 4096 per side and 4 "
         "megapixels");
-  if (request.steps < 2 || request.steps > 100)
+  if (request.steps != 0 && (request.steps < 2 || request.steps > 100))
     throw std::invalid_argument("image steps must be between 2 and 100");
   if (request.images.size() > 10)
     throw std::invalid_argument(
@@ -461,7 +461,8 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     const auto quality = String(fields, "quality", "auto");
     if (quality != "auto" && quality != "standard" && quality != "high")
       throw std::invalid_argument(
-          "quality must be auto, standard or high (40 steps)");
+          "quality must be auto, standard or high; steps are "
+          "checkpoint-specific");
     if (const auto* stream = fields.find("stream");
         stream && (!stream->is_bool() || stream->as_bool()))
       throw std::invalid_argument("streaming image responses are unsupported");
@@ -501,7 +502,8 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
       generation.width = parse(std::string_view(size).substr(0, separator));
       generation.height = parse(std::string_view(size).substr(separator + 1));
     }
-    generation.steps = static_cast<int>(Number(fields, "steps", 40, 2, 100));
+    // Omitted steps keep zero so the runner applies its checkpoint default.
+    generation.steps = static_cast<int>(Number(fields, "steps", 0, 2, 100));
     std::random_device entropy;
     generation.seed =
         Number(fields, "seed",
@@ -532,7 +534,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
               << " seed=" << generation.seed << " size=" << generation.width
               << 'x' << generation.height
               << " references=" << generation.images.size()
-              << " steps=" << generation.steps
+              << " steps=" << result.metrics.steps
               << " prompt_ms=" << result.metrics.prompt_ms
               << " denoise_ms=" << result.metrics.denoise_ms
               << " vae_ms=" << result.metrics.vae_ms

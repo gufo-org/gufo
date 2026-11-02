@@ -42,6 +42,7 @@ public:
                 .vae_ms = result.metrics.vae_ms,
                 .total_ms = result.metrics.total_ms,
                 .resident_weight_bytes = result.metrics.resident_weight_bytes,
+                .steps = result.metrics.steps,
             },
     };
   }
