@@ -19,7 +19,7 @@ unit tests (including the identity goldens), CPU/hosted checks, static audits
 and formatting; their functional requirements stay recorded as deferred,
 pending evidence with exact commands — never as passes.
 
-Statuses: pending, implementing, reviewing, integrating, complete. The agent
+Statuses: pending, implementing, reviewing, integrating, complete, won't do. The agent
 orchestrating this work records agent names, review findings, their disposition,
 commands and retained evidence in the execution record. Splitting a card further
 is allowed; dropping a requirement or replacing a gate with weaker evidence is
@@ -132,9 +132,9 @@ the current implementation milestone stops after Card 14.
 | 24 | 11; 23 | [Prove capability extensibility with second providers](cards/24-second-provider-conformance.md) | implementing |
 | 25 | 11b; 24 | [Generate Nix serving arguments and validation](cards/25-generated-serve-module.md) | implementing |
 | 26 | distribution/conformance; 25 | [Complete distribution recipes and conformance policy](cards/26-distribution-and-policy.md) | pending |
-| 27 | success criteria; 26 | [Audit every RFC success criterion](cards/27-final-requirements-audit.md) | pending |
-| 28 | 12 preparation; 27 | [Pin external compatibility fixtures and stability evidence](cards/28-external-compatibility-ledger.md) | pending |
-| 29 | 12 graduation; 28 | [Graduate the extension API to 1.0](cards/29-api-one-graduation.md) | pending |
+| 27 | success criteria; 26 | [Audit every RFC success criterion](cards/27-final-requirements-audit.md) | won't do |
+| 28 | 12 preparation; 27 | [Pin external compatibility fixtures and stability evidence](cards/28-external-compatibility-ledger.md) | won't do |
+| 29 | 12 graduation; 28 | [Graduate the extension API to 1.0](cards/29-api-one-graduation.md) | won't do |
 
 ## Execution records
 
@@ -404,6 +404,8 @@ GPU/CPU builds, `lfm3_config_test`, `lfm3_ops_test`, `lfm3_session_test`, CPU vs
 `lfm3_probe`, CLI `prompt`/`bench`, and live `gufo serve llm` HTTP conformance.
 Non-text second providers and the full exclusion matrix remain pending.
 
+### Cards 27–29
 
-
-
+Won't do by user decision (2026-11-02): the final audit, external compatibility
+ledger and API 1.0 graduation add no functionality. Nothing was executed; no
+audit, compatibility pin or 1.0 criterion is claimed. The API stays 0.x.
