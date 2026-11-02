@@ -386,7 +386,7 @@ void TestValidation(const std::filesystem::path& root) {
            {}, "multipart/form-data; boundary=\"gufo-openai-video-boundary\"");
   Check(multipart.status == 202,
         "OpenAI-style multipart text-to-video request is admitted");
-  runner.WaitForCalls(2);
+  runner.WaitForCalls(3);
   Check(runner.latest().parameters.preset == "fast-384",
         "multipart request preserves the selected H3 mode");
 
