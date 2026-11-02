@@ -1,8 +1,9 @@
 # Card 28: Pin external compatibility fixtures and stability evidence
 
-Status: **pending**. RFC step and dependencies: **12 preparation; 27**.
+Status: **won't do**. RFC step and dependencies: **12 preparation; 27**.
 
-Future scope; do not execute during the cards 01–14 milestone.
+Won't do by user decision (2026-11-02): this card adds no functionality.
+Nothing was executed and none of its definition of done is claimed.
 
 Navigation: [index](../CARDS.md) · [workflow and validation conventions](README.md) · [RFC](../RFC.md).
 
@@ -37,4 +38,4 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+Not executed (won't do, 2026-11-02).
