@@ -269,6 +269,10 @@ public:
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
+  /// Commits the in-pass checkpoint arena on first use. False when the device
+  /// lacks headroom for it; the caller then captures at a pass boundary.
+  [[nodiscard]] bool ReservePrefillCheckpoint(const Session& session) const;
+  /// Requires ReservePrefillCheckpoint.
   [[nodiscard]] std::unique_ptr<PrefillCheckpoint> MakePrefillCheckpoint(
       Session& session, std::span<const std::int32_t> tokens,
       std::uint32_t prefix, std::string* error_msg) const;

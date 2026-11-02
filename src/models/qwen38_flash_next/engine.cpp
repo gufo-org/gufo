@@ -719,19 +719,26 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
                               ? exec.max_batch()
                               : model_->PrefillCapacity();
     std::size_t n = std::min<std::size_t>(capacity, remaining);
+    const bool captures = (checkpoint || consume) && boundary > tokens_.size();
     // Extended-context attention can fall back from WMMA to the per-token
     // kernel. Its checkpoint must end a pass: the fused in-pass path requires
     // WMMA for both query groups. Preserve ordinary split-pass arithmetic on
     // either side of the boundary. Use the actual launch capability rather
     // than the model's independently configured native context length.
-    if ((checkpoint || consume) && boundary > tokens_.size() &&
-        boundary < tokens_.size() + n &&
+    if (captures && boundary < tokens_.size() + n &&
         tokens_.size() + n >
             rocm::WmmaCausalAttentionContextLimit(
                 model_->config().num_heads, model_->config().num_kv_heads,
                 model_->config().head_dim, model_->config().compress_ratio)) {
       n = boundary - tokens_.size();
     }
+    // Without device room for the checkpoint arena, end the pass at the
+    // boundary and capture the live session there instead: split-pass rows
+    // are the same as in-pass rows.
+    const bool live = captures && boundary <= tokens_.size() + n &&
+                      !exec.ReservePrefillCheckpoint(*session_);
+    if (live)
+      n = boundary - tokens_.size();
     const auto chunk = tokens.subspan(off, n);
     if (MtpEnabled() && !tokens_.empty() &&
         !DraftCatchUp(chunk[0], false, error_msg)) {
@@ -740,8 +747,7 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     const auto mode = prefill ? rocm::Executor::ForwardMode::kPrefill
                               : rocm::Executor::ForwardMode::kDecode;
     std::unique_ptr<rocm::PrefillCheckpoint> capture;
-    if ((checkpoint || consume) && boundary > tokens_.size() &&
-        boundary <= tokens_.size() + n) {
+    if (captures && !live && boundary <= tokens_.size() + n) {
       capture = exec.MakePrefillCheckpoint(
           *session_, chunk,
           static_cast<std::uint32_t>(boundary - tokens_.size()), error_msg);
@@ -763,15 +769,17 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
         tokens_.size() + n -
         std::min<std::size_t>(kept, exec.max_speculative()));
     tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
-    if (capture) {
+    if (capture || live) {
       const auto started = std::chrono::steady_clock::now();
       if (consume) {
-        consume(*capture);
+        consume(capture.get());
       } else {
         *checkpoint = SaveSnapshotImpl(
-            *capture->state,
+            capture ? *capture->state : *session_,
             std::span<const std::int32_t>(tokens_).first(boundary),
-            capture->logits, capture->hidden_rows, error_msg,
+            capture ? std::span<const float>(capture->logits)
+                    : std::span<const float>(logits_),
+            capture ? capture->hidden_rows : KeptHiddenRows(), error_msg,
             SnapshotMode::kBorrowed);
         if (capture_ms)
           *capture_ms += std::chrono::duration<double, std::milli>(

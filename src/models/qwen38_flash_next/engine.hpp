@@ -272,7 +272,9 @@ private:
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
   void ResetImpl(bool reuse_mtp);
 
-  using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint&)>;
+  /// Consumes an in-pass checkpoint, or null when the live session is at
+  /// the boundary.
+  using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint*)>;
   bool SyncThroughComponents(std::span<const std::int32_t>, std::uint32_t,
                              const PrefillCapture&, std::string*);
 

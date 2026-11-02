@@ -435,6 +435,21 @@ int main(int argc, char** argv) {
     std::vector<std::int32_t> prompt(4095);
     for (std::size_t i = 0; i < prompt.size(); ++i)
       prompt[i] = pattern[i % pattern.size()];
+    {
+      // Before any capture commits the in-pass checkpoint arena: without
+      // device headroom for it, the checkpoint comes from a pass split at its
+      // boundary instead of failing the request (#937).
+      struct Unlimit {
+        ~Unlimit() {
+          LimitReportedDeviceFree(std::numeric_limits<std::size_t>::max());
+        }
+      } unlimit;
+      LimitReportedDeviceFree(0);
+      CheckPrefillCheckpoint(model, prompt,
+                             gufo::core::SessionMode::kAutoregressive);
+      CheckPrefillCheckpoint(model, prompt,
+                             gufo::core::SessionMode::kSpeculative);
+    }
     CheckPrefillCheckpoint(model, prompt,
                            gufo::core::SessionMode::kAutoregressive);
     CheckPrefillCheckpoint(model, prompt,
