@@ -1,0 +1,23 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+test_compile_edge_identifiers (__main__.ConfigureTests.test_compile_edge_identifiers) ... ok
+test_dependencies_and_version (__main__.ConfigureTests.test_dependencies_and_version) ... ok
+test_deterministic_generation_and_exclusions (__main__.ConfigureTests.test_deterministic_generation_and_exclusions) ... ok
+test_false_like_owners (__main__.ConfigureTests.test_false_like_owners) ... ok
+test_library_restrictions (__main__.ConfigureTests.test_library_restrictions) ... ok
+test_names_and_collisions (__main__.ConfigureTests.test_names_and_collisions) ... ok
+test_nul_metadata (__main__.ConfigureTests.test_nul_metadata) ... ok
+test_options (__main__.ConfigureTests.test_options) ... ok
+test_registry_target_contracts (__main__.ConfigureTests.test_registry_target_contracts) ... ok
+test_required_fields (__main__.ConfigureTests.test_required_fields) ... ok
+test_reserved_entries (__main__.ConfigureTests.test_reserved_entries) ... ok
+test_serving_metadata (__main__.ConfigureTests.test_serving_metadata) ... ok
+test_target_conditions (__main__.ConfigureTests.test_target_conditions) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 12.755s
+
+OK

@@ -15,6 +15,25 @@ SURFACE = "include/gufo/ext/SURFACE"
 SERIES = "include/gufo/ext/api-series.json"
 RECORDS = "include/gufo/ext/changes"
 VERSION = "include/gufo/ext/version.hpp"
+# One-time normalization of the original records to descriptive names/headings.
+# Bodies are preserved; the baseline no longer hardcodes a revision floor.
+LEGACY_RECORD_NAMES = {
+    '0': ('baseline', 'Source API baseline'),
+    '1': ('extension-provenance', 'Extension provenance and excluded metadata'),
+    '2': ('public-forwarding-headers', 'Public forwarding headers'),
+    '3': ('embedding-contracts', 'Capability-neutral embedding contracts'),
+    '4': ('metadata-only-discovery', 'Metadata-only extension discovery'),
+    '5': ('ggml-block-formats', 'GGML block format support'),
+    '6': ('media-provider-contracts', 'Media provider contracts'),
+    '7': ('sampler-logit-scratch', 'Sampler logit scratch storage'),
+    '8': ('text-generation-contracts', 'Text generation contracts'),
+    '9': ('embedding-video-token-budget', 'Embedding video token budget'),
+    '10': ('external-extension-sources', 'External extension source trees'),
+    'automatic-versioning': ('automatic-versioning', 'Automatic API revision derivation'),
+    '784-image-default-steps': ('image-default-steps', 'Image checkpoint default steps'),
+    'speech-realtime-decision': ('speech-realtime-decision', 'Realtime speech and decision contracts'),
+}
+GUIDANCE = {f"{RECORDS}/{name}" for name in ("README.md", "AGENTS.md", "CLAUDE.md")}
 CONTRACTS = {"cmake/GufoExtension.cmake", "cmake/GufoExtensionDiscovery.cmake", "schemas/extension.schema.json",
              "cmake/GufoExtensionVersion.cmake", "cmake/GufoExtensionVersion.hpp.in"}
 INCLUDE = re.compile(r'^\s*#\s*include\s*["<]([^">]+)[">]', re.M)
@@ -78,14 +97,15 @@ def record_errors(records):
 
 def computed_version(series, records):
     major, minor, base = series_values(series)
-    count = sum(path.startswith(f"{RECORDS}/{major}.{minor}/") and Path(path).name != f"{base}.md"
+    count = sum(path.startswith(f"{RECORDS}/{major}.{minor}/") and Path(path).name not in ("baseline.md", f"{base}.md")
                 for path in records)
     return f"{major}.{minor}.{base + count}"
 
 
 def records_for_root(root):
     return {p.relative_to(root).as_posix(): p.read_text()
-            for p in (root / RECORDS).rglob("*") if p.is_file()}
+            for p in (root / RECORDS).rglob("*")
+            if p.is_file() and p.relative_to(root).as_posix() not in GUIDANCE}
 
 
 def version_for_root(root):
@@ -105,7 +125,7 @@ def changelog(root):
     records = records_for_root(root)
     groups = sorted({p.split("/")[-2] for p in records}, key=lambda s: tuple(map(int, s.split('.'))), reverse=True)
     result = ["# Extension API changes", "", f"Current API: {version_for_root(root)}", "",
-              "Historical headings preserve assigned versions; other records have no revision assignment.", ""]
+              "Record names and headings describe changes; API revisions are derived from the record count.", ""]
     def order(path):
         revision = historical_revision(path, records[path])
         return (1, -revision, path) if revision is not None else (0, 0, path)
@@ -114,7 +134,7 @@ def changelog(root):
         for path in sorted(records, key=order):
             if path.split("/")[-2] != group: continue
             body = records[path].strip()
-            if historical_revision(path, records[path]) is not None:
+            if body.startswith("# "):
                 title, _, body = body.partition("\n")
                 title = title.removeprefix("# ")
             else:
@@ -127,15 +147,27 @@ def check_diff(read_old, read_new, labels, old_records=None, new_records=None):
     old_records = old_records or {}
     new_records = new_records or {}
     errors = record_errors(new_records)
+    normalized_records = set()
     for path, body in old_records.items():
         if new_records.get(path) != body:
+            legacy = LEGACY_RECORD_NAMES.get(Path(path).stem)
+            if legacy is not None and path == f"{RECORDS}/0.1/{Path(path).stem}.md":
+                name, title = legacy
+                normalized = f"{RECORDS}/0.1/{name}.md"
+                description = re.sub(r"^# [0-9]+\.[0-9]+\.[0-9]+\n\n", "", body, count=1)
+                description = description.replace('`api_version: ">= 0.1.0"`',
+                    'an `api_version` floor in the active compatibility series')
+                if (not body.startswith(f"# {title}\n\n")
+                        and new_records.get(normalized) == f"# {title}\n\n{description}"):
+                    normalized_records.add(normalized)
+                    continue
             errors.append(f"extension API change records are permanent and immutable: {path}")
     old_surface = {p for p in read_old(SURFACE).splitlines() if p and not p.startswith("#")}
     new_surface = {p for p in read_new(SURFACE).splitlines() if p and not p.startswith("#")}
     changed = sorted(path for path in old_surface | new_surface | CONTRACTS
                      if tokens(read_old(path), path) != tokens(read_new(path), path))
     series_changed = read_old(SERIES) != read_new(SERIES)
-    added = set(new_records) - set(old_records)
+    added = set(new_records) - set(old_records) - normalized_records
     if not changed and old_surface == new_surface and not series_changed and not added: return errors
     if "ext-api" not in labels: errors.append("extension API changes require the ext-api PR label")
     if not added: errors.append("extension API changes require a new permanent change record")
@@ -202,7 +234,7 @@ def main():
             return (root / path).read_text() if (root / path).is_file() else ""
         paths = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", args.base, "--", RECORDS],
                                         cwd=root, text=True).splitlines()
-        old_records = {path: old(path) for path in paths}
+        old_records = {path: old(path) for path in paths if path not in GUIDANCE}
         errors = check_diff(old, new, json.loads(args.labels), old_records, records_for_root(root))
         if errors: parser.exit(1, "\n".join(errors) + "\n")
     print(f"PASS: extension API {version}; surface ({len(closure(root))} paths)")

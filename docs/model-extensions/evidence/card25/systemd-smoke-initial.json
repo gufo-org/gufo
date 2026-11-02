@@ -1,0 +1,110 @@
+{
+  "command": "/tmp/gufo-card25-wruoc53x/bin/gufo serve --host 127.0.0.1 --port 35871 llm --model /home/mixer/gufo/models/lfm3/LFM3-1.7B-Q8_0.gguf --served-model-name card25-lfm3 --context 1024",
+  "binary_sha256": "521ce318c873eaa1b886cb914dd3f5fb7c3b05f05a8a29b458f0f71d4f4bacf1",
+  "external_revision": "fb488aebef5abc3fefcbb21ce0d53eebe8cc3e27",
+  "models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "card25-lfm3",
+        "object": "model",
+        "created": 1793600566,
+        "owned_by": "gufo",
+        "context_length": 1024,
+        "architecture": {
+          "input_modalities": [
+            "text"
+          ]
+        }
+      }
+    ]
+  },
+  "chat_status": 200,
+  "chat": {
+    "id": "chatcmpl-zxlpd2sa511f859nqldq",
+    "object": "chat.completion",
+    "created": 1793600567,
+    "model": "card25-lfm3",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "reasoning_content": "The user asks: \"What is the capital of France?\" This is a straightforward factual question. The answer: Paris.\n\nWe should respond concisely. There's",
+          "content": ""
+        },
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 17,
+      "completion_tokens": 32,
+      "total_tokens": 49,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 32
+      },
+      "cached_tokens": 0,
+      "prompt_tokens_per_second": 611.5356707497705,
+      "completion_tokens_per_second": 106.0650740518505,
+      "draft_tokens": 0,
+      "draft_tokens_accepted": 0,
+      "gufo": {
+        "cache_hit": false,
+        "cache_miss_reason": "no_checkpoint",
+        "cache_common_prefix_tokens": 0,
+        "cache_checkpoint_tokens": 0,
+        "cache_restore_bytes": 0,
+        "cache_snapshot_bytes": 3670080,
+        "cache_disk_queued_bytes": 0,
+        "cache_shared_bytes": 0,
+        "cache_restore_ms": 0,
+        "cache_snapshot_ms": 4.281327,
+        "cache_disk_enqueue_ms": 0,
+        "cache_disk_hit": false,
+        "cache_shared_prefix_snapshots": 0,
+        "cache_shared_prefix_bytes": 0,
+        "cache_shared_prefix_ms": 0,
+        "draft_rounds": 0,
+        "prefill_tokens": 17,
+        "prefill_chunks": 2,
+        "active_decode_prefill_chunks": 0,
+        "max_prefill_chunk_tokens": 13,
+        "queue_depth_at_submit": 1,
+        "client_queue_depth_at_submit": 1,
+        "resident_requests_at_admission": 1,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "queue_ms": 1.837406,
+        "shared_prefix_wait_ms": 0,
+        "prefill_ms": 27.798869,
+        "decode_ms": 301.701576,
+        "ttft_ms": 31.769558,
+        "mean_inter_token_ms": 9.497947806451613,
+        "max_inter_token_ms": 11.64147,
+        "execution_plan": "serial-c1"
+      }
+    },
+    "timings": {
+      "prompt_n": 17,
+      "prompt_ms": 27.798869,
+      "prompt_per_token_ms": 1.635227588235294,
+      "prompt_per_second": 611.5356707497705,
+      "predicted_n": 32,
+      "predicted_ms": 301.701576,
+      "predicted_per_token_ms": 9.42817425,
+      "predicted_per_second": 106.0650740518505,
+      "cache_n": 0,
+      "cache_restore_ms": 0,
+      "cache_snapshot_ms": 4.281327,
+      "cache_disk_enqueue_ms": 0,
+      "draft_rounds": 0,
+      "draft_n": 0,
+      "draft_n_accepted": 0
+    },
+    "cache_persist": true
+  },
+  "journal": "Nov 02 07:22:42 homelab systemd[7131]: Starting [systemd-run] /tmp/gufo-card25-wruoc53x/bin/gufo serve --host 127.0.0.1 --port 35871 llm --model /home/mixer/gufo/models/lfm3/LFM3-1.7B-Q8_0.gguf --served-model-name card25-lfm3 --context 1024...\nNov 02 07:22:42 homelab systemd[7131]: Started [systemd-run] /tmp/gufo-card25-wruoc53x/bin/gufo serve --host 127.0.0.1 --port 35871 llm --model /home/mixer/gufo/models/lfm3/LFM3-1.7B-Q8_0.gguf --served-model-name card25-lfm3 --context 1024.\nNov 02 07:22:42 homelab gufo[2181317]: 2026-11-02 07:22:42 [INFO] [gpu] event=queue_budget kind=llm observed=0 budget=8 expected_max=3 cap=2\nNov 02 07:22:42 homelab gufo[2181317]: 2026-11-02 07:22:42 [INFO] [loader] event=load_started kind=text artifact=/home/mixer/gufo/models/lfm3/LFM3-1.7B-Q8_0.gguf rss_mib=138 host_available_mib=113504\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [loader] event=load_phase phase=sessions rss_mib=1992 host_available_mib=111307\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [cache] event=snapshot_cache_configured sessions=1 snapshot_entries=128 capacity_bytes=34359738368 automatic_bytes=34359738368 max_bytes=112288182272 ram_cache=on\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [loader] event=structured_output_prepared vocabulary_tokens=128000 prepare_ms=14.2 rss_delta_kib=5664 rss_mib=1999 host_available_mib=111164\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [sampling] event=defaults thinking=on temperature=0 top_k=0 top_p=1 min_p=0 min_keep=0 seed=-1 repeat_penalty=1 repeat_last_n=64 frequency_penalty=0 presence_penalty=0\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [loader] event=load_completed kind=text elapsed_ms=3966 monotonic_us=422477518163 model=card25-lfm3 sessions=1 context_tokens=1024 speculative=off draft_limit=7 disk_cache=off rss_mib=1984 host_available_mib=111162 gpu_device_used_mib=6387 gpu_device_total_mib=126976\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [server] event=listening monotonic_us=422477518274 address=http://127.0.0.1:35871 auth=off max_connections=16 max_body_bytes=8388608\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [http] request=r1 event=received method=GET path=/v1/models body_bytes=0\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [http] request=r1 event=completed method=GET path=/v1/models status=200 duration_ms=0.1 outcome=completed rss_mib=1984 host_available_mib=111162\nNov 02 07:22:46 homelab gufo[2181317]: 2026-11-02 07:22:46 [INFO] [http] request=r2 event=received method=POST path=/v1/chat/completions body_bytes=163\nNov 02 07:22:47 homelab gufo[2181317]: 2026-11-02 07:22:47 [INFO] [http] request=r2 event=completed method=POST path=/v1/chat/completions status=200 duration_ms=336.0 outcome=completed prompt_tokens=17 prefill_tokens=17 generated_tokens=32 finish=length cache=miss cached_tokens=0 cache_restore_ms=0.0 queue_depth=1 resident_at_admission=1 queue_ms=1.8 shared_prefix_wait_ms=0.0 ttft_ms=31.8 prefill_tps=611.5 decode_tps=106.1 batch_width=1 plan=serial-c1 draft_accepted=0 draft_proposed=0 draft_rounds=0 cache_snapshot_bytes=3670080 cache_miss_reason=no_checkpoint common_prefix_tokens=0 nearest_checkpoint_tokens=0 rss_mib=1991 host_available_mib=111156\n"
+}

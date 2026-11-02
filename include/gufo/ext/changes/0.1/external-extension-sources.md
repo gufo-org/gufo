@@ -1,4 +1,4 @@
-# 0.1.10
+# External extension source trees
 
 Support external extension source trees and build sandboxing (Card 23):
 - Out-of-tree discovery: `GUFO_EXTENSION_DIRS` CMake discovery and Nix `extensions` argument.

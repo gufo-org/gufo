@@ -1,4 +1,4 @@
-# 0.1.9
+# Embedding video token budget
 
 Embeddings (`embeddings.hpp`): `EmbeddingVideoOptions` gains
 `max_soft_tokens`, the per-frame vision budget (default

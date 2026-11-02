@@ -54,6 +54,10 @@ gufo.override {
 }
 ```
 
+The serving helper reads the overridden package's manifests automatically; see
+[Nix serving from extension metadata](../../docs/model-extensions/serving.md)
+for provider validation, draft paths, voices and lock selection.
+
 ## Windows Packaging (ZIP Recipe)
 
 Third-party Windows extension distributions package:

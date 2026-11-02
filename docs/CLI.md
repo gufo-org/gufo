@@ -21,6 +21,9 @@ embeddings and decision models.
 `gufo serve embedding` provides [EmbeddingGemma 2 text embeddings](SERVER.md#embeddings).
 `gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
 
+For Nix command generation and deployment validation, see
+[Nix serving from extension metadata](model-extensions/serving.md).
+
 ### LLM or text
 
 **Model identity**

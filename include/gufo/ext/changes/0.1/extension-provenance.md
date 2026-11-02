@@ -1,4 +1,4 @@
-# 0.1.1
+# Extension provenance and excluded metadata
 
 Add excluded extension metadata and artifact-key diagnostics, and generated
 selection-mode provenance. Existing registration and provider contracts remain

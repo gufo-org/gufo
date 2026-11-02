@@ -92,6 +92,50 @@ class ApiPolicyTests(unittest.TestCase):
                                         ["ext-api"], records, new_records)
                 self.assertTrue(any("immutable" in e for e in errors))
 
+    def test_descriptive_record_normalization_preserves_descriptions_and_version(self):
+        old = self.fixture()
+        previous = {f"{api.RECORDS}/0.1/{name}.md": f"Original {name} description\n"
+                    for name in api.LEGACY_RECORD_NAMES}
+        normalized = {f"{api.RECORDS}/0.1/{name}.md":
+                      f"# {title}\n\n{previous[f'{api.RECORDS}/0.1/{legacy}.md']}"
+                      for legacy, (name, title) in api.LEGACY_RECORD_NAMES.items()}
+        self.assertEqual(api.computed_version(old[api.SERIES], previous),
+                         api.computed_version(old[api.SERIES], normalized))
+        self.assertEqual(api.check_diff(lambda p: old.get(p, ""), lambda p: old.get(p, ""),
+                                        [], previous, normalized), [])
+        already_normalized = normalized.copy()
+        path = f"{api.RECORDS}/0.1/automatic-versioning.md"
+        duplicate_heading = normalized | {path: "# Automatic API revision derivation\n\n" + normalized[path]}
+        errors = api.check_diff(lambda p: old.get(p, ""), lambda p: old.get(p, ""),
+                                ["ext-api"], already_normalized, duplicate_heading)
+        self.assertTrue(any("immutable" in e for e in errors))
+        normalized[f"{api.RECORDS}/0.1/automatic-versioning.md"] += "Edited history"
+        errors = api.check_diff(lambda p: old.get(p, ""), lambda p: old.get(p, ""),
+                                ["ext-api"], previous, normalized)
+        self.assertTrue(any("immutable" in e for e in errors))
+
+    def test_repository_records_have_descriptive_names_without_versions(self):
+        for path, body in api.records_for_root(ROOT).items():
+            with self.subTest(path=path):
+                self.assertRegex(Path(path).stem, r"^[a-z][a-z0-9_-]*$")
+                self.assertNotRegex(body, r"(?m)^# [0-9]+\.[0-9]+\.[0-9]+")
+
+    def test_guidance_and_agents_symlink_do_not_advance_api_revision(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            records = root / api.RECORDS
+            (records / "0.1").mkdir(parents=True)
+            (root / api.SERIES).write_text(self.fixture()[api.SERIES])
+            (records / "0.1/baseline.md").write_text("# Source API baseline\n\nBaseline")
+            (records / "README.md").write_text("Record instructions")
+            for name in ("AGENTS.md", "CLAUDE.md"):
+                if os.name != "nt":
+                    (records / name).symlink_to("README.md")
+                else:
+                    (records / name).write_text("README.md")
+            self.assertEqual(api.version_for_root(root), "0.1.0")
+            self.assertEqual(len(api.records_for_root(root)), 1)
+
     def test_wrong_series_and_base_edits_rejected(self):
         old = self.fixture(); new = old.copy()
         records = {f"{api.RECORDS}/0.2/change.md": "Wrong series"}
@@ -170,7 +214,7 @@ class ApiPolicyTests(unittest.TestCase):
             records = root / api.RECORDS / "0.1"
             records.mkdir(parents=True)
             # The baseline record preserves its description but is not a bump.
-            (records / "9.md").write_text("# 0.1.9\n\nBaseline contracts")
+            (records / "baseline.md").write_text("# Source API baseline\n\nBaseline contracts")
             (records / "first.md").write_text("First change")
             (root / "CMakeLists.txt").write_text('''cmake_minimum_required(VERSION 3.21)
 project(api_identity LANGUAGES CXX)

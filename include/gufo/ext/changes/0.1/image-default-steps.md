@@ -1,3 +1,5 @@
+# Image checkpoint default steps
+
 Image (`src/ext/image.hpp`): `ImageRequest::steps` defaults to zero, which
 selects the runner's checkpoint default; runners reject step counts their
 checkpoint does not support. The HTTP image API forwards omitted `steps` as

@@ -1,4 +1,4 @@
-# 0.1.5
+# GGML block format support
 
 Accept every GGML block format (`gguf_reader.hpp`, `experimental/ggml_dequant.hpp`):
 - `GgmlType` gains `kIQ2_XS`, `kIQ3_XXS`, `kIQ1_S`, `kIQ2_S` and `kIQ1_M`, so
