@@ -1233,6 +1233,41 @@ Use appropriate HTTP status codes:
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
 
+## llama-swap
+
+[llama-swap](https://github.com/mostlygeek/llama-swap) can launch Gufo on
+demand. Use the model readiness endpoint for its startup check:
+
+```yaml
+models:
+  gufo-model:
+    cmd: >
+      /path/to/gufo serve --host 127.0.0.1 --port ${PORT} llm
+      --model /path/to/model.gguf --served-model-name gufo-model
+    checkEndpoint: /ready
+```
+
+Replace the executable and model paths. llama-swap assigns `${PORT}` and
+waits for `/ready` to return HTTP 200 before forwarding the triggering
+request. Gufo returns 503 while the model loads. The served model name
+matches the llama-swap model ID, so clients can request `gufo-model`
+through the proxy. For long cold starts, increase llama-swap's
+`healthCheckTimeout` to cover model and disk-cache loading.
+
+To load the model without generating a response, request its readiness
+endpoint through llama-swap (assuming the router listens on port 8080):
+
+```sh
+curl --fail-with-body http://127.0.0.1:8080/upstream/gufo-model/ready
+```
+
+In llama-swap v262, the browser Load action and startup preloading trigger
+a request to the upstream root `/`. Unmodified Gufo does not serve that
+path, so these actions can report HTTP 404 after the model has become
+ready. `checkEndpoint` controls readiness polling, not the triggering
+request. Use the explicit readiness request above or a normal inference
+request to load the model.
+
 ## Authentication and Exposure
 
 The server binds to `127.0.0.1` by default. Set `--api-key` to require:
