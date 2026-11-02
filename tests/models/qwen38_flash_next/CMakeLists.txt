@@ -63,7 +63,8 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(qwen38_flash_next_snapshot_test PRIVATE
     qwen38_flash_next_test_hip ${CMAKE_DL_LIBS})
   add_executable(qwen38_flash_next_continuation_adapter_test EXCLUDE_FROM_ALL
-    continuation_adapter_test.cpp reset_submission_fault.cpp)
+    continuation_adapter_test.cpp reset_submission_fault.cpp
+    device_headroom_fault.cpp)
   target_link_libraries(qwen38_flash_next_continuation_adapter_test PRIVATE
     qwen38_flash_next_test_hip ${CMAKE_DL_LIBS})
   add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL

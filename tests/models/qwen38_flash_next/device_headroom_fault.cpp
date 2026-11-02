@@ -1,5 +1,6 @@
 // Process-local device headroom limit for snapshot storage tests. Linked only
-// into the model-local snapshot test, not the model or serving library.
+// into the model-local snapshot and adapter tests, not the model or serving
+// library.
 #include <dlfcn.h>
 #include <hip/hip_runtime.h>
 

@@ -564,9 +564,12 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     metadata.draft = native.mtp_.position;
     metadata.blocks = native.blocks_;
     metadata.draft_blocks = native.mtp_.blocks;
+    // A boundary capture stores the base a restore rebuilds from its kept
+    // rows (none without MTP), whether it reads the arena or the live session.
     metadata.hidden_base =
-        state.checkpoint ? native.position_ - state.checkpoint->hidden_rows
-                         : session.hidden_base_;
+        state.checkpoint    ? native.position_ - state.checkpoint->hidden_rows
+        : state.at_boundary ? native.position_ - session.KeptHiddenRows()
+                            : session.hidden_base_;
     metadata.residual_valid = native.mtp_.residual_valid;
     metadata.ngram = native.ngram_;
     metadata.policy = session.draft_length_.State();
