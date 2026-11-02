@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -20,6 +21,7 @@ namespace cache = gufo::cache;
 namespace sampling = gufo::sampling;
 void FailNextResetSubmission();
 void FailNextTransferWait();
+void LimitReportedDeviceFree(std::size_t bytes);
 namespace {
 void Require(bool ok, const std::string& message) {
   if (!ok)
@@ -957,6 +959,20 @@ int main(int argc, char** argv) {
     Require(sampled_tail && sampled_tail->size() < 8203, error);
     std::copy(sampled_tail->begin(), sampled_tail->end(),
               prompt.begin() + 8203 - sampled_tail->size());
+    if (!image_only && !guard_only) {
+      // Before any capture commits the in-pass checkpoint arena: without
+      // device headroom for it, the consumer reads the live session at a
+      // pass split at the boundary (#937).
+      struct Unlimit {
+        ~Unlimit() {
+          LimitReportedDeviceFree(std::numeric_limits<std::size_t>::max());
+        }
+      } unlimit;
+      LimitReportedDeviceFree(0);
+      std::cout << "device exhaustion:\n";
+      CheckInPass(model, false, prompt);
+      CheckInPass(model, true, prompt);
+    }
     if (!image_only && !in_pass_only) {
       CheckTransferAndGuardLifetime(model, false, prompt);
       CheckTransferAndGuardLifetime(model, true, prompt);
