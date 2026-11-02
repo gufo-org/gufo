@@ -1,0 +1,49 @@
+{
+  "observed_at": "2026-11-02T06:58:39.628104+00:00",
+  "images": [
+    {
+      "image": "ghcr.io/gufo-org/toolboxes/gufo-dev",
+      "tag": "edge",
+      "tag_digest": "sha256:c3bf4c5d03cd46e0943f38eeff281c54ab2eca568326bda1089cf2a12bcbe662",
+      "tag_payload_sha256": "sha256:c3bf4c5d03cd46e0943f38eeff281c54ab2eca568326bda1089cf2a12bcbe662",
+      "platform_digest": "sha256:c3bf4c5d03cd46e0943f38eeff281c54ab2eca568326bda1089cf2a12bcbe662",
+      "config_digest": "sha256:f9b1581d3a6822b121763c22a76e4dab983a1975d789477172ee607fce9a02c1",
+      "config_payload_sha256": "sha256:f9b1581d3a6822b121763c22a76e4dab983a1975d789477172ee607fce9a02c1",
+      "architecture": "amd64",
+      "os": "linux",
+      "created": "2026-11-01T11:24:57+00:00",
+      "labels": {
+        "org.gufo.engine.revision": "2e6aa96ce20a0e244561cb86915dd79260042eac",
+        "org.opencontainers.image.created": "2026-11-01T11:24:57Z",
+        "org.opencontainers.image.revision": "62d93f839ac3341e5228dbe64e14c4a6ddd27cca",
+        "org.opencontainers.image.source": "https://github.com/gufo-org/toolboxes",
+        "org.opencontainers.image.version": "edge"
+      },
+      "layer_count": 99,
+      "layer_bytes": 4395765760,
+      "runtime_executed": false
+    },
+    {
+      "image": "ghcr.io/gufo-org/toolboxes/gufo-runtime",
+      "tag": "edge",
+      "tag_digest": "sha256:92ba47700a016a645775ecb61e228a782285ccaec5bbce94446d610ad5c9b67e",
+      "tag_payload_sha256": "sha256:92ba47700a016a645775ecb61e228a782285ccaec5bbce94446d610ad5c9b67e",
+      "platform_digest": "sha256:92ba47700a016a645775ecb61e228a782285ccaec5bbce94446d610ad5c9b67e",
+      "config_digest": "sha256:d938e14320c4058e802d7e196b2e7ed5a9724d315cbf169c421c54bf7430148f",
+      "config_payload_sha256": "sha256:d938e14320c4058e802d7e196b2e7ed5a9724d315cbf169c421c54bf7430148f",
+      "architecture": "amd64",
+      "os": "linux",
+      "created": "2026-11-01T11:24:57+00:00",
+      "labels": {
+        "org.gufo.engine.revision": "2e6aa96ce20a0e244561cb86915dd79260042eac",
+        "org.opencontainers.image.created": "2026-11-01T11:24:57Z",
+        "org.opencontainers.image.revision": "62d93f839ac3341e5228dbe64e14c4a6ddd27cca",
+        "org.opencontainers.image.source": "https://github.com/gufo-org/toolboxes",
+        "org.opencontainers.image.version": "edge"
+      },
+      "layer_count": 99,
+      "layer_bytes": 1902090240,
+      "runtime_executed": false
+    }
+  ]
+}

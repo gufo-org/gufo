@@ -1,0 +1,4 @@
+build-and-push (gufo-dev)	UNKNOWN STEP	2026-11-01T11:31:19.4663292Z edge: digest: sha256:c3bf4c5d03cd46e0943f38eeff281c54ab2eca568326bda1089cf2a12bcbe662 size: 16050
+build-and-push (gufo-dev)	UNKNOWN STEP	2026-11-01T11:31:20.4766018Z sha-2e6aa96ce20a0e244561cb86915dd79260042eac: digest: sha256:c3bf4c5d03cd46e0943f38eeff281c54ab2eca568326bda1089cf2a12bcbe662 size: 16050
+build-and-push (gufo-runtime)	UNKNOWN STEP	2026-11-01T11:29:56.3443993Z edge: digest: sha256:92ba47700a016a645775ecb61e228a782285ccaec5bbce94446d610ad5c9b67e size: 16031
+build-and-push (gufo-runtime)	UNKNOWN STEP	2026-11-01T11:30:00.0431050Z sha-2e6aa96ce20a0e244561cb86915dd79260042eac: digest: sha256:92ba47700a016a645775ecb61e228a782285ccaec5bbce94446d610ad5c9b67e size: 16031

@@ -60,6 +60,11 @@ class ConfigureTests(unittest.TestCase):
             with self.subTest(option_field=field):
                 self.invalid(lambda m: m[0]["options"][0].pop(field), field)
 
+    def test_decision_capability(self):
+        manifests = copy.deepcopy(BASE)
+        manifests[0]["providers"][0]["capability"] = "decision"
+        self.configure(manifests)
+
     def test_serving_metadata(self):
         manifests = copy.deepcopy(BASE)
         provider = manifests[0]["providers"][0]
@@ -297,6 +302,13 @@ class ConfigureTests(unittest.TestCase):
 
 
 class SchemaTests(unittest.TestCase):
+    def test_decision_capability(self):
+        import jsonschema
+        decision = copy.deepcopy(BASE[0])
+        decision["providers"][0]["capability"] = "decision"
+        schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
+        jsonschema.Draft202012Validator(schema).validate(decision)
+
     def test_full_schema(self):
         import jsonschema
         schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())

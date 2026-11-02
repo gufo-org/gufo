@@ -154,7 +154,8 @@
               "speech_recognition",
               "speech_synthesis",
               "image_generation",
-              "video_generation"
+              "video_generation",
+              "decision"
             ]
           },
           "keys": {

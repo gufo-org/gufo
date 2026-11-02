@@ -49,7 +49,7 @@
     {
       "pkg_config": "libavutil",
       "nix": "ffmpeg-headless",
-      "windows": "ffmpeg[avutil]"
+      "windows": "ffmpeg"
     },
     {
       "pkg_config": "libswscale",

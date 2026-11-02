@@ -108,7 +108,7 @@ quality; successful optimizations become the default, without extra switches.
   `include/gufo/ext/changes/<major>.<minor>/` when declarations/contracts change.
   Records are permanent and immutable. CMake derives the API revision from the
   active series in `include/gufo/ext/api-series.json` plus its revision-record
-  count. The baseline's numbered record documents that revision without advancing
+  count. The `baseline.md` record documents the initial contracts without advancing
   it. Do not manually bump versions for additive changes.
   Run `python3 tools/ci/check-extension-api.py --write` after header/include
   changes; the PR diff gate also checks forwarded declarations. Before 1.0, a minor bump

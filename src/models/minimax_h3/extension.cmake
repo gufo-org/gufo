@@ -62,3 +62,7 @@ if(TARGET gufo_minimax_h3_hip)
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR})
 endif()
+
+# Install model-owned assets only when this extension is selected.
+install(FILES "${GUFO_EXTENSION_BUILD_ROOT}/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+  DESTINATION share/gufo/models/minimax_h3)

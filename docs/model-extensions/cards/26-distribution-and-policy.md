@@ -2,7 +2,7 @@
 
 Status: **pending**. RFC step and dependencies: **distribution/conformance; 25**.
 
-Future scope; do not execute during the cards 01–14 milestone.
+Implementation is underway; external runtime and native Windows validation remain open.
 
 Navigation: [index](../CARDS.md) · [workflow and validation conventions](README.md) · [RFC](../RFC.md).
 
@@ -24,7 +24,7 @@ Publish source/CMake/Nix/Windows recipes, arbitrary-native-code trust and tier p
 ## Definition of done
 
 - [ ] Recipes are reproducible, licensing/install data is complete and arbitrary-code/tier policy is explicit.
-- [ ] Conformance suites and provenance diagnostics are documented for each capability and distribution path.
+- [x] Conformance suites and provenance diagnostics are documented for each capability and distribution path.
 - [ ] Toolboxes builder/runtime and edge integration have actual external evidence or the card stays pending; no repository-only completion claim.
 
 ## Validation criteria
@@ -37,4 +37,14 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
 
 ## Execution record
 
-Pending. Record implementation, independent review and third-agent integration, finding dispositions, evidence and the closing jj commit here before advancing.
+Implemented the [extension author guide](../../extensions.md), distribution and
+support policy, conformance guidance, pinned template recipe, install auditing
+and Windows dependency preflight. Extension-owned data/licenses now follow
+extension selection. The decision capability is accepted by the metadata schema.
+
+Linux source/template and Nix template/release builds passed installed-package
+audits; focused contract and repository tests passed. See the
+[retained evidence](../evidence/card26/README.md) for outputs, hashes, limitations
+and initial failed runs. Native Windows execution, a published builder extension
+build and published lock-mode runtime checks remain open. This card is pending;
+no full model qualification or external completion is claimed.

@@ -115,3 +115,7 @@ if(TARGET gufo_deepseek_v4_flash_hip)
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
 endif()
+
+# Install model-owned assets only when this extension is selected.
+install(FILES "${GUFO_EXTENSION_BUILD_ROOT}/LICENSE.ds4"
+  DESTINATION share/licenses/gufo/third-party)

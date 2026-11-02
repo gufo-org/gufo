@@ -248,6 +248,13 @@ jobs:
           if ($env:EXTERNAL_EXTENSION_REPO) {
             $identity += "-DGUFO_EXTENSION_DIRS=$PWD/external-extension"
           }
+          $packageArgs = @('--root', "$PWD")
+          if ($env:GUFO_RELEASE_VERSION) { $packageArgs += '--from-lock' }
+          if ($env:EXTERNAL_EXTENSION_REPO) {
+            $packageArgs += @('--extension-dir', "$PWD/external-extension")
+          }
+          python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_extension_packages.py" @packageArgs
+          if ($LASTEXITCODE -ne 0) { throw 'extension dependencies are missing from the vcpkg manifest' }
           # ccache cannot cache objects that write a shared /Zi PDB: embed
           # the debug info in each object instead (/Z7).
           cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
@@ -289,6 +296,11 @@ jobs:
           $dist = "$env:RUNNER_TEMP\windows-gufo"
           $build = 'build\windows-release'
           New-Item -ItemType Directory -Force -Path $dist, "$dist\tests\fixtures", "$dist\tests\functional\fixtures" | Out-Null
+          $install = "$env:RUNNER_TEMP/gufo-installed"
+          cmake --install $build --prefix $install
+          if ($LASTEXITCODE -ne 0) { throw 'install failed' }
+          Copy-Item "$install/bin/*" $dist -Recurse -Force
+          if (Test-Path "$install/share") { Copy-Item "$install/share" $dist -Recurse }
           Copy-Item "$build\gufo.exe", "$build\*.dll", "$env:SDK_ROOT\bin\hipInfo.exe" $dist
           foreach ($dir in 'rocblas', 'hipblaslt') {
             if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
@@ -375,6 +387,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item "$bundle\gufo.exe", "$bundle\*.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $dist
           Copy-Item "$bundle/llvm-openmp-LICENSE.txt", "$bundle/llvm-openmp-version.txt" $dist
+          if (Test-Path "$bundle/share") { Copy-Item "$bundle/share" $dist -Recurse }
           if (Test-Path "$bundle/gufo-video-libraries.txt") {
             Copy-Item "$bundle/gufo-video-libraries.txt" $dist
           }

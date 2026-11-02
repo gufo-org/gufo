@@ -492,14 +492,10 @@ endif()
 
 install(TARGETS gufo DESTINATION bin)
 install(FILES
-  src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
-  DESTINATION share/gufo/models/minimax_h3)
-install(FILES
   tests/fixtures/eval/antirez-ds4.json
   DESTINATION share/gufo/eval)
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
-install(FILES src/models/deepseek_v4_flash/LICENSE.ds4 DESTINATION share/licenses/gufo/third-party)
 if (NOT WIN32)
 install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
 else()
@@ -868,6 +864,11 @@ endfunction()
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_pr_title_test.py)
   set_tests_properties(check_pr_title_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
+
+  add_test(NAME extension_distribution_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/extension_distribution_test.py)
+  set_tests_properties(extension_distribution_test PROPERTIES LABELS "cpu;repository;extensions" TIMEOUT 30)
 
   add_test(NAME generate_infrastructure_test
     COMMAND ${Python3_EXECUTABLE}
