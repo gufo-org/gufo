@@ -6,9 +6,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/sampling.hpp>
 
-#include "src/core/sampling.hpp"
-#include "src/models/qwen/vision/rope.hpp"
+#include "src/families/qwen/hip_common/rope.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 /// Model-private HIP launchers for everything outside the quantized GEMM
@@ -106,6 +106,43 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
                    std::uint32_t inject_parts, const float* gamma, float* xn,
                    void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                    std::uint32_t streams, float eps, hipStream_t stream);
+/// Operands of HcMixQ8Fused: the decode combine HcCombineQ8_1 would run
+/// (res, block_out, inject, gamma, xn, xn_q8), the next mixer's Q8_0
+/// projections with its SiluScaleQ8_1 rows (lo, lo_q8 of `lo_q8_cols`), and
+/// HcMixEpilogue's outputs; a null `inject_w` writes no inject partials.
+struct HcFusedMix {
+  const void* down;  ///< Q8_0 [rank][streams * hidden]
+  const void* up;    ///< Q8_0 [streams * hidden][rank]
+  float* res;
+  const float* block_out;
+  const float* inject;
+  std::uint32_t inject_parts;
+  const float* gamma;
+  float* xn;
+  void* xn_q8;
+  float* lo;
+  void* lo_q8;
+  std::uint32_t lo_q8_cols;
+  const float* inject_w;
+  float* mixed;
+  void* mixed_q8;     ///< optional Q8_1 rows of mixed
+  float* inject_out;  ///< HcInjectParts(hidden) partials per logit
+  std::uint32_t hidden;
+  std::uint32_t streams;
+  std::uint32_t rank;
+  float eps;
+  float scale;  ///< the SiLU input scale, 1 / streams
+};
+/// Device bytes of HcMixQ8Fused's counters and intermediates. Allocate them
+/// zeroed once; every launch leaves its counters zero again, so captured
+/// graphs replay it. Launches sharing one state must be stream-ordered.
+std::size_t HcMixQ8FusedStateBytes();
+/// A decode batch's (1..8 tokens) HcCombineQ8_1, down projection, SiLU
+/// scale, up projection and HcMixEpilogue in one launch, byte for byte their
+/// outputs (the up projection's gate rows are not stored). Only the model's
+/// 4 x 2560 streams and rank 320; false, with nothing launched, otherwise.
+bool HcMixQ8Fused(void* state, const HcFusedMix& mix, std::uint32_t n_tokens,
+                  hipStream_t stream);
 /// HcCombine writing the normalized output as F16, the width the next
 /// mixer's projection and epilogue consume on the F16 mixer input route.
 /// A non-null `xn_q8` also receives the norm quantized into the tiled Q8
@@ -283,7 +320,8 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 /// projection's F32 output over the same rows) turns it into
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
-/// or 64 for Q5_1/Q8_0.
+/// or 128 for the prefill down projection (Q5_1/Q8_0, F16 output and no
+/// `swiglu_gate`). Every tile height gives each row the same bits.
 /// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
 /// and tile widths return false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
@@ -295,7 +333,8 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
 
 /// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
 /// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
-/// projections share one launch and never materialize the gate output.
+/// projections share one launch and never materialize the gate output;
+/// every row equals the separate gate and up launches bit for bit.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,
                         std::uint32_t n_tiles, const std::int32_t* pad_bounds,
@@ -355,7 +394,9 @@ struct GdnCheckpoint {
 /// ([n_tokens-1][(kernel-1)*channels]), when populated, receive the state after
 /// each proper prefix. The live state already holds the full batch.
 /// Scratch: `conv_scratch` ((n_tokens + kernel) * channels), `qn`/`kn`
-/// (n_tokens * k_heads * d), `raw` (n_tokens * v_heads * d).
+/// (n_tokens * k_heads * d), `raw` (n_tokens * v_heads * d). The `row_split`
+/// route for 128-wide heads without snapshots (prefill) runs as one fused
+/// launch and leaves `qn`, `kn` and `raw` untouched.
 /// `qkv` rows are `qkv_stride` floats apart and `z` rows `z_stride`, so a
 /// stacked [qkv|z] projection feeds both without unpacking. A non-null
 /// `out_q8` receives the rows quantized into the W8A8 tiled layout
@@ -495,14 +536,17 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
 /// output is bitwise identical to the mask walk. Null lists use the mask walk.
 /// Complete blocks past a row's `mask_words` * 32 bits are not selected,
 /// whatever the device position; keys up to the position must exist.
+/// Rows seeing at most `dense_extent` keys ignore the mask and sweep densely,
+/// as they do without one; pass the token budget so a row's arithmetic does
+/// not depend on whether its batch crosses the budget.
 void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* mask, std::uint32_t mask_words, float* out,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                hipStream_t stream, std::uint32_t* lists = nullptr,
-               std::uint32_t* counts = nullptr,
-               std::uint32_t list_capacity = 0);
+               std::uint32_t* counts = nullptr, std::uint32_t list_capacity = 0,
+               std::uint32_t dense_extent = 0);
 
 /// Maximum visible sparse context for this WMMA geometry, or zero when the
 /// geometry is unsupported. Checkpoint planning uses the same dispatch limit.

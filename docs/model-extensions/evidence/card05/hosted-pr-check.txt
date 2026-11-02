@@ -1,0 +1,70 @@
+# nix build .#checks.x86_64-linux.pr — hosted PR check, Card 05 integration
+
+Run on 2026-10-31 from /home/mixer/gufo with `--no-link --print-build-logs`.
+Full raw logs: /tmp/card05-int/30-hosted.log, 32-hosted.log and 33-hosted.log.
+The first two attempts failed only on documentation links to files that were not
+in the Nix source snapshot yet (this file itself in attempt 2, and the new
+review/integration files in attempt 1, before `jj` had snapshotted them). They
+are kept because "a planned command is not a result" cuts both ways.
+
+## Attempt 1 — exit 1
+
+check-docs>   - docs/model-extensions/evidence/card05/README.md:5: Broken local link to non-existent file 'review-and-integration.md'
+check-docs>   - docs/model-extensions/evidence/card05/README.md:6: Broken local link to non-existent file 'review/independent-static-review.md'
+check-docs>   - docs/model-extensions/evidence/card05/README.md:7: Broken local link to non-existent file 'review/independent-execution-review.md'
+check-docs>   - docs/model-extensions/evidence/card05/README.md:95: Broken local link to non-existent file 'review-and-integration.md'
+
+## Attempt 2 — exit 1
+
+check-docs>   - docs/model-extensions/evidence/card05/review-and-integration.md:90: Broken local link to non-existent file 'hosted-pr-check.txt'
+       >   - docs/model-extensions/evidence/card05/review-and-integration.md:90: Broken local link to non-existent file 'hosted-pr-check.txt'
+
+## Attempt 3 — exit 0 (HOSTED_EXIT=0)
+
+All derivations built, including check-dependency-inventory, check-docs,
+check-format and check-pr-tests:
+
+check-docs> [check-docs] PASSED: 150 markdown files and 903 local links/anchors verified with zero broken links or invalid JSON blocks.
+check-format> PASS: Checked 725 C++ files
+
+Hosted contract suite (ctest -R over the generated gufo_pr_tests list, which now
+includes extension_discovery_test):
+64/89 Test #109: extension_runtime_test .........................   Passed    0.00 sec
+65/89 Test #110: extension_role_test ............................   Passed    0.00 sec
+66/89 Test #111: extension_cli_provenance_test ..................   Passed    0.05 sec
+67/89 Test #112: extension_discovery_test .......................   Passed   40.82 sec
+68/89 Test #113: extension_api_policy_test ......................   Passed    0.04 sec
+69/89 Test #114: extension_api_surface ..........................   Passed    0.04 sec
+70/89 Test #115: extension_metadata_test ........................   Passed   10.02 sec
+71/89 Test #116: extension_schema_test ..........................   Passed    0.11 sec
+100% tests passed out of 89
+Total Test time (real) =  94.61 sec
+
+The Card 05 lock-mode block that every hosted CPU check now requires (built
+from the filtered Nix source, then executed):
+-- gufo: extension mode=lock; included=[]; excluded=[]
+-- Build files have been written to: /build/lock-build
+{"extensionApiVersion":"0.1.1","selectionMode":"lock","builtExtensions":[],"excludedExtensions":[],"providers":[]}
+Extension selection: lock
+
+Exit status line retained verbatim: HOSTED_EXIT=0
+
+## Post-commit re-run on the committed tree (orchestrator closure)
+
+Run from /home/mixer/gufo after committing the Card 05 review-integration paths,
+so the Nix source snapshot contained every file the documentation refers to:
+`nix build .#checks.x86_64-linux.pr --no-link --print-build-logs`.
+
+    check-docs> [check-docs] PASSED: 150 markdown files and 904 local links/anchors
+                  verified with zero broken links or invalid JSON blocks.
+    check-pr> PASS: Formatting check clean
+    check-pr> PASS: Dependency inventory clean
+    check-pr> PASS: Documentation check clean
+    check-pr> PASS: Hosted CPU contract suite passed
+    check-pr> PASS: mkGufoServe CLI string check passed
+
+Only check-docs and check-pr rebuilt (the CPU compile outputs were already in the
+store), which is why this log is shorter than the attempts above. 904 links
+instead of 903 reflects the documents committed with this change.
+
+Exit status line retained verbatim: HOSTED_EXIT=0

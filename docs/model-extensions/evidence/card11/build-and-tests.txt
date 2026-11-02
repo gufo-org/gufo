@@ -1,0 +1,230 @@
+================================================================================
+Card 11: Compilations and Test Execution Log
+================================================================================
+
+1. Preset Reconfiguration (after adding include_directories(... ${CMAKE_SOURCE_DIR}/include))
+--------------------------------------------------------------------------------
+$ nix develop -c cmake --preset cpu-test
+-- gufo: compiling C and CXX through /nix/store/.../bin/ccache
+-- gufo: extension mode=discovery; included=[]; excluded=[]
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/mixer/gufo/build/cpu-test
+
+$ nix develop -c cmake --preset gpu-test
+-- gufo: compiling C and CXX through /nix/store/.../bin/ccache
+-- gufo: extension mode=discovery; included=[]; excluded=[]
+-- gufo: HIP target gfx1151
+-- Configuring done (0.3s)
+-- Generating done (0.3s)
+-- Build files have been written to: /home/mixer/gufo/build/gpu-test
+
+2. Per-Model Compilations & Unit Tests
+--------------------------------------------------------------------------------
+
+[Model 1: EmbeddingGemma]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_embedding_gemma2
+[27/28] Linking HIP static library src/models/embedding_gemma2/libgufo_embedding_gemma2.a
+Result: PASS
+
+$ nix develop -c cmake --build --preset cpu-test --target embedding_gemma2_config_test embedding_gemma2_loader_test embedding_gemma2_batch_scheduler_test embedding_gemma2_tokenizer_test embedding_gemma2_embeddings_api_test embedding_gemma2_image_processor_test embedding_gemma2_audio_processor_test embedding_gemma2_audio_decoder_test embedding_gemma2_video_processor_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/cpu-test -R '^embedding_gemma2_.*_test$' --output-on-failure
+Test project /home/mixer/gufo/build/cpu-test
+    Start 144: embedding_gemma2_config_test
+1/9 Test #144: embedding_gemma2_config_test ............   Passed    0.00 sec
+2/9 Test #145: embedding_gemma2_loader_test ............***Skipped   0.00 sec
+3/9 Test #146: embedding_gemma2_batch_scheduler_test ...   Passed    0.14 sec
+4/9 Test #147: embedding_gemma2_tokenizer_test .........***Skipped   0.00 sec
+5/9 Test #148: embedding_gemma2_embeddings_api_test ....   Passed    0.17 sec
+6/9 Test #149: embedding_gemma2_image_processor_test ...   Passed    0.34 sec
+7/9 Test #150: embedding_gemma2_audio_processor_test ...   Passed    0.01 sec
+8/9 Test #151: embedding_gemma2_audio_decoder_test .....   Passed    0.01 sec
+9/9 Test #152: embedding_gemma2_video_processor_test ...   Passed    0.68 sec
+100% tests passed out of 9
+
+$ nix develop -c ctest --test-dir build/gpu-test -R '^embedding_gemma2_.*_test$' -E 'gemm_bench' --output-on-failure
+100% tests passed out of 14
+
+[Model 2: ASR]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_qwen3_asr
+[15/16] Linking HIP static library src/models/qwen3_asr/libgufo_qwen3_asr.a
+Result: PASS
+
+$ nix develop -c cmake --build --preset gpu-test --target qwen3_asr_config_test qwen3_asr_loader_test qwen3_asr_audio_test qwen3_asr_prompt_test qwen3_asr_audio_api_test qwen3_asr_audio_encoder_hip_test qwen3_asr_text_decoder_hip_test qwen3_asr_transcription_hip_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/gpu-test -R '^qwen3_asr_.*_test$' --output-on-failure
+Test project /home/mixer/gufo/build/gpu-test
+1/8 Test #1: qwen3_asr_config_test ..............   Passed    0.06 sec
+2/8 Test #2: qwen3_asr_loader_test ..............***Skipped   0.06 sec
+3/8 Test #3: qwen3_asr_audio_test ...............***Skipped   0.06 sec
+4/8 Test #4: qwen3_asr_prompt_test ..............***Skipped   0.06 sec
+5/8 Test #5: qwen3_asr_audio_api_test ...........   Passed    0.06 sec
+6/8 Test #6: qwen3_asr_audio_encoder_hip_test ...***Skipped   0.42 sec
+7/8 Test #7: qwen3_asr_text_decoder_hip_test ....***Skipped   0.11 sec
+8/8 Test #8: qwen3_asr_transcription_hip_test ...***Skipped   0.06 sec
+100% tests passed out of 8
+
+[Model 3: TTS]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_qwen3_tts
+[56/57] Linking HIP static library src/models/qwen3_tts/libgufo_qwen3_tts.a
+Result: PASS
+
+$ nix develop -c cmake --build --preset gpu-test --target qwen3_tts_config_test qwen3_tts_loader_test qwen3_tts_tokenizer_test qwen3_tts_prompt_test qwen3_tts_audio_test qwen3_tts_audio_api_test qwen3_tts_synthesis_hip_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/gpu-test -R '^qwen3_tts_.*_test$' --output-on-failure
+1/12 Test  #79: qwen3_tts_loader_test ................***Skipped   0.06 sec
+2/12 Test  #80: qwen3_tts_audio_api_test .............   Passed    0.06 sec
+3/12 Test  #81: qwen3_tts_audio_test .................   Passed    0.06 sec
+4/12 Test  #82: qwen3_tts_config_test ................   Passed    0.06 sec
+5/12 Test  #83: qwen3_tts_tokenizer_test .............***Skipped   0.06 sec
+6/12 Test  #84: qwen3_tts_prompt_test ................   Passed    0.06 sec
+7/12 Test  #85: qwen3_tts_reference_artifacts_test ...***Skipped   0.06 sec
+8/12 Test #106: qwen3_tts_synthesis_hip_test .........***Skipped   0.06 sec
+9/12 Test #107: qwen3_tts_speech_decoder_hip_test ....***Skipped   0.04 sec
+10/12 Test #108: qwen3_tts_talker_hip_prefill_test ....***Skipped   0.05 sec
+11/12 Test #109: qwen3_tts_variant_talker_hip_test ....***Skipped   0.04 sec
+12/12 Test #110: qwen3_tts_base_encoders_hip_test .....***Skipped   0.04 sec
+100% tests passed out of 12
+
+[Model 4: Image]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_qwen_image_21 qwen_image_21_weights_test qwen_image_21_test qwen_image_21_weight_upload_test qwen_image_21_kernel_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/gpu-test -R '^qwen_image_21_.*_test$' --output-on-failure
+1/3 Test  #9: qwen_image_21_weights_test .........   Passed    0.06 sec
+2/3 Test #11: qwen_image_21_weight_upload_test ...   Passed    0.78 sec
+3/3 Test #12: qwen_image_21_kernel_test ..........   Passed    2.40 sec
+100% tests passed out of 3
+
+$ nix develop -c ctest --test-dir build/gpu-test -R '^qwen_image_21_test$' --output-on-failure
+1/1 Test #10: qwen_image_21_test ...............   Passed    0.06 sec
+100% tests passed out of 1
+
+[Model 5: H3]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_minimax_h3 minimax_h3_runtime_test minimax_h3_tokenizer_test minimax_h3_sampling_test minimax_h3_generation_test minimax_h3_media_test minimax_h3_runtime_hip_test minimax_h3_sampling_hip_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/gpu-test -R '^minimax_h3_.*_test$' --output-on-failure
+1/7 Test  #78: minimax_h3_runtime_test ..........   Passed    0.06 sec
+2/7 Test  #86: minimax_h3_tokenizer_test ........   Passed    0.07 sec
+3/7 Test  #87: minimax_h3_sampling_test .........   Passed    0.06 sec
+4/7 Test  #88: minimax_h3_generation_test .......   Passed    0.06 sec
+5/7 Test  #90: minimax_h3_media_test ............   Passed    0.22 sec
+6/7 Test #111: minimax_h3_runtime_hip_test ......***Skipped   0.06 sec
+7/7 Test #114: minimax_h3_sampling_hip_test .....   Passed    0.40 sec
+100% tests passed out of 7
+
+[Model 6: Qwen 27B]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_qwen27b qwen27b_continuation_layout_test qwen27b_continuation_identity_test qwen27b_vision_test qwen27b_target_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/gpu-test -R 'qwen27b.*test' --output-on-failure
+1/4 Test #194: qwen27b_continuation_identity_test ...   Passed    0.00 sec
+2/4 Test #196: qwen27b_vision_test ..................   Passed    0.26 sec
+3/4 Test #197: qwen27b_continuation_layout_test .....   Passed    0.05 sec
+4/4 Test #202: qwen27b_target_test ..................***Skipped   0.06 sec
+100% tests passed out of 4
+
+[Model 7: Flash-Next]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_qwen38_flash_next qwen38_flash_next_tests qwen38_flash_next_continuation_identity_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/gpu-test -R 'qwen38_flash_next' --output-on-failure
+1/22 Test #242: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+2/22 Test #243: qwen38_flash_next.config .......................   Passed    0.06 sec
+3/22 Test #244: qwen38_flash_next.continuation_layout ..........   Passed    0.06 sec
+4/22 Test #245: qwen38_flash_next.ngram ........................   Passed    0.52 sec
+5/22 Test #246: qwen38_flash_next.mtp_sampling .................   Passed    0.15 sec
+6/22 Test #247: qwen38_flash_next.rope_scaling .................   Passed    0.06 sec
+7/22 Test #248: qwen38_flash_next.rope_scaling_oracle ..........   Passed    0.06 sec
+8/22 Test #249: qwen38_flash_next.draft_vocab ..................   Passed    0.06 sec
+9/22 Test #250: qwen38_flash_next.prompt_lookup ................   Passed    0.06 sec
+10/22 Test #251: qwen38_flash_next.mtp_ops ......................   Passed    0.53 sec
+11/22 Test #252: qwen38_flash_next.blaslt_ops ...................   Passed    0.61 sec
+12/22 Test #253: qwen38_flash_next.hc_mix_ops ...................   Passed    0.45 sec
+13/22 Test #254: qwen38_flash_next.hc_route_ops .................   Passed    1.79 sec
+14/22 Test #255: qwen38_flash_next.gdn_ops ......................   Passed    0.45 sec
+15/22 Test #256: qwen38_flash_next.attention_ops ................   Passed   86.56 sec
+16/22 Test #257: qwen38_flash_next.moe_epilogue_ops .............   Passed    0.26 sec
+17/22 Test #258: qwen38_flash_next.moe_ids_ops ..................   Passed    0.16 sec
+18/22 Test #259: qwen38_flash_next.projection_ops ...............   Passed    8.81 sec
+19/22 Test #260: qwen38_flash_next.routed_wmma_ops ..............   Passed   27.74 sec
+20/22 Test #261: qwen38_flash_next.select_ops ...................   Passed    2.19 sec
+21/22 Test #262: qwen38_flash_next.snapshot_copy ................   Passed    0.28 sec
+22/22 Test #263: qwen38_flash_next.verification_sampling ........   Passed    3.08 sec
+100% tests passed out of 22
+
+[Model 8: DeepSeek]
+$ nix develop -c cmake --build --preset gpu-test --target gufo_deepseek_v4_flash deepseek_v4_flash_continuation_identity_test
+Result: PASS
+
+$ nix develop -c ctest --test-dir build/gpu-test -R 'deepseek_v4_flash_continuation_identity_test' --output-on-failure
+1/1 Test #225: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+100% tests passed out of 1
+
+3. Verification of All Gates
+--------------------------------------------------------------------------------
+
+Gate 1: Public Extension API Surface
+$ python3 tools/ci/check-extension-api.py
+PASS: extension API surface (97 paths)
+
+Gate 2: Isolation Ratchets
+$ python3 tools/ci/check-extension-isolation.py \
+    --fail-on-core-model-includes \
+    --fail-on-serving-boundary \
+    --fail-on-family-graph \
+    --fail-on-target-ownership \
+    --fail-on-model-core-includes
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: model core boundary (no production src/models -> src/core|src/cache includes)
+[check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+
+Gate 3: Isolation Regression Test Suite
+$ python3 tests/tools/check_extension_isolation_test.py
+Ran 24 tests in 19.117s
+OK
+
+Gate 4: Extension API Regression Test Suite
+$ python3 tests/tools/check_extension_api_test.py
+Ran 7 tests in 0.002s
+OK
+
+Gate 5: Continuation Identity Goldens (CPU & GPU)
+$ nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity_test' --output-on-failure
+1/3 Test #139: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+2/3 Test #153: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+3/3 Test #159: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+100% tests passed out of 3
+
+$ nix develop -c ctest --test-dir build/gpu-test -R 'continuation_identity_test' --output-on-failure
+1/3 Test #194: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+2/3 Test #225: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+3/3 Test #242: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+100% tests passed out of 3
+
+Gate 6: Code Formatting Check
+$ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+PASS: Checked 785 C++ files
+
+Gate 7: Docs Checks
+$ python3 tests/tools/check_docs_test.py
+Ran 11 tests in 0.005s
+OK
+
+Gate 8: Windows Portability Audit
+$ python3 -c '...git grep check for windows.h, _WIN32, _MSC_VER...'
+PASS: Zero Windows facilities introduced in Card 11 diff.
+
+Gate 9: CTest Ratchet Gate (extension_model_core_includes_gate)
+$ nix develop -c ctest --test-dir build/cpu-test -R 'extension_model_core_includes_gate'
+1/1 Test #39: extension_model_core_includes_gate ...   Passed    3.78 sec
+
+$ nix develop -c ctest --test-dir build/gpu-test -R 'extension_model_core_includes_gate'
+1/1 Test #44: extension_model_core_includes_gate ...   Passed    3.72 sec

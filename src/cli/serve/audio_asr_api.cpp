@@ -216,8 +216,7 @@ bool IsKnownField(std::string_view name) {
   return std::ranges::find(kKnown, name) != std::end(kKnown);
 }
 
-std::string ServerTiming(
-    const models::qwen3_asr::TranscriptionTimings& timings) {
+std::string ServerTiming(const ext::TranscriptionTimings& timings) {
   std::ostringstream value;
   value << "decode_audio;dur=" << timings.decode_audio_ms
         << ", features;dur=" << timings.feature_extraction_ms
@@ -353,7 +352,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
             published = text;
             return send(std::move(event));
           };
-          models::qwen3_asr::TranscriptionRequest input{
+          ext::TranscriptionRequest input{
               .wav = {reinterpret_cast<const std::byte*>(wav.data()),
                       wav.size()},
               .context = context,
@@ -361,7 +360,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
               .max_new_tokens = maximum_tokens,
               .on_text = progress,
           };
-          models::qwen3_asr::TranscriptionResult result;
+          ext::TranscriptionResult result;
           std::string error;
           const auto stop = [&] {
             return !connected || (cancelled && cancelled());
@@ -390,10 +389,10 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
         };
     return response;
   }
-  models::qwen3_asr::TranscriptionResult result;
+  ext::TranscriptionResult result;
   std::string error;
   if (!service.Transcribe(
-          models::qwen3_asr::TranscriptionRequest{
+          ext::TranscriptionRequest{
               .wav = std::span<const std::byte>(wav_data, file->body.size()),
               .context = prompt == nullptr ? std::string{} : prompt->body,
               .language = language == nullptr || language->body.empty()

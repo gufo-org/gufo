@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "qwen",
+  "target": "gufo_qwen27b",
+  "kind": "static",
+  "purpose": "Qwen27B and Qwen3-8B-Flash serving model over the Qwen family libraries: ROCm runtime, speculative decoding and the model-private kernels.",
+  "consumers": [],
+  "checks": [
+    "exact_token_test",
+    "persistent_deltanet_test"
+  ]
+}

@@ -23,8 +23,8 @@
 #include "src/core/json.hpp"
 #include "src/core/platform/env.hpp"
 #include "src/core/platform/os_info.hpp"
-#include "src/models/qwen/control_tokens.hpp"
-#include "src/models/qwen/vision/prompt.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
+#include "src/families/qwen/vision/prompt.hpp"
 #include "tests/support/temporary_directory.hpp"
 
 using gufo::tokenization::kImEnd;

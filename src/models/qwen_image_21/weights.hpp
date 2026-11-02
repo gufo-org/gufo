@@ -3,15 +3,14 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/json.hpp>
 #include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "src/core/gguf_reader.hpp"
-#include "src/core/json.hpp"
 
 namespace gufo::models::qwen_image_21 {
 

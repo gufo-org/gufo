@@ -6,16 +6,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
+#include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/model_config.hpp>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
-
-#include "src/core/gguf_reader.hpp"
-#include "src/core/model_config.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models {
 

@@ -1,9 +1,12 @@
 #include "src/cli/serve/image_api.hpp"
 
+#include <png.h>
+
 #include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <ctime>
 #include <map>
 #include <random>
@@ -15,11 +18,10 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
+#include "src/ext/image.hpp"
 
 namespace gufo::server {
 namespace {
-
-namespace image = models::qwen_image_21;
 
 json::Value ParseJson(std::string_view text) {
   try {
@@ -121,9 +123,128 @@ std::string Parameter(std::string_view value, std::string_view key) {
   return {};
 }
 
+void CheckImage(const ext::ImageBuffer& image) {
+  if (image.width <= 0 || image.height <= 0 ||
+      static_cast<std::uint64_t>(image.width) * image.height >
+          core::kMaxImagePixels ||
+      image.rgba.size() !=
+          static_cast<std::size_t>(image.width) * image.height * 4)
+    throw std::invalid_argument("invalid RGBA image dimensions");
+}
+
+struct PngOutput {
+  std::vector<std::uint8_t> bytes;
+  std::size_t used{0};
+};
+
+void WritePng(png_structp png, png_bytep data, png_size_t size) {
+  auto& output = *static_cast<PngOutput*>(png_get_io_ptr(png));
+  if (size > output.bytes.size() - output.used)
+    png_error(png, "output PNG exceeds its allocation");
+  std::memcpy(output.bytes.data() + output.used, data, size);
+  output.used += size;
+}
+
+ext::ImageBuffer DecodeImage(std::span<const std::uint8_t> bytes) {
+  if (bytes.size() > core::kMaxEncodedImageBytes || bytes.size() < 8)
+    throw std::invalid_argument("invalid or oversized input image");
+  if (png_sig_cmp(bytes.data(), 0, 8) != 0) {
+    const auto rgb = core::DecodeImage(bytes);
+    ext::ImageBuffer image{
+        static_cast<int>(rgb.width), static_cast<int>(rgb.height), {}};
+    image.rgba.resize(static_cast<std::size_t>(rgb.width) * rgb.height * 4);
+    for (std::size_t i = 0; i < image.rgba.size() / 4; ++i) {
+      std::memcpy(image.rgba.data() + 4 * i, rgb.pixels.data() + 3 * i, 3);
+      image.rgba[4 * i + 3] = 255;
+    }
+    return image;
+  }
+  png_image png{};
+  png.version = PNG_IMAGE_VERSION;
+  if (!png_image_begin_read_from_memory(&png, bytes.data(), bytes.size()))
+    throw std::invalid_argument("cannot decode PNG image");
+  const auto cleanup = std::unique_ptr<png_image, decltype(&png_image_free)>(
+      &png, png_image_free);
+  if (!png.width || !png.height ||
+      static_cast<std::uint64_t>(png.width) * png.height >
+          core::kMaxImagePixels)
+    throw std::invalid_argument("PNG image dimensions exceed limits");
+  png.format = PNG_FORMAT_RGBA;
+  ext::ImageBuffer image{
+      static_cast<int>(png.width), static_cast<int>(png.height), {}};
+  image.rgba.resize(PNG_IMAGE_SIZE(png));
+  if (!png_image_finish_read(&png, nullptr, image.rgba.data(), 0, nullptr))
+    throw std::invalid_argument("invalid PNG image data");
+  return image;
+}
+
+std::vector<std::uint8_t> EncodePng(const ext::ImageBuffer& image) {
+  CheckImage(image);
+  png_image geometry{};
+  geometry.width = image.width;
+  geometry.height = image.height;
+  geometry.format = PNG_FORMAT_RGBA;
+  const auto output = std::make_unique<PngOutput>();
+  output->bytes.resize(PNG_IMAGE_PNG_SIZE_MAX(geometry));
+  auto png = png_create_write_struct(
+      PNG_LIBPNG_VER_STRING, nullptr,
+      [](png_structp p, png_const_charp) { png_longjmp(p, 1); }, nullptr);
+  if (!png)
+    throw std::runtime_error("cannot allocate PNG encoder");
+  auto info = png_create_info_struct(png);
+  if (!info) {
+    png_destroy_write_struct(&png, nullptr);
+    throw std::runtime_error("cannot allocate PNG metadata");
+  }
+  if (setjmp(png_jmpbuf(png))) {
+    png_destroy_write_struct(&png, &info);
+    throw std::runtime_error("cannot encode output PNG");
+  }
+  png_set_write_fn(png, output.get(), WritePng, nullptr);
+  png_set_IHDR(png, info, image.width, image.height, 8, PNG_COLOR_TYPE_RGBA,
+               PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+               PNG_FILTER_TYPE_DEFAULT);
+  png_set_sRGB(png, info, PNG_sRGB_INTENT_PERCEPTUAL);
+  png_set_compression_level(png, 1);
+  png_set_filter(png, PNG_FILTER_TYPE_BASE, PNG_ALL_FILTERS);
+  png_write_info(png, info);
+  for (int row = 0; row < image.height; ++row)
+    png_write_row(png, const_cast<png_bytep>(image.rgba.data() +
+                                             static_cast<std::size_t>(row) *
+                                                 image.width * 4));
+  png_write_end(png, info);
+  png_destroy_write_struct(&png, &info);
+  output->bytes.resize(output->used);
+  return std::move(output->bytes);
+}
+
+void ValidateRequest(const ext::ImageRequest& request) {
+  if (request.prompt.size() > (64U << 10U))
+    throw std::invalid_argument("image prompt exceeds 64 KiB");
+  if (request.width < 32 || request.height < 32 || request.width % 32 ||
+      request.height % 32 || request.width > 4096 || request.height > 4096 ||
+      static_cast<std::uint64_t>(request.width) * request.height > 4194304)
+    throw std::invalid_argument(
+        "image size must be multiples of 32, at most 4096 per side and 4 "
+        "megapixels");
+  if (request.steps < 2 || request.steps > 100)
+    throw std::invalid_argument("image steps must be between 2 and 100");
+  if (request.images.size() > 10)
+    throw std::invalid_argument(
+        "Qwen-Image supports at most 10 reference images");
+  std::size_t pixels = 0;
+  for (const auto& image : request.images) {
+    CheckImage(image);
+    pixels += static_cast<std::size_t>(image.width) * image.height;
+  }
+  if (pixels > core::kMaxImagePixels)
+    throw std::invalid_argument(
+        "reference images exceed 32 megapixels combined");
+}
+
 struct Parsed {
   json::Value fields = json::Value::object();
-  std::vector<image::Image> images;
+  std::vector<ext::ImageBuffer> images;
 };
 
 Parsed Multipart(const HttpRequest& request) {
@@ -203,7 +324,7 @@ Parsed Multipart(const HttpRequest& request) {
           data.size() > core::kMaxEncodedImageBytes - image_bytes)
         throw std::invalid_argument("image inputs exceed 10 images or 20 MiB");
       image_bytes += data.size();
-      parsed.images.push_back(image::DecodeImage(std::span(
+      parsed.images.push_back(DecodeImage(std::span(
           reinterpret_cast<const std::uint8_t*>(data.data()), data.size())));
       const auto& decoded = parsed.images.back();
       image_pixels += static_cast<std::size_t>(decoded.width) * decoded.height;
@@ -263,16 +384,27 @@ ImageService::ImageService(const std::filesystem::path& root,
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
   if (!runner_) {
-#if defined(ENGINE_ENABLE_HIP)
-    model_ = std::make_unique<image::Model>(root);
+    const auto* provider = ext::ProbeImageProvider(root.string());
+    if (!provider) {
+      provider = ext::FindImageProvider("qwen-image-21");
+    }
+    if (!provider) {
+      provider = ext::FindImageProvider("qwen-image-2.1");
+    }
+    if (!provider) {
+      throw std::runtime_error("extension 'qwen_image_21' is not registered");
+    }
+    std::string create_error;
+    model_ = provider->create(root.string(), &create_error);
+    if (!model_) {
+      throw std::runtime_error(
+          "failed to create runner for " + root.string() +
+          (create_error.empty() ? "" : ": " + create_error));
+    }
     runner_ = [this](const Request& request,
                      const CancellationCheck& cancelled) {
       return model_->Generate(request, cancelled);
     };
-#else
-    (void)root;
-    throw std::runtime_error("Qwen-Image requires the HIP build");
-#endif
   }
 }
 
@@ -338,7 +470,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     if (background != "auto" && background != "transparent" &&
         background != "opaque")
       throw std::invalid_argument("invalid image background");
-    image::Request generation;
+    ext::ImageRequest generation;
     generation.prompt = String(fields, "prompt", "");
     if (background == "transparent")
       generation.prompt =
@@ -376,7 +508,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
                (static_cast<std::uint64_t>(entropy()) << 21) ^ entropy(), 0,
                (1ULL << 53) - 1);
     const auto count = Number(fields, "n", 1, 1, 10);
-    image::ValidateRequest(generation);
+    ValidateRequest(generation);
     auto body = json::Value::object();
     body["created"] = static_cast<double>(std::time(nullptr));
     auto data = json::Value::array();
@@ -392,7 +524,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
         }
       }
       auto item = json::Value::object();
-      item["b64_json"] = Base64(image::EncodePng(result.image));
+      item["b64_json"] = Base64(EncodePng(result.image));
       data.push_back(std::move(item));
       std::ostringstream details;
       details << "request=" << request.request_id

@@ -16,10 +16,10 @@
 #include <vector>
 
 #include "src/cli/serve/inference_backend.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
-#include "src/models/qwen/chat_template.hpp"
 
 namespace {
 

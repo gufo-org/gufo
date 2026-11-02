@@ -1,0 +1,48 @@
+{
+  "assets": {
+    "flash-next": {
+      "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+      "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+      "patterns": [
+        "UD-Q4_K_XL/*.gguf",
+        "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "mmproj-BF16.gguf"
+      ],
+      "required": [
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+        "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+        "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "mmproj-BF16.gguf"
+      ]
+    }
+  },
+  "models": {
+    "flash-next-q4": {
+      "title": "Flash-Next Q4",
+      "category": "llm",
+      "asset": "flash-next",
+      "target": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "projector": "mmproj-BF16.gguf",
+      "draft_asset": "flash-next",
+      "draft": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "draft_option": "--mtp-model",
+      "mode": "mtp",
+      "sampling": "qwen38"
+    }
+  },
+  "rules": [
+    {
+      "id": "private-flash-next",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen38_flash_next/**",
+        "tests/models/qwen38_flash_next/**"
+      ],
+      "owners": [
+        "flash-next-q4"
+      ]
+    }
+  ]
+}

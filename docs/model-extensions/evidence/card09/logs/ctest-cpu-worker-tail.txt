@@ -1,0 +1,28 @@
+Historical worker partial output; not a complete verdict list.
+17/42 Test #100: extension_link_graph_gate ......................   Passed    0.02 sec
+18/42 Test #101: check_target_graph_test ........................   Passed    0.03 sec
+19/42 Test #102: cache_adapter_lifecycle_test ...................   Passed    0.00 sec
+20/42 Test #103: cache_ledger_test ..............................   Passed    0.04 sec
+21/42 Test #104: cache_checkpoint_test ..........................   Passed    0.00 sec
+22/42 Test #105: cache_prefix_index_test ........................   Passed    0.06 sec
+23/42 Test #106: cache_retention_test ...........................   Passed    0.02 sec
+24/42 Test #107: cache_idle_spill_test ..........................   Passed    0.28 sec
+25/42 Test #108: cache_adapter_test .............................   Passed    0.00 sec
+26/42 Test #110: cache_slot_test ................................   Passed    0.26 sec
+27/42 Test #111: cache_disk_test ................................   Passed    0.08 sec
+28/42 Test #112: cache_streaming_test ...........................   Passed    0.50 sec
+29/42 Test #113: cache_tiered_test ..............................   Passed    0.22 sec
+30/42 Test #114: cache_disk_publication_test ....................   Passed    1.77 sec
+31/42 Test #115: extension_runtime_test .........................   Passed    0.00 sec
+32/42 Test #116: extension_role_test ............................   Passed    0.00 sec
+33/42 Test #117: ext_runtime_neutral_contracts_test .............   Passed    0.00 sec
+34/42 Test #118: extension_cli_provenance_test ..................   Passed    0.05 sec
+35/42 Test #119: extension_discovery_test .......................   Passed   44.91 sec
+36/42 Test #120: extension_api_policy_test ......................   Passed    0.04 sec
+37/42 Test #121: extension_api_surface ..........................   Passed    0.02 sec
+38/42 Test #122: extension_metadata_test ........................   Passed   10.05 sec
+39/42 Test #139: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+40/42 Test #142: qwen27b_continuation_layout_test ...............   Passed    0.00 sec
+41/42 Test #153: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+42/42 Test #159: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+100% tests passed out of 42

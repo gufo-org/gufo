@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "config",
+  "target": "gufo_qwen_config",
+  "kind": "static",
+  "purpose": "CPU-only Qwen GGUF configuration extraction (ExtractQwenConfig) with its structural validation; the free function that replaced GgufReader::ExtractModelConfig.",
+  "depends": []
+}

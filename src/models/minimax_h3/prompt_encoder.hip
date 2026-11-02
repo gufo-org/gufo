@@ -26,8 +26,8 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/mapped_prefetch.hpp"
-#include "src/core/platform/mapped_file.hpp"
+#include <gufo/ext/mapped_prefetch.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 #include "src/models/minimax_h3/prompt_encoder_ops.hip.hpp"
 

@@ -2,11 +2,11 @@
 
 #include <cstdlib>
 
+#include "src/families/qwen/hip_common/gemm_route.hpp"
 #include "src/models/qwen/forward.hpp"  // TensorGEMV
-#include "src/models/qwen/gemm_route.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
 #endif
 
 namespace gufo::models::qwen {

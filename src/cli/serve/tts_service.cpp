@@ -1,26 +1,25 @@
 #include "src/cli/serve/tts_service.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "src/core/cancellable_gate.hpp"
-#include "src/models/qwen3_tts/config.hpp"
-#include "src/models/qwen3_tts/hip/synthesis_runtime.hpp"
 
 namespace gufo::server {
 namespace {
 
-std::string ModelId(models::qwen3_tts::ModelVariant variant) {
+std::string ModelId(ext::TtsVariant variant) {
   switch (variant) {
-    case models::qwen3_tts::ModelVariant::kBase:
+    case ext::TtsVariant::kBase:
       return "qwen3-tts-12hz-1.7b-base";
-    case models::qwen3_tts::ModelVariant::kVoiceDesign:
+    case ext::TtsVariant::kVoiceDesign:
       return "qwen3-tts-12hz-1.7b-voice-design";
-    case models::qwen3_tts::ModelVariant::kCustomVoice:
+    case ext::TtsVariant::kCustomVoice:
       return "qwen3-tts-12hz-1.7b-customvoice";
-    case models::qwen3_tts::ModelVariant::kUnsupported:
+    case ext::TtsVariant::kUnsupported:
       break;
   }
   return {};
@@ -30,32 +29,54 @@ std::string ModelId(models::qwen3_tts::ModelVariant variant) {
 
 struct TtsService::Impl {
   explicit Impl(TtsServiceOptions supplied) : options(std::move(supplied)) {
-    std::optional<models::qwen3_tts::ModelConfig> config;
+    const ext::TtsProvider* provider = nullptr;
+    if (!options.model_root.empty()) {
+      provider = ext::ProbeTtsProvider(options.model_root.string());
+    }
+    if (!provider && !options.model_id.empty()) {
+      provider = ext::FindTtsProvider(options.model_id);
+    }
+
     if (options.validate_model) {
-      config = models::qwen3_tts::LoadModelConfigFromPath(
-          options.model_root.string());
-      if (!config.has_value() ||
-          !models::qwen3_tts::IsSupportedModelConfig(*config)) {
+      if (!provider || !provider->probe ||
+          !provider->probe(options.model_root.string())) {
         initialization_error =
             "Qwen3-TTS service requires a supported 1.7B model";
         return;
       }
-      options.variant = config->variant;
-      if (options.voices.empty() &&
-          options.variant == models::qwen3_tts::ModelVariant::kCustomVoice) {
-        for (const auto& [name, unused] : config->talker.spk_id) {
-          (void)unused;
-          options.voices.push_back(name);
-        }
-      }
     }
+
+    if (!options.runner) {
+      if (!provider || !provider->create) {
+        initialization_error = "TTS provider not available for model: " +
+                               options.model_root.string();
+        return;
+      }
+      native_runtime = provider->create(options.model_root.string(),
+                                        options.native_context_tokens,
+                                        &initialization_error);
+      if (native_runtime == nullptr) {
+        return;
+      }
+      options.variant = native_runtime->Variant();
+      if (options.voices.empty()) {
+        options.voices = native_runtime->Voices();
+      }
+      options.runner = [this](const ext::SynthesisRequest& request,
+                              const ext::CancellationCheck& is_cancelled,
+                              ext::SynthesisResult* result,
+                              std::string* error) {
+        return native_runtime->Synthesize(request, is_cancelled, result, error);
+      };
+    }
+
     if (options.model_id.empty()) {
       options.model_id = ModelId(options.variant);
     }
     if (options.voices.empty()) {
-      if (options.variant == models::qwen3_tts::ModelVariant::kVoiceDesign) {
+      if (options.variant == ext::TtsVariant::kVoiceDesign) {
         options.voices.push_back("voice-design");
-      } else if (options.variant == models::qwen3_tts::ModelVariant::kBase) {
+      } else if (options.variant == ext::TtsVariant::kBase) {
         options.voices.push_back("voice-clone");
       }
     }
@@ -63,7 +84,7 @@ struct TtsService::Impl {
     // CustomVoice selects a trained speaker embedding and VoiceDesign is
     // driven by `instruct`, so neither has anything to apply them to.
     if (!options.voice_presets.empty() &&
-        options.variant != models::qwen3_tts::ModelVariant::kBase) {
+        options.variant != ext::TtsVariant::kBase) {
       initialization_error =
           "voice presets require a Qwen3-TTS Base checkpoint";
       return;
@@ -74,28 +95,12 @@ struct TtsService::Impl {
         options.voices.push_back(name);
       }
     }
-    if (!options.runner) {
-      native_runtime = models::qwen3_tts::hip::SynthesisHipRuntime::Create(
-          options.model_root.string(), options.native_context_tokens,
-          options.variant, &initialization_error);
-      if (native_runtime == nullptr) {
-        return;
-      }
-      options.runner =
-          [this](const models::qwen3_tts::SynthesisRequest& request,
-                 const models::qwen3_tts::CancellationCheck& is_cancelled,
-                 models::qwen3_tts::SynthesisResult* result,
-                 std::string* error) {
-            return native_runtime->Generate(request, is_cancelled, result,
-                                            error);
-          };
-    }
     std::ranges::sort(options.voices);
     ready = true;
   }
 
   TtsServiceOptions options;
-  std::unique_ptr<models::qwen3_tts::hip::SynthesisHipRuntime> native_runtime;
+  std::unique_ptr<ext::TtsRunner> native_runtime;
   std::string initialization_error;
   core::CancellableGate generation_gate;
   bool ready{false};
@@ -131,14 +136,13 @@ const TtsVoicePreset* TtsService::voice_preset(const std::string& name) const {
   return found == impl_->options.voice_presets.end() ? nullptr : &found->second;
 }
 
-models::qwen3_tts::ModelVariant TtsService::variant() const noexcept {
+ext::TtsVariant TtsService::variant() const noexcept {
   return impl_->options.variant;
 }
 
-bool TtsService::Synthesize(
-    const models::qwen3_tts::SynthesisRequest& request,
-    const models::qwen3_tts::CancellationCheck& is_cancelled,
-    models::qwen3_tts::SynthesisResult* result, std::string* error) {
+bool TtsService::Synthesize(const ext::SynthesisRequest& request,
+                            const ext::CancellationCheck& is_cancelled,
+                            ext::SynthesisResult* result, std::string* error) {
   if (!impl_->ready) {
     if (error != nullptr) {
       *error = impl_->initialization_error;

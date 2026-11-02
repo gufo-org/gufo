@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "src/families/qwen/config/qwen_config.hpp"
 #include "src/models/qwen/state.hpp"
 
 namespace gufo::models {
@@ -140,7 +141,7 @@ bool ValidateTensor(const QwenTensorRef& tensor, std::size_t expected_elements,
 
 std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
-  const auto config_opt = reader.ExtractModelConfig(error_msg);
+  const auto config_opt = qwen::ExtractQwenConfig(reader, error_msg);
   if (!config_opt.has_value()) {
     return std::nullopt;
   }

@@ -1,0 +1,140 @@
+Card 08 integration — exact rerun ledger
+Supervisor tool discovery: contact_supervisor unavailable (no matching tool).
+Initial environment probe: nix develop -c python3 --version
+Exit: 1
+warning: Git tree '/home/mixer/gufo' is dirty
+error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation not permitted
+
+No daemon retry: sandbox skill forbids retrying denied operations.
+Sanitizer directory uses /tmp per the overriding scratch-only rule.
+
+COMMAND: nix develop -c cmake -S . -B /tmp/card08-sanitizer -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DGUFO_ENABLE_SANITIZERS=ON -DENGINE_ENABLE_HIP=OFF
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix develop -c cmake --build /tmp/card08-sanitizer --target gufo_deepseek_v4_flash_text gufo_eval gufo_compare gufo_minimax_h3 ds4_sampling_test ds4_chat_template_test ds4_eval_test eval_regrade_test openai_chat_test minimax_h3_runtime_test minimax_h3_tokenizer_test minimax_h3_sampling_test minimax_h3_generation_test
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix develop -c ctest --test-dir /tmp/card08-sanitizer -R '^(ds4\.(sampling|template|eval)|eval_regrade_test|openai_chat_test|minimax_h3_(runtime|tokenizer|sampling|generation)_test)$' --output-on-failure
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix develop -c cmake --build build/card08-gpu --target qwen_oracle_test qwen_l1_norm_module_test qwen_l1_ffn_module_test qwen_l1_ssm_module_test
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix develop -c ctest --test-dir build/card08-gpu -R '^(qwen_oracle_test|qwen_l1_(norm|ffn|ssm)_module_test)$' --output-on-failure
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix develop -c python3 tools/prof/card08_parity.py --mode flags --before build/card07-release/compile_commands.json --after build/card08-release/compile_commands.json
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix develop -c python3 tools/prof/card08_parity.py --mode object --before build/card07-release/compile_commands.json --after build/card08-release/compile_commands.json
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix develop -c python3 tools/prof/card08_parity.py --mode device --before build/card07-release/compile_commands.json --after build/card08-release/compile_commands.json --scratch /tmp/card08-parity
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+COMMAND: nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+PENDING — NOT RUN (same denied Nix daemon dependency; initial probe exit 1, no command exit claimed).
+
+Static checks: existing Python 3.13.14 store environment (not a fresh pinned nix develop shell).
+PATH prepended: /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin
+TMPDIR=/tmp/card08-static, cleaned in finally.
+
+COMMAND: python3 tests/tools/check_extension_isolation_test.py
+Exit: 0
+Ran 19 tests in 11.340s
+OK
+
+COMMAND: python3 tools/ci/check-extension-api.py --write
+Exit: 0
+PASS: extension API surface (6 paths)
+
+COMMAND: python3 tools/ci/check-extension-api.py
+Exit: 0
+PASS: extension API surface (6 paths)
+
+COMMAND: python3 tools/ci/check-docs.py
+Exit: 0
+[check-docs] PASSED: 273 markdown files and 1499 local links/anchors verified with zero broken links or invalid JSON blocks.
+
+COMMAND: python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-family-graph
+Exit: 0
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+
+COMMAND: python3 tools/ci/check-extension-isolation.py --fail-on-target-ownership
+Exit: 0
+[check-extension-isolation] PASS: target ownership (17 libraries, 183 dependency edges)
+
+Per-moved-source sanitizer audit (static; actual fresh sanitizer compilation PENDING).
+Parent H3/eval/compare inherited sanitizer directory options; candidate retains inheritance.
+Parent DeepSeek CPU test copies inherited sanitizer options; HIP model copies did not.
+New text target inherits sanitizer options in both modes. OFF release databases cannot establish ON compilation.
+src/eval/dataset.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/eval/extract.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/eval/regrade.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/deepseek_v4_flash/chat_template.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/deepseek_v4_flash/runtime/sampling.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/attention.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/audio_vae.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/audio_vae.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/denoiser.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/denoiser.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/dense.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/dit.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/dit.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/generation.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/json.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/media_posix.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/prompt_encoder.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/prompt_encoder.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/runtime.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/runtime_hip.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/sampling.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/sampling.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/sha256.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/tokenizer.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/video_vae.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/models/minimax_h3/video_vae.hip: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+src/testing/compare/logit_comparator.cpp: old release ASan/UBSan=False; candidate release ASan/UBSan=False; fresh Debug sanitizer flags=PENDING
+
+Integration static verdicts: 19 fixtures pass; API write/check pass (6 paths); docs pass (273 markdown, 1499 links); core/family pass (6 libraries, 7 edges); ownership pass (17 libraries, 183 edges).
+DoD audit: 1 proven explicit targets/manifests; 2 registration half only, extension.json unavailable; 3 single text target confirmed by CMake source ownership, HTTP tool syntax stays in gufo_http.
+Historical worker results are preserved, not represented as fresh candidate validation.
+
+Files changed since review:
+src/models/deepseek_v4_flash/text/CMakeLists.txt
+tests/models/qwen/CMakeLists.txt
+src/models/deepseek_v4_flash/library.json
+tools/ci/check-extension-isolation.py
+tools/prof/card08_parity.py
+tests/tools/check_extension_isolation_test.py
+docs/model-extensions/target-ownership.md
+docs/model-extensions/CARDS.md
+docs/model-extensions/cards/README.md
+docs/model-extensions/cards/08-h3-eval-and-test-targets.md
+docs/model-extensions/evidence/card08/gates.md
+docs/model-extensions/evidence/card08/ownership-inventory.md
+docs/model-extensions/evidence/card08/unit-and-identity-tests.md
+docs/model-extensions/evidence/card08/pending-commands.md
+docs/model-extensions/evidence/card08/README.md
+docs/model-extensions/evidence/card08/RESUME-NOTES.md
+docs/model-extensions/evidence/card08/integration-reruns.txt
+docs/model-extensions/evidence/card08/input-brief-worker.md
+Deleted/renamed: docs/model-extensions/evidence/card08/brief-worker.md -> input-brief-worker.md
+
+REJECTED findings: none.
+F1/F2/F5/F6: PENDING requested pinned validation after code fixes.
+F3/F4/F7/F8/F9: RESOLVED implementation/documentation; authoritative post-commit hosted run still PENDING.
+
+contact_supervisor discovery returned no matching tools; no supervisor channel was available.
+RFC SHA256: 2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448
+COMMAND: git diff --cached --name-only
+Exit: 0
+PASS: no staged files
+COMMAND: git diff --check
+Exit: 0
+PASS: no whitespace errors
+No commands wrote build/card06-* or build/card07-*; controls were read only. No commit, push, jj mutation, service change or functional/performance run.
+Scratch audit: PASS: no /tmp/card08-* scratch survives after caller removes audit script.
+Evidence size: every file <1 MB; 85000 bytes before final ledger append.
+editing ownership released

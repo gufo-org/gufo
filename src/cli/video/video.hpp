@@ -7,12 +7,12 @@
 #include <string>
 #include <string_view>
 
-#include "src/models/minimax_h3/generation.hpp"
+#include "src/ext/video.hpp"
 
 namespace gufo::cli {
 
 struct VideoCliOptions {
-  minimax_h3::GenerationRequest request;
+  ext::VideoRequest request;
   std::filesystem::path parameters_path;
   std::filesystem::path telemetry_path;
   bool profile{false};

@@ -1,0 +1,24 @@
+G7b kernel resources (scratch) parity — tools/ci/check-kernel-resources.py, current CLI.
+
+Release (NDEBUG) binaries:
+  $ python3 tools/ci/check-kernel-resources.py build/card07-release/gufo \
+      --compare build/card06-release/gufo
+  0 worse, 0 better, 2692 same, 0 one side only; scratch increased in 0
+  -> Every gfx1151 kernel in the shipped-shape binary keeps its exact scratch
+     allocation and kernel set after the move (2692 kernels, both sides).
+
+gpu-test binaries (same comparison across build modes):
+  $ python3 tools/ci/check-kernel-resources.py build/card07-gpu/gufo \
+      --compare build/card06-gpu/gufo
+  0 worse, 0 better, 2692 same, 0 one side only; scratch increased in 0
+
+Registered CTest kernel_resources_test (baseline tools/ci/kernel-resources.json): FAILED,
+and the failure is PRE-EXISTING on this host, not introduced by Card 07:
+  build/card06-gpu/gufo (parent revision) -> 2692 kernels checked, 246 use scratch, 30 over budget
+  build/card07-gpu/gufo (this work)       -> 2692 kernels checked, 246 use scratch, 30 over budget
+  diff of the two full FAIL lists         -> empty (byte-identical, diff exit 0)
+  build/card06-release/gufo and build/card07-release/gufo report the same 30 over budget too.
+So the baseline file is stale against the pinned ROCm 10.1 / clang 24 toolchain
+(the CMake comment already documents compiler-driven spill drift). Card 07 changes no
+kernel's scratch by a single byte; refreshing tools/ci/kernel-resources.json or fixing the
+spills is a separate owner decision and is listed in pending-commands.md.

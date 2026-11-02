@@ -1,0 +1,5 @@
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+gate_exit=0
+Ran 6 tests in 3.430s
+
+OK

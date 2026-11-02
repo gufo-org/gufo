@@ -3,16 +3,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/gguf_reader.hpp>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
-#include "src/core/gguf_reader.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/ssm.hpp"
 #include "src/models/qwen/state.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 namespace gufo::speculative {
 

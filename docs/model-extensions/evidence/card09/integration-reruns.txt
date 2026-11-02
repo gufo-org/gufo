@@ -1,0 +1,126 @@
+Card 09 integration — exact validation commands and outcomes
+Host interpreter: /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3
+Tools not on login-shell PATH: python3, jj. Located readable installed binaries.
+
+Initial command: python3 /tmp edit heredoc (CMake F1 edit) — exit 127,
+zsh: command not found: python3. No edit occurred; corrected with installed interpreter.
+Command: nix develop -c cmake --build build/card09-cpu --target check-pr -- -n
+exit 1: warning: Git tree '/home/mixer/gufo' is dirty
+error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation not permitted
+The following shell assignment `status=$?` failed: zsh: read-only variable: status.
+No Nix retry; all dependent gates PENDING(orchestrator).
+Command: /nix/store/c4hg7fhyy1agrxlq6hzk5918609j3nhl-jujutsu-0.45.1/bin/jj diff --name-only
+exit 255 (jj error; shell group subsequently exited 0): Failed to snapshot the working copy;
+Could not create named temp file in '/home/mixer/gufo/.git/objects': Read-only file system (os error 30).
+No jj retry or commits. Changed-path inventory is integration-owned paths plus
+historical worker paths in RESUME-NOTES.md; full jj inventory PENDING(orchestrator).
+contact_supervisor tool discovery: no matching tool available. No supervisor messages sent.
+Read-only inspection commands (exit 0): sed/cat of input-brief-integration.md,
+review-findings.md, RESUME-NOTES.md, AGENTS.md, Card 09, TargetGraph.cmake,
+check-target-graph.py, check_target_graph_test.py, flag-audit.py,
+moved-source-flags.txt, target-ownership.md, pending-commands.txt,
+negative-proofs.txt, build/card09-cpu/gufo-link-graph.json; tail CMakeLists.txt;
+rg Card 09/checkpoint/Execution records in CARDS.md/cards/README.md;
+ls /nix/store/*/bin/python3 /nix/store/*/bin/jj; printenv PATH;
+cat nono-sandbox/SKILL.md; rg card09/probe in TESTING.md and pending-commands.txt.
+Edit scripts: installed python3 /tmp/card09-integration/edit.py, docs.py — exit 0.
+These scripts and complete validation logs are scratch, not evidence of builds.
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 docs/model-extensions/evidence/card09/flag-audit.py build/card08-gpu/compile_commands.json build/card09-gpu/compile_commands.json gufo gufo_serving
+exit 0; all seven source rows present; GPU adds only -UNDEBUG.
+Complete rows: logs/gpu-test-flag-diff.txt
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 docs/model-extensions/evidence/card09/flag-audit.py build/card08-release/compile_commands.json build/card09-release/compile_commands.json gufo gufo_serving
+exit 0; all seven source rows present; Production adds []; removes only executable-local defines/include.
+Complete rows: logs/production-flag-diff.txt
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tests/tools/check_target_graph_test.py
+exit 0
+...........s
+----------------------------------------------------------------------
+Ran 12 tests in 0.001s
+
+OK (skipped=1)
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tests/tools/check_target_graph_test.py /tmp/card09-integration/no-report
+exit 1
+...........F
+======================================================================
+FAIL: test_repository_link_graph_is_clean (__main__.LinkGraphTest.test_repository_link_graph_is_clean)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/mixer/gufo/tests/tools/check_target_graph_test.py", line 115, in test_repository_link_graph_is_clean
+    self.assertTrue(report.is_file(), f"missing configured report: {report}")
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : missing configured report: /tmp/card09-integration/no-report/gufo-link-graph.json
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.001s
+
+FAILED (failures=1)
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tools/ci/check-extension-isolation.py --fail-on-serving-boundary
+exit 0; [check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tools/ci/check-extension-isolation.py --fail-on-target-ownership
+exit 0; [check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tools/ci/check-target-graph.py --report build/card09-gpu/gufo-link-graph.json --root . --show
+exit 1; LINK GRAPH INVALID: report must record boolean hip configuration.
+Existing report is stale; no regenerated graph pass claimed.
+
+Additional inspection commands (exit 0): tail -35 review-findings.md;
+head -80 RESUME-NOTES.md; wc -c integration-reruns.txt and logs/*;
+rg qwen38_flash_next.continuation_layout in generated CTestTestfile.cmake
+confirmed the exact dotted registration (static inspection, not ctest -N);
+ls /tmp | rg '^card09-' listed logs, backup, review, integration scratch;
+rg --files -g AGENTS.md src/ext src/cache src/core tests/tools cmake docs
+found no narrower AGENTS.md; test -f .git/index returned 0 (existence only,
+not staged-state proof). No staging command ran; staged state unverified.
+Edit scripts: installed interpreter /tmp/card09-integration/record.py and
+finalize.py, exit 0. No include/gufo/ext edit and no RFC write.
+
+NOT RUN (PENDING(orchestrator), common daemon denial above):
+nix develop -c ctest --test-dir build/card09-gpu -N
+R=$(cat docs/model-extensions/evidence/card09/logs/selection.txt)
+nix develop -c ctest --test-dir build/card09-gpu -R "$R" --output-on-failure
+nix develop -c ctest --test-dir build/card09-cpu -R "$R" --output-on-failure
+nix develop -c cmake -S . -B build/card09-gpu
+nix develop -c cmake -S . -B build/card09-cpu
+nix develop -c cmake --preset gpu-test -B /tmp/card09-integration/rename-proof
+(rename/revert sequence and exact checker commands: pending-commands.txt)
+nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+nix build .#checks.x86_64-linux.pr
+No real rename injection made because it could not be configured/proven/reverted
+with a gate run. No skipped or unexecuted check counted as a pass.
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tools/ci/check-docs.py
+exit 0
+[check-docs] PASSED: 278 markdown files and 1514 local links/anchors verified with zero broken links or invalid JSON blocks.
+
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tools/ci/check-extension-api.py
+exit 0
+PASS: extension API surface (6 paths)
+
+
+RFC SHA256 (host hashlib read, exit 0): 2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448; byte-identical required digest.
+
+Final read-only audit: sed of graph tests/checker and target-ownership.md plus
+wc -c integration-reruns.txt, exit 0. Final CMake audit fixed the empty-property
+test to distinguish an actual missing property from an unclassified false-like
+item such as OFF; the latter must fail rather than disappear. No additional
+CMake execution was possible. Host docs/API checks are rerun after this edit;
+the first successful checks above are retained, not discarded.
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tools/ci/check-docs.py
+exit 0
+[check-docs] PASSED: 278 markdown files and 1514 local links/anchors verified with zero broken links or invalid JSON blocks.
+
+
+$ /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3 tools/ci/check-extension-api.py
+exit 0
+PASS: extension API surface (6 paths)
+
+
+RFC SHA256 (host hashlib read, exit 0): 2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448; byte-identical required digest.

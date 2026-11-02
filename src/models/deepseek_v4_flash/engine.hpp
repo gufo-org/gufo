@@ -4,13 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "src/core/session_mode.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/runtime/model.h"
 
@@ -149,6 +149,9 @@ public:
     bool operator==(const DsparkStats&) const = default;
   };
   [[nodiscard]] DsparkStats DsparkStatistics() const;
+  /// Valid until the next Evaluate, Sync, step, or restore on this session.
+  [[nodiscard]] std::span<const float> Logits(
+      std::string* error_msg = nullptr) const;
   [[nodiscard]] std::vector<float> CopyLogits(
       std::string* error_msg = nullptr) const;
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(

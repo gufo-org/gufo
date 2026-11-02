@@ -12,8 +12,8 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
-#include "src/models/qwen/chat_template.hpp"
-#include "src/models/qwen/tokenizer.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "tests/models/chat_template_golden_helpers.hpp"
 
 namespace {

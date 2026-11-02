@@ -3,21 +3,30 @@ name: PR title
 on:
   pull_request:
     branches: [ main ]
-    types: [ opened, edited, reopened, synchronize ]
+    types: [ opened, edited, reopened, synchronize, labeled, unlabeled ]
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: Validate PR title
+    name: Validate PR title and extension API
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: python3 tools/ci/check-pr-title.py "$PR_TITLE"
+
+      - name: Validate extension API diff and policy
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: python3 tools/ci/check-extension-api.py --base "$PR_BASE" --labels "$PR_LABELS"

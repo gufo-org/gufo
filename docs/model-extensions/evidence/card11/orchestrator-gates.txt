@@ -1,0 +1,138 @@
+================================================================================
+CARD 11 ORCHESTRATOR CLOSURE VERIFICATION TRANSCRIPT
+================================================================================
+Host: Linux x86_64 Strix Halo (gfx1151), 125 GiB RAM, 32 cores
+Date: 2026-11-01
+Parent commit: xppvypvw 8d8ef356 feat(extensions): publish and measure public extension api surface
+RFC.md sha256: 2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448 (byte-identical, uncommitted)
+
+--------------------------------------------------------------------------------
+1. Memory Headroom Check
+--------------------------------------------------------------------------------
+$ free -g
+               total        used        free      shared  buff/cache   available
+Mem:             125          12          20           0          93         112
+Swap:              0           0           0
+VERDICT: PASS (112 GiB available >= 15 GiB required headroom)
+
+--------------------------------------------------------------------------------
+2. Extension API Surface Check (check-extension-api.py)
+--------------------------------------------------------------------------------
+$ python3 tools/ci/check-extension-api.py
+PASS: extension API surface (97 paths)
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+3. Extension Isolation & Ratchet Boundary Gates (check-extension-isolation.py)
+--------------------------------------------------------------------------------
+$ python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-serving-boundary --fail-on-family-graph --fail-on-target-ownership --fail-on-model-core-includes
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: model core boundary (no production src/models -> src/core|src/cache includes)
+[check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+4. Extension Isolation Unit & Ratchet Tests (check_extension_isolation_test.py)
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_extension_isolation_test.py
+Ran 24 tests in 21.096s
+OK
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+5. Extension API Policy Tests (check_extension_api_test.py)
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_extension_api_test.py
+Ran 7 tests in 0.003s
+OK
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+6. Documentation Integrity (check_docs_test.py)
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_docs_test.py
+Ran 11 tests in 0.005s
+OK
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+7. Code Formatting (check-format.py)
+--------------------------------------------------------------------------------
+$ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+PASS: Checked 785 C++ files
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+8. Bounded CPU CTest (check ratchet gate and continuation identity goldens)
+--------------------------------------------------------------------------------
+$ nix develop -c ctest --test-dir build/cpu-test -R '^(extension_model_core_includes_gate|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Test project /home/mixer/gufo/build/cpu-test
+    Start  39: extension_model_core_includes_gate
+1/4 Test  #39: extension_model_core_includes_gate .............   Passed    3.77 sec
+    Start 140: qwen27b_continuation_identity_test
+2/4 Test #140: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 154: deepseek_v4_flash_continuation_identity_test
+3/4 Test #154: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 160: qwen38_flash_next_continuation_identity_test
+4/4 Test #160: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 4
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+9. Bounded GPU CTest (check ratchet gate and continuation identity goldens)
+--------------------------------------------------------------------------------
+$ nix develop -c ctest --test-dir build/gpu-test -R '^(extension_model_core_includes_gate|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Test project /home/mixer/gufo/build/gpu-test
+    Start  44: extension_model_core_includes_gate
+1/4 Test  #44: extension_model_core_includes_gate .............   Passed    3.73 sec
+    Start 195: qwen27b_continuation_identity_test
+2/4 Test #195: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 226: deepseek_v4_flash_continuation_identity_test
+3/4 Test #226: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 243: qwen38_flash_next_continuation_identity_test
+4/4 Test #243: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 4
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+10. Hosted PR Checks (nix build .#checks.x86_64-linux.pr)
+--------------------------------------------------------------------------------
+$ nix build .#checks.x86_64-linux.pr
+these 4 derivations will be built:
+  /nix/store/5km4dnwnvmxzij2333k9qjq1q9b6r3n8-check-pr-tests.drv
+  /nix/store/l8f986dnlywmmm52cdhb7k2cc4xicr5a-check-format.drv
+  /nix/store/x7aad6r4mfl2k5zyis60lpisn8ia4zin-check-docs.drv
+  /nix/store/gwan9f8vpsr9vqqhnvk3p0glwh0cwz19-check-pr.drv
+Exit Code: 0
+VERDICT: PASS
+
+--------------------------------------------------------------------------------
+11. Independent Codex Review and Fix
+--------------------------------------------------------------------------------
+$ codex exec review --dangerously-bypass-approvals-and-sandbox 'review the diff of current jj revision, you can use jj diff to see changes'
+
+Codex Review Output:
+- [P2] Update standalone benchmark include paths for migrated headers — /home/mixer/gufo/src/models/qwen_image_21/weights.hpp:6-7
+  The standalone image GEMM benchmark now fails to compile: tools/models/qwen_image_21/qwen_image_gemm_bench.hip includes dense.hip, which includes runtime.hpp and then this header. tools/bench/build.sh supplies only -I. and dependency include paths, so it cannot resolve the new <gufo/ext/gguf_reader.hpp> include. Add the repository's include directory to the standalone build helper as well; the global CMake change does not affect that workflow.
+
+Orchestrator Resolution:
+- Fixed `tools/bench/build.sh` at line 57: added `-I./include` to `compile` array alongside `-I.`.
+- Verified compilation:
+  $ nix develop -c tools/bench/build.sh tools/models/qwen_image_21/qwen_image_gemm_bench.hip
+  ==> tools/models/qwen_image_21/qwen_image_gemm_bench.hip -> /tmp/qwen_image_gemm_bench
+  ...
+  ok (Exit Code: 0)
+- Cleaned up scratch binary `/tmp/qwen_image_gemm_bench`.
+VERDICT: RESOLVED

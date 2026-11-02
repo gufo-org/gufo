@@ -6,10 +6,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <gufo/ext/sampling.hpp>
 #include <span>
 #include <stdexcept>
 
-#include "src/core/sampling.hpp"
 #include "src/models/deepseek_v4_flash/runtime/model.h"
 
 namespace gufo::models::deepseek_v4_flash {

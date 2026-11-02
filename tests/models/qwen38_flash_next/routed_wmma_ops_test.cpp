@@ -376,13 +376,21 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   for (std::size_t i = 0; i < x.size(); ++i) {
     x_half[i] = __float2half(x[i]);
   }
-  std::vector<std::int32_t> tiles;
-  for (std::size_t e = 0; e < experts; ++e) {
-    const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
-    for (std::uint32_t j = 0; j < (padded + tile_rows - 1) / tile_rows; ++j) {
-      tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+  // The 128-row tile is the wide down projection (F16 output only): the F32
+  // output comes from 48-row tiles, so the F16 check below compares the two
+  // tile heights bit for bit.
+  const std::uint32_t f32_rows = tile_rows == 128 ? 48 : tile_rows;
+  const auto tile_map = [&](std::uint32_t rows) {
+    std::vector<std::int32_t> map;
+    for (std::size_t e = 0; e < experts; ++e) {
+      const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
+      for (std::uint32_t j = 0; j < (padded + rows - 1) / rows; ++j)
+        map.push_back(static_cast<std::int32_t>(e | (j << 16)));
     }
-  }
+    return map;
+  };
+  const std::vector<std::int32_t> tiles = tile_map(f32_rows);
+  const std::vector<std::int32_t> half_tiles = tile_map(tile_rows);
   __half* d_x_half = nullptr;
   CheckHip(hipMalloc(&d_x_half, x_half.size() * sizeof(__half)),
            "exact F16 input allocation");
@@ -390,9 +398,10 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                      hipMemcpyHostToDevice),
            "F16 input upload");
   std::int32_t* d_tiles = Upload(tiles);
+  std::int32_t* d_half_tiles = Upload(half_tiles);
   float* d_f16 = Upload(zero_out);
   if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
-                        static_cast<std::uint32_t>(tiles.size()), tile_rows,
+                        static_cast<std::uint32_t>(tiles.size()), f32_rows,
                         d_bounds, d_rows_token, d_rows_slot, nullptr, d_f16,
                         nullptr, m, k, nullptr)) {
     throw std::runtime_error("routed F16 GEMM rejected the shape");
@@ -403,39 +412,16 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   const __half half_guard = __float2half(123.0F);
   __half* d_f16_half =
       Upload(std::vector<__half>(slots * m + kHalfGuard, half_guard));
-  if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
-                        static_cast<std::uint32_t>(tiles.size()), tile_rows,
-                        d_bounds, d_rows_token, d_rows_slot, nullptr, nullptr,
-                        d_f16_half, m, k, nullptr)) {
+  if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_half_tiles,
+                        static_cast<std::uint32_t>(half_tiles.size()),
+                        tile_rows, d_bounds, d_rows_token, d_rows_slot, nullptr,
+                        nullptr, d_f16_half, m, k, nullptr)) {
     throw std::runtime_error("routed F16 GEMM (F16 out) rejected the shape");
   }
   CheckHip(hipDeviceSynchronize(), "routed GEMMs");
   const auto mmq = Download(d_mmq, slots * m);
   const auto f16 = Download(d_f16, slots * m);
   const auto f16_half = Download(d_f16_half, slots * m);
-  if (tile_rows == 64) {
-    std::vector<std::int32_t> narrow_tiles;
-    for (std::size_t e = 0; e < experts; ++e) {
-      const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
-      for (std::uint32_t j = 0; j < (padded + 47u) / 48u; ++j) {
-        narrow_tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
-      }
-    }
-    auto* d_narrow_tiles = Upload(narrow_tiles);
-    if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_narrow_tiles,
-                          static_cast<std::uint32_t>(narrow_tiles.size()), 48,
-                          d_bounds, d_rows_token, d_rows_slot, nullptr, d_f16,
-                          nullptr, m, k, nullptr)) {
-      throw std::runtime_error("routed reference tile rejected");
-    }
-    CheckHip(hipDeviceSynchronize(), "routed tile comparison");
-    const auto narrow = Download(d_f16, slots * m);
-    if (std::memcmp(narrow.data(), f16.data(), f16.size() * sizeof(float)) !=
-        0) {
-      throw std::runtime_error("routed tile widths change output bits");
-    }
-    CheckHip(hipFree(d_narrow_tiles), "free reference tiles");
-  }
   for (std::size_t i = 0; i < slots * m; ++i) {
     const __half expected = __float2half(f16[i]);
     if (std::memcmp(&expected, &f16_half[i], sizeof(__half)) != 0) {
@@ -562,13 +548,14 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
             << r.vs_ref << ", worst |MMQ - F64| " << r.mmq_vs_ref
             << ", MMQ NMSE " << r.mmq_sq_error / r.ref_sq << " (scale "
             << r.scale << ", widest bucket " << max_bucket << ")\n";
-  for (void* p : {static_cast<void*>(d_w), static_cast<void*>(d_x),
-                  static_cast<void*>(d_ids), static_cast<void*>(d_counts),
-                  static_cast<void*>(d_bounds), static_cast<void*>(d_cursors),
-                  static_cast<void*>(d_rows_token),
-                  static_cast<void*>(d_rows_slot), static_cast<void*>(d_mmq),
-                  static_cast<void*>(d_x_half), static_cast<void*>(d_tiles),
-                  static_cast<void*>(d_f16), static_cast<void*>(d_f16_half)}) {
+  for (void* p :
+       {static_cast<void*>(d_w), static_cast<void*>(d_x),
+        static_cast<void*>(d_ids), static_cast<void*>(d_counts),
+        static_cast<void*>(d_bounds), static_cast<void*>(d_cursors),
+        static_cast<void*>(d_rows_token), static_cast<void*>(d_rows_slot),
+        static_cast<void*>(d_mmq), static_cast<void*>(d_x_half),
+        static_cast<void*>(d_tiles), static_cast<void*>(d_half_tiles),
+        static_cast<void*>(d_f16), static_cast<void*>(d_f16_half)}) {
     (void)hipFree(p);
   }
   return r;
@@ -1145,16 +1132,21 @@ std::vector<__half> RoutedDown(const Routing& r, const void* w,
 }
 
 /// A prompt row's expert outputs must not depend on the pass that computes
-/// it: the wide prefill pass (paired 128-row gate/up tiles, 64-row down
-/// tiles over every token) against short passes over the last tokens alone
-/// (separate 16- or 48-row tiles), and every separate tile height against
-/// the paired route, bit for bit. Model shapes (640 x 2560 gate/up, top-10,
-/// ragged buckets over many experts; 2560 x 640 down).
-bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type) {
+/// it: the wide prefill pass (paired gate/up and down, 128-row tiles over
+/// every token) against short passes over some tokens alone (up to eight
+/// rows: separate 16-row tiles; more: the wide routes again, and the 48-row
+/// separate tiles), and every separate tile height against the paired route,
+/// bit for bit. Model shapes (640 x 2560 gate/up, top-10, ragged buckets
+/// over many experts; 2560 x 640 down).
+bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type,
+                     const std::vector<std::uint8_t>* gate_bytes = nullptr,
+                     const std::vector<std::uint8_t>* up_bytes = nullptr,
+                     std::size_t experts = 128) {
   constexpr std::size_t m = 640, k = 2560, used = 10, n_tokens = 1619;
-  constexpr std::size_t experts = 128;
-  const auto gate = MakePacked(gate_type, experts, m, k, 0xA11CE);
-  const auto up = MakePacked(gate_type, experts, m, k, 0xB0B0);
+  const auto gate =
+      gate_bytes ? *gate_bytes : MakePacked(gate_type, experts, m, k, 0xA11CE);
+  const auto up =
+      up_bytes ? *up_bytes : MakePacked(gate_type, experts, m, k, 0xB0B0);
   const auto down = MakePacked(down_type, experts, k, m, 0xD0D0);
   auto* d_gate = Upload(gate);
   auto* d_up = Upload(up);
@@ -1190,32 +1182,46 @@ bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type) {
          ok;
   }
   auto* d_act = Upload(paired);
-  const auto wide_down = RoutedDown(all, d_down, down_type, d_act, k, m, 64);
+  const auto wide_down = RoutedDown(all, d_down, down_type, d_act, k, m, 128);
   for (std::uint32_t tile : {16U, 48U}) {
     ok = CountDiffs(wide_down, 0,
                     RoutedDown(all, d_down, down_type, d_act, k, m, tile), k,
-                    name + " down 64 vs " + std::to_string(tile)) == 0 &&
+                    name + " down 128 vs " + std::to_string(tile)) == 0 &&
          ok;
   }
-  // Short passes: a restored prompt's tail, and a ragged middle chunk.
-  for (const auto [first, count, tile] :
-       {std::array<std::size_t, 3>{n_tokens - 7, 7, 16},
-        std::array<std::size_t, 3>{n_tokens - 1, 1, 16},
-        std::array<std::size_t, 3>{300, 33, 48}}) {
+  // Short passes: a restored prompt's tail, ragged middle chunks, and the
+  // smallest wide passes.
+  for (const auto [first, count] : {std::array<std::size_t, 2>{n_tokens - 7, 7},
+                                    std::array<std::size_t, 2>{n_tokens - 1, 1},
+                                    std::array<std::size_t, 2>{n_tokens - 9, 9},
+                                    std::array<std::size_t, 2>{300, 33},
+                                    std::array<std::size_t, 2>{701, 95},
+                                    std::array<std::size_t, 2>{1000, 96}}) {
     const Routing part(ids, first, count, used, experts);
-    const auto gated =
-        SeparateSwiglu(part, d_gate, d_up, gate_type, d_x + first * k, m, k,
-                       static_cast<std::uint32_t>(tile));
     const std::string what = name + " " + std::to_string(count) +
                              "-token pass at " + std::to_string(first);
+    const std::uint32_t tile = count <= 8 ? 16 : 48;
+    const auto gated = SeparateSwiglu(part, d_gate, d_up, gate_type,
+                                      d_x + first * k, m, k, tile);
     ok = CountDiffs(paired, first * used, gated, m, what + " gate/up") == 0 &&
          ok;
-    const auto short_down =
-        RoutedDown(part, d_down, down_type, d_act + first * used * m, k, m,
-                   static_cast<std::uint32_t>(tile));
+    const auto short_down = RoutedDown(part, d_down, down_type,
+                                       d_act + first * used * m, k, m, tile);
     ok = CountDiffs(wide_down, first * used, short_down, k, what + " down") ==
              0 &&
          ok;
+    if (count > 8) {
+      ok = CountDiffs(paired, first * used,
+                      PairedSwiglu(part, d_gate, d_up, gate_type,
+                                   d_x + first * k, m, k),
+                      m, what + " paired gate/up") == 0 &&
+           ok;
+      ok = CountDiffs(wide_down, first * used,
+                      RoutedDown(part, d_down, down_type,
+                                 d_act + first * used * m, k, m, 128),
+                      k, what + " wide down") == 0 &&
+           ok;
+    }
   }
   for (void* p : {static_cast<void*>(d_gate), static_cast<void*>(d_up),
                   static_cast<void*>(d_down), static_cast<void*>(d_x),
@@ -1245,16 +1251,18 @@ int main() {
          ok;
     // Down view: single-expert slot rows, 2560 x 640 Q5_1.
     ok = Ok(Run(q::WeightType::kQ5_1, 3000, 1, 64, 2560, 640, 0x0BADF00DU,
-                64)) &&
+                128)) &&
          ok;
-    ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 64)) &&
+    ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 128)) &&
          ok;
     // Q5_K gate/up view (one layer).
     ok = Ok(Run(q::WeightType::kQ5_K, 300, 10, 64, 640, 2560, 0x5A5A0001U)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
-                64)) &&
+                128)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ8_0, 97, 1, 8, 129, 640, 0x0C0FFEE1U, 128)) &&
          ok;
     // Ragged rows against the 128-row tile and a tiny batch.
     ok = Ok(Run(q::WeightType::kQ4_K, 40, 4, 8, 201, 512, 0xDEADBEEFU)) && ok;

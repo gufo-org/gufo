@@ -1,5 +1,54 @@
 # Qwen3.8 Flash-Next experiments
 
+## Routed prefill experts (October 23, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Register-resident routed down projection over 128-token tiles (`RoutedDownF16Kernel`, Q5_1/Q8_0) and a rewritten paired gate/up (`RoutedPairF16Kernel`, Q4_K/Q5_K) sharing one 128-token map | Retained. gfx1151 WMMA reads row r's A operand from one lane only (r for even rows, r + 16 for odd; the other copy is ignored, verified with garbage in the unread lanes), so each lane decodes one K16 half and one `v_permlanex16` per dword supplies the other: no duplicate decode, no selects. Down keeps each wave's 16 rows' codes in registers (activations are the only LDS stage, 155 VGPRs); the pair loads superblocks raw and decodes them at commit, removing a full memory wait every fourth stage. Loop VALU per WMMA: down 11 → 4.6, pair 6.8 → 3.9. Every row is bit-identical across 16/48/128-row tiles, paired vs separate, and 1/7/9/33/95/96-row passes (`CheckPassRoutes`). `routed_gemm_bench` (synthetic skewed top-10, Q4_K gate/up, Q5_1 down) on main `34ebb5fe`, two rounds, ms per layer at 4,096 / 26,541 rows: gate/up 10.61, 11.06 → 10.30, 10.34 / 54.43, 59.42 → 52.30, 56.35; down 6.58, 6.77 → 5.72, 6.16 / 32.83, 37.83 → 28.29, 31.50. On the production fork (quiet GPU, alternating medians), TFLOPS at 4,096 / 26,541 rows: down Q5_1 21.1 → 23.8 / 25.1 → 30.6, Q8_0 17.8 → 20.4 / 23.6 → 29.0; gate/up Q4_K 26.7 → 28.3 / 32.6 → 33.1, Q5_K 24.1 → 25.3 / 30.2 → 30.7. The GPU runs these kernels power-limited near 1.9 GHz (~110 W), so the measured WMMA ceiling is about 39–48 TFLOPS. `gufo bench` UD-Q4_K_XL pp16384, two rounds: 1,590 / 1,583 → 1,624 / 1,629 tok/s. Rejected (all exact): prefetching two stages ahead, the next token tile's B fragments (199 VGPRs), double-buffered activation stages with one barrier (BK 1 or 2), and 256-row × 64-token down tiles; none beat the version kept. Ablation at 26.5K rows: without WMMA the down kernel takes 16 of 30 ms, without decode −5%, without B fragment reads −3%, without stores −2%. |
+| Weighted top-10 combine folded into the down epilogue | Not done: a token's ten slot rows come from ten experts' tiles spread over the whole launch, so an exact slot-order sum needs every partial first; integer atomics would be order-independent but cost more than the 51 KB/token read and would change every route. The combine already streams about 190 GB/s. |
+
+## Long prefill passes (October 23, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| 16,384-row lone-prompt passes, dense prefill GEMMs launched in 4,096-row token-tile groups | Retained. `GroupedRasterTile` maps blocks so each group of 4,096 rows sweeps every row tile before the next group starts (`DenseF16GEMMKernel`, `W8A8BlockedWmmaGEMMKernel`); grids up to one group keep their order, and only the block-to-tile mapping changes. On the production fork (mixed K-quant recipe + MTP, ROCm 7.2.4): routed experts per token at 16K rows pair 106.9 → 101.4, down 65.3 → 57.4 µs; the HC down GEMM 23.8 → 21.3. Long greedy replies (21,022 and 25,580-token prompts through `gufo serve`, 4,096 against 16,384-row plans) byte-identical; retrieval 48/48 (16.5K and 38.3K prompts). `gufo bench` MTP, alternating twice: pp32768 1,666/1,666 → 1,711/1,696; pp8192 1,758/1,734 → 1,749/1,754. HTTP probe, alternating twice: 26.5K 1,551/1,549 → 1,597/1,605, 7.3K 1,598/1,585 → 1,626/1,624. Peak GTT in `gufo bench` 68.5 → 72.6 GiB. On main `34ebb5fe` with UD-Q4_K_XL, `gufo bench -n 0 -r 2`, two rounds: pp16384 1,590 / 1,583 → 1,632 / 1,625 tok/s. A request that arrives during a lone long prefill now waits for up to one 16K pass (about 10 s). `projection_ops` checks W8A8 and F16 rows of 9,001-row passes against 1,031/4,096-row passes, including rows that straddle a group. |
+| 16,384-row passes in the original tile order | Rejected: experts −13.9 µs/token, but the dense GEMMs re-read activations for every row tile once a pass outgrew the caches (+17 µs/token; HC down +5.4, fused SSM projection +4.5), so pp32768 stayed 1,661 → 1,663. |
+| Per-pass fixed cost | Not a lever: head GEMV, MTP boundary row and idle gaps total about 3 ms per 4,096-row pass (0.7 µs/token); the GPU is 99.8% busy across a bench prefill. |
+
+## One-launch decode HC mixer (October 29, 2026)
+
+Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
+
+| Experiment | Outcome |
+| --- | --- |
+| `HcMixQ8Fused`: a decode batch's combine, Q8_0 down/up projections, SiLU and epilogue in one launch (1-8 rows) | Retained as a component result: outputs bit for bit the five separate kernels (`hc_mix_ops`, eager, in place and replayed). `hc_mix_bench`, graph-replayed, µs per mixer: T1 47.8 → 44.5, T2 48.2 → 44.3, T4 51.7 → 48.5, T8 59.2 → 57.2. End to end, replies byte-identical; AR 28.81/29.38 (main before/after) against 29.82 and 29.55 tok/s, MTP 50.3 → 50.7/50.8 (main, three runs); C4 MTP wall throughput (4 × 32,768, four unique 256-token prompts) 76.2/76.9 → 80.0 tok/s. Rejected (exact): warming the down weights during the combine (T8 0.92×), LDS-staged up rows (0.75-0.93×), all 16 up rows ahead at T5-T8 (1.00×). |
+
+## Prefill DeltaNet (October 23, 2026)
+
+Component results from the production fork (ROCm 7.2.4); end to end on main
+`34ebb5fe` with UD-Q4_K_XL, `gufo bench -p 2048,16384 -n 0 -r 2`, two
+alternated rounds, ROCm 7.2.4, no cooldown between processes, tok/s:
+
+| Build | pp2048 | pp16384 |
+| --- | ---: | ---: |
+| main | 1,591 / 1,502 | 1,590 / 1,583 |
+| fused GDN, both #758 side streams (this change) | 1,624 / 1,542 | 1,617 / 1,610 |
+| fused GDN, side streams off | 1,627 / 1,561 | 1,647 / 1,658 |
+
+pp2048 drifted with temperature between rounds; pp16384 gains 1.7%, and
+2.4% more without the Z-row and shared-expert overlap. The fused kernel
+reads z from its first token, so the Z overlap cannot hide anything, and
+both side streams contend with it (on the production fork's recipe + MTP at
+pp32768: 1,658-1,662 with either overlap, 1,693 without the shared-expert
+one, 1,741 without both). Their removal is left to a ROCm 10.1 measurement.
+
+| Experiment | Outcome |
+| --- | --- |
+| One fused prefill launch per GDN layer (`GdnPrefillKernel`): one 8-wave block per value head computes the q/k norms and gates when it commits each 4-token window to LDS, runs the row-split recurrence, and does the epilogue from LDS. That replaces `GdnPrepKq`, `GdnPrepAb`, `GdnRowSplit` and `GdnEpilogue` (the raw/qn/kn round trips). Every thread issues the same three loads per window, so the in-order vmcnt wait no longer drains later windows. Barriers are LDS-only, the row stores have no branch (the rows' FMA chains were serialized), and the decay comes from an SGPR (+29 dual issues) | Retained. Rows, state, checkpoint captures and the F32, F16-strided and Q8-tiled outputs are byte-identical to the four separate kernels (hashes from `tools/bench/qfn_gdn_prefill_bench.hip`, fixed history, 1,031 rows). Inlining reassociated the norm sums and the epilogue products, so they are spelled out. µs per row per layer for the whole GDN after the fused projection, alternating, quiet GPU, 2048/4096/8192/16384 rows: 1.30/1.28/1.27/1.29 → 1.05/1.05/1.05/1.05. Contended GPU, min of 5, 2048/4096/8192/26541 rows: 1.28/1.51/1.53/1.56 → 0.92/1.18/1.19/1.18. Counters: busiest SIMD at about 59% VALU issue. With 48 head blocks on 20 WGPs, 8 WGPs run 3 blocks (grid 40 → 48 costs 1.28×). |
+| Chunked (WY, 16-token) recurrence | Not built. The split contract rules it out: a pass that ends inside a block hands over the state at that row, and the next pass cannot reproduce the single pass's whole-block arithmetic. The single pass cannot know where later splits fall. |
+| q/k held by quad lanes, broadcast as DPP operands of the FMAs | Rejected. Byte-identical, with 4× fewer LDS loads, but the combiner left 300 `v_mov_dpp` per token (1.10 → 1.24 µs/row). Inline-asm `v_fmac_f32_dpp` lost dual issue and chained badly (1.36–1.80). |
+| 4 rows per lane (4 waves); 8 lanes × 16 keys × 4 rows; scheduling barriers interleaving the row chains; crossed-component update order for dual issue | Rejected: 1.73 / 1.19–1.24 / unchanged / unchanged against 1.10 µs/row (the last cut the instruction count 200 → 180 with no time gain). Microbenchmark: dual FMAs with six VGPR reads issue no faster than two single FMAs, so the recurrence is bound by VGPR operand reads rather than by instruction count. |
+
 ## Prefill route independence (October 23, 2026)
 
 A prompt restored from a checkpoint and finished by a short prefill pass must

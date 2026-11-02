@@ -5,15 +5,14 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <gufo/ext/json.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
+#include <gufo/ext/platform/prefault.hpp>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
-
-#include "src/core/json.hpp"
-#include "src/core/platform/mapped_file.hpp"
-#include "src/core/platform/prefault.hpp"
 
 namespace gufo::models::qwen3_tts {
 namespace {

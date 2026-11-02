@@ -6,8 +6,8 @@
 #include <string>
 #include <vector>
 
-#include "src/models/embedding_gemma2/config.hpp"
-#include "src/models/embedding_gemma2/tensor.hpp"
+#include "config.hpp"
+#include "tensor.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 

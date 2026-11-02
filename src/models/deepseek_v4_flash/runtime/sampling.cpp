@@ -1,4 +1,4 @@
-#include "src/core/sampling.hpp"
+#include <gufo/ext/sampling.hpp>
 
 #include <cmath>
 #include <limits>

@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
@@ -39,11 +40,11 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
 #endif
+#include "src/cli/serve/audio_buffer.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/video/video.hpp"
-#include "src/models/qwen3_tts/audio.hpp"
 
 namespace gufo::cli {
 namespace {
@@ -340,9 +341,8 @@ bool BuildVoicePresets(
 
     server::TtsVoicePreset preset;
     std::string decode_error;
-    if (!models::qwen3_tts::DecodeWav(
-            std::as_bytes(std::span<const char>(wav_bytes)),
-            &preset.reference_audio, &decode_error)) {
+    if (!server::DecodeWav(std::as_bytes(std::span<const char>(wav_bytes)),
+                           &preset.reference_audio, &decode_error)) {
       *error = wav_path.string() + ": " + decode_error;
       return false;
     }
@@ -804,6 +804,9 @@ int RunServe(std::span<const char* const> args) {
   // that simply vanished after event=load_started.
   ReportTerminationReason();
   InstallFatalSignalReporter();
+
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
 
   std::string host = "127.0.0.1";
   if (const char* env_host = std::getenv("HOST");
@@ -1469,7 +1472,7 @@ int RunServe(std::span<const char* const> args) {
           speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
         throw std::invalid_argument("--draft-policy requires DFlash2");
       speculative_config.dflash_policy =
-          speculative::ParseDFlashDraftPolicy(draft_policy);
+          server::speculative::ParseDFlashDraftPolicy(draft_policy);
     } catch (const std::invalid_argument& exception) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;

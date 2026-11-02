@@ -1,0 +1,75 @@
+Moved-source compile-line audit (Card 09, RFC steps 5 and 6)
+
+Method: compare every compile-command token (minus -o/-c outputs and the build
+directory) for the seven serving translation units between the Card 08 tree
+(`gufo` executable) and this tree (`gufo_serving` static library).
+
+GPU test build  (gpu-test: RelWithDebInfo + GUFO_BUILD_TEST_UTILS, -UNDEBUG)
+  card08 carrier: target `gufo`        -> card09 carrier: target `gufo_serving`
+  added   : -UNDEBUG
+  removed : -DGUFO_EVAL_INSTALLED_DATA, -DGUFO_EVAL_SOURCE_DATA,
+            -DGUFO_H3_INSTALLED_SOURCE_MANIFEST, -DGUFO_H3_SOURCE_MANIFEST,
+            -DGUFO_RELEASE_VERSION, -DGUFO_REVISION, -I<build>/extensions/gufo
+  Model-test carriers in card08 (qwen_serving_test_support, ds4_serving_test,
+  qwen38_flash_next_session_test) already carried -UNDEBUG, -fopenmp, the HIP
+  include dirs and -DGUFO_CACHE_TESTING; the new serving carrier matches them,
+  adding only -Iinclude (the public extension include root, from
+  gufo_ext_runtime).
+
+Production builds (BUILD_TESTING=OFF, RelWithDebInfo, no sanitizers)
+  card08 `gufo` objects -> card09 `gufo_serving` objects, release-discovery and
+  lock selections:
+  added   : (nothing)
+  removed : -DGUFO_EVAL_INSTALLED_DATA, -DGUFO_EVAL_SOURCE_DATA,
+            -DGUFO_H3_INSTALLED_SOURCE_MANIFEST, -DGUFO_H3_SOURCE_MANIFEST,
+            -DGUFO_RELEASE_VERSION, -DGUFO_REVISION, -I<build>/extensions/gufo
+  `-O2 -g -DNDEBUG`, -fPIC, all -W*/-Werror flags, -fopenmp, the HIP/HOST-ONLY
+  include paths, and -DGUFO_ENABLE_SANITIZER are unchanged.
+
+Why the removed defines are inert here
+  `grep -c 'GUFO_EVAL_|GUFO_H3_|GUFO_RELEASE_VERSION|GUFO_REVISION|
+   GUFO_IDENTITY_FIXTURES|gufo/ext/generated'` returns 0 for all seven serving
+  sources, and none of them includes the generated registry. Those macros are
+  PRIVATE to the `gufo` executable and are used only by src/cli/main.cpp,
+  src/cli/serve.cpp and src/cli/eval.cpp, which stay in the executable.
+
+Intentional consequence of the single production library (recorded deviation)
+  In a BUILD_TESTING tree, `gufo_serving` compiles with -UNDEBUG, so asserts in
+  the serving runtime are live for the test binaries and for the test-preset
+  `gufo`. In the card08 GPU tree the executable objects had no -UNDEBUG, so
+  those same asserts were compiled out in the `gufo` binary built by the test
+  preset (they were already live in every model-test carrier). Production
+  presets keep NDEBUG and are unaffected: the release-discovery and lock
+  additions above are empty.
+
+`src/core/hip/component_cache_resources.cpp` (moved out of
+`src/cli/serve/inference_backend.cpp` into `gufo_cache_hip`) inherits that
+target's flags: `--offload-arch=gfx1151 --offload-compress -fPIC -O2 -g
+-DNDEBUG` in production, plus `-UNDEBUG` under BUILD_TESTING. Same language as
+before (HIP host code, no device kernels), and the only new dependencies are
+the injected `hip::ComponentCacheHooks`, so no model symbol crosses the edge.
+
+How to reproduce (script retained next to this file)
+  python3 docs/model-extensions/evidence/card09/flag-audit.py \
+    build/card08-gpu/compile_commands.json \
+    build/card09-gpu/compile_commands.json gufo gufo_serving
+  python3 docs/model-extensions/evidence/card09/flag-audit.py \
+    build/card08-release/compile_commands.json \
+    build/card09-release/compile_commands.json gufo gufo_serving
+
+Captured output: logs/gpu-test-flag-diff.txt and logs/production-flag-diff.txt.
+The lock build was configured without CMAKE_EXPORT_COMPILE_COMMANDS, so its
+selection is evidenced by the release audit plus `gufo diagnose`; the two
+configurations differ only in GUFO_EXTENSIONS_FROM_LOCK.
+Baselines: build/card08-gpu/compile_commands.json, build/card08-release/...
+Candidates: build/card09-gpu/..., build/card09-release/...
+
+Integration correction (F4/F5/F7): qualification must use a BUILD_TESTING=OFF
+artifact. Test-preset and production assertion state now differs; live assertions
+in test-preset serving code are an expected compilation change, not by themselves
+a newly introduced regression. Investigate actual assertion failures normally.
+continuation_identity.cpp retains a second carrier in each of the qwen27b,
+qwen38_flash_next and deepseek_v4_flash model test directories, with their own
+GUFO_IDENTITY_FIXTURES definitions. It has no conditional compilation today.
+The regenerated logs contain one exact invocation per real pair. They supersede
+the mixed gpu-test/release rows; the lock selection has no independent flag audit.

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "name": "deepseek_v4_flash",
+  "target": "gufo_deepseek_v4_flash",
+  "kind": "static",
+  "purpose": "DeepSeek V4 Flash ROCm runtime: model data, graph capture, session and tokenizer over the CPU-only text tier. Registered only when ENGINE_ENABLE_HIP is ON.",
+  "consumers": [],
+  "checks": [
+    "openai_chat_test"
+  ]
+}

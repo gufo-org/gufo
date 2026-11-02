@@ -11,15 +11,14 @@
 #include <string>
 #include <vector>
 
+#include "gufo/ext/asr.hpp"
+#include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/core/json.hpp"
-#include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 
 namespace gufo::cli {
 namespace {
 
-namespace qwen3_asr = models::qwen3_asr;
-namespace qwen3_asr_hip = models::qwen3_asr::hip;
 namespace json = gufo::json;
 
 constexpr std::uintmax_t kMaximumAudioBytes = 256U << 20U;
@@ -62,7 +61,7 @@ bool ReadAudio(const std::filesystem::path& path,
   return true;
 }
 
-json::Value TimingsJson(const qwen3_asr::TranscriptionTimings& timings,
+json::Value TimingsJson(const ext::TranscriptionTimings& timings,
                         double load_ms) {
   json::Value result = json::Value::object();
   result["load_ms"] = load_ms;
@@ -192,9 +191,19 @@ int RunTranscribe(std::span<const char* const> args) {
     return 1;
   }
 
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  const ext::AsrProvider* provider = ext::ProbeAsrProvider(model.string());
+  if (!provider) {
+    provider = ext::FindAsrProvider("qwen3-asr");
+  }
+  if (!provider || !provider->create) {
+    std::cerr << "Error loading ASR: provider not available\n";
+    return 1;
+  }
+
   const auto load_begin = std::chrono::steady_clock::now();
-  auto runtime = qwen3_asr_hip::TranscriptionHipRuntime::Create(
-      model.string(), capacity, &error);
+  auto runtime = provider->create(model.string(), capacity, &error);
   const auto load_end = std::chrono::steady_clock::now();
   if (runtime == nullptr) {
     std::cerr << "Error loading Qwen3-ASR: " << error << '\n';
@@ -205,20 +214,20 @@ int RunTranscribe(std::span<const char* const> args) {
 
   g_cancel_requested = 0;
   const auto previous_interrupt = std::signal(SIGINT, HandleInterrupt);
-  const qwen3_asr::TranscriptionRequest request{
+  const ext::TranscriptionRequest request{
       .wav = wav,
       .context = context,
       .language = language.empty() ? std::nullopt
                                    : std::optional<std::string>(language),
       .max_new_tokens = maximum_tokens,
   };
-  qwen3_asr::TranscriptionResult result;
+  ext::TranscriptionResult result;
   bool transcribed = true;
   for (std::size_t run = 0; run < warmup && transcribed; ++run) {
     transcribed = runtime->Transcribe(
         request, [] { return g_cancel_requested != 0; }, &result, &error);
   }
-  std::vector<qwen3_asr::TranscriptionTimings> run_timings;
+  std::vector<ext::TranscriptionTimings> run_timings;
   run_timings.reserve(repeat);
   std::string expected_text;
   for (std::size_t run = 0; run < repeat && transcribed; ++run) {
@@ -261,7 +270,7 @@ int RunTranscribe(std::span<const char* const> args) {
   report["timings"] = TimingsJson(result.timings, load_ms);
   json::Value runs = json::Value::array();
   double total_ms = 0.0;
-  for (const qwen3_asr::TranscriptionTimings& timings : run_timings) {
+  for (const ext::TranscriptionTimings& timings : run_timings) {
     runs.push_back(TimingsJson(timings, 0.0));
     total_ms += timings.total_ms;
   }

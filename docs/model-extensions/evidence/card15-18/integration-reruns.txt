@@ -1,0 +1,113 @@
+================================================================================
+CARDS 15-18 INTEGRATION RERUNS EVIDENCE
+================================================================================
+Timestamp: 2026-11-01T13:08:25Z
+Integration Agent: codex-exec-writer
+Host: x86_64-linux (AMD RYZEN AI MAX+ 395 w/ Radeon 8060S gfx1151)
+Pinned Toolchain: ROCm 10.1.0
+
+--------------------------------------------------------------------------------
+1. python3 tools/ci/generate-infrastructure.py --check
+Exit Code: 0
+Output:
+PASS: Infrastructure files are up to date with model metadata.
+
+--------------------------------------------------------------------------------
+2. python3 tools/ci/check-extension-api.py
+Exit Code: 0
+Output:
+PASS: extension API surface (108 paths)
+
+--------------------------------------------------------------------------------
+3. python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes
+Exit Code: 0
+Summary:
+Strict Boundary Violations: 0
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: model core boundary (no production src/models -> src/core|src/cache includes)
+[check-extension-isolation] PASS: extension boundary (no src/cli -> migrated extension includes)
+
+--------------------------------------------------------------------------------
+4. python3 tools/ci/check-docs.py
+Exit Code: 0
+Output:
+[check-docs] PASSED: 321 markdown files and 1605 local links/anchors verified with zero broken links or invalid JSON blocks.
+
+--------------------------------------------------------------------------------
+5. nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+Exit Code: 0
+Output:
+PASS: Formatted 816 C++ files
+
+--------------------------------------------------------------------------------
+6. nix develop -c python3 -m unittest tests/extensions/metadata_test.py
+Exit Code: 0
+Output:
+Ran 13 tests in 10.181s
+OK
+
+--------------------------------------------------------------------------------
+7. python3 -m unittest tests/tools/check_extension_isolation_test.py
+Exit Code: 0
+Output:
+Ran 27 tests in 23.379s
+OK
+
+--------------------------------------------------------------------------------
+8. nix develop -c cmake --build --preset cpu-test --target check-pr
+Exit Code: 0
+Output:
+100% tests passed out of 96
+Total Test time (real) = 152.23 sec
+
+--------------------------------------------------------------------------------
+9. nix build
+Exit Code: 0
+./result/bin/gufo diagnose:
+Overall Status  : [PASS]
+Target Platform : x86_64-linux (Linux 7.2.9)
+CPU Model       : AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (32 threads)
+GPU Architecture: AMD Radeon 8060S Graphics [gfx1151, 20 CUs]
+Pinned Toolchain: ROCm 10.1.0
+Compatibility Verdict: [supported]
+Extension API: 0.1.5
+Extension selection: discovery
+Built extensions:
+  embedding_gemma2 0.1.0 (src/models/embedding_gemma2)
+  minimax_h3 0.1.0 (src/models/minimax_h3)
+  qwen3_asr 0.1.0 (src/models/qwen3_asr)
+  qwen3_tts 0.1.0 (src/models/qwen3_tts)
+  qwen_image_21 0.1.0 (src/models/qwen_image_21)
+  provider embeddinggemma-2: available
+  provider minimax-h3: available
+  provider qwen3-asr: available
+  provider qwen3-tts: available
+  provider qwen-image-21: available
+  excluded deepseek_v4_flash 0.1.0 (src/models/deepseek_v4_flash): metadata only
+  excluded qwen 0.1.0 (src/models/qwen): metadata only
+  excluded qwen38_flash_next 0.1.0 (src/models/qwen38_flash_next): metadata only
+
+--------------------------------------------------------------------------------
+10. nix build .#checks.x86_64-linux.pr --no-link
+Exit Code: 0
+Output:
+these 4 derivations will be built:
+  /nix/store/...-check-format.drv
+  /nix/store/...-check-docs.drv
+  /nix/store/...-check-pr-tests.drv
+  /nix/store/...-check-pr.drv
+building '/nix/store/...-check-docs.drv'...
+building '/nix/store/...-check-format.drv'...
+building '/nix/store/...-check-pr-tests.drv'...
+building '/nix/store/...-check-pr.drv'...
+[All 4 check derivations built and passed successfully]
+
+--------------------------------------------------------------------------------
+Summary of Resolution for Findings U1, M1, M2, M3, N1, N2:
+- U1 (Separate HIP target in manifest): Added `gufo_<name>_hip` (`requires: ["hip"]`) and `gufo_<name>` (`requires: []`) in extension.json and extension.cmake across qwen3_asr, qwen3_tts, qwen_image_21, and minimax_h3. Linked rocblas/hipblaslt to gufo_minimax_h3_hip. Nix production build passed with all 5 extensions built and active.
+- M1 (Dead DecodeBase64Wav): Removed DecodeBase64Wav and its helpers from src/models/qwen3_tts/audio.hpp/.cpp.
+- M2 (Qwen3-ASR model name alias): Registered both "qwen3-asr" and "qwen3-asr-1.7b" in provider.cpp / extension.cpp and updated asr_service.cpp fallback check.
+- M3 (Consolidate TakeSpeechSegments): Removed src/models/qwen3_tts/text_stream.hpp duplicate; updated tests/models/qwen3_tts/audio_api_test.cpp to include src/cli/serve/text_stream.hpp.
+- N1 (Public CHANGES.md entry): Updated include/gufo/ext/CHANGES.md to document RunCapture and RunMediaMux, removing obsolete RunSubprocess.
+- N2 (Ext platform namespace wrapper): Removed namespace gufo::ext::platform alias wrapper from include/gufo/ext/platform/process.hpp; updated src/models/minimax_h3/media.cpp to call gufo::platform directly.
+================================================================================

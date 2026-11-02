@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <memory>
 #include <optional>
 #include <span>
@@ -12,8 +13,6 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
-
-#include "src/core/platform/mapped_file.hpp"
 
 namespace gufo::minimax_h3 {
 

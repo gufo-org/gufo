@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/audio_processor.hpp"
+#include "audio_processor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6,11 +6,10 @@
 #include <complex>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <numbers>
 #include <sstream>
 #include <stdexcept>
-
-#include "src/core/json.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

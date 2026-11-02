@@ -158,7 +158,7 @@
           default = base;
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
-          release = base.override { inherit releaseVersion; };
+          release = base.override { inherit releaseVersion; extensionsFromLock = true; };
           # Windows test binaries of the platform leaves and the CPU cache,
           # cross-built here and run on a Windows CI host.
           windows-platform-tests =
@@ -260,6 +260,7 @@
 
           formatSource = mkFilteredSource {
             directories = [
+              "include"
               "src"
               "tests"
             ];
@@ -271,6 +272,7 @@
 
           staticAnalysisSource = mkFilteredSource {
             directories = [
+              "include"
               "cmake"
               "src"
             ];
@@ -278,11 +280,15 @@
               ".clang-format"
               ".clang-tidy"
               "CMakeLists.txt"
+              "extensions.lock"
             ];
           };
 
           testSource = mkFilteredSource {
             directories = [
+              "examples/extension_template"
+              "include"
+              "schemas"
               "cmake"
               "src"
               "tests"
@@ -291,7 +297,10 @@
             files = [
               ".clang-format"
               "CMakeLists.txt"
+              "extensions.lock"
+              "AGENTS.md"
               "docs/RELEASING.md"
+              "docs/models/README.md"
               "tools/prof/prof.py"
               "tools/bench/speculative-corpus.py"
             ];
@@ -475,7 +484,7 @@
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
-              (if full then pkgsSys.python3.withPackages (ps: [ ps.numpy ]) else pkgsSys.python3)
+              (pkgsSys.python3.withPackages (ps: [ ps.jsonschema ] ++ pkgsSys.lib.optionals full [ ps.numpy ]))
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
@@ -513,6 +522,13 @@
             '' else ''
               cmake --build . --parallel "$NIX_BUILD_CORES" --target check-pr
             ''}
+
+            # Build the real CPU lock-mode executable, using the same source
+            # and toolchain. This does not replace shipped HIP qualification.
+            cmake "$src" -B ../lock-build -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF -DGUFO_EXTENSIONS_FROM_LOCK=ON
+            cmake --build ../lock-build --target gufo --parallel "$NIX_BUILD_CORES"
+            ../lock-build/gufo diagnose --section extensions --json
+            ../lock-build/gufo --version | grep -Fx 'Extension selection: lock'
 
             if [[ -n "$ccache_launcher" ]]; then
               ccache --show-stats

@@ -1,0 +1,719 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "kind": {
+      "enum": [
+        "extension",
+        "library"
+      ]
+    },
+    "api_version": {
+      "type": "string",
+      "pattern": "^>= [0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([+-][A-Za-z0-9.-]+)?$"
+    },
+    "entry": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "not": {
+        "enum": [
+          "alignas",
+          "alignof",
+          "and",
+          "and_eq",
+          "asm",
+          "atomic_cancel",
+          "atomic_commit",
+          "atomic_noexcept",
+          "auto",
+          "bitand",
+          "bitor",
+          "bool",
+          "break",
+          "case",
+          "catch",
+          "char",
+          "char8_t",
+          "char16_t",
+          "char32_t",
+          "class",
+          "compl",
+          "concept",
+          "const",
+          "consteval",
+          "constexpr",
+          "constinit",
+          "const_cast",
+          "continue",
+          "co_await",
+          "co_return",
+          "co_yield",
+          "decltype",
+          "default",
+          "delete",
+          "do",
+          "double",
+          "dynamic_cast",
+          "else",
+          "enum",
+          "explicit",
+          "export",
+          "extern",
+          "false",
+          "float",
+          "for",
+          "friend",
+          "goto",
+          "if",
+          "inline",
+          "int",
+          "long",
+          "mutable",
+          "namespace",
+          "new",
+          "noexcept",
+          "not",
+          "not_eq",
+          "nullptr",
+          "operator",
+          "or",
+          "or_eq",
+          "private",
+          "protected",
+          "public",
+          "reflexpr",
+          "register",
+          "reinterpret_cast",
+          "requires",
+          "return",
+          "short",
+          "signed",
+          "sizeof",
+          "static",
+          "static_assert",
+          "static_cast",
+          "struct",
+          "switch",
+          "synchronized",
+          "template",
+          "this",
+          "thread_local",
+          "throw",
+          "true",
+          "try",
+          "typedef",
+          "typeid",
+          "typename",
+          "union",
+          "unsigned",
+          "using",
+          "virtual",
+          "void",
+          "volatile",
+          "wchar_t",
+          "while",
+          "xor",
+          "xor_eq"
+        ]
+      }
+    },
+    "registration_target": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "depends": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      }
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$"
+          },
+          "capability": {
+            "enum": [
+              "text_generation",
+              "embeddings",
+              "speech_recognition",
+              "speech_synthesis",
+              "image_generation",
+              "video_generation"
+            ]
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(gguf|safetensors|manifest|diffusers):.+$",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "model_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "speculative": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "target": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "entry": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "not": {
+              "enum": [
+                "alignas",
+                "alignof",
+                "and",
+                "and_eq",
+                "asm",
+                "atomic_cancel",
+                "atomic_commit",
+                "atomic_noexcept",
+                "auto",
+                "bitand",
+                "bitor",
+                "bool",
+                "break",
+                "case",
+                "catch",
+                "char",
+                "char8_t",
+                "char16_t",
+                "char32_t",
+                "class",
+                "compl",
+                "concept",
+                "const",
+                "consteval",
+                "constexpr",
+                "constinit",
+                "const_cast",
+                "continue",
+                "co_await",
+                "co_return",
+                "co_yield",
+                "decltype",
+                "default",
+                "delete",
+                "do",
+                "double",
+                "dynamic_cast",
+                "else",
+                "enum",
+                "explicit",
+                "export",
+                "extern",
+                "false",
+                "float",
+                "for",
+                "friend",
+                "goto",
+                "if",
+                "inline",
+                "int",
+                "long",
+                "mutable",
+                "namespace",
+                "new",
+                "noexcept",
+                "not",
+                "not_eq",
+                "nullptr",
+                "operator",
+                "or",
+                "or_eq",
+                "private",
+                "protected",
+                "public",
+                "reflexpr",
+                "register",
+                "reinterpret_cast",
+                "requires",
+                "return",
+                "short",
+                "signed",
+                "sizeof",
+                "static",
+                "static_assert",
+                "static_cast",
+                "struct",
+                "switch",
+                "synchronized",
+                "template",
+                "this",
+                "thread_local",
+                "throw",
+                "true",
+                "try",
+                "typedef",
+                "typeid",
+                "typename",
+                "union",
+                "unsigned",
+                "using",
+                "virtual",
+                "void",
+                "volatile",
+                "wchar_t",
+                "while",
+                "xor",
+                "xor_eq"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "capability",
+          "keys",
+          "target",
+          "entry"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^--[a-z][a-z0-9-]*$"
+          },
+          "type": {
+            "enum": [
+              "boolean",
+              "integer",
+              "number",
+              "string",
+              "path"
+            ]
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "help": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "commands"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "targets": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "requires": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "hip",
+                "linux",
+                "windows",
+                "testing"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "role": {
+            "enum": [
+              "library",
+              "test"
+            ]
+          }
+        },
+        "required": [
+          "requires"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "linux",
+          "windows"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "packages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pkg_config": {
+            "type": "string",
+            "minLength": 1
+          },
+          "nix": {
+            "type": "string",
+            "minLength": 1
+          },
+          "windows": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "compile_definitions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "runtime_libraries": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "install_data": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "licenses": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "production_paths": {
+      "type": "object",
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "include",
+        "exclude"
+      ],
+      "additionalProperties": false
+    },
+    "vendored_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "kernel_resources": {
+      "type": "string",
+      "minLength": 1
+    },
+    "docs": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inputs": {
+          "type": "string",
+          "minLength": 1
+        },
+        "guide": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "title",
+        "inputs",
+        "guide"
+      ],
+      "additionalProperties": false
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "ctest": {
+            "type": "string",
+            "minLength": 1
+          },
+          "check_pr": {
+            "type": "boolean"
+          },
+          "windows_build": {
+            "type": "boolean"
+          },
+          "exclude_os": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "linux",
+                "windows"
+              ]
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "target",
+          "ctest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "test_labels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "fixtures": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundled_tests": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "functional": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tools": {
+      "type": "string",
+      "minLength": 1
+    },
+    "python_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tests": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "name",
+          "tests",
+          "sources"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "name",
+    "api_version",
+    "version",
+    "depends",
+    "targets",
+    "platforms"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gufo.dev/schemas/extension.schema.json",
+  "title": "Gufo extension metadata API 0.1.1",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "library"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "entry"
+              ]
+            },
+            {
+              "required": [
+                "registration_target"
+              ]
+            },
+            {
+              "properties": {
+                "providers": {
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "providers"
+              ]
+            },
+            {
+              "required": [
+                "options"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "entry",
+          "registration_target",
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "$ref": "#/$defs/nul_free"
+    }
+  ],
+  "$defs": {
+    "nul_free": {
+      "allOf": [
+        {
+          "if": {
+            "type": "string"
+          },
+          "then": {
+            "pattern": "^[^\u0000]*$"
+          }
+        },
+        {
+          "if": {
+            "type": "object"
+          },
+          "then": {
+            "propertyNames": {
+              "pattern": "^[^\u0000]*$"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/nul_free"
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "array"
+          },
+          "then": {
+            "items": {
+              "$ref": "#/$defs/nul_free"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

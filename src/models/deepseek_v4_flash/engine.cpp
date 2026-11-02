@@ -374,19 +374,23 @@ Session::DsparkStats Session::DsparkStatistics() const {
   return stats;
 }
 
-std::vector<float> Session::CopyLogits(std::string* error_msg) const {
+std::span<const float> Session::Logits(std::string* error_msg) const {
   const int vocab_size = model_->VocabSize();
   if (vocab_size <= 0) {
     AssignError(error_msg, "DeepSeek V4 Flash vocabulary size is invalid");
     return {};
   }
-  std::vector<float> logits(static_cast<std::size_t>(vocab_size));
-  if (ds4_session_copy_logits(session_, logits.data(), vocab_size) !=
-      vocab_size) {
-    AssignError(error_msg, "failed to copy DeepSeek V4 Flash logits");
+  const float* logits = ds4_session_logits(session_);
+  if (logits == nullptr) {
+    AssignError(error_msg, "DeepSeek V4 Flash logits are unavailable");
     return {};
   }
-  return logits;
+  return {logits, static_cast<std::size_t>(vocab_size)};
+}
+
+std::vector<float> Session::CopyLogits(std::string* error_msg) const {
+  const auto logits = Logits(error_msg);
+  return {logits.begin(), logits.end()};
 }
 
 std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(

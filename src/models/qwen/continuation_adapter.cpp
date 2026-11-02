@@ -4,12 +4,11 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <gufo/ext/experimental/snapshot_copy.hpp>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <utility>
-
-#include "src/core/hip/snapshot_copy.hpp"
 
 namespace gufo::models::qwen {
 namespace {

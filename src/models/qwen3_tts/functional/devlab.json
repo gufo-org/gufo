@@ -1,0 +1,97 @@
+{
+  "assets": {
+    "tts-base": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "revision": "fd4b254389122332181a7c3db7f27e918eec64e3",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors",
+        "speech_tokenizer/config.json",
+        "speech_tokenizer/model.safetensors"
+      ]
+    },
+    "tts-custom": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "revision": "0c0e3051f131929182e2c023b9537f8b1c68adfe",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors",
+        "speech_tokenizer/config.json",
+        "speech_tokenizer/model.safetensors"
+      ]
+    },
+    "tts-design": {
+      "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "revision": "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors",
+        "speech_tokenizer/config.json",
+        "speech_tokenizer/model.safetensors"
+      ]
+    }
+  },
+  "models": {
+    "qwen3-tts-base": {
+      "title": "Qwen3-TTS base",
+      "category": "tts",
+      "asset": "tts-base",
+      "service": "tts",
+      "variant": "base"
+    },
+    "qwen3-tts-custom": {
+      "title": "Qwen3-TTS custom",
+      "category": "tts",
+      "asset": "tts-custom",
+      "service": "tts",
+      "variant": "custom"
+    },
+    "qwen3-tts-design": {
+      "title": "Qwen3-TTS design",
+      "category": "tts",
+      "asset": "tts-design",
+      "service": "tts",
+      "variant": "design"
+    }
+  },
+  "rules": [
+    {
+      "id": "tts",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen3_tts/**",
+        "tests/models/qwen3_tts/**",
+        "src/cli/serve/tts*",
+        "src/cli/serve/audio_tts*",
+        "tests/functional/tts_service.py"
+      ],
+      "owners": [
+        "tts"
+      ]
+    }
+  ]
+}

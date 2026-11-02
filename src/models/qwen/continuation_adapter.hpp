@@ -2,9 +2,9 @@
 #define GUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
 
 #include <atomic>
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/experimental/transfer_pool.hpp>
 
-#include "src/cache/adapter.hpp"
-#include "src/core/hip/transfer_pool.hpp"
 #include "src/models/qwen/continuation_layout.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -41,7 +41,7 @@ public:
   void FinishPrefill(cache::Slot&) noexcept;
   void RollbackPrefill(cache::Slot&);
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
-      std::size_t ram_bytes) const {
+      std::size_t ram_bytes) const override {
     return layout_.BackingPlan(ram_bytes);
   }
   // Prompt-capture bytes the live slots pinned and charged to the ledger.

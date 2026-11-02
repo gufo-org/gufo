@@ -1,13 +1,12 @@
 #ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
 #define GUFO_MODELS_DEEPSEEK_V4_FLASH_CHAT_TEMPLATE_HPP_
 
+#include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/reasoning.hpp>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include "src/core/gguf_reader.hpp"
-#include "src/core/reasoning.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
 

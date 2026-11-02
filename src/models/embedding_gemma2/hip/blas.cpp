@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/hip/blas.hpp"
+#include "blas.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 

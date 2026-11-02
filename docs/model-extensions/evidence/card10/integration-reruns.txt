@@ -1,0 +1,114 @@
+Card 10 integration — exact rerun ledger
+Agent: codex-exec-writer (integration agent, daeda205-c3f4-4d9f-a035-6467a64d8706)
+Date: 2026-10-31
+Working copy: @ over parent klwmvoxr a761679a
+Logs directory: /tmp/card10-integration/
+
+COMMAND 1:
+python3 tools/ci/check-extension-api.py
+Exit: 0
+Output:
+PASS: extension API surface (97 paths)
+
+COMMAND 2:
+python3 tools/ci/check-extension-api.py --base a761679a --labels '["ext-api"]'
+Exit: 0
+Output:
+Extension API changed paths: cmake/GufoExtension.cmake, include/gufo/ext/adapter.hpp, include/gufo/ext/cache.hpp, include/gufo/ext/cancellable_gate.hpp, include/gufo/ext/continuation.hpp, include/gufo/ext/crypto.hpp, include/gufo/ext/device_probe.hpp, include/gufo/ext/draft_backend.hpp, include/gufo/ext/experimental/dispatch_telemetry.hpp, include/gufo/ext/experimental/gemv_dispatcher.hpp, include/gufo/ext/experimental/ggml_dequant.hpp, include/gufo/ext/experimental/ggml_gemm.hpp, include/gufo/ext/experimental/heap_placement.hpp, include/gufo/ext/experimental/hip_graph_decode_executor.hpp, include/gufo/ext/experimental/hip_utils.hpp, include/gufo/ext/experimental/hipblaslt_plan_database.hpp, include/gufo/ext/experimental/host_allocations.hpp, include/gufo/ext/experimental/managed_alloc.hpp, include/gufo/ext/experimental/snapshot_copy.hpp, include/gufo/ext/experimental/snapshot_transfer.hpp, include/gufo/ext/experimental/transfer_pool.hpp, include/gufo/ext/experimental/weight_upload.hpp, include/gufo/ext/gguf_reader.hpp, include/gufo/ext/host_budget.hpp, include/gufo/ext/image.hpp, include/gufo/ext/json.hpp, include/gufo/ext/ledger.hpp, include/gufo/ext/mapped_prefetch.hpp, include/gufo/ext/model_config.hpp, include/gufo/ext/platform/fs.hpp, include/gufo/ext/platform/library.hpp, include/gufo/ext/platform/mapped_file.hpp, include/gufo/ext/platform/os_info.hpp, include/gufo/ext/platform/pages.hpp, include/gufo/ext/platform/prefault.hpp, include/gufo/ext/platform/publish.hpp, include/gufo/ext/prompt_lookup.hpp, include/gufo/ext/reasoning.hpp, include/gufo/ext/sampling.hpp, include/gufo/ext/session_mode.hpp, include/gufo/ext/sha256.hpp, include/gufo/ext/speculative_verifier.hpp, include/gufo/ext/text_contracts.hpp, include/gufo/ext/types.hpp, include/gufo/ext/utf8.hpp, include/gufo/ext/version.hpp
+PASS: extension API surface (97 paths)
+
+COMMAND 3 (Negative policy control):
+python3 tools/ci/check-extension-api.py --base a761679a --labels '[]'
+Exit: 1 (Expected rejection on missing ext-api label)
+Output:
+extension API changes require the ext-api PR label
+Extension API changed paths: cmake/GufoExtension.cmake, ... (46 paths)
+
+COMMAND 4:
+python3 tests/tools/check_extension_api_test.py
+Exit: 0
+Output:
+.......
+Ran 7 tests in 0.002s
+OK
+
+COMMAND 5:
+python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-serving-boundary --fail-on-family-graph --fail-on-target-ownership
+Exit: 0
+Output:
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+
+COMMAND 6:
+python3 tests/tools/check_docs_test.py
+Exit: 0
+Output:
+...........
+Ran 11 tests in 0.004s
+OK
+
+COMMAND 7:
+nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+Exit: 0
+Output:
+PASS: Checked 785 C++ files
+
+COMMAND 8 (Bounded CPU CTest):
+nix develop -c ctest --test-dir build/cpu-test -R '^(ext_runtime_neutral_contracts_test|extension_runtime_test|extension_role_test|extension_api_policy_test|extension_api_surface|extension_metadata_test|extension_discovery_test|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Exit: 0
+Output:
+Test project /home/mixer/gufo/build/cpu-test
+      Start 115: extension_runtime_test
+ 1/10 Test #115: extension_runtime_test .........................   Passed    0.00 sec
+      Start 116: extension_role_test
+ 2/10 Test #116: extension_role_test ............................   Passed    0.00 sec
+      Start 117: ext_runtime_neutral_contracts_test
+ 3/10 Test #117: ext_runtime_neutral_contracts_test .............   Passed    0.00 sec
+      Start 119: extension_discovery_test
+ 4/10 Test #119: extension_discovery_test .......................   Passed   44.70 sec
+      Start 120: extension_api_policy_test
+ 5/10 Test #120: extension_api_policy_test ......................   Passed    0.04 sec
+      Start 121: extension_api_surface
+ 6/10 Test #121: extension_api_surface ..........................   Passed    0.04 sec
+      Start 122: extension_metadata_test
+ 7/10 Test #122: extension_metadata_test ........................   Passed   10.05 sec
+      Start 139: qwen27b_continuation_identity_test
+ 8/10 Test #139: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+      Start 153: deepseek_v4_flash_continuation_identity_test
+ 9/10 Test #153: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+      Start 159: qwen38_flash_next_continuation_identity_test
+10/10 Test #159: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 10
+Total Test time (real) =  54.84 sec
+
+COMMAND 9 (Bounded GPU CTest):
+nix develop -c ctest --test-dir build/gpu-test -R '^(ext_runtime_neutral_contracts_test|extension_runtime_test|extension_role_test|extension_api_policy_test|extension_api_surface|extension_metadata_test|extension_discovery_test|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Exit: 0
+Output:
+Test project /home/mixer/gufo/build/gpu-test
+      Start 150: extension_runtime_test
+ 1/10 Test #150: extension_runtime_test .........................   Passed    0.00 sec
+      Start 151: extension_role_test
+ 2/10 Test #151: extension_role_test ............................   Passed    0.00 sec
+      Start 152: ext_runtime_neutral_contracts_test
+ 3/10 Test #152: ext_runtime_neutral_contracts_test .............   Passed    0.00 sec
+      Start 154: extension_discovery_test
+ 4/10 Test #154: extension_discovery_test .......................   Passed   44.79 sec
+      Start 155: extension_api_policy_test
+ 5/10 Test #155: extension_api_policy_test ......................   Passed    0.04 sec
+      Start 156: extension_api_surface
+ 6/10 Test #156: extension_api_surface ..........................   Passed    0.04 sec
+      Start 157: extension_metadata_test
+ 7/10 Test #157: extension_metadata_test ........................   Passed   10.04 sec
+      Start 194: qwen27b_continuation_identity_test
+ 8/10 Test #194: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+      Start 225: deepseek_v4_flash_continuation_identity_test
+ 9/10 Test #225: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+      Start 242: qwen38_flash_next_continuation_identity_test
+10/10 Test #242: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 10
+Total Test time (real) =  54.93 sec

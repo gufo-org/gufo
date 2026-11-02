@@ -20,17 +20,29 @@ __global__ static void output_hc_weights_kernel(
 }
 
 
-__global__ static void swiglu_kernel(float *out, const float *gate, const float *up, uint32_t n, float clamp, float weight) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    float g = gate[i];
-    float u = up[i];
+__device__ __forceinline__ static float swiglu_value(float g, float u, float clamp, float weight) {
     if (clamp > 1.0e-6f) {
         g = fminf(g, clamp);
         u = fminf(fmaxf(u, -clamp), clamp);
     }
     float s = g / (1.0f + expf(-g));
-    out[i] = s * u * weight;
+    return s * u * weight;
+}
+
+__global__ static void swiglu_kernel(float *out, const float *gate, const float *up, uint32_t n, float clamp, float weight) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = swiglu_value(gate[i], up[i], clamp, weight);
+}
+
+/* SwiGLU that also writes the result's Q8_0 form; n is a multiple of 256. */
+__global__ static void swiglu_quantize_q8_0_kernel(float *out, int8_t *out_q8, float *out_q8_scale,
+                                                   const float *gate, const float *up, float clamp,
+                                                   float weight) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    const float v = swiglu_value(gate[i], up[i], clamp, weight);
+    out[i] = v;
+    quantize_q8_0_block32(v, threadIdx.x & 31u, 32u, out_q8 + (i & ~31u), out_q8_scale + (i >> 5));
 }
 
 __global__ static void zero_kernel(float *out, uint64_t n) {

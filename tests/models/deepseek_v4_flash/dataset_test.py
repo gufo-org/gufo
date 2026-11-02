@@ -55,7 +55,10 @@ class ReferenceMetricsTest(unittest.TestCase):
 class EvalDatasetTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.path = Path(__file__).parent / "fixtures" / "antirez-ds4.json"
+        # The eval dataset is core-owned; the model's own fixtures, such as the
+        # official 0731 continuations, stay beside this test.
+        cls.model_fixtures = Path(__file__).parent / "fixtures"
+        cls.path = Path(__file__).parents[2] / "fixtures" / "eval" / "antirez-ds4.json"
         cls.document = json.loads(cls.path.read_text(encoding="utf-8"))
 
     def test_source_identity_and_counts(self) -> None:
@@ -161,7 +164,7 @@ class EvalDatasetTest(unittest.TestCase):
             self.assertNotIn("title", case)
 
     def test_official_continuation_fixture(self) -> None:
-        data = self.path.with_name("official-0731.json").read_bytes()
+        data = (self.model_fixtures / "official-0731.json").read_bytes()
         self.assertEqual(
             hashlib.sha256(data).hexdigest(),
             "0ec57ef24cc0cb5838a4c0ccacf806edc12cbe09f27f0c13efdf90eb33591a4d",

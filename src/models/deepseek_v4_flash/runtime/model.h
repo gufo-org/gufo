@@ -134,8 +134,8 @@ void ds4_session_dspark_stats(const ds4_session* session, uint64_t* drafted,
                               uint64_t* positional_accepted, uint64_t* anchors,
                               uint64_t* full_blocks, uint64_t* steps,
                               uint64_t* skipped, uint32_t* context_tokens);
-int ds4_session_copy_logits(const ds4_session* session, float* out,
-                            int capacity);
+/* The latest logits row, valid until the session next evaluates or restores. */
+const float* ds4_session_logits(const ds4_session* session);
 int ds4_session_save_snapshot(const ds4_session* session,
                               ds4_session_snapshot* snapshot, char* error,
                               size_t error_capacity);

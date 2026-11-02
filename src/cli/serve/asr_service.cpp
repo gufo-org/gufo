@@ -1,52 +1,65 @@
 #include "src/cli/serve/asr_service.hpp"
 
+#include <memory>
 #include <optional>
 #include <utility>
 
 #include "src/core/cancellable_gate.hpp"
-#include "src/models/qwen3_asr/config.hpp"
-#include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 
 namespace gufo::server {
 
 struct AsrService::Impl {
   explicit Impl(AsrServiceOptions supplied) : options(std::move(supplied)) {
+    if (options.model_id.empty()) {
+      options.model_id = "qwen3-asr-1.7b";
+    }
+
+    const ext::AsrProvider* provider = nullptr;
+    if (!options.model_root.empty()) {
+      provider = ext::ProbeAsrProvider(options.model_root.string());
+    }
+    if (!provider && !options.model_id.empty()) {
+      provider = ext::FindAsrProvider(options.model_id);
+      if (!provider && options.model_id == "qwen3-asr-1.7b") {
+        provider = ext::FindAsrProvider("qwen3-asr");
+      } else if (!provider && options.model_id == "qwen3-asr") {
+        provider = ext::FindAsrProvider("qwen3-asr-1.7b");
+      }
+    }
+
     if (options.validate_model) {
-      const std::optional<models::qwen3_asr::ModelConfig> config =
-          models::qwen3_asr::LoadModelConfigFromPath(
-              options.model_root.string());
-      if (!config.has_value() ||
-          !models::qwen3_asr::IsSupportedModelConfig(*config)) {
+      if (!provider || !provider->probe ||
+          !provider->probe(options.model_root.string())) {
         initialization_error =
             "Qwen3-ASR service requires the supported 1.7B model";
         return;
       }
     }
-    if (options.model_id.empty()) {
-      options.model_id = "qwen3-asr-1.7b";
-    }
+
     if (!options.runner) {
-      native_runtime = models::qwen3_asr::hip::TranscriptionHipRuntime::Create(
-          options.model_root.string(), options.native_context_tokens,
-          &initialization_error);
+      if (!provider || !provider->create) {
+        initialization_error = "ASR provider not available for model: " +
+                               options.model_root.string();
+        return;
+      }
+      native_runtime = provider->create(options.model_root.string(),
+                                        options.native_context_tokens,
+                                        &initialization_error);
       if (native_runtime == nullptr) {
         return;
       }
-      options.runner =
-          [this](const models::qwen3_asr::TranscriptionRequest& request,
-                 const models::qwen3_asr::CancellationCheck& is_cancelled,
-                 models::qwen3_asr::TranscriptionResult* result,
-                 std::string* error) {
-            return native_runtime->Transcribe(request, is_cancelled, result,
-                                              error);
-          };
+      options.runner = [this](const ext::TranscriptionRequest& request,
+                              const ext::CancellationCheck& is_cancelled,
+                              ext::TranscriptionResult* result,
+                              std::string* error) {
+        return native_runtime->Transcribe(request, is_cancelled, result, error);
+      };
     }
     ready = true;
   }
 
   AsrServiceOptions options;
-  std::unique_ptr<models::qwen3_asr::hip::TranscriptionHipRuntime>
-      native_runtime;
+  std::unique_ptr<ext::AsrRunner> native_runtime;
   std::string initialization_error;
   core::CancellableGate transcription_gate;
   bool ready{false};
@@ -73,10 +86,10 @@ std::string AsrService::backend_name() const {
   return "native-hip";
 }
 
-bool AsrService::Transcribe(
-    const models::qwen3_asr::TranscriptionRequest& request,
-    const models::qwen3_asr::CancellationCheck& is_cancelled,
-    models::qwen3_asr::TranscriptionResult* result, std::string* error) {
+bool AsrService::Transcribe(const ext::TranscriptionRequest& request,
+                            const ext::CancellationCheck& is_cancelled,
+                            ext::TranscriptionResult* result,
+                            std::string* error) {
   if (!impl_->ready) {
     if (error != nullptr) {
       *error = impl_->initialization_error;

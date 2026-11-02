@@ -1,36 +1,21 @@
-# Qwen control tokens
+# Qwen3.8-27B model directory
 
-[`control_tokens.hpp`](control_tokens.hpp) owns shared Qwen framing spellings
-in `gufo::tokenization`. Inspect it when reviewing or changing their use.
-Centralizing these constants does not change tokenization or EOS handling.
+This directory owns the 27B model: target inference, native MTP and DFlash2.
+It is the model's home until Card 20 gives it an `extension.json` manifest, so
+`CMakeLists.txt` here still defines a plain `gufo_qwen27b` library.
 
-## Rules
+Shared Qwen code is not here. The tokenizer, chat template, control tokens,
+GGUF configuration extraction, shared HIP operators, RoPE layout and vision
+stack live in [`src/families/qwen/`](../../families/qwen/README.md), and their
+rules — including the control-token catalogue and the Python mirror — are in
+[`src/families/qwen/AGENTS.md`](../../families/qwen/AGENTS.md).
 
-- Use the named constants in production framing and tokenizer code.
-- Keep fixed prompts compile-time; append constants when building dynamic text.
-- Confirm new tokens against pinned model metadata or the official reference,
-  and update both language catalogues when shared consumers need them.
-- Preserve independent reference fixtures and rendered-byte goldens. Expected
-  results must not be derived solely from the constants they validate.
-- Keep other models' token families in their model directories.
+Model rules:
 
-## Catalogue
-
-| Constant | Meaning |
-|---|---|
-| `kEndOfText` | End-of-text entry; fallback eos and pad when GGUF metadata does not carry them. |
-| `kImStart` | Opens a chat turn, emitted immediately before the role name; fallback BOS. |
-| `kImEnd` | Closes a chat turn; the primary end-of-generation stop token. |
-| `kObjectRefStart`, `kObjectRefEnd` | Delimit an object reference in grounding output. |
-| `kBoxStart`, `kBoxEnd` | Delimit a bounding box in grounding output. |
-| `kQuadStart`, `kQuadEnd` | Delimit a quadrilateral in grounding output. |
-| `kVisionStart`, `kVisionEnd` | Delimit the image-placeholder run inside a user turn. |
-| `kVisionPad` | Padding entry in the pinned MiniMax H3 vocabulary. |
-| `kImagePad` | One image-placeholder token, repeated once per visual token. |
-| `kVideoPad` | One video-placeholder token. |
-
-## Python
-
-`tools/gufo/control_tokens.py` mirrors this catalogue for the Python tools and
-tests, imported as `gufo.control_tokens`. Keep shared values identical across
-the two catalogues.
+- Depend on family libraries through the libraries named in
+  `src/models/qwen/CMakeLists.txt`; do not reach into another model directory.
+- Keep kernel per-source compile options bound to this target
+  (`TARGET_DIRECTORY gufo_qwen27b`); a moved kernel must keep them and its
+  production code objects must stay identical.
+- Run the model quality runners before changing arithmetic, layouts or cache
+  boundaries.

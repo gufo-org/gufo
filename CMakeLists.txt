@@ -26,7 +26,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(GUFO_RELEASE_VERSION "development" CACHE STRING "Gufo release version")
 set(GUFO_REVISION "unknown" CACHE STRING "Gufo source revision")
-include_directories(${CMAKE_SOURCE_DIR})
+include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include)
 
 # Reuse the compiler cache whenever it is installed, as the CPU check
 # derivations do. HIP kernels stay uncached: hipcc drive files and bitcode
@@ -98,6 +98,8 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
 
 # CPU-only builds exist for host checks; production targets gfx1151 only.
 option(ENGINE_ENABLE_HIP "Build the gfx1151 HIP backend" ON)
+include(cmake/GufoExtensionDiscovery.cmake)
+gufo_discover_extensions()
 set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")
 if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
   message(FATAL_ERROR "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151")
@@ -127,6 +129,12 @@ if (ENGINE_ENABLE_HIP)
       "${CMAKE_HIP_FLAGS_RELWITHDEBINFO}")
     string(REPLACE "/Ob1" "/Ob2" CMAKE_HIP_FLAGS_MINSIZEREL
       "${CMAKE_HIP_FLAGS_MINSIZEREL}")
+    # Under /Fo, clang-cl writes the device image and .hipfb into the build
+    # directory named after the source, so same-named sources race and can
+    # swap device code in parallel builds. -o keeps them in unique temp files
+    # and is still recognised by ccache.
+    string(REPLACE "/Fo<OBJECT>" "-o <OBJECT>" CMAKE_HIP_COMPILE_OBJECT
+      "${CMAKE_HIP_COMPILE_OBJECT}")
   endif()
   find_package(hip REQUIRED)
   find_package(hipblas REQUIRED)
@@ -168,21 +176,7 @@ function(gufo_stage_hip_runtime target)
   endif()
 endfunction()
 
-if (ENGINE_ENABLE_HIP)
-  add_subdirectory(src/models/deepseek_v4_flash)
-endif()
 
-# Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
-add_subdirectory(src/models/qwen38_flash_next)
-
-# Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
-add_subdirectory(src/models/qwen3_tts)
-
-# Qwen3-ASR — model-private 1.7B speech recognition runtime.
-add_subdirectory(src/models/qwen3_asr)
-
-# EmbeddingGemma 2 is a model-private BF16 text/image embedding runtime.
-add_subdirectory(src/models/embedding_gemma2)
 
 # Compiler warnings and sanitizers
 option(GUFO_ENABLE_WARNINGS "Enable compiler warnings" ON)
@@ -230,12 +224,6 @@ if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   endif()
 endif()
 
-if (WIN32)
-  # Platform layer: WinSock (net), process memory counters (logging), BCrypt
-  # and the registry (os_info).
-  set(GUFO_PLATFORM_LIBS ws2_32 iphlpapi bcrypt advapi32)
-endif()
-
 add_subdirectory(src/cache)
 
 if (ENGINE_ENABLE_HIP)
@@ -262,6 +250,7 @@ if (ENGINE_ENABLE_HIP)
   target_include_directories(gufo_hip_host PUBLIC ${PROJECT_SOURCE_DIR})
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
+    src/core/hip/component_cache_resources.cpp
     src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
@@ -318,61 +307,37 @@ add_library(gufo_core STATIC
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
   src/core/sampling.cpp
-  src/models/minimax_h3/audio_vae.cpp
-  src/models/minimax_h3/denoiser.cpp
-  src/models/minimax_h3/dit.cpp
-  src/models/minimax_h3/generation.cpp
-  src/models/minimax_h3/json.cpp
-  "$<$<PLATFORM_ID:Windows>:src/models/minimax_h3/media_windows.cpp>"
-  "$<$<NOT:$<PLATFORM_ID:Windows>>:src/models/minimax_h3/media_posix.cpp>"
-  src/models/minimax_h3/prompt_encoder.cpp
-  src/models/minimax_h3/runtime.cpp
-  src/models/minimax_h3/sampling.cpp
-  src/models/minimax_h3/sha256.cpp
-  src/models/minimax_h3/tokenizer.cpp
-  src/models/minimax_h3/video_vae.cpp
-  src/testing/compare/logit_comparator.cpp
-  src/eval/dataset.cpp
-  src/eval/extract.cpp
-  src/eval/regrade.cpp
+  src/core/sampling_logit_row.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
-target_compile_definitions(gufo_core PRIVATE
-  GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
-  GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
   Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
-add_subdirectory(src/models/qwen)
-add_subdirectory(src/models/qwen_image_21)
-
-target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
-if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_core)
-endif()
+# Family libraries come before the model that needs them; they may depend on
+# gufo_core and on each other, never on a model directory.
+add_subdirectory(src/families/qwen)
 
 find_package(OpenMP)
 if (OpenMP_CXX_FOUND)
   target_link_libraries(gufo_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+# The softmax-bracket error bounds in sampling_logit_row.cpp were swept without
+# FMA contraction.
+if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+  set_property(SOURCE src/core/sampling_logit_row.cpp
+    APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set_property(SOURCE src/core/sampling_logit_row.cpp
+    APPEND PROPERTY COMPILE_OPTIONS /clang:-ffp-contract=off)
+endif()
+
 if (ENGINE_ENABLE_HIP)
-  set_property(SOURCE src/models/minimax_h3/dit.hip
-    APPEND PROPERTY COMPILE_OPTIONS -O2)
   target_sources(gufo_core PRIVATE
-    src/models/minimax_h3/audio_vae.hip
-    src/models/minimax_h3/denoiser.hip
-    src/models/minimax_h3/dit.hip
-    src/models/minimax_h3/dense.hip
-    src/models/minimax_h3/runtime_hip.cpp
-    src/models/minimax_h3/prompt_encoder.hip
-    src/models/minimax_h3/sampling.hip
-    src/models/minimax_h3/video_vae.hip
-    src/models/minimax_h3/attention.hip
     src/core/hip/snapshot_copy.hip
     src/core/hip/weight_upload.cpp
     src/core/speculative/speculative_verifier.cpp
@@ -385,26 +350,50 @@ if (ENGINE_ENABLE_HIP)
     roc::hipblaslt roc::rocblas)
 endif()
 
+# Card 08 (RFC step 5): the model, comparison and eval tiers that used to be
+# object files of gufo_core are separate targets now. They are added here,
+# after the warning/sanitizer block, so their sources keep the compile
+# environment they had inside gufo_core.
+add_subdirectory(src/testing/compare)
+add_subdirectory(src/eval)
+
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
-if(ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_ext_runtime)
+
+add_subdirectory(src/ext)
+
+# RFC step 6: the text-serving tier the gufo executable used to compile into
+# itself. Scheduler, runner pool, component text cache and InferenceBackend
+# live here; queueing, retention/admission and API policy stay on this core
+# side of the boundary, while models reach execution through gufo_ext_runtime.
+add_library(gufo_serving STATIC
+  src/cli/serve/continuation_cache.cpp
+  src/cli/serve/continuation_disk_store.cpp
+  src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp
+  src/cli/serve/text_generation_scheduler.cpp
+  src/cli/serve/inference_backend.cpp)
+target_link_libraries(gufo_serving PUBLIC gufo_ext_runtime gufo_logging
+  gufo_core gufo_cache)
+# The executable's own objects carried production NDEBUG, the test binaries that
+# re-compiled these sources forced assertions on. One library can only pick
+# one: test builds keep assertions, so a test-preset `gufo` now asserts where it
+# previously did not. Production (BUILD_TESTING=OFF) is unchanged.
+if (BUILD_TESTING)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(gufo_serving PRIVATE -UNDEBUG)
+  elseif (MSVC)
+    target_compile_options(gufo_serving PRIVATE /UNDEBUG)
+  endif()
 endif()
-
-add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
-target_include_directories(gufo_logging PUBLIC ${PROJECT_SOURCE_DIR})
-target_compile_features(gufo_logging PUBLIC cxx_std_20)
-
-# The imported DeepSeek V4 Flash runtime routes its informational messages
-# through the shared logger instead of writing to stderr directly, so it needs
-# the threshold that `--log-level` arms.
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
+  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip hip::host)
 endif()
 
 add_library(gufo_http STATIC
+  src/cli/serve/audio_buffer.cpp
   src/cli/serve/image_api.cpp
   src/cli/serve/audio_asr_api.cpp
   src/cli/serve/asr_service.cpp
@@ -419,41 +408,36 @@ add_library(gufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
-  # The DeepSeek tool-call scanner lives with its model; its renderer stays in
-  # the engine library, so no translation unit is linked twice.
-  src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text)
 
 add_executable(gufo
   src/cli/main.cpp
+  src/cli/extension_diagnostics.cpp
   src/cli/banner.cpp
   src/cli/eval/eval.cpp
   src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
-  src/cli/serve/continuation_cache.cpp
-  src/cli/serve/continuation_disk_store.cpp
-  src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp
-  src/cli/serve/text_generation_scheduler.cpp
-  src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_eval
+  gufo_llm_cli gufo_http gufo_serving CURL::libcurl)
+gufo_build_discovered_extensions()
+get_property(gufo_selected_extensions GLOBAL PROPERTY GUFO_SELECTED_EXTENSIONS)
+gufo_target_extensions(gufo EXTENSIONS ${gufo_selected_extensions})
 gufo_stage_hip_runtime(gufo)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"
-  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
+  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/eval/antirez-ds4.json"
   GUFO_EVAL_INSTALLED_DATA="${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json"
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
+  target_link_libraries(gufo PRIVATE gufo_cache_hip)
 endif()
-target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2)
 
 if (NOT WIN32)
   add_custom_target(gufo-server ALL
@@ -486,10 +470,13 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
     gufo_kernel_bench_support
     gufo_diagnostics
     gufo_core
+    ${GUFO_QWEN_LIBRARIES}
+    gufo_qwen_kernels
     ${ROCTX_LIBRARY})
 
   add_executable(tune_hipblaslt tools/bench/tune_hipblaslt.cpp)
-  target_link_libraries(tune_hipblaslt PRIVATE gufo_core hip::host)
+  target_link_libraries(tune_hipblaslt PRIVATE gufo_core gufo_qwen_kernels
+    hip::host)
 
   add_executable(wmma_layout_test tools/bench/wmma_layout_test.hip)
   target_link_libraries(wmma_layout_test PRIVATE gufo_core hip::device)
@@ -500,7 +487,7 @@ install(FILES
   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
   DESTINATION share/gufo/models/minimax_h3)
 install(FILES
-  tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json
+  tests/fixtures/eval/antirez-ds4.json
   DESTINATION share/gufo/eval)
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
@@ -527,7 +514,15 @@ if (BUILD_TESTING)
   endif()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+  # In-tree test support for model API tests (RFC Step 7b, Card 12).
+  # Wraps HTTP and serving fixtures so tests stop reaching src/cli/ directly.
+  # Excluded from production, external extensions, and installation.
+  add_library(gufo_test_support STATIC tests/support/test_support.cpp)
+  target_include_directories(gufo_test_support PUBLIC ${CMAKE_SOURCE_DIR})
+  target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
+
   add_subdirectory(tests/cache)
+  add_subdirectory(tests/extensions)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or
   # production. No HIP headers are needed for these stable C ABI hooks.
@@ -553,6 +548,124 @@ if (BUILD_TESTING)
     endforeach()
   endif()
 
+function(gufo_qwen3_asr_register_tests)
+  if (NOT TARGET gufo_qwen3_asr)
+    return()
+  endif()
+  add_executable(qwen3_asr_config_test
+    ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/config_test.cpp)
+  target_link_libraries(qwen3_asr_config_test PRIVATE gufo_qwen3_asr)
+  add_test(NAME qwen3_asr_config_test COMMAND qwen3_asr_config_test)
+  set_tests_properties(qwen3_asr_config_test PROPERTIES
+    LABELS "cpu;models;qwen3-asr;config;quality")
+
+  add_executable(qwen3_asr_loader_test
+    ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/loader_test.cpp)
+  target_link_libraries(qwen3_asr_loader_test PRIVATE gufo_qwen3_asr)
+  add_test(NAME qwen3_asr_loader_test COMMAND qwen3_asr_loader_test)
+  set_tests_properties(qwen3_asr_loader_test PROPERTIES
+    LABELS "cpu;models;qwen3-asr;loader;safetensors;external-model"
+    SKIP_RETURN_CODE 77)
+
+  add_executable(qwen3_asr_audio_test
+    ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/audio_test.cpp)
+  target_link_libraries(qwen3_asr_audio_test PRIVATE gufo_qwen3_asr)
+  add_test(NAME qwen3_asr_audio_test COMMAND qwen3_asr_audio_test)
+  set_tests_properties(qwen3_asr_audio_test PROPERTIES
+    LABELS "cpu;models;qwen3-asr;audio;quality;external-model"
+    SKIP_RETURN_CODE 77)
+
+  add_executable(qwen3_asr_prompt_test
+    ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/prompt_test.cpp)
+  target_link_libraries(qwen3_asr_prompt_test PRIVATE gufo_qwen3_asr)
+  add_test(NAME qwen3_asr_prompt_test COMMAND qwen3_asr_prompt_test)
+  set_tests_properties(qwen3_asr_prompt_test PROPERTIES
+    LABELS "cpu;models;qwen3-asr;tokenizer;prompt;quality;external-model"
+    SKIP_RETURN_CODE 77)
+
+  add_executable(qwen3_asr_audio_api_test
+    ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/audio_api_test.cpp)
+  target_link_libraries(qwen3_asr_audio_api_test PRIVATE gufo_qwen3_asr gufo_test_support)
+  add_test(NAME qwen3_asr_audio_api_test COMMAND qwen3_asr_audio_api_test)
+  set_tests_properties(qwen3_asr_audio_api_test PROPERTIES
+    LABELS "cpu;models;qwen3-asr;server;api;audio;quality")
+
+  if (ENGINE_ENABLE_HIP AND TARGET gufo_qwen3_asr_hip)
+    add_executable(qwen3_asr_audio_encoder_hip_test
+      ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/audio_encoder_hip_test.cpp)
+    target_link_libraries(qwen3_asr_audio_encoder_hip_test PRIVATE
+      gufo_qwen3_asr gufo_qwen3_asr_hip hip::host)
+    target_compile_definitions(qwen3_asr_audio_encoder_hip_test PRIVATE
+      ENGINE_ENABLE_HIP=1)
+    add_test(NAME qwen3_asr_audio_encoder_hip_test
+      COMMAND qwen3_asr_audio_encoder_hip_test)
+    set_tests_properties(qwen3_asr_audio_encoder_hip_test PROPERTIES
+      LABELS "gpu;models;qwen3-asr;audio-encoder;quality;external-model"
+      SKIP_RETURN_CODE 77
+      RUN_SERIAL TRUE)
+
+    add_executable(qwen3_asr_text_decoder_hip_test
+      ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/text_decoder_hip_test.cpp)
+    target_link_libraries(qwen3_asr_text_decoder_hip_test PRIVATE
+      gufo_qwen3_asr gufo_qwen3_asr_hip hip::host)
+    target_compile_definitions(qwen3_asr_text_decoder_hip_test PRIVATE
+      ENGINE_ENABLE_HIP=1)
+    add_test(NAME qwen3_asr_text_decoder_hip_test
+      COMMAND qwen3_asr_text_decoder_hip_test)
+    set_tests_properties(qwen3_asr_text_decoder_hip_test PROPERTIES
+      LABELS "gpu;models;qwen3-asr;text-decoder;quality;external-model"
+      SKIP_RETURN_CODE 77
+      RUN_SERIAL TRUE)
+
+    add_executable(qwen3_asr_transcription_hip_test
+      ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/transcription_hip_test.cpp)
+    target_link_libraries(qwen3_asr_transcription_hip_test PRIVATE
+      gufo_qwen3_asr gufo_qwen3_asr_hip hip::host)
+    add_test(NAME qwen3_asr_transcription_hip_test
+      COMMAND qwen3_asr_transcription_hip_test)
+    set_tests_properties(qwen3_asr_transcription_hip_test PROPERTIES
+      LABELS "gpu;models;qwen3-asr;transcription;quality;exact;external-model"
+      SKIP_RETURN_CODE 77
+      RUN_SERIAL TRUE)
+  endif()
+endfunction()
+
+function(gufo_qwen_image_21_register_tests)
+  if (NOT TARGET gufo_qwen_image_21)
+    return()
+  endif()
+  add_executable(qwen_image_21_weights_test
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/weights_test.cpp)
+  target_link_libraries(qwen_image_21_weights_test PRIVATE gufo_qwen_image_21)
+  add_test(NAME qwen_image_21_weights_test COMMAND qwen_image_21_weights_test)
+  set_tests_properties(qwen_image_21_weights_test PROPERTIES LABELS "cpu;models;qwen-image")
+  add_executable(qwen_image_21_test
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/model_test.cpp)
+  target_link_libraries(qwen_image_21_test PRIVATE gufo_qwen_image_21 gufo_test_support)
+  add_test(NAME qwen_image_21_test COMMAND qwen_image_21_test)
+  set_tests_properties(qwen_image_21_test PROPERTIES LABELS "cpu;models;qwen-image")
+  if(ENGINE_ENABLE_HIP AND TARGET gufo_qwen_image_21_hip)
+    add_executable(qwen_image_21_weight_upload_test
+      ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/weights_test.cpp)
+    target_compile_definitions(qwen_image_21_weight_upload_test PRIVATE
+      GUFO_TEST_WEIGHT_UPLOAD=1)
+    target_link_libraries(qwen_image_21_weight_upload_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    add_test(NAME qwen_image_21_weight_upload_test COMMAND qwen_image_21_weight_upload_test)
+    set_tests_properties(qwen_image_21_weight_upload_test PROPERTIES
+      LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
+    add_executable(qwen_image_21_kernel_test
+      ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/kernel_test.hip)
+    target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    add_test(NAME qwen_image_21_kernel_test COMMAND qwen_image_21_kernel_test)
+    set_tests_properties(qwen_image_21_kernel_test PROPERTIES
+      LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
+    add_executable(qwen_image_21_probe
+      ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/probe.cpp)
+    target_link_libraries(qwen_image_21_probe PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+  endif()
+endfunction()
+
+  add_subdirectory(tests/families/qwen)
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
   gufo_qwen3_asr_register_tests()
@@ -612,6 +725,14 @@ if (BUILD_TESTING)
   add_test(NAME arg_parser_test COMMAND arg_parser_test)
   set_tests_properties(arg_parser_test PROPERTIES LABELS "cpu;cli")
 
+  add_executable(transcribe_cli_test
+    tests/cli/transcribe_test.cpp
+    src/cli/transcribe/transcribe.cpp)
+  target_link_libraries(transcribe_cli_test PRIVATE gufo_core gufo_ext_runtime)
+  add_test(NAME transcribe_cli_test COMMAND transcribe_cli_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav")
+  set_tests_properties(transcribe_cli_test PROPERTIES LABELS "cpu;cli;audio")
+
   add_executable(json_constraint_test tests/core/json_constraint_test.cpp)
   target_link_libraries(json_constraint_test PRIVATE gufo_core)
   target_compile_definitions(json_constraint_test PRIVATE
@@ -639,14 +760,14 @@ if (BUILD_TESTING)
   add_test(NAME logprobs_test COMMAND logprobs_test)
   set_tests_properties(logprobs_test PROPERTIES LABELS "cpu;server;api;openai")
 
+  # openai_chat.cpp and the DeepSeek tool-call scanner come from gufo_http, and
+  # the chat template from the CPU-only DeepSeek text target: this test no
+  # longer compiles a second copy of any of them.
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
-    src/cli/serve/logging.cpp
-    src/cli/serve/openai_chat.cpp
-    src/models/deepseek_v4_flash/chat_template.cpp
-    src/models/deepseek_v4_flash/tool_calls.cpp
   )
-  target_link_libraries(openai_chat_test PRIVATE gufo_core)
+  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_logging gufo_http
+    gufo_deepseek_v4_flash_text ${GUFO_QWEN_LIBRARIES})
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
@@ -694,6 +815,41 @@ if (BUILD_TESTING)
   set_tests_properties(kernel_resources_parser_test PROPERTIES
     LABELS "cpu;kernels" TIMEOUT 30)
 
+  add_test(NAME check_extension_isolation_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_extension_isolation_test.py)
+  add_test(NAME extension_isolation_report
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py --mode report)
+  add_test(NAME extension_core_model_includes_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-core-model-includes)
+  add_test(NAME extension_serving_boundary_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-serving-boundary)
+  add_test(NAME extension_model_core_includes_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-model-core-includes)
+  add_test(NAME extension_family_graph_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-family-graph)
+  add_test(NAME extension_target_ownership_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --fail-on-target-ownership)
+  # The checker's own tests scan the tree many times: about 25 s on Linux.
+  set_tests_properties(check_extension_isolation_test PROPERTIES
+    LABELS "cpu;repository" TIMEOUT 180)
+  set_tests_properties(extension_isolation_report
+    extension_core_model_includes_gate extension_family_graph_gate
+    extension_model_core_includes_gate
+    extension_serving_boundary_gate extension_target_ownership_gate
+    PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
+
   add_test(NAME check_docs_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_docs_test.py)
@@ -703,6 +859,11 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_pr_title_test.py)
   set_tests_properties(check_pr_title_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
+
+  add_test(NAME generate_infrastructure_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/generate_infrastructure_test.py)
+  set_tests_properties(generate_infrastructure_test PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
   # It reads the gufo binary, which Windows does not build yet.
   if(ENGINE_ENABLE_HIP AND TARGET gufo)
@@ -727,7 +888,8 @@ if (BUILD_TESTING)
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test
       tests/models/chat_template_hf_token_golden_test.cpp)
-    target_link_libraries(chat_template_hf_token_golden_test PRIVATE gufo_core)
+    target_link_libraries(chat_template_hf_token_golden_test PRIVATE gufo_core
+      gufo_qwen_text)
     target_compile_definitions(chat_template_hf_token_golden_test PRIVATE
       GUFO_CHAT_TEMPLATE_HF_GOLDENS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
     add_test(NAME chat_template_hf_token_golden_test
@@ -737,31 +899,22 @@ if (BUILD_TESTING)
       SKIP_RETURN_CODE 77)
   endif()
 
-  add_executable(continuation_cache_test
-    tests/cli/continuation_cache_test.cpp
-    src/cli/serve/continuation_cache.cpp)
-  target_link_libraries(continuation_cache_test PRIVATE gufo_core gufo_logging)
+  add_executable(continuation_cache_test tests/cli/continuation_cache_test.cpp)
+  target_link_libraries(continuation_cache_test PRIVATE gufo_serving)
   add_test(NAME continuation_cache_test COMMAND continuation_cache_test)
   set_tests_properties(continuation_cache_test PROPERTIES
     LABELS "cpu;server;cache;state;lifecycle")
 
   add_executable(component_text_cache_test
-    tests/cli/component_text_cache_test.cpp
-    src/cli/serve/component_text_cache.cpp
-    src/cli/serve/continuation_cache.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp)
-  target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake gufo_core gufo_logging)
+    tests/cli/component_text_cache_test.cpp)
+  target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake
+    gufo_serving)
   add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
   set_tests_properties(component_text_cache_test PROPERTIES LABELS "cpu;server;cache;state;lifecycle")
 
-  add_executable(text_model_runner_test
-    tests/cli/text_model_runner_test.cpp
-    src/cli/serve/continuation_cache.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp)
-  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core gufo_cache)
+  add_executable(text_model_runner_test tests/cli/text_model_runner_test.cpp)
+  target_link_libraries(text_model_runner_test PRIVATE gufo_serving
+    ${GUFO_QWEN_LIBRARIES})
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
@@ -769,12 +922,8 @@ if (BUILD_TESTING)
   # the disk-store suite exercises permission faults with chmod and lstat
   if (NOT WIN32)
   add_executable(continuation_disk_store_test
-    tests/cli/continuation_disk_store_test.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp
-    src/cli/serve/continuation_cache.cpp)
-  target_link_libraries(continuation_disk_store_test PRIVATE gufo_logging gufo_core gufo_cache)
+    tests/cli/continuation_disk_store_test.cpp)
+  target_link_libraries(continuation_disk_store_test PRIVATE gufo_serving)
   add_test(NAME continuation_disk_store_test
     COMMAND continuation_disk_store_test)
   set_tests_properties(continuation_disk_store_test PROPERTIES
@@ -788,13 +937,8 @@ if (BUILD_TESTING)
     LABELS "cpu;server;sampling")
 
   add_executable(text_generation_scheduler_test
-    tests/cli/text_generation_scheduler_test.cpp
-    src/cli/serve/continuation_cache.cpp
-    src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/component_text_cache.cpp
-  src/cli/serve/text_model_runner.cpp
-    src/cli/serve/text_generation_scheduler.cpp)
-  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_logging gufo_core gufo_cache)
+    tests/cli/text_generation_scheduler_test.cpp)
+  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_serving)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES
@@ -804,6 +948,7 @@ if (BUILD_TESTING)
     tests/cli/prompt_test.cpp
   )
   target_link_libraries(prompt_cli_test PRIVATE gufo_llm_cli)
+  gufo_target_extensions(prompt_cli_test EXTENSIONS ${gufo_selected_extensions})
 
   add_test(NAME prompt_cli_test COMMAND prompt_cli_test)
   set_tests_properties(prompt_cli_test PROPERTIES LABELS "cpu;server;cli")
@@ -811,38 +956,58 @@ if (BUILD_TESTING)
   add_executable(bench_cli_test
     tests/cli/bench_test.cpp
   )
-  target_link_libraries(bench_cli_test PRIVATE gufo_llm_cli)
+  target_link_libraries(bench_cli_test PRIVATE gufo_llm_cli gufo_qwen38_flash_next)
+  gufo_target_extensions(bench_cli_test EXTENSIONS ${gufo_selected_extensions})
 
   add_test(NAME bench_cli_test COMMAND bench_cli_test)
   set_tests_properties(bench_cli_test PROPERTIES LABELS "cpu;server;cli")
 
-  add_executable(video_cli_test
-    tests/cli/video_test.cpp
-    src/cli/video/video.cpp
-  )
-  target_link_libraries(video_cli_test PRIVATE gufo_core)
-  add_test(NAME video_cli_test COMMAND video_cli_test)
-  set_tests_properties(video_cli_test PROPERTIES
-    LABELS "cpu;server;cli;minimax-h3;quality")
+  add_executable(text_cli_dispatch_test tests/cli/text_cli_dispatch_test.cpp)
+  target_link_libraries(text_cli_dispatch_test PRIVATE gufo_llm_cli)
+  foreach(command prompt chat bench)
+    add_test(NAME text_cli_dispatch_${command}
+      COMMAND text_cli_dispatch_test ${command})
+    set_tests_properties(text_cli_dispatch_${command} PROPERTIES LABELS "cpu;cli;extensions")
+  endforeach()
 
-  add_executable(video_jobs_test
-    tests/cli/video_jobs_test.cpp
-    src/cli/serve/video_jobs.cpp
-  )
-  target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core gufo_cache)
-  add_test(NAME video_jobs_test COMMAND video_jobs_test)
-  set_tests_properties(video_jobs_test PROPERTIES
-    LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality")
+  # H3 host contracts share an object with generation. In HIP builds that
+  # object references the backend implementations, so tests need both tiers.
+  set(gufo_minimax_h3_test_libraries gufo_minimax_h3)
+  if (TARGET gufo_minimax_h3_hip)
+    list(APPEND gufo_minimax_h3_test_libraries gufo_minimax_h3_hip)
+  endif()
 
-  add_executable(video_api_test
-    tests/cli/video_api_test.cpp
-    src/cli/serve/video_api.cpp
-    src/cli/serve/video_jobs.cpp
-  )
-  target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core gufo_cache)
-  add_test(NAME video_api_test COMMAND video_api_test)
-  set_tests_properties(video_api_test PROPERTIES
-    LABELS "cpu;server;api;video;minimax-h3;quality")
+  if (TARGET gufo_minimax_h3)
+    add_executable(video_cli_test
+      tests/cli/video_test.cpp
+      src/cli/video/video.cpp
+    )
+    target_link_libraries(video_cli_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries} gufo_ext_runtime)
+    add_test(NAME video_cli_test COMMAND video_cli_test)
+    set_tests_properties(video_cli_test PROPERTIES
+      LABELS "cpu;server;cli;minimax-h3;quality")
+
+    add_executable(video_jobs_test
+      tests/cli/video_jobs_test.cpp
+      src/cli/serve/video_jobs.cpp
+    )
+    target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core
+      ${gufo_minimax_h3_test_libraries} gufo_cache gufo_ext_runtime)
+    add_test(NAME video_jobs_test COMMAND video_jobs_test)
+    set_tests_properties(video_jobs_test PROPERTIES
+      LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality")
+
+    add_executable(video_api_test
+      tests/cli/video_api_test.cpp
+      src/cli/serve/video_api.cpp
+      src/cli/serve/video_jobs.cpp
+    )
+    target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core
+      ${gufo_minimax_h3_test_libraries} gufo_cache gufo_ext_runtime)
+    add_test(NAME video_api_test COMMAND video_api_test)
+    set_tests_properties(video_api_test PROPERTIES
+      LABELS "cpu;server;api;video;minimax-h3;quality")
+  endif()
 
   add_test(NAME h3_profile_test
     COMMAND ${Python3_EXECUTABLE}
@@ -954,13 +1119,16 @@ if (BUILD_TESTING)
   set_tests_properties(gguf_identity_test PROPERTIES LABELS "cpu;core;gguf")
   endif()
 
+  if (TARGET gufo_minimax_h3)
   add_executable(minimax_h3_runtime_test
     tests/models/minimax_h3_runtime_test.cpp)
-  target_link_libraries(minimax_h3_runtime_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_runtime_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_runtime_test COMMAND minimax_h3_runtime_test)
   set_tests_properties(minimax_h3_runtime_test PROPERTIES
     LABELS "cpu;models;minimax-h3;safetensors;residency;failure-injection")
+  endif()
 
+  if (TARGET gufo_qwen3_tts)
   add_executable(qwen3_tts_loader_test
     tests/models/qwen3_tts/loader_test.cpp)
   target_link_libraries(qwen3_tts_loader_test PRIVATE gufo_qwen3_tts)
@@ -970,10 +1138,8 @@ if (BUILD_TESTING)
     SKIP_RETURN_CODE 77)
 
   add_executable(qwen3_tts_audio_api_test
-    tests/models/qwen3_tts/audio_api_test.cpp
-    src/cli/serve/audio_tts_api.cpp
-    src/cli/serve/tts_service.cpp)
-  target_link_libraries(qwen3_tts_audio_api_test PRIVATE gufo_qwen3_tts)
+    tests/models/qwen3_tts/audio_api_test.cpp)
+  target_link_libraries(qwen3_tts_audio_api_test PRIVATE gufo_qwen3_tts gufo_test_support)
   add_test(NAME qwen3_tts_audio_api_test COMMAND qwen3_tts_audio_api_test)
   set_tests_properties(qwen3_tts_audio_api_test PROPERTIES
     LABELS "cpu;models;qwen3-tts;server;api;audio;quality")
@@ -1016,24 +1182,26 @@ if (BUILD_TESTING)
   set_tests_properties(qwen3_tts_reference_artifacts_test PROPERTIES
     LABELS "cpu;models;qwen3-tts;reference;quality;exact"
     SKIP_RETURN_CODE 77)
+  endif()
 
+  if (TARGET gufo_minimax_h3)
   add_executable(minimax_h3_tokenizer_test
     tests/models/minimax_h3_tokenizer_test.cpp)
-  target_link_libraries(minimax_h3_tokenizer_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_tokenizer_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_tokenizer_test COMMAND minimax_h3_tokenizer_test)
   set_tests_properties(minimax_h3_tokenizer_test PROPERTIES
     LABELS "cpu;models;minimax-h3;tokenizer;quality")
 
   add_executable(minimax_h3_sampling_test
     tests/models/minimax_h3_sampling_test.cpp)
-  target_link_libraries(minimax_h3_sampling_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_sampling_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_sampling_test COMMAND minimax_h3_sampling_test)
   set_tests_properties(minimax_h3_sampling_test PROPERTIES
     LABELS "cpu;models;minimax-h3;layout;schedule;rng;quality")
 
   add_executable(minimax_h3_generation_test
     tests/models/minimax_h3_generation_test.cpp)
-  target_link_libraries(minimax_h3_generation_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_generation_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_generation_test
     COMMAND minimax_h3_generation_test)
   set_tests_properties(minimax_h3_generation_test PROPERTIES
@@ -1041,7 +1209,7 @@ if (BUILD_TESTING)
 
   add_executable(minimax_h3_video_vae_test
     tests/models/minimax_h3_video_vae_test.cpp)
-  target_link_libraries(minimax_h3_video_vae_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_video_vae_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_video_vae_plan
     COMMAND minimax_h3_video_vae_test)
   set_tests_properties(minimax_h3_video_vae_plan PROPERTIES
@@ -1049,11 +1217,12 @@ if (BUILD_TESTING)
 
   add_executable(minimax_h3_media_test
     tests/models/minimax_h3_media_test.cpp)
-  target_link_libraries(minimax_h3_media_test PRIVATE gufo_core)
+  target_link_libraries(minimax_h3_media_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
   add_test(NAME minimax_h3_media_test COMMAND minimax_h3_media_test)
   set_tests_properties(minimax_h3_media_test PROPERTIES
     LABELS "cpu;models;minimax-h3;video;audio;ffmpeg;mux;quality"
     SKIP_RETURN_CODE 77)
+  endif()
 
   add_executable(ggml_dequant_test tests/core/ggml_dequant_test.cpp)
   target_link_libraries(ggml_dequant_test PRIVATE gufo_core)
@@ -1068,12 +1237,12 @@ if (BUILD_TESTING)
   set_tests_properties(ggml_gemm_parity_test PROPERTIES LABELS "cpu;core;quant")
 
   add_executable(exact_token_test tests/quality/exact_token_test.cpp)
-  target_link_libraries(exact_token_test PRIVATE gufo_core)
+  target_link_libraries(exact_token_test PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
   add_test(NAME exact_token_test COMMAND exact_token_test)
   set_tests_properties(exact_token_test PROPERTIES LABELS "cpu;quality;tokens")
 
   add_executable(eval_regrade_test tests/quality/eval_regrade_test.cpp)
-  target_link_libraries(eval_regrade_test PRIVATE gufo_core)
+  target_link_libraries(eval_regrade_test PRIVATE gufo_core gufo_eval)
   add_test(NAME eval_regrade_test COMMAND eval_regrade_test)
   set_tests_properties(eval_regrade_test PROPERTIES LABELS "cpu;quality;eval")
 
@@ -1081,7 +1250,7 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_http.py
       --gufo $<TARGET_FILE:gufo>
-      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json)
+      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/eval/antirez-ds4.json)
   set_tests_properties(eval_http_test PROPERTIES
     LABELS "cpu;quality;eval;http;cli;server")
 
@@ -1150,16 +1319,17 @@ if (BUILD_TESTING)
     LABELS "cpu;hipblaslt;cache")
 
   if (ENGINE_ENABLE_HIP)
+    if (TARGET gufo_qwen3_tts_hip)
     add_executable(qwen3_tts_synthesis_hip_test
       tests/models/qwen3_tts/synthesis_hip_test.cpp)
-    target_link_libraries(qwen3_tts_synthesis_hip_test PRIVATE gufo_qwen3_tts)
+    target_link_libraries(qwen3_tts_synthesis_hip_test PRIVATE gufo_qwen3_tts gufo_qwen3_tts_hip)
     add_test(NAME qwen3_tts_synthesis_hip_test COMMAND qwen3_tts_synthesis_hip_test)
     set_tests_properties(qwen3_tts_synthesis_hip_test PROPERTIES
       LABELS "hip;gpu;models;qwen3-tts;quality;external-model;slow" SKIP_RETURN_CODE 77)
     add_executable(qwen3_tts_speech_decoder_hip_test
       tests/models/qwen3_tts/speech_decoder_hip_test.cpp)
     target_link_libraries(qwen3_tts_speech_decoder_hip_test PRIVATE
-      gufo_qwen3_tts hip::host)
+      gufo_qwen3_tts gufo_qwen3_tts_hip hip::host)
     add_test(NAME qwen3_tts_speech_decoder_hip_test
       COMMAND qwen3_tts_speech_decoder_hip_test)
     set_tests_properties(qwen3_tts_speech_decoder_hip_test PROPERTIES
@@ -1168,7 +1338,7 @@ if (BUILD_TESTING)
     add_executable(qwen3_tts_talker_hip_prefill_test
       tests/models/qwen3_tts/talker_hip_prefill_test.cpp)
     target_link_libraries(qwen3_tts_talker_hip_prefill_test PRIVATE
-      gufo_qwen3_tts hip::host)
+      gufo_qwen3_tts gufo_qwen3_tts_hip hip::host)
     add_test(NAME qwen3_tts_talker_hip_prefill_test
       COMMAND qwen3_tts_talker_hip_prefill_test)
     set_tests_properties(qwen3_tts_talker_hip_prefill_test PROPERTIES
@@ -1178,7 +1348,7 @@ if (BUILD_TESTING)
     add_executable(qwen3_tts_variant_talker_hip_test
       tests/models/qwen3_tts/variant_talker_hip_test.cpp)
     target_link_libraries(qwen3_tts_variant_talker_hip_test PRIVATE
-      gufo_qwen3_tts hip::host)
+      gufo_qwen3_tts gufo_qwen3_tts_hip hip::host)
     add_test(NAME qwen3_tts_variant_talker_hip_test
       COMMAND qwen3_tts_variant_talker_hip_test)
     set_tests_properties(qwen3_tts_variant_talker_hip_test PROPERTIES
@@ -1188,17 +1358,19 @@ if (BUILD_TESTING)
     add_executable(qwen3_tts_base_encoders_hip_test
       tests/models/qwen3_tts/base_encoders_hip_test.cpp)
     target_link_libraries(qwen3_tts_base_encoders_hip_test PRIVATE
-      gufo_qwen3_tts hip::host)
+      gufo_qwen3_tts gufo_qwen3_tts_hip hip::host)
     add_test(NAME qwen3_tts_base_encoders_hip_test
       COMMAND qwen3_tts_base_encoders_hip_test)
     set_tests_properties(qwen3_tts_base_encoders_hip_test PROPERTIES
       LABELS "hip;gpu;gfx1151;models;qwen3-tts;base;speech-encoder;speaker-encoder;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
+    endif()
 
+    if (TARGET gufo_minimax_h3_hip)
     add_executable(minimax_h3_runtime_hip_test
       tests/models/minimax_h3_runtime_hip_test.cpp)
     target_link_libraries(minimax_h3_runtime_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
     add_test(NAME minimax_h3_runtime_hip_test
       COMMAND minimax_h3_runtime_hip_test)
     set_tests_properties(minimax_h3_runtime_hip_test PROPERTIES
@@ -1210,7 +1382,7 @@ if (BUILD_TESTING)
     target_compile_definitions(minimax_h3_prompt_encoder_hip_test PRIVATE
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
     target_link_libraries(minimax_h3_prompt_encoder_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
     add_test(NAME minimax_h3_prompt_encoder_analytic
       COMMAND minimax_h3_prompt_encoder_hip_test --analytic)
     set_tests_properties(minimax_h3_prompt_encoder_analytic PROPERTIES
@@ -1224,19 +1396,18 @@ if (BUILD_TESTING)
     add_executable(minimax_h3_sampling_hip_test
       tests/models/minimax_h3_sampling_hip_test.hip)
     target_link_libraries(minimax_h3_sampling_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
     add_test(NAME minimax_h3_sampling_hip_test
       COMMAND minimax_h3_sampling_hip_test)
     set_tests_properties(minimax_h3_sampling_hip_test PROPERTIES
-      LABELS "gpu;hip;gfx1151;minimax-h3;sampling;euler;analytic"
-      SKIP_RETURN_CODE 77)
+      LABELS "gpu;hip;gfx1151;minimax-h3;sampling;euler;analytic")
 
     add_executable(minimax_h3_dit_hip_test
       tests/models/minimax_h3_dit_hip_test.hip)
     target_compile_definitions(minimax_h3_dit_hip_test PRIVATE
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
     target_link_libraries(minimax_h3_dit_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
     add_test(NAME minimax_h3_dit_analytic
       COMMAND minimax_h3_dit_hip_test --analytic)
     set_tests_properties(minimax_h3_dit_analytic PROPERTIES
@@ -1252,7 +1423,7 @@ if (BUILD_TESTING)
     target_compile_definitions(minimax_h3_denoiser_hip_test PRIVATE
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
     target_link_libraries(minimax_h3_denoiser_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
     add_test(NAME minimax_h3_denoiser_smoke
       COMMAND minimax_h3_denoiser_hip_test --smoke)
     set_tests_properties(minimax_h3_denoiser_smoke PROPERTIES
@@ -1280,7 +1451,7 @@ if (BUILD_TESTING)
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
       GUFO_H3_VIDEO_VAE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/video-vae-oracle-v1.json")
     target_link_libraries(minimax_h3_video_vae_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
     add_test(NAME minimax_h3_video_vae_real
       COMMAND minimax_h3_video_vae_hip_test)
     set_tests_properties(minimax_h3_video_vae_real PROPERTIES
@@ -1293,7 +1464,7 @@ if (BUILD_TESTING)
       GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
       GUFO_H3_AUDIO_VAE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/audio-vae-oracle-v1.json")
     target_link_libraries(minimax_h3_audio_vae_hip_test PRIVATE
-      gufo_core hip::host)
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
     add_test(NAME minimax_h3_audio_vae_primitives
       COMMAND minimax_h3_audio_vae_hip_test --primitives)
     set_tests_properties(minimax_h3_audio_vae_primitives PROPERTIES
@@ -1303,6 +1474,7 @@ if (BUILD_TESTING)
     set_tests_properties(minimax_h3_audio_vae_real PROPERTIES
       LABELS "gpu;hip;gfx1151;minimax-h3;audio;vae;quality;external-model;very-slow"
       SKIP_RETURN_CODE 77)
+    endif()
 
     add_executable(hip_memory_visibility_test
       tests/core/hip_memory_visibility_test.hip)
@@ -1326,7 +1498,7 @@ if (BUILD_TESTING)
     add_executable(hipblaslt_runtime_cache_test
       tests/kernels/hipblaslt_runtime_cache_test.cpp)
     target_link_libraries(hipblaslt_runtime_cache_test PRIVATE
-      gufo_core hip::host)
+      gufo_core ${GUFO_QWEN_LIBRARIES} hip::host)
     add_test(NAME hipblaslt_runtime_cache_test
       COMMAND hipblaslt_runtime_cache_test)
     set_tests_properties(hipblaslt_runtime_cache_test PROPERTIES
@@ -1334,7 +1506,8 @@ if (BUILD_TESTING)
 
     add_executable(persistent_deltanet_test
       tests/kernels/persistent_deltanet_test.cpp)
-    target_link_libraries(persistent_deltanet_test PRIVATE gufo_core hip::host)
+    target_link_libraries(persistent_deltanet_test PRIVATE gufo_core
+      ${GUFO_QWEN_LIBRARIES} hip::host)
     add_test(NAME persistent_deltanet_test COMMAND persistent_deltanet_test)
     set_tests_properties(persistent_deltanet_test PROPERTIES
       LABELS "hip;gpu;kernels;deltanet;speculative")
@@ -1359,6 +1532,25 @@ if (BUILD_TESTING)
     set_tests_properties(gufo_cpu_probe PROPERTIES
       LABELS "platform;probe;cpu")
   endif()
+endif()
+
+include(cmake/TargetGraph.cmake)
+if (BUILD_TESTING)
+  # Card 09 (RFC step 6): record the real link edges here, where every target
+  # is defined, and let `extension_link_graph_gate` judge them.
+  gufo_write_link_graph("${CMAKE_BINARY_DIR}/gufo-link-graph.json")
+  add_test(NAME extension_link_graph_gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-target-graph.py
+      --report ${CMAKE_BINARY_DIR}/gufo-link-graph.json
+      --root ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(extension_link_graph_gate PROPERTIES
+    LABELS "cpu;repository" TIMEOUT 60)
+  add_test(NAME check_target_graph_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_target_graph_test.py ${CMAKE_BINARY_DIR})
+  set_tests_properties(check_target_graph_test PROPERTIES
+    LABELS "cpu;repository" TIMEOUT 60)
 endif()
 
 if (BUILD_TESTING)

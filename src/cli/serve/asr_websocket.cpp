@@ -1,12 +1,12 @@
 #include <optional>
 
 #include "src/cli/serve/asr_service.hpp"
+#include "src/cli/serve/audio_buffer.hpp"
 #include "src/cli/serve/audio_stream.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
-#include "src/models/qwen3_asr/audio.hpp"
 
 namespace gufo::server {
 namespace {
@@ -191,8 +191,7 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
           if (!send(std::move(created)))
             return;
           previous_item = item;
-          models::qwen3_asr::AudioBuffer audio{.sample_rate = 24000,
-                                               .channels = 1};
+          AudioBuffer audio{.sample_rate = 24000, .channels = 1, .samples = {}};
           audio.samples.resize(audio_bytes.size() / 2);
           for (std::size_t i = 0; i < audio.samples.size(); ++i) {
             const auto bits = static_cast<std::uint16_t>(
@@ -201,9 +200,13 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
             audio.samples[i] = static_cast<std::int16_t>(bits) / 32768.0F;
           }
           audio_bytes.clear();
-          const auto pcm = models::qwen3_asr::ResampleMono16k(audio);
-          models::qwen3_asr::TranscriptionRequest transcription{
-              .context = prompt, .language = language, .pcm16k = pcm};
+          const auto pcm = ResampleMono16k(audio);
+          ext::TranscriptionRequest transcription{.wav = {},
+                                                  .context = prompt,
+                                                  .language = language,
+                                                  .max_new_tokens = 256,
+                                                  .pcm16k = pcm,
+                                                  .on_text = {}};
           std::string published;
           transcription.on_text = [&](std::string_view text) {
             if (!text.starts_with(published))
@@ -218,7 +221,7 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
             published = text;
             return send(std::move(delta));
           };
-          models::qwen3_asr::TranscriptionResult result;
+          ext::TranscriptionResult result;
           std::string failure;
           const bool ok = service.Transcribe(
               transcription, [&] { return socket.cancelled(); }, &result,

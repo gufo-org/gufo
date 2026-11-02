@@ -47,7 +47,7 @@
 #include "src/core/platform/net.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
 #include "src/core/utf8.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 
 namespace gufo::server {
 namespace {

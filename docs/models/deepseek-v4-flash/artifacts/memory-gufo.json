@@ -13,16 +13,16 @@
       "gpuDriver": "amdgpu",
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
-      "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "kernelRelease": "7.2.9-200.fc44.x86_64",
+      "memoryTotalBytes": 134297587712,
       "memoryType": "LPDDR5X (Unified)",
-      "rocmVersion": "7.2.3",
+      "rocmVersion": "10.1.0",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "6a00ba111e0ba4f715799d4fb9dd494ab94a336e71a45179b26e52c2d1b6a917",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-24",
+  "measuredOn": "2026-10-30",
   "mode": null,
   "model": {
     "id": "DeepSeek-V4-Flash",
@@ -35,16 +35,14 @@
   "referenceName": "antirez/ds4",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
-      "command": "gufo serve --port 55771 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 93.88,
-      "idle_gib": 2.38
+      "command": "gufo serve --port 42385 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 91.22,
+      "idle_gib": 0.01
     },
     "pp2048 + tg128": {
-      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
-      "command": "gufo serve --port 55771 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 93.09,
-      "idle_gib": 2.38
+      "command": "gufo serve --port 42385 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 90.55,
+      "idle_gib": 0.01
     }
   },
   "schemaVersion": 1,
@@ -53,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "55771",
+      "42385",
       "--sessions",
       "1",
       "llm",
@@ -71,8 +69,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+    "dirty": false,
+    "revision": "07206ea40c4aadc5ea7da081073bf10a570cb1af"
   },
   "table": "memory",
   "target": "gufo"

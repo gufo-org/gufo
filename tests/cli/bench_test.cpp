@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "src/models/qwen38_flash_next/bench_yarn.hpp"
+
 namespace {
 
 void Expect(bool condition, const char* message) {
@@ -160,10 +162,13 @@ void TestInvalidWorkload() {
 // reserves (depth + prompt or generation + 1) instead of enabling YaRN
 // silently.
 void TestFlashNextYarnRule() {
+  using gufo::models::qwen38_flash_next::FlashNextBenchContext;
+  using gufo::models::qwen38_flash_next::ResolveFlashNextBenchYarn;
+
   const std::array<const char*, 0> none{};
   auto defaults = gufo::cli::ParseBenchOptions(none);
   Expect(defaults && !defaults->enable_yarn, "YaRN is off by default");
-  Expect(gufo::cli::FlashNextBenchContext(*defaults) == 4096,
+  Expect(FlashNextBenchContext(*defaults) == 4096,
          "default workload reserves the 4096-token floor");
 
   const std::array<const char*, 7> within = {
@@ -171,38 +176,34 @@ void TestFlashNextYarnRule() {
       "--n-gen",   "128",    "--enable-yarn"};
   auto options = gufo::cli::ParseBenchOptions(within);
   Expect(options && options->enable_yarn, "--enable-yarn parses");
-  Expect(gufo::cli::FlashNextBenchContext(*options) == 262048,
+  Expect(FlashNextBenchContext(*options) == 262048,
          "depth + prompt + 1 sizes the benchmark context");
   std::optional<gufo::models::qwen38_flash_next::RopeScaling> scaling;
   std::string error;
-  Expect(!gufo::cli::ResolveFlashNextBenchYarn(*options, 262144, &scaling,
-                                               &error) &&
+  Expect(!ResolveFlashNextBenchYarn(*options, 262144, &scaling, &error) &&
              error ==
                  "--enable-yarn has no effect: context 262048 is within "
                  "the native 262144 tokens",
          "--enable-yarn is rejected when the benchmark fits natively");
   options->enable_yarn = false;
   error.clear();
-  Expect(gufo::cli::ResolveFlashNextBenchYarn(*options, 262144, &scaling,
-                                              &error) &&
+  Expect(ResolveFlashNextBenchYarn(*options, 262144, &scaling, &error) &&
              !scaling.has_value(),
          "a benchmark within the native context leaves YaRN off");
 
   const std::array<const char*, 6> beyond = {
       "--n-depth", "260000", "--n-prompt", "4096", "--n-gen", "0"};
   options = gufo::cli::ParseBenchOptions(beyond);
-  Expect(options && gufo::cli::FlashNextBenchContext(*options) == 264097,
+  Expect(options && FlashNextBenchContext(*options) == 264097,
          "a deep benchmark reserves past the native context");
-  Expect(!gufo::cli::ResolveFlashNextBenchYarn(*options, 262144, &scaling,
-                                               &error) &&
+  Expect(!ResolveFlashNextBenchYarn(*options, 262144, &scaling, &error) &&
              error ==
                  "context above the native 262144 tokens needs static YaRN, "
                  "which applies to every request; pass --enable-yarn "
                  "(requested 264097)",
          "a benchmark past the native context requires --enable-yarn");
   options->enable_yarn = true;
-  Expect(gufo::cli::ResolveFlashNextBenchYarn(*options, 262144, &scaling,
-                                              &error) &&
+  Expect(ResolveFlashNextBenchYarn(*options, 262144, &scaling, &error) &&
              scaling && scaling->original_context == 262144 &&
              gufo::models::qwen38_flash_next::ScaledContextLength(
                  *scaling, 262144) >= 264097,
@@ -211,11 +212,10 @@ void TestFlashNextYarnRule() {
   const std::array<const char*, 6> generation = {
       "--n-depth", "262000", "--n-prompt", "0", "--n-gen", "512"};
   options = gufo::cli::ParseBenchOptions(generation);
-  Expect(options && gufo::cli::FlashNextBenchContext(*options) == 262513,
+  Expect(options && FlashNextBenchContext(*options) == 262513,
          "depth + generation + 1 sizes the benchmark context too");
-  Expect(
-      !gufo::cli::ResolveFlashNextBenchYarn(*options, 262144, &scaling, &error),
-      "depth + generation past the native context requires the flag");
+  Expect(!ResolveFlashNextBenchYarn(*options, 262144, &scaling, &error),
+         "depth + generation past the native context requires the flag");
 }
 
 }  // namespace

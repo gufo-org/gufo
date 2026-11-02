@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "src/cli/serve/inference_backend.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"

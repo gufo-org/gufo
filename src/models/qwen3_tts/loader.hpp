@@ -3,12 +3,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/gguf_reader.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "src/core/gguf_reader.hpp"
 #include "src/models/qwen3_tts/config.hpp"
 #include "src/models/qwen3_tts/tensor.hpp"
 
