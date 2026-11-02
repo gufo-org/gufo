@@ -312,8 +312,12 @@ public:
   /// anchor is copied from its history (ForwardWide), or 0 without MTP.
   static constexpr std::uint32_t kWideRows = 64;
   [[nodiscard]] std::uint32_t max_copy_rows() const noexcept {
-    return has_mtp() ? std::min(kWideRows, options_.max_batch) : 0;
+    return has_mtp() ? std::min({kWideRows, options_.max_batch, copy_rows_cap_})
+                     : 0;
   }
+  /// Caps max_copy_rows() before any session is created, so the wide
+  /// rollback rows fit beside the configured sessions.
+  void LimitCopyRows(std::uint32_t rows) noexcept { copy_rows_cap_ = rows; }
   /// Whether a sampled verification of `rows` rows can stay compact.
   [[nodiscard]] static bool CanCompactWideVerification(
       const sampling::SamplerState& sampler, std::size_t rows);
@@ -780,6 +784,7 @@ private:
   mutable Session::Control* wide_controls_{nullptr};
   /// Rows of the pending wide verification, or 0.
   mutable std::uint32_t wide_rows_{0};
+  std::uint32_t copy_rows_cap_{kWideRows};
   /// Compact sampled candidates of a wide verification's rows.
   mutable std::vector<std::vector<sampling::LogitCandidate>> wide_candidates_;
   bool EnsureWideSegments(std::uint32_t segments, std::string* error) const;

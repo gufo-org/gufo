@@ -298,6 +298,10 @@ std::size_t Model::DeferredScratchBytes() const {
   return executor_->DeferredScratchBytes();
 }
 
+void Model::LimitCopyRows(std::uint32_t rows) noexcept {
+  executor_->LimitCopyRows(rows);
+}
+
 std::size_t Session::AllocatedBytes() const noexcept {
   return session_->AllocatedBytes();
 }

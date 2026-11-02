@@ -1613,8 +1613,9 @@ std::size_t Executor::SessionBytes(
          attention * (kv + index) + sizeof(Session::Control) +
          (mode == core::SessionMode::kSpeculative
               ? kv + index +
-                    std::size_t{options_.max_speculative + 1} * c.HcDim() *
-                        sizeof(float) +
+                    std::size_t{std::max(options_.max_speculative + 1,
+                                         max_copy_rows())} *
+                        c.HcDim() * sizeof(float) +
                     (model_->draft_output().empty()
                          ? 0
                          : std::size_t{kMtpDraftExtraRows} *

@@ -95,7 +95,9 @@ consecutive ordinary verifications (`wide_verification_test` checks the logits
 and the continuation after cutting back to any kept prefix). Later segments
 keep their starting state and snapshot rows in executor-owned buffers, about
 270 MiB per segment past the first (1.9 GiB at 64 rows), allocated on first use
-and reserved with the other lazy scratch. When more than eight rows are kept,
+and reserved with the other lazy scratch. When the configured sessions leave
+less device memory, the load narrows the widest pass to what fits instead of
+refusing the session count. When more than eight rows are kept,
 the draft block catches up on all but the last of them at once (K/V only, as
 for prompt rows), so snapshots and batched cycles still hold at most eight
 hidden rows. Seeded sampled requests and batched cycles keep the ordinary
