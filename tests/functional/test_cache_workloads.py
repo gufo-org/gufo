@@ -271,6 +271,11 @@ class CacheWorkloadsTest(unittest.TestCase):
             for event, tokens, accepted in (
                     ("capture_refused reason=byte_capacity", 169, True),
                     ("capture_refused reason=entry_capacity", 169, True),
+                    ("retention action=1 reason=1", 169, True),
+                    ("retention action=1 reason=2", 169, True),
+                    ("retention action=1 reason=6", 169, False),
+                    ("retention action=2 reason=2", 169, False),
+                    ("retention action=1 reason=2", 168, False),
                     ("capture_failed reason=transfer", 169, False),
                     ("capture_refused reason=byte_capacity", 168, False)):
                 log.write_text(f"schema=component-cache-v1 event={event} tokens={tokens}\n")
