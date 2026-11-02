@@ -66,7 +66,8 @@ if (ENGINE_ENABLE_HIP)
   add_executable(inference_backend_gpu_test serving_test.cpp)
   target_link_libraries(inference_backend_gpu_test PRIVATE gufo_serving)
   add_executable(qwen_vision_serving_test ../qwen/vision_serving_test.cpp)
-  target_link_libraries(qwen_vision_serving_test PRIVATE gufo_serving)
+  target_link_libraries(qwen_vision_serving_test PRIVATE gufo_serving
+    gufo_qwen_hip gufo_qwen38_flash_next_hip gufo_qwen_vision)
   add_test(NAME qwen_vision_serving_test COMMAND qwen_vision_serving_test)
   set_tests_properties(qwen_vision_serving_test PROPERTIES
     LABELS "qwen27b;qwen38-flash-next;hip;gpu;vision;external-model"
