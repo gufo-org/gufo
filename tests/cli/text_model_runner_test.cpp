@@ -454,14 +454,19 @@ void TestBatchedAdvancePreservesIndependentRequests() {
 
 void TestResourceClaimsAreValidatedBeforeAllocation() {
   auto stats = std::make_shared<FakeStats>();
-  bool rejected = false;
+  std::string message;
   try {
     auto runner = std::make_shared<FakeRunner>(stats, 64, 159);
     TextRunnerPool pool(runner, 2);
-  } catch (const std::invalid_argument&) {
-    rejected = true;
+  } catch (const std::invalid_argument& error) {
+    message = error.what();
   }
-  Expect(rejected, "aggregate request-state claim must fit capacity");
+  Expect(!message.empty(), "aggregate request-state claim must fit capacity");
+  Expect(message.find("2 sessions at 64-token context") != std::string::npos &&
+             message.find("need 80 bytes") != std::string::npos &&
+             message.find("only 159 bytes") != std::string::npos &&
+             message.find("at most 1 session fits") != std::string::npos,
+         "capacity rejection reports the claim and the sessions that fit");
   Expect(stats->states_created == 0,
          "invalid resource claim is rejected before state allocation");
 }
