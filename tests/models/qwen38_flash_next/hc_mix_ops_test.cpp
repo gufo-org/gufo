@@ -485,11 +485,69 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject) {
 
 }  // namespace
 
+void CheckBatchedReadyQ8(std::uint32_t rows, bool inject, float scale) {
+  constexpr std::size_t guard = 256;
+  const auto input = MakeValues(std::size_t{rows} * kHidden * kStreams,
+                                0x572100U + rows, scale);
+  const auto gates = MakeValues(input.size(), 0x781900U + rows, 2.0F);
+  const auto weights =
+      MakeValues(kStreams * kHidden * kStreams, 0x124003U, 0.01F);
+  HipBuffer<float> x(input.size()), g(gates.size()), w(weights.size());
+  Upload(&x, input);
+  Upload(&g, gates);
+  Upload(&w, weights);
+  const auto mixed_bytes = std::size_t{rows} * kHidden * sizeof(float);
+  const auto inject_bytes =
+      std::size_t{rows} * kStreams * q::HcInjectParts(kHidden) * sizeof(float);
+  const auto q8_bytes = qfn_mmq_q8_1_bytes(rows, kHidden);
+  HipBuffer<std::uint8_t> ref_mixed(mixed_bytes + 2 * guard),
+      out_mixed(mixed_bytes + 2 * guard), ref_inject(inject_bytes + 2 * guard),
+      out_inject(inject_bytes + 2 * guard), ref_q8(q8_bytes + 2 * guard),
+      out_q8(q8_bytes + 2 * guard);
+  for (auto* b :
+       {&ref_mixed, &out_mixed, &ref_inject, &out_inject, &ref_q8, &out_q8})
+    CheckHip(hipMemset(b->get(), 0xA5, b->bytes()), "ready-Q8 guards");
+  auto floats = [&](auto& b) {
+    return reinterpret_cast<float*>(b.get() + guard);
+  };
+  q::HcMixEpilogue(x.get(), g.get(), inject ? w.get() : nullptr,
+                   floats(ref_mixed), floats(ref_inject), rows, kHidden,
+                   kStreams, nullptr);
+  if (qfn_mmq_quantize_q8_1(floats(ref_mixed), ref_q8.get() + guard, rows,
+                            kHidden, nullptr) != 0)
+    throw std::runtime_error("ready-Q8 reference quantization failed");
+  q::HcMixEpilogue(x.get(), g.get(), inject ? w.get() : nullptr,
+                   floats(out_mixed), floats(out_inject), rows, kHidden,
+                   kStreams, nullptr, out_q8.get() + guard);
+  CheckHip(hipDeviceSynchronize(), "ready-Q8 completion");
+  const auto exact = [&](auto& a, auto& b, std::size_t used, bool live) {
+    std::vector<std::uint8_t> reference(a.bytes()), actual(b.bytes());
+    CheckHip(
+        hipMemcpy(reference.data(), a.get(), a.bytes(), hipMemcpyDeviceToHost),
+        "ready-Q8 reference");
+    CheckHip(
+        hipMemcpy(actual.data(), b.get(), b.bytes(), hipMemcpyDeviceToHost),
+        "ready-Q8 producer");
+    if (reference != actual)
+      throw std::runtime_error("ready-Q8 producer differs from separate path");
+    for (std::size_t i = 0; i < actual.size(); ++i)
+      if ((!live || i < guard || i >= guard + used) && actual[i] != 0xA5)
+        throw std::runtime_error("ready-Q8 guard or inactive output changed");
+  };
+  exact(ref_mixed, out_mixed, mixed_bytes, true);
+  exact(ref_inject, out_inject, inject_bytes, inject);
+  exact(ref_q8, out_q8, q8_bytes, true);
+}
+
 int main() {
   try {
     for (std::uint32_t n = 1; n <= 8; ++n) {
       CheckFusedDecodeMixer(n, true);
     }
+    for (std::uint32_t rows = 1; rows <= 8; ++rows)
+      for (bool inject : {false, true})
+        for (float scale : {0.0001F, 1.0F, 10000.0F})
+          CheckBatchedReadyQ8(rows, inject, scale);
     CheckFusedDecodeMixer(1, false);
     CheckFusedDecodeMixer(5, false);
     CheckFusedProjection(96);
