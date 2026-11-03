@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import os
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -34,7 +35,7 @@ class ConfigureTests(unittest.TestCase):
                 cmake.append(f'gufo_extension(MANIFEST "{path.as_posix()}")')
             cmake.extend(["gufo_extensions_validate()", extra])
             (source / "CMakeLists.txt").write_text("\n".join(cmake))
-            result = subprocess.run(["cmake", "-S", str(source), "-B", str(source / "build")],
+            result = subprocess.run(["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             DIAGNOSTICS.append({"test": self.id(), "expected": expected,
                                 "extra": extra, "returncode": result.returncode, "output": result.stdout})
@@ -215,7 +216,8 @@ class ConfigureTests(unittest.TestCase):
             for command in (["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
                             ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "4"],
                             ["ctest", "--test-dir", str(source / "build"), "-C", "Release", "--output-on-failure"]):
-                result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                result = subprocess.run(command, env=dict(os.environ, CCACHE_BASEDIR=str(source)),
+                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 DIAGNOSTICS.append({"test": self.id(), "command": command,
                                     "returncode": result.returncode, "output": result.stdout})
                 self.assertEqual(result.returncode, 0, result.stdout)
@@ -283,7 +285,7 @@ class ConfigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gufo-extension-registry-") as temp:
             directories = [Path(temp) / name for name in ("first", "second", "available")]
             for directory in directories:
-                result = subprocess.run(["cmake", "-S", str(FIXTURES), "-B", str(directory),
+                result = subprocess.run(["cmake", "-S", str(FIXTURES), "-B", str(directory), "-GNinja",
                                          f"-DENGINE_ENABLE_HIP={'ON' if directory.name == 'available' else 'OFF'}",
                                          "-DCMAKE_DISABLE_FIND_PACKAGE_Python3=TRUE"],
                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

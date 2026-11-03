@@ -21,6 +21,9 @@ class DiscoveryTests(unittest.TestCase):
         # returns long ones; relative extension sources need one spelling.
         self.source = Path(self.temporary.name).resolve()
         self.build = self.source / "build"
+        # Each case has a fresh source tree. Normalize its temporary paths so
+        # unchanged runtime objects remain reusable across cases and CI runs.
+        self.env = dict(os.environ, CCACHE_BASEDIR=str(self.source))
         (self.source / "extensions.lock").write_text('{"schema":1,"extensions":[]}')
         (self.source / "main.cpp").write_text('''#include <iostream>
 #include "gufo/ext/registry.hpp"
@@ -84,7 +87,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
 
     def configure(self, *flags, error=None):
         result = subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build), "-GNinja", *flags],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if error:
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn(error, " ".join(result.stdout.split()))
@@ -94,7 +97,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
 
     def run_fixture(self):
         result = subprocess.run(["cmake", "--build", str(self.build), "--target", "fixture", "--parallel", "2"],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.assertEqual(result.returncode, 0, result.stdout)
         return json.loads(subprocess.check_output([str(self.build / "fixture")], text=True))
 
@@ -419,7 +422,7 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
         # A private header outside the API SURFACE must fail to compile.
         source.write_text('#include "src/core/logging/trace.hpp"\n' + source.read_text())
         result = subprocess.run(["cmake", "--build", str(self.build), "--target", "gufo_template_model"],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("src/core/logging/trace.hpp", result.stdout)
 
