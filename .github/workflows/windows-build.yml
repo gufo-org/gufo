@@ -281,8 +281,15 @@ jobs:
           # here; the Devlab job runs the full diagnosis on the device.
           & $gufo diagnose --section platform
           if ($LASTEXITCODE -ne 0) { throw 'gufo diagnose --section platform failed' }
+          ccache --zero-stats
           cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target check-pr
-          if ($LASTEXITCODE -ne 0) { throw 'check-pr failed' }
+          $checkExit = $LASTEXITCODE
+          ccache --show-stats
+          if (Test-Path build/windows-release/Testing/Temporary/LastTest.log) {
+            Get-Content build/windows-release/Testing/Temporary/LastTest.log |
+              Select-String 'discovery timing:'
+          }
+          if ($checkExit -ne 0) { throw 'check-pr failed' }
           ctest --test-dir build/windows-release --output-on-failure --no-tests=error --timeout 60 -R '^(qwen38_flash_next\.ngram|gpu_queues_test|bandwidth_test|allocation_benchmark_test)$'
           if ($LASTEXITCODE -ne 0) { throw 'diagnostics and ngram tests failed' }
 

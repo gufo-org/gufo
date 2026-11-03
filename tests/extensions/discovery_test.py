@@ -8,6 +8,7 @@ import stat
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
+        self.timings = {"configure": 0.0, "build": 0.0}
+        self.calls = {"configure": 0, "build": 0}
         self.temporary = tempfile.TemporaryDirectory(prefix="gufo-discovery-")
         self.addCleanup(self.temporary.cleanup)
         # Windows may spell TEMP with 8.3 short names, while the manifest glob
@@ -57,6 +60,21 @@ gufo_target_extensions(fixture EXTENSIONS ${{selected}})
         self.add("alpha", depends=["base"])
         self.add("beta", hip=True)
 
+    def tearDown(self):
+        # CTest retains this in LastTest.log even for successful cases.
+        print(f"discovery timing: {self._testMethodName}: "
+              f"configure={self.timings['configure']:.2f}s/{self.calls['configure']} calls, "
+              f"build={self.timings['build']:.2f}s/{self.calls['build']} calls", flush=True)
+
+    def timed_run(self, phase, command):
+        start = time.monotonic()
+        try:
+            return subprocess.run(command, env=self.env, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        finally:
+            self.timings[phase] += time.monotonic() - start
+            self.calls[phase] += 1
+
     def add(self, name, depends=None, family=False, hip=False):
         directory = self.source / (f"src/families/test/{name}" if family else f"src/models/{name}")
         directory.mkdir(parents=True, exist_ok=True)
@@ -86,8 +104,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         return directory
 
     def configure(self, *flags, error=None):
-        result = subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build), "-GNinja", *flags],
-                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = self.timed_run("configure", ["cmake", "-S", str(self.source), "-B", str(self.build), "-GNinja", *flags])
         if error:
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn(error, " ".join(result.stdout.split()))
@@ -96,8 +113,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         return result.stdout
 
     def run_fixture(self):
-        result = subprocess.run(["cmake", "--build", str(self.build), "--target", "fixture", "--parallel", "2"],
-                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = self.timed_run("build", ["cmake", "--build", str(self.build), "--target", "fixture", "--parallel", "2"])
         self.assertEqual(result.returncode, 0, result.stdout)
         return json.loads(subprocess.check_output([str(self.build / "fixture")], text=True))
 
