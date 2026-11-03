@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -291,14 +292,15 @@ void TestStreaming() {
 void TestQueuedCancellation() {
   std::binary_semaphore entered{0}, release{0};
   std::atomic<int> calls{0};
-  TtsService service(
-      TtsServiceOptions{.validate_model = false,
-                        .runner = [&](const auto&, const auto&, auto*, auto*) {
-                          ++calls;
-                          entered.release();
-                          release.acquire();
-                          return true;
-                        }});
+  TtsService service(TtsServiceOptions{
+      .validate_model = false,
+      .runner = [&](const auto&, const auto&, auto* result, auto*) {
+        ++calls;
+        entered.release();
+        release.acquire();
+        result->sample_rate = 24000;
+        return true;
+      }});
   auto active = std::async(std::launch::async, [&] {
     qwen3_tts::SynthesisResult output;
     std::string error;
@@ -472,6 +474,156 @@ void TestInvalidWaveform() {
   }
 }
 
+void TestSampleRateAndDuration() {
+  struct CustomRateRunner final : gufo::ext::TtsRunner {
+    explicit CustomRateRunner(std::uint32_t rate) : rate_(rate) {}
+    bool Synthesize(const gufo::ext::SynthesisRequest& request,
+                    const gufo::ext::CancellationCheck&,
+                    gufo::ext::SynthesisResult* result, std::string*) override {
+      result->sample_rate = rate_;
+      result->samples.assign(22050, 0.1F);
+      return !request.on_audio || request.on_audio(result->samples);
+    }
+    std::vector<std::string> Voices() const override { return {"default"}; }
+    std::uint32_t SampleRate() const override { return rate_; }
+    std::string ModelId() const override { return "custom-rate-tts"; }
+    std::uint32_t rate_;
+  };
+  static std::uint32_t provider_rate = 44100;
+  gufo::ext::RegisterTtsProvider({
+      .id = "test-custom-rate-provider",
+      .probe =
+          [](std::string_view root) {
+            return root == "/virtual/custom-rate-tts";
+          },
+      .resolve = [](std::string_view, std::string*) { return true; },
+      .create = [](const std::string&, std::size_t,
+                   std::string*) -> std::unique_ptr<gufo::ext::TtsRunner> {
+        return std::make_unique<CustomRateRunner>(provider_rate);
+      },
+  });
+  {
+    TtsService from_provider(TtsServiceOptions{
+        .model_root = "/virtual/custom-rate-tts",
+        .validate_model = true,
+    });
+    Check(from_provider.ready() && from_provider.sample_rate() == 44100 &&
+              from_provider.model_id() == "custom-rate-tts",
+          "provider TtsRunner::SampleRate() populates service sample_rate");
+  }
+  for (const std::uint32_t bad_rate : {0U, 192001U}) {
+    provider_rate = bad_rate;
+    TtsService invalid_provider(TtsServiceOptions{
+        .model_root = "/virtual/custom-rate-tts",
+        .validate_model = true,
+    });
+    Check(!invalid_provider.ready(),
+          "invalid TtsRunner::SampleRate() rejected at startup");
+  }
+
+  for (const std::uint32_t bad_rate : {0U, 192001U}) {
+    TtsService invalid(TtsServiceOptions{
+        .validate_model = false,
+        .sample_rate = bad_rate,
+        .voices = {"vivian"},
+        .runner = [](const auto&, const auto&, auto*, auto*) { return true; },
+    });
+    Check(!invalid.ready(), "invalid output sample rate rejected at startup");
+    qwen3_tts::SynthesisResult out;
+    std::string error;
+    Check(!invalid.Synthesize({}, {}, &out, &error) && !error.empty(),
+          "unready service rejects synthesis");
+  }
+
+  for (const auto& [rate, half_sec_samples] :
+       {std::pair{24000U, std::size_t{12000}},
+        std::pair{44100U, std::size_t{22050}}}) {
+    TtsService service(TtsServiceOptions{
+        .validate_model = false,
+        .sample_rate = rate,
+        .model_id = "test-tts",
+        .voices = {"default"},
+        .runner =
+            [rate, half_sec_samples](const auto& request, const auto&,
+                                     auto* result, auto*) {
+              result->sample_rate = rate;
+              result->code_groups = 10;
+              result->codes.resize(100);
+              result->samples.assign(half_sec_samples, 0.25F);
+              return !request.on_audio || request.on_audio(result->samples);
+            },
+    });
+    Check(service.ready() && service.sample_rate() == rate,
+          "custom sample rate service is ready");
+
+    const auto wav =
+        Send(service, "POST", "/v1/audio/speech",
+             R"({"model":"test-tts","input":"half second","voice":"default"})");
+    Check(wav.status == 200 &&
+              wav.log_details.find("audio_ms=500") != std::string::npos,
+          "buffered WAV duration uses exact sample rate");
+    std::uint32_t wav_rate = 0;
+    std::memcpy(&wav_rate, wav.body.data() + 24, sizeof(wav_rate));
+    Check(wav_rate == rate, "WAV header carries provider sample rate");
+
+    for (const auto format : {"audio", "sse"}) {
+      auto stream = Send(
+          service, "POST", "/v1/audio/speech",
+          std::string(
+              R"({"model":"test-tts","input":"half second","voice":"default","response_format":"pcm","stream_format":")") +
+              format + "\"}");
+      std::string payload;
+      stream.streaming_body([&](std::string_view bytes) {
+        payload.append(bytes);
+        return true;
+      });
+      Check(stream.stream_log->error_code.empty() &&
+                stream.stream_log->details.find("audio_ms=500") !=
+                    std::string::npos,
+            "streaming duration uses exact provider sample rate");
+    }
+  }
+
+  TtsService mismatched(TtsServiceOptions{
+      .validate_model = false,
+      .sample_rate = 44100,
+      .model_id = "test-tts",
+      .voices = {"default"},
+      .runner =
+          [](const auto& request, const auto&, auto* result, auto*) {
+            result->sample_rate = 24000;
+            result->samples = {0.0F, 0.25F};
+            return !request.on_audio || request.on_audio(result->samples);
+          },
+  });
+  const auto bad_wav =
+      Send(mismatched, "POST", "/v1/audio/speech",
+           R"({"model":"test-tts","input":"x","voice":"default"})");
+  Check(bad_wav.status == 500 &&
+            bad_wav.body.find("invalid_audio") != std::string::npos,
+        "mismatched result sample rate fails closed for buffered WAV");
+  for (const auto format : {"audio", "sse"}) {
+    auto stream = Send(
+        mismatched, "POST", "/v1/audio/speech",
+        std::string(
+            R"({"model":"test-tts","input":"x","voice":"default","response_format":"pcm","stream_format":")") +
+            format + "\"}");
+    std::string body;
+    stream.streaming_body([&](std::string_view bytes) {
+      body.append(bytes);
+      return true;
+    });
+    Check(stream.stream_log->error_code == "invalid_audio",
+          "mismatched result sample rate marks streaming log as invalid_audio");
+    if (format == std::string_view("sse")) {
+      Check(
+          body.find("event: error") != std::string::npos &&
+              body.find("speech.audio.done") == std::string::npos,
+          "SSE reports an error instead of speech.audio.done on rate mismatch");
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -483,6 +635,7 @@ int main() {
   TestVoiceDesignContract();
   TestBaseContract();
   TestInvalidWaveform();
+  TestSampleRateAndDuration();
   std::cout << "PASS qwen3_tts_audio_api_test\n";
   return 0;
 }

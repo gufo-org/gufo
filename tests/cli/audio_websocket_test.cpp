@@ -687,8 +687,9 @@ int main() {
     client.Send(Client::Frame("ping", 9));
     assert(client.Receive() == std::make_pair(10U, std::string("ping")));
     client.Send(Client::Frame(std::string_view(message).substr(split), 0));
-    assert(client.Event("audio.start").member_str("sentence_text") ==
-           "Hello é.");
+    auto first_start = client.Event("audio.start");
+    assert(first_start.member_str("sentence_text") == "Hello é.");
+    assert(first_start.find("sample_rate")->as_double() == 24000);
     const auto expected = EncodePcm16(std::vector<float>{-.5F, 0, .5F});
     assert(client.Receive() == std::make_pair(2U, expected));
     assert(client.Receive() == std::make_pair(2U, expected));
@@ -759,5 +760,46 @@ int main() {
   }
   server.stop();
   worker.join();
+  {
+    bool mismatch_rate = false;
+    auto tts_44k = std::make_shared<TtsService>(TtsServiceOptions{
+        .validate_model = false,
+        .sample_rate = 44100,
+        .model_id = "fish-drama-3",
+        .voices = {"default"},
+        .runner = [&](const auto& request, const auto&, auto* result, auto*) {
+          result->sample_rate = mismatch_rate ? 24000 : 44100;
+          result->code_groups = 10;
+          result->samples = {-.25F, 0.0F, .25F};
+          return !request.on_audio || request.on_audio(result->samples);
+        }});
+    HttpServer server_44k("127.0.0.1", 0, nullptr, nullptr, tts_44k, nullptr,
+                          {});
+    assert(server_44k.start(&error));
+    std::jthread worker_44k([&] { server_44k.run(); });
+    {
+      Client client(server_44k.port(), "/v1/audio/speech/stream");
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","voice":"default","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Forty-four one."})");
+      client.Text(R"({"type":"input.done"})");
+      auto start = client.Event("audio.start");
+      assert(start.find("sample_rate")->as_double() == 44100);
+      const auto expected = EncodePcm16(std::vector<float>{-.25F, 0.0F, .25F});
+      assert(client.Receive() == std::make_pair(2U, expected));
+      client.Event("audio.done");
+      client.Event("session.done");
+
+      mismatch_rate = true;
+      client.Text(R"({"type":"input.text","text":"Mismatch."})");
+      client.Text(R"({"type":"input.done"})");
+      assert(client.Event("audio.start").find("sample_rate")->as_double() ==
+             44100);
+      assert(client.Receive() == std::make_pair(2U, expected));
+      assert(client.Event("error").member_str("message") == "invalid_audio");
+    }
+    server_44k.stop();
+    worker_44k.join();
+  }
   RealtimeStreams();
 }

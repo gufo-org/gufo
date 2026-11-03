@@ -594,7 +594,8 @@ Base additionally accepts `reference_audio`, `reference_text`, `voice_clone_mode
 Unknown fields are ignored. `response_format` supports buffered `wav` and
 streaming `pcm`; `stream_format: "sse"` emits OpenAI audio events with base64
 PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
-`max_new_tokens` at 8192 (default 3000). Output is 24 kHz mono 16-bit PCM.
+`max_new_tokens` at 8192 (default 3000). Output is mono 16-bit PCM at the
+model's output sample rate (24 kHz for Qwen3-TTS).
 
 `GET /v1/audio/speech/stream` upgrades to the vLLM-Omni incremental-text
 WebSocket protocol. [TTS streaming examples](models/qwen3-tts/README.md#sampling-and-streaming)
