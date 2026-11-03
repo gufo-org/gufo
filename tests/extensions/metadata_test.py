@@ -169,6 +169,7 @@ class ConfigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gufo-extension-edges-") as temp:
             source = Path(temp)
             cmake = ["cmake_minimum_required(VERSION 3.21)", "project(extension_edges LANGUAGES CXX)",
+                     f'include("{ROOT.as_posix()}/cmake/CompilerCache.cmake")',
                      "set(CMAKE_CXX_STANDARD 20)", "set(CMAKE_CXX_STANDARD_REQUIRED ON)",
                      f'set(PROJECT_SOURCE_DIR "{ROOT.as_posix()}")', "find_package(Threads REQUIRED)",
                      f'add_subdirectory("{ROOT.as_posix()}/src/core/platform" platform)',

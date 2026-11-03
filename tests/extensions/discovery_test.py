@@ -33,6 +33,7 @@ int main(int argc, char**) {
 ''')
         (self.source / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.21)
 project(discovery_fixture LANGUAGES CXX)
+include("{ROOT.as_posix()}/cmake/CompilerCache.cmake")
 set(CMAKE_CXX_STANDARD 20)
 set(ENGINE_ENABLE_HIP OFF)
 include("{ROOT.as_posix()}/cmake/GufoExtensionDiscovery.cmake")
