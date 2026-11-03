@@ -17,19 +17,24 @@ if(NOT GUFO_EXTENSION_FIXTURE)
       "-DOPENSSL_CRYPTO_LIBRARY=${OPENSSL_CRYPTO_LIBRARY}"
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target
       extension_runtime_test extension_role_test
-      ext_runtime_neutral_contracts_test
+      ext_runtime_neutral_contracts_test ext_text_hidden_states_contract_test
     INSTALL_COMMAND ""
     BUILD_ALWAYS TRUE)
   add_custom_target(extension_runtime_test DEPENDS extension_fixture_build)
   add_custom_target(extension_role_test DEPENDS extension_fixture_build)
   add_custom_target(ext_runtime_neutral_contracts_test
     DEPENDS extension_fixture_build)
+  add_custom_target(ext_text_hidden_states_contract_test
+    DEPENDS extension_fixture_build)
   add_test(NAME extension_runtime_test COMMAND "${fixture_build}/extensions/extension_runtime_test${CMAKE_EXECUTABLE_SUFFIX}")
   add_test(NAME extension_role_test COMMAND "${fixture_build}/extensions/extension_role_test${CMAKE_EXECUTABLE_SUFFIX}")
   add_test(NAME ext_runtime_neutral_contracts_test
     COMMAND "${fixture_build}/extensions/ext_runtime_neutral_contracts_test${CMAKE_EXECUTABLE_SUFFIX}")
+  add_test(NAME ext_text_hidden_states_contract_test
+    COMMAND "${fixture_build}/extensions/ext_text_hidden_states_contract_test${CMAKE_EXECUTABLE_SUFFIX}")
   set_tests_properties(extension_runtime_test extension_role_test
-    ext_runtime_neutral_contracts_test PROPERTIES LABELS "cpu;extensions")
+    ext_runtime_neutral_contracts_test ext_text_hidden_states_contract_test
+    PROPERTIES LABELS "cpu;extensions")
   # The fixture project has no gufo_core, so the implementation behind the public
   # services links here. Like an external target, this one drops the directory's
   # repository include path.
@@ -96,6 +101,17 @@ target_link_libraries(ext_runtime_neutral_contracts_test PRIVATE
 add_test(NAME ext_runtime_neutral_contracts_test
   COMMAND ext_runtime_neutral_contracts_test)
 set_tests_properties(ext_runtime_neutral_contracts_test PROPERTIES
+  LABELS "cpu;extensions")
+
+# An image extension using a registered text model as its encoder sees only
+# this public contract; see tests/models/qwen/hip for the Qwen numerics.
+add_executable(ext_text_hidden_states_contract_test
+  ext_text_hidden_states_contract_test.cpp)
+target_link_libraries(ext_text_hidden_states_contract_test PRIVATE
+  gufo_ext_runtime)
+add_test(NAME ext_text_hidden_states_contract_test
+  COMMAND ext_text_hidden_states_contract_test)
+set_tests_properties(ext_text_hidden_states_contract_test PROPERTIES
   LABELS "cpu;extensions")
 
 add_executable(extension_runtime_test runtime_test.cpp)
