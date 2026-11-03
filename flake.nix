@@ -290,6 +290,7 @@
               ".clang-format"
               ".clang-tidy"
               "CMakeLists.txt"
+              "rust-toolchain.toml"
               "extensions.lock"
             ];
           };
@@ -307,6 +308,7 @@
             files = [
               ".clang-format"
               "CMakeLists.txt"
+              "rust-toolchain.toml"
               "extensions.lock"
               "AGENTS.md"
               "docs/RELEASING.md"
@@ -359,6 +361,24 @@
           cargoSetup = import ./.devops/nix/png-decode-cargo.nix {
             inherit (pkgsSys) rustPlatform;
           };
+
+          rustCheck = pkgsSys.runCommand "check-rust" {
+            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc ];
+            src = mkFilteredSource {
+              directories = [ "src/core/png_decode" ];
+              files = [ "rust-toolchain.toml" ];
+            };
+          } (cargoSetup + ''
+            export HOME=$TMPDIR
+            cp -r "$src" source
+            chmod -R u+w source
+            cd source
+            cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
+            cargo clippy --manifest-path src/core/png_decode/Cargo.toml \
+              --locked --offline --all-targets -- -D warnings
+            mkdir -p $out
+            echo "PASS: Rust formatting and clippy clean" > $out/result.txt
+          '');
 
           formatCheck = pkgsSys.runCommand "check-format" {
             nativeBuildInputs = [ pkgsSys.clang-tools pkgsSys.python3 ];
@@ -716,6 +736,7 @@
           prCheck = pkgsSys.runCommand "check-pr" { } ''
             mkdir -p $out
             cat ${formatCheck}/result.txt \
+                ${rustCheck}/result.txt \
                 ${dependencyInventoryCheck}/result.txt \
                 ${docsCheck}/result.txt \
                 ${prTestCheck}/result.txt \
@@ -726,6 +747,7 @@
         in
         {
           format = formatCheck;
+          rust = rustCheck;
           static-analysis = staticAnalysisCheck;
           dependency-inventory = dependencyInventoryCheck;
           docs = docsCheck;

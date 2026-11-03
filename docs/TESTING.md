@@ -41,6 +41,23 @@ not a quality pass.
 
 ## PNG decoding
 
+The Rust decoder uses the toolchain pinned in `rust-toolchain.toml`.
+`nix build .#checks.x86_64-linux.rust` checks rustfmt and clippy offline;
+this check also runs in `check-pr`. Outside Nix, run:
+
+```sh
+cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
+cargo clippy --manifest-path src/core/png_decode/Cargo.toml --locked --all-targets -- -D warnings
+```
+
+CMake Debug builds use Cargo's development profile. RelWithDebInfo uses an
+optimized profile with full debug information, debug assertions and overflow
+checks; other configurations use the release profile. CMake invokes Cargo on
+every build, leaving incremental rebuild decisions to Cargo, and validates
+Rust's native system-library requirements during configuration. The C++
+sanitizer preset does not instrument the Rust library; it uses the development
+profile when configured as Debug.
+
 `png_decode_test` decodes generated PNGs and chunk edits with `DecodeImage` and
 with a frozen copy of the libpng decoder from 0.28.1 in
 `tests/core/png_reference.cpp`. The pixels, or the exception type and message,

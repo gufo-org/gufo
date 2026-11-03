@@ -12,5 +12,12 @@ crate-type = ["staticlib"]
 [profile.release]
 debug = 1
 
+# Match the assertion-enabled CMake RelWithDebInfo development/test builds.
+[profile.relwithdebinfo]
+inherits = "release"
+debug = 2
+debug-assertions = true
+overflow-checks = true
+
 [dependencies]
 png = "=0.18.1"
