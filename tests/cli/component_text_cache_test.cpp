@@ -41,6 +41,10 @@ public:
   bool defer_idle{};
   bool in_pass{};
   bool partial{};
+  std::size_t alignment{1};
+  /// Every prefill step's end and in-pass checkpoint, in order.
+  mutable std::vector<std::size_t> pass_ends;
+  mutable std::vector<std::size_t> in_pass_points;
   std::size_t private_blocks{128};
   cache::Rows rows_per_chunk{4};
   mutable std::size_t through_calls{};
@@ -55,7 +59,8 @@ public:
                              .final_token_advance_required = false,
                              .prefix_reuse = true,
                              .in_pass_checkpoint = in_pass,
-                             .partial_prefill_retention = partial}};
+                             .partial_prefill_retention = partial,
+                             .prefill_alignment = alignment}};
   }
   TextRunnerResourceClaim ResourceClaim() const override {
     return {.state_capacity_bytes = 1ULL << 30,
@@ -173,6 +178,7 @@ public:
     const auto count = std::min(budget, prompt.size() - offset);
     s.adapter.Append(s.slot, prompt.subspan(offset, count),
                      prompt.subspan(offset, count));
+    pass_ends.push_back(offset + count);
     return {count, offset + count == prompt.size()};
   }
   std::optional<std::size_t> PrefillCheckpointBytes(
@@ -202,6 +208,8 @@ public:
     }
     const auto tail = prompt.subspan(boundary, offset + count - boundary);
     s.adapter.Append(s.slot, tail, tail);
+    in_pass_points.push_back(boundary);
+    pass_ends.push_back(offset + count);
     return {count, offset + count == prompt.size()};
   }
   TextDecodeSelection SelectNext(TextRunnerState& state,
@@ -306,6 +314,56 @@ void InPassCapturePreservesBoundaryAndLiveTail() {
     assert(Generate(independent) == resumed);
     independent.Invalidate();
   }
+}
+// A runner whose prefill continues a prompt exactly only from multiples of
+// four (Flash-Next's sparse tiles) ends every step but the last there and
+// rounds its stable, intermediate and complete-prompt checkpoints down. A
+// restore then starts on that boundary and re-prefills the rest.
+void AlignedPrefillKeepsAlignedBoundaries() {
+  std::vector<TextRunnerToken> prompt(41);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  const auto aligned = [](const std::vector<std::size_t>& positions,
+                          std::size_t last) {
+    return std::ranges::all_of(positions, [&](std::size_t position) {
+      return position % 4 == 0 || position == last;
+    });
+  };
+  auto runner = std::make_shared<Runner>();
+  runner->alignment = 4;
+  runner->in_pass = true;
+  TextRunnerPool pool(runner, 2);
+  // The stable boundary 35 starts the final user turn.
+  auto seed =
+      pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
+  while (!seed.prefill_complete())
+    (void)seed.Prefill(10);
+  assert((runner->pass_ends == std::vector<std::size_t>{8, 16, 24, 32, 41}));
+  assert((runner->in_pass_points == std::vector<std::size_t>{40}));
+  const auto expected = Generate(seed);
+  (void)seed.Commit();
+  for (const auto [edit, cached] :
+       {std::pair{40U, 40U}, std::pair{36U, 32U}, std::pair{33U, 32U}}) {
+    auto branch = prompt;
+    branch[edit] = 999;
+    runner->pass_ends.clear();
+    runner->in_pass_points.clear();
+    auto restored =
+        pool.Acquire(branch, sampling::SamplingConfig{}, {}, {}, true, 35);
+    assert(restored.cached_prompt_tokens() == cached);
+    while (!restored.prefill_complete())
+      (void)restored.Prefill(3);
+    assert(aligned(runner->pass_ends, branch.size()));
+    assert(aligned(runner->in_pass_points, branch.size()));
+    (void)Generate(restored);
+    restored.Invalidate();
+  }
+  // An unchanged retry restores the aligned prompt end and replays the tail.
+  auto retry =
+      pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
+  assert(retry.cached_prompt_tokens() == 40);
+  Prefill(retry);
+  assert(Generate(retry) == expected);
+  retry.Invalidate();
 }
 void ColdAcquireResetsOnce() {
   auto runner = std::make_shared<Runner>();
@@ -2110,6 +2168,7 @@ int main() {
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
+  AlignedPrefillKeepsAlignedBoundaries();
   ColdAcquireResetsOnce();
   ColdAssignmentAvoidsDrainingCancelledSlot();
   ColdAssignmentAvoidsDrainingCancelledSlot(true);

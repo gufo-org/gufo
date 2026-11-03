@@ -100,6 +100,10 @@ struct TextRunnerCapabilities {
   bool in_pass_checkpoint{false};
   bool partial_prefill_retention{false};
   bool prefill_rollback{false};
+  /// Prefill continues a prompt exactly only from positions divisible by
+  /// this. Intermediate pass ends and published prompt checkpoints are
+  /// rounded down to it; one keeps every position.
+  std::size_t prefill_alignment{1};
 };
 
 struct TextRunnerPersistenceDescriptor {

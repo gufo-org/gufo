@@ -243,7 +243,7 @@ public:
   [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 19;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(

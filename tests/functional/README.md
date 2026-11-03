@@ -139,6 +139,21 @@ slots with duplicate deep conversations. This checks that a short request
 after cancellation can reuse a redundant slot while another live copy retains
 the generated frontier. It also rejects the roughly 280 ms restore stall.
 
+Flash-Next prompt restores have a focused alignment check. Four conversations
+place the end of the final user turn on each residue modulo four past the
+sparse budget. Each continuation restores that boundary from RAM, and from
+`--cache-disk` after a restart, and must equal the same request on a fresh
+server byte for byte, with every restore on a multiple of four:
+
+```sh
+nix develop -c python3 tests/functional/cache_alignment_qwen38.py \
+  --output /tmp/cache-alignment -- \
+  /path/to/production/gufo serve llm --model /path/to/flash-next.gguf
+```
+
+Add `--mtp-model /path/to/mtp.gguf` before `--` for the MTP mode. The test owns
+its servers, cache directory and loopback listener.
+
 Flash-Next MTP and Qwen27B DFlash2 prompt lookup have a focused runner. It
 requires actual accepted copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
 default sampling, mixes greedy copies with new text at C8, and checks stops
