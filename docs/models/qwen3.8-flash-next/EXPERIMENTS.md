@@ -1,5 +1,32 @@
 # Qwen3.8 Flash-Next experiments
 
+## Wide prompt-lookup verification (November 1, 2026)
+
+Measured downstream, on a fork that runs Swift 1.5 IQ4_XS with its Q8_0 MTP
+head (formats main does not load): Strix Halo gfx1151, ROCm 7.2.4, 120 W
+package limit, `--sessions 8`, HTTP streaming, thinking off, one fresh server
+per build, both builds in one block. Rewrites re-emit a file from the prompt.
+Client decode tok/s:
+
+| Workload | Before | After | Verifications |
+| --- | ---: | ---: | ---: |
+| 220-line Python file, rename (2,222 tokens), greedy | 124.1 | 187.9 | 280 → 53 |
+| same file, add docstrings, greedy | 122.4 | 186.9 | 286 → 54 |
+| same file, add return hints, greedy | 123.5 | 194.4 | 279 → 41 |
+| 150-line C++ header, rename (1,675 tokens), greedy | 124.1 | 186.5 | 212 → 41 |
+| SEARCH/REPLACE blocks (1,122 tokens), greedy | 106.4 | 119.9 | 159 → 104 |
+| lines 60–160 of a line-numbered listing, greedy | 88.9 | 89.0 | 185 → 185 |
+| prose / code / Czech, 512 tokens, greedy | 66.5 / 83.6 / 57.6 | 66.3 / 83.4 / 57.6 | unchanged |
+| Python rename, temperature 1, unseeded | 123.9 | 182.9 | 280 → 58 |
+| Python rename, eight requests (aggregate) | 206.0 | 205.7 | unchanged |
+
+Every greedy output, alone, staggered and eight-way, is byte-identical.
+
+| Variant | Outcome |
+| --- | --- |
+| 32-row limit | Rejected: the four rewrites ran at 157–174 tok/s against 186–195 at 64 in the same block. |
+| Double the width after one whole copy | Rejected: copies of the line-numbered listing break at every line number, so doubled copies wasted rows (87.9 → 85.1 tok/s). Two whole copies in a row: 89.0–89.2. |
+
 ## Routed prefill experts (October 23, 2026)
 
 | Experiment | Outcome |
