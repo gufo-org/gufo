@@ -83,5 +83,7 @@ dispatch (exact outputs, weights rotated beyond the MALL cache); build the
 pinned upstream PyTorch operators using the same GGUF weights.
 `qwen27b/hidden_state_reference.py` records unquantized Hugging Face pre- and
 post-norm last-layer states for `qwen_text_hidden_states_test`, which checks
-`TextModelRunner::EncodeHiddenStates` (`GUFO_QWEN_HIDDEN_REFERENCE`). See
+`TextModelRunner::EncodeHiddenStates` (`GUFO_QWEN_HIDDEN_REFERENCE`);
+`--device cuda --dtype bfloat16` loads the checkpoint onto the GPU instead of
+host RAM (needs `accelerate`). See
 `docs/models/qwen3.8-27b/BENCHMARKS.md` and its quality report for commands and evidence.

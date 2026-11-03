@@ -12,7 +12,9 @@ tests/models/qwen/hip/text_hidden_states_test.cpp (GUFO_QWEN_HIDDEN_REFERENCE)
 compares Gufo's Qwen adapter with the first and, after applying the norm once
 itself, with the second. Token IDs are stored, so both sides encode identical
 inputs. No download is implicit: pass local directories. The default float32
-run needs about four bytes of RAM per parameter.
+CPU run needs about four bytes of RAM per parameter; --device cuda (ROCm or
+CUDA) loads the weights straight onto the GPU, normally with --dtype bfloat16,
+without staging them in host RAM. Recorded rows are float32 either way.
 """
 from __future__ import annotations
 
@@ -57,10 +59,18 @@ def main() -> None:
     parser.add_argument("--tokenizer", type=Path,
                         help="tokenizer directory (default: the checkpoint)")
     parser.add_argument("--dtype", choices=("float32", "bfloat16"), default="float32")
+    parser.add_argument("--device", default="cpu",
+                        help="torch device, e.g. cuda (also ROCm) to load the weights "
+                             "directly onto the GPU (default: cpu); needs accelerate")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.checkpoint)
-    model = AutoModel.from_pretrained(args.checkpoint, torch_dtype=getattr(torch, args.dtype))
+    # A device map streams each tensor straight to its device instead of
+    # materializing the whole model in host RAM first.
+    placement = ({} if torch.device(args.device).type == "cpu" else
+                 {"low_cpu_mem_usage": True, "device_map": {"": args.device}})
+    model = AutoModel.from_pretrained(args.checkpoint, torch_dtype=getattr(torch, args.dtype),
+                                      **placement)
     model.eval()
     name, backbone = text_backbone(model)
     norm = backbone.norm
@@ -68,8 +78,8 @@ def main() -> None:
     width = backbone.embed_tokens.embedding_dim
     # For x = 1 an RMS norm returns scale / sqrt(1 + eps), whatever its weight
     # parameterization (plain or zero-centered).
-    ones = torch.ones(1, 1, width, dtype=norm.weight.dtype)
-    scale = (norm(ones).float() * math.sqrt(1.0 + epsilon)).reshape(width)
+    ones = torch.ones(1, 1, width, dtype=norm.weight.dtype, device=norm.weight.device)
+    scale = (norm(ones).float() * math.sqrt(1.0 + epsilon)).reshape(width).cpu()
 
     captured = []
     hook = backbone.layers[-1].register_forward_hook(
@@ -80,13 +90,13 @@ def main() -> None:
         ids = tokenizer(FRAME.format(prompt), add_special_tokens=False,
                         return_tensors="pt").input_ids
         captured.clear()
-        backbone(input_ids=ids, use_cache=False)
+        backbone(input_ids=ids.to(backbone.embed_tokens.weight.device), use_cache=False)
         if len(captured) != 1:
             raise SystemExit(f"expected one last-layer output, got {len(captured)}")
         pre = captured[0]
         cases.append((ids.reshape(-1).numpy().astype("<u4"),
-                      pre.float().reshape(-1, width).numpy().astype("<f4"),
-                      norm(pre).float().reshape(-1, width).numpy().astype("<f4")))
+                      pre.float().reshape(-1, width).cpu().numpy().astype("<f4"),
+                      norm(pre).float().reshape(-1, width).cpu().numpy().astype("<f4")))
     hook.remove()
 
     with args.output.open("wb") as out:
