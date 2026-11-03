@@ -1,0 +1,48 @@
+{
+  "profiles": {
+    "flash-next-q4/off": {
+      "model": "flash-next-q4",
+      "mode": "off",
+      "vision": true
+    },
+    "flash-next-q4/mtp": {
+      "model": "flash-next-q4",
+      "mode": "mtp",
+      "vision": true
+    }
+  },
+  "rules": [
+    {
+      "id": "flash-next-runtime",
+      "paths": [
+        "src/models/qwen38_flash_next/**"
+      ],
+      "priority": 10,
+      "profiles": [
+        "flash-next-q4/off",
+        "flash-next-q4/mtp"
+      ],
+      "affects": [
+        "*"
+      ],
+      "obligations": [],
+      "ignored": false
+    },
+    {
+      "id": "flash-next-continuation",
+      "paths": [
+        "src/models/qwen38_flash_next/continuation_*"
+      ],
+      "priority": 20,
+      "profiles": [
+        "flash-next-q4/off",
+        "flash-next-q4/mtp"
+      ],
+      "affects": [
+        "continuation"
+      ],
+      "obligations": [],
+      "ignored": false
+    }
+  ]
+}

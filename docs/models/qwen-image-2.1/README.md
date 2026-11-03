@@ -64,6 +64,25 @@ URL output, separate masks, streaming and `input_fidelity` are unsupported.
 OpenAI SDK clients use the local `/v1` base URL; `seed` and `steps` are Gufo
 extensions supplied through `extra_body`.
 
+## Qwen-Image-2.1-Turbo
+
+The separately trained Turbo checkpoint (about 32.5 GB, same license) runs on
+the same engine, API and editing paths with its fixed eight-step schedule:
+
+```sh
+MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1-Turbo \
+  --revision fc13ba1986fcb905854dc8de2f52eee395f49b5b --exclude 'assets/*')
+./result/bin/gufo serve image --model "$MODEL_DIR" \
+  --served-model-name Qwen-Image-2.1-Turbo --port 8080
+```
+
+Omit `steps` or pass `8`; other counts return HTTP 400. The checkpoint's eight
+`sample_sigmas` replace the base model's dynamic shift. It is about 4.8× faster
+than the 40-step base model at 1024²; see [benchmarks](BENCHMARKS.md#qwen-image-21-turbo)
+and [quality](QUALITY.md#qwen-image-21-turbo).
+
+## llama-swap
+
 For llama-swap, add this model and send the same requests to the proxy:
 
 ```yaml

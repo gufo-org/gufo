@@ -1,0 +1,149 @@
+Card 09 deferred qualification — PENDING, never recorded as a pass
+==================================================================
+
+Cards 06–14 run only unit / identity / CPU / hosted / static gates. The
+functional, matched-timing, performance, Windows and lock-runtime half of this
+card's validation criteria stays unexecuted and is queued for the single
+qualification window after Card 14. Deferred qualification below was not attempted; every line is
+a command to run, not a result. Replace /path/to/... with the weights and
+drafts on the qualification host, and delete every scratch/cache directory the
+runs create afterwards (all server disk caches stay under /tmp/card09-*).
+
+Before each GPU run: `free -g` and keep at least 15 GiB of headroom; the
+llama-swap services stay running unless a run needs the whole device.
+
+1. Four text profiles with explicit long-context and cache
+   (tests/functional/README.md; one model and one mode per invocation, keep
+   server options, suite order and weights identical between baseline and
+   candidate, inspect the actually loaded mode and real draft counts):
+
+     nix develop -c python3 tests/functional/run.py \
+       --record-baseline --output /tmp/card09-fn/qwen27b-ar --sampling-preset qwen38 \
+       --suite tools --suite sampling-defaults --suite batch --suite cache --suite long-context -- \
+       /path/to/candidate/gufo serve llm --model /path/to/qwen27b.gguf --sessions 4
+
+     Same command per profile, with the model's normal speculative options and a
+     fresh --output directory:
+       qwen27b + --mode dflash2 --draft /path/to/dflash2.gguf
+       qwen38-flash-next (+ its MTP/DSpec option as shipped)
+       deepseek4 with --sampling-preset deepseek4 (native snapshot path)
+
+   Then re-run each against clean main with `--baseline /tmp/card09-fn/<profile>`
+   instead of `--record-baseline`, and compare only the affected suites.
+
+2. Native DeepSeek continuation/snapshot behaviour and local persistence:
+   the deepseek4 run above must show real snapshot restore and prefill work,
+   not an inferred cache cutover. Qwen deep-history recovery uses the dedicated
+   drivers:
+
+     python3 tests/functional/deep_peers_qwen.py \
+       --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+       --mode ar --source-revision BUILD_SHA --expect-component --out /tmp/card09-fn/qwen-deep
+     python3 tests/functional/over_ram_qwen.py \
+       --binary /path/to/production/gufo --model /path/to/qwen27b.gguf \
+       --mode dflash2 --draft /path/to/dflash2.gguf \
+       --source-revision BUILD_SHA --expect-component --out /tmp/card09-fn/qwen-over-ram
+
+3. Matched timing controls (mandatory per request/phase at 5% and 10 ms, never
+   averaged across requests; alternate main and candidate for affected histories,
+   keep every result, leave noisy evidence visibly inconclusive):
+
+     nix develop -c python3 tests/functional/run.py \
+       --output /tmp/card09-fn/timing-candidate --sampling-preset qwen38 \
+       --suite cache --suite long-context --baseline /tmp/card09-fn/<profile> -- \
+       /path/to/candidate/gufo serve llm --model /path/to/model.gguf --sessions 4
+
+     (repeat with /path/to/main/gufo as both binary and baseline host)
+
+4. Speed benchmark and serving measurements:
+
+     result/bin/gufo bench llm --model /path/to/model.gguf --pp2048 --tg128
+     python3 tools/serving/gufo-serving-bench.py --binary /path/to/gufo \
+       --model /path/to/model.gguf --output /tmp/card09-fn/serving
+
+5. Coding-agent replay for reported loops:
+
+     nix develop -c python3 tests/functional/pi_agent.py --base-url http://127.0.0.1:8000 \
+       --model /path/to/model.gguf --pi /path/to/pi-0.87.0 \
+       --server-log /tmp/card09-fn/pi/server.log --output /tmp/card09-fn/pi \
+       --case literal-protocol --passes 1
+
+6. Identity goldens on the qualification candidate (already run here; re-run in
+   the window so the qualification set is self-contained):
+
+     nix develop -c ctest --test-dir build/card09-gpu -R \
+       '^(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test$' \
+       --output-on-failure
+
+7. Lock-mode runtime qualification and the production derivation:
+
+     nix build .#release
+     ./result/bin/gufo diagnose
+     nix build .#packages.x86_64-linux.release --no-link
+     nix build .#checks.x86_64-linux.pr
+
+   The lock *artifact* built here (build/card09-lock/gufo, diagnose exit 0);
+   the Nix derivation itself was not built during Card 09.
+
+8. Windows native build/execution of the same selection:
+
+     cmake --preset release   # or the documented Windows preset
+     ctest --preset <windows-test-preset> -R '<the corrected 43-test Card 09 selection>'
+
+Deferred workloads must be run on the candidate; a missing model, a skipped
+suite or an inconclusive timing stays pending evidence, never a pass.
+
+9. F9 device-probe HIP path (PENDING; no integration execution):
+   The isolated fixture has no hip::host target, so its zero-bound assertion
+   takes immediate kUsable. It does not test pending-at-bound, HIP allocation,
+   timeout, or teardown. Real GPU compile commands enable ENGINE_ENABLE_HIP.
+     nix develop -c ctest --test-dir build/card09-gpu -R \
+       '^(gufo_gpu_probe|ds4\.serving|inference_backend_gpu_test)$' --output-on-failure
+   These are covering rows to inspect, not retained passes.
+
+10. Integration Nix-dependent gates — RUN BY THE ORCHESTRATOR at closure
+    (results in orchestrator-gates.txt: both reconfigures exit 0, both full builds
+    exit 0, the 43-test selection 43/43 in GPU and CPU with complete verdict lists
+    retained, both link-graph reports PASS, the graph fixture passes inside both
+    build directories, the two F3 negative proofs fail as required, formatting
+    passes and `nix build .#checks.x86_64-linux.pr` is recorded at the end of this
+    file). They stay listed because the qualification window re-runs them:
+
+    F3 negative proof as actually executed by the orchestrator (a protected name
+    silently dropped from GUFO_LINK_GRAPH_PROTECTED, which is the coverage hole the
+    reviewer described): inject, configure a throwaway directory, expect
+    "protected target gufo_cache_hip is missing from the link graph" exit 1, then
+    revert and expect PASS. A second proof injected a forbidden
+    `gufo_ext_runtime -> gufo_http` edge and got
+    "gufo_ext_runtime reaches gufo_http" exit 1.
+
+    nix develop -c cmake --build build/card09-cpu --target check-pr -- -n
+    nix develop -c ctest --test-dir build/card09-gpu -N
+    R=$(cat docs/model-extensions/evidence/card09/logs/selection.txt)
+    nix develop -c ctest --test-dir build/card09-gpu -R "$R" --output-on-failure
+    nix develop -c ctest --test-dir build/card09-cpu -R "$R" --output-on-failure
+    Retain COMPLETE verdicts in logs/ctest-{gpu,cpu}-final.txt. Five serving
+    suites plus Flash-Next dotted continuation-layout must be visible.
+    Reconfigure EXISTING trees (not from scratch) to refresh hip reports:
+    nix develop -c cmake -S . -B build/card09-gpu
+    nix develop -c cmake -S . -B build/card09-cpu
+    python3 tools/ci/check-target-graph.py --report build/card09-gpu/gufo-link-graph.json --root . --show
+    python3 tools/ci/check-target-graph.py --report build/card09-cpu/gufo-link-graph.json --root . --show
+    python3 tests/tools/check_target_graph_test.py build/card09-gpu
+    python3 tests/tools/check_target_graph_test.py build/card09-cpu
+
+    nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+    nix build .#checks.x86_64-linux.pr
+
+11. Orchestrator-review fixes still needing host coverage:
+    - Windows native configure of a `BUILD_TESTING=ON` tree, to confirm the
+      classified system-library list (CR1) against the real `GUFO_PLATFORM_LIBS`:
+      `cmake --preset windows-cpu-test` then `ctest --preset windows-cpu-test`.
+    - The zero-ceiling branch of the fixed host-budget assertion. On this host a
+      `systemd-run --user --scope -p MemoryMax=2G` scope exposed no readable
+      `memory.max`, so the branch was never executed:
+      `systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 \
+         build/card09-cpu/tests/extensions/isolated-fixture/extensions/ext_runtime_neutral_contracts_test`
+      on a host that publishes its cgroup limit.
+
+All qualification servers above must use BUILD_TESTING=OFF production artifacts.

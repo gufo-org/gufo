@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "gufo/ext/text.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
@@ -49,18 +50,8 @@ struct DeepSeekToolSyntax {
 
 /// One invocation exactly as the model wrote it, before the API surface
 /// applies a declared schema.
-struct ScannedToolCall {
-  std::string name;
-  std::vector<ChatMessage::ToolArgument> arguments;
-  /// An unterminated `string="true"` parameter, held back from a possible
-  /// closing delimiter.
-  std::optional<ChatMessage::ToolArgument> unfinished;
-  /// Every scanned parameter and attribute was well formed, and repeated
-  /// parameters did not conflict.
-  bool valid{false};
-  /// The closing invocation tag was consumed.
-  bool complete{false};
-};
+using ScannedToolCall = ext::ScannedToolCall;
+using ScannedToolArgument = ext::ScannedToolArgument;
 
 /// Scans DeepSeek invocations and their enclosing call blocks. `markers` are
 /// the dialect openers the request grammar admits; `spans` receives the byte

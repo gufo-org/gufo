@@ -29,6 +29,7 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/embeddings_api.hpp"
 #include "src/cli/serve/image_api.hpp"
@@ -42,12 +43,11 @@
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/serve/websocket.hpp"
-#include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/core/platform/net.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
 #include "src/core/utf8.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 
 namespace gufo::server {
 namespace {
@@ -228,39 +228,6 @@ bool ExpectsContinue(const HttpRequest& request) {
   });
 }
 
-std::string CredentialHash(std::string_view value) {
-  return crypto::Sha256Hex(std::span(
-      reinterpret_cast<const std::uint8_t*>(value.data()), value.size()));
-}
-
-bool IsAuthorized(const HttpRequest& request, const std::string& key_hash) {
-  if (key_hash.empty()) {
-    return true;
-  }
-  std::string_view credential;
-  bool found = false;
-  for (const auto& [name, value] : request.headers) {
-    if (ToLower(name) == "authorization") {
-      if (found) {
-        return false;
-      }
-      found = true;
-      credential = value;
-    }
-  }
-  const auto space = credential.find(' ');
-  if (space == std::string_view::npos ||
-      ToLower(credential.substr(0, space)) != "bearer") {
-    return false;
-  }
-  credential.remove_prefix(space + 1);
-  while (credential.starts_with(' ')) {
-    credential.remove_prefix(1);
-  }
-  // Comparing digests does not disclose matching prefixes of the API key.
-  return CredentialHash(credential) == key_hash;
-}
-
 bool HasHeader(const HttpResponse& response, std::string_view name) {
   const std::string lowered = ToLower(name);
   return std::ranges::any_of(response.headers, [&](const auto& header) {
@@ -320,6 +287,8 @@ std::string BuildResponseHead(const HttpResponse& resp,
   }
   out += "Access-Control-Allow-Origin: *\r\n";
   out += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
+  // Authorization is accepted (and ignored) so browser SDKs that always send
+  // it still pass their CORS preflight.
   out += "Access-Control-Allow-Headers: Content-Type, Authorization, Range\r\n";
   for (const auto& [name, value] : resp.headers) {
     out += name;
@@ -754,11 +723,20 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
 // Endpoint handlers
 // ---------------------------------------------------------------------------
 
+// The primary ID followed by its accepted aliases, in listing order.
+std::vector<std::string> ServedIds(const std::string& primary,
+                                   const std::vector<std::string>& aliases) {
+  std::vector<std::string> ids{primary};
+  ids.insert(ids.end(), aliases.begin(), aliases.end());
+  return ids;
+}
+
 HttpResponse ListModels(TextGenerationBackend* backend,
                         const VideoJobService* video_jobs,
                         const TtsService* tts, const AsrService* asr,
                         const ImageService* images,
-                        const EmbeddingService* embeddings) {
+                        const EmbeddingService* embeddings,
+                        const DecisionService* decisions) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
@@ -801,41 +779,83 @@ HttpResponse ListModels(TextGenerationBackend* backend,
       model["capability"] = "video";
       data.push_back(std::move(model));
     }
+    // Configured `--served-model-name` aliases of the root model (#957).
+    for (const auto& alias : video_jobs->model_aliases()) {
+      json::Value model = json::Value::object();
+      model["id"] = alias;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-minimax";
+      model["root"] = "minimax-h3";
+      model["capability"] = "video";
+      data.push_back(std::move(model));
+    }
   }
   if (tts != nullptr && tts->ready()) {
-    json::Value model = json::Value::object();
-    model["id"] = tts->model_id();
-    model["object"] = "model";
-    model["created"] = Now();
-    model["owned_by"] = "operator-supplied-qwen";
-    model["capability"] = "audio_tts";
-    data.push_back(std::move(model));
+    for (const auto& id : ServedIds(tts->model_id(), tts->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-qwen";
+      model["capability"] = "audio_tts";
+      data.push_back(std::move(model));
+    }
   }
   if (asr != nullptr && asr->ready()) {
-    json::Value model = json::Value::object();
-    model["id"] = asr->model_id();
-    model["object"] = "model";
-    model["created"] = Now();
-    model["owned_by"] = "operator-supplied-qwen";
-    model["capability"] = "audio_asr";
-    data.push_back(std::move(model));
+    for (const auto& id : ServedIds(asr->model_id(), asr->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-qwen";
+      model["capability"] = "audio_asr";
+      data.push_back(std::move(model));
+    }
   }
   if (images != nullptr) {
-    auto model = json::Value::object();
-    model["id"] = images->model_id();
-    model["object"] = "model";
-    model["created"] = Now();
-    model["owned_by"] = "operator-supplied-qwen";
-    model["capability"] = "image";
-    data.push_back(std::move(model));
+    for (const auto& id :
+         ServedIds(images->model_id(), images->model_aliases())) {
+      auto model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-qwen";
+      model["capability"] = "image";
+      data.push_back(std::move(model));
+    }
   }
   if (embeddings != nullptr && embeddings->ready()) {
-    json::Value model = json::Value::object();
-    model["id"] = embeddings->model_id();
+    for (const auto& id :
+         ServedIds(embeddings->model_id(), embeddings->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied-gemma";
+      model["capability"] = "embedding";
+      data.push_back(std::move(model));
+    }
+  }
+  for (const auto& decision_id :
+       decisions != nullptr
+           ? ServedIds(decisions->model_id, decisions->model_aliases)
+           : std::vector<std::string>{}) {
+    auto model = json::Value::object();
+    model["id"] = decision_id;
     model["object"] = "model";
     model["created"] = Now();
-    model["owned_by"] = "operator-supplied-gemma";
-    model["capability"] = "embedding";
+    model["owned_by"] = "gufo";
+    model["capability"] = "decision";
+    auto modalities = json::Value::array();
+    modalities.push_back("text");
+    if (decisions->multimodal) {
+      modalities.push_back("image");
+      modalities.push_back("audio");
+    }
+    auto architecture = json::Value::object();
+    architecture["input_modalities"] = modalities;
+    model["architecture"] = architecture;
     data.push_back(std::move(model));
   }
   resp["data"] = std::move(data);
@@ -1890,7 +1910,8 @@ HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<AsrService> asr,
                        HttpServerOptions options,
                        std::shared_ptr<ImageService> images,
-                       std::shared_ptr<EmbeddingService> embeddings)
+                       std::shared_ptr<EmbeddingService> embeddings,
+                       std::shared_ptr<DecisionService> decisions)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
@@ -1899,12 +1920,10 @@ HttpServer::HttpServer(std::string host, int port,
       asr_(std::move(asr)),
       images_(std::move(images)),
       embeddings_(std::move(embeddings)),
+      decisions_(std::move(decisions)),
       options_(std::move(options)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
-  }
-  if (!options_.api_key.empty()) {
-    api_key_hash_ = CredentialHash(options_.api_key);
   }
   register_routes();
 }
@@ -2048,7 +2067,6 @@ void HttpServer::run(bool handle_signals) {
           " address=http://" +
           (host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]") +
           ":" + std::to_string(port_) +
-          " auth=" + (options_.api_key.empty() ? "off" : "bearer") +
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
   while (!stopped_.load(std::memory_order_acquire)) {
@@ -2156,17 +2174,23 @@ void HttpServer::reap_workers() {
 }
 
 HttpResponse HttpServer::handle_request(const HttpRequest& req) {
-  if (!IsAuthorized(req, api_key_hash_)) {
-    auto response = Err(401, "Unauthorized", "missing or invalid API key",
-                        "authentication_error", "invalid_api_key");
-    response.headers.emplace_back("WWW-Authenticate", "Bearer");
-    return response;
+  // The voice page holds no data; it opens its WebSocket when the user
+  // connects.
+  if (req.method == "GET" && req.path == "/voice" && asr_ &&
+      asr_->supports_voice()) {
+    HttpResponse page{
+        .status = 200, .reason = "OK", .body = std::string(VoicePage())};
+    page.headers.emplace_back("Content-Type", "text/html; charset=utf-8");
+    page.headers.emplace_back("Cache-Control", "no-store");
+    return page;
   }
   // `/health` and `/ready` are the native spelling and match llama-server's
   // `/health`. `/healthz` and `/readyz` are aliases so Kubernetes-style probe
-  // configuration works unmodified.
+  // configuration works unmodified. `GET /` answers like `/health` so
+  // llama-swap's Load button and startup preload, which request the upstream
+  // root, report success once the loading gate has released (#957).
   if (req.method == "GET" &&
-      (req.path == "/health" || req.path == "/v1/health" ||
+      (req.path == "/" || req.path == "/health" || req.path == "/v1/health" ||
        req.path == "/healthz")) {
     if (device_lost())
       return DeviceLost();
@@ -2183,7 +2207,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                        (tts_ != nullptr && tts_->ready()) ||
                        (asr_ != nullptr && asr_->ready()) ||
                        (embeddings_ != nullptr && embeddings_->ready()) ||
-                       images_ != nullptr;
+                       images_ != nullptr || decisions_ != nullptr;
     if (!ready) {
       return Err(503, "Service Unavailable", "model service is not ready",
                  "server_error", "not_ready");
@@ -2198,6 +2222,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       body["model"] = tts_->model_id();
     } else if (embeddings_ != nullptr && embeddings_->ready()) {
       body["model"] = embeddings_->model_id();
+    } else if (decisions_ != nullptr) {
+      body["model"] = decisions_->model_id;
     } else if (images_ != nullptr) {
       body["model"] = images_->model_id();
     } else {
@@ -2208,7 +2234,39 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
-                      images_.get(), embeddings_.get());
+                      images_.get(), embeddings_.get(), decisions_.get());
+  }
+  if (req.path == "/v1/systemone") {
+    if (req.method != "POST")
+      return Err(405, "Method Not Allowed", "use POST", "invalid_request_error",
+                 "method_not_allowed");
+    if (!decisions_ || !decisions_->decide)
+      return Err(503, "Service Unavailable",
+                 "decision service is not configured", "server_error",
+                 "decision_service_unavailable");
+    json::Value payload;
+    try {
+      payload = json::parse(req.body);
+    } catch (const std::exception& e) {
+      return Err(400, "Bad Request", e.what(), "invalid_request_error",
+                 "invalid_json");
+    }
+    try {
+      if (const auto* model = payload.find("model");
+          model &&
+          (!model->is_string() || !ServesModel(*decisions_, model->str())))
+        return Err(404, "Not Found", "unknown decision model",
+                   "invalid_request_error", "model_not_found");
+      auto result = decisions_->decide(payload);
+      result["model"] = decisions_->model_id;
+      return Ok(result);
+    } catch (const std::invalid_argument& e) {
+      return Err(400, "Bad Request", e.what(), "invalid_request_error",
+                 "invalid_request");
+    } catch (const std::exception& e) {
+      return Err(500, "Internal Server Error", e.what(), "server_error",
+                 "decision_failed");
+    }
   }
   if (req.path == "/v1/images/generations" || req.path == "/v1/images/edits") {
     if (!images_)
@@ -2468,9 +2526,7 @@ void HttpServer::handle_connection(int client_fd,
     } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
     } else {
-      // A client without the API key cannot write into the trace.
-      traced = Trace::Enabled() && IsTracedRoute(req) &&
-               IsAuthorized(req, api_key_hash_);
+      traced = Trace::Enabled() && IsTracedRoute(req);
       if (traced) {
         TraceRequest(req);
       }

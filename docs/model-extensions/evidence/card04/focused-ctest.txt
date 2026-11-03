@@ -1,0 +1,33 @@
+Test project /home/mixer/gufo/build/cpu-test
+    Start  27: openai_chat_test
+1/8 Test  #27: openai_chat_test .................   Passed    1.77 sec
+    Start  29: trace_test
+2/8 Test  #29: trace_test .......................   Passed    0.00 sec
+    Start  30: http_server_test
+3/8 Test  #30: http_server_test .................   Passed    1.81 sec
+    Start  36: extension_isolation_report
+4/8 Test  #36: extension_isolation_report .......   Passed    3.36 sec
+    Start 109: extension_role_test
+5/8 Test #109: extension_role_test ..............   Passed    0.00 sec
+    Start 110: extension_runtime_test
+6/8 Test #110: extension_runtime_test ...........   Passed    0.00 sec
+    Start 111: extension_metadata_test
+7/8 Test #111: extension_metadata_test ..........   Passed    9.97 sec
+    Start 112: extension_schema_test
+8/8 Test #112: extension_schema_test ............   Passed    0.10 sec
+
+100% tests passed out of 8
+
+Label Time Summary:
+api           =   1.77 sec*proc (1 test)
+cpu           =  17.01 sec*proc (8 tests)
+extensions    =  10.07 sec*proc (4 tests)
+http          =   1.81 sec*proc (1 test)
+openai        =   1.77 sec*proc (1 test)
+repository    =   3.36 sec*proc (1 test)
+server        =   3.59 sec*proc (3 tests)
+streaming     =   1.77 sec*proc (1 test)
+tools         =   1.77 sec*proc (1 test)
+trace         =   0.00 sec*proc (1 test)
+
+Total Test time (real) =  17.02 sec

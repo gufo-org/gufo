@@ -21,7 +21,11 @@
 
 namespace {
 
-using gufo::tokenization::TokenId;
+using gufo::sampling::TokenId;
+
+// Scripted-executor sentinel: an id outside every scripted vocabulary,
+// mirroring the tokenizer's invalid-token marker without importing a model.
+constexpr TokenId kNoEndoftextTokenId = 0xFFFFFFFFU;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -32,9 +36,8 @@ void Expect(bool condition, std::string_view message) {
 class ScriptedTargetExecutor final
     : public gufo::speculative::ISpeculativeTargetExecutor {
 public:
-  ScriptedTargetExecutor(
-      std::vector<TokenId> generated_tokens, TokenId eos_id,
-      TokenId endoftext_id = gufo::tokenization::kInvalidTokenId)
+  ScriptedTargetExecutor(std::vector<TokenId> generated_tokens, TokenId eos_id,
+                         TokenId endoftext_id = kNoEndoftextTokenId)
       : generated_tokens_(std::move(generated_tokens)),
         eos_id_(eos_id),
         endoftext_id_(endoftext_id) {}
@@ -503,8 +506,8 @@ private:
   std::uint32_t marker_{0};
 };
 
-gufo::models::GenerationOptions GenerationOptions(std::size_t max_tokens) {
-  gufo::models::GenerationOptions options;
+gufo::speculative::GenerationOptions GenerationOptions(std::size_t max_tokens) {
+  gufo::speculative::GenerationOptions options;
   options.max_new_tokens = max_tokens;
   return options;
 }

@@ -25,7 +25,12 @@ def retry_copy_refused(server_log, start, end, prompt_tokens):
                        rf"bytes=\d+ tokens={prompt_tokens} ", window)
     component = re.search(r"schema=component-cache-v1 event=capture_refused "
                           rf"reason=(?:byte|entry)_capacity tokens={prompt_tokens}(?:\s|$)", window)
-    return legacy is not None or component is not None
+    # Retention admission refuses a copy once every record or byte is taken:
+    # action=1 is refused, reason=1 byte and reason=2 record capacity
+    # (src/cache/retention.hpp).
+    admission = re.search(r"schema=component-cache-v1 event=retention action=1 "
+                          rf"reason=[12] tokens={prompt_tokens}(?:\s|$)", window)
+    return legacy is not None or component is not None or admission is not None
 
 
 def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,

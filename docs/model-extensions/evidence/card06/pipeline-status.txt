@@ -1,0 +1,35 @@
+STATUS builds-done pr=960217f1d82db18e main=d5b14ded311048a2 2026-10-31T08:40:16+01:00
+STATUS sanity-start flash-next-q4/off 2026-10-31T08:40:16+01:00
+STATUS run tag=sanity-flashnext-off-pr row=flash-next-q4/off cfg=standard arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/sanity-flashnext-off-pr 2026-10-31T08:43:30+01:00
+STATUS ABORT sanity run failed; see functional/sanity-flashnext-off-pr.stdout 2026-10-31T08:43:30+01:00
+STATUS builds-done pr=960217f1d82db18e main=d5b14ded311048a2 2026-10-31T08:49:45+01:00
+STATUS sanity-start flash-next-q4/off mem=115595MiB 2026-10-31T08:49:45+01:00
+STATUS run tag=sanity-flashnext-off-pr row=flash-next-q4/off cfg=standard arm=pr rc=0 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/sanity-flashnext-off-pr.1 2026-10-31T08:51:12+01:00
+STATUS row-start row=deepseek4/dspark mem=115237MiB 2026-10-31T08:51:12+01:00
+STATUS run tag=deepseek4-dspark-std-main row=deepseek4/dspark cfg=standard arm=main rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-dspark-std-main 2026-10-31T08:51:16+01:00
+STATUS run tag=deepseek4-dspark-std-pr row=deepseek4/dspark cfg=standard arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-dspark-std-pr 2026-10-31T08:51:20+01:00
+STATUS run tag=deepseek4-dspark-single-session-main row=deepseek4/dspark cfg=single-session arm=main rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-dspark-single-session-main 2026-10-31T08:51:21+01:00
+STATUS run tag=deepseek4-dspark-single-session-pr row=deepseek4/dspark cfg=single-session arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-dspark-single-session-pr 2026-10-31T08:51:22+01:00
+STATUS run tag=deepseek4-dspark-cache-pressure-main row=deepseek4/dspark cfg=cache-pressure arm=main rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-dspark-cache-pressure-main 2026-10-31T08:51:23+01:00
+STATUS run tag=deepseek4-dspark-cache-pressure-pr row=deepseek4/dspark cfg=cache-pressure arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-dspark-cache-pressure-pr 2026-10-31T08:51:24+01:00
+STATUS compare row=deepseek4/dspark rc=1 out=compare-deepseek4-dspark.json 2026-10-31T08:51:24+01:00
+STATUS row-start row=deepseek4/off mem=115460MiB 2026-10-31T08:51:24+01:00
+STATUS run tag=deepseek4-off-std-main row=deepseek4/off cfg=standard arm=main rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-off-std-main 2026-10-31T08:51:25+01:00
+STATUS run tag=deepseek4-off-std-pr row=deepseek4/off cfg=standard arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-off-std-pr 2026-10-31T08:51:26+01:00
+STATUS run tag=deepseek4-off-single-session-main row=deepseek4/off cfg=single-session arm=main rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-off-single-session-main 2026-10-31T08:51:27+01:00
+STATUS run tag=deepseek4-off-single-session-pr row=deepseek4/off cfg=single-session arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-off-single-session-pr 2026-10-31T08:51:28+01:00
+STATUS run tag=deepseek4-off-cache-pressure-main row=deepseek4/off cfg=cache-pressure arm=main rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-off-cache-pressure-main 2026-10-31T08:51:29+01:00
+STATUS run tag=deepseek4-off-cache-pressure-pr row=deepseek4/off cfg=cache-pressure arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/deepseek4-off-cache-pressure-pr 2026-10-31T08:51:30+01:00
+STATUS compare row=deepseek4/off rc=1 out=compare-deepseek4-off.json 2026-10-31T08:51:30+01:00
+STATUS row-start row=flash-next-q4/mtp mem=115474MiB 2026-10-31T08:51:30+01:00
+STATUS run tag=flash-next-q4-mtp-std-main row=flash-next-q4/mtp cfg=standard arm=main rc=0 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-std-main 2026-10-31T09:02:26+01:00
+STATUS run tag=flash-next-q4-mtp-std-pr row=flash-next-q4/mtp cfg=standard arm=pr rc=1 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-std-pr 2026-10-31T09:13:45+01:00
+STATUS run tag=flash-next-q4-mtp-single-session-main row=flash-next-q4/mtp cfg=single-session arm=main rc=0 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-single-session-main 2026-10-31T09:16:56+01:00
+STATUS run tag=flash-next-q4-mtp-single-session-pr row=flash-next-q4/mtp cfg=single-session arm=pr rc=2 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-single-session-pr 2026-10-31T09:20:14+01:00
+STATUS run tag=flash-next-q4-mtp-cache-stalls-main row=flash-next-q4/mtp cfg=cache-stalls arm=main rc=0 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-cache-stalls-main 2026-10-31T09:22:26+01:00
+STATUS run tag=flash-next-q4-mtp-cache-stalls-pr row=flash-next-q4/mtp cfg=cache-stalls arm=pr rc=2 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-cache-stalls-pr 2026-10-31T09:24:38+01:00
+STATUS run tag=flash-next-q4-mtp-cache-pressure-main row=flash-next-q4/mtp cfg=cache-pressure arm=main rc=0 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-cache-pressure-main 2026-10-31T09:25:55+01:00
+STATUS run tag=flash-next-q4-mtp-cache-pressure-pr row=flash-next-q4/mtp cfg=cache-pressure arm=pr rc=2 out=/home/mixer/gufo/docs/model-extensions/evidence/card06/functional/flash-next-q4-mtp-cache-pressure-pr 2026-10-31T09:27:13+01:00
+STATUS compare row=flash-next-q4/mtp rc=1 out=compare-flash-next-q4-mtp.json 2026-10-31T09:27:14+01:00
+STATUS row-start row=flash-next-q4/off mem=116008MiB 2026-10-31T09:27:14+01:00
+STATUS DEFERRED functional matrix halted by user instruction 2026-10-31T10:05+01:00 (focus unit/static now; functional rerun at the true end after all code edits). flash-next-q4/off interrupted mid-main-arm; q4/q8 rows not started. Existing rows retained incl. flash-next-q4/mtp qualification verdicts pending triage.

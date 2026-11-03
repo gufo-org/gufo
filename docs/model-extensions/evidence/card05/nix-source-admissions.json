@@ -1,0 +1,7 @@
+{
+  "include/gufo/ext/registry.hpp": true,
+  "schemas/extension.schema.json": true,
+  "extensions.lock": true,
+  "tests/extensions/discovery_test.py": false,
+  "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json": true
+}

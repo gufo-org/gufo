@@ -880,6 +880,110 @@ void CheckPositionPastMask() {
             << " mask bits: walk and lists ignore the following words\n";
 }
 
+/// A decode or verification row's context must not depend on the chain it
+/// is computed in. A query before the 2048-token budget sweeps its keys
+/// densely when decoded alone (no mask); a chain that crosses the budget
+/// passes the selector's mask, which marks every block of such rows. The
+/// mask walk attends the incomplete tail block in a tile of its own, so the
+/// launcher must keep those rows on the dense sweep. Compares every row of
+/// chains starting at 2040..2047 (one launch, eight splits, compact lists)
+/// bit for bit against the same row launched alone, and checks that the
+/// mask walk would have differed.
+void CheckBudgetRows(std::uint32_t seed) {
+  constexpr std::uint32_t kBudget = 512;
+  constexpr std::uint32_t kTopK = kBudget * kRatio;
+  constexpr std::uint32_t kSplits = 8;
+  constexpr std::uint32_t kChain = 8;
+  constexpr std::uint32_t kFirst = kTopK - 8;
+  const std::uint32_t n_kv = kFirst + 7 + kChain;
+  const std::uint32_t mask_words = ((n_kv + kRatio - 1) / kRatio + 31) / 32;
+  const std::size_t kv_count = static_cast<std::size_t>(n_kv) * kKvWidth;
+  std::vector<__half> kh(kv_count);
+  std::vector<__half> vh(kv_count);
+  {
+    const auto kf = MakeValues(kv_count, seed ^ 0xAAAAU, 1.0F);
+    const auto vf = MakeValues(kv_count, seed ^ 0x3333U, 1.0F);
+    for (std::size_t i = 0; i < kv_count; ++i) {
+      kh[i] = __float2half(kf[i]);
+      vh[i] = __float2half(vf[i]);
+    }
+  }
+  HipBuffer<__half> d_k(kv_count);
+  HipBuffer<__half> d_v(kv_count);
+  Upload(&d_k, kh);
+  Upload(&d_v, vh);
+  const std::size_t q_count = std::size_t{kChain} * kQWidth;
+  HipBuffer<float> d_q(q_count);
+  HipBuffer<std::uint32_t> d_mask(std::size_t{kChain} * mask_words);
+  HipBuffer<std::uint32_t> d_pos(1);
+  HipBuffer<std::uint32_t> d_lists(std::size_t{kChain} * kBudget);
+  HipBuffer<std::uint32_t> d_counts(kChain);
+  HipBuffer<float> d_partials(std::size_t{kChain} * kHeads * kSplits *
+                              (kDim + 2));
+  HipBuffer<float> d_out(q_count);
+  std::uint32_t state = seed ^ 0x77777777U;
+  std::uint32_t walk_differs = 0;
+  for (std::uint32_t first = kFirst; first < kTopK; ++first) {
+    const auto qv = MakeValues(q_count, seed + first, 4.0F);
+    // The selector's mask: every word of a row within the budget, else a
+    // random full budget of complete blocks.
+    std::vector<std::uint32_t> mask(std::size_t{kChain} * mask_words);
+    for (std::uint32_t t = 0; t < kChain; ++t) {
+      const std::uint32_t complete = (first + t + 1) / kRatio;
+      std::uint32_t* row = mask.data() + std::size_t{t} * mask_words;
+      if (complete <= kBudget) {
+        std::fill(row, row + mask_words, 0xFFFFFFFFU);
+        continue;
+      }
+      for (std::uint32_t selected = 0; selected < kBudget;) {
+        const auto block = NextRandom(&state) % complete;
+        if ((row[block / 32] & (1U << (block % 32))) == 0) {
+          row[block / 32] |= 1U << (block % 32);
+          ++selected;
+        }
+      }
+    }
+    Upload(&d_q, qv);
+    Upload(&d_mask, mask);
+    const auto launch = [&](std::uint32_t row, std::uint32_t rows, bool masked,
+                            std::uint32_t dense_extent) {
+      Upload(&d_pos, std::vector<std::uint32_t>{first + row});
+      q::Attention(
+          d_q.get() + std::size_t{row} * kQWidth, d_k.get(), d_v.get(),
+          masked ? d_mask.get() + std::size_t{row} * mask_words : nullptr,
+          mask_words, d_out.get() + std::size_t{row} * kQWidth,
+          d_partials.get(), kSplits, rows, d_pos.get(), kHeads, kKvHeads, kDim,
+          kRatio, nullptr, d_lists.get(), d_counts.get(), kBudget,
+          dense_extent);
+      CheckHip(hipDeviceSynchronize(), "budget attention");
+    };
+    for (std::uint32_t t = 0; t < kChain; ++t)
+      launch(t, 1, first + t >= kTopK, kTopK);
+    const auto alone = Download(&d_out, q_count);
+    launch(0, kChain, true, kTopK);
+    const auto chained = Download(&d_out, q_count);
+    launch(0, kChain, true, 0);
+    const auto walk = Download(&d_out, q_count);
+    for (std::uint32_t t = 0; t < kChain; ++t) {
+      const auto at = std::size_t{t} * kQWidth;
+      if (std::memcmp(alone.data() + at, chained.data() + at,
+                      kQWidth * sizeof(float)) != 0)
+        throw std::runtime_error(
+            "attention row " + std::to_string(first + t) +
+            " differs between a budget-crossing chain and decoding alone");
+      walk_differs += std::memcmp(alone.data() + at, walk.data() + at,
+                                  kQWidth * sizeof(float)) != 0;
+    }
+  }
+  // Rows with an incomplete tail block before the budget take another tile
+  // partition on the mask walk; the check must be able to see that.
+  if (walk_differs == 0)
+    throw std::runtime_error("the budget check cannot tell the routes apart");
+  std::cout << "budget-crossing chains from " << kFirst << " to " << kTopK - 1
+            << ": rows bitwise-equal to decoding alone (" << walk_differs
+            << " rows differ on the mask walk)\n";
+}
+
 void CheckChunks(std::uint32_t n, std::uint32_t split) {
   const std::size_t count = std::size_t(n) * kQWidth;
   HipBuffer<float> queries(count), gates(count), full(count), chunked(count);
@@ -956,6 +1060,7 @@ int main() {
   try {
     CheckChunks(136, 94);
     CheckChunks(2048, 1025);
+    CheckBudgetRows(0xB0D6E7U);
     CheckWmmaLiveExtent();
     CheckPositionPastMask();
     CheckPreparation(1, 0, 64);

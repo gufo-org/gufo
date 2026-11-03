@@ -12,7 +12,7 @@
 #include <tuple>
 #include <utility>
 
-#include "src/core/hip/weight_upload.hpp"
+#include <gufo/ext/experimental/weight_upload.hpp>
 #include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 

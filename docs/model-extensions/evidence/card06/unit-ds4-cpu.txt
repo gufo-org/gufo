@@ -1,0 +1,8 @@
+cmd: TMPDIR=/tmp nix develop -c ctest --test-dir build/card06-gpu -R '^(ds4\.sampling|ds4\.template|ds4\.cli|ds4\.load|deepseek_v4_flash_continuation_identity_test)$' --output-on-failure
+100% tests passed out of 5
+1/5 Test #218: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+2/5 Test #219: ds4.sampling ...................................   Passed    0.55 sec
+3/5 Test #220: ds4.template ...................................   Passed    0.06 sec
+4/5 Test #221: ds4.cli ........................................   Passed    0.06 sec
+5/5 Test #225: ds4.load .......................................   Passed    0.06 sec
+100% tests passed out of 5

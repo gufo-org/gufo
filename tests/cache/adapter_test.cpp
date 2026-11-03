@@ -399,6 +399,15 @@ void InputBoundaries() {
   assert(std::ranges::equal(generated.At(10), appended.At(8)));
   assert(generated.Matches(appended, 4) && generated.Matches(appended, 6));
 }
+// The host backing plan is a neutral cache contract (RFC step 6): a provider
+// asks every adapter for it, so it never downcasts to a model type. An adapter
+// with no pinned host backing reports none, and the provider that requires one
+// rejects it instead of guessing.
+void BackingPlanDefaultsToNone() {
+  const FakeAdapter adapter;
+  const Adapter& base = adapter;
+  assert(base.BackingPlan(std::size_t{1} << 20).empty());
+}
 }  // namespace
 int main() {
   RoundTripAndContentOracle();
@@ -410,5 +419,6 @@ int main() {
   CompletionOwnership();
   ReentrantWaitFailsImmediately();
   InputBoundaries();
+  BackingPlanDefaultsToNone();
   std::cout << "cache adapter contracts passed\n";
 }

@@ -207,17 +207,7 @@ bool ParsePositiveSize(std::string_view value, std::size_t maximum,
   return true;
 }
 
-bool IsKnownField(std::string_view name) {
-  static constexpr std::string_view kKnown[] = {
-      "file",       "model",           "language",
-      "prompt",     "response_format", "temperature",
-      "max_tokens", "stream",          "timestamp_granularities[]",
-  };
-  return std::ranges::find(kKnown, name) != std::end(kKnown);
-}
-
-std::string ServerTiming(
-    const models::qwen3_asr::TranscriptionTimings& timings) {
+std::string ServerTiming(const ext::TranscriptionTimings& timings) {
   std::ostringstream value;
   value << "decode_audio;dur=" << timings.decode_audio_ms
         << ", features;dur=" << timings.feature_extraction_ms
@@ -239,14 +229,8 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
     return Error(400, "Bad Request", std::move(parse_error),
                  "invalid_multipart");
   }
-  for (const auto& [name, unused] : parts) {
-    (void)unused;
-    if (!IsKnownField(name)) {
-      return Error(400, "Bad Request",
-                   "unsupported transcription field: " + name,
-                   "unsupported_field");
-    }
-  }
+  // As in vLLM and the other OpenAI-compatible servers, unknown fields are
+  // ignored.
 
   const MultipartPart* file = Find(parts, "file");
   if (file == nullptr || file->body.empty()) {
@@ -254,8 +238,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
                  "missing_file");
   }
   const MultipartPart* model = Find(parts, "model");
-  if (model != nullptr && model->body != service.model_id() &&
-      model->body != "qwen3-asr" && model->body != "qwen3-asr-1.7b") {
+  if (model != nullptr && !service.serves_model(model->body)) {
     return Error(400, "Bad Request", "unsupported transcription model",
                  "invalid_model");
   }
@@ -292,6 +275,11 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
   if (Find(parts, "timestamp_granularities[]") != nullptr) {
     return Error(400, "Bad Request",
                  "timestamp granularities are not supported",
+                 "unsupported_option");
+  }
+  // `include[]` only requests logprobs, which this server cannot return.
+  if (Find(parts, "include[]") != nullptr) {
+    return Error(400, "Bad Request", "transcription logprobs are not supported",
                  "unsupported_option");
   }
   bool stream = false;
@@ -353,7 +341,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
             published = text;
             return send(std::move(event));
           };
-          models::qwen3_asr::TranscriptionRequest input{
+          ext::TranscriptionRequest input{
               .wav = {reinterpret_cast<const std::byte*>(wav.data()),
                       wav.size()},
               .context = context,
@@ -361,7 +349,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
               .max_new_tokens = maximum_tokens,
               .on_text = progress,
           };
-          models::qwen3_asr::TranscriptionResult result;
+          ext::TranscriptionResult result;
           std::string error;
           const auto stop = [&] {
             return !connected || (cancelled && cancelled());
@@ -390,10 +378,10 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
         };
     return response;
   }
-  models::qwen3_asr::TranscriptionResult result;
+  ext::TranscriptionResult result;
   std::string error;
   if (!service.Transcribe(
-          models::qwen3_asr::TranscriptionRequest{
+          ext::TranscriptionRequest{
               .wav = std::span<const std::byte>(wav_data, file->body.size()),
               .context = prompt == nullptr ? std::string{} : prompt->body,
               .language = language == nullptr || language->body.empty()

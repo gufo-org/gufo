@@ -1,0 +1,11 @@
+#pragma once
+
+#include <string_view>
+
+namespace gufo::ext {
+// Generated from api-series.json and permanent change records. Do not edit.
+inline constexpr unsigned kApiMajor = @GUFO_EXTENSION_API_major@;
+inline constexpr unsigned kApiMinor = @GUFO_EXTENSION_API_minor@;
+inline constexpr unsigned kApiRevision = @GUFO_EXTENSION_API_revision@;
+inline constexpr std::string_view kApiVersion = "@GUFO_EXTENSION_API_VERSION@";
+}  // namespace gufo::ext

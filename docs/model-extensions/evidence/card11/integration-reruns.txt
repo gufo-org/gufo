@@ -1,0 +1,98 @@
+Card 11 integration — exact rerun ledger
+Agent: codex-exec-writer (integration agent, dd111c9e-4200-4e2c-bc44-4c549b28b08d)
+Date: 2026-11-01
+Working copy: @ over parent xppvypvw 8d8ef356
+Logs directory: /tmp/card11-integration/
+
+COMMAND 1:
+python3 tools/ci/check-extension-api.py
+Exit: 0
+Output:
+PASS: extension API surface (97 paths)
+
+COMMAND 2:
+python3 tools/ci/check-extension-isolation.py \
+    --fail-on-core-model-includes \
+    --fail-on-serving-boundary \
+    --fail-on-family-graph \
+    --fail-on-target-ownership \
+    --fail-on-model-core-includes
+Exit: 0
+Output:
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: model core boundary (no production src/models -> src/core|src/cache includes)
+[check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+
+COMMAND 3:
+python3 tests/tools/check_extension_isolation_test.py
+Exit: 0
+Output:
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 19.093s
+
+OK
+
+COMMAND 4:
+python3 tests/tools/check_extension_api_test.py
+Exit: 0
+Output:
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.002s
+
+OK
+
+COMMAND 5:
+python3 tests/tools/check_docs_test.py
+Exit: 0
+Output:
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.004s
+
+OK
+
+COMMAND 6:
+nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+Exit: 0
+Output:
+PASS: Checked 785 C++ files
+
+COMMAND 7 (Bounded CPU CTest):
+nix develop -c ctest --test-dir build/cpu-test -R '^(extension_model_core_includes_gate|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Exit: 0
+Output:
+Test project /home/mixer/gufo/build/cpu-test
+    Start  39: extension_model_core_includes_gate
+1/4 Test  #39: extension_model_core_includes_gate .............   Passed    3.78 sec
+    Start 140: qwen27b_continuation_identity_test
+2/4 Test #140: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 154: deepseek_v4_flash_continuation_identity_test
+3/4 Test #154: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 160: qwen38_flash_next_continuation_identity_test
+4/4 Test #160: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 4
+
+Total Test time (real) =   3.79 sec
+
+COMMAND 8 (Bounded GPU CTest):
+nix develop -c ctest --test-dir build/gpu-test -R '^(extension_model_core_includes_gate|(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test)$' --output-on-failure
+Exit: 0
+Output:
+Test project /home/mixer/gufo/build/gpu-test
+    Start  44: extension_model_core_includes_gate
+1/4 Test  #44: extension_model_core_includes_gate .............   Passed    3.74 sec
+    Start 195: qwen27b_continuation_identity_test
+2/4 Test #195: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 226: deepseek_v4_flash_continuation_identity_test
+3/4 Test #226: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 243: qwen38_flash_next_continuation_identity_test
+4/4 Test #243: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 4
+
+Total Test time (real) =   3.75 sec

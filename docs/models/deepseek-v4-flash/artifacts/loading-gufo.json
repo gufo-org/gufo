@@ -13,16 +13,16 @@
       "gpuDriver": "amdgpu",
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
-      "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "kernelRelease": "7.2.9-200.fc44.x86_64",
+      "memoryTotalBytes": 134297587712,
       "memoryType": "LPDDR5X (Unified)",
-      "rocmVersion": "7.2.3",
+      "rocmVersion": "10.1.0",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "6a00ba111e0ba4f715799d4fb9dd494ab94a336e71a45179b26e52c2d1b6a917",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-24",
+  "measuredOn": "2026-10-30",
   "mode": "dspark",
   "model": {
     "id": "DeepSeek-V4-Flash",
@@ -35,9 +35,8 @@
   "referenceName": "antirez/ds4",
   "rows": {
     "default": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 35099 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
-      "ready_s": 16.408,
+      "command": "gufo serve --port 54535 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "ready_s": 14.501,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -48,7 +47,7 @@
       "gufo",
       "serve",
       "--port",
-      "35099",
+      "54535",
       "--sessions",
       "1",
       "llm",
@@ -69,7 +68,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": false,
-    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+    "revision": "07206ea40c4aadc5ea7da081073bf10a570cb1af"
   },
   "table": "loading",
   "target": "gufo"

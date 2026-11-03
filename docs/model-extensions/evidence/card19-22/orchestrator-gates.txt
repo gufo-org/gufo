@@ -1,0 +1,17 @@
+# Orchestrator Pinned Gate Set Verification Record — Cards 19–22
+
+Conducted by the orchestrator on 2026-11-01 following the completion of integration agent `e9dc339b-e68d-4b7b-8100-80ed6c3161a5`.
+
+## Summary of Gates
+
+| # | Gate | Command | Result | Details |
+|---|---|---|---|---|
+| 1 | Infrastructure sync | `python3 tools/ci/generate-infrastructure.py --check` | **PASS** | 0 drift across managed configs |
+| 2 | Extension API surface | `python3 tools/ci/check-extension-api.py` | **PASS** | 120 paths validated |
+| 3 | Documentation integrity | `python3 tools/ci/check-docs.py` | **PASS** | 328 markdown files, 1613 local links/anchors clean |
+| 4 | Code formatting | `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py` | **PASS** | 848 C++ files clean |
+| 5 | Isolation ratchets | `python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes` | **PASS** | 0 strict boundary violations across 1401 files |
+| 6 | Continuation identity | `nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure` | **PASS** | 3/3 tests passed (qwen27b, deepseek_v4_flash, qwen38_flash_next) |
+| 7 | Hosted PR suite | `nix develop -c cmake --build --preset cpu-test --target check-pr` | **PASS** | 96/96 tests passed (100% in 168.64s) |
+| 8 | Hosted PR derivations | `nix build .#checks.x86_64-linux.pr --no-link` | **PASS** | All 4 check derivations built and passed |
+| 9 | Production Nix build | `nix build && ./result/bin/gufo diagnose` | **PASS** | Overall Status: [PASS], 8 built extensions, 8 available providers |

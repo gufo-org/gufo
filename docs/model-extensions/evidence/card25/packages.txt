@@ -1,0 +1,11 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+error (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/f4dc4fe04e86f5a2ff0966ed01a7f0bba44fcce4385661ea365ed99102cff8a9.sqlite' is busy
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+these 2 derivations will be built:
+  /nix/store/hs6gyn5c0xvjlwj48hhxljsap0ljkd88-gufo-0-unstable-13f6456-dirty.drv
+  /nix/store/n21hz6lsk3x1nf149gfmsw5f4rbrmbc0-gufo-0.28.1.drv
+building '/nix/store/hs6gyn5c0xvjlwj48hhxljsap0ljkd88-gufo-0-unstable-13f6456-dirty.drv'...
+building '/nix/store/n21hz6lsk3x1nf149gfmsw5f4rbrmbc0-gufo-0.28.1.drv'...

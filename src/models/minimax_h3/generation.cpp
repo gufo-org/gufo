@@ -6,12 +6,12 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <gufo/ext/platform/os_info.hpp>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
 #include <utility>
 
-#include "src/core/platform/os_info.hpp"
 #include "src/models/minimax_h3/sampling.hpp"
 #include "src/models/minimax_h3/sha256.hpp"
 #include "src/models/minimax_h3/tokenizer.hpp"

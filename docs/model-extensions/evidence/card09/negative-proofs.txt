@@ -1,0 +1,64 @@
+Negative proofs for the two new Card 09 gates
+
+A guard that cannot fail is not a guard. The following are historical worker proofs against the pre-integration tree,
+then reverted. They do not validate the hardened integration generator.
+
+1. Link-graph guard (tools/ci/check-target-graph.py)
+
+   Injection (temporary, in CMakeLists.txt):
+     target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
+     target_link_libraries(gufo_cache_hip PRIVATE gufo_http)   # NEGATIVE PROOF
+
+   $ nix develop -c cmake --preset gpu-test -B build/card09-gpu     exit 0
+   $ python3 tools/ci/check-target-graph.py \
+       --report build/card09-gpu/gufo-link-graph.json --root .        exit 1
+
+     [check-target-graph] LINK GRAPH INVALID (nothing below gufo_ext_runtime
+     may depend on the serving or HTTP tiers):
+       gufo_cache_hip reaches gufo_http through the link graph (closure: ... gufo_http ...)
+       gufo_qwen27b reaches gufo_http through the link graph (closure: ... gufo_cache_hip ... gufo_http ...)
+       gufo_qwen38_flash_next reaches gufo_http through the link graph (...)
+
+   The guard therefore catches a forbidden edge both directly and transitively,
+   and names the reachers instead of printing a bare failure. Reverting the two
+   lines and reconfiguring gives:
+     [check-target-graph] PASS: link graph (24 protected targets, no edge to
+     gufo_http or gufo_serving)                                             exit 0
+
+   Historical worker evidence above proves direct/transitive forbidden edges,
+   not rename coverage. The integration checker now rejects non-allow-listed
+   absence, HIP-tier absence with HIP enabled, policy disagreement, and missing
+   configuration. Only fixed and manifest-declared libraries are covered.
+   The requested real CMake rename/revert proof is PENDING(orchestrator): Nix
+   daemon access was denied before configuration. See pending-commands.txt.
+
+2. Serving-boundary isolation (tools/ci/check-extension-isolation.py
+   --fail-on-serving-boundary)
+
+   Injection (temporary): src/models/deepseek_v4_flash/runtime/rocm_graph.cpp
+   switched back from "src/core/logging/logging.hpp" to
+   "src/cli/serve/logging.hpp".
+
+   $ python3 tools/ci/check-extension-isolation.py --fail-on-serving-boundary
+     exit 1
+     [check-extension-isolation] SERVING BOUNDARY VIOLATED (models, families,
+     cache, src/ext and the public API must not include a src/cli header):
+       src/models/deepseek_v4_flash/runtime/rocm_graph.cpp:16: src/cli/serve/logging.hpp
+
+   After restoring the include:
+     [check-extension-isolation] PASS: serving boundary (no src/cli include
+     from models, families, cache, src/ext or the public extension API)      exit 0
+
+   The same rule is unit-tested with synthetic trees (violating production
+   include, same-named test-tree include that stays exempt, and the
+   models/families/cache/ext/public-API roots each blocking a `src/cli` header)
+   in tests/tools/check_extension_isolation_test.py.
+
+3. Neutral-contracts link isolation (tests/extensions/
+   ext_runtime_neutral_contracts_test.cpp)
+
+   The executable links `gufo_ext_runtime` and nothing else. Deleting a neutral
+   contract, or making one of them pull a serving header into the runtime,
+   breaks this link. It runs in the isolated extension fixture project, so a
+   serving or HTTP target is not even defined there.
+     1/1 Test #152: ext_runtime_neutral_contracts_test ... Passed

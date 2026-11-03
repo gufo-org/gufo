@@ -12,6 +12,8 @@ agents and contributors are in [AGENTS.md](../AGENTS.md).
 | --- | --- |
 | `src/cli` | Executable commands, terminal interfaces and HTTP adapters |
 | `src/core` | Shared runtime: GGUF loading, sampling, quantization, HIP helpers, diagnostics |
+| `src/cache` | Continuation cache: tiers, ledger and the neutral capture/backing contract |
+| `src/ext` | Extension runtime: registry, options, neutral continuation and host-service contracts |
 | `src/models/<model>` | One model package: config, weights, engine, kernels, CPU reference |
 | `src/eval` | HTTP capability evaluation |
 | `src/testing` | Test-only comparison helpers |
@@ -27,6 +29,13 @@ Model code, kernels, tests, tools and numerical contracts stay with their model.
 A model package builds as its own static library and is attached in the root
 `CMakeLists.txt` with `add_subdirectory`; heavy CPU oracles are declared
 `EXCLUDE_FROM_ALL` so routine builds stay cheap.
+
+`gufo_serving` (`src/cli/serve`: scheduler, model runner, cache facade, model
+selection) and `gufo_http` are the top of the graph. Nothing under
+`gufo_ext_runtime` includes `src/cli/**` or links either library, which
+`extension_serving_boundary_gate` and `extension_link_graph_gate` enforce; see
+[testing](TESTING.md#boundary-and-link-graph-gates) and
+[target ownership](model-extensions/target-ownership.md).
 
 ## Build
 

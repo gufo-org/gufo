@@ -1,0 +1,15 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+error (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/1feb7a1609d1c71b0caee49762bd06441d2024d45f1bd0a59de0d504f83defb2.sqlite' is busy
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+Traceback (most recent call last):
+  File "/home/mixer/gufo/tests/tools/windows_bundle_test.py", line 14, in <module>
+    spec.loader.exec_module(bundle)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1027, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/mixer/gufo/tools/windows/check_bundle.py", line 12, in <module>
+    import pefile
+ModuleNotFoundError: No module named 'pefile'

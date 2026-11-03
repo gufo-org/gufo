@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
-#include "src/models/embedding_gemma2/batch_scheduler.hpp"
-#include "src/models/embedding_gemma2/config.hpp"
+#include "batch_scheduler.hpp"
+#include "config.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 

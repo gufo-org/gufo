@@ -1,0 +1,5 @@
+Historical build final retained completion line:
+[190/191] Linking HIP executable gufo
+Historical ninja exit code: not retained; PENDING, cannot infer from a link line.
+Re-verify: nix develop -c cmake --build build/card06-gpu --target qwen27b_continuation_identity_test qwen38_flash_next_continuation_identity_test deepseek_v4_flash_continuation_identity_test speculative_verification_test speculative_corpus_test
+Integration Nix gates blocked by daemon socket access (exit 1); see integration-gates.txt.

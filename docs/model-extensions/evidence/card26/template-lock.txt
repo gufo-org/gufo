@@ -1,0 +1,12 @@
+unpacking 'github:gufo-org/gufo/ae7ef25f350650a94be2f798706895fa0c8aa80f' into the Git cache...
+warning: creating lock file "/home/mixer/gufo/examples/extension_template/flake.lock":
+• Added input 'gufo':
+    'github:gufo-org/gufo/ae7ef25f350650a94be2f798706895fa0c8aa80f?narHash=sha256-3EKeMPk5z70oEh5l4EidMsZ8fc%2BS3G75twYzRsflXxw%3D' (2026-11-02)
+• Added input 'gufo/audio-cpp':
+    'github:0xShug0/audio.cpp/e3de8e3f3cbfac55ffa58df71426c41550a8598b?narHash=sha256-%2B9tVcd%2B0TkDxg7JRU7M06Lvm20sXEbuerm62uhm6JKA%3D' (2026-09-20)
+• Added input 'gufo/audio-cpp/nixpkgs':
+    follows 'gufo/nixpkgs'
+• Added input 'gufo/nixpkgs':
+    'github:NixOS/nixpkgs/3ec636362e1816bc2f0888fa0fa2c69f1bc9e504?narHash=sha256-rZLrzrC6i%2BjnTAlvPZHogKDulY7WWDEv9hJeHieO7Zw%3D' (2026-10-23)
+• Added input 'gufo/nixpkgs-rocm10':
+    'github:gufo-org/nixpkgs/1a6ba8bc6f744f7a843d025e46bc9911b4b6c37d?narHash=sha256-yrZaTHidqCI3oJgXDAobDazn%2BqdeUD328pk22ZQ/YsI%3D' (2026-10-24)

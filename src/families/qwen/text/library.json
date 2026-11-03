@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "text",
+  "target": "gufo_qwen_text",
+  "kind": "static",
+  "purpose": "Qwen tokenizer and bounded deterministic ChatML chat template shared by the Qwen text extensions.",
+  "depends": ["control_tokens", "config"]
+}

@@ -1,0 +1,1575 @@
+{
+  "embedded_hip_images": [
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/core/hip/snapshot_copy.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "31694c984125e7f7b429634c3dfdf6dd5ba0b1be152413d0fa29378675dd2905",
+      "candidate_sha256": "707f9c0e76ea104122f147a212fea6f48c55820e942a9c58caa76e0a22eb5b6f"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/attention.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "1451db2d35aa58cff3ef07a11c1563f44fa2d4131e81b784a5fee052373078ec",
+      "candidate_sha256": "704767448c4e2bca564c260d3102e09bf7e94407a736b819b4ae64ff83417597"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/audio_vae.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "dc8c0d7f89a62c0e8e8019e684834e255bf1f326c4c9748802535ed4a3d408f4",
+      "candidate_sha256": "18548cf73a6233437d5d2589226da3660b4f1bd7c9803af2ea85f95cb1e1a750"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/denoiser.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "3c00fa713b2ad25fe1d54d7dc7a9a2d4070ec00b821e92270ee66e6c4a97a8c5",
+      "candidate_sha256": "0ebb774e8044b7a07986dbb7665dbd633037902f5fbd4ca5fa4bcc66c96a65bc"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/dense.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "30b57441f68e5c997ae3a440c60c1284f34c3ad67f4befa4b70ff78bef913b10",
+      "candidate_sha256": "641de8269544f8fe3c96a75e3275a5a191528a1422bc194f81c51466f051945e"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/dit.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "83613e04db32e4b7991a1d1139c0e69aea76b61f393a0a06042838e1bb880726",
+      "candidate_sha256": "d9ffc916b2d8b1f3d2855b78a85f98c211d25999ea41d132d7fa330c4ce810ed"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/prompt_encoder.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "7e065fd0e385a087979fc21f1f5d9efdd32699a180cb308405d180b76ddd8194",
+      "candidate_sha256": "242a40b3ccc82a56558b184f2cc88241a0d75a66c1d5c25b746bb2130b38aae0"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/sampling.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "7f32e3060dd2788b8bd0e792947e430041fbe1fe3a229a24eb664fabac8ea321",
+      "candidate_sha256": "43010c2fdc5f9755d035ab15ea119889d0c394fffc555cb7dd05347cdb1c8339"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/minimax_h3/video_vae.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "631e7c7cca0d6ffada5e7c6c049db7b57f1d672dbd87f53005d16aff566c92c5",
+      "candidate_sha256": "0c92b9e4f66e4c2ba11cc7a5b712f165a62f6631f73b6989bdafd1a045cfd729"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/batched_ssm.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "906235b8c76f7fb77ec5b1bb91c0d6b9f0ff797a96593d7747e54644c263a73f",
+      "candidate_sha256": "1f9483671ae7e994a0e91917d9e64cb1d97079b8e5eab0d0173f4e9b64400f59"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_batched.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "5acc35a1361435a7d13e6045ecc146368619bcca93c4473b5c6ed7aec8f55720",
+      "candidate_sha256": "75e94a2040f2c4d1bb3701fe354e9291dd5af10f09f7c8286fbacf169d99c503"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_decode.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "ad61460da5c920a2ba6894e1e3a954f889e593330c992fbb85265787fcd612ca",
+      "candidate_sha256": "ce136bf7bd39902e4fd15d4b7014618137b5479041fbce259e3a799fb8d9b025"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_decode_graph.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "c3ea423341ff0e10e94d1b1042adc381bf2703148abc5a62e2dce0c007239442",
+      "candidate_sha256": "d3e235d38b240d88bdddebf8e77186a91ad2ae40ec5a00aac9b7214dc1f05405"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "64d3859219da2729ec92df6ebe6c4b89ed7f5cda4d2472f224daf16c1cb652db",
+      "candidate_sha256": "ecbd258ddedc024946c5b69838644eb032a3ae95e1c884a4a4286de97a9cc1cd"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_tile.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "3d9927807c83192fc6894c1453efb67bc7632d4c919883fc4be8c37b9e464864",
+      "candidate_sha256": "e041df010abd5ae95c728c84a50e6a6b8ce926db60299502a4f2895349dbe3ee"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/attention_wmma.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "adf06f79cbbf578ce92de22e273c6aa8bf4b7c9bc3e7377db4e4674c07ab4d47",
+      "candidate_sha256": "889f88b5d8882cdb268cd3a49be1352964544f87eb37e8545bbb7c30ba8a46f3"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/dflash_kernels.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "3bcab75627946e131b068299339154727940c17f18736f004b72514de713e805",
+      "candidate_sha256": "6004398b14c342ed6c2524f15968737a34be88781c8c2cd87228d227af636cab"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/embed.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "fa564579930aaa80997146eaaebdb516ac7ac0c597cc2b13c6cf4fc7cc0432d7",
+      "candidate_sha256": "f103cf522e1781dce60a19242904ec26c7928b84939400bf4d52c8c090dacbfe"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/fused.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "7e70ed11bd145d24675c70e052d4134b794a15b81e7e9cc56ca49f1e4df70c02",
+      "candidate_sha256": "6894d1360ae68908a1895625c66a478c3768068dc2327d53a535156f422d8bcc"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/gemv.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "10819a4bf995c0c52ce687eb97abfa62d6aa30c126bf4ba0d44b2a733cd90507",
+      "candidate_sha256": "11813d8d4992319ed7f86f4fe27e64150451453e8c74f034ca20349e0c46f1f6"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/gemv_quant.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "c2b99ccb50c372ef9eac16efe1e35070adfd9ac6c4759eafbc023e4a012d94d7",
+      "candidate_sha256": "ad907edec359d6381ed6d1a294e6daa4fd25dd7238b887dffcf014c1f182813c"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/norm.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "151273d9738d0795a7f39801e84900fb2e8a3123e8742e42ef83e3b78918ec1a",
+      "candidate_sha256": "7abb16e3ac836fd0520af2ab5976bbdc095f840b00b218940207ef7062658528"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_embed.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "6bc811666825b7dd46fa92407447841dcdf8581fe086804ac50b52a8a951a384",
+      "candidate_sha256": "5a6c327f23fe94295ed1ac058e24c37bf055fa12d1647f749c6385f52cd1d775"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_fp16.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "38235cfad480e4bbc8fb0b866a84ef3366fb4db4ce92d132496cbbe41ab0f6ec",
+      "candidate_sha256": "79660067b072daf5284a15eea99513891e5b7d6e3ccb8a8478cabc153da4fc57"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_gemm.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "e5a6b44beb39f112b774e6529811a84d8917da81a003d448e925fd039adc45f3",
+      "candidate_sha256": "9996a78e4c2d6c2e471176719deda2ae80aa5408655e40b08ec7fea10baeb610"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_norm.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "171f1b84b7f471b87a9a2f34cecf6b5503e04e0fdef9ba299978681bca22f7d5",
+      "candidate_sha256": "ea084c2e711deee62c76eacfde08458a672d2c99cc0dd5891ab4b34b3fdc5acc"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_quant_gemm.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "9ba7222ff5de791a9717992d2cf011ce358b115dd5314dce498bf24467ebec53",
+      "candidate_sha256": "2cf4094e7a1c1b93996aae4dd6c948a97c4e1131f7323c948019a6612f412c12"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_quant_wave64.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "2114f33ee08ec795d9564912374550df473d64ef30a095576d5ea08a2f84abe3",
+      "candidate_sha256": "62eea55a8c3bf43cab336c8bd362bcf3e600d654262fe3750b4fc09f56698b24"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_residual.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "dd535bf2c81c196a1c2bd0d0f9359aac8c5c821d20b741b1d42d8a16c12652f2",
+      "candidate_sha256": "21486b0da9c4ff534a1df81701ef287a36213aaa0b064d8975f08cf618a3876d"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_rope.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "e9e93449f081e3c48f199d8d14186fb34048f4f537bdede5e259250a434c0d60",
+      "candidate_sha256": "592da72171b7d2f9eecb4a8943ca3f3636f2a130d7e8b6432d0c5ab787a8f843"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_ssm.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "bb8473a3d07a32cecfb7782b84d3eb4b69f10d5dcef1478152d57ce92ec5fe38",
+      "candidate_sha256": "24804f895ab84d8f35cf0d7722e04f1303fa865770bd8963d7c646060e71bd21"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_swiglu.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "4b677ce441635583c8fbad591867dc1153662bf2f1e2a786052ba4e16e7033ba",
+      "candidate_sha256": "5d448b108d9f1151db42d1b2435d02340164e46e6d73c7e667bcd208aa7a1764"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/prefill_unpack.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "82eada20bead840100e69f9ec7828fcb22aec8c480d57885885a1cc0801de4a2",
+      "candidate_sha256": "b4cd15665997684771d3ea2c13d99d53c1b6c8ad858480cbb0e2f7dc0d30cc8b"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/qkv.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "266be40d6cec02f5547157d06edc176e2e120adc8a2924545482ef97d434a373",
+      "candidate_sha256": "5c49b6da74242dbc9b1253bc18819db2d2c1aa8c8500637cbc03304b2649c25f"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/residual.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "7d2cab0472f81c22fe2ff3354f8e2a2047fb2fe77f11288f8985926cc42c7213",
+      "candidate_sha256": "3b3abe72cbdfdf4979b8de5ab054832571665f5114b55cdf97fdff42958ac169"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/rope.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "165a68b4a8f71961cd99a522c15f19f908d9c0a56c66e6fca0930a552723d30f",
+      "candidate_sha256": "74c322731cf54e89b620a26309694cccdac2c2433190eb6a49e6c92c531da76e"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/sample.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "751d8413f0c2ada36d8ba2677496e0ef98189e0d9f5661344629d5282093bc3b",
+      "candidate_sha256": "8e89fe73a243cd39e120fa110246befe69352cdbf59387dcb5d99de803f30f4e"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "3ed0df43e7b2d5872ebc4b22d74451a3192c1d460bd373c2e8fae161a0aad5fa",
+      "candidate_sha256": "30aec11d1e38cd4a70b9dac7193dcaa05cde2992ee77a041c111851ab6696d05"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/small_batch_wave64.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "925aa96c5ccd24703cdd436ff5b2652b10f2c109226a2ce5987f1d5981754c7a",
+      "candidate_sha256": "10e31611b7dc8a050480763b0206b660fb4952576e33c03e95c1d53aeac354f6"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "88a4a1703a13dfeabd5d005e47267e725bc474dc64b482aa28cfc91380734fae",
+      "candidate_sha256": "e0048cd0650ec7e2098a8195c585858f6f4a01e69d585045b7e597f99e1d8086"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm_decode_recurrence.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "70db5cfab1e53fd8bc9fe683f07f256c34a8ef2ca8d4f85c0c9f1b7d4bca20c1",
+      "candidate_sha256": "4bc07f6b57dc4442a1eea3bafe50cf9cfa05423cb0ee7ebe5b31d993ea7b2e67"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm_recurrence.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "2aaae8b2fbd5de313b57469eed5aafa2636743f88e1bdb8042844225f301ecaf",
+      "candidate_sha256": "2a1f923738ef1f5c2489b5b953e5e27794bd51a92346180c421d3efb60d4a3a7"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/ssm_row_split.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "12b8868950184e55ab9c683fa93eae692c8acd078fe1569c1093b0f8c9f7de79",
+      "candidate_sha256": "51a51a05d87c68e2cc940562fc2da4493e3bd4ac0e7dabbb2a46af2c8ae19c14"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/swiglu.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "364b33830988cb6e3d9f035c9796aeedc0f19a3b360673474c8572b7d6f95fcf",
+      "candidate_sha256": "8cc6cab92356d97f1d660edbfc0d85bede63a3d6532568e893a4fea612c68d91"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/unpack.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "a9e03ce08bdc8cf170cf3e927590626ee1d69def79c2ca6154ed6e05d0e6ec12",
+      "candidate_sha256": "8966aa6bc9f9b26fa480101ffa53246be44fb94e170cbf35213fb6eec91a4e2b"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/hip/kernels/verify_gemm_27b.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "ca6cfe470713afaecb23de226db518ae5357bd560a6bd4a4050b35778cb15fe9",
+      "candidate_sha256": "27c3f5f919e84574175c419592a8b1d0a8f89b2ac0efad8dfdcdb412a4482a7d"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/vision/device_input.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "50a43ebe88519659fd28407fff6c39aa39484600e789ca39dfeab04d5060ea01",
+      "candidate_sha256": "740e9468e05b24ee169785fe1a19ee8c514ee30a8529e3e83c2b7483b662b745"
+    },
+    {
+      "object": "CMakeFiles/gufo_core.dir/src/models/qwen/vision/encoder.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "5d83c043c968db41eb0136e1ca2ea7b79ef1e6ae5e2a3d71752b5f0552732adf",
+      "candidate_sha256": "851690bd2ce4dd8a26f4e81fe9dc35b62f32f5ad12d080e621818439cbfa3b4b"
+    },
+    {
+      "object": "CMakeFiles/gufo_diagnostics.dir/src/core/hip/allocation_benchmark.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "8426f1a8f98d8860d8b0916eac0831dbd9b47e8298d13ec40199967c61ab7833",
+      "candidate_sha256": "2e154758c60ea553c9d89a91bdd3e982aa34984b119b5c745bd2119fa4a02787"
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash.dir/kernels/rocm/backend.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "a77be4f3ecdb3443171480fab29859f8af02890dca69e9d8101721a841a41a80",
+      "candidate_sha256": "4a868288c18c5d051914d59e387ab9821c4970211dc186b6d46a6b184fcdaa24"
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/ds4_mmq.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "2b23d6912df47832f008d676838c9a1741c4674186bedb2130cfbe34e2b677dd",
+      "candidate_sha256": "534c262ab06d55c761ccd46b7c2192fc476b0209dfef8cff4306e0c5f4a9d1e8"
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/mmid.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "f120f32a113be0275710a591acd92c362e03d2324adf16f77e85ebfa7f392ce4",
+      "candidate_sha256": "07bf38df0f843b4e1e639d81833e0f10bf9ea1b6ff2d1ee2e501aa7273b34bd7"
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/mmvq.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "66c9db373834003d5a423433ecb70972be5aba85000f8a11c5538e6991f5c10e",
+      "candidate_sha256": "7040f698edc2eb8ed4dd39a6e002d447cc7c5140c38d90b30d5ede2585a42c41"
+    },
+    {
+      "object": "src/models/deepseek_v4_flash/CMakeFiles/gufo_deepseek_v4_flash_mmq.dir/kernels/rocm/mmq/quantize.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "4a188dabc62de4a84be60855e14c74a6d38e1d1ea280b6a7cb399cfeb663fe62",
+      "candidate_sha256": "4a5ecef8998c14f9a1c3cd2ce8eb92766e843f0545855a4e6aa6af1f08d612a4"
+    },
+    {
+      "object": "src/models/embedding_gemma2/CMakeFiles/gufo_embedding_gemma2.dir/hip/audio_runtime.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "01fbee9c34499c4d477f55ae7ae109cc3dfb54fc7b2e5870cd3359f8a6cc539c",
+      "candidate_sha256": "27b9d942943f7deeec64f4fde5816eb355c48f77331b32c643d57748f1de1fa3"
+    },
+    {
+      "object": "src/models/embedding_gemma2/CMakeFiles/gufo_embedding_gemma2.dir/hip/ops.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "d4e4ac8496a330e8f36434d17e8a94096e527fe9d465769f0d150c55d5a2ca99",
+      "candidate_sha256": "f1f4ef44eecebf7bb0f26a21f333d6b5e0a85809b38f5fbe0912e12d20dda320"
+    },
+    {
+      "object": "src/models/embedding_gemma2/CMakeFiles/gufo_embedding_gemma2.dir/hip/vision_ops.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "ae6df2b6d22129f3b219177fe5e0dc86903131ac30c67a2cebe029ae3da41a02",
+      "candidate_sha256": "90fdc2681d798723fdf3893116d1eba1b3d707da655396eb1c5aae63045da6a3"
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next.dir/kernels/rocm/kernels.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "b60764e80a423a743438c49ae1ba5f57eacf94e342bb1c3fffadbb9e542e8956",
+      "candidate_sha256": "61812c7c0a9e0b28a8c7ad730b122d5d5e001307e548ba73e9d06f242fd57f20"
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next.dir/kernels/rocm/w8a8_wave64.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "32ba50d699c93445544a6db32798408ef26e966401945bb099d03df74928d1c4",
+      "candidate_sha256": "698c395abe1502d409b08508832d3a41e34153d7e53e3eb92d5ecdac526c0c93"
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/mmid.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "e3f83ac83cb5b05c16a34b06301c1e2fe76da8e99e7b46bdb4999e652701eec3",
+      "candidate_sha256": "97fb40205e28149413df0ca3b2b3c52f5da3743a5598dad95ca96f377fdc77d5"
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/mmvq.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "15453a22bbe6514f4cd1e42b23339a7cf3b69b94ebef90d75c733c73d167f66f",
+      "candidate_sha256": "133d70c4973acec0260df8c14a1790954cf88bb1a5682efa177098a7c8f319b8"
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/moe_wave64.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "893b1705f22dcd6fcf968ee86dcce0e3bc43a6c81652bad37608f397d762f34a",
+      "candidate_sha256": "0e1fa5254c63af92848121cca5a0c43babeffe2d908bf1b9ba96549528b30a6d"
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/qfn_mmq.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "10f194b71f43a4d77691a65ca11409a164add1de4ae5a1ce3d185bac228179ab",
+      "candidate_sha256": "7d8c609d2c9830b79ac04528de9d5f5d657bf2f66c1824fa79127a8feb650135"
+    },
+    {
+      "object": "src/models/qwen38_flash_next/CMakeFiles/gufo_qwen38_flash_next_mmq.dir/kernels/rocm/mmq/quantize.hip.cpp.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "c48882e73206a230165a5060a683752d7a904395510e4809cdc2b0c0512011f4",
+      "candidate_sha256": "3bb3eac69b27c4534e3edab013ca44571597f8f5dd0f8dd019ff6a619ec860f6"
+    },
+    {
+      "object": "src/models/qwen3_asr/CMakeFiles/gufo_qwen3_asr.dir/hip/audio_ops.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "7740567328e9dfdc8d9ff2aa9ed11c11150f9478bdf0f958f89abb7b41541199",
+      "candidate_sha256": "fe56877dc29af00a0c2204b609908ba6633cab9c5ee223eddd87312cfab79252"
+    },
+    {
+      "object": "src/models/qwen3_asr/CMakeFiles/gufo_qwen3_asr.dir/hip/convolution.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "eea41189589137da526d909c391b2e4a866845667d0c1c3070286d4b9e4ff9f2",
+      "candidate_sha256": "137a8cebb4684f9aa9c6bafe1a20432d3f7d499c423941400d94ea019bf03146"
+    },
+    {
+      "object": "src/models/qwen3_asr/CMakeFiles/gufo_qwen3_asr.dir/hip/text_ops.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "ea7ae301953386f22f4483b4ffb35b76c71cdad44e633be858cbb5c82593de12",
+      "candidate_sha256": "7c584118055c24a0454940002d87e63900a7337fd876efb2eab7160774fb65ba"
+    },
+    {
+      "object": "src/models/qwen3_tts/CMakeFiles/gufo_qwen3_tts.dir/hip/encoder_ops.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "f9b0eb96f3e7efd4891770d0948e87ffb445e35a00878d101bae491cad168703",
+      "candidate_sha256": "f425bdb02b6368eb3dfd3d879c67e0965e3e1c54b2a5a258eae0362eb6909803"
+    },
+    {
+      "object": "src/models/qwen3_tts/CMakeFiles/gufo_qwen3_tts.dir/hip/speech_decoder_ops.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "86b854a295f2dc665e5322bba7903a9290efb2c654caeefc602162a3d781dc08",
+      "candidate_sha256": "d835946a58b2ea5813056d3e45a3d9955921860a4c804f4911b1d0b8a0079e37"
+    },
+    {
+      "object": "src/models/qwen3_tts/CMakeFiles/gufo_qwen3_tts.dir/hip/talker_ops.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "6854f2c9c615d10f26d7ce2bb40df1aa293b98ea518c666e60a625138cb1b958",
+      "candidate_sha256": "e159524db0a7d7a82eb8db9f6a1064de2c69cc32e469d0d46fc8fb7420e1eebb"
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/attention.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "715b5c67e6676482b1fdf3c9b7a0774199cc8b6371e660f3d1486f26d010e73d",
+      "candidate_sha256": "8933b0fef7aa7f745ec949cc4018ece89ab945155e461c833476e74b9db96dc9"
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/convolution.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "df0a2df3792169102b4180bb05a674009fe3c9b74c9d5cd69e339b176e0a1e7e",
+      "candidate_sha256": "a7752e0fbbb3ead950c1ddd0584f439c964b1d9dfa47fd9c98c7385da1901977"
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/dense.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "0c74340f718496a6d082617eea1fa4a9a4b2966a2fd1a88b6e88d071e93b05f3",
+      "candidate_sha256": "5f4c96fece78f12c0aeeee60ab41482a09056ae739d8b86e70b2cf5131f0ce8d"
+    },
+    {
+      "object": "src/models/qwen_image_21/CMakeFiles/gufo_qwen_image_21.dir/hip/kernels.hip.o",
+      "identical_embedded_image": false,
+      "baseline_sha256": "c43e62f3b17abb40cfd3f94e61dab2bf8488324604ecd410bda234c00507d6ab",
+      "candidate_sha256": "de38bbf14fc39e8ca57578f7d4a42a22ecf5cf50fe36efcaa3365b98d54ffe36"
+    }
+  ],
+  "common_compile_commands": [
+    {
+      "source": "src/cache/checkpoint.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/completion.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/disk.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/disk_catalog.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/identity.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/ledger.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/prefix_index.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/retention.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/slot.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cache/streaming.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/banner.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/bench/bench.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/diagnose/diagnose.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/eval/eval.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/main.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/prompt/prompt.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/asr_service.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/asr_websocket.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/audio_asr_api.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/audio_tts_api.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/component_text_cache.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/continuation_cache.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/continuation_disk_store.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/continuation_identity.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/embedding_service.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/embeddings_api.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/http_server.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/image_api.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/inference_backend.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/logging.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/openai_chat.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/serve.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/text_generation_scheduler.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/text_model_runner.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/trace.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/tts_service.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/tts_websocket.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/video_api.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/video_jobs.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/serve/websocket.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/transcribe/transcribe.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/cli/video/video.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/crypto/sha256.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/allocation_benchmark.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/artifact_validator.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/bandwidth.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/compatibility.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/fingerprint.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/gpu_queues.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/linux_sysfs.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/report.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/diagnostics/system_inventory.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/gguf_identity.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/gguf_reader.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/allocation_benchmark.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/bandwidth.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/committed_backing.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/hipblaslt_plan_database.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/host_allocations.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/snapshot_copy.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/staging.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/transfer_pool.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/hip/weight_upload.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/image.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/json_constraint.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/json_schema_lexeme.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/json_schema_regex.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/env.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/fs_posix.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/library.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/mapped_file.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/net.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/os_info.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/page_pin_linux.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/pages_posix.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/publish.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/platform/shutdown_signal.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/quant/ggml_dequant.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/quant/ggml_gemm.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/sampling.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/core/speculative/speculative_verifier.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/eval/dataset.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/eval/extract.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/eval/http_client.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/eval/regrade.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/chat_template.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/engine.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/kernels/rocm/backend.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/kernels/rocm/mmq/ds4_ggml_stubs.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/kernels/rocm/mmq/ds4_mmq.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/kernels/rocm/mmq/ds4_mmq_d2r.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/kernels/rocm/mmq/mmid.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/kernels/rocm/mmq/mmvq.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/kernels/rocm/mmq/quantize.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/runtime/model_data.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/runtime/rocm_graph.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/runtime/sampling.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/runtime/session.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/runtime/tokenizer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/deepseek_v4_flash/tool_calls.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/audio_decoder.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/audio_processor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/batch_scheduler.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/config.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/hip/audio_runtime.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/hip/blas.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/hip/encoder_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/hip/ops.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/hip/vision_ops.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/image_processor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/loader.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/reference/cpu_encoder.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/tensor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/tokenizer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/tokenizer_loader.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/embedding_gemma2/video_processor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/attention.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/audio_vae.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/audio_vae.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/denoiser.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/denoiser.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/dense.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/dit.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/dit.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/generation.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/json.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/media_posix.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/prompt_encoder.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/prompt_encoder.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/runtime_hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/sampling.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/sampling.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/sha256.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/tokenizer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/video_vae.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/minimax_h3/video_vae.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/chat_template.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/continuation_adapter.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/continuation_layout.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/dflash_weights.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/forward.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/generator.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/arena.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/attention.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/batched_decode.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/batched_ssm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/decode.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/decode_step.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/dflash/backend.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/dflash/batch.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/dflash/executor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/dflash/model.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/executor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/attention_batched.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/attention_decode.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/attention_decode_graph.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/attention_tile.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/attention_wmma.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/dflash_kernels.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/embed.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/fused.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/gemv.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/gemv_quant.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/hipblas_gemm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/hipblaslt_gemm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/norm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_embed.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_fp16.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_gemm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_norm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_quant_gemm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_quant_wave64.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_residual.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_rope.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_ssm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_swiglu.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/prefill_unpack.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/qkv.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/residual.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/rope.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/sample.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/small_batch_wave64.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/ssm.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/ssm_decode_recurrence.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/ssm_recurrence.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/ssm_row_split.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/swiglu.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/unpack.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/kernels/verify_gemm_27b.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/model_loader.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/mtp/backend.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/mtp/executor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/mtp/model.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/prefill.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/prefill_chunk.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/prompt_hidden_buffer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/hip/ssm_replay.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/attention.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/embed.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/ffn.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/norm.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/quant_gemm.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/residual.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/rope.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/sample.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/ssm.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/modules/unembed.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/mtp_reference.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/oracles.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/ssm.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/state.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/tokenizer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/vision/device_input.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/vision/encoder.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/vision/image_cache.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/vision/prompt.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen/weights.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/config.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/continuation_adapter.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/continuation_layout.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/cpu_ops.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/engine.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/batch.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/blaslt.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/device_model.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/executor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/mmq/mmid.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/mmq/mmvq.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/mmq/moe_wave64.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/mmq/quantize.hip.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/kernels/rocm/w8a8_wave64.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/ngram.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/reference.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/rope_scaling.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen38_flash_next/weights.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/audio.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/bpe.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/config.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/hip/audio_encoder_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/hip/audio_ops.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/hip/blas.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/hip/convolution.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/hip/text_decoder_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/hip/text_ops.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/hip/transcription_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/loader.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/prompt.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/tensor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_asr/tokenizer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/audio.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/config.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/encoder_ops.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/encoder_support.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/speaker_encoder_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/speech_decoder_ops.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/speech_decoder_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/speech_encoder_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/synthesis_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/talker_ops.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/hip/talker_runtime.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/loader.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/prompt.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/sampling.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/tensor.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen3_tts/tokenizer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/hip/attention.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/hip/blas.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/hip/convolution.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/hip/dense.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/hip/kernels.hip",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/hip/pipeline.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/image.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/tokenizer.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/models/qwen_image_21/weights.cpp",
+      "identical_normalized_command": true
+    },
+    {
+      "source": "src/testing/compare/logit_comparator.cpp",
+      "identical_normalized_command": true
+    }
+  ],
+  "note": "Exact embedded-image equality is stronger than stripped ISA/resource equality; any mismatch remains explicit."
+}

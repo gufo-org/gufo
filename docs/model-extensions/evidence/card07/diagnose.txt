@@ -1,0 +1,15 @@
+G11 smoke: production and gpu-test binaries, no model servers started.
+  $ ./build/card07-release/gufo diagnose -> DIAG_RELEASE_EXIT=0
+  $ ./build/card07-gpu/gufo diagnose     -> DIAG_GPU_EXIT=0
+  === Gufo Diagnostics ===
+  Engine Revision : 0.1.0
+  Schema Version  : 1.0.0
+  Timestamp       : 2026-10-31T11:43:54Z
+  Overall Status  : [PASS]
+  
+  === Machine Fingerprint ===
+  Fingerprint ID      : 80a06f3fcc3e8535b201f8261de2610a10506a9be76602e1e51062703e984f0a
+  Target Platform     : x86_64-linux (Linux 7.2.9)
+  CPU Model           : AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (32 threads)
+  GPU Architecture    : AMD Radeon 8060S Graphics [gfx1151, 20 CUs]
+  Pinned Toolchain    : ROCm 10.1.0

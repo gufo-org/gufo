@@ -2,13 +2,13 @@
 #define GUFO_MODELS_QWEN3_ASR_LOADER_HPP_
 
 #include <cstddef>
+#include <gufo/ext/gguf_reader.hpp>
 #include <initializer_list>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "src/core/gguf_reader.hpp"
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/tensor.hpp"
 

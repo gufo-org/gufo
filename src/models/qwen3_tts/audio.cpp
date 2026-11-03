@@ -18,7 +18,6 @@
 namespace gufo::models::qwen3_tts {
 namespace {
 
-constexpr std::size_t kMaximumEncodedBytes = 12U << 20U;
 constexpr std::uint32_t kMaximumChannels = 8;
 constexpr std::uint32_t kMaximumSampleRate = 192000;
 constexpr std::uint64_t kMaximumFrames = 30ULL * kMaximumSampleRate;
@@ -55,25 +54,6 @@ std::uint32_t ReadU32(std::span<const std::byte> bytes, std::size_t offset) {
   return result;
 }
 
-int Base64Value(unsigned char character) {
-  if (character >= 'A' && character <= 'Z') {
-    return character - 'A';
-  }
-  if (character >= 'a' && character <= 'z') {
-    return character - 'a' + 26;
-  }
-  if (character >= '0' && character <= '9') {
-    return character - '0' + 52;
-  }
-  if (character == '+') {
-    return 62;
-  }
-  if (character == '/') {
-    return 63;
-  }
-  return -1;
-}
-
 std::int64_t ReflectIndex(std::int64_t index, std::int64_t length) {
   if (length <= 1) {
     return 0;
@@ -82,54 +62,6 @@ std::int64_t ReflectIndex(std::int64_t index, std::int64_t length) {
     index = index < 0 ? -index : 2 * length - index - 2;
   }
   return index;
-}
-
-std::vector<std::byte> DecodeBase64(std::string_view encoded) {
-  constexpr std::string_view prefix = "data:audio/wav;base64,";
-  if (encoded.starts_with(prefix)) {
-    encoded.remove_prefix(prefix.size());
-  }
-  if (encoded.empty() || encoded.size() > kMaximumEncodedBytes ||
-      encoded.size() % 4 != 0) {
-    throw std::invalid_argument("Qwen3-TTS reference audio base64 is invalid");
-  }
-  std::vector<std::byte> output;
-  output.reserve((encoded.size() / 4) * 3);
-  for (std::size_t offset = 0; offset < encoded.size(); offset += 4) {
-    std::uint32_t block = 0;
-    unsigned padding = 0;
-    for (unsigned index = 0; index < 4; ++index) {
-      const unsigned char character =
-          static_cast<unsigned char>(encoded[offset + index]);
-      if (character == '=') {
-        if (index < 2 || offset + 4 != encoded.size()) {
-          throw std::invalid_argument(
-              "Qwen3-TTS reference audio base64 padding is invalid");
-        }
-        ++padding;
-        block <<= 6U;
-      } else {
-        if (padding != 0) {
-          throw std::invalid_argument(
-              "Qwen3-TTS reference audio base64 padding is invalid");
-        }
-        const int value = Base64Value(character);
-        if (value < 0) {
-          throw std::invalid_argument(
-              "Qwen3-TTS reference audio base64 is invalid");
-        }
-        block = (block << 6U) | static_cast<std::uint32_t>(value);
-      }
-    }
-    output.push_back(static_cast<std::byte>((block >> 16U) & 0xFFU));
-    if (padding < 2) {
-      output.push_back(static_cast<std::byte>((block >> 8U) & 0xFFU));
-    }
-    if (padding == 0) {
-      output.push_back(static_cast<std::byte>(block & 0xFFU));
-    }
-  }
-  return output;
 }
 
 AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
@@ -213,23 +145,6 @@ AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
 }
 
 }  // namespace
-
-bool DecodeBase64Wav(std::string_view encoded, AudioBuffer* output,
-                     std::string* error) {
-  if (output == nullptr) {
-    SetError(error, "Qwen3-TTS reference audio output must not be null");
-    return false;
-  }
-  *output = {};
-  try {
-    const std::vector<std::byte> bytes = DecodeBase64(encoded);
-    *output = DecodeWavBytes(bytes);
-    return true;
-  } catch (const std::exception& exception) {
-    SetError(error, exception.what());
-    return false;
-  }
-}
 
 bool DecodeWav(std::span<const std::byte> bytes, AudioBuffer* output,
                std::string* error) {

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <gufo/ext/model_config.hpp>
 #include <memory>
 #include <optional>
 #include <span>
@@ -14,25 +15,25 @@
 #include <type_traits>
 #include <vector>
 
-#include "src/core/model_config.hpp"
-#include "src/models/qwen/continuation_hooks.hpp"
+#include "src/families/qwen/hip_common/continuation_hooks.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
-#include "src/core/hip/detail/hip_graph_decode_executor.hpp"
-#include "src/models/qwen/hip/execution_policy.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
-#include "src/models/qwen/hip/ops/ssm.hpp"
-#include "src/models/qwen/hip/ops/token.hpp"
+#include <gufo/ext/experimental/hip_graph_decode_executor.hpp>
+
+#include "src/families/qwen/hip_common/execution_policy.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/ssm.hpp"
+#include "src/families/qwen/kernels/ops/token.hpp"
+#include "src/families/qwen/vision/device_input.hpp"
 #include "src/models/qwen/hip/prompt_hidden_buffer.hpp"
-#include "src/models/qwen/vision/device_input.hpp"
 
 namespace gufo::hip {
 

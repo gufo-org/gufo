@@ -64,6 +64,19 @@ class ArtifactTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'unbundled runtime'):
                     artifact.verify(root, 'a' * 40)
 
+    def test_multiline_extension_provenance_retains_revision_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, manifest = self.fixture(directory)
+            manifest['version'] += '\nExtension API: 0.1.1\nExtension selection: discovery\nBuilt extensions: none'
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            with patch.object(artifact, 'output', side_effect=[manifest['version'], 'libc.so.6 => /runtime/libc.so.6']):
+                artifact.verify(root, 'a' * 40)
+            # A later provenance line must not hide an incorrect first-line revision.
+            wrong = manifest['version'].replace('(aaaaaaa)', '(bbbbbbb)')
+            with patch.object(artifact, 'output', return_value=wrong):
+                with self.assertRaisesRegex(ValueError, 'wrong revision'):
+                    artifact.verify(root, 'a' * 40)
+
     def test_share_copy_is_removable(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'store/share'

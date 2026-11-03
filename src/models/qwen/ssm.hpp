@@ -3,10 +3,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/model_config.hpp>
 #include <span>
 #include <vector>
 
-#include "src/core/model_config.hpp"
 #include "src/models/qwen/state.hpp"
 
 namespace gufo::models {

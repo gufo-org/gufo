@@ -12,8 +12,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "src/models/qwen/vision/image_cache.hpp"
-#include "src/models/qwen/vision/prompt.hpp"
+#include "src/families/qwen/vision/image_cache.hpp"
+#include "src/families/qwen/vision/prompt.hpp"
 
 namespace {
 using namespace gufo::models::qwen::vision;

@@ -2,6 +2,7 @@
 # re-mangle them.
 *.jinja text eol=lf
 tests/fixtures/** text eol=lf
+tests/models/*/fixtures/continuation_identity/** text eol=lf
 # Compressed fixtures are binary (zip CRLF bytes must survive).
 *.npz binary
 *.mp4 binary

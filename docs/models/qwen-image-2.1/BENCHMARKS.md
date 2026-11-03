@@ -13,8 +13,24 @@ measure loading and replay, not normal 40-step generation quality.
 
 | Mode | Output | Steps | Prompt (s) | Denoising (s) | VAE (s) | Total (s) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Generation, C1 | 1024×1024 | 40 | TODO | TODO | TODO | TODO |
-| Edit, one reference, C1 | 1024×1024 | 40 | TODO | TODO | TODO | TODO |
+| Generation, C1 | 1024×1024 | 40 | 0.086 | 89.03 | 0.77 | 89.89 |
+| Edit, one reference, C1 | 1024×1024 | 40 | 3.11 | 126.30 | 0.81 | 130.23 |
+
+Median of three warm runs, ROCm 10.1, seed 42, 2026-11-01.
+
+## Qwen-Image-2.1-Turbo
+
+Same host, build and method; separate Turbo weights with eight steps.
+
+| Mode | Output | Steps | Prompt (s) | Denoising (s) | VAE (s) | Total (s) | vs base |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Generation, C1 | 1024×1024 | 8 | 0.088 | 17.78 | 0.76 | 18.63 | 4.8× |
+| Edit, one reference, C1 | 1024×1024 | 8 | 2.99 | 27.16 | 0.77 | 30.93 | 4.2× |
+| Edit, original plus mask, C1 | 1024×1024 | 8 | 5.01 | 35.37 | 0.77 | 41.16 | — |
+| Generation, C1 | 1920×1088 | 8 | 0.091 | 47.97 | 2.57 | 50.63 | — |
+
+Resident weights match the base model (28.5 GiB; 29.8 GiB with the editing
+vision encoder).
 
 Concurrent requests are isolated and queued; concurrent GPU batching is not
 implemented. Do not report a two-step execution smoke check as model quality

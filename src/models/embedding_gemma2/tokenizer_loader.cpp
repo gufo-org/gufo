@@ -2,12 +2,12 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "src/core/json.hpp"
-#include "src/models/embedding_gemma2/tokenizer.hpp"
+#include "tokenizer.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <gufo/ext/experimental/weight_upload.hpp>
 #include <limits>
 #include <memory>
 #include <ranges>
@@ -23,7 +24,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/weight_upload.hpp"
 #include "src/models/qwen3_asr/hip/audio_ops.hpp"
 #include "src/models/qwen3_asr/hip/blas.hpp"
 #include "src/models/qwen3_asr/loader.hpp"

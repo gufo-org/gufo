@@ -38,6 +38,10 @@ DEFAULT_PROMPT = (
     "in concrete technical terms. Continue until the output limit is reached."
 )
 
+
+# The Gufo server has no authentication layer, but a benchmark may target
+# another OpenAI-compatible endpoint or a Gufo deployment behind an
+# authenticating reverse proxy; OPENAI_API_KEY is sent when set.
 def _authorization_headers() -> dict[str, str]:
     key = os.environ.get("OPENAI_API_KEY", "")
     return {"Authorization": f"Bearer {key}"} if key else {}

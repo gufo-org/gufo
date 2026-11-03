@@ -240,48 +240,13 @@ __global__ static void q8_K_quantize_kernel(hip_block_q8_K *out, const float *x,
     uint32_t row = blockIdx.y;
     if (row >= n_rows || b >= in_dim / ROCM_QK_K) return;
     const float *xr = x + (uint64_t)row * in_dim + (uint64_t)b * ROCM_QK_K;
-    hip_block_q8_K *yb = out + (uint64_t)row * (in_dim / ROCM_QK_K) + b;
     __shared__ float abs_part[256];
     __shared__ float val_part[256];
-    __shared__ float maxv_s;
     __shared__ float iscale_s;
-    uint32_t tid = threadIdx.x;
-    float v = tid < ROCM_QK_K ? xr[tid] : 0.0f;
-    abs_part[tid] = tid < ROCM_QK_K ? fabsf(v) : 0.0f;
-    val_part[tid] = v;
-    __syncthreads();
-    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
-        if (tid < stride && abs_part[tid + stride] > abs_part[tid]) {
-            abs_part[tid] = abs_part[tid + stride];
-            val_part[tid] = val_part[tid + stride];
-        }
-        __syncthreads();
-    }
-    float amax = abs_part[0];
-    if (amax == 0.0f) {
-        if (tid == 0) yb->d = 0.0f;
-        if (tid < ROCM_QK_K) yb->qs[tid] = 0;
-        if (tid < ROCM_QK_K / 16) yb->bsums[tid] = 0;
-        return;
-    }
-    if (tid == 0) {
-        maxv_s = val_part[0];
-        iscale_s = -127.0f / maxv_s;
-    }
-    __syncthreads();
-    if (tid < ROCM_QK_K) {
-        int qv = (int)lrintf(iscale_s * xr[tid]);
-        if (qv > 127) qv = 127;
-        if (qv < -128) qv = -128;
-        yb->qs[tid] = (int8_t)qv;
-    }
-    __syncthreads();
-    if (tid < ROCM_QK_K / 16) {
-        int sum = 0;
-        for (int i = 0; i < 16; i++) sum += yb->qs[tid * 16 + i];
-        yb->bsums[tid] = (int16_t)sum;
-    }
-    if (tid == 0) yb->d = 1.0f / iscale_s;
+    const uint32_t tid = threadIdx.x;
+    quantize_q8_K_block256(tid < ROCM_QK_K ? xr[tid] : 0.0f, tid,
+                           out + (uint64_t)row * (in_dim / ROCM_QK_K) + b,
+                           abs_part, val_part, &iscale_s);
 }
 
 __global__ static void moe_gate_up_mid_qwarp32_kernel(

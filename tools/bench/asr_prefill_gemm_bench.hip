@@ -267,7 +267,7 @@ const Case kCases[] = {
 };
 
 // Mirrors SelectHipblasLtHeuristicRank in
-// src/models/qwen/hip/kernels/hipblaslt_gemm.hip, so the row labelled
+// src/families/qwen/kernels/hipblaslt_gemm.hip, so the row labelled
 // `production rank` is the algorithm the runtime actually installs.
 constexpr std::size_t kLargeBatch = 512;
 constexpr std::size_t kLargeWideRank = 3;

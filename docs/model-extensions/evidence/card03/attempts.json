@@ -1,0 +1,100 @@
+{
+  "attempts": [
+    {
+      "id": "baseline-off",
+      "artifacts": "artifacts/model-extensions/card03/baseline-off",
+      "binary_sha256": "04a885b0d7847c5567c233cb1aeecafd1de3ca4862cec3034c505e0ce6dad8b6",
+      "source_revision": "79930b75",
+      "timing_eligibility": "contaminated",
+      "reason": "Candidate production and CPU builds overlapped initial baseline requests. Retain diagnostic results; repeat matched timing histories after all builds finish."
+    },
+    {
+      "id": "baseline-off-idle",
+      "artifacts": "artifacts/model-extensions/card03/baseline-off-idle",
+      "functional_status": "passed",
+      "sub_suites": 17,
+      "requests": 118,
+      "timing_eligibility": "idle matched arm",
+      "comparison_status": "reference",
+      "flagged_phases": null
+    },
+    {
+      "id": "candidate-off-idle",
+      "artifacts": "artifacts/model-extensions/card03/candidate-off-idle",
+      "functional_status": "passed",
+      "sub_suites": 17,
+      "requests": 118,
+      "timing_eligibility": "idle matched arm",
+      "comparison_status": "inconclusive",
+      "flagged_phases": 17
+    },
+    {
+      "id": "baseline-mtp-idle",
+      "artifacts": "artifacts/model-extensions/card03/baseline-mtp-idle",
+      "functional_status": "passed",
+      "sub_suites": 17,
+      "requests": 118,
+      "timing_eligibility": "idle matched arm",
+      "comparison_status": "reference",
+      "flagged_phases": null
+    },
+    {
+      "id": "candidate-mtp-idle",
+      "artifacts": "artifacts/model-extensions/card03/candidate-mtp-idle",
+      "functional_status": "passed",
+      "sub_suites": 17,
+      "requests": 118,
+      "timing_eligibility": "idle matched arm",
+      "comparison_status": "inconclusive",
+      "flagged_phases": 24
+    },
+    {
+      "id": "baseline-off-repeat1",
+      "timing_eligibility": "idle matched alternating history",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/baseline-off-repeat1"
+    },
+    {
+      "id": "candidate-off-repeat1",
+      "timing_eligibility": "idle matched alternating history",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/candidate-off-repeat1"
+    },
+    {
+      "id": "baseline-mtp-repeat1",
+      "timing_eligibility": "idle matched alternating history",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/baseline-mtp-repeat1"
+    },
+    {
+      "id": "candidate-mtp-repeat1",
+      "timing_eligibility": "idle matched alternating history",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/candidate-mtp-repeat1"
+    },
+    {
+      "id": "baseline-mtp-cold-control1",
+      "timing_eligibility": "focused idle history, strict hashes matched",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/baseline-mtp-cold-control1"
+    },
+    {
+      "id": "candidate-mtp-cold-control1",
+      "timing_eligibility": "focused idle history, strict hashes matched",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/candidate-mtp-cold-control1"
+    },
+    {
+      "id": "baseline-mtp-cold-control2",
+      "timing_eligibility": "focused idle history, strict hashes matched",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/baseline-mtp-cold-control2"
+    },
+    {
+      "id": "candidate-mtp-cold-control2",
+      "timing_eligibility": "focused idle history, strict hashes matched",
+      "functional_status": "passed",
+      "artifacts": "artifacts/model-extensions/card03/candidate-mtp-cold-control2"
+    }
+  ]
+}

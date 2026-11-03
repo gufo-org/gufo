@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "selected_extensions": [
+    "template_model"
+  ],
+  "excluded_assets_absent": [
+    "share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json",
+    "share/licenses/gufo/third-party/LICENSE.ds4"
+  ]
+}

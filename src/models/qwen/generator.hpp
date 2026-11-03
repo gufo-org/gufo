@@ -4,17 +4,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/sampling.hpp>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
-#include "src/core/gguf_reader.hpp"
-#include "src/core/sampling.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/state.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 namespace gufo::models {
 

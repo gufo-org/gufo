@@ -1,0 +1,22 @@
+# Card05 integration: initial failure of the newly added unshipped-reporting test
+# Command: nix develop -c python3 tests/extensions/discovery_test.py -v  (12/13 passed, this case failed)
+# Cause: the new test expected 'unshipped' to follow the selection mode; the implemented
+# contract is 'discovered but not present in extensions.lock', mode independent. The test
+# expectation was corrected; the implementation was left unchanged.
+
+test_unshipped_reporting_at_configure_time (__main__.DiscoveryTests.test_unshipped_reporting_at_configure_time) ... FAIL
+
+======================================================================
+FAIL: test_unshipped_reporting_at_configure_time (__main__.DiscoveryTests.test_unshipped_reporting_at_configure_time)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/mixer/gufo/tests/extensions/discovery_test.py", line 146, in test_unshipped_reporting_at_configure_time
+    self.assertIn(f"gufo: unshipped discovered extension {name}", output)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'gufo: unshipped discovered extension alpha' not found in '-- gufo: unshipped discovered extension beta\n-- gufo: extension mode=discovery; included=[base;alpha;beta]; excluded=[]\n-- Configuring done (0.0s)\n-- Generating done (0.0s)\n-- Build files have been written to: /tmp/nix-shell.PofHYB/gufo-discovery-xjb_sle6/build\n'
+
+----------------------------------------------------------------------
+Ran 13 tests in 41.063s
+
+FAILED (failures=1)
+DISCOVERY_EXIT=1

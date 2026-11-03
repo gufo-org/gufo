@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -546,8 +547,9 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
       }
     }
     {
-      // Double-precision recurrence over the conv output: the raw rows and
-      // the final state of both routes against it.
+      // Double-precision recurrence over the conv output: the final state and
+      // the normalized, gated output rows of both routes against it, and the
+      // raw rows of the decode route (the prefill kernel keeps them on chip).
       std::vector<float> raw_ref(kRaw);
       std::vector<float> state_ref(kStateCount);
       std::vector<double> S(static_cast<std::size_t>(kDim) * kDim);
@@ -595,26 +597,45 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
           state_ref[h * S.size() + i] = static_cast<float>(S[i]);
         }
       }
+      std::vector<double> out_ref(kOut);
+      for (std::uint32_t tt = 0; tt < kTokens; ++tt) {
+        for (std::uint32_t h = 0; h < kVHeads; ++h) {
+          const std::size_t row = (tt * kVHeads + h) * kDim;
+          double ss = 0.0;
+          for (std::uint32_t v = 0; v < kDim; ++v)
+            ss += static_cast<double>(raw_ref[row + v]) * raw_ref[row + v];
+          const double scale = 1.0 / std::sqrt(ss / kDim + kEps);
+          for (std::uint32_t v = 0; v < kDim; ++v) {
+            const double gate = 1.0 / (1.0 + std::exp(-static_cast<double>(
+                                                 z[tt * kZ + h * kDim + v])));
+            out_ref[row + v] = raw_ref[row + v] * scale * norm_w[v] * gate;
+          }
+        }
+      }
       // Per (token, head) row and per-head state: worst error over that
       // row's / head's own RMS (heads decay at very different rates).
-      double worst_row[2] = {0.0, 0.0};
-      double worst_head[2] = {0.0, 0.0};
-      for (int route = 0; route < 2; ++route) {
+      const auto worst_rows = [&](const auto& reference, const auto& actual) {
+        double result = 0.0;
         for (std::uint32_t tt = 0; tt < kTokens; ++tt) {
           for (std::uint32_t h = 0; h < kVHeads; ++h) {
             double ss = 0.0;
             double worst = 0.0;
             for (std::uint32_t v = 0; v < kDim; ++v) {
               const std::size_t idx = (tt * kVHeads + h) * kDim + v;
-              ss += static_cast<double>(raw_ref[idx]) * raw_ref[idx];
-              worst =
-                  std::max(worst, std::abs(static_cast<double>(raw_ref[idx]) -
-                                           raws[route][idx]));
+              const auto expected = static_cast<double>(reference[idx]);
+              ss += expected * expected;
+              worst = std::max(worst, std::abs(expected - actual[idx]));
             }
-            worst_row[route] = std::max(worst_row[route],
-                                        worst / std::sqrt(ss / kDim + 1e-30));
+            result = std::max(result, worst / std::sqrt(ss / kDim + 1e-30));
           }
         }
+        return result;
+      };
+      const double worst_raw = worst_rows(raw_ref, raws[0]);
+      double worst_row[2] = {0.0, 0.0};
+      double worst_head[2] = {0.0, 0.0};
+      for (int route = 0; route < 2; ++route) {
+        worst_row[route] = worst_rows(out_ref, outs[route]);
         for (std::uint32_t h = 0; h < kVHeads; ++h) {
           double ss = 0.0;
           double worst = 0.0;
@@ -629,12 +650,13 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
               worst_head[route], worst / std::sqrt(ss / (kDim * kDim) + 1e-30));
         }
       }
-      std::cout << "  per row / head over own RMS: raw route0 " << worst_row[0]
-                << " route1 " << worst_row[1] << "; state route0 "
-                << worst_head[0] << " route1 " << worst_head[1] << '\n';
+      std::cout << "  per row / head over own RMS: raw route0 " << worst_raw
+                << "; output route0 " << worst_row[0] << " route1 "
+                << worst_row[1] << "; state route0 " << worst_head[0]
+                << " route1 " << worst_head[1] << '\n';
       // Both routes accumulate in F32: F64 agreement to accumulation order.
-      if (std::max(std::max(worst_row[0], worst_row[1]),
-                   std::max(worst_head[0], worst_head[1])) > 1e-3) {
+      if (std::max({worst_raw, worst_row[0], worst_row[1], worst_head[0],
+                    worst_head[1]}) > 1e-3) {
         return 1;
       }
     }
@@ -651,11 +673,57 @@ int RunCase(std::uint32_t kTokens, bool extreme_gates = false) {
   }
 }
 
+// Output layouts of a prefill pass: F32 rows, F16 rows with a padded stride
+// (the ssm_out F16 GEMM's input) and the W8A8 GEMM's tiled Q8 activations.
+enum class SplitOutput { kF32, kHalf, kQ8 };
+
+// The W8A8 activation tiles (kernels.hip.cpp): 16 tokens x one 32-wide K
+// block, two 256-byte halves of 16 tokens x 16 codes, then 16 F32 scales.
+constexpr std::size_t kQ8TileTokens = 16;
+constexpr std::size_t kQ8TileBytes = 576;
+constexpr std::size_t kHalfStride = kZ + 32;
+
+// One token row of a pass's output, as bytes comparable across passes: the
+// row itself, or for Q8 its codes followed by its 192 block scales.
+std::vector<std::uint8_t> OutputRow(const std::vector<std::uint8_t>& out,
+                                    SplitOutput mode, std::uint32_t row) {
+  switch (mode) {
+    case SplitOutput::kF32: {
+      const auto* first = out.data() + std::size_t{row} * kZ * sizeof(float);
+      return {first, first + kZ * sizeof(float)};
+    }
+    case SplitOutput::kHalf: {
+      const auto* first =
+          out.data() + std::size_t{row} * kHalfStride * sizeof(__half);
+      return {first, first + kZ * sizeof(__half)};
+    }
+    case SplitOutput::kQ8: {
+      constexpr std::size_t blocks = kZ / 32;
+      std::vector<std::uint8_t> bytes(kZ + blocks * sizeof(float));
+      const std::size_t tt = row / kQ8TileTokens;
+      const std::size_t tl = row % kQ8TileTokens;
+      for (std::size_t kb = 0; kb < blocks; ++kb) {
+        const auto* tile = out.data() + ((tt * blocks) + kb) * kQ8TileBytes;
+        for (std::size_t lane = 0; lane < 32; ++lane)
+          bytes[kb * 32 + lane] =
+              tile[((lane >> 4U) * 256) + (tl * 16) + (lane & 15U)];
+        std::memcpy(bytes.data() + kZ + kb * sizeof(float),
+                    tile + 512 + tl * sizeof(float), sizeof(float));
+      }
+      return bytes;
+    }
+  }
+  return {};
+}
+
 // A prefill pass that finishes a prompt after a checkpoint restore covers
 // only its last rows: eight or fewer take the history-saving convolution,
 // wider ones the token-tiled one. Each row's output and the final recurrent
-// and convolution state must equal the single pass's, bit for bit.
-void CheckSplitPasses(std::uint32_t tokens) {
+// and convolution state must equal the single pass's, bit for bit, in every
+// output layout and for prefixes ending anywhere in the recurrence's
+// four-token windows.
+void CheckSplitPasses(std::uint32_t tokens, SplitOutput mode,
+                      std::initializer_list<std::uint32_t> tails) {
   const std::size_t qkv_count = std::size_t{tokens} * kChannels;
   const std::size_t state_count = std::size_t{kVHeads} * kDim * kDim;
   const std::size_t conv_count = std::size_t{kKernel - 1} * kChannels;
@@ -679,7 +747,13 @@ void CheckSplitPasses(std::uint32_t tokens) {
   HipBuffer<float> d_kn(std::size_t{tokens} * kKHeads * kDim);
   HipBuffer<float> d_raw(std::size_t{tokens} * kVHeads * kDim);
   HipBuffer<float> d_conv_state(conv_count), d_state(state_count);
-  HipBuffer<float> d_out(out_count);
+  // Each pass writes its rows from the start of its own output buffer.
+  const std::size_t out_bytes =
+      mode == SplitOutput::kQ8
+          ? ((tokens + kQ8TileTokens - 1) / kQ8TileTokens) * (kZ / 32) *
+                kQ8TileBytes
+          : std::size_t{tokens} * kHalfStride * sizeof(float);
+  HipBuffer<std::uint8_t> d_out(out_bytes);
   Upload(&d_qkv, qkv);
   Upload(&d_z, z);
   Upload(&d_alpha_beta, alpha_beta);
@@ -687,40 +761,55 @@ void CheckSplitPasses(std::uint32_t tokens) {
   Upload(&d_a, a);
   Upload(&d_dt, dt);
   Upload(&d_norm_w, norm_w);
-  // Rows [first, first + count) continuing from the current state.
+  // Rows [first, first + count) continuing from the current state; returns
+  // the pass's output.
   const auto pass = [&](std::uint32_t first, std::uint32_t count) {
+    CheckHip(hipMemset(d_out.get(), 0, out_bytes), "output reset");
+    void* out = d_out.get();
     q::GatedDeltaNet(
         d_qkv.get() + std::size_t{first} * kChannels, kChannels,
         d_z.get() + std::size_t{first} * kZ, kZ,
         d_alpha_beta.get() + std::size_t{first} * 2 * kVHeads, d_conv_w.get(),
         d_a.get(), d_dt.get(), d_norm_w.get(), d_conv_state.get(),
         d_scratch.get(), d_qn.get(), d_kn.get(), d_raw.get(), d_state.get(),
-        d_out.get() + std::size_t{first} * kZ, nullptr, {}, {}, count, kKHeads,
-        kVHeads, kDim, kKernel, true, false, kEps, nullptr);
+        mode == SplitOutput::kF32 ? static_cast<float*>(out) : nullptr,
+        mode == SplitOutput::kQ8 ? out : nullptr, {}, {}, count, kKHeads,
+        kVHeads, kDim, kKernel, true, false, kEps, nullptr,
+        mode == SplitOutput::kHalf ? static_cast<__half*>(out) : nullptr, {},
+        mode == SplitOutput::kHalf ? kHalfStride : 0);
+    std::vector<std::uint8_t> bytes(out_bytes);
+    CheckHip(
+        hipMemcpy(bytes.data(), d_out.get(), out_bytes, hipMemcpyDeviceToHost),
+        "pass output");
+    return bytes;
   };
   Upload(&d_conv_state, conv_state);
   Upload(&d_state, state);
-  pass(0, tokens);
-  const auto out = Download(&d_out, out_count);
+  const auto out = pass(0, tokens);
   const auto final_state = Download(&d_state, state_count);
   const auto final_conv = Download(&d_conv_state, conv_count);
-  for (const std::uint32_t tail : {1U, 7U, 8U, 9U, 40U}) {
+  for (const std::uint32_t tail : tails) {
     const std::uint32_t prefix = tokens - tail;
     Upload(&d_conv_state, conv_state);
     Upload(&d_state, state);
     pass(0, prefix);
-    pass(prefix, tail);
-    const auto split_out = Download(&d_out, out_count);
-    if (std::memcmp(split_out.data() + std::size_t{prefix} * kZ,
-                    out.data() + std::size_t{prefix} * kZ,
-                    std::size_t{tail} * kZ * sizeof(float)) != 0 ||
-        Download(&d_state, state_count) != final_state ||
+    const auto split_out = pass(prefix, tail);
+    for (std::uint32_t r = 0; r < tail; ++r)
+      if (OutputRow(split_out, mode, r) != OutputRow(out, mode, prefix + r))
+        throw std::runtime_error("GDN rows depend on the prefill split (" +
+                                 std::to_string(prefix) + " + " +
+                                 std::to_string(tail) + " rows)");
+    if (Download(&d_state, state_count) != final_state ||
         Download(&d_conv_state, conv_count) != final_conv)
-      throw std::runtime_error("GDN rows depend on the prefill split (" +
+      throw std::runtime_error("GDN state depends on the prefill split (" +
                                std::to_string(prefix) + " + " +
                                std::to_string(tail) + " rows)");
   }
-  std::cout << "GDN prefill splits of " << tokens << " rows: exact\n";
+  std::cout << "GDN prefill splits of " << tokens << " rows ("
+            << (mode == SplitOutput::kF32    ? "F32"
+                : mode == SplitOutput::kHalf ? "F16"
+                                             : "Q8")
+            << "): exact\n";
 }
 
 }  // namespace
@@ -737,7 +826,11 @@ int main() {
     }
     if (RunCase(1, true) != 0 || RunCase(8, true) != 0)
       return 1;
-    CheckSplitPasses(99);
+    for (const auto mode :
+         {SplitOutput::kF32, SplitOutput::kHalf, SplitOutput::kQ8})
+      CheckSplitPasses(99, mode, {1U, 7U, 8U, 9U, 40U});
+    // Several hundred windows; prefixes end at every position of a window.
+    CheckSplitPasses(1031, SplitOutput::kHalf, {1U, 2U, 3U, 4U, 5U, 515U});
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

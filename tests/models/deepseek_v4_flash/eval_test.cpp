@@ -7,8 +7,7 @@
 #include "src/eval/extract.hpp"
 
 #ifndef GUFO_EVAL_TEST_DATA
-#define GUFO_EVAL_TEST_DATA \
-  "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
+#define GUFO_EVAL_TEST_DATA "tests/fixtures/eval/antirez-ds4.json"
 #endif
 
 namespace {

@@ -167,7 +167,7 @@
           default = base;
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
-          release = base.override { inherit releaseVersion; };
+          release = base.override { inherit releaseVersion; extensionsFromLock = true; };
           # Windows test binaries of the platform leaves and the CPU cache,
           # cross-built here and run on a Windows CI host.
           windows-platform-tests =
@@ -270,6 +270,7 @@
 
           formatSource = mkFilteredSource {
             directories = [
+              "include"
               "src"
               "tests"
             ];
@@ -281,6 +282,7 @@
 
           staticAnalysisSource = mkFilteredSource {
             directories = [
+              "include"
               "cmake"
               "src"
             ];
@@ -288,11 +290,15 @@
               ".clang-format"
               ".clang-tidy"
               "CMakeLists.txt"
+              "extensions.lock"
             ];
           };
 
           testSource = mkFilteredSource {
             directories = [
+              "examples/extension_template"
+              "include"
+              "schemas"
               "cmake"
               "src"
               "tests"
@@ -301,7 +307,10 @@
             files = [
               ".clang-format"
               "CMakeLists.txt"
+              "extensions.lock"
+              "AGENTS.md"
               "docs/RELEASING.md"
+              "docs/models/README.md"
               "tools/prof/prof.py"
               "tools/bench/speculative-corpus.py"
             ];
@@ -490,7 +499,7 @@
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
-              (if full then pkgsSys.python3.withPackages (ps: [ ps.numpy ]) else pkgsSys.python3)
+              (pkgsSys.python3.withPackages (ps: [ ps.jsonschema ] ++ pkgsSys.lib.optionals full [ ps.numpy ]))
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
@@ -530,6 +539,13 @@
               cmake --build . --parallel "$NIX_BUILD_CORES" --target check-pr
             ''}
 
+            # Build the real CPU lock-mode executable, using the same source
+            # and toolchain. This does not replace shipped HIP qualification.
+            cmake "$src" -B ../lock-build -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF -DGUFO_EXTENSIONS_FROM_LOCK=ON
+            cmake --build ../lock-build --target gufo --parallel "$NIX_BUILD_CORES"
+            ../lock-build/gufo diagnose --section extensions --json
+            ../lock-build/gufo --version | grep -Fx 'Extension selection: lock'
+
             if [[ -n "$ccache_launcher" ]]; then
               ccache --show-stats
             fi
@@ -543,6 +559,7 @@
 
           mkServeCheck =
             let
+              evaluationTests = import ./.devops/nix/mk-serve-tests.nix { lib = pkgsSys.lib; };
               # Test command rendering without realizing the GPU package.
               mkServe = args: self.lib.${system}.mkGufoServe (args // { gufo = "/gufo-test"; });
               ttsCmd = mkServe {
@@ -680,7 +697,18 @@
               echo "$image_str" | grep -F -- "--max-request-bytes 33554432"
               echo "$image_str" | grep -F -- "image --model /var/models/qwen-image --served-model-name qwen-image-test"
               mkdir -p $out
-              echo "PASS: mkGufoServe CLI string check passed" > $out/result.txt
+              echo "PASS: mkGufoServe CLI string check passed; ${toString (builtins.length evaluationTests.passed)} metadata evaluation cases" > $out/result.txt
+            '';
+
+          mkServeNixosCheck =
+            assert import ./.devops/nix/mk-serve-nixos-tests.nix {
+              pkgs = pkgsSys;
+              defaultPackage = self.packages.${system}.default;
+              releasePackage = self.packages.${system}.release;
+            };
+            pkgsSys.runCommand "check-mk-serve-nixos" { } ''
+              mkdir -p $out
+              echo "PASS: default/release mkServe NixOS service evaluation" > $out/result.txt
             '';
 
           # The hosted runner builds CPU contracts only. GPU compilation,
@@ -691,7 +719,8 @@
                 ${dependencyInventoryCheck}/result.txt \
                 ${docsCheck}/result.txt \
                 ${prTestCheck}/result.txt \
-                ${mkServeCheck}/result.txt > $out/pr-summary.txt
+                ${mkServeCheck}/result.txt \
+                ${mkServeNixosCheck}/result.txt > $out/pr-summary.txt
             cat $out/pr-summary.txt
           '';
         in
@@ -706,6 +735,7 @@
           tests = testCheck;
           pr-tests = prTestCheck;
           mk-serve = mkServeCheck;
+          mk-serve-nixos = mkServeNixosCheck;
           pr = prCheck;
         }
       );

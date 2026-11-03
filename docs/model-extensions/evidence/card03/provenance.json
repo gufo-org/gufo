@@ -1,0 +1,77 @@
+{
+  "arms": {
+    "baseline": {
+      "source_revision": "79930b75383fcda678daee98d796e6cc6dfdb63f",
+      "binary": "/home/mixer/gufo/build/release/gufo",
+      "binary_sha256": "04a885b0d7847c5567c233cb1aeecafd1de3ca4862cec3034c505e0ce6dad8b6",
+      "cache": {
+        "BUILD_TESTING": "OFF",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_COMPILER": "/nix/store/r5ri78axx1qggkjq3vawywlzglg70b5w-gcc-wrapper-16.2.0/bin/g++",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG",
+        "CMAKE_HIP_COMPILER": "/nix/store/92bpbb2rmrkszhw83x63x7qzj9jsz324-rocm-toolchain/bin/clang",
+        "CMAKE_HIP_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG"
+      }
+    },
+    "candidate": {
+      "source_revision": "50ba836fc4ab2fe7003371f3f290bdd48ea68b0a",
+      "binary": "/tmp/gufo-card03-spike/build/release/gufo",
+      "binary_sha256": "0bf5c8653f071884f4f575dff3d51ccc1a3b640900ea293b72fc65b91c2b0a9d",
+      "cache": {
+        "BUILD_TESTING": "OFF",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_COMPILER": "/nix/store/r5ri78axx1qggkjq3vawywlzglg70b5w-gcc-wrapper-16.2.0/bin/g++",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG",
+        "CMAKE_HIP_COMPILER": "/nix/store/92bpbb2rmrkszhw83x63x7qzj9jsz324-rocm-toolchain/bin/clang",
+        "CMAKE_HIP_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG"
+      }
+    }
+  },
+  "model_files": [
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "size": 10946624,
+      "stamp": "40:12470529:10946624:1789396482288344802:1789396924492133508",
+      "sha256": "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082",
+      "hash_method": "stat_validated_production_identity_cache"
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+      "size": 49859583136,
+      "stamp": "40:12470525:49859583136:1789396791259688456:1789396924492133508",
+      "sha256": "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9",
+      "hash_method": "stat_validated_production_identity_cache"
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+      "size": 49376141504,
+      "stamp": "40:12470521:49376141504:1789396909393969680:1789396924492133508",
+      "sha256": "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3",
+      "hash_method": "stat_validated_production_identity_cache"
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+      "size": 12087983520,
+      "stamp": "40:12470530:12087983520:1789396643273085413:1789396924492133508",
+      "sha256": "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a",
+      "hash_method": "stat_validated_production_identity_cache"
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/mmproj-BF16.gguf",
+      "size": 907542944,
+      "stamp": "40:12876264:907542944:1790069108027671858:1790069108027671858",
+      "sha256": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355",
+      "hash_method": "full_file_read_after_timing_jobs"
+    },
+    {
+      "path": "/persist/models/qwen38-flash-next/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "size": 2786568256,
+      "stamp": "40:12470428:2786568256:1789396358070004780:1789396358072004802",
+      "sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6",
+      "hash_method": "stat_validated_production_identity_cache"
+    }
+  ],
+  "model_hash_scope": "Existing production gguf-sha256-v1 cached full-file digests indexed by current device/inode/size/mtime/ctime stamp, or full file read when cache absent (projector); this audit does not reread the 111 GB main model.",
+  "raw_model_bench_provenance_limit": "Raw artifacts infer GCC15.3 and source79930b75 from editing host/root even when candidate binary is supplied; actual per-arm audited GCC16.2/HIPClang24 production metadata above takes precedence. Raw artifacts retained unchanged.",
+  "toolchain": "Pinned flake GCC16.2.0 / HIP Clang24 / ROCm10.1; same dependency paths and normalized common compile commands."
+}

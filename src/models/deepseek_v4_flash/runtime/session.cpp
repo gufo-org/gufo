@@ -373,16 +373,10 @@ int ds4_session_sample(const ds4_session *session,
       temperature, top_k, top_p, min_p, rng_state);
 }
 
-int ds4_session_copy_logits(const ds4_session *session,
-                            float *out,
-                            int capacity) {
-  if (!session || !session->checkpoint_valid || !out)
-    return 0;
-  const int vocabulary_size = ds4_engine_vocab_size(session->engine);
-  if (capacity < vocabulary_size)
-    return 0;
-  memcpy(out, session->logits.get(), (size_t)vocabulary_size * sizeof(out[0]));
-  return vocabulary_size;
+const float* ds4_session_logits(const ds4_session* session) {
+  if (!session || !session->checkpoint_valid)
+    return nullptr;
+  return session->logits.get();
 }
 
 int ds4_session_eval(ds4_session *session,
