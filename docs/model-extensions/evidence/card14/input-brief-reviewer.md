@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 > Instructions given to the independent review agent (written before it ran).
 > A brief, not a result.
 
@@ -52,7 +56,7 @@ assuming results (the orchestrator does not re-run the same gate twice).
     - Conformance tests in `tests/tools/generate_infrastructure_test.py` test missing metadata, duplicate metadata, drift detection, and conditional metadata.
   * Verification Gates:
     - Bounded hosted CPU contract and check-pr targets: `nix develop -c cmake --build --preset cpu-test --target check-pr`.
-    - Bounded PR checks in Nix: `nix build .#checks.x86_64-linux.pr`.
+    - Bounded PR checks in Nix: `legacy hosted PR check`.
     - Clang-format clean: `tools/ci/check-format.py`.
     - Documentation check clean: `tools/ci/check-docs.py`.
     - Python tests clean: `generate_infrastructure_test.py`, `metadata_test.py`, `discovery_test.py`, `check_extension_isolation_test.py`.

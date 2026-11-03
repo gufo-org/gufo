@@ -871,6 +871,8 @@ def main():
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--mode", choices=["report"], default="report")
     parser.add_argument("--json-report", type=Path, help="Write complete deterministic inventory")
+    parser.add_argument("--inventory", type=Path,
+                        help="Read a snapshot produced by --json-report in this test run")
     parser.add_argument("--details", action="store_true", help="Print the full JSON inventory")
     parser.add_argument("--legacy-counts", action="store_true",
                         help="Print legacy unclassified flat cross-owner counts")
@@ -893,7 +895,8 @@ def main():
     parser.add_argument("--target-ownership-report", action="store_true",
                         help="Print the library/target ownership graph")
     args = parser.parse_args()
-    report = inventory(args.root.resolve())
+    report = (json.loads(args.inventory.read_text(encoding="utf-8"))
+              if args.inventory else inventory(args.root.resolve()))
     if args.json_report:
         args.json_report.parent.mkdir(parents=True, exist_ok=True)
         args.json_report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

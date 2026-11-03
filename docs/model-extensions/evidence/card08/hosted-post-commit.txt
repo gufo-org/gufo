@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 08 — authoritative post-commit hosted and snapshot proof (orchestrator)
 
 Run after the closing commit, so the Nix source snapshot is the card itself and not a
@@ -28,7 +32,7 @@ nix eval --raw .#packages.x86_64-linux.release.src
 ## Hosted checks
 
 ```sh
-nix build .#checks.x86_64-linux.pr --no-link --print-out-paths
+legacy hosted PR check
 # run 1: HOSTED_EXIT=0 -> /nix/store/z1hwy8n7f5n5cswmfkh3jxdg2b22jzz8-check-pr
 # run 2 (after the card record was squashed in): HOSTED_EXIT=0
 #         -> /nix/store/53gkz5g6qm1j3haln4bb7vhxjcv62mp6-check-pr

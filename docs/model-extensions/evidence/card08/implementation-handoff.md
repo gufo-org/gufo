@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Implemented Card 08 (RFC step 5) in the working copy; nothing committed, nothing staged.
 
 **What changed**
@@ -13,7 +17,7 @@ Implemented Card 08 (RFC step 5) in the working copy; nothing committed, nothing
 - Builds `build/card08-{cpu,gpu,release}` all exit 0 (parent `build/card07-*` untouched).
 - CTest: CPU selection `100% out of 25`; GPU selection `100% out of 30` — three continuation identity goldens passed; **9 H3 rows Skipped (exit 77, missing weights) recorded as pending, not passes**.
 - Parity vs parent: flags `compared=27 failures=0` (21 identical, 6 justified), object `compared=27 failures=0` (27 code identical/move-artifact), device `compared=8 failures=0` (24 `.text/.rodata/.note` sections byte-identical); kernel resources `0 worse, 2692 same`, registered baseline FAIL rows identical to parent (pre-existing).
-- Hosted: `nix build .#checks.x86_64-linux.pr` exit 0 (format/dependency/docs/**hosted CPU contract suite**/mkGufoServe all PASS); `checks…h3-manifest` PASS.
+- Hosted: `legacy hosted PR check` exit 0 (format/dependency/docs/**hosted CPU contract suite**/mkGufoServe all PASS); `checks…h3-manifest` PASS.
 
 **Open items for the orchestrator**
 

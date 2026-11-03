@@ -45,7 +45,7 @@ Git first: flakes only see tracked files.
 ```sh
 nix build                              # production package, no tests or tools
 ./result/bin/gufo diagnose
-nix build .#checks.x86_64-linux.pr     # hosted CPU/repository checks
+nix flake check     # hosted CPU/repository checks
 nix develop                            # GPU development, profilers, reference tools
 ```
 
@@ -167,7 +167,7 @@ compiler and dependency versions fixed across compared runs. Follow
 
 ## Submitting changes
 
-Hosted CI runs `nix build .#checks.x86_64-linux.pr` on Ubuntu with a 25-minute
+Hosted CI runs `nix flake check` on Ubuntu with a 25-minute
 limit: formatting, documentation, dependency inventory, server-command checks
 and the CPU contract suite. It does not build ROCm, download weights or run
 model oracles, so run the GPU checks that cover the change locally; the exact

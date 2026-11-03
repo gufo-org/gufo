@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 06: Move model-specific speculation out of core
 
 Status: **complete** (functional/performance criteria explicitly deferred —
@@ -121,7 +125,7 @@ PENDING commands (not run during this integration):
   `nix develop -c cmake --build --preset release --parallel 4`;
   repeat pending numerical/functional/lookup/bench commands with
   `BIN=build/release/gufo`, retain actual lock cache/compile/binary provenance.
-- Hosted closure: `nix build .#checks.x86_64-linux.pr` — RUN by the
+- Hosted closure: `legacy hosted PR check` — RUN by the
   orchestrator after all final edits: exit 0; `check-format`,
   `check-pr-tests` and `check-pr` derivations freshly built (not cached).
   Raw capture: `hosted-pr-check.txt`. Caveat retained from Card 05: the Nix

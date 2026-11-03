@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 ================================================================================
 CARD 12 ORCHESTRATOR CLOSURE VERIFICATION TRANSCRIPT
 ================================================================================
@@ -119,9 +123,9 @@ Exit Code: 0
 VERDICT: PASS
 
 --------------------------------------------------------------------------------
-10. Repository PR Checks (nix build .#checks.x86_64-linux.pr)
+10. Repository PR Checks (legacy hosted PR check)
 --------------------------------------------------------------------------------
-$ nix build .#checks.x86_64-linux.pr
+$ legacy hosted PR check
 building '/nix/store/5mx9i4k1ipblgpv1n918k4dqj90qiw23-check-docs.drv'...
 building '/nix/store/q651qmjb7yn2zskdn8d9awmbi0mvh0w5-check-format.drv'...
 building '/nix/store/4vfgx8r8b3pacaz3142xw6k0zgvp696c-check-pr-tests.drv'...

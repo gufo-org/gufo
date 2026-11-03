@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Model extensions implementation cards
 
 This ledger implements the full [RFC](RFC.md), including its success criteria,
@@ -293,7 +297,7 @@ managing 6 target files with `--check` drift validation and `--write` updates;
 added unit tests in `tests/tools/generate_infrastructure_test.py` (9/9 passed);
 resolved reviewer findings F1 (dead code) and F2 (non-existent manifest paths);
 and passed all 8 affected verification gates including `check-pr` (96/96 passed, 100%)
-and `nix build .#checks.x86_64-linux.pr` (all 4 check derivations built and passed).
+and `legacy hosted PR check` (all 4 check derivations built and passed).
 Its unresolved gates — none of which it claims — are the deferred functional
 harness runs and speed benchmark sweeps, which are now ready to run in the consolidated
 post-Card-14 qualification window.

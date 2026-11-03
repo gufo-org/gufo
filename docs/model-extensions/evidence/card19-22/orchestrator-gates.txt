@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Orchestrator Pinned Gate Set Verification Record — Cards 19–22
 
 Conducted by the orchestrator on 2026-11-01 following the completion of integration agent `e9dc339b-e68d-4b7b-8100-80ed6c3161a5`.
@@ -13,5 +17,5 @@ Conducted by the orchestrator on 2026-11-01 following the completion of integrat
 | 5 | Isolation ratchets | `python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes` | **PASS** | 0 strict boundary violations across 1401 files |
 | 6 | Continuation identity | `nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure` | **PASS** | 3/3 tests passed (qwen27b, deepseek_v4_flash, qwen38_flash_next) |
 | 7 | Hosted PR suite | `nix develop -c cmake --build --preset cpu-test --target check-pr` | **PASS** | 96/96 tests passed (100% in 168.64s) |
-| 8 | Hosted PR derivations | `nix build .#checks.x86_64-linux.pr --no-link` | **PASS** | All 4 check derivations built and passed |
+| 8 | Hosted PR derivations | `legacy hosted PR check` | **PASS** | All 4 check derivations built and passed |
 | 9 | Production Nix build | `nix build && ./result/bin/gufo diagnose` | **PASS** | Overall Status: [PASS], 8 built extensions, 8 available providers |

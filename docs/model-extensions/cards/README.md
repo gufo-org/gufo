@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Model extension cards
 
 The [index](../CARDS.md) lists all 29 sequential cards, dependencies, current
@@ -92,7 +96,7 @@ implemented the automated infrastructure generator `tools/ci/generate-infrastruc
 6 target files with drift checks; added generator unit tests in `tests/tools/generate_infrastructure_test.py`
 (9/9 passed); resolved review findings F1 (dead code) and F2 (non-existent manifest paths); and
 passed all 8 affected verification gates including `check-pr` (96/96 passed, 100%) and
-`nix build .#checks.x86_64-linux.pr` (all 4 derivations built and passed). Its unresolved gates — none
+`legacy hosted PR check` (all 4 derivations built and passed). Its unresolved gates — none
 of which it claims — are the deferred functional harness runs and speed benchmark sweeps, which are
 now ready for the consolidated post-Card-14 qualification window. See its
 [execution record](14-generated-infrastructure.md#execution-record).
@@ -198,7 +202,7 @@ multi-megabyte scratch under `docs/model-extensions/evidence/`. Before closing a
 explained, durable artifacts.
 
 For hosted CPU scope, configure `cpu-test` and run its relevant tests; use
-`nix build .#checks.x86_64-linux.pr` when the card requires bounded hosted checks.
+`legacy hosted PR check` when the card requires bounded hosted checks.
 C++ changes need the required formatting check in AGENTS.md. Header/include
 changes need `python3 tools/ci/check-extension-api.py --write` followed by a clean
 check and the required API policy updates when declarations/contracts change.

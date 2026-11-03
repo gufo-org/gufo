@@ -11,7 +11,7 @@ Linux source-build prerequisites are in [README.md](README.md#build-from-source)
 nix build                              # development package, all discovered extensions
 nix build .#release                    # shipped lock-mode package, no tests/tools
 ./result/bin/gufo diagnose
-nix build .#checks.x86_64-linux.pr      # bounded hosted CPU/repository checks
+nix flake check                       # hosted CPU/repository checks
 nix develop                            # GPU development and reference tools
 
 # Same production build without Nix, with the documented dependencies installed
@@ -34,6 +34,12 @@ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.p
 # Add --fix to apply formatting, then rerun the check.
 ```
 
+Tests selected by `nix flake check` should stay fast and cache-friendly where
+possible. Reuse expensive setup and compiler caches when valid, use the smallest
+deterministic fixtures that preserve the assertions, and avoid redundant builds,
+fixed sleeps and repeated whole-tree work. Measure added wall time; keep expensive
+stress/model qualification explicitly selectable without weakening correctness.
+
 Run the smallest check covering the change. `gpu-test` is RelWithDebInfo with
 assertions enabled. Build only the affected target during iteration:
 
@@ -44,7 +50,8 @@ nix develop -c ctest --preset gpu-full -R '^<test-name>$' --output-on-failure
 ```
 
 The same CMake/CTest commands work outside Nix. `cmake --build --preset pr`
-runs the hosted contract suite after configuring `cpu-test`. Full CPU checks,
+runs the focused contract subset after configuring `cpu-test`; `nix flake check`
+runs the canonical CPU/repository gate. Full CPU checks,
 sanitisers, GPU/operator/model checks and H3 quality tools remain available
 locally; see [docs/TESTING.md](docs/TESTING.md). Do not run full model sweeps,
 video generation or duplicate suites for routine edits. A missing-model skip

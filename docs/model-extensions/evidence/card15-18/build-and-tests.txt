@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Card 15-18 Verification Evidence: Build and Tests
 Executed on: Linux x86_64 Strix Halo gfx1151
 Workspace: /home/mixer/gufo
@@ -148,9 +152,9 @@ Disposition: PASS (100% check-pr test suite passes)
 Gate 11: Sandboxed Nix PR Checks
 ================================================================================
 Command:
-nix build .#checks.x86_64-linux.pr --no-link
+legacy hosted PR check
 
 Output:
-[4 of 4 built] checks.x86_64-linux.pr
+[4 of 4 built] legacy hosted PR check
 
 Disposition: PASS (Sandboxed check-format, check-docs, check-pr-tests, and check-pr all pass cleanly)

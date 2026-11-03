@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 15: Migrate speech recognition
 
 Status: **complete**. RFC step and dependencies: **8 ASR; 14**.
@@ -50,5 +54,5 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
   - `check-extension-isolation.py`: PASS (0 boundary violations).
   - `check-pr`: PASS (96/96 test suites passed).
   - `nix build`: PASS (`./result/bin/gufo diagnose` verifies `qwen3_asr` extension and `qwen3-asr` provider).
-  - `nix build .#checks.x86_64-linux.pr --no-link`: PASS.
+  - `legacy hosted PR check`: PASS.
   - Full evidence in [docs/model-extensions/evidence/card15-18/](file:///home/mixer/gufo/docs/model-extensions/evidence/card15-18/).

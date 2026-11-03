@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 08 — pending evidence (PENDING, never recorded as passes)
 
 Per the run plan, Card 08 runs unit, identity, CPU, hosted and static gates
@@ -16,7 +20,7 @@ the exact command to run there; none of it was executed for this card.
 | P4 | `nix develop -c python3 tests/functional/prompt_lookup.py --binary build/card08-release/gufo` | explicitly out-of-band for this card |
 | P5 | `nix develop -c python3 tests/functional/pi_agent.py --binary build/card08-release/gufo --model <pinned agent model>` | agent-loop replay; retain the sessions and inspect actual tool results |
 | P6 | `result/bin/gufo bench …` per [docs/BENCHMARKS.md](../../../BENCHMARKS.md) on the candidate and on a matched main control, per-request phase timings at 5 % and 10 ms | `gufo bench` is the shipped consumer of `gufo_compare`; timing belongs to the qualification window |
-| P7 | ~~PENDING~~ **RUN by the orchestrator after the closing commit** (2026-10-31): `nix build .#checks.x86_64-linux.pr --no-link --print-out-paths` exit 0 with freshly built `check-docs`/`check-format`/`check-pr-tests`/`check-pr`; `nix eval --raw .#packages.x86_64-linux.release.src` shows the H3 tier, the core fixture present, the old model path gone and exactly one `tests/` file admitted. Evidence: [`hosted-post-commit.txt`](hosted-post-commit.txt). The pre-commit row in `gates.md` stays non-authoritative. | Hosted coverage of the committed revision established |
+| P7 | ~~PENDING~~ **RUN by the orchestrator after the closing commit** (2026-10-31): `legacy hosted PR check` exit 0 with freshly built `check-docs`/`check-format`/`check-pr-tests`/`check-pr`; `nix eval --raw .#packages.x86_64-linux.release.src` shows the H3 tier, the core fixture present, the old model path gone and exactly one `tests/` file admitted. Evidence: [`hosted-post-commit.txt`](hosted-post-commit.txt). The pre-commit row in `gates.md` stays non-authoritative. | Hosted coverage of the committed revision established |
 
 ## Blocked on assets on this host (PENDING, not passes)
 

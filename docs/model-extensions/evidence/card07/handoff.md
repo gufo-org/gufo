@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 07 implementation handoff
 
 **This agent has finished editing and releases editing ownership of `/home/mixer/gufo`.**
@@ -111,7 +115,7 @@ decision, not a Card 07 baseline edit — see `pending-commands.md` §8.
 PENDING (never claimed as passes): the functional matrix and `long-context`/`cache`
 histories, `prompt_lookup.py`, matched per-request/phase main-control timings, CLI
 `prompt`/`bench` matched controls, standard speed benchmark, shipped lock-mode HIP artifact,
-Windows native build/run, hosted `nix build .#checks.x86_64-linux.pr`, and the
+Windows native build/run, hosted `legacy hosted PR check`, and the
 asset-blocked MTP/`qwen27b.cli`-full/`qwen_vision_serving_test` rows — all with literal
 commands in `pending-commands.md`.
 

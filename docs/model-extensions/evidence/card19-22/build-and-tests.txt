@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Cards 19–22 Verification Evidence: Build and Tests
 Executed on: Linux x86_64 Strix Halo gfx1151
 Workspace: /home/mixer/gufo
@@ -136,10 +140,10 @@ Exit Code: 0
 Disposition: PASS (96/96 tests passed)
 
 ================================================================================
-Gate 10: Hermetic Hosted CPU & Repository Checks (`.#checks.x86_64-linux.pr`)
+Gate 10: Hermetic Hosted CPU & Repository Checks (`legacy hosted PR check`)
 ================================================================================
 Command:
-nix build .#checks.x86_64-linux.pr --no-link
+legacy hosted PR check
 
 Output:
 these 4 derivations will be built:

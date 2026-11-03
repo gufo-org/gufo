@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 06 evidence index — move model-owned speculation out of core
 
 Candidate: jj working copy @ `kppqwqnv` (parent `cfc9802f` "docs(extensions): record card 05 closure verification").
@@ -31,7 +35,7 @@ Status table (updated as each check completes; PENDING lists the exact remaining
 | 9 | Matched main-control timings + compare.py per profile/mode (5% and 10 ms per request/phase) | DEFERRED to post-Card-14 window — PENDING (arms prepared: build/card06-release/gufo vs /tmp/gufo-main-ctl/build/card06-main-release/gufo, same pinned dev shell) |
 | 10 | Standard speed benchmark (model-bench.py, Gufo-side continuity for affected modes) | DEFERRED to post-Card-14 window — PENDING; exact commands in notes below |
 | 11 | HIP build audit: gufo_core compile graph, per-source flags, moved-TU ISA | PASS (graph, flags and per-function ISA all PASS — adapter 22/22 fixed-key methods: 16 identical, 4 address-encoding-only diffs, 2 destructors + 1 ctor presence-verified; class verbatim at source level; engine 59 identical + 69 alias-rename call/jump encoding differences backed by empty normalized source diff) | hip-build-audit.md, isa-audit-output.txt |
-| 12 | nix build .#checks.x86_64-linux.pr (LAST, after all code/doc edits incl. review/integration) | PASS exit 0 (orchestrator, after final edits; fresh check-format/check-pr-tests/check-pr derivations, not cached). Card 05 snapshot caveat applies. Final user-mandated `codex exec review` stamp: exit 0, no critical/major findings. | hosted-pr-check.txt, integration-gates.txt |
+| 12 | legacy hosted PR check (LAST, after all code/doc edits incl. review/integration) | PASS exit 0 (orchestrator, after final edits; fresh check-format/check-pr-tests/check-pr derivations, not cached). Card 05 snapshot caveat applies. Final user-mandated `codex exec review` stamp: exit 0, no critical/major findings. | hosted-pr-check.txt, integration-gates.txt |
 
 ## Implementation summary (what changed and why)
 

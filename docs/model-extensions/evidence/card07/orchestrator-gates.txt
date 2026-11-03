@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 07 — orchestrator closure gates (2026-10-31, pinned `nix develop`, TMPDIR=/tmp)
 
 Run by the orchestrator once, after all integration edits, on working copy `@`
@@ -38,13 +42,13 @@ before the GPU step; llama-swap services untouched; one GPU test at a time.
    `FLAG-DIFF`, or on a missing/stale mapping. First strengthened run surfaced 8 such
    call-target rows, which the CU-id mask now covers; the retained rerun above is clean.
 
-Deferred/hosted work after these edits: `nix build .#checks.x86_64-linux.pr` (run last) and
+Deferred/hosted work after these edits: `legacy hosted PR check` (run last) and
 the mandated `codex exec review`; functional/performance rows stay PENDING in
 `pending-commands.md` for the single post-Card-14 qualification window.
 
 ## Closure checks after every edit (orchestrator, last two gates)
 
-Hosted: `nix build .#checks.x86_64-linux.pr` -> HOSTED_EXIT=0. Freshly built derivations, not cache hits:
+Hosted: `legacy hosted PR check` -> HOSTED_EXIT=0. Freshly built derivations, not cache hits:
   - check-format.drv
   - check-pr-tests.drv
   - check-pr.drv

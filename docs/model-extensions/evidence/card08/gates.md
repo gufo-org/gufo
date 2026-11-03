@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 08 — gates run by the implementation agent
 
 Working copy `@ uytorytn 1cac04bf`, parent `zwllvvnv ec59bed0` (Card 07).
@@ -54,7 +58,7 @@ real exclusions available today were configured:
 
 | Gate | Command (verbatim) | Result |
 | --- | --- | --- |
-| Hosted PR check | `nix build .#checks.x86_64-linux.pr` | see *Hosted outcome* at the end of this file |
+| Hosted PR check | `legacy hosted PR check` | see *Hosted outcome* at the end of this file |
 | H3 manifest | `nix build .#checks.x86_64-linux.h3-manifest --no-link --print-out-paths` | `PASS: MiniMax H3 manifest tests clean`, exit 0 |
 | Nix source admission | `nix eval --raw .#packages.x86_64-linux.release.src` then `find $src/tests -type f` | the production source admits exactly one test-tree file: `tests/fixtures/eval/antirez-ds4.json`; the old `tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json` is gone and no model test file enters the derivation |
 | Snapshot honesty | Pre-commit Nix evaluations | coverage not established (dirty git tree → Nix snapshot from tracked parent paths); P7 is authoritative after commit |

@@ -75,8 +75,7 @@ jobs:
 
       - name: Run CPU and repository checks
         run: |
-          nix build .#checks.x86_64-linux.pr --print-build-logs --cores 2 --max-jobs 2
-          cat ./result/pr-summary.txt
+          nix flake check --print-build-logs --cores "$(nproc)" --max-jobs 2
 
   # Populate the shared production-package cache on main for later builds.
   cache-package:
