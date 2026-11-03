@@ -212,11 +212,12 @@ class ConfigureTests(unittest.TestCase):
                 'if (p.id.ends_with("-extra")) { if (!p.options.empty()) return 3; continue; }'
                 'if (p.options.size() != 1 || p.options[0].help != "x\\\\u0000y") return 2; } return 0; }\n')
             # Ninja keeps the build's compiler (CXX); a Visual Studio generator
-            # would select MSVC instead.
+            # would select MSVC instead. Like discovery fixtures, these temporary
+            # builds can reuse objects without retaining debug directory paths.
             for command in (["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
                             ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "2"],
                             ["ctest", "--test-dir", str(source / "build"), "-C", "Release", "--output-on-failure"]):
-                result = subprocess.run(command, env=dict(os.environ, CCACHE_BASEDIR=str(source)),
+                result = subprocess.run(command, env=dict(os.environ, CCACHE_BASEDIR=str(source), CCACHE_NOHASHDIR="true"),
                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 DIAGNOSTICS.append({"test": self.id(), "command": command,
                                     "returncode": result.returncode, "output": result.stdout})

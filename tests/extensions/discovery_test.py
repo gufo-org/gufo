@@ -26,7 +26,10 @@ class DiscoveryTests(unittest.TestCase):
         self.build = self.source / "build"
         # Each case has a fresh source tree. Normalize its temporary paths so
         # unchanged runtime objects remain reusable across cases and CI runs.
-        self.env = dict(os.environ, CCACHE_BASEDIR=str(self.source))
+        # clang-cl also hashes the working directory without debug flags.
+        # These disposable fixtures need no directory-specific debug paths;
+        # keep header/content validation but share objects across temp roots.
+        self.env = dict(os.environ, CCACHE_BASEDIR=str(self.source), CCACHE_NOHASHDIR="true")
         (self.source / "extensions.lock").write_text('{"schema":1,"extensions":[]}')
         (self.source / "main.cpp").write_text('''#include <iostream>
 #include "gufo/ext/registry.hpp"

@@ -41,9 +41,6 @@ not a quality pass.
 
 ## Hosted versus local checks
 
-The [Nix check inventory](CI_CHECKS.md) lists the canonical `nix flake check`
-selection and the explicitly invoked qualification suites.
-
 GitHub runs `nix flake check`: formatting, documentation, dependency inventory,
 server-command checks and one CPU build/test derivation. The CPU suite selects
 168 tests, runs with up to four CTest slots, and validates a separate lock-mode
@@ -76,16 +73,14 @@ nix develop .#checks.x86_64-linux.tests -c python3 tests/tools/serving_bench_tes
 ```
 
 The default `.clang-tidy` runs the static analyzer and selected correctness
-checks. Style, general guidelines and performance suggestions are available as
-an explicit audit with `.clang-tidy-audit`:
+checks. Run it explicitly against an affected source file:
 
 ```sh
-nix develop -c clang-tidy --config-file=.clang-tidy-audit \
-  -p build/cpu-test src/core/json.cpp
+nix develop -c clang-tidy -p build/cpu-test src/core/json.cpp
 ```
 
 The compilation database must already be configured (the `cpu-test` preset
-exports it). Replace the source file to audit the affected code.
+exports it).
 
 Full CPU builds need Python NumPy for the offline tool tests. GPU model oracles
 need the documented local weights; use focused targets and CTest labels before
