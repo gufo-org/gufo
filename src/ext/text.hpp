@@ -18,6 +18,7 @@
 
 #include "gufo/ext/adapter.hpp"
 #include "gufo/ext/cache.hpp"
+#include "gufo/ext/chat_template.hpp"
 #include "gufo/ext/continuation.hpp"
 #include "gufo/ext/device_probe.hpp"
 #include "gufo/ext/gguf_reader.hpp"
@@ -100,6 +101,7 @@ struct TextRunnerCapabilities {
   bool in_pass_checkpoint{false};
   bool partial_prefill_retention{false};
   bool prefill_rollback{false};
+  bool uses_jinja_chat_template{false};
 };
 
 struct TextRunnerPersistenceDescriptor {
@@ -257,6 +259,8 @@ struct ChatMessage {
 
   ChatRole role{ChatRole::kUser};
   std::string content;
+  /// Validated Jinja content parts, without transport URLs or image bytes.
+  json::Value template_content;
   std::string framing_suffix;
   std::string name;
   std::string thought;
@@ -312,6 +316,7 @@ struct ChatRequest {
   bool parallel_tool_calls{true};
   ReasoningOptions reasoning;
   bool add_vision_id{false};
+  json::Value chat_template_kwargs{json::Value::object()};
   bool cache_prompt{true};
   bool cache_persist{true};
   bool return_progress{false};
@@ -574,6 +579,7 @@ struct TextRunnerOptions {
   TextDiskCacheConfig disk_cache{};
   TextRunnerRamCacheOptions ram_cache{};
   bool enable_yarn{false};
+  std::shared_ptr<const core::JinjaChatTemplate> template_renderer{};
 };
 
 struct TextBenchOptions {
@@ -625,6 +631,8 @@ struct TextPromptOptions {
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+  core::ChatTemplateConfig chat_template;
+  std::shared_ptr<const core::JinjaChatTemplate> template_renderer{};
 };
 
 struct ScannedToolArgument {

@@ -19,6 +19,7 @@
 #include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
@@ -113,6 +114,12 @@ public:
       const gufo::server::ChatRequest& request) const override {
     if (initial_output_state_override)
       return *initial_output_state_override;
+    if (jinja) {
+      const auto rendered = render_chat_prompt(request);
+      return gufo::core::PromptOpensReasoning(*rendered)
+                 ? InitialOutputState::kReasoning
+                 : InitialOutputState::kContent;
+    }
     return request.reasoning.enabled.value_or(false)
                ? InitialOutputState::kReasoning
                : InitialOutputState::kContent;
@@ -214,8 +221,27 @@ public:
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  std::optional<std::string> render_chat_prompt(
+      const gufo::server::ChatRequest& request) const override {
+    if (!jinja)
+      return std::nullopt;
+    auto options = gufo::tokenization::ResolveQwenChatOptions(
+        request.reasoning, request.add_vision_id);
+    options.jinja = jinja;
+    options.kwargs = request.chat_template_kwargs;
+    std::string error;
+    auto result = gufo::tokenization::QwenChatTemplate::Render(
+        request.messages, request.tools, options, &error);
+    if (!result)
+      throw std::invalid_argument(error);
+    return result;
+  }
+  std::shared_ptr<const gufo::core::JinjaChatTemplate> jinja;
   [[nodiscard]] bool supports_images() const override { return image_support; }
   bool image_support{true};
+  [[nodiscard]] bool uses_jinja_chat_template() const override {
+    return jinja != nullptr;
+  }
 
   bool WaitForFirstPiece() {
     std::unique_lock<std::mutex> lock(mutex);
@@ -6876,7 +6902,120 @@ void TestChatUsageReportsReasoningTokens() {
   }
 }
 
+void TestJinjaContentParts() {
+  FakeBackend backend;
+  backend.jinja = gufo::core::JinjaChatTemplate::Compile(
+      "{% for message in messages %}{{ message.role }}:"
+      "{% if message.content is string %}{{ message.content }}"
+      "{% else %}{% for part in message.content %}"
+      "{% if part.type == 'image' %}"
+      "<|vision_start|><|image_pad|><|vision_end|>"
+      "{% else %}[{{ part.text }}]{% endif %}{% endfor %}{% endif %};"
+      "{% endfor %}");
+  const auto body = gufo::json::parse(R"({"messages":[
+    {"role":"developer","content":[{"type":"text","text":"example input"},
+       {"type":"text","text":"example output"}]},
+    {"role":"user","content":[{"type":"text","text":"one"},
+       {"type":"text","text":"two"}]},
+    {"role":"system","content":"last"}]})");
+  const auto response =
+      gufo::server::HandleApplyTemplate(Request(body.dump()), backend);
+  Expect(response.status == 200 &&
+             gufo::json::parse(response.body).member_str("prompt") ==
+                 "developer:[example input][example "
+                 "output];user:[one][two];system:last;",
+         "Jinja preserves roles, message order, and individual content parts");
+  const auto images = gufo::json::parse(R"({"model":"test-model","messages":[
+    {"role":"developer","content":[
+       {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}},
+       {"type":"text","text":"example output"}]},
+    {"role":"user","content":[{"type":"text","text":"one"},
+       {"type":"text","text":"two"}]},
+    {"role":"system","content":"last"}]})");
+  const auto image_response =
+      gufo::server::HandleApplyTemplate(Request(images.dump()), backend);
+  Expect(image_response.status == 200 &&
+             gufo::json::parse(image_response.body).member_str("prompt") ==
+                 "developer:<|vision_start|><|image_pad|><|vision_end|>["
+                 "example output];user:[one][two];system:last;",
+         "Jinja accepts image examples without exposing transport URLs");
+  gufo::tokenization::ChatMessage parsed;
+  gufo::core::ImageReadBudget budget;
+  std::string error;
+  const auto response_item = gufo::json::parse(
+      R"({"role":"user","content":[{"type":"input_text","text":"one"},{"type":"input_text","text":"two"}]})");
+  Expect(gufo::server::ParseOpenAiResponseMessage(response_item, &parsed,
+                                                  budget, &error, true) &&
+             parsed.template_content.size() == 2,
+         "Responses preserves content parts when Jinja is selected");
+  parsed = {};
+  Expect(gufo::server::ParseOpenAiResponseMessage(response_item, &parsed,
+                                                  budget, &error) &&
+             parsed.template_content.is_null() && parsed.content == "onetwo",
+         "compiled Responses retains only the flattened content");
+  backend.jinja.reset();
+  auto compiled_body = body;
+  compiled_body["model"] = "test-model";
+  const auto compiled =
+      gufo::server::HandleOpenAiChat(Request(compiled_body.dump()), backend);
+  Expect(compiled.status == 200 &&
+             backend.last_request.messages.front().template_content.is_null(),
+         "compiled chat does not duplicate content parts for Jinja");
+  Expect(
+      gufo::server::HandleOpenAiChat(Request(images.dump()), backend).status ==
+          400,
+      "compiled mode still rejects developer images");
+}
+
+void TestJinjaHttpControls() {
+  FakeBackend backend;
+  backend.jinja = gufo::core::JinjaChatTemplate::Compile(
+      "{{ label }}:{{ messages[0].content }}{% if add_generation_prompt "
+      "%}<think>{% endif %}");
+  backend.pieces = {"reason", "</think>", "answer"};
+  const auto body = gufo::json::parse(
+      R"({"model":"test-model","messages":[{"role":"user","content":"hello"}],"chat_template_kwargs":{"label":"custom","enable_thinking":false}})");
+  auto applied =
+      gufo::server::HandleApplyTemplate(Request(body.dump()), backend);
+  Expect(applied.status == 200 &&
+             gufo::json::parse(applied.body).member_str("prompt") ==
+                 "custom:hello<think>",
+         "apply-template forwards custom kwargs");
+  for (const bool stream : {false, true}) {
+    auto input = body;
+    input["stream"] = stream;
+    auto response =
+        gufo::server::HandleOpenAiChat(Request(input.dump()), backend);
+    Expect(response.status == 200, "Jinja HTTP request accepted");
+    if (stream) {
+      std::string output;
+      response.streaming_body([&](std::string_view chunk) {
+        output += chunk;
+        return true;
+      });
+      Expect(output.find("[DONE]") != std::string::npos,
+             "Jinja streaming completes");
+    }
+    Expect(backend.last_request.chat_template_kwargs.member_str("label") ==
+               "custom",
+           "generation receives the same kwargs");
+  }
+  auto reserved = body;
+  reserved["chat_template_kwargs"]["messages"] = gufo::json::Value::array();
+  Expect(gufo::server::HandleApplyTemplate(Request(reserved.dump()), backend)
+                 .status == 400,
+         "reserved template variables rejected");
+  backend.jinja = gufo::core::JinjaChatTemplate::Compile(
+      "{{ raise_exception('invalid history') }}");
+  Expect(
+      gufo::server::HandleApplyTemplate(Request(body.dump()), backend).status ==
+          400,
+      "template runtime errors are request errors");
+}
+
 int main() {
+  TestJinjaContentParts();
+  TestJinjaHttpControls();
   gufo::models::deepseek_v4_flash::RegisterToolDialect();
   TestLogprobs();
   TestToolCallRenderParseRoundTrip();

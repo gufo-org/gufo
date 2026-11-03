@@ -3,6 +3,7 @@ include/gufo/ext/adapter.hpp
 include/gufo/ext/asr.hpp
 include/gufo/ext/cache.hpp
 include/gufo/ext/cancellable_gate.hpp
+include/gufo/ext/chat_template.hpp
 include/gufo/ext/component_cache_resources.hpp
 include/gufo/ext/continuation.hpp
 include/gufo/ext/core_options.def
@@ -86,6 +87,7 @@ src/core/hip/snapshot_transfer.hpp
 src/core/hip/transfer_pool.hpp
 src/core/hip/weight_upload.hpp
 src/core/image.hpp
+src/core/jinja/chat_template.hpp
 src/core/json.hpp
 src/core/json_constraint.hpp
 src/core/json_schema_lexeme.hpp

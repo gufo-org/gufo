@@ -12,6 +12,7 @@
 #include "gufo/ext/registry.hpp"
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/chat_template_options.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
@@ -84,6 +85,7 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   parser.AddOption("-m", "--model", "PATH", "Path to GGUF model file", "Model",
                    &opt.model_path);
   RegisterImageOptions(parser, opt);
+  RegisterChatTemplateOptions(parser, opt.chat_template);
 
   // Prompt & Formatting
   if (command == "prompt") {
@@ -201,6 +203,7 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
   opt.sampling_supplied = SamplingOptionsSupplied(parser);
   try {
     opt.sampling.Validate();
+    opt.chat_template.Validate(!opt.use_chat_template);
   } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr) {
       *error_msg = exception.what();
@@ -372,6 +375,14 @@ int RunPrompt(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
+  try {
+    opt.template_renderer =
+        core::JinjaChatTemplate::Load(*reader, opt.chat_template);
+  } catch (const std::exception& error) {
+    std::cerr << "Error loading chat template: " << error.what() << '\n';
+    return 1;
+  }
+
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
@@ -380,7 +391,12 @@ int RunPrompt(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  return provider->prompt_driver(opt, *reader, model_load_start);
+  try {
+    return provider->prompt_driver(opt, *reader, model_load_start);
+  } catch (const std::exception& error) {
+    std::cerr << "Prompt failed: " << error.what() << '\n';
+    return 1;
+  }
 }
 
 int RunChat(std::span<const char* const> args) {
@@ -415,6 +431,14 @@ int RunChat(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
+  try {
+    opt.template_renderer =
+        core::JinjaChatTemplate::Load(*reader, opt.chat_template);
+  } catch (const std::exception& error) {
+    std::cerr << "Error loading chat template: " << error.what() << '\n';
+    return 1;
+  }
+
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
@@ -423,7 +447,12 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  return provider->chat_driver(opt, *reader, model_load_start);
+  try {
+    return provider->chat_driver(opt, *reader, model_load_start);
+  } catch (const std::exception& error) {
+    std::cerr << "Chat failed: " << error.what() << '\n';
+    return 1;
+  }
 }
 
 }  // namespace gufo::cli

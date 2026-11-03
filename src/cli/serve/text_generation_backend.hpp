@@ -281,6 +281,8 @@ public:
   }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
+  /// Preserve original content parts for the selected Jinja renderer.
+  [[nodiscard]] virtual bool uses_jinja_chat_template() const { return false; }
   /// The served model file and build revision, as llama-server's /props
   /// reports them. Empty when unknown.
   [[nodiscard]] virtual std::string model_path() const { return {}; }

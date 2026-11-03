@@ -103,7 +103,8 @@ public:
   [[nodiscard]] static std::shared_ptr<const QwenGpuModel> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr,
-      std::shared_ptr<models::qwen::vision::Encoder> vision = {});
+      std::shared_ptr<models::qwen::vision::Encoder> vision = {},
+      bool compiled_chat_template = true);
 
   [[nodiscard]] const std::shared_ptr<models::qwen::vision::Encoder>&
   VisionEncoder() const noexcept {
@@ -424,7 +425,8 @@ public:
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production(),
+      bool compiled_chat_template = true);
 
   /// Generates tokens auto-regressively on GPU with streaming callback.
   std::vector<tokenization::TokenId> Generate(

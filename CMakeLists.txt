@@ -290,7 +290,18 @@ endif()
 
 add_subdirectory(src/core/platform)
 
+add_library(gufo_jinja STATIC
+  src/core/jinja/vendor/lexer.cpp
+  src/core/jinja/vendor/parser.cpp
+  src/core/jinja/vendor/runtime.cpp
+  src/core/jinja/vendor/string.cpp
+  src/core/jinja/vendor/value.cpp
+  src/core/jinja/vendor/unicode.cpp)
+target_include_directories(gufo_jinja PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(gufo_jinja PRIVATE ICU::uc)
+
 add_library(gufo_core STATIC
+  src/core/jinja/chat_template.cpp
   src/core/image.cpp
   src/core/crypto/sha256.cpp
   src/core/gguf_reader.cpp
@@ -305,7 +316,7 @@ add_library(gufo_core STATIC
   src/core/quant/ggml_gemm.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
+target_link_libraries(gufo_core PUBLIC gufo_jinja gufo_platform ICU::uc ICU::i18n
   Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
@@ -737,6 +748,12 @@ endfunction()
   add_test(NAME json_constraint_test COMMAND json_constraint_test)
   set_tests_properties(json_constraint_test PROPERTIES LABELS "cpu;json;sampling")
 
+  add_executable(jinja_chat_template_test tests/core/jinja_chat_template_test.cpp)
+  target_link_libraries(jinja_chat_template_test PRIVATE gufo_core)
+  target_compile_definitions(jinja_chat_template_test PRIVATE GUFO_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME jinja_chat_template_test COMMAND jinja_chat_template_test)
+  set_tests_properties(jinja_chat_template_test PROPERTIES LABELS "cpu;chat_template")
+
   add_executable(json_test tests/core/json_test.cpp)
   target_link_libraries(json_test PRIVATE gufo_core)
   add_test(NAME json_test COMMAND json_test)
@@ -900,19 +917,18 @@ endfunction()
   add_subdirectory(tests/models/deepseek_v4_flash)
   add_subdirectory(tests/models/qwen38_flash_next)
 
-  if(ENGINE_ENABLE_HIP)
-    add_executable(chat_template_hf_token_golden_test
-      tests/models/chat_template_hf_token_golden_test.cpp)
-    target_link_libraries(chat_template_hf_token_golden_test PRIVATE gufo_core
-      gufo_qwen_text)
-    target_compile_definitions(chat_template_hf_token_golden_test PRIVATE
-      GUFO_CHAT_TEMPLATE_HF_GOLDENS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
-    add_test(NAME chat_template_hf_token_golden_test
-      COMMAND chat_template_hf_token_golden_test)
-    set_tests_properties(chat_template_hf_token_golden_test PROPERTIES
-      LABELS "gpu;hip;tokenization;chat_template;qwen;external-model"
-      SKIP_RETURN_CODE 77)
-  endif()
+  add_executable(chat_template_hf_token_golden_test
+    tests/models/chat_template_hf_token_golden_test.cpp)
+  target_link_libraries(chat_template_hf_token_golden_test PRIVATE gufo_core
+    gufo_qwen_text)
+  target_compile_definitions(chat_template_hf_token_golden_test PRIVATE
+    GUFO_CHAT_TEMPLATE_HF_GOLDENS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json"
+    GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/src/families/qwen/text/reference/chat_template.jinja")
+  add_test(NAME chat_template_hf_token_golden_test
+    COMMAND chat_template_hf_token_golden_test)
+  set_tests_properties(chat_template_hf_token_golden_test PROPERTIES
+    LABELS "cpu;tokenization;chat_template;qwen;external-model"
+    SKIP_RETURN_CODE 77)
 
   add_executable(continuation_cache_test tests/cli/continuation_cache_test.cpp)
   target_link_libraries(continuation_cache_test PRIVATE gufo_serving)

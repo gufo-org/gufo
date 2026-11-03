@@ -51,6 +51,12 @@ To add or maintain a model, start with the [source extension guide](docs/extensi
 
 ## Quickstart
 
+Text commands use compiled chat templates by default. To use a GGUF's embedded
+Jinja template, add `--chat-template` to `serve llm`, `prompt`, or `chat`.
+To override it, also pass `--chat-template-path custom.jinja`.
+See [chat template configuration](docs/SERVER.md#single-executable-and-model-configuration)
+for compatibility and examples.
+
 ```sh
 hf download unsloth/Qwen3.8-27B-GGUF \
   Qwen3.8-27B-UD-Q8_K_XL.gguf \
@@ -129,9 +135,9 @@ Reasoning tokens count toward that response limit.
 ## Harness notes
 
 - **Qwen with Codex:** Codex sends developer messages mid-conversation, after
-  compaction or a settings change. Qwen's template accepts only one leading
-  system turn, so Gufo moves them there. The request that introduces one is
-  prefilled again; later requests reuse the cache. See the
+  compaction or a settings change. Gufo's compiled Qwen formatter accepts only
+  one leading system turn, so it moves them there. The request that introduces
+  one is prefilled again; later requests reuse the cache. See the
   [API contract](docs/SERVER.md).
 - **Qwen with Claude Code:** not supported. Claude Code adds a system message
   to `messages` on every turn, so Gufo moves a new one to the leading system

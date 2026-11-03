@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -507,6 +508,26 @@ void TestLiteralControlSpellingsStayText() {
          "a full scan would have turned the content into framing");
 }
 
+void TestJinjaLiteralControlSpellingsStayText() {
+  ChatTemplateOptions options;
+  options.jinja = gufo::core::JinjaChatTemplate::Compile(
+      "<｜begin▁of▁sentence｜><｜User｜>{{ messages[0].content }}"
+      "<｜Assistant｜><think>",
+      "", "");
+  const std::vector<ChatMessage> messages{
+      Message("user", std::string(kControlSpellings))};
+  std::vector<ContentSpan> spans;
+  const auto rendered = gufo::models::deepseek_v4_flash::RenderChat(
+      messages, {}, options, &spans);
+  const auto pieces = SplitControlTokens(rendered, spans);
+  Expect(Joined(pieces) == rendered,
+         "Jinja provenance splitting preserves the rendered bytes");
+  Expect(Controls(pieces) ==
+             std::vector{ControlToken::kBeginOfSentence, ControlToken::kUser,
+                         ControlToken::kAssistant, ControlToken::kThinkStart},
+         "Jinja message control spellings stay text through native splitting");
+}
+
 void TestSplitMatchesFullScanWithoutLiterals() {
   const auto rendered = RenderWithSpans(ConversationCarrying("plain"));
   const auto pieces = SplitControlTokens(rendered.text, rendered.spans);
@@ -556,6 +577,63 @@ void TestSplitSpanBoundaries() {
          "framing between two content spans stays a control token");
 }
 
+void TestJinjaGoldens() {
+  const std::filesystem::path root(GUFO_SOURCE_DIR);
+  const auto read = [](const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    Expect(input.good(), "Jinja fixture opens");
+    return std::string{std::istreambuf_iterator<char>(input), {}};
+  };
+  const auto fixture = gufo::json::parse(
+      read(root / "tests/fixtures/jinja_chat_templates.json"));
+  for (const auto& example : fixture.find("cases")->items()) {
+    if (example.member_str("family") != "deepseek")
+      continue;
+    const auto source = read(root / example.member_str("source"));
+    Expect(Sha256(source) == example.member_str("source_sha256"),
+           "pinned Jinja source hash");
+    const auto renderer = gufo::core::JinjaChatTemplate::Compile(
+        source, example.member_str("bos"), example.member_str("eos"));
+    const auto& inputs = *example.find("inputs");
+    const auto expected = example.member_str("expected");
+    namespace ds = gufo::models::deepseek_v4_flash;
+    std::vector<ds::ChatMessage> messages;
+    for (const auto& item : inputs.find("messages")->items()) {
+      ds::ChatMessage message{};
+      message.role = item.member_str("role");
+      message.content = item.member_str("content");
+      message.reasoning_content = item.member_str("reasoning_content");
+      message.tool_call_id = item.member_str("tool_call_id");
+      if (const auto* calls = item.find("tool_calls"))
+        for (const auto& call : calls->items()) {
+          ds::ChatMessage::ToolCall converted{};
+          converted.id = call.member_str("id");
+          const auto& function = *call.find("function");
+          converted.name = function.member_str("name");
+          for (const auto& [key, value] : function.find("arguments")->members())
+            converted.arguments.push_back(
+                {key, value.is_string() ? value.str() : value.dump(),
+                 value.is_string()});
+          message.tool_calls.push_back(std::move(converted));
+        }
+      messages.push_back(std::move(message));
+    }
+    std::vector<ds::ChatTool> tools;
+    for (const auto& tool : inputs.find("tools")->items()) {
+      ds::ChatTool converted{};
+      converted.definition_json = tool.find("function")->dump();
+      tools.push_back(std::move(converted));
+    }
+    ds::ChatTemplateOptions options;
+    options.jinja = renderer;
+    options.enable_thinking = inputs.find("enable_thinking")->as_bool();
+    options.reasoning_effort = gufo::ReasoningEffort::kLow;
+    options.preserve_thinking = false;
+    Expect(ds::RenderChat(messages, tools, options) == expected,
+           "DeepSeek adapter matches Python Jinja2");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -574,6 +652,7 @@ int main() {
             std::string::npos,
         "complete function definition survives DeepSeek rendering");
   }
+  TestJinjaGoldens();
   TestParallelToolOrder();
   TestChatAndThinkingPrefixes();
   TestHistoricalThinkingPolicy();
@@ -583,6 +662,7 @@ int main() {
   TestPinnedArtifactTemplateValidation();
   TestContentSpansCoverCallerText();
   TestLiteralControlSpellingsStayText();
+  TestJinjaLiteralControlSpellingsStayText();
   TestSplitMatchesFullScanWithoutLiterals();
   TestSplitSpanBoundaries();
   std::cout << "DeepSeek V4 Flash chat template tests passed\n";

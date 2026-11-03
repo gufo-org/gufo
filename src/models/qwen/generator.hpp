@@ -33,7 +33,8 @@ public:
 
   /// Creates a generator directly from a loaded GGUF file.
   [[nodiscard]] static std::unique_ptr<QwenGenerator> CreateFromGguf(
-      const core::GgufReader& reader, std::string* error_msg = nullptr);
+      const core::GgufReader& reader, std::string* error_msg = nullptr,
+      bool compiled_chat_template = true);
 
   /// Executes prompt prefill and decodes tokens, invoking on_token for each
   /// generated token. Generation halts if on_token returns false or when an EOS

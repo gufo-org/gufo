@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/chat_template.hpp"
+
 namespace gufo::models::deepseek_v4_flash {
 
 struct ChatMessage {
@@ -42,6 +44,9 @@ struct ChatTool {
 };
 
 struct ChatTemplateOptions {
+  std::shared_ptr<const core::JinjaChatTemplate> jinja{};
+  json::Value kwargs{json::Value::object()};
+  std::size_t max_output_bytes{1024ULL * 1024ULL};
   // Literal encoder options; user-facing defaults are resolved below.
   bool enable_thinking{false};
   ReasoningEffort reasoning_effort{ReasoningEffort::kLow};

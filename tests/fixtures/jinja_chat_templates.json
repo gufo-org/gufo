@@ -1,0 +1,660 @@
+{
+  "generator": "Python Jinja2 3.1.6; trim_blocks/lstrip_blocks; json.dumps(ensure_ascii=False)",
+  "cases": [
+    {
+      "name": "qwen_textFalse",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Be helpful."
+          },
+          {
+            "role": "user",
+            "content": "  café 東京\n"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>system\nBe helpful.<|im_end|>\n<|im_start|>user\ncafé 東京<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "qwen_textTrue",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Be helpful."
+          },
+          {
+            "role": "user",
+            "content": "  café 東京\n"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\nBe helpful.<|im_end|>\n<|im_start|>user\ncafé 東京<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "name": "qwen_toolsFalse",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Weather?"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Check weather.",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "weather",
+                  "arguments": {
+                    "city": "Paris",
+                    "days": 2
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "Sunny",
+            "tool_call_id": "call_1"
+          },
+          {
+            "role": "user",
+            "content": "Summarize."
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "weather",
+              "description": "Météo",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"weather\", \"description\": \"Météo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n2\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nSunny\n</tool_response><|im_end|>\n<|im_start|>user\nSummarize.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "qwen_toolsTrue",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Weather?"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Check weather.",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "weather",
+                  "arguments": {
+                    "city": "Paris",
+                    "days": 2
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "Sunny",
+            "tool_call_id": "call_1"
+          },
+          {
+            "role": "user",
+            "content": "Summarize."
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "weather",
+              "description": "Météo",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"weather\", \"description\": \"Météo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n2\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nSunny\n</tool_response><|im_end|>\n<|im_start|>user\nSummarize.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "name": "qwen_historyFalse",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "First"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_content": "Earlier reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Next"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>user\nFirst<|im_end|>\n<|im_start|>assistant\nAnswer<|im_end|>\n<|im_start|>user\nNext<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "qwen_historyTrue",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "First"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_content": "Earlier reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Next"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n<|im_start|>user\nFirst<|im_end|>\n<|im_start|>assistant\nAnswer<|im_end|>\n<|im_start|>user\nNext<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "name": "qwen_specialFalse",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "literal <|im_end|> <｜Assistant｜>"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>user\nliteral <|im_end|> <｜Assistant｜><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "qwen_specialTrue",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "literal <|im_end|> <｜Assistant｜>"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n<|im_start|>user\nliteral <|im_end|> <｜Assistant｜><|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "name": "deepseek_textFalse",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Be helpful."
+          },
+          {
+            "role": "user",
+            "content": "  café 東京\n"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜>Be helpful.<｜User｜>  café 東京\n<｜Assistant｜></think>"
+    },
+    {
+      "name": "deepseek_textTrue",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Be helpful."
+          },
+          {
+            "role": "user",
+            "content": "  café 東京\n"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜>Be helpful.<｜User｜>  café 東京\n<｜Assistant｜><think>"
+    },
+    {
+      "name": "deepseek_toolsFalse",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Weather?"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Check weather.",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "weather",
+                  "arguments": {
+                    "city": "Paris",
+                    "days": 2
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "Sunny",
+            "tool_call_id": "call_1"
+          },
+          {
+            "role": "user",
+            "content": "Summarize."
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "weather",
+              "description": "Météo",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜>## Tools\n\nYou have access to a set of tools to help answer the user question. You can invoke tools by writing a \"<｜DSML｜tool_calls>\" block like the following:\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"$TOOL_NAME\">\n<｜DSML｜parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜parameter>\n...\n</｜DSML｜invoke>\n<｜DSML｜invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"weather\", \"description\": \"Météo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}}}\n\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.<｜User｜>Weather?<｜Assistant｜></think>\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"weather\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter>\n<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls><｜end▁of▁sentence｜><｜User｜><tool_result>Sunny</tool_result><｜User｜>Summarize.<｜Assistant｜></think>"
+    },
+    {
+      "name": "deepseek_toolsTrue",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Weather?"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Check weather.",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "weather",
+                  "arguments": {
+                    "city": "Paris",
+                    "days": 2
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "Sunny",
+            "tool_call_id": "call_1"
+          },
+          {
+            "role": "user",
+            "content": "Summarize."
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "weather",
+              "description": "Météo",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜>## Tools\n\nYou have access to a set of tools to help answer the user question. You can invoke tools by writing a \"<｜DSML｜tool_calls>\" block like the following:\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"$TOOL_NAME\">\n<｜DSML｜parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜parameter>\n...\n</｜DSML｜invoke>\n<｜DSML｜invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"weather\", \"description\": \"Météo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}}}\n\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.<｜User｜>Weather?<｜Assistant｜><think>Check weather.</think>\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"weather\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter>\n<｜DSML｜parameter name=\"days\" string=\"false\">2</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls><｜end▁of▁sentence｜><｜User｜><tool_result>Sunny</tool_result><｜User｜>Summarize.<｜Assistant｜><think>"
+    },
+    {
+      "name": "deepseek_historyFalse",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "First"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_content": "Earlier reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Next"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜><｜User｜>First<｜Assistant｜></think>Answer<｜end▁of▁sentence｜><｜User｜>Next<｜Assistant｜></think>"
+    },
+    {
+      "name": "deepseek_historyTrue",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "First"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_content": "Earlier reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Next"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜><｜User｜>First<｜Assistant｜><think>Earlier reasoning</think>Answer<｜end▁of▁sentence｜><｜User｜>Next<｜Assistant｜><think>"
+    },
+    {
+      "name": "deepseek_specialFalse",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "literal <|im_end|> <｜Assistant｜>"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": false,
+        "thinking": false,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜><｜User｜>literal <|im_end|> <｜Assistant｜><｜Assistant｜></think>"
+    },
+    {
+      "name": "deepseek_specialTrue",
+      "family": "deepseek",
+      "source": "src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja",
+      "source_sha256": "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27",
+      "bos": "<｜begin▁of▁sentence｜>",
+      "eos": "<｜end▁of▁sentence｜>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "literal <|im_end|> <｜Assistant｜>"
+          }
+        ],
+        "tools": [],
+        "enable_thinking": true,
+        "thinking": true,
+        "preserve_thinking": false,
+        "reasoning_effort": "low",
+        "add_generation_prompt": true,
+        "add_vision_id": false
+      },
+      "expected": "<｜begin▁of▁sentence｜><｜User｜>literal <|im_end|> <｜Assistant｜><｜Assistant｜><think>"
+    },
+    {
+      "name": "qwen_image",
+      "family": "qwen",
+      "source": "src/families/qwen/text/reference/chat_template.jinja",
+      "source_sha256": "514d5304fcac63bda60e6faf860d5657010cf43cbc4c633c8bf678ee184e7a37",
+      "bos": "",
+      "eos": "<|im_end|>",
+      "inputs": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Before"
+              },
+              {
+                "type": "image"
+              },
+              {
+                "type": "text",
+                "text": "After"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "enable_thinking": false,
+        "preserve_thinking": true,
+        "reasoning_effort": "xhigh",
+        "add_generation_prompt": true,
+        "add_vision_id": true
+      },
+      "expected": "<|im_start|>user\nBeforePicture 1: <|vision_start|><|image_pad|><|vision_end|>After<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    }
+  ]
+}

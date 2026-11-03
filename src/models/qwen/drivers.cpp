@@ -194,6 +194,14 @@ static gufo::ReasoningOptions PromptReasoningOptions(
   return reasoning;
 }
 
+tokenization::ChatTemplateOptions PromptChatOptions(
+    const ext::TextPromptOptions& opt) {
+  auto options = tokenization::ResolveQwenChatOptions(
+      PromptReasoningOptions(opt), opt.add_vision_id);
+  options.jinja = opt.template_renderer;
+  return options;
+}
+
 void AttachImages(const ext::TextPromptOptions& opt,
                   tokenization::ChatMessage& user_msg) {
   for (const auto& path : opt.image_paths) {
@@ -236,12 +244,10 @@ std::shared_ptr<const models::qwen::vision::Prompt> PrepareVision(
   if (!encoder)
     throw std::invalid_argument(
         "image input requires a matching --mmproj BF16 sidecar");
-  const auto reasoning = PromptReasoningOptions(opt);
   return std::make_shared<models::qwen::vision::Prompt>(
-      models::qwen::vision::Prepare(
-          tokenizer, messages, {},
-          tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-          encoder->identity(), kDefaultContext));
+      models::qwen::vision::Prepare(tokenizer, messages, {},
+                                    PromptChatOptions(opt), encoder->identity(),
+                                    kDefaultContext));
 }
 
 std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
@@ -792,15 +798,16 @@ int RunQwenPromptImpl(const ext::TextPromptOptions& opt,
     }
     messages.push_back(
         {tokenization::ChatRole::kUser, opt.prompt_text, "", ""});
-    const auto reasoning = PromptReasoningOptions(opt);
+    if (opt.template_renderer)
+      AttachImages(opt, messages.back());
+    std::string template_error;
     const auto rendered = tokenization::QwenChatTemplate::Render(
-        messages, {},
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-        nullptr, nullptr, nullptr, &content_spans);
+        messages, {}, PromptChatOptions(opt), &template_error, nullptr, nullptr,
+        &content_spans);
     if (rendered.has_value()) {
       rendered_prompt = *rendered;
     } else {
-      std::cerr << "Error formatting chat template.\n";
+      std::cerr << "Error formatting chat template: " << template_error << '\n';
       return 1;
     }
   }
@@ -815,14 +822,17 @@ int RunQwenPromptImpl(const ext::TextPromptOptions& opt,
   int dev_count = 0;
   if (!opt.force_cpu && hipGetDeviceCount(&dev_count) == hipSuccess &&
       dev_count > 0) {
-    auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(reader, &err);
+    auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(
+        reader, &err, 4096, hip::QwenExecutionPolicy::Production(),
+        !opt.template_renderer);
     if (gpu_exec) {
       PrintModelLoadTime(model_load_start);
       auto prompt_tokens = encode_prompt(gpu_exec->GetTokenizer());
       try {
         auto encoder = LoadQwenVision(opt, *reader);
         if (!opt.image_paths.empty()) {
-          AttachImages(opt, messages.back());
+          if (!opt.template_renderer)
+            AttachImages(opt, messages.back());
           auto vision =
               PrepareVision(opt, gpu_exec->GetTokenizer(), messages, encoder);
           prompt_tokens = vision->tokens;
@@ -875,7 +885,8 @@ int RunQwenPromptImpl(const ext::TextPromptOptions& opt,
     std::cerr << "Qwen speculative decoding requires the ROCm backend\n";
     return 1;
   }
-  auto generator = models::QwenGenerator::CreateFromGguf(*reader, &err);
+  auto generator = models::QwenGenerator::CreateFromGguf(
+      *reader, &err, !opt.template_renderer);
   if (!generator) {
     std::cerr << "Error creating Qwen generator: " << err << "\n";
     PrintModelLoadTime(model_load_start, false);
@@ -943,7 +954,9 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
     std::string err;
     auto reader_ptr = std::shared_ptr<const core::GgufReader>(
         std::shared_ptr<const core::GgufReader>{}, &reader);
-    gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(reader_ptr, &err);
+    gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(
+        reader_ptr, &err, 4096, hip::QwenExecutionPolicy::Production(),
+        !opt.template_renderer);
     if (!gpu_executor) {
       std::cerr << "Error creating Qwen GPU executor: " << err << '\n';
       PrintModelLoadTime(model_load_start, false);
@@ -975,7 +988,8 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
       return 1;
     }
     std::string err;
-    generator = models::QwenGenerator::CreateFromGguf(reader, &err);
+    generator = models::QwenGenerator::CreateFromGguf(reader, &err,
+                                                      !opt.template_renderer);
     if (!generator) {
       std::cerr << "Error creating Qwen generator: " << err << '\n';
       PrintModelLoadTime(model_load_start, false);
@@ -1012,14 +1026,15 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
     }
 
     history.push_back({tokenization::ChatRole::kUser, user_input, "", ""});
-    const auto reasoning = PromptReasoningOptions(opt);
+    if (first_turn && opt.template_renderer)
+      AttachImages(opt, history.back());
     std::vector<tokenization::ContentSpan> content_spans;
+    std::string template_error;
     const auto rendered_prompt = tokenization::QwenChatTemplate::Render(
-        history, {},
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-        nullptr, nullptr, nullptr, &content_spans);
+        history, {}, PromptChatOptions(opt), &template_error, nullptr, nullptr,
+        &content_spans);
     if (!rendered_prompt.has_value()) {
-      std::cerr << "Error formatting chat template.\n";
+      std::cerr << "Error formatting chat template: " << template_error << '\n';
       return 1;
     }
 
@@ -1032,7 +1047,7 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
 
     try {
 #if defined(ENGINE_ENABLE_HIP)
-      if (first_turn)
+      if (first_turn && !opt.template_renderer)
         AttachImages(opt, history.back());
       first_turn = false;
       if (!opt.image_paths.empty()) {
@@ -1066,8 +1081,9 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
 
     std::cout << '\n';
     tokenization::ChatMessage reply{tokenization::ChatRole::kAssistant, ""};
-    if (tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id)
-            .enable_thinking) {
+    if (opt.template_renderer ? tokenization::RenderedOpensReasoning(
+                                    *rendered_prompt, content_spans)
+                              : PromptChatOptions(opt).enable_thinking) {
       constexpr std::string_view end = "</think>";
       const auto boundary = assistant_reply.find(end);
       reply.thought = assistant_reply.substr(0, boundary);

@@ -48,6 +48,7 @@ struct InferenceBackend::Impl {
     SamplingDefaults sampling_defaults;
     std::uint32_t max_context{0};
     bool supports_images{false};
+    bool uses_jinja_chat_template{false};
     ReasoningOptions reasoning_defaults;
     std::string model_path;
     std::string build_info;
@@ -177,6 +178,8 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
     new_state->sampling_defaults.sampling = sampling::SamplingConfig{};
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = desc.capabilities.supports_vision;
+    new_state->uses_jinja_chat_template =
+        desc.capabilities.uses_jinja_chat_template;
     new_state->model_id = desc.model_id;
     new_state->max_context = desc.max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
@@ -214,7 +217,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const TextDiskCacheConfig& disk_cache_config,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+                            bool enable_yarn,
+                            const core::ChatTemplateConfig& chat_template) {
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
   if (reader_owner == nullptr) {
@@ -238,6 +242,13 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .ram_cache = ram_cache_config,
       .enable_yarn = enable_yarn,
   };
+  try {
+    options.template_renderer =
+        core::JinjaChatTemplate::Load(*reader, chat_template);
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
   auto runner = provider->create(options, error);
   if (runner == nullptr) {
     return false;
@@ -258,7 +269,8 @@ bool InferenceBackend::load(const std::string&, std::string* error,
                             std::uint32_t, std::size_t, TextPrefillPolicy,
                             TextSchedulerPolicy, const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
-                            TextRunnerRamCacheOptions, bool) {
+                            TextRunnerRamCacheOptions, bool,
+                            const core::ChatTemplateConfig&) {
   SetError(error, "HIP engine is disabled");
   return false;
 }
@@ -308,6 +320,15 @@ bool InferenceBackend::supports_images() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
   return state != nullptr && state->supports_images;
+#else
+  return false;
+#endif
+}
+
+bool InferenceBackend::uses_jinja_chat_template() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr && state->uses_jinja_chat_template;
 #else
   return false;
 #endif

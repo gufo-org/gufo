@@ -25,7 +25,8 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config = {},
     std::string artifact_fingerprint = {},
-    std::string draft_artifact_fingerprint = {});
+    std::string draft_artifact_fingerprint = {},
+    std::shared_ptr<const core::JinjaChatTemplate> chat_template = {});
 #endif
 
 }  // namespace gufo::models::qwen38_flash_next

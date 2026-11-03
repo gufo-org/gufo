@@ -25,8 +25,10 @@ QwenGenerator::QwenGenerator(
       arena_(weights_.config) {}
 
 std::unique_ptr<QwenGenerator> QwenGenerator::CreateFromGguf(
-    const core::GgufReader& reader, std::string* error_msg) {
-  if (!tokenization::QwenChatTemplate::ValidateGgufTemplate(reader,
+    const core::GgufReader& reader, std::string* error_msg,
+    bool compiled_chat_template) {
+  if (compiled_chat_template &&
+      !tokenization::QwenChatTemplate::ValidateGgufTemplate(reader,
                                                             error_msg)) {
     return nullptr;
   }

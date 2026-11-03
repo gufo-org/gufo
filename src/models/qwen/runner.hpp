@@ -26,7 +26,8 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model,
     const speculative::SpeculativeOptions& speculative_options,
     speculative::DFlashDraftPolicy dflash_policy,
-    std::string artifact_fingerprint, std::string draft_artifact_fingerprint);
+    std::string artifact_fingerprint, std::string draft_artifact_fingerprint,
+    std::shared_ptr<const core::JinjaChatTemplate> chat_template = {});
 #endif
 
 }  // namespace gufo::models::qwen

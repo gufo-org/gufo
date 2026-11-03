@@ -26,6 +26,7 @@
 
 #include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/chat_template_options.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/decision_service.hpp"
@@ -657,6 +658,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    core::ChatTemplateConfig chat_template;
     std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
@@ -714,6 +716,7 @@ void PrintServeHelp(std::string_view program_name,
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
         "Sampling Defaults", &max_tokens);
+    RegisterChatTemplateOptions(parser, chat_template);
     RegisterSamplingOptions(parser, &sampling_config, "Sampling Defaults", true,
                             true);
 
@@ -1318,6 +1321,7 @@ int RunServe(std::span<const char* const> args) {
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    core::ChatTemplateConfig chat_template;
     std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
@@ -1385,6 +1389,7 @@ int RunServe(std::span<const char* const> args) {
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
         "Sampling Defaults", &max_tokens);
+    RegisterChatTemplateOptions(llm_parser, chat_template);
     RegisterSamplingOptions(llm_parser, &sampling_config, "Sampling Defaults",
                             true, true);
     llm_parser.AddOption(
@@ -1520,6 +1525,12 @@ int RunServe(std::span<const char* const> args) {
                            "event=trace_enabled path=" + trace_path +
                                " content=prompts,generated_text,replies");
     }
+    try {
+      chat_template.Validate();
+    } catch (const std::invalid_argument& exception) {
+      std::cerr << "Error: " << exception.what() << '\n';
+      return 2;
+    }
     sampling::SamplingConfig validated_sampling;
     const bool sampling_valid = !server::ParseSamplingConfig(
         json::Value::object(), sampling_config, &validated_sampling);
@@ -1642,7 +1653,7 @@ int RunServe(std::span<const char* const> args) {
             .staging_capacity_bytes = cache_disk_staging_bytes,
             .model_artifact_fingerprint = {},
         },
-        vision_model_path, cache_ram, enable_yarn);
+        vision_model_path, cache_ram, enable_yarn, chat_template);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";

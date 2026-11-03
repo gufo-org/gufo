@@ -326,7 +326,8 @@ std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
 
 std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::shared_ptr<models::qwen::vision::Encoder> vision) {
+    std::shared_ptr<models::qwen::vision::Encoder> vision,
+    bool compiled_chat_template) {
   if (reader == nullptr) {
     if (error_msg != nullptr) {
       *error_msg = "GGUF reader must not be null";
@@ -334,7 +335,8 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     return nullptr;
   }
 
-  if (!tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader,
+  if (compiled_chat_template &&
+      !tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader,
                                                             error_msg)) {
     return nullptr;
   }
@@ -412,8 +414,10 @@ std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::uint32_t max_context, QwenExecutionPolicy policy) {
-  auto model = QwenGpuModel::CreateFromGguf(std::move(reader), error_msg);
+    std::uint32_t max_context, QwenExecutionPolicy policy,
+    bool compiled_chat_template) {
+  auto model = QwenGpuModel::CreateFromGguf(std::move(reader), error_msg, {},
+                                            compiled_chat_template);
   if (model == nullptr) {
     return nullptr;
   }

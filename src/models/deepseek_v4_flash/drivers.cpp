@@ -669,7 +669,8 @@ static std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
     return nullptr;
   }
   std::string template_error;
-  if (!models::deepseek_v4_flash::ValidateGgufTemplate(reader,
+  if (!opt.template_renderer &&
+      !models::deepseek_v4_flash::ValidateGgufTemplate(reader,
                                                        &template_error)) {
     std::cerr << "Unsupported DeepSeek chat template: " << template_error
               << '\n';
@@ -897,9 +898,10 @@ static int RunDeepSeekPromptImpl(
                         .reasoning_content = {},
                         .tool_calls = {},
                         .tool_call_id = {}});
-    prompt_tokens = model->EncodeChat(
-        messages,
-        models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning));
+    auto options =
+        models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning);
+    options.jinja = opt.template_renderer;
+    prompt_tokens = model->EncodeChat(messages, options);
   } else {
     prompt_tokens = model->Tokenize(opt.prompt_text);
   }
@@ -935,8 +937,9 @@ static int RunDeepSeekChatImpl(
                        .tool_call_id = {}});
   }
   const auto reasoning = PromptReasoningOptions(opt);
-  const auto chat_options =
+  auto chat_options =
       models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning);
+  chat_options.jinja = opt.template_renderer;
   std::cout << "=== Gufo Interactive Chat (DeepSeek V4 Flash) ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
   for (std::string input;;) {
@@ -957,7 +960,16 @@ static int RunDeepSeekChatImpl(
       return 1;
     models::deepseek_v4_flash::ChatMessage response{};
     response.role = "assistant";
-    if (chat_options.enable_thinking) {
+    bool starts_reasoning = chat_options.enable_thinking;
+    if (chat_options.jinja) {
+      std::vector<ContentSpan> spans;
+      const auto rendered = RenderChat(history, {}, chat_options, &spans);
+      const auto start =
+          spans.empty() ? 0 : spans.back().offset + spans.back().size;
+      starts_reasoning =
+          core::PromptOpensReasoning(std::string_view(rendered).substr(start));
+    }
+    if (starts_reasoning) {
       constexpr std::string_view end = "</think>";
       const auto boundary = reply.find(end);
       response.reasoning_content = reply.substr(0, boundary);

@@ -20,6 +20,7 @@ add_executable(ds4_chat_template_test chat_template_test.cpp)
 target_link_libraries(ds4_chat_template_test PRIVATE gufo_core
   gufo_deepseek_v4_flash_text)
 target_compile_definitions(ds4_chat_template_test PRIVATE
+  GUFO_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
   GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja"
   GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
 add_test(NAME ds4.template COMMAND ds4_chat_template_test)

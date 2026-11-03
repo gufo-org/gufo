@@ -24,6 +24,11 @@ def main():
         return subprocess.run([binary, *args], env=env, text=True,
                               capture_output=True, timeout=10)
 
+    for command in (["prompt"], ["chat"], ["serve", "llm"]):
+        check([*command, "--help"], 0, "--chat-template-path")
+        check([*command, "--chat-template-path", "x.jinja"], 2, "requires --chat-template")
+    check(["prompt", "--raw", "--chat-template"], 2, "--raw")
+
     for modality in ("llm", "tts", "asr", "video", "image", "embedding"):
         check(["serve", "--port", "0", modality, "--help"], 0,
               "--max-connections")

@@ -13,6 +13,7 @@
 
 #include "gufo/ext/text.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/core/jinja/chat_template.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 
@@ -106,6 +107,8 @@ enum class QwenReasoningEffort : std::uint8_t {
 
 /// Formatting options for rendering a conversation into a text prompt.
 struct ChatTemplateOptions {
+  std::shared_ptr<const core::JinjaChatTemplate> jinja{};
+  json::Value kwargs{json::Value::object()};
   bool add_generation_prompt{true};
   bool enable_thinking{true};
   QwenReasoningEffort reasoning_effort{QwenReasoningEffort::kXHigh};
@@ -121,6 +124,10 @@ struct ContentSpan {
   std::size_t offset{0};
   std::size_t size{0};
 };
+
+/// Inspect only template-authored suffix bytes, not quoted user control text.
+bool RenderedOpensReasoning(std::string_view rendered,
+                            std::span<const ContentSpan> content_spans);
 
 /// Longest Qwen3.8 vocabulary entry in bytes (Flash-Next GGUF, 248,320
 /// tokens). A prompt of N tokens cannot render to more than N times this.
@@ -224,6 +231,11 @@ public:
       const TokenizerOptions& options);
 
 private:
+  static std::optional<std::string> RenderJinja(
+      std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
+      const ChatTemplateOptions& options, std::string* error_msg,
+      std::vector<std::size_t>* image_offsets, std::size_t* stable_prefix_bytes,
+      std::vector<ContentSpan>* content_spans);
   QwenChatTemplate(std::string template_str, std::string template_sha256,
                    Profile profile)
       : template_string_(std::move(template_str)),

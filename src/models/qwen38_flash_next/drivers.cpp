@@ -149,6 +149,14 @@ static gufo::ReasoningOptions PromptReasoningOptions(
   return reasoning;
 }
 
+tokenization::ChatTemplateOptions PromptChatOptions(
+    const ext::TextPromptOptions& opt) {
+  auto options = tokenization::ResolveQwenChatOptions(
+      PromptReasoningOptions(opt), opt.add_vision_id);
+  options.jinja = opt.template_renderer;
+  return options;
+}
+
 void AttachImages(const ext::TextPromptOptions& opt,
                   tokenization::ChatMessage& user_msg) {
   for (const auto& path : opt.image_paths) {
@@ -175,12 +183,10 @@ std::shared_ptr<const models::qwen::vision::Prompt> PrepareVision(
   if (!encoder)
     throw std::invalid_argument(
         "image input requires a matching --mmproj BF16 sidecar");
-  const auto reasoning = PromptReasoningOptions(opt);
   return std::make_shared<models::qwen::vision::Prompt>(
-      models::qwen::vision::Prepare(
-          tokenizer, messages, {},
-          tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-          encoder->identity(), kDefaultContext));
+      models::qwen::vision::Prepare(tokenizer, messages, {},
+                                    PromptChatOptions(opt), encoder->identity(),
+                                    kDefaultContext));
 }
 
 std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
@@ -194,7 +200,7 @@ std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
                  "--min-draft-tokens 1\n";
     return nullptr;
   }
-  if (opt.use_chat_template &&
+  if (opt.use_chat_template && !opt.template_renderer &&
       !tokenization::QwenChatTemplate::ValidateGgufTemplate(reader, &error)) {
     std::cerr << "Unsupported Flash-Next chat template: " << error << '\n';
     return nullptr;
@@ -569,15 +575,16 @@ int RunFlashNextPromptImpl(
     }
     messages.push_back(
         {tokenization::ChatRole::kUser, opt.prompt_text, "", ""});
-    const auto reasoning = PromptReasoningOptions(opt);
+    if (opt.template_renderer)
+      AttachImages(opt, messages.back());
+    std::string template_error;
     const auto rendered = tokenization::QwenChatTemplate::Render(
-        messages, {},
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-        nullptr, nullptr, nullptr, &content_spans);
+        messages, {}, PromptChatOptions(opt), &template_error, nullptr, nullptr,
+        &content_spans);
     if (rendered.has_value()) {
       rendered_prompt = *rendered;
     } else {
-      std::cerr << "Error formatting chat template.\n";
+      std::cerr << "Error formatting chat template: " << template_error << '\n';
       return 1;
     }
   }
@@ -601,7 +608,8 @@ int RunFlashNextPromptImpl(
   }
   try {
     if (!opt.image_paths.empty()) {
-      AttachImages(opt, messages.back());
+      if (!opt.template_renderer)
+        AttachImages(opt, messages.back());
       auto vision = PrepareVision(opt, model->tokenizer(), messages,
                                   model->VisionEncoder());
       session->ConfigureVision(vision);
@@ -674,14 +682,15 @@ int RunFlashNextChat(const ext::TextPromptOptions& opt,
     }
 
     history.push_back({tokenization::ChatRole::kUser, user_input, "", ""});
-    const auto reasoning = PromptReasoningOptions(opt);
+    if (first_turn && opt.template_renderer)
+      AttachImages(opt, history.back());
     std::vector<tokenization::ContentSpan> content_spans;
+    std::string template_error;
     const auto rendered_prompt = tokenization::QwenChatTemplate::Render(
-        history, {},
-        tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id),
-        nullptr, nullptr, nullptr, &content_spans);
+        history, {}, PromptChatOptions(opt), &template_error, nullptr, nullptr,
+        &content_spans);
     if (!rendered_prompt.has_value()) {
-      std::cerr << "Error formatting chat template.\n";
+      std::cerr << "Error formatting chat template: " << template_error << '\n';
       return 1;
     }
 
@@ -693,7 +702,7 @@ int RunFlashNextChat(const ext::TextPromptOptions& opt,
     std::string assistant_reply;
 
     try {
-      if (first_turn)
+      if (first_turn && !opt.template_renderer)
         AttachImages(opt, history.back());
       first_turn = false;
       if (!opt.image_paths.empty()) {
@@ -711,8 +720,9 @@ int RunFlashNextChat(const ext::TextPromptOptions& opt,
 
     std::cout << '\n';
     tokenization::ChatMessage reply{tokenization::ChatRole::kAssistant, ""};
-    if (tokenization::ResolveQwenChatOptions(reasoning, opt.add_vision_id)
-            .enable_thinking) {
+    if (opt.template_renderer ? tokenization::RenderedOpensReasoning(
+                                    *rendered_prompt, content_spans)
+                              : PromptChatOptions(opt).enable_thinking) {
       constexpr std::string_view end = "</think>";
       const auto boundary = assistant_reply.find(end);
       reply.thought = assistant_reply.substr(0, boundary);

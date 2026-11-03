@@ -38,7 +38,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
 bool ParseOpenAiResponseMessage(const json::Value& item,
                                 tokenization::ChatMessage* message,
                                 core::ImageReadBudget& budget,
-                                std::string* error);
+                                std::string* error,
+                                bool jinja_template = false);
 /// Shared effort names; each API applies its own thinking and alias rules.
 std::optional<ReasoningEffort> ParseReasoningEffortName(std::string_view value);
 

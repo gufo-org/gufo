@@ -149,12 +149,14 @@ public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kDeepSeek;
   }
-  DeepSeekTextRunner(std::shared_ptr<models::deepseek_v4_flash::Model> model,
-                     std::uint32_t max_context, bool use_dspark,
-                     std::uint32_t max_draft_tokens,
-                     std::string artifact_fingerprint = {},
-                     std::string support_fingerprint = {})
-      : model_(std::move(model)),
+  DeepSeekTextRunner(
+      std::shared_ptr<models::deepseek_v4_flash::Model> model,
+      std::uint32_t max_context, bool use_dspark,
+      std::uint32_t max_draft_tokens, std::string artifact_fingerprint = {},
+      std::string support_fingerprint = {},
+      std::shared_ptr<const core::JinjaChatTemplate> chat_template = {})
+      : chat_template_(std::move(chat_template)),
+        model_(std::move(model)),
         max_context_(max_context),
         use_dspark_(use_dspark),
         max_draft_tokens_(std::max(max_draft_tokens, 1u)) {
@@ -170,6 +172,11 @@ public:
               max_draft_tokens_),
           .payload_version = DS4_SESSION_PAYLOAD_VERSION,
       };
+      if (chat_template_) {
+        const auto identity = "\njinja=" + chat_template_->Identity();
+        auto& bytes = persistence_->compatibility_identity;
+        bytes.insert(bytes.end(), identity.begin(), identity.end());
+      }
     }
   }
 
@@ -190,6 +197,7 @@ public:
                 .batched_multi_token_decode = dspark,
                 .batched_multi_token_decode_max_width = 8u,
                 .prefix_reuse = true,
+                .uses_jinja_chat_template = chat_template_ != nullptr,
             },
         .persistence = persistence_,
         .sampling_preset = sampling::TextModelPreset::kDeepSeekV4Flash,
@@ -270,6 +278,20 @@ public:
 
   [[nodiscard]] ext::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
+    if (chat_template_ && request.messages.empty())
+      return ext::InitialOutputState::kAuto;
+    if (chat_template_) {
+      const auto input = ConvertChat(request);
+      std::vector<ContentSpan> spans;
+      const auto rendered =
+          RenderChat(input.messages, input.tools, input.options, &spans);
+      const auto start =
+          spans.empty() ? 0 : spans.back().offset + spans.back().size;
+      return core::PromptOpensReasoning(
+                 std::string_view(rendered).substr(start))
+                 ? ext::InitialOutputState::kReasoning
+                 : ext::InitialOutputState::kContent;
+    }
     return models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
                request.reasoning)
                    .enable_thinking
@@ -288,7 +310,14 @@ public:
       // of assuming the suffix alone is the only changed part of the prompt.
       auto continuation = request;
       continuation.messages.emplace_back(ext::ChatRole::kUser, "");
-      const auto continued = RenderAndTokenize(continuation);
+      std::optional<std::vector<TextRunnerToken>> continued;
+      try {
+        continued = RenderAndTokenize(continuation);
+      } catch (const std::invalid_argument&) {
+        // A speculative next turn must not reject the valid request.
+        if (!chat_template_)
+          throw;
+      }
       if (continued) {
         prepared->cache_prefix_tokens = static_cast<std::size_t>(
             std::mismatch(prepared->tokens.begin(), prepared->tokens.end(),
@@ -736,6 +765,7 @@ public:
   }
 
 private:
+  std::shared_ptr<const core::JinjaChatTemplate> chat_template_;
   struct DeepSeekChatInput {
     std::vector<models::deepseek_v4_flash::ChatMessage> messages;
     std::vector<models::deepseek_v4_flash::ChatTool> tools;
@@ -758,8 +788,8 @@ private:
     return "user";
   }
 
-  [[nodiscard]] static DeepSeekChatInput ConvertChat(
-      const ChatRequest& request) {
+  [[nodiscard]] DeepSeekChatInput ConvertChat(
+      const ChatRequest& request) const {
     std::vector<models::deepseek_v4_flash::ChatMessage> messages;
     messages.reserve(request.messages.size());
     for (const auto& message : request.messages) {
@@ -807,6 +837,10 @@ private:
     }
     auto options = models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
         request.reasoning);
+    options.jinja = chat_template_;
+    options.kwargs = request.chat_template_kwargs;
+    options.max_output_bytes = std::max(
+        options.max_output_bytes, static_cast<std::size_t>(max_context_) * 128);
     options.tools_present =
         !request.tools.empty() &&
         request.tool_choice != ChatRequest::ToolChoice::kNone;
@@ -825,13 +859,14 @@ private:
 std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config,
-    std::string artifact_fingerprint, std::string support_fingerprint) {
+    std::string artifact_fingerprint, std::string support_fingerprint,
+    std::shared_ptr<const core::JinjaChatTemplate> chat_template) {
   const bool use_dspark =
       speculative_config.backend == ext::TextSpeculativeBackend::kDSpark;
   return std::make_shared<DeepSeekTextRunner>(
       std::move(model), max_context, use_dspark,
       speculative_config.max_draft_tokens, std::move(artifact_fingerprint),
-      std::move(support_fingerprint));
+      std::move(support_fingerprint), std::move(chat_template));
 }
 
 std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
@@ -867,7 +902,8 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     return nullptr;
   }
   std::string load_error;
-  if (!ValidateGgufTemplate(*reader, &load_error)) {
+  if (!options.template_renderer &&
+      !ValidateGgufTemplate(*reader, &load_error)) {
     if (error)
       *error = "Unsupported DeepSeek chat template: " + load_error;
     return nullptr;
@@ -928,9 +964,9 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
       return nullptr;
     }
   }
-  return CreateDeepSeekTextRunner(std::move(model), max_context,
-                                  options.speculative, model_fingerprint,
-                                  support_fingerprint);
+  return CreateDeepSeekTextRunner(
+      std::move(model), max_context, options.speculative, model_fingerprint,
+      support_fingerprint, options.template_renderer);
 }
 
 }  // namespace gufo::models::deepseek_v4_flash

@@ -28,28 +28,42 @@ void CheckQwenCase(const json::Value& fixture, std::string_view case_name,
                    std::span<const qwen::ChatMessage> messages,
                    std::span<const qwen::ChatTool> tools,
                    const qwen::ChatTemplateOptions& options) {
-  std::string error;
-  const auto rendered =
-      qwen::QwenChatTemplate::Render(messages, tools, options, &error);
-  Expect(rendered.has_value(), "Qwen golden prompt renders: " + error);
-  const auto tokens = qwen::QwenChatTemplate::RenderAndTokenize(
-      tokenizer, messages, tools, options, &error);
-  Expect(tokens.has_value(), "Qwen golden prompt tokenizes: " + error);
+  static const auto jinja = [] {
+    std::ifstream input(GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE, std::ios::binary);
+    return gufo::core::JinjaChatTemplate::Compile(
+        std::string{std::istreambuf_iterator<char>(input), {}});
+  }();
+  for (const bool interpret : {false, true}) {
+    if (interpret && case_name == "developer_tools")
+      continue;  // This fixture assumes compiled system/developer
+                 // normalization.
+    auto selected = options;
+    if (interpret)
+      selected.jinja = jinja;
 
-  const json::Value& expected = GoldenCase(fixture, "qwen", case_name);
-  Expect(Sha256(*rendered) == expected.member_str("rendered_sha256"),
-         "Qwen rendered bytes match Hugging Face");
-  if (tokens->size() != expected.member_size("token_count")) {
-    std::cerr << "Qwen case " << case_name << ": expected "
-              << expected.member_size("token_count") << " tokens, got "
-              << tokens->size() << "; token SHA-256 "
-              << TokenSha256<qwen::TokenId>(*tokens) << '\n';
+    std::string error;
+    const auto rendered =
+        qwen::QwenChatTemplate::Render(messages, tools, selected, &error);
+    Expect(rendered.has_value(), "Qwen golden prompt renders: " + error);
+    const auto tokens = qwen::QwenChatTemplate::RenderAndTokenize(
+        tokenizer, messages, tools, selected, &error);
+    Expect(tokens.has_value(), "Qwen golden prompt tokenizes: " + error);
+
+    const json::Value& expected = GoldenCase(fixture, "qwen", case_name);
+    Expect(Sha256(*rendered) == expected.member_str("rendered_sha256"),
+           "Qwen rendered bytes match Hugging Face");
+    if (tokens->size() != expected.member_size("token_count")) {
+      std::cerr << "Qwen case " << case_name << ": expected "
+                << expected.member_size("token_count") << " tokens, got "
+                << tokens->size() << "; token SHA-256 "
+                << TokenSha256<qwen::TokenId>(*tokens) << '\n';
+    }
+    Expect(tokens->size() == expected.member_size("token_count"),
+           "Qwen token count matches Hugging Face");
+    Expect(TokenSha256<qwen::TokenId>(*tokens) ==
+               expected.member_str("token_ids_le_u32_sha256"),
+           "Qwen token IDs match Hugging Face");
   }
-  Expect(tokens->size() == expected.member_size("token_count"),
-         "Qwen token count matches Hugging Face");
-  Expect(TokenSha256<qwen::TokenId>(*tokens) ==
-             expected.member_str("token_ids_le_u32_sha256"),
-         "Qwen token IDs match Hugging Face");
 }
 
 void TestQwenGoldens(const json::Value& fixture,

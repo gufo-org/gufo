@@ -65,28 +65,60 @@ struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
 };
 
-tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
-                                                  std::uint32_t max_context) {
+tokenization::ChatTemplateOptions QwenChatOptions(
+    const ChatRequest& request, std::uint32_t max_context,
+    const std::shared_ptr<const core::JinjaChatTemplate>& chat_template) {
   auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
                                                       request.add_vision_id);
+  options.jinja = chat_template;
+  options.kwargs = request.chat_template_kwargs;
   // gufo #285: the rendered prompt may be as long as the context can hold.
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);
   return options;
 }
 
+ext::InitialOutputState QwenInitialOutputState(
+    const ChatRequest& request, std::uint32_t max_context,
+    const std::shared_ptr<const core::JinjaChatTemplate>& chat_template) {
+  // Startup logs query the default state without a conversation. A Jinja
+  // prefix can only be determined from a real request and its kwargs.
+  if (chat_template && request.messages.empty())
+    return ext::InitialOutputState::kAuto;
+  if (chat_template) {
+    std::vector<tokenization::ContentSpan> spans;
+    std::string error;
+    const auto rendered = tokenization::QwenChatTemplate::Render(
+        request.messages,
+        request.tool_choice == ChatRequest::ToolChoice::kNone
+            ? std::span<const tokenization::ChatTool>{}
+            : std::span<const tokenization::ChatTool>{request.tools},
+        QwenChatOptions(request, max_context, chat_template), &error, nullptr,
+        nullptr, &spans);
+    if (!rendered)
+      throw std::invalid_argument(error);
+    return tokenization::RenderedOpensReasoning(*rendered, spans)
+               ? ext::InitialOutputState::kReasoning
+               : ext::InitialOutputState::kContent;
+  }
+  return QwenChatOptions(request, max_context, chat_template).enable_thinking
+             ? ext::InitialOutputState::kReasoning
+             : ext::InitialOutputState::kContent;
+}
+
 // The text before tokenization. An image renders as its one placeholder, not
 // the visual tokens Prepare expands it into. Template errors are request
 // errors, as in Prepare.
-std::optional<std::string> RenderQwenPrompt(const ChatRequest& request,
-                                            std::uint32_t max_context) {
+std::optional<std::string> RenderQwenPrompt(
+    const ChatRequest& request, std::uint32_t max_context,
+    const std::shared_ptr<const core::JinjaChatTemplate>& chat_template) {
   std::string error;
   auto rendered = tokenization::QwenChatTemplate::Render(
       request.messages,
       request.tool_choice == ChatRequest::ToolChoice::kNone
           ? std::span<const tokenization::ChatTool>{}
           : std::span<const tokenization::ChatTool>{request.tools},
-      QwenChatOptions(request, max_context), &error);
+      QwenChatOptions(request, max_context, chat_template), &error);
   if (!rendered)
     throw std::invalid_argument(error);
   return rendered;
@@ -95,8 +127,9 @@ std::optional<std::string> RenderQwenPrompt(const ChatRequest& request,
 std::optional<std::size_t> CountQwenPromptTokens(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
-  const auto options = QwenChatOptions(request, max_context);
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    const std::shared_ptr<const core::JinjaChatTemplate>& chat_template) {
+  const auto options = QwenChatOptions(request, max_context, chat_template);
   const auto tools =
       request.tool_choice == ChatRequest::ToolChoice::kNone
           ? std::span<const tokenization::ChatTool>{}
@@ -109,6 +142,10 @@ std::optional<std::size_t> CountQwenPromptTokens(
       return std::nullopt;
     return tokens->size();
   }
+  // Reuse generation's CPU image preparation, including resize, token
+  // expansion and projector validation. Counting does not encode images on
+  // the GPU or admit the prompt to an execution context. Keep only the shared
+  // layout's signed position limit so oversized prompts can still be sized.
   return models::qwen::vision::Prepare(
              tokenizer, request.messages, tools, options,
              encoder ? encoder->identity() : std::string_view{},
@@ -120,10 +157,11 @@ std::optional<std::size_t> CountQwenPromptTokens(
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    const std::shared_ptr<const core::JinjaChatTemplate>& chat_template) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
-  const auto options = QwenChatOptions(request, max_context);
+  const auto options = QwenChatOptions(request, max_context, chat_template);
   auto prompt = std::make_shared<models::qwen::vision::Prompt>(
       models::qwen::vision::Prepare(
           tokenizer, request.messages,
@@ -220,12 +258,13 @@ public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
-  QwenFlashNextTextRunner(std::shared_ptr<QwenFlashNextModel> model,
-                          std::uint32_t max_context, bool use_mtp,
-                          std::uint32_t max_draft_tokens,
-                          std::string artifact_fingerprint = {},
-                          std::string mtp_fingerprint = {})
-      : model_(std::move(model)),
+  QwenFlashNextTextRunner(
+      std::shared_ptr<QwenFlashNextModel> model, std::uint32_t max_context,
+      bool use_mtp, std::uint32_t max_draft_tokens,
+      std::string artifact_fingerprint = {}, std::string mtp_fingerprint = {},
+      std::shared_ptr<const core::JinjaChatTemplate> chat_template = {})
+      : chat_template_(std::move(chat_template)),
+        model_(std::move(model)),
         max_context_(max_context),
         use_mtp_(use_mtp),
         max_draft_tokens_(max_draft_tokens) {
@@ -244,6 +283,11 @@ public:
           .payload_version =
               models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
       };
+      if (chat_template_) {
+        const auto identity = "\njinja=" + chat_template_->Identity();
+        auto& bytes = persistence_->compatibility_identity;
+        bytes.insert(bytes.end(), identity.begin(), identity.end());
+      }
       component_identity_ = persistence_->compatibility_identity;
     } else {
       component_identity_ = QwenFlashNextProcessIdentity(
@@ -296,6 +340,7 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
+                .uses_jinja_chat_template = chat_template_ != nullptr,
             },
         .persistence = persistence_,
         .sampling_preset = sampling::TextModelPreset::kQwen38,
@@ -369,26 +414,26 @@ public:
         request.tool_choice == ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools},
-        QwenChatOptions(request, max_context_));
+        QwenChatOptions(request, max_context_, chat_template_));
   }
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->tokenizer(),
                              model_->VisionEncoder(), max_context_,
-                             image_cache_);
+                             image_cache_, chat_template_);
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
       const ChatRequest& request) const override {
     return CountQwenPromptTokens(request, model_->tokenizer(),
                                  model_->VisionEncoder(), max_context_,
-                                 image_cache_);
+                                 image_cache_, chat_template_);
   }
 
   [[nodiscard]] std::optional<std::string> RenderPrompt(
       const ChatRequest& request) const override {
-    return RenderQwenPrompt(request, max_context_);
+    return RenderQwenPrompt(request, max_context_, chat_template_);
   }
 
   void SetPromptContext(
@@ -400,9 +445,7 @@ public:
 
   [[nodiscard]] ext::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
-    return QwenChatOptions(request, max_context_).enable_thinking
-               ? ext::InitialOutputState::kReasoning
-               : ext::InitialOutputState::kContent;
+    return QwenInitialOutputState(request, max_context_, chat_template_);
   }
 
   [[nodiscard]] std::string Decode(
@@ -734,6 +777,7 @@ public:
   }
 
 private:
+  std::shared_ptr<const core::JinjaChatTemplate> chat_template_;
   mutable models::qwen::vision::ImageCache image_cache_;
   std::shared_ptr<QwenFlashNextModel> model_;
   std::uint32_t max_context_;
@@ -748,13 +792,14 @@ private:
 std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config,
-    std::string artifact_fingerprint, std::string draft_artifact_fingerprint) {
+    std::string artifact_fingerprint, std::string draft_artifact_fingerprint,
+    std::shared_ptr<const core::JinjaChatTemplate> chat_template) {
   const bool use_mtp =
       speculative_config.backend == ext::TextSpeculativeBackend::kMtp;
   return std::make_shared<QwenFlashNextTextRunner>(
       std::move(model), max_context, use_mtp,
       speculative_config.max_draft_tokens, std::move(artifact_fingerprint),
-      std::move(draft_artifact_fingerprint));
+      std::move(draft_artifact_fingerprint), std::move(chat_template));
 }
 
 std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
@@ -810,6 +855,13 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     return nullptr;
   }
   std::string load_error;
+  if (!options.template_renderer &&
+      !tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader,
+                                                            &load_error)) {
+    if (error)
+      *error = load_error;
+    return nullptr;
+  }
   auto model = Model::Load(
       options.model_path,
       ModelOptions{
@@ -877,9 +929,9 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
       return nullptr;
     }
   }
-  return CreateQwenFlashNextTextRunner(std::move(model), max_context,
-                                       options.speculative, model_fingerprint,
-                                       draft_fingerprint);
+  return CreateQwenFlashNextTextRunner(
+      std::move(model), max_context, options.speculative, model_fingerprint,
+      draft_fingerprint, options.template_renderer);
 }
 
 }  // namespace gufo::models::qwen38_flash_next

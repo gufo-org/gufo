@@ -15,8 +15,8 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
 std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config = {},
-    std::string artifact_fingerprint = {},
-    std::string support_fingerprint = {});
+    std::string artifact_fingerprint = {}, std::string support_fingerprint = {},
+    std::shared_ptr<const core::JinjaChatTemplate> chat_template = {});
 #endif
 
 }  // namespace gufo::models::deepseek_v4_flash

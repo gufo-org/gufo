@@ -616,6 +616,12 @@ std::optional<std::string> QwenChatTemplate::Render(
     return std::nullopt;
   }
 
+  // Jinja owns role handling and content normalization. In particular,
+  // developer turns may be extraction examples rather than instructions.
+  if (options.jinja)
+    return RenderJinja(messages, tools, options, error_msg, image_offsets,
+                       stable_prefix_bytes, content_spans);
+
   // The reference template accepts one leading system turn, but OpenAI clients
   // such as Codex send system/developer messages mid-conversation. Hoist them,
   // in order, into that turn; templates that allow them keep them in place.

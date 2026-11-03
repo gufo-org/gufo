@@ -15,6 +15,7 @@ void TestDefaultOptions() {
   assert(opt->sampling.temperature == 0.0F);
   assert(!opt->sampling_supplied.temperature && !opt->sampling_supplied.top_k);
   assert(opt->use_chat_template);
+  assert(!opt->chat_template.enabled);
   assert(opt->system_prompt.empty());
   assert(opt->reasoning_mode == "auto");
   assert(opt->reasoning_effort == "auto");
@@ -118,7 +119,8 @@ void TestInvalidFlags() {
   assert(!gufo::cli::ParsePromptOptions(policy_without_backend, &err));
 
   const std::array<const char*, 2> args8 = {"--chat-template", "qwen"};
-  assert(!gufo::cli::ParsePromptOptions(args8, &err).has_value());
+  const auto jinja = gufo::cli::ParsePromptOptions(args8, &err);
+  assert(jinja && jinja->chat_template.enabled && jinja->prompt_text == "qwen");
 
   const std::array<const char*, 2> args9 = {"--reasoning-budget", "1024"};
   assert(!gufo::cli::ParsePromptOptions(args9, &err).has_value());
@@ -201,7 +203,21 @@ void TestSamplingAndReasoningFlags() {
   assert(opt->prompt_text == "Explicit prompt text");
 }
 
+void TestJinjaFlags() {
+  const auto parsed = gufo::cli::ParsePromptOptions(std::array{
+      "--chat-template", "--chat-template-path", "custom.jinja", "hello"});
+  assert(parsed && parsed->chat_template.enabled &&
+         parsed->chat_template.path == "custom.jinja");
+  assert(
+      !gufo::cli::ParsePromptOptions(std::array{"--chat-template-path", "x"}));
+  assert(
+      !gufo::cli::ParsePromptOptions(std::array{"--raw", "--chat-template"}));
+  assert(!gufo::cli::ParsePromptOptions(
+      std::array{"--chat-template", "--chat-template-path"}));
+}
+
 int main() {
+  TestJinjaFlags();
   TestDefaultOptions();
   TestExplicitFlags();
   TestSamplingAndReasoningFlags();

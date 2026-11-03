@@ -71,6 +71,14 @@ For Nix command generation and deployment validation, see
 - `presencePenalty` — a flat penalty for any token used at least once. Pushes
   the model toward new words and topics even if it used each only once.
 
+**Chat formatting**
+
+- `chatTemplate` — opt into the Jinja template embedded in the GGUF.
+  Compiled model templates remain the default.
+- `chatTemplatePath` — with `chatTemplate` enabled, load a Jinja file instead.
+  Both options apply to local prompt, chat, and LLM serving; raw prompts reject
+  them. See [template behavior and compatibility](SERVER.md#single-executable-and-model-configuration).
+
 **Reasoning models**
 
 - `think` (`"on"` / `"off"` / `"auto"`) — whether the model produces its

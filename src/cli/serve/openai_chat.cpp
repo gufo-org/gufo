@@ -298,7 +298,8 @@ tokenization::ChatRole ParseRole(std::string_view role) {
 
 bool ParseContent(const json::Value* content,
                   tokenization::ChatMessage* message,
-                  core::ImageReadBudget& budget, std::string* error) {
+                  core::ImageReadBudget& budget, std::string* error,
+                  bool jinja_template) {
   auto* output = &message->content;
   if (content == nullptr || content->is_null()) {
     return true;
@@ -312,6 +313,8 @@ bool ParseContent(const json::Value* content,
     return false;
   }
 
+  if (jinja_template)
+    message->template_content = json::Value::array();
   for (const auto& part : content->items()) {
     if (!part.is_object()) {
       *error = "message content parts must be objects";
@@ -323,7 +326,9 @@ bool ParseContent(const json::Value* content,
       const auto* url =
           image != nullptr && image->is_object() ? image->find("url") : nullptr;
       if ((message->role != tokenization::ChatRole::kUser &&
-           message->role != tokenization::ChatRole::kTool) ||
+           message->role != tokenization::ChatRole::kTool &&
+           !(jinja_template &&
+             message->role == tokenization::ChatRole::kDeveloper)) ||
           url == nullptr || !url->is_string()) {
         *error = "image_url requires a user or tool message and a string URL";
         return false;
@@ -353,6 +358,11 @@ bool ParseContent(const json::Value* content,
         *error = exception.what();
         return false;
       }
+      if (jinja_template) {
+        auto placeholder = json::Value::object();
+        placeholder["type"] = "image";
+        message->template_content.push_back(std::move(placeholder));
+      }
       continue;
     }
     if (type != "text" && type != "input_text") {
@@ -363,6 +373,12 @@ bool ParseContent(const json::Value* content,
     if (text == nullptr || !text->is_string()) {
       *error = "text message content parts require a string 'text'";
       return false;
+    }
+    if (jinja_template) {
+      auto preserved = json::Value::object();
+      preserved["type"] = "text";
+      preserved["text"] = *text;
+      message->template_content.push_back(std::move(preserved));
     }
     output->append(text->get_str());
   }
@@ -442,7 +458,8 @@ bool ParseHistoricalFunction(const json::Value& function,
 }
 
 bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
-                  core::ImageReadBudget& budget, std::string* error) {
+                  core::ImageReadBudget& budget, std::string* error,
+                  bool jinja_template = false) {
   if (!value.is_object()) {
     *error = "each message must be an object";
     return false;
@@ -455,7 +472,8 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
   message->role = ParseRole(role);
   message->name = value.member_str("name");
   message->tool_call_id = value.member_str("tool_call_id");
-  if (!ParseContent(value.find("content"), message, budget, error)) {
+  if (!ParseContent(value.find("content"), message, budget, error,
+                    jinja_template)) {
     return false;
   }
   if (const json::Value* reasoning = value.find("reasoning_content");
@@ -921,7 +939,8 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   for (const auto& item : messages->items()) {
     tokenization::ChatMessage message;
     std::string parse_error;
-    if (!ParseMessage(item, &message, image_budget, &parse_error)) {
+    if (!ParseMessage(item, &message, image_budget, &parse_error,
+                      backend.uses_jinja_chat_template())) {
       return Error(400, "Bad Request", std::move(parse_error),
                    "invalid_messages");
     }
@@ -939,6 +958,8 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   if (auto error = ParseReasoningBudget(body, &output->chat.reasoning))
     return error;
   if (const auto* kwargs = body.find("chat_template_kwargs")) {
+    if (backend.uses_jinja_chat_template())
+      output->chat.chat_template_kwargs = *kwargs;
     if (const auto* vision_id = kwargs->find("add_vision_id")) {
       if (!vision_id->is_bool())
         return Error(400, "Bad Request",
@@ -3271,7 +3292,7 @@ HttpResponse StreamingResponse(
 bool ParseOpenAiResponseMessage(const json::Value& item,
                                 tokenization::ChatMessage* message,
                                 core::ImageReadBudget& budget,
-                                std::string* error) {
+                                std::string* error, bool jinja_template) {
   auto converted = item;
   const auto kind = item.member_str("type");
   if (kind == "function_call" || kind == "function_call_output" ||
@@ -3344,7 +3365,7 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
     }
     converted["content"] = std::move(content);
   }
-  return ParseMessage(converted, message, budget, error);
+  return ParseMessage(converted, message, budget, error, jinja_template);
 }
 
 std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,

@@ -41,6 +41,43 @@ not be required to serve requests.
 The deployed product is one `gufo` executable. Supported model graphs,
 tokenizers and HIP kernels are compiled into it.
 
+Chat formatting uses Gufo's compiled model templates by default. Add
+`--chat-template` to `gufo serve llm`, `gufo prompt`, or `gufo chat` to execute
+the Jinja template in the GGUF's `tokenizer.chat_template` metadata:
+
+```sh
+gufo serve llm --model model.gguf --chat-template
+gufo chat --model model.gguf --chat-template --chat-template-path custom.jinja
+gufo prompt --model model.gguf --chat-template --prompt "Hello"
+```
+
+`--chat-template-path PATH` requires `--chat-template` and replaces the embedded
+template with that file. Templates are read and compiled once when the model
+loads; restart to pick up file changes. Missing or invalid templates fail
+explicitly. Neither option can be combined with `prompt --raw`.
+
+The native interpreter is adapted from Gufo's pinned llama.cpp reference;
+Python is not needed at runtime. Jinja mode supplies messages, tools,
+`add_generation_prompt`, BOS/EOS strings from the tokenizer, and resolved
+reasoning controls. Chat Completions forwards additional `chat_template_kwargs`;
+those cannot replace `messages`, `tools`, `bos_token`, `eos_token`, or
+`add_generation_prompt`. Gufo's validated reasoning controls take precedence.
+An embedded `tokenizer.chat_template.tool_use` is selected when tools are
+active; an explicit file replaces both embedded variants.
+
+The selected template also drives `/apply-template`, prompt token counting,
+and interactive conversation history. Jinja receives the original Chat
+Completions message roles and content-part boundaries, so its own handling of
+developer examples and system instructions applies. Images require the model's
+native placeholders in input order, one per image. Template changes isolate persistent cache
+entries. Raw completion requests keep their existing behavior.
+
+This option changes input rendering. Generated reasoning and tool calls still
+use Gufo's existing model-specific parsers, so custom templates must retain
+those output conventions. It does not add new model architectures or arbitrary
+response formats. The GGUF template may intentionally differ from Gufo's
+compiled formatter, including its reasoning instructions.
+
 The executable provides subcommands rather than separate inference binaries:
 
 ```text
@@ -449,9 +486,10 @@ Generated reasoning is returned as `reasoning_content` in ordinary and
 streaming Chat Completions responses. Per-model effort mappings and history
 policies are documented in the model cards under `docs/models/`.
 
-The server uses compiled model-specific formatters and validates recognized
-artifact template hashes during model loading. It does not accept custom Jinja
-or claim to enforce a reasoning-token budget.
+By default, the server uses compiled model-specific formatters and validates
+recognized artifact template hashes during model loading. `--chat-template`
+selects Jinja rendering instead; model, tensor and tokenizer validation still
+apply. Neither mode claims to enforce a reasoning-token budget.
 
 Diagnostic telemetry is limited to status, token counts, timing, and
 cancellation state. It must not contain prompt text, model paths, machine
@@ -923,8 +961,9 @@ ordinary continuation.
 - `messages`: `system` and `developer` messages may appear at any position.
   Agent clients such as Codex send them mid-conversation after context
   compaction or when session settings change. DeepSeek renders them in place.
-  Qwen's template accepts only one leading system turn, so Qwen models hoist
-  them into it in their original relative order. That changes the prompt head:
+  Gufo's compiled Qwen formatter accepts only one leading system turn, so it
+  hoists them into it in their original relative order. Jinja mode leaves
+  message order and roles to the selected template. That changes the prompt head:
   the request that introduces such a message is prefilled again, and later
   requests that keep it reuse the whole prompt
 - `max_tokens` or `max_completion_tokens`

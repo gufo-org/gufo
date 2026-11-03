@@ -462,7 +462,8 @@ bool ReadTextContent(const json::Value* content, std::string* out,
 bool ReadTextMessages(const json::Value* input,
                       std::vector<tokenization::ChatMessage>* messages,
                       bool images_supported, bool responses = false,
-                      std::string* parse_error = nullptr) {
+                      std::string* parse_error = nullptr,
+                      bool jinja_template = false) {
   core::ImageReadBudget image_budget;
   image_budget.accepts_images = images_supported;
   if (input == nullptr || !input->is_array() || input->empty())
@@ -500,7 +501,8 @@ bool ReadTextMessages(const json::Value* input,
                       item.member_str("type") == "custom_tool_call_output")) {
       tokenization::ChatMessage message;
       std::string error;
-      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
+      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error,
+                                      jinja_template)) {
         if (parse_error && !error.empty())
           *parse_error = std::move(error);
         return false;
@@ -550,7 +552,8 @@ bool ReadTextMessages(const json::Value* input,
     message.role = RoleFrom(role);
     if (responses) {
       std::string error;
-      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
+      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error,
+                                      jinja_template)) {
         if (parse_error && !error.empty())
           *parse_error = std::move(error);
         return false;
@@ -583,6 +586,7 @@ bool ReadTextMessages(const json::Value* input,
         messages->back().role == tokenization::ChatRole::kAssistant &&
         messages->back().content.empty() && !messages->back().thought.empty()) {
       messages->back().content = std::move(message.content);
+      messages->back().template_content = std::move(message.template_content);
     } else {
       push(std::move(message));
     }
@@ -1155,7 +1159,7 @@ std::optional<HttpResponse> ReadOpenAiResponseChat(
   if (input != nullptr && input->is_string() && !input->str().empty()) {
     messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
   } else if (!ReadTextMessages(input, &messages, b.supports_images(), true,
-                               &input_error)) {
+                               &input_error, b.uses_jinja_chat_template())) {
     return InvalidCompatibilityRequest(input_error);
   }
 

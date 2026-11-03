@@ -294,6 +294,9 @@ void TestGgufTemplateExtraction() {
   Expect(gufo::tokenization::QwenChatTemplate::CreateFromGguf(*lookalike_reader,
                                                               &err) == nullptr,
          "Qwen3.8 look-alike template is rejected by hash");
+  Expect(gufo::core::JinjaChatTemplate::Load(*lookalike_reader, {true, {}}) !=
+             nullptr,
+         "Jinja mode accepts an unrecognized embedded template");
 }
 
 void TestHuggingFaceRenderedGoldens() {
@@ -328,6 +331,23 @@ void TestHuggingFaceRenderedGoldens() {
                 .member_str("rendered_sha256");
         Expect(Sha256(*rendered) == expected,
                "Qwen rendered bytes match the pinned Hugging Face golden");
+        // This fixture normalizes developer instructions for the compiled
+        // formatter. Jinja receives the original roles instead.
+        if (name == "developer_tools")
+          return;
+        auto interpreted = options;
+        interpreted.jinja = gufo::core::JinjaChatTemplate::Compile(
+            ReadText(GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE));
+        std::string error;
+        const auto jinja =
+            QwenChatTemplate::Render(messages, tools, interpreted, &error);
+        Expect(jinja.has_value(), "Jinja golden renders: " + error);
+        if (Sha256(*jinja) != expected) {
+          std::cerr << "Jinja case " << name << "\nExpected: " << *rendered
+                    << "\nActual: " << *jinja << '\n';
+        }
+        Expect(Sha256(*jinja) == expected,
+               "Jinja bytes match independent Hugging Face golden");
       };
 
   ChatTemplateOptions options;
@@ -684,7 +704,7 @@ void TestNewLiteralTokenDoesNotRetokenizeHistory() {
 /// has to hold there too. The synthetic vocabulary and the message are the ones
 /// the template test above uses: the same conversation must tokenize the same
 /// way whichever entry point reads it.
-void TestVisionPreparationReadsContentAsText() {
+void TestVisionPreparationReadsContentAsText(bool interpret = false) {
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
@@ -714,6 +734,9 @@ void TestVisionPreparationReadsContentAsText() {
   };
   gufo::tokenization::ChatTemplateOptions opts;
   opts.enable_thinking = false;
+  if (interpret)
+    opts.jinja = gufo::core::JinjaChatTemplate::Compile(
+        ReadText(GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE));
 
   const auto injected = tokenizer->FindSpecialToken(kEndOfText);
   Expect(injected.has_value(), "the message token is a vocabulary token");
@@ -748,7 +771,7 @@ void TestVisionPreparationReadsContentAsText() {
 /// boundaries, image placeholders included. Decoding the picture itself needs
 /// the model's projector, which this test has no reason to carry: the
 /// image-inputs functional suite covers that path end to end.
-void TestEncodeRenderedReadsImageContentAsText() {
+void TestEncodeRenderedReadsImageContentAsText(bool interpret = false) {
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
@@ -781,6 +804,9 @@ void TestEncodeRenderedReadsImageContentAsText() {
       {0, std::make_shared<const std::vector<std::uint8_t>>(1, 0)});
   gufo::tokenization::ChatTemplateOptions opts;
   opts.enable_thinking = false;
+  if (interpret)
+    opts.jinja = gufo::core::JinjaChatTemplate::Compile(
+        ReadText(GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE));
 
   const auto injected = tokenizer->FindSpecialToken(kEndOfText);
   const auto framing = tokenizer->FindSpecialToken(kImStart);
@@ -826,6 +852,46 @@ void TestEncodeRenderedReadsImageContentAsText() {
   Expect(
       tokenizer->Decode(whole).find(text) != std::string::npos,
       "the literal characters of the message reach the model with a picture");
+}
+
+void TestJinjaCacheAndImageValidation() {
+  using namespace gufo::tokenization;
+  std::vector<std::string> vocab;
+  for (int i = 0; i < 256; ++i)
+    vocab.emplace_back(1, static_cast<char>(i));
+  vocab.emplace_back("ab");
+  vocab.emplace_back("abc");
+  std::string error;
+  auto tokenizer = QwenTokenizer::CreateFromVocabulary(
+      vocab, std::vector<std::string>{"a b", "ab c"}, {}, &error);
+  Expect(tokenizer != nullptr, "Boundary tokenizer: " + error);
+  std::vector<ChatMessage> messages{{ChatRole::kUser, "test"}};
+  ChatTemplateOptions options;
+  options.jinja = gufo::core::JinjaChatTemplate::Compile(
+      "prefix {% if messages | length == 1 %}abc{% else %}abd{% endif %}");
+  const auto prepared = gufo::models::qwen::vision::Prepare(
+      *tokenizer, messages, {}, options, {}, 512);
+  Expect(prepared.tokens.back() == 257 &&
+             prepared.stable_prefix_tokens == prepared.tokens.size() - 1,
+         "A byte prefix inside a merged token backs up to a token boundary");
+
+  options.jinja = gufo::core::JinjaChatTemplate::Compile(
+      "{% if messages | length > 1 %}{{ raise_exception('alternate roles') }}"
+      "{% endif %}{{ messages[0].content }}");
+  const auto strict = gufo::models::qwen::vision::Prepare(*tokenizer, messages,
+                                                          {}, options, {}, 512);
+  Expect(!strict.tokens.empty() && strict.stable_prefix_tokens == 0,
+         "An invalid speculative next turn does not reject the real request");
+
+  messages[0].images.push_back(
+      {0, std::make_shared<const std::vector<std::uint8_t>>(1, 0)});
+  for (const auto source : {"no image", "<|image_pad|>",
+                            "<|vision_start|><|image_pad|><|vision_end|>"
+                            "<|vision_start|><|image_pad|><|vision_end|>"}) {
+    options.jinja = gufo::core::JinjaChatTemplate::Compile(source);
+    Expect(!QwenChatTemplate::Render(messages, {}, options, &error),
+           "Incompatible image layout is rejected");
+  }
 }
 
 void TestChatCorpusConformance() {
@@ -1210,7 +1276,10 @@ int main() {
   TestToolReplayArgumentsAreContent();
   TestNewLiteralTokenDoesNotRetokenizeHistory();
   TestVisionPreparationReadsContentAsText();
+  TestVisionPreparationReadsContentAsText(true);
   TestEncodeRenderedReadsImageContentAsText();
+  TestEncodeRenderedReadsImageContentAsText(true);
+  TestJinjaCacheAndImageValidation();
   TestChatCorpusConformance();
   TestToolImageRendering();
   TestToolRendering();

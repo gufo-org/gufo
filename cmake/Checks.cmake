@@ -25,6 +25,7 @@ set(gufo_pr_targets
   audio_websocket_test
   text_generation_scheduler_test
   component_text_cache_test text_model_runner_test continuation_disk_store_test
+  jinja_chat_template_test
   bench_cli_test prompt_cli_test text_cli_dispatch_test eval_http_client_test
   # BEGIN GENERATED MODEL PR TARGETS
   deepseek_v4_flash_continuation_identity_test ds4_chat_template_test ds4_cli_test

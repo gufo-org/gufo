@@ -328,6 +328,59 @@ std::string RenderChat(std::span<const ChatMessage> messages,
                        std::span<const ChatTool> tools,
                        const ChatTemplateOptions& options,
                        std::vector<ContentSpan>* content_spans) {
+  if (options.jinja) {
+    auto inputs = json::Value::object();
+    inputs["messages"] = json::Value::array();
+    for (const auto& message : messages) {
+      auto entry = json::Value::object();
+      entry["role"] = message.role;
+      entry["content"] = message.content;
+      entry["reasoning_content"] = message.reasoning_content;
+      entry["tool_call_id"] = message.tool_call_id;
+      entry["tool_calls"] = json::Value::array();
+      for (const auto& call : message.tool_calls) {
+        auto tool_call = json::Value::object();
+        tool_call["id"] = call.id;
+        tool_call["type"] = "function";
+        tool_call["function"]["name"] = call.name;
+        auto args = json::Value::object();
+        for (const auto& arg : call.arguments)
+          args[arg.name] =
+              arg.is_string ? json::Value(arg.value) : json::parse(arg.value);
+        tool_call["function"]["arguments"] = std::move(args);
+        entry["tool_calls"].push_back(std::move(tool_call));
+      }
+      inputs["messages"].push_back(std::move(entry));
+    }
+    inputs["tools"] = json::Value::array();
+    for (const auto& tool : tools) {
+      auto entry = json::Value::object();
+      entry["type"] = "function";
+      if (!tool.definition_json.empty()) {
+        entry["function"] = json::parse(tool.definition_json);
+      } else {
+        entry["function"]["name"] = tool.name;
+        entry["function"]["description"] = tool.description;
+        entry["function"]["parameters"] = json::parse(tool.parameters_json);
+      }
+      inputs["tools"].push_back(std::move(entry));
+    }
+    inputs["add_generation_prompt"] = true;
+    inputs["enable_thinking"] = options.enable_thinking;
+    inputs["thinking"] = options.enable_thinking;
+    inputs["preserve_thinking"] = options.preserve_thinking;
+    inputs["reasoning_effort"] =
+        std::string(DeepSeekReasoningEffortName(options.reasoning_effort));
+    auto rendered =
+        options.jinja->Render(inputs, options.kwargs, options.max_output_bytes);
+    std::string output;
+    for (const auto& part : rendered) {
+      if (part.input && content_spans)
+        content_spans->push_back({output.size(), part.text.size()});
+      output += part.text;
+    }
+    return output;
+  }
   std::string output(kBos);
   if (options.enable_thinking) {
     AppendEffortPrompt(output, options.reasoning_effort);

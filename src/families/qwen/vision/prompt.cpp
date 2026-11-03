@@ -350,13 +350,35 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
   // The boundary starts a special token (the assistant turn, or a final user
   // turn an agent replaces each request), after every image.
   // Encode only the mutable suffix; never decode or resize images twice.
-  const auto suffix = tokenization::QwenChatTemplate::EncodeRendered(
+  auto suffix = tokenization::QwenChatTemplate::EncodeRendered(
       tokenizer, *rendered, stable_prefix_bytes, rendered->size(),
       content_spans, tok_options);
-  if (suffix.size() > prompt.tokens.size() ||
-      !std::ranges::equal(suffix, std::span(prompt.tokens).last(suffix.size())))
-    throw std::logic_error("Qwen stable prefix is not a token boundary");
-  prompt.stable_prefix_tokens = prompt.tokens.size() - suffix.size();
+  const auto matches = [&] {
+    return suffix.size() <= prompt.tokens.size() &&
+           std::ranges::equal(suffix,
+                              std::span(prompt.tokens).last(suffix.size()));
+  };
+  if (options.jinja) {
+    // Jinja's common byte prefix may end inside a BPE token. Back up to a
+    // verified boundary, never retaining image state across an uncertain cut.
+    const auto floor =
+        offsets.empty() ? 0 : offsets.back() + tokenization::kImagePad.size();
+    for (std::size_t back = 0; !matches() && stable_prefix_bytes > floor &&
+                               back < tokenization::kMaxRenderedBytesPerToken;
+         ++back) {
+      --stable_prefix_bytes;
+      suffix = tokenization::QwenChatTemplate::EncodeRendered(
+          tokenizer, *rendered, stable_prefix_bytes, rendered->size(),
+          content_spans, tok_options);
+    }
+    prompt.stable_prefix_tokens = matches() && stable_prefix_bytes >= floor
+                                      ? prompt.tokens.size() - suffix.size()
+                                      : 0;
+  } else {
+    if (!matches())
+      throw std::logic_error("Qwen stable prefix is not a token boundary");
+    prompt.stable_prefix_tokens = prompt.tokens.size() - suffix.size();
+  }
   prompt.rope.Validate(max_context);
   if (!prompt.images.empty()) {
     const auto digest = identity.Finish();
