@@ -138,12 +138,20 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
               next["voice_clone_mode"] =
                   value.as_bool() ? "speaker_embedding_only" : "icl";
             } else if (name == "task_type") {
-              const auto variant = service.variant();
-              const std::string expected =
-                  variant == ext::TtsVariant::kBase          ? "Base"
-                  : variant == ext::TtsVariant::kVoiceDesign ? "VoiceDesign"
-                                                             : "CustomVoice";
-              if (!value.is_string() || value.str() != expected)
+              if (!value.is_string())
+                throw std::invalid_argument(
+                    "task_type does not match the loaded checkpoint");
+              const auto& cond = service.conditioning();
+              const bool ok =
+                  (value.str() == "Base" &&
+                   (cond.reference_audio !=
+                        ext::TtsConditioningMode::kUnsupported ||
+                    cond.reference_presets)) ||
+                  (value.str() == "VoiceDesign" &&
+                   cond.instructions == ext::TtsConditioningMode::kRequired) ||
+                  (value.str() == "CustomVoice" && cond.unconditioned &&
+                   cond.instructions != ext::TtsConditioningMode::kRequired);
+              if (!ok)
                 throw std::invalid_argument(
                     "task_type does not match the loaded checkpoint");
             } else {

@@ -801,5 +801,96 @@ int main() {
     server_44k.stop();
     worker_44k.join();
   }
+  {
+    constexpr std::string_view kReferenceWav =
+        "UklGRiwAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YQgAAAAAAOgD"
+        "GPwAAA==";
+    gufo::ext::SynthesisRequest last_request;
+    auto hybrid_tts = std::make_shared<TtsService>(TtsServiceOptions{
+        .validate_model = false,
+        .variant = gufo::ext::TtsVariant::kBase,
+        .conditioning =
+            gufo::ext::TtsConditioningCapabilities{
+                .unconditioned = true,
+                .require_voice = false,
+                .default_voice = "default",
+                .reference_audio = gufo::ext::TtsConditioningMode::kOptional,
+                .reference_presets = true,
+                .instructions = gufo::ext::TtsConditioningMode::kOptional,
+            },
+        .model_id = "fish-drama-3",
+        .voices = {"default", "voice-clone"},
+        .voice_presets = {{"narrator",
+                           {.reference_audio = {.sample_rate = 24000,
+                                                .channels = 1,
+                                                .samples = {0.2F, -0.2F}},
+                            .reference_text = "Narrator ref."}}},
+        .runner = [&](const auto& request, const auto&, auto* result, auto*) {
+          last_request = request;
+          last_request.on_audio = {};
+          result->sample_rate = 24000;
+          result->code_groups = 10;
+          result->samples = {-.25F, 0.0F, .25F};
+          return !request.on_audio || request.on_audio(result->samples);
+        }});
+    HttpServer hybrid_server("127.0.0.1", 0, nullptr, nullptr, hybrid_tts,
+                             nullptr, {});
+    assert(hybrid_server.start(&error));
+    std::jthread hybrid_worker([&] { hybrid_server.run(); });
+    {
+      Client client(hybrid_server.port(), "/v1/audio/speech/stream");
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","task_type":"CustomVoice","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Default voice."})");
+      client.Text(R"({"type":"input.done"})");
+      client.Event("audio.start");
+      client.Receive();
+      client.Event("audio.done");
+      client.Event("session.done");
+      assert(last_request.speaker == "default" &&
+             last_request.reference_audio.samples.empty());
+
+      client.Text(
+          std::string(
+              R"({"type":"session.config","model":"fish-drama-3","task_type":"Base","voice":"voice-clone","ref_audio":")") +
+          std::string(kReferenceWav) +
+          R"(","ref_text":"Clone ref.","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Cloned voice."})");
+      client.Text(R"({"type":"input.done"})");
+      client.Event("audio.start");
+      client.Receive();
+      client.Event("audio.done");
+      client.Event("session.done");
+      assert(last_request.speaker == "voice-clone" &&
+             last_request.reference_audio.samples.size() == 4 &&
+             last_request.reference_text == "Clone ref.");
+
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","voice":"narrator","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Preset voice."})");
+      client.Text(R"({"type":"input.done"})");
+      client.Event("audio.start");
+      client.Receive();
+      client.Event("audio.done");
+      client.Event("session.done");
+      assert(last_request.speaker == "narrator" &&
+             last_request.reference_audio.samples.size() == 2 &&
+             last_request.reference_text == "Narrator ref.");
+
+      client.Text(
+          std::string(
+              R"({"type":"session.config","model":"fish-drama-3","voice":"narrator","ref_audio":")") +
+          std::string(kReferenceWav) + R"(","ref_text":"conflict"})");
+      assert(client.Event("error").member_str("message").find(
+                 "unsupported_field") != std::string::npos);
+
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","task_type":"VoiceDesign","instructions":"warm"})");
+      assert(client.Event("error").member_str("message").find("task_type") !=
+             std::string::npos);
+    }
+    hybrid_server.stop();
+    hybrid_worker.join();
+  }
   RealtimeStreams();
 }

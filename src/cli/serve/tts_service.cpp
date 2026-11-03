@@ -72,6 +72,9 @@ struct TtsService::Impl {
       }
       options.sample_rate = native_runtime->SampleRate();
       options.variant = native_runtime->Variant();
+      if (!options.conditioning.has_value()) {
+        options.conditioning = native_runtime->Conditioning();
+      }
       options.concurrent = options.concurrent || native_runtime->Concurrent();
       if (options.model_id.empty())
         options.model_id = native_runtime->ModelId();
@@ -90,23 +93,43 @@ struct TtsService::Impl {
       initialization_error = "invalid TTS output sample rate";
       return;
     }
+    if (!options.conditioning.has_value()) {
+      options.conditioning =
+          ext::DefaultTtsConditioningCapabilities(options.variant);
+    }
+    const auto& cond = *options.conditioning;
+    if (!cond.unconditioned &&
+        cond.reference_audio == ext::TtsConditioningMode::kUnsupported &&
+        !cond.reference_presets) {
+      initialization_error =
+          "TTS provider does not support any synthesis conditioning mode";
+      return;
+    }
+    if (cond.unconditioned &&
+        cond.reference_audio == ext::TtsConditioningMode::kRequired) {
+      initialization_error =
+          "TTS provider cannot require reference audio when unconditioned "
+          "synthesis is enabled";
+      return;
+    }
+
     if (options.model_id.empty()) {
       options.model_id = ModelId(options.variant);
     }
     if (options.voices.empty()) {
-      if (options.variant == ext::TtsVariant::kVoiceDesign) {
+      if (!cond.default_voice.empty()) {
+        options.voices.push_back(cond.default_voice);
+      } else if (cond.instructions == ext::TtsConditioningMode::kRequired) {
         options.voices.push_back("voice-design");
-      } else if (options.variant == ext::TtsVariant::kBase) {
+      } else if (cond.reference_audio !=
+                 ext::TtsConditioningMode::kUnsupported) {
         options.voices.push_back("voice-clone");
       }
     }
-    // Presets carry reference audio, which only the Base checkpoint consumes:
-    // CustomVoice selects a trained speaker embedding and VoiceDesign is
-    // driven by `instruct`, so neither has anything to apply them to.
-    if (!options.voice_presets.empty() &&
-        options.variant != ext::TtsVariant::kBase) {
+    if (!options.voice_presets.empty() && !cond.reference_presets) {
       initialization_error =
-          "voice presets require a Qwen3-TTS Base checkpoint";
+          "voice presets require a TTS model that supports reference "
+          "presets";
       return;
     }
     for (const auto& [name, unused] : options.voice_presets) {
@@ -173,6 +196,21 @@ std::uint32_t TtsService::sample_rate() const noexcept {
 
 ext::TtsVariant TtsService::variant() const noexcept {
   return impl_->options.variant;
+}
+
+const ext::TtsConditioningCapabilities& TtsService::conditioning()
+    const noexcept {
+  // Construction always fills `conditioning` before the service can become
+  // ready; the fallback only guards use on a service that failed to start.
+  static const ext::TtsConditioningCapabilities kNoneSupported{
+      /*unconditioned=*/false,
+      /*require_voice=*/false,
+      /*default_voice=*/{},
+      /*reference_audio=*/ext::TtsConditioningMode::kUnsupported,
+      /*reference_presets=*/false,
+      /*instructions=*/ext::TtsConditioningMode::kUnsupported};
+  return impl_->options.conditioning.has_value() ? *impl_->options.conditioning
+                                                 : kNoneSupported;
 }
 
 bool TtsService::Synthesize(const ext::SynthesisRequest& request,

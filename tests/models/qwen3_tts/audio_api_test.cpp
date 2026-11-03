@@ -624,6 +624,152 @@ void TestSampleRateAndDuration() {
   }
 }
 
+void TestConditioningCapabilities() {
+  constexpr std::string_view kReferenceWav =
+      "UklGRiwAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YQgAAAAAAOgD"
+      "GPwAAA==";
+
+  for (const auto variant : {gufo::ext::TtsVariant::kCustomVoice,
+                             gufo::ext::TtsVariant::kVoiceDesign}) {
+    FakeRunner runner;
+    TtsService rejected(TtsServiceOptions{
+        .validate_model = false,
+        .variant = variant,
+        .voices = {"vivian"},
+        .voice_presets = {{"preset",
+                           {.reference_audio = {.sample_rate = 24000,
+                                                .channels = 1,
+                                                .samples = {0.1F}},
+                            .reference_text = "hi"}}},
+        .runner = [&](const auto&, const auto&, auto*, auto*) { return true; },
+    });
+    Check(!rejected.ready(),
+          "startup rejects voice presets when reference_presets is false");
+  }
+
+  for (const auto& bad_cond : {
+           gufo::ext::TtsConditioningCapabilities{
+               .unconditioned = false,
+               .require_voice = false,
+               .default_voice = {},
+               .reference_audio = gufo::ext::TtsConditioningMode::kUnsupported,
+               .reference_presets = false,
+               .instructions = gufo::ext::TtsConditioningMode::kOptional,
+           },
+           gufo::ext::TtsConditioningCapabilities{
+               .unconditioned = true,
+               .require_voice = false,
+               .default_voice = "default",
+               .reference_audio = gufo::ext::TtsConditioningMode::kRequired,
+               .reference_presets = false,
+               .instructions = gufo::ext::TtsConditioningMode::kOptional,
+           },
+       }) {
+    TtsService invalid(TtsServiceOptions{
+        .validate_model = false,
+        .conditioning = bad_cond,
+        .voices = {"default"},
+        .runner = [](const auto&, const auto&, auto*, auto*) { return true; },
+    });
+    Check(!invalid.ready(),
+          "contradictory conditioning capabilities rejected at startup");
+  }
+
+  FakeRunner runner;
+  TtsService hybrid(TtsServiceOptions{
+      .validate_model = false,
+      .variant = gufo::ext::TtsVariant::kBase,
+      .conditioning =
+          gufo::ext::TtsConditioningCapabilities{
+              .unconditioned = true,
+              .require_voice = false,
+              .default_voice = "default",
+              .reference_audio = gufo::ext::TtsConditioningMode::kOptional,
+              .reference_presets = true,
+              .instructions = gufo::ext::TtsConditioningMode::kUnsupported,
+          },
+      .model_id = "fish-drama-3",
+      .voices = {"default", "voice-clone"},
+      .voice_presets = {{"aaa_preset",
+                         {.reference_audio = {.sample_rate = 24000,
+                                              .channels = 1,
+                                              .samples = {0.25F, -0.25F}},
+                          .reference_text = "Preset transcript.",
+                          .speaker_embedding_only = false,
+                          .language = "italian"}}},
+      .runner =
+          [&runner](const qwen3_tts::SynthesisRequest& request,
+                    const qwen3_tts::CancellationCheck& cancelled,
+                    qwen3_tts::SynthesisResult* result, std::string* error) {
+            return runner.Run(request, cancelled, result, error);
+          },
+  });
+  Check(hybrid.ready(), "hybrid conditioning service with presets is ready");
+
+  const auto unconditioned =
+      Send(hybrid, "POST", "/v1/audio/speech",
+           R"({"model":"fish-drama-3","input":"Unconditioned hello."})");
+  Check(
+      unconditioned.status == 200 && runner.calls == 1 &&
+          runner.latest.speaker == "default" &&
+          runner.latest.reference_audio.samples.empty() &&
+          runner.latest.reference_text.empty(),
+      "hybrid runner synthesizes without reference audio using default_voice");
+
+  const auto cloned = Send(
+      hybrid, "POST", "/v1/audio/speech",
+      std::string(
+          R"({"model":"fish-drama-3","input":"Cloned hello.","voice":"voice-clone","reference_audio":")") +
+          std::string(kReferenceWav) +
+          R"(","reference_text":"Reference phrase."})");
+  Check(cloned.status == 200 && runner.calls == 2 &&
+            runner.latest.speaker == "voice-clone" &&
+            runner.latest.reference_audio.samples.size() == 4 &&
+            runner.latest.reference_text == "Reference phrase.",
+        "hybrid runner accepts explicit per-request reference cloning");
+
+  const auto preset = Send(
+      hybrid, "POST", "/v1/audio/speech",
+      R"({"model":"fish-drama-3","input":"Preset hello.","voice":"aaa_preset"})");
+  Check(
+      preset.status == 200 && runner.calls == 3 &&
+          runner.latest.speaker == "aaa_preset" &&
+          runner.latest.reference_audio.samples.size() == 2 &&
+          runner.latest.reference_text == "Preset transcript." &&
+          runner.latest.language == "italian",
+      "hybrid runner applies registered voice preset and its default language");
+
+  Check(
+      Send(
+          hybrid, "POST", "/v1/audio/speech",
+          std::string(
+              R"({"model":"fish-drama-3","input":"x","voice":"aaa_preset","reference_audio":")") +
+              std::string(kReferenceWav) + R"(","reference_text":"conflict"})")
+              .status == 400,
+      "preset rejects conflicting per-request reference audio");
+  Check(
+      Send(hybrid, "POST", "/v1/audio/speech",
+           R"({"model":"fish-drama-3","input":"x","reference_text":"orphan"})")
+              .status == 400,
+      "orphan reference_text without reference_audio fails closed");
+  Check(Send(hybrid, "POST", "/v1/audio/speech",
+             std::string(
+                 R"({"model":"fish-drama-3","input":"x","reference_audio":")") +
+                 std::string(kReferenceWav) + R"("})")
+                .status == 400,
+        "ICL reference_audio without reference_text fails closed");
+  Check(
+      Send(
+          hybrid, "POST", "/v1/audio/speech",
+          R"({"model":"fish-drama-3","input":"x","reference_audio":"not-wav","reference_text":"hi"})")
+              .status == 400,
+      "malformed reference_audio fails closed");
+  Check(Send(hybrid, "POST", "/v1/audio/speech",
+             R"({"model":"fish-drama-3","input":"x","instructions":"whisper"})")
+                .status == 400,
+        "unsupported instructions field fails closed");
+}
+
 }  // namespace
 
 int main() {
@@ -636,6 +782,7 @@ int main() {
   TestBaseContract();
   TestInvalidWaveform();
   TestSampleRateAndDuration();
+  TestConditioningCapabilities();
   std::cout << "PASS qwen3_tts_audio_api_test\n";
   return 0;
 }

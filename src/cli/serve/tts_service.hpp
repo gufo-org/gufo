@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,6 +47,7 @@ struct TtsServiceOptions {
   bool validate_model{true};
   std::uint32_t sample_rate{24000};
   ext::TtsVariant variant{ext::TtsVariant::kCustomVoice};
+  std::optional<ext::TtsConditioningCapabilities> conditioning;
   std::string model_id;
   /// Additional IDs accepted from requests; `model_id` stays primary in
   /// listings and responses (#957).
@@ -82,6 +84,8 @@ public:
       const std::string& name) const;
   [[nodiscard]] std::uint32_t sample_rate() const noexcept;
   [[nodiscard]] ext::TtsVariant variant() const noexcept;
+  [[nodiscard]] const ext::TtsConditioningCapabilities& conditioning()
+      const noexcept;
 
   [[nodiscard]] bool Synthesize(const ext::SynthesisRequest& request,
                                 const ext::CancellationCheck& is_cancelled,
