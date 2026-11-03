@@ -214,7 +214,7 @@ class ConfigureTests(unittest.TestCase):
             # Ninja keeps the build's compiler (CXX); a Visual Studio generator
             # would select MSVC instead.
             for command in (["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
-                            ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "4"],
+                            ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "2"],
                             ["ctest", "--test-dir", str(source / "build"), "-C", "Release", "--output-on-failure"]):
                 result = subprocess.run(command, env=dict(os.environ, CCACHE_BASEDIR=str(source)),
                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
