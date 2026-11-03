@@ -500,16 +500,23 @@
             export HOME=$TMPDIR
             set -euo pipefail
 
+            # The store source name changes on every revision. base_dir alone
+            # rewrites it to ../<hash>-source, which still changes cache keys.
+            # Compile a writable copy at a stable sandbox path instead.
+            cp -r "$src" source
+            chmod -R u+w source
+            src="$PWD/source"
+
             ccache_launcher=
             ccache_dir=/tmp/gufo-ccache
             if [[ -d "$ccache_dir" && -w "$ccache_dir" ]]; then
               export CCACHE_DIR="$ccache_dir"
-              export CCACHE_BASEDIR="$src"
+              export CCACHE_BASEDIR="$PWD"
               export CCACHE_COMPILERCHECK=content
               export CCACHE_MAXSIZE=2G
               export CCACHE_NOHASHDIR=true
               export CCACHE_UMASK=000
-              export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -fdebug-prefix-map=$src=."
+              export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -fdebug-prefix-map=$PWD=."
               ccache_launcher=-DCMAKE_CXX_COMPILER_LAUNCHER=ccache
               ccache --zero-stats
             fi
