@@ -2273,10 +2273,13 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
                            inject_fused_ != nullptr &&
                            inject_fused_ == m.inject.f32();
   inject_fused_ = nullptr;
-  // A separate inject projection can overwrite the cached half input. Keep
-  // the full mixed row available for the following projection in that case.
-  half_only =
-      half_only && (inject == nullptr || m.inject.empty() || fused_inject);
+  // A separate inject projection (BF16 or F16 rows) narrows its own input
+  // into the cached half buffer. Keep the full mixed row available for the
+  // projections that follow in that case: they narrow it again.
+  const bool separate_inject =
+      inject != nullptr && !m.inject.empty() && !fused_inject;
+  half_only = half_only && !separate_inject;
+  no_f32 = no_f32 && !separate_inject;
   const float* xn = s_.xn;
   const bool vectorized =
       xn_half_ ||
@@ -2334,7 +2337,7 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
   inject_parts_ = fused_inject ? (vectorized ? HcInjectPartsVec4(c.hidden_size)
                                              : HcInjectParts(c.hidden_size))
                                : 1;
-  if (inject != nullptr && !m.inject.empty() && !fused_inject) {
+  if (separate_inject) {
     // A quantized inject projection (the draft block's) reads an F32 norm;
     // on the wide route the combine only produced F16, so norm again.
     if (xn_half_) {
