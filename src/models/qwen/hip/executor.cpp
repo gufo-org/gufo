@@ -263,7 +263,7 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
     for (std::uint32_t offset = 0; offset < count;) {
       const auto start = position + offset;
       const auto until_wrap = static_cast<std::uint32_t>(
-          kSsmReplayCapacity - (start % kSsmReplayCapacity));
+          arena_.replay_capacity_ - (start % arena_.replay_capacity_));
       const auto rows =
           std::min({count - offset, until_wrap, arena_.GetMaxBatch()});
       LaunchSSMConvRecurrenceRows(
