@@ -41,6 +41,9 @@ not a quality pass.
 
 ## Hosted versus local checks
 
+The [Nix check inventory](CI_CHECKS.md) lists every PR check, the additional
+`nix flake check` coverage, exact CPU test selections, and duplicated work.
+
 GitHub runs formatting, documentation, dependency-inventory and server-command
 checks plus `cmake/Checks.cmake`: parsing, GGUF safety, sampling, templates,
 server/cache/scheduler behavior, model configuration and small audio/video API
