@@ -15,8 +15,7 @@
   openssl,
   ffmpeg-headless,
   ccache,
-  cargo,
-  rustc,
+  rustToolchain,
   rustPlatform,
   rocmPackages,
   releaseVersion ? null,
@@ -45,7 +44,7 @@ let
         relativePath = lib.removePrefix "${root}/" pathString;
       in
       pathString == root
-      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" ]
+      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" "rust-toolchain.toml" ]
       || relativePath == "licenses"
       || lib.hasPrefix "licenses/" relativePath
       || relativePath == "cmake"
@@ -70,8 +69,7 @@ stdenv.mkDerivation {
     ninja
     pkg-config
     makeWrapper
-    cargo
-    rustc
+    rustToolchain
     rocmPackages.clr
   ];
 

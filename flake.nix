@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # ROCm 10.1.0 / HIP Clang 24, with gfx1151 binaries on gufo.cachix.org.
     nixpkgs-rocm10.url = "github:gufo-org/nixpkgs/1a6ba8bc6f744f7a843d025e46bc9911b4b6c37d";
     # Reference ASR/TTS runtime for benchmark comparisons; exposes a
@@ -23,7 +27,7 @@
   };
 
   outputs =
-    { self, nixpkgs, nixpkgs-rocm10, audio-cpp }:
+    { self, nixpkgs, nixpkgs-rocm10, audio-cpp, rust-overlay }:
     let
       # Strix Halo is a Linux x86-64-only target (see README non-goals).
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" ];
@@ -42,15 +46,20 @@
       rocmPkgs = forAllSystems (system: import nixpkgs-rocm10 { inherit system; });
       pkgs = forAllSystems (system: import nixpkgs {
         inherit system;
-        overlays = [ (_final: _prev: {
+        overlays = [ rust-overlay.overlays.default (_final: _prev: {
           rocmPackages = rocmPkgs.${system}.rocmPackages_10;
         }) ];
       });
+
+      rustToolchains = forAllSystems (system:
+        pkgs.${system}.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
+      );
 
       gufoPackages = forAllSystems (
         system:
         pkgs.${system}.callPackage ./.devops/nix/scope.nix {
           inherit revision;
+          rustToolchain = rustToolchains.${system};
           rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
         }
       );
@@ -231,6 +240,7 @@
         system:
         let
           pkgsSys = pkgs.${system};
+          rustToolchain = rustToolchains.${system};
           root = toString ./.;
           mkFilteredSource =
             {
@@ -365,8 +375,7 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
-              pkgsSys.cargo
-              pkgsSys.rustc
+              rustToolchain
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
@@ -487,8 +496,7 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
-              pkgsSys.cargo
-              pkgsSys.rustc
+              rustToolchain
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
