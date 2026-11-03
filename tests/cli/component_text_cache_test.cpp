@@ -393,6 +393,27 @@ void AlignedPrefillKeepsAlignedBoundaries() {
   assert(Generate(retry) == expected);
   retry.Invalidate();
 }
+// A request that stops at an unaligned prompt end before advancing a token
+// (one-token completions) drops its live frontier there, but still publishes
+// the complete prompt, which an unchanged retry restores without prefill.
+void UnalignedPromptEndPublishesBeforeDroppingTheFrontier() {
+  std::vector<TextRunnerToken> prompt(41);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto runner = std::make_shared<Runner>();
+  runner->alignment = 4;
+  runner->in_pass = true;
+  TextRunnerPool pool(runner, 2);
+  auto seed =
+      pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
+  Prefill(seed);
+  (void)seed.Commit();
+  auto retry =
+      pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
+  assert(retry.cached_prompt_tokens() == prompt.size());
+  assert(retry.prefill_complete());
+  (void)Generate(retry);
+  retry.Invalidate();
+}
 void ColdAcquireResetsOnce() {
   auto runner = std::make_shared<Runner>();
   ComponentTextCache cache(runner, 1, 1 << 22, {});
@@ -2208,6 +2229,7 @@ int main() {
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
   AlignedPrefillKeepsAlignedBoundaries();
+  UnalignedPromptEndPublishesBeforeDroppingTheFrontier();
   ColdAcquireResetsOnce();
   ColdAssignmentAvoidsDrainingCancelledSlot();
   ColdAssignmentAvoidsDrainingCancelledSlot(true);

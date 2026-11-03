@@ -1536,12 +1536,15 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
         " generated=" + std::to_string(impl_->generated.size()));
   }
   checkpoint.resize(position);
-  // As in Cancel: an unaligned prefill frontier is not kept live.
+  // As in Cancel: an unaligned prefill frontier is not kept live. The lease
+  // drops a component state after publishing the prompt snapshot, which
+  // reads its positions; other states are reset here.
   if (position % impl_->alignment != 0 &&
       position > impl_->lease.cached_tokens() &&
       position <= impl_->prefill_offset) {
     checkpoint.clear();
-    state.Invalidate();
+    if (!impl_->lease.component())
+      state.Invalidate();
   }
   if (capabilities.snapshot && capabilities.fork) {
     CommitMetrics metrics = impl_->snapshot_metrics;
@@ -1602,12 +1605,14 @@ TextRunnerPool::Request::Cancel() noexcept {
             "cancelled checkpoint is outside completed work");
       checkpoint.resize(position);
       // This request's prefill frontier off the alignment cannot continue the
-      // prompt exactly; a decoded or reused frontier is kept there.
+      // prompt exactly; a decoded or reused frontier is kept there. As in
+      // Commit, the lease drops a component state after publishing.
       if (position % impl_->alignment != 0 &&
           position > impl_->lease.cached_tokens() &&
           position <= impl_->prefill_offset) {
         checkpoint.clear();
-        state.Invalidate();
+        if (!impl_->lease.component())
+          state.Invalidate();
       }
     } else {
       state.Invalidate();
