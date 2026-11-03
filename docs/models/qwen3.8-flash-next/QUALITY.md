@@ -1,5 +1,28 @@
 # Qwen3.8 Flash-Next quality
 
+## Four-token prefill alignment, November 3, 2026
+
+Sparse prefill packs four consecutive queries from each pass start into one
+tile and gathers the union of their key selections, so a prompt split
+matches one pass only when every later pass starts on a multiple of four.
+Serving restored cached prompts from unaligned positions: the stable
+boundary at the end of the final user turn, shared-prefix and grid
+checkpoints and the complete-prompt snapshot. Budget-limited passes beside
+decoders could also end off the alignment. Flash-Next now reports
+`prefill_alignment` 4; the server rounds those checkpoints down to it and
+ends budget-limited passes on it, and `Session::Feed` does the same for its
+own passes. The snapshot payload version is 19.
+
+- A 16,694-token prompt with 256 greedy tokens (UD-Q4_K_XL, two sessions,
+  `--context 40960`): on main the cold request and the same request after a
+  cached half-prompt restore gave different text, with and without MTP
+  (SHA-256 prefixes `3354805207df` and `653901e9338d`). With the change both
+  give `3a1f21850729` in AR and MTP.
+- `tests/functional/cache_alignment_qwen38.py` passes in AR and MTP: final
+  user turns ending at 2,977–2,980 tokens (every residue) restore at 2,944
+  from RAM and from `--cache-disk` after a restart, byte-identical to a
+  fresh server.
+
 ## Decode rows at the sparse budget, October 28, 2026
 
 A verification chain that crosses the 2,048-token sparse-attention budget
