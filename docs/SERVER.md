@@ -582,15 +582,19 @@ transcript: synthesis runs to the `max_new_tokens` cap, so a short input can
 return several minutes of unusable audio. Preset names join
 `voice-clone` in `/v1/audio/voices`, and a request naming a preset must not
 also send `reference_audio`, `reference_text`, or `voice_clone_mode` --- the
-preset already supplies them. Presets require a Base checkpoint; CustomVoice
-selects a trained embedding and VoiceDesign is driven by `instructions`, so
-neither has anything to apply them to.
+preset already supplies them. Presets require a checkpoint that supports
+reference presets (such as Qwen3-TTS Base); CustomVoice selects a trained
+embedding and VoiceDesign is driven by `instructions`, so neither has anything
+to apply them to. A request that omits `voice` gets the model's declared
+default voice (such as `voice-clone`), falling back to the first name in
+`/v1/audio/voices`; a preset is never chosen implicitly.
 
 `POST /v1/audio/speech` accepts `model`, `input`, `voice`, `response_format`,
 `speed`, `language`, `instructions`, `seed`, `max_new_tokens`, `greedy`,
 `stream_format`, talker `temperature`/`top_k`/`top_p`/`repetition_penalty`, and
 predictor `subtalker_dosample`/`subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p`.
-Base additionally accepts `reference_audio`, `reference_text`, `voice_clone_mode`.
+Checkpoints that support reference conditioning additionally accept
+`reference_audio`, `reference_text`, `voice_clone_mode`.
 Unknown fields are ignored. `response_format` supports buffered `wav` and
 streaming `pcm`; `stream_format: "sse"` emits OpenAI audio events with base64
 PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
