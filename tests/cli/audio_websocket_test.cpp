@@ -532,10 +532,13 @@ void RealtimeStreams() {
     client.Event("conversation.item.created");
     client.Text(R"({"type":"response.create"})");
     client.Event("response.created");
-    speak(Pcm(0.6, true) + Pcm(0.4, false));
+    speak(Pcm(0.6, true));
     client.Event("input_audio_buffer.speech_started");
     assert(client.Event("response.done")["response"].member_str("status") ==
            "cancelled");
+    // Wait for cancellation before sending silence: the response worker and
+    // incoming audio run independently, so their events can otherwise race.
+    speak(Pcm(0.4, false));
     client.Event("input_audio_buffer.speech_stopped");
     client.Event("input_audio_buffer.committed");
     client.Event("conversation.item.created");
