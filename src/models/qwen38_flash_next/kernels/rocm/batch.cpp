@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 #include "qfn_mmq.h"
-#include "src/models/qwen38_flash_next/draft_vocab.hpp"
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -524,7 +524,7 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
   const auto& full_head = model_->output();
   const std::size_t vocab = full_head.rows;
   const std::size_t prefix = prefix_head.rows;
-  const std::size_t kSmall = prefix + kMtpDraftExtraRows;
+  const std::size_t kSmall = prefix + speculative::kDraftVocabExtraRows;
   std::array<std::uint32_t, kBatchSessions> slot{};
   std::uint32_t subset_rows = 0;
   for (std::uint32_t i = 0; i < n; ++i)
@@ -566,7 +566,8 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
       return false;
     if (!AnyActive(items))
       return true;
-    static_assert(kMtpDraftExtraRows <= 1024, "GatherDraftLogits is one block");
+    static_assert(speculative::kDraftVocabExtraRows <= 1024,
+                  "GatherDraftLogits is one block");
     if (mixed) {
       if (!DenseBatch(full_head, base.mixed, batch_logits_, n, error))
         return false;
@@ -574,7 +575,7 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
         if (slot[i] < subset_rows)
           GatherDraftLogits(logits_of(i), items[i].session->mtp_.draft_ids,
                             static_cast<std::uint32_t>(prefix),
-                            kMtpDraftExtraRows, stream_);
+                            speculative::kDraftVocabExtraRows, stream_);
       }
     } else if (subset_rows != 0) {
       float* staged = batch_logits_ + kBatchSessions * vocab -
@@ -595,7 +596,7 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
                    logits_of(i) + prefix, 1, error))
           return false;
         MaskDraftLogits(logits_of(i) + prefix, session.mtp_.draft_ids,
-                        kMtpDraftExtraRows, stream_);
+                        speculative::kDraftVocabExtraRows, stream_);
       }
     }
     if (subset_rows == 0 &&
@@ -615,7 +616,7 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
         if (table != nullptr)
           RemapDraftIds(reinterpret_cast<std::uint32_t*>(s_.mtp_token), 1,
                         static_cast<std::uint32_t>(prefix), table,
-                        kMtpDraftExtraRows, stream_);
+                        speculative::kDraftVocabExtraRows, stream_);
         if (!Check(hipMemcpyAsync(batch_candidates_host_[i].ids.data(),
                                   s_.mtp_token, 2 * sizeof(std::int32_t),
                                   hipMemcpyDeviceToHost, stream_),
@@ -628,7 +629,7 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
       if (table != nullptr)
         RemapDraftIds(s_.mtp_ids, static_cast<std::uint32_t>(count),
                       static_cast<std::uint32_t>(prefix), table,
-                      kMtpDraftExtraRows, stream_);
+                      speculative::kDraftVocabExtraRows, stream_);
       if (!Check(hipMemcpyAsync(batch_candidates_host_ + i, s_.mtp_ids,
                                 offsetof(MtpCandidateLogits, logits) +
                                     count * sizeof(float),

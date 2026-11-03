@@ -10,8 +10,8 @@
 #include <optional>
 #include <type_traits>
 
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
-#include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -152,18 +152,19 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   if (!m->device_) {
     return nullptr;
   }
-  if (m->mtp_weights_ && m->device_->output().rows > kMtpDraftVocab) {
+  if (m->mtp_weights_ &&
+      m->device_->output().rows > speculative::kDraftVocabPrefix) {
     std::vector<std::int32_t> specials;
-    for (std::uint32_t id = kMtpDraftVocab; id < m->device_->output().rows;
-         ++id)
+    for (std::uint32_t id = speculative::kDraftVocabPrefix;
+         id < m->device_->output().rows; ++id)
       if (m->tokenizer_->IsSpecialToken(id))
         specials.push_back(static_cast<std::int32_t>(id));
     // A vocabulary with more special tokens than table rows drafts over the
     // full head.
-    if (specials.size() < kMtpDraftExtraRows) {
+    if (specials.size() < speculative::kDraftVocabExtraRows) {
       m->draft_specials_ = static_cast<std::uint32_t>(specials.size());
-      if (!m->device_->SetDraftVocab(kMtpDraftVocab, std::move(specials),
-                                     error_msg))
+      if (!m->device_->SetDraftVocab(speculative::kDraftVocabPrefix,
+                                     std::move(specials), error_msg))
         return nullptr;
       m->draft_subset_ = true;
     }
@@ -262,9 +263,10 @@ std::size_t Model::ExpandedQ8_0Tensors() const noexcept {
 }
 
 bool Model::InDraftSubset(std::int32_t token) const {
-  return token >= 0 && (static_cast<std::uint32_t>(token) < kMtpDraftVocab ||
-                        tokenizer_->IsSpecialToken(
-                            static_cast<tokenization::TokenId>(token)));
+  return token >= 0 &&
+         (static_cast<std::uint32_t>(token) < speculative::kDraftVocabPrefix ||
+          tokenizer_->IsSpecialToken(
+              static_cast<tokenization::TokenId>(token)));
 }
 
 std::string Model::ModelName() const {
@@ -320,7 +322,8 @@ Session::Session(std::shared_ptr<Model> model,
       session_(std::move(session)),
       draft_length_(model_->options_.max_draft_tokens,
                     model_->DecodeConcurrency()),
-      draft_vocab_(kMtpDraftExtraRows - model_->draft_specials_) {
+      draft_vocab_(speculative::kDraftVocabExtraRows -
+                   model_->draft_specials_) {
   logits_.resize(model_->VocabSize());
 }
 
@@ -1013,12 +1016,12 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const std::size_t room = ContextSize() - tokens_.size();
   const std::size_t cap =
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
-  // Head eligibility is MtpDraftSubsetAllowed. Sampled cohorts are never
-  // jointly planned (DecodeBatchImpl), so a sampled request decides the same
-  // way alone and in any batch. A greedy request decoding alone has no
+  // Head eligibility is speculative::DraftSubsetAllowed. Sampled cohorts are
+  // never jointly planned (DecodeBatchImpl), so a sampled request decides the
+  // same way alone and in any batch. A greedy request decoding alone has no
   // peers to delay, so it drafts as on one session. Every request keeps the
   // established length controller and AR backoff.
-  const bool allow_subset = MtpDraftSubsetAllowed(
+  const bool allow_subset = speculative::DraftSubsetAllowed(
       sampler.config().uses_random_sampling(), model_->DecodeConcurrency(),
       occupancy, batch_drafts.has_value());
   pending->policy_concurrency = MtpPolicyConcurrency(

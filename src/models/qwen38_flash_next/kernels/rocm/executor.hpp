@@ -177,8 +177,9 @@ private:
     float* target_hidden{nullptr};  ///< last max_speculative trunk rows
     std::uint32_t position{0};
     bool residual_valid{false};
-    /// The request's draft table (draft_vocab.hpp): kMtpDraftExtraRows
-    /// output() rows and their token IDs, -1 for an empty slot.
+    /// The request's draft table (draft_vocab.hpp):
+    /// speculative::kDraftVocabExtraRows output() rows and their token IDs, -1
+    /// for an empty slot.
     std::uint8_t* draft_rows{nullptr};
     std::int32_t* draft_ids{nullptr};
   };
@@ -597,7 +598,8 @@ private:
     return requested && !model_->draft_output().empty() &&
            session.mtp_.draft_rows != nullptr;
   }
-  /// The session's draft table as a weight of kMtpDraftExtraRows rows.
+  /// The session's draft table as a weight of speculative::kDraftVocabExtraRows
+  /// rows.
   DeviceTensor DraftTable(const Session& session) const noexcept;
   /// Small-head draft logits: prefix rows, then the table rows with empty
   /// slots at -infinity.
