@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 05: Discovery, lock selection and provenance
 
 Status: **complete**. RFC step and dependencies: **3; 04**.
@@ -82,8 +86,7 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
   is embedded); the platform-only build still ignores the deliberately bogus
   selector; Nix default/release flags and source admissions reproduce against
   store path `/nix/store/22i36v145df5wkscvvcyjdk7kq992kc2-source`.
-- The hosted gate itself now has executed evidence: `nix build
-  .#checks.x86_64-linux.pr` exits 0 with `100% tests passed out of 89`, the
+- The hosted gate itself now has executed evidence: `legacy hosted PR check` exits 0 with `100% tests passed out of 89`, the
   mandatory lock-mode build reporting `Extension selection: lock`, `check-docs`
   passing 150 markdown files (903 links pre-commit, 904 after) and
   `check-format` 725 C++ files
@@ -104,7 +107,7 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
   13 discovery cases, metadata (12 plus schema), policy (4), Linux artifact (6),
   the extension-API gate in both directions (exit 0 with the `ext-api` label,
   exit 1 without it), the drift inventory (6 paths, unchanged by `--write`) and
-  the formatter (725 files), then re-ran `nix build .#checks.x86_64-linux.pr`
+  the formatter (725 files), then re-ran `legacy hosted PR check`
   on the committed tree (exit 0, documentation check clean). Details:
   [review and integration](../evidence/card05/review-and-integration.md).
   The 19 task-owned paths are committed as

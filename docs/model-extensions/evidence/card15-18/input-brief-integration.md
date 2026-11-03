@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 > Instructions given to the integration agent, written before it ran. This is a
 > brief, not a result. Results go in the other files of this directory.
 
@@ -54,7 +58,7 @@ You are the **integration agent** (`codex-exec-writer`) for Cards 15, 16, 17, an
   - `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py --fix`
   - `nix develop -c cmake --build --preset cpu-test --target check-pr`
   - `nix build` (default derivation with HIP enabled)
-  - `nix build .#checks.x86_64-linux.pr --no-link`
+  - `legacy hosted PR check`
 
 ### 4. Update Card Files and Ledger
 - Update `docs/model-extensions/cards/15-speech-recognition.md`: mark DoD `[x]`, update Status to `complete`, and fill Execution Record.

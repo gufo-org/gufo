@@ -43,6 +43,7 @@ public:
   bool partial{};
   std::size_t private_blocks{128};
   cache::Rows rows_per_chunk{4};
+  std::size_t row_backing_bytes{16};
   mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
@@ -89,20 +90,28 @@ public:
       cache::ResourceCharge pool;
       std::span<std::byte> data;
       std::shared_ptr<const void> owner;
+      bool private_state;
     };
     auto blocks = std::make_shared<std::vector<Block>>();
     // Physical backing commits once, before any request; assigned owner tokens
     // account for the entire block including unused bytes.
-    auto data = std::make_shared<std::vector<std::byte>>(2048 * 16 +
+    constexpr std::size_t kRowBackingBytes = 2048 * 16;
+    const auto row_bytes = row_backing_bytes;
+    const auto row_blocks = kRowBackingBytes / row_bytes;
+    auto data = std::make_shared<std::vector<std::byte>>(kRowBackingBytes +
                                                          private_blocks * 64);
-    for (std::size_t i = 0; i < 2048 + private_blocks; ++i) {
-      const auto size = i < 2048 ? 16ULL : 64ULL;
-      const auto offset = i < 2048 ? i * 16 : 2048 * 16 + (i - 2048) * 64;
+    for (std::size_t i = 0; i < row_blocks + private_blocks; ++i) {
+      const bool private_state = i >= row_blocks;
+      const auto size = private_state ? 64ULL : row_bytes;
+      const auto offset = private_state
+                              ? kRowBackingBytes + (i - row_blocks) * 64
+                              : i * row_bytes;
       auto reservation =
           ledger.Reserve(cache::ResourceCategory::kBackingFree, size);
       auto bytes = std::span(*data).subspan(offset, size);
       blocks->push_back({reservation.Convert(), bytes,
-                         std::shared_ptr<const void>(data, bytes.data())});
+                         std::shared_ptr<const void>(data, bytes.data()),
+                         private_state});
     }
     auto resources = std::make_unique<ComponentCacheResources>();
     resources->adapter = std::make_unique<FakeAdapter>(rows_per_chunk);
@@ -118,8 +127,14 @@ public:
     resources->allocate = [this, blocks,
                            data](const cache::PayloadRequest& request) {
       for (const auto& block : *blocks) {
+        if (request.bytes > block.data.size())
+          continue;
         if ((request.category == cache::ResourceCategory::kPrivateState) !=
-            (block.data.size() == 64))
+            block.private_state)
+          continue;
+        // Occupied blocks are normal, not allocation failures. Keep the
+        // reservation below authoritative if another thread races this scan.
+        if (block.pool.Info().category != cache::ResourceCategory::kBackingFree)
           continue;
         try {
           auto reservation = std::make_shared<cache::ResourceReservation>(
@@ -1763,6 +1778,10 @@ void UnbackedDeepRowsSurviveDiskRestart() {
   std::uint64_t hash;
   {
     auto runner = std::make_shared<HeldRunner>();
+    // Keep the same over-RAM row bytes and a partial tail while avoiding
+    // thousands of tiny durable chunk files in this restart contract.
+    runner->rows_per_chunk = 64;
+    runner->row_backing_bytes = 64 * sizeof(cache::Token);
     ComponentTextCache cache(runner, 1, 1 << 24, disk);
     auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
     auto& state = dynamic_cast<State&>(lease->state());
@@ -1811,6 +1830,8 @@ void UnbackedDeepRowsSurviveDiskRestart() {
     std::iota(appended.begin(), appended.end(), 8000);
     prompt.insert(prompt.end(), appended.begin(), appended.end());
     auto runner = std::make_shared<Runner>();
+    runner->rows_per_chunk = 64;
+    runner->row_backing_bytes = 64 * sizeof(cache::Token);
     ComponentTextCache cache(runner, 1, 1 << 24, disk);
     auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
     assert(lease->restored_from_disk() && lease->cached_tokens() == seed_size);
@@ -1840,6 +1861,7 @@ void UnbackedDeepRowsSurviveDiskRestart() {
         child = &entry.Manifest();
     }
     assert(parent && child);
+    bool checked_tail = false;
     for (std::size_t i = 0; i < parent->components.size(); ++i) {
       const auto& before = parent->components[i];
       const auto& after = child->components[i];
@@ -1848,13 +1870,17 @@ void UnbackedDeepRowsSurviveDiskRestart() {
       if (before.private_state)
         assert(before.private_state->file != after.private_state->file);
       if (before.tail) {
+        checked_tail = true;
         assert(after.chunks.size() > before.chunks.size());
         assert(before.tail->file != after.chunks[before.chunks.size()].file);
       }
     }
+    assert(checked_tail);
   }
   {
     auto runner = std::make_shared<Runner>();
+    runner->rows_per_chunk = 64;
+    runner->row_backing_bytes = 64 * sizeof(cache::Token);
     ComponentTextCache cache(runner, 1, 1 << 24, disk);
     auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
     assert(lease->restored_from_disk() &&

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 14 Resume Notes: Generate Infrastructure from Model Metadata
 
 ## Summary of Accomplished Work
@@ -58,7 +62,7 @@ Card 14 implements the infrastructure generator and manifest completeness step o
    - Gate 4: `python3 tools/ci/check-docs.py` (exit 0, 315 docs / 1591 links PASS)
    - Gate 5: `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py` (exit 0, 792 C++ files PASS)
    - Gate 6: `nix develop -c cmake --build --preset cpu-test --target check-pr` (exit 0, 96/96 100% PASS, 139.82s)
-   - Gate 7: `nix build .#checks.x86_64-linux.pr` (exit 0, all 4 check derivations built and passed)
+   - Gate 7: `legacy hosted PR check` (exit 0, all 4 check derivations built and passed)
    - Gate 8: `nix eval --raw .#packages.x86_64-linux.default.drvPath` (exit 0, derivation hash invariance verified)
 
 ## Agent Sequence

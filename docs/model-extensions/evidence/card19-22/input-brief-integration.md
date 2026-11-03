@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 > Instructions given to the integration agent, written before it ran. This is a
 > brief, not a result. Results go in the other files of this directory.
 
@@ -53,7 +57,7 @@ Re-run the verification gates and record exact commands, exit codes, and transcr
 7. `python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes`
 8. `nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure`
 9. `nix develop -c cmake --build --preset cpu-test --target check-pr`
-10. `nix build .#checks.x86_64-linux.pr --no-link`
+10. `legacy hosted PR check`
 11. `nix build && ./result/bin/gufo diagnose`
 
 ### 3. Update Card Files and Ledgers

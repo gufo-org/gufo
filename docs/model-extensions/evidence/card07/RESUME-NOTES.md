@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 07 — RESUME NOTES (implementation, resumed 2026-10-31 11:57)
 
 Baseline: jj working copy `@` = `zwllvvnv 6b9217ec` (no description), parent `@-` =
@@ -76,5 +80,5 @@ compile-flag and ISA audits, formatting/API/docs checks, `gufo diagnose`, and th
   `build/card06-release/gufo` (pre-Card-07 production build; every object is older than the
   first Card 07 edit at 11:06).
 - Do not run functional harnesses (`tests/functional/run.py`, `prompt_lookup.py`, `compare.py`),
-  `tools/bench/model-bench.py`, devlab, or hosted `nix build .#checks.x86_64-linux.pr`.
+  `tools/bench/model-bench.py`, devlab, or hosted `legacy hosted PR check`.
 - Scratch lives in `/tmp/card07-work` and `/tmp/card07-orch`; both must be deleted at the end.

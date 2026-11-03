@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Cards 15–18 Integration & Verification Evidence
 
 This directory consolidates the execution records, review findings, resolution logs, and verification evidence for **Cards 15, 16, 17, and 18** of the Model Extension Migration roadmap.
@@ -21,7 +25,7 @@ All findings identified during review and Nix validation were resolved prior to 
    - `cmake/GufoExtension.cmake` enforces that `gufo_extension_hip_sources` can only attach to targets declaring `"requires": ["hip"]`.
    - Updated manifests (`extension.json`) and CMake files (`extension.cmake`) for all 4 models to split into base target (unconditional registration, metadata) and HIP target (kernels, runtime, requires HIP).
    - Added `roc::hipblaslt` and `roc::rocblas` to `gufo_minimax_h3_hip`.
-   - Staged changes; `nix build` and `nix build .#checks.x86_64-linux.pr` completed cleanly with code 0.
+   - Staged changes; `nix build` and `legacy hosted PR check` completed cleanly with code 0.
 2. **M1 — Duplicate Dead Code Elimination**:
    - Removed obsolete `DecodeBase64Wav` helper and constants from `src/models/qwen3_tts/audio.hpp` and `audio.cpp`.
 3. **M2 — Qwen3-ASR Provider Alias**:
@@ -51,7 +55,7 @@ All findings identified during review and Nix validation were resolved prior to 
 | Isolation unit tests | `python3 -m unittest tests/tools/check_extension_isolation_test.py` | **PASS** | 27 unit tests passed |
 | Hosted PR suite | `nix develop -c cmake --build --preset cpu-test --target check-pr` | **PASS** | 96/96 test suites passed (152s) |
 | Nix production build | `nix build` | **PASS** | Produces `./result/bin/gufo`; all 5 extensions built & active |
-| Nix PR check derivations | `nix build .#checks.x86_64-linux.pr --no-link` | **PASS** | All 4 check derivations built and passed |
+| Nix PR check derivations | `legacy hosted PR check` | **PASS** | All 4 check derivations built and passed |
 
 > [!NOTE]
 > End-to-end functional model harness sweeps (`tests/functional/run.py`) and live inference benchmarks are deferred to the unified post-Card-14 qualification window per RFC guidelines.

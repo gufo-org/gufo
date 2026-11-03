@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Cards 15–18 Independent Review Findings: Migrate Speech, Audio, Image, and Video Models
 
 Reviewer: Independent Read-Only Review Agent  
@@ -23,7 +27,7 @@ Cards 15, 16, 17, and 18 represent the migration of all four multimodal / non-te
 - **Isolation Ratchet**: `tools/ci/check-extension-isolation.py` enforces all 5 migrated extensions. Zero boundary violations across all 3 strict gates (`--fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes`).
 - **Platform Conventions**: Zero `<windows.h>`, `_WIN32`, or `_MSC_VER` macros introduced outside `src/core/platform/`. `minimax_h3/media_windows.cpp` was cleanly replaced by platform leaves.
 - **Repository Integrity**: `docs/model-extensions/RFC.md` remains strictly byte-identical and uncommitted.
-- **Verification Gates**: 100% passed (generator drift, schema/isolation unit tests, clang-format across 817 files, docs link check across 319 markdown files, 26 ctest CPU tests for migrated models and contracts, and sandboxed nix PR checks `checks.x86_64-linux.pr`). GPU speed and functional benchmarks are systematically recorded as `PENDING` in `docs/model-extensions/evidence/card15-18/pending-commands.txt` for the post-Card-14 qualification window.
+- **Verification Gates**: 100% passed (generator drift, schema/isolation unit tests, clang-format across 817 files, docs link check across 319 markdown files, 26 ctest CPU tests for migrated models and contracts, and sandboxed nix PR checks `legacy hosted PR check`). GPU speed and functional benchmarks are systematically recorded as `PENDING` in `docs/model-extensions/evidence/card15-18/pending-commands.txt` for the post-Card-14 qualification window.
 
 ---
 
@@ -170,5 +174,5 @@ The following validation commands were run and verified by the reviewer:
    ```
 7. **Sandboxed Nix PR Checks**:
    ```sh
-   nix build .#checks.x86_64-linux.pr --no-link
+   legacy hosted PR check
    ```

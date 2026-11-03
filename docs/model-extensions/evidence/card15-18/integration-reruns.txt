@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 ================================================================================
 CARDS 15-18 INTEGRATION RERUNS EVIDENCE
 ================================================================================
@@ -88,7 +92,7 @@ Built extensions:
   excluded qwen38_flash_next 0.1.0 (src/models/qwen38_flash_next): metadata only
 
 --------------------------------------------------------------------------------
-10. nix build .#checks.x86_64-linux.pr --no-link
+10. legacy hosted PR check
 Exit Code: 0
 Output:
 these 4 derivations will be built:

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 10: Publish and measure the public extension API
 
 Status: **complete for in-card gates** (deferred functional harness pending post-Card-14 qualification window). RFC step and dependencies: **7; 09**.
@@ -107,7 +111,7 @@ The integration rerun ledger is retained in [`integration-reruns.txt`](../eviden
 7. `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py`: **PASS** (785 C++ files formatted, exit 0).
 8. Bounded CPU CTest: **10/10 passed** (100%, exit 0), including all 7 extension suite tests and 3 continuation identity goldens.
 9. Bounded GPU CTest: **10/10 passed** (100%, exit 0), including all 7 extension suite tests and 3 continuation identity goldens.
-10. `nix build .#checks.x86_64-linux.pr`: **PASS** (exit 0).
+10. `legacy hosted PR check`: **PASS** (exit 0).
 11. `codex exec review`: **PASS** (0 critical, 0 major findings; exit 0).
 
 #### Definition of Done Audit

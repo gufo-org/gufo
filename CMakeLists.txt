@@ -925,7 +925,10 @@ endfunction()
   target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake
     gufo_serving)
   add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
-  set_tests_properties(component_text_cache_test PROPERTIES LABELS "cpu;server;cache;state;lifecycle")
+  # Start the long persistence suite early while other contracts fill the
+  # remaining CTest slots. Costs order tests; they do not change timeouts.
+  set_tests_properties(component_text_cache_test PROPERTIES
+    LABELS "cpu;server;cache;state;lifecycle" COST 70)
 
   add_executable(text_model_runner_test tests/cli/text_model_runner_test.cpp)
   target_link_libraries(text_model_runner_test PRIVATE gufo_serving
@@ -1028,37 +1031,37 @@ endfunction()
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_profile_test.py)
   set_tests_properties(h3_profile_test PROPERTIES
-    LABELS "cpu;profiling;video;minimax-h3;quality")
+    LABELS "cpu;profiling;video;minimax-h3;quality;h3-qualification")
 
   add_test(NAME h3_preset_quality_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_preset_quality_test.py)
   set_tests_properties(h3_preset_quality_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;quality;video;audio")
+    LABELS "cpu;tools;models;minimax-h3;quality;video;audio;h3-qualification")
 
   add_test(NAME h3_rng_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_rng_test.py)
   set_tests_properties(h3_rng_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;quality")
+    LABELS "cpu;tools;models;minimax-h3;quality;h3-qualification")
 
   add_test(NAME h3_latent_quality_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_latent_quality_test.py)
   set_tests_properties(h3_latent_quality_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;quality")
+    LABELS "cpu;tools;models;minimax-h3;quality;h3-qualification")
 
   add_test(NAME h3_cache_control_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_cache_control_test.py)
   set_tests_properties(h3_cache_control_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;profiling")
+    LABELS "cpu;tools;models;minimax-h3;profiling;h3-qualification")
 
   add_test(NAME h3_profile_report_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_profile_report_test.py)
   set_tests_properties(h3_profile_report_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;profiling")
+    LABELS "cpu;tools;models;minimax-h3;profiling;h3-qualification")
 
   add_test(NAME serving_bench_test
     COMMAND ${Python3_EXECUTABLE}

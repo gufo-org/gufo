@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Orchestrator input brief — planned commands, none of these are results.
 
 # Card 08 — worker brief (implementation, sole editing owner)
@@ -228,7 +232,7 @@ Expect `0 worse, 0 better, N same` for kernel resources; the pre-existing
 `kernel_resources_test` 30-over-budget baseline drift is owned outside this card
 (documented in Card 07 §8) — do not widen the baseline.
 
-Not yours: `nix build .#checks.x86_64-linux.pr` (needs a committed tree — the
+Not yours: `legacy hosted PR check` (needs a committed tree — the
 orchestrator runs it) and Windows native execution (no Windows host: record the exact
 `BUILD-WINDOWS.md` commands as PENDING, like Card 07 §6).
 
