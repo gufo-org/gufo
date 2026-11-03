@@ -310,21 +310,57 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeForRequest(
   if (!std::isfinite(request.temperature) || request.temperature < 0 ||
       (request.temperature > 0 && request.rng_state == nullptr))
     throw std::invalid_argument("invalid DFlash request sampling");
+  // The core verifier proposes here only for a request it verifies alone. A
+  // seeded sampled request keeps the ordinary width, so its proposals and
+  // random draws do not depend on whether it was scheduled alone.
+  const bool wide =
+      request.temperature == 0.0F ||
+      (request.sampler != nullptr && request.sampler->config().seed < 0);
   return ProposeImpl(request.tokens, request.position, request.max_tokens,
-                     request.temperature, request.rng_state, request.sampler);
+                     request.temperature, request.rng_state, request.sampler,
+                     wide);
+}
+
+std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeEach(
+    std::span<const speculative::DraftProposalRequest> requests) {
+  // A verification batch keeps at most eight rows per session, so these
+  // proposals never use the wide copy width.
+  std::vector<speculative::DraftProposal> proposals;
+  proposals.reserve(requests.size());
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    if (request.backend == nullptr)
+      throw std::invalid_argument("draft batch contains a null backend");
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      if (request.backend == requests[previous].backend)
+        throw std::invalid_argument("draft batch repeats a session");
+    }
+    auto* backend = dynamic_cast<QwenDFlashGpuDraftBackend*>(request.backend);
+    if (backend == nullptr) {
+      proposals.push_back(request.backend->ProposeForRequest(request));
+      continue;
+    }
+    if (!std::isfinite(request.temperature) || request.temperature < 0 ||
+        (request.temperature > 0 && request.rng_state == nullptr))
+      throw std::invalid_argument("invalid DFlash request sampling");
+    proposals.push_back(backend->ProposeImpl(
+        request.tokens, request.position, request.max_tokens,
+        request.temperature, request.rng_state, request.sampler));
+  }
+  return proposals;
 }
 
 std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
     std::span<const speculative::DraftProposalRequest> requests) {
   if (requests.size() < 2 || requests.size() > 8)
-    return IDraftBackend::ProposeBatch(requests);
+    return ProposeEach(requests);
   std::array<QwenDFlashGpuDraftBackend*, 8> backends{};
   for (std::size_t index = 0; index < requests.size(); ++index) {
     auto* backend =
         dynamic_cast<QwenDFlashGpuDraftBackend*>(requests[index].backend);
     if (backend == nullptr ||
         &backend->executor_->GetModel() != &executor_->GetModel())
-      return IDraftBackend::ProposeBatch(requests);
+      return ProposeEach(requests);
     backends[index] = backend;
   }
   // Validate every request before changing caches or drawing random values.
@@ -405,9 +441,9 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
                            budgets[index], request.position, greedy_batch_size);
     if (count == 0)
       continue;
-    if (auto copied =
-            backend.TryLookup(request.tokens, request.position, budgets[index],
-                              request.temperature > 0.0F)) {
+    if (auto copied = backend.TryLookup(
+            request.tokens, request.position, budgets[index],
+            request.temperature > 0.0F, backend.config_.max_draft_tokens)) {
       proposals[index] = std::move(*copied);
       continue;
     }
@@ -488,8 +524,9 @@ bool QwenDFlashGpuDraftBackend::UseDraftSubset(
 
 std::optional<speculative::DraftProposal> QwenDFlashGpuDraftBackend::TryLookup(
     std::span<const tokenization::TokenId> tokens, std::uint32_t position,
-    std::uint32_t limit, bool sampled) {
+    std::uint32_t limit, bool sampled, std::uint32_t copy_limit) {
   lookup_proposal_ = false;
+  lookup_wide_ = false;
   // Some native callers supply only the anchor, not an indexed history.
   if (limit == 0 || tokens.size() != std::size_t{position} + 1 ||
       !lookup_.Step(position))
@@ -510,7 +547,7 @@ std::optional<speculative::DraftProposal> QwenDFlashGpuDraftBackend::TryLookup(
     return std::nullopt;
   const auto committed = tokens.first(position);
   lookup_.Extend(committed, sampled);
-  const auto cap = std::min(limit, config_.max_draft_tokens);
+  const auto cap = std::min(limit, copy_limit);
   const auto match =
       lookup_.Find(committed, tokens.last(1), minimum, [&](std::size_t start) {
         const auto count =
@@ -619,7 +656,8 @@ bool QwenDFlashGpuDraftBackend::AppendTargetContext(
 speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
     std::span<const tokenization::TokenId> prompt_tokens,
     std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
-    std::uint64_t* rng_state, const sampling::SamplerState* sampler) {
+    std::uint64_t* rng_state, const sampling::SamplerState* sampler,
+    bool wide) {
   CheckContinuation();
   if (!primed_ || prompt_tokens.empty() || current_pos == 0) {
     throw std::logic_error("DFlash GPU draft backend is not primed");
@@ -635,10 +673,18 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
   const std::uint32_t context_budget =
       current_pos < config_.max_context ? config_.max_context - current_pos - 1U
                                         : 0;
-  if (auto copied =
-          TryLookup(prompt_tokens, current_pos,
-                    std::min(max_tokens, context_budget), temperature > 0.0F))
+  // A copy needs no draft forward; its cost is the verification rows, whose
+  // shared projections a wider pass reads once (kMaxWideVerificationRows).
+  wide = wide && config_.max_copy_rows > OrdinaryRows();
+  const auto copy_rows = wide ? std::min(std::max(copy_rows_, OrdinaryRows()),
+                                         config_.max_copy_rows)
+                              : OrdinaryRows();
+  if (auto copied = TryLookup(prompt_tokens, current_pos,
+                              std::min(max_tokens, context_budget),
+                              temperature > 0.0F, copy_rows - 1)) {
+    lookup_wide_ = wide;
     return std::move(*copied);
+  }
   const std::uint32_t count =
       controller_.Choose(std::min(max_tokens, context_budget), current_pos);
   if (count == 0) {
@@ -679,13 +725,54 @@ void QwenDFlashGpuDraftBackend::AcceptFeedback(
     throw std::logic_error("DFlash GPU proposal feedback is invalid");
   }
 
-  if (lookup_proposal_)
+  if (lookup_proposal_) {
     lookup_.Observe(lookup_start_, proposed_tokens_.size(), accepted.size());
-  else
+    if (lookup_wide_)
+      ObserveCopyWidth(proposed_tokens_.size() + 1, accepted.size() + 1);
+  } else {
     controller_.Observe(accepted.size(), proposed_tokens_.size());
+  }
   lookup_proposal_ = false;
+  lookup_wide_ = false;
   proposal_active_ = false;
   proposed_tokens_.clear();
+  CatchUpPendingFeatures();
+}
+
+void QwenDFlashGpuDraftBackend::ObserveCopyWidth(std::size_t rows,
+                                                 std::size_t kept) noexcept {
+  // Two whole copies in a row at the current width double it; any rejected
+  // copy returns it to the ordinary width. A whole copy shorter than the
+  // width (its source ended) leaves the width unchanged.
+  const auto width = std::max(copy_rows_, OrdinaryRows());
+  if (kept < rows) {
+    copy_rows_ = OrdinaryRows();
+    copy_streak_ = 0;
+  } else if (rows >= width && ++copy_streak_ >= 2) {
+    copy_rows_ = std::min(2 * width, config_.max_copy_rows);
+    copy_streak_ = 0;
+  }
+}
+
+void QwenDFlashGpuDraftBackend::CatchUpPendingFeatures() {
+  const std::size_t width = executor_->GetTargetFeaturesSize();
+  if (width == 0)
+    return;
+  const std::size_t rows = pending_target_features_.size() / width;
+  if (rows <= kMaxPendingRows)
+    return;
+  // Every row but the last reaches the draft K/V now, as prompt rows do; the
+  // next proposal injects the last one as after an ordinary verification.
+  const auto count = static_cast<std::uint32_t>(rows - 1);
+  if (!executor_->InjectTargetContext(
+          std::span<const float>(pending_target_features_)
+              .first(std::size_t{count} * width),
+          executor_->GetInjectedContextLength(), count))
+    throw std::runtime_error("DFlash wide target feature injection failed");
+  pending_target_features_.erase(
+      pending_target_features_.begin(),
+      pending_target_features_.begin() +
+          static_cast<std::ptrdiff_t>(std::size_t{count} * width));
 }
 
 void QwenDFlashGpuDraftBackend::UpdateTargetHidden(
@@ -762,6 +849,7 @@ void QwenDFlashGpuDraftBackend::RestoreSnapshot(
   controller_ = controller;
   lookup_.Restore(dflash_snapshot->lookup);
   lookup_proposal_ = false;
+  ResetCopyWidth();
   pending_target_features_ = dflash_snapshot->pending_target_features;
   proposed_tokens_.clear();
   primed_ = dflash_snapshot->primed;
@@ -858,6 +946,7 @@ void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
   controller_ = controller;
   lookup_.Restore(lookup);
   lookup_proposal_ = false;
+  ResetCopyWidth();
   proposed_tokens_.clear();
   primed_ = primed;
   proposal_active_ = false;
@@ -876,6 +965,7 @@ void QwenDFlashGpuDraftBackend::Reset() noexcept {
   controller_.Reset();
   lookup_.Clear();
   lookup_proposal_ = false;
+  ResetCopyWidth();
   pending_target_features_.clear();
   proposed_tokens_.clear();
   primed_ = false;

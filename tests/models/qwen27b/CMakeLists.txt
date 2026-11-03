@@ -53,6 +53,8 @@ if (ENGINE_ENABLE_HIP)
   add_qwen27b_test(qwen_mtp_gpu_test mtp_test.cpp "gpu;hip;mtp;external-model")
   add_qwen27b_test(qwen_dflash_gpu_test dflash_test.cpp
     "gpu;hip;dflash;dflash2;external-model")
+  add_qwen27b_test(qwen27b_wide_verification_test wide_verification_test.cpp
+    "gpu;hip;target;dflash2;external-model")
   add_qwen27b_test(qwen_dflash_upload_lifetime_test
     dflash_upload_lifetime_test.cpp "gpu;hip;dflash2;external-model")
   target_link_libraries(qwen_dflash_upload_lifetime_test PRIVATE hip::host)

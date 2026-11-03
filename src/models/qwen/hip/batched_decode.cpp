@@ -458,6 +458,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
   const bool capture_prompt_hidden_ = coordinator.capture_prompt_hidden_;
   const auto policy = coordinator.policy_.Fingerprint();
   constexpr std::size_t kMaxRows = kMaxDecodeBatch * kMaxDecodeBatch;
+  static_assert(kMaxWideVerificationRows <= kMaxRows);
+  // One session may verify a wide chain; batched sessions keep eight rows.
+  const std::size_t max_tokens =
+      items.size() == 1 ? kMaxWideVerificationRows : kMaxDecodeBatch;
   std::array<std::size_t, kMaxDecodeBatch> offsets{};
   std::size_t batch_size = 0;
   for (std::size_t index = 0; index < items.size(); ++index) {
@@ -468,7 +472,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
         executor->capture_prompt_hidden_ != capture_prompt_hidden_ ||
         !std::ranges::equal(executor->arena_.GetTargetLayerCapture(),
                             arena_.GetTargetLayerCapture()) ||
-        item.tokens.empty() || item.tokens.size() > kMaxDecodeBatch) {
+        item.tokens.empty() || item.tokens.size() > max_tokens) {
       throw std::invalid_argument(
           "Qwen verification has incompatible sessions or token counts");
     }
@@ -487,6 +491,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
     throw std::length_error(
         "Qwen verification exceeds coordinator scratch capacity");
   }
+  // Rollback replays every committed row of a chain from the pinned state.
+  for (const auto& item : items)
+    if (item.executor->arena_.EnsureSsmReplayCapacity(item.tokens.size()))
+      item.executor->graph_executor_.Reset();
   std::array<models::qwen::ContinuationWrite, kMaxDecodeBatch> writes;
   for (std::size_t i = 0; i < items.size(); ++i)
     if (auto* hooks = items[i].executor->continuation_hooks_)
@@ -627,12 +635,22 @@ QwenGpuExecutor::ForwardVerificationBatch(
         }
       }
 
-      for (std::size_t index = 0; index < items.size(); ++index) {
+      // Attention runs in segments of at most eight rows, each with the start
+      // position (split-K count, online route) of an ordinary verification of
+      // those rows. Only a wide single-session chain has more than one.
+      for (std::size_t index = 0, item_row = 0; index < items.size();) {
         const auto& item = items[index];
         auto& state_arena = item.executor->arena_;
-        const std::size_t offset = offsets[index];
-        const std::size_t sequence_size = item.tokens.size();
-        const std::uint32_t start_pos = item.position;
+        const std::size_t offset = offsets[index] + item_row;
+        const std::size_t sequence_size =
+            std::min(kMaxDecodeBatch, item.tokens.size() - item_row);
+        const std::uint32_t start_pos =
+            item.position + static_cast<std::uint32_t>(item_row);
+        item_row += sequence_size;
+        if (item_row == item.tokens.size()) {
+          ++index;
+          item_row = 0;
+        }
         const std::size_t total_k = state_arena.GetAttentionKvPlaneElements();
         if (fused_qknorm_rope_kv) {
           LaunchBatchedFusedQKNormRoPEKvWrite(

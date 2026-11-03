@@ -310,12 +310,19 @@ struct QwenDFlashGpuDraftConfig {
   std::uint32_t max_draft_tokens{7};
   speculative::DFlashDraftPolicy policy{
       speculative::DFlashDraftPolicy::kAdaptive};
+  /// Verification rows (anchor included) a prompt-lookup copy of a request
+  /// decoding alone may grow to; at most max_draft_tokens + 1 disables it.
+  std::uint32_t max_copy_rows{0};
 };
 
 /// Adapts the GPU DFlash executor to the repository's IDraftBackend speculative
 /// interface.
 class QwenDFlashGpuDraftBackend final : public speculative::IDraftBackend {
 public:
+  /// Committed target rows the draft leaves pending for its next proposal,
+  /// as continuation snapshots expect (an ordinary verification's rows).
+  static constexpr std::size_t kMaxPendingRows = 8;
+
   ~QwenDFlashGpuDraftBackend() override = default;
 
   [[nodiscard]] static std::unique_ptr<QwenDFlashGpuDraftBackend> Create(
@@ -381,6 +388,7 @@ public:
       CheckContinuation();
       controller_.Reset();
       lookup_.BeginRequest();
+      ResetCopyWidth();
     } catch (...) {
       if (continuation_hooks_)
         continuation_hooks_->WriteFailed();
@@ -418,14 +426,32 @@ private:
   [[nodiscard]] std::uint32_t PendingFeatureCount(std::uint32_t position) const;
   QwenDFlashGpuDraftBackend(std::unique_ptr<QwenDFlashGpuExecutor> executor,
                             QwenDFlashGpuDraftConfig config);
+  /// `wide`: the proposal is verified alone (ProposeForRequest), so a copy
+  /// may use the current copy width instead of max_draft_tokens.
   [[nodiscard]] speculative::DraftProposal ProposeImpl(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
-      std::uint64_t* rng_state,
-      const sampling::SamplerState* sampler = nullptr);
+      std::uint64_t* rng_state, const sampling::SamplerState* sampler = nullptr,
+      bool wide = false);
+  [[nodiscard]] static std::vector<speculative::DraftProposal> ProposeEach(
+      std::span<const speculative::DraftProposalRequest> requests);
   [[nodiscard]] std::optional<speculative::DraftProposal> TryLookup(
       std::span<const tokenization::TokenId> tokens, std::uint32_t position,
-      std::uint32_t limit, bool sampled);
+      std::uint32_t limit, bool sampled, std::uint32_t cap);
+  [[nodiscard]] std::uint32_t OrdinaryRows() const noexcept {
+    return config_.max_draft_tokens + 1;
+  }
+  void ResetCopyWidth() noexcept {
+    copy_rows_ = 0;
+    copy_streak_ = 0;
+    lookup_wide_ = false;
+  }
+  /// Applies the copy width rule after feedback on a wide-eligible copy.
+  void ObserveCopyWidth(std::size_t rows, std::size_t kept) noexcept;
+  /// Injects all but the last pending row once a wide keep leaves more than
+  /// an ordinary verification's rows pending, as snapshots and batched
+  /// cycles expect.
+  void CatchUpPendingFeatures();
 
   std::unique_ptr<QwenDFlashGpuExecutor> executor_;
   QwenDFlashGpuDraftConfig config_;
@@ -434,6 +460,13 @@ private:
   speculative::PromptLookup<tokenization::TokenId> lookup_;
   std::size_t lookup_start_{0};
   bool lookup_proposal_{false};
+  /// The pending copy may verify wider than an ordinary block.
+  bool lookup_wide_{false};
+  /// Rows (anchor included) the next wide-eligible copy may verify; 0 means
+  /// OrdinaryRows(). Two whole copies in a row at this width double it, up to
+  /// max_copy_rows; a rejected copy returns it to OrdinaryRows().
+  std::uint32_t copy_rows_{0};
+  std::uint32_t copy_streak_{0};
   std::vector<float> pending_target_features_;
   std::vector<tokenization::TokenId> proposed_tokens_;
   bool primed_{false};
