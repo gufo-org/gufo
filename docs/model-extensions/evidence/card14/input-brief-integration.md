@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 > Instructions given to the integration agent (written before it ran).
 > A brief, not a result.
 
@@ -43,7 +47,7 @@ Rerun the affected gates and record exact commands, exit codes, and output summa
 4. `python3 tools/ci/check-docs.py`
 5. `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py`
 6. `nix develop -c cmake --build --preset cpu-test --target check-pr`
-7. `nix build .#checks.x86_64-linux.pr`
+7. `legacy hosted PR check`
 8. `nix eval --raw .#packages.x86_64-linux.default.drvPath` (derivation hash invariance)
 
 ### 3. Create Evidence Index

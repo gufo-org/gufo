@@ -18,7 +18,7 @@ The review confirms:
 - **Card 21 (Qwen3.8 Flash-Next Extension)**: Fully extracted into `src/models/qwen38_flash_next/`. `ProbeFlashNextGguf` strictly verifies `qwen4exp`. MTP speculation, YaRN RoPE scaling (`bench_yarn.hpp`/`cpp`), and CLI drivers are migrated.
 - **Card 22 (DeepSeek V4 Flash Extension)**: Fully extracted into `src/models/deepseek_v4_flash/`. `tool_calls.cpp` is decoupled from `gufo_http` and uses neutral types `ext::ScannedToolCall` / `ext::ScannedToolArgument`. DSpark speculation and CLI drivers are migrated.
 - **Decoupling and Isolation**: `src/cli/serve/inference_backend.cpp`, `openai_chat.cpp`, `src/cli/bench/bench.cpp`, and `src/cli/prompt/prompt.cpp` contain zero direct includes to `src/models/`. Root `CMakeLists.txt` direct model dependencies are eliminated. Static boundary checks pass with 0 strict violations.
-- **Verification Gates**: 11 verification gates were executed and pass (format, unit tests, schema, documentation, isolation, continuation identity, `check-pr` with 96/96 tests, hermetic `.checks.x86_64-linux.pr`, and `nix build` + `gufo diagnose`).
+- **Verification Gates**: 11 verification gates were executed and pass (format, unit tests, schema, documentation, isolation, continuation identity, `check-pr` with 96/96 tests, hermetic `legacy hosted PR check`, and `nix build` + `gufo diagnose`).
 - **Invariants**: `docs/model-extensions/RFC.md` remains strictly byte-identical and uncommitted. Functional harness runs are deferred to the dedicated post-Card-14 qualification window per project policy and documented in `pending-commands.txt`.
 
 One **Major** finding (`M1`) was identified regarding provider metadata registration in `gufo diagnose` / `registry.Providers()`, along with two minor/nit items (`N1`, `N2`).

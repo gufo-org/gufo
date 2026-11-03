@@ -8,6 +8,7 @@ import stat
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,12 +16,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
+        self.timings = {"configure": 0.0, "build": 0.0}
+        self.calls = {"configure": 0, "build": 0}
         self.temporary = tempfile.TemporaryDirectory(prefix="gufo-discovery-")
         self.addCleanup(self.temporary.cleanup)
         # Windows may spell TEMP with 8.3 short names, while the manifest glob
         # returns long ones; relative extension sources need one spelling.
         self.source = Path(self.temporary.name).resolve()
         self.build = self.source / "build"
+        # Each case has a fresh source tree. Normalize its temporary paths so
+        # unchanged runtime objects remain reusable across cases and CI runs.
+        # clang-cl also hashes the working directory without debug flags.
+        # These disposable fixtures need no directory-specific debug paths;
+        # keep header/content validation but share objects across temp roots.
+        self.env = dict(os.environ, CCACHE_BASEDIR=str(self.source), CCACHE_NOHASHDIR="true")
         (self.source / "extensions.lock").write_text('{"schema":1,"extensions":[]}')
         (self.source / "main.cpp").write_text('''#include <iostream>
 #include "gufo/ext/registry.hpp"
@@ -33,6 +42,7 @@ int main(int argc, char**) {
 ''')
         (self.source / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.21)
 project(discovery_fixture LANGUAGES CXX)
+include("{ROOT.as_posix()}/cmake/CompilerCache.cmake")
 set(CMAKE_CXX_STANDARD 20)
 set(ENGINE_ENABLE_HIP OFF)
 include("{ROOT.as_posix()}/cmake/GufoExtensionDiscovery.cmake")
@@ -52,6 +62,21 @@ gufo_target_extensions(fixture EXTENSIONS ${{selected}})
         self.add("base", family=True)
         self.add("alpha", depends=["base"])
         self.add("beta", hip=True)
+
+    def tearDown(self):
+        # CTest retains this in LastTest.log even for successful cases.
+        print(f"discovery timing: {self._testMethodName}: "
+              f"configure={self.timings['configure']:.2f}s/{self.calls['configure']} calls, "
+              f"build={self.timings['build']:.2f}s/{self.calls['build']} calls", flush=True)
+
+    def timed_run(self, phase, command):
+        start = time.monotonic()
+        try:
+            return subprocess.run(command, env=self.env, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        finally:
+            self.timings[phase] += time.monotonic() - start
+            self.calls[phase] += 1
 
     def add(self, name, depends=None, family=False, hip=False):
         directory = self.source / (f"src/families/test/{name}" if family else f"src/models/{name}")
@@ -82,8 +107,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         return directory
 
     def configure(self, *flags, error=None):
-        result = subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build), "-GNinja", *flags],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = self.timed_run("configure", ["cmake", "-S", str(self.source), "-B", str(self.build), "-GNinja", *flags])
         if error:
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn(error, " ".join(result.stdout.split()))
@@ -92,8 +116,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         return result.stdout
 
     def run_fixture(self):
-        result = subprocess.run(["cmake", "--build", str(self.build), "--target", "fixture", "--parallel", "2"],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = self.timed_run("build", ["cmake", "--build", str(self.build), "--target", "fixture", "--parallel", "2"])
         self.assertEqual(result.returncode, 0, result.stdout)
         return json.loads(subprocess.check_output([str(self.build / "fixture")], text=True))
 
@@ -418,7 +441,7 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
         # A private header outside the API SURFACE must fail to compile.
         source.write_text('#include "src/core/logging/trace.hpp"\n' + source.read_text())
         result = subprocess.run(["cmake", "--build", str(self.build), "--target", "gufo_template_model"],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("src/core/logging/trace.hpp", result.stdout)
 

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 05 — independent review and third-agent integration
 
 Review phase: two distinct read-only agents.
@@ -19,7 +23,7 @@ the findings stay durable instead of living under `/tmp` or `~/.pi`.
 
 | # | Finding | Disposition | Change | Proving check |
 | --- | --- | --- | --- | --- |
-| F-A | P1: hosted `mkTestCheck` lock-build block and `extension_discovery_test` in the pr list were never executed | RESOLVED | none needed; executed the gate | `nix build .#checks.x86_64-linux.pr` exit 0: `100% tests passed out of 89` including `extension_discovery_test` (40.82 s), plus the mandatory lock-mode build (`Extension selection: lock`, `-- gufo: extension mode=lock; included=[]; excluded=[]`). Retained in [hosted-pr-check.txt](hosted-pr-check.txt) |
+| F-A | P1: hosted `mkTestCheck` lock-build block and `extension_discovery_test` in the pr list were never executed | RESOLVED | none needed; executed the gate | `legacy hosted PR check` exit 0: `100% tests passed out of 89` including `extension_discovery_test` (40.82 s), plus the mandatory lock-mode build (`Extension selection: lock`, `-- gufo: extension mode=lock; included=[]; excluded=[]`). Retained in [hosted-pr-check.txt](hosted-pr-check.txt) |
 | F-B | No positive coverage for an explicit empty `GUFO_EXTENSIONS=` | RESOLVED | `test_explicit_empty_selector_selects_none`: mode `explicit`, zero built, all three discovered names excluded with reason `not selected in explicit mode` | `extension_discovery_test` (13 cases) |
 | F-C | No coverage for a missing `extensions.lock` | RESOLVED | `test_missing_lock_is_an_error_in_every_mode`: `extension lock: missing` in both discovery and lock mode | same |
 | F-D | Configure-time `unshipped` STATUS line unasserted | RESOLVED | `test_unshipped_reporting_at_configure_time`: all names unshipped with an empty lock; only `beta` once locked | same; initial wrong expectation retained in `initial-unshipped-reporting-failure.txt` |
@@ -85,7 +89,7 @@ directories.
 
 ## Hosted check (run last, after every code and test edit)
 
-`nix build .#checks.x86_64-linux.pr` exercises the Card 05 additions to the
+`legacy hosted PR check` exercises the Card 05 additions to the
 branch-protection path: the mandatory lock-mode build block in `flake.nix`'s
 `mkTestCheck` and `extension_discovery_test` inside `gufo_pr_tests`. It exited 0
 with `100% tests passed out of 89`, `check-docs` "PASSED: 150 markdown files and
@@ -136,7 +140,7 @@ agent handed off editing ownership:
   diff.
 - `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py`
   → `PASS: Checked 725 C++ files`.
-- Post-commit `nix build .#checks.x86_64-linux.pr` → exit 0 (documented above).
+- Post-commit `legacy hosted PR check` → exit 0 (documented above).
 - `sha256sum docs/model-extensions/RFC.md` →
   `2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448`, unchanged.
 

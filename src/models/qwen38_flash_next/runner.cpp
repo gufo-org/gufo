@@ -27,6 +27,7 @@
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -825,6 +826,24 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     if (error)
       *error = "Failed to load Flash-Next model: " + load_error;
     return nullptr;
+  }
+  // Each eight rows of wide copy verification past the first reserve
+  // rollback rows beside the sessions (ResourceClaim). Narrow the width
+  // until the configured sessions fit, rather than refusing a session count
+  // the ordinary verifier width fits.
+  if (std::size_t free_bytes = 0, total_bytes = 0;
+      use_mtp && hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    const std::size_t sessions =
+        std::max<std::size_t>(options.session_count, 1);
+    for (std::uint32_t rows = rocm::Executor::kWideRows;; rows -= 8) {
+      model->LimitCopyRows(rows);
+      if (rows == 8 ||
+          sessions * model->SessionBytes(gufo::core::SessionMode::kSpeculative,
+                                         max_context) +
+                  model->DeferredScratchBytes() <=
+              free_bytes)
+        break;
+    }
   }
   std::string model_fingerprint = options.disk_cache.model_artifact_fingerprint;
   if (!options.disk_cache.directory.empty() && model_fingerprint.empty()) {

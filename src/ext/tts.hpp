@@ -47,12 +47,14 @@ struct SynthesisRequest {
   bool speaker_embedding_only{false};
   std::size_t max_new_tokens{3000};
   TtsSamplingOptions sampling;
-  /// Called with newly generated mono audio at 24 kHz. Returning false cancels
-  /// generation. Streaming results retain codes but do not buffer the waveform.
+  /// Called with newly generated mono audio at the runner's fixed
+  /// `SampleRate()`. Returning false cancels generation. Streaming results
+  /// retain codes but do not buffer the waveform.
   std::function<bool(std::span<const float>)> on_audio{};
 };
 
 struct SynthesisResult {
+  /// Output waveform sample rate in Hz; must match `TtsRunner::SampleRate()`.
   std::uint32_t sample_rate{0};
   std::uint32_t code_groups{0};
   std::vector<float> samples;
@@ -77,6 +79,10 @@ public:
   [[nodiscard]] virtual TtsVariant Variant() const {
     return TtsVariant::kCustomVoice;
   }
+  /// Fixed output waveform sample rate in Hz for buffered and streaming
+  /// synthesis. Must be in [1, 192000]. Defaults to 24000 for 24 kHz
+  /// compatibility.
+  [[nodiscard]] virtual std::uint32_t SampleRate() const { return 24000; }
   /// Public model ID when the service names none; empty keeps the core
   /// default.
   [[nodiscard]] virtual std::string ModelId() const { return {}; }
@@ -110,7 +116,7 @@ struct SpeakOptions {
   bool reasoning{false};
   std::string language{"en"};
   std::string voice;
-  /// 24 kHz WAV output (tts and chat modes).
+  /// WAV output path at the provider's sample rate (tts and chat modes).
   std::string output_path;
   /// "text" or "json" report.
   std::string format{"text"};

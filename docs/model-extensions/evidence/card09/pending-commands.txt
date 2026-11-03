@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Card 09 deferred qualification — PENDING, never recorded as a pass
 ==================================================================
 
@@ -80,7 +84,7 @@ llama-swap services stay running unless a run needs the whole device.
      nix build .#release
      ./result/bin/gufo diagnose
      nix build .#packages.x86_64-linux.release --no-link
-     nix build .#checks.x86_64-linux.pr
+     legacy hosted PR check
 
    The lock *artifact* built here (build/card09-lock/gufo, diagnose exit 0);
    the Nix derivation itself was not built during Card 09.
@@ -106,7 +110,7 @@ suite or an inconclusive timing stays pending evidence, never a pass.
     exit 0, the 43-test selection 43/43 in GPU and CPU with complete verdict lists
     retained, both link-graph reports PASS, the graph fixture passes inside both
     build directories, the two F3 negative proofs fail as required, formatting
-    passes and `nix build .#checks.x86_64-linux.pr` is recorded at the end of this
+    passes and `legacy hosted PR check` is recorded at the end of this
     file). They stay listed because the qualification window re-runs them:
 
     F3 negative proof as actually executed by the orchestrator (a protected name
@@ -133,7 +137,7 @@ suite or an inconclusive timing stays pending evidence, never a pass.
     python3 tests/tools/check_target_graph_test.py build/card09-cpu
 
     nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
-    nix build .#checks.x86_64-linux.pr
+    legacy hosted PR check
 
 11. Orchestrator-review fixes still needing host coverage:
     - Windows native configure of a `BUILD_TESTING=ON` tree, to confirm the

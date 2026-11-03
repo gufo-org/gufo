@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 09: Separate serving policy from extension execution
 
 Status: **complete** for its in-card gates; the deferred functional and performance
@@ -132,7 +136,7 @@ links), `check-extension-api` (6 paths, `--write` leaves `SURFACE` unchanged),
 formatting (740 C++ files, after formatting the fixed test once), the discovery and
 lock production builds and their `gufo diagnose` (exit 0 each; with Timestamp and
 availableBytes filtered the discovery report is byte-identical to the parent
-artifact), and the hosted `nix build .#checks.x86_64-linux.pr`.
+artifact), and the hosted `legacy hosted PR check`.
 
 DoD 2 stays unticked on purpose: the shared step/batch, cancellation,
 publication-wait, budget and snapshot/resource suites pass in both

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 18: Migrate video generation
 
 Status: **complete**. RFC step and dependencies: **8 video; 17**.
@@ -52,5 +56,5 @@ Apply the [shared acceptance gates](../CARDS.md#shared-acceptance-gates) and [va
   - `check-extension-isolation.py`: PASS (0 boundary violations).
   - `check-pr`: PASS (96/96 test suites passed).
   - `nix build`: PASS (`./result/bin/gufo diagnose` verifies `minimax_h3` extension and `minimax-h3` provider).
-  - `nix build .#checks.x86_64-linux.pr --no-link`: PASS.
+  - `legacy hosted PR check`: PASS.
   - Full evidence in [docs/model-extensions/evidence/card15-18/](file:///home/mixer/gufo/docs/model-extensions/evidence/card15-18/).

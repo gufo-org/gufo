@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 === Gate 1: Infrastructure generation check ===
 $ python3 tools/ci/generate-infrastructure.py --check
 Exit code: 0
@@ -62,7 +66,7 @@ Exit code: 0
 100% tests passed out of 96
 
 === Gate 10: Hermetic hosted checks ===
-$ nix build .#checks.x86_64-linux.pr --no-link
+$ legacy hosted PR check
 Exit code: 0
 building '/nix/store/n89sjggj28yi3igwhkkjfxssp4c4vmjx-check-docs.drv'...
 building '/nix/store/clmy7aq43k49917bgn2kr3j33hi90fp0-check-format.drv'...

@@ -11,6 +11,8 @@
 namespace gufo::server {
 namespace {
 
+constexpr std::uint32_t kMaximumSampleRate = 192000;
+
 std::string ModelId(ext::TtsVariant variant) {
   switch (variant) {
     case ext::TtsVariant::kBase:
@@ -68,6 +70,7 @@ struct TtsService::Impl {
       if (native_runtime == nullptr) {
         return;
       }
+      options.sample_rate = native_runtime->SampleRate();
       options.variant = native_runtime->Variant();
       options.concurrent = options.concurrent || native_runtime->Concurrent();
       if (options.model_id.empty())
@@ -83,6 +86,10 @@ struct TtsService::Impl {
       };
     }
 
+    if (options.sample_rate == 0 || options.sample_rate > kMaximumSampleRate) {
+      initialization_error = "invalid TTS output sample rate";
+      return;
+    }
     if (options.model_id.empty()) {
       options.model_id = ModelId(options.variant);
     }
@@ -160,6 +167,10 @@ const TtsVoicePreset* TtsService::voice_preset(const std::string& name) const {
   return found == impl_->options.voice_presets.end() ? nullptr : &found->second;
 }
 
+std::uint32_t TtsService::sample_rate() const noexcept {
+  return impl_->options.sample_rate;
+}
+
 ext::TtsVariant TtsService::variant() const noexcept {
   return impl_->options.variant;
 }
@@ -173,15 +184,30 @@ bool TtsService::Synthesize(const ext::SynthesisRequest& request,
     }
     return false;
   }
+  const auto run = [&] {
+    if (!impl_->options.runner(request, is_cancelled, result, error)) {
+      return false;
+    }
+    if (result == nullptr ||
+        result->sample_rate != impl_->options.sample_rate) {
+      if (error != nullptr) {
+        *error = kInvalidSynthesisResultError;
+      }
+      if (result)
+        *result = {};
+      return false;
+    }
+    return true;
+  };
   if (impl_->options.concurrent)
-    return impl_->options.runner(request, is_cancelled, result, error);
+    return run();
   auto lease = impl_->generation_gate.Acquire(is_cancelled, error);
   if (!lease) {
     if (result)
       *result = {};
     return false;
   }
-  return impl_->options.runner(request, is_cancelled, result, error);
+  return run();
 }
 
 }  // namespace gufo::server

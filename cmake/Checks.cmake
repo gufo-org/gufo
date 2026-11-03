@@ -84,10 +84,20 @@ if (WIN32)
   list(REMOVE_ITEM gufo_pr_tests ${gufo_pr_linux_only})
 endif()
 
+# Keep hosted tests within the runner's CPU budget. Nested compilation tests
+# consume two slots each; ordinary contracts can fill the remaining slots.
+include(ProcessorCount)
+ProcessorCount(gufo_pr_jobs)
+if(gufo_pr_jobs LESS 1)
+  set(gufo_pr_jobs 1)
+elseif(gufo_pr_jobs GREATER 4)
+  set(gufo_pr_jobs 4)
+endif()
+
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
 add_custom_target(check-pr
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error
-    --timeout 180 -R "^(${gufo_pr_pattern})$"
+    --parallel ${gufo_pr_jobs} --timeout 180 -R "^(${gufo_pr_pattern})$"
   DEPENDS gufo ${gufo_pr_targets}
     $<$<NOT:$<BOOL:${WIN32}>>:cache_disk_faults>
   USES_TERMINAL VERBATIM)

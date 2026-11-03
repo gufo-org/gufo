@@ -25,6 +25,15 @@ constexpr std::string_view kVoicesPath = "/v1/audio/voices";
 constexpr std::size_t kMaximumInputBytes = 16U << 10U;
 constexpr std::size_t kMaximumNewTokens = 8192;
 
+std::uint64_t AudioDurationMs(std::size_t samples,
+                              std::uint32_t sample_rate) noexcept {
+  if (sample_rate == 0)
+    return 0;
+  const auto count = static_cast<std::uint64_t>(samples);
+  return (count / sample_rate) * 1000ULL +
+         ((count % sample_rate) * 1000ULL) / sample_rate;
+}
+
 bool ReadUnsigned(const json::Value& body, std::string_view name,
                   std::size_t default_value, std::size_t maximum,
                   std::size_t* output) {
@@ -439,9 +448,10 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
         return disconnected || (cancelled && cancelled());
       };
       if (!service.Synthesize(synthesis, check, &result, &error)) {
-        log->error_code = invalid_audio ? "invalid_audio"
-                          : check()     ? "cancelled"
-                                        : "generation_failed";
+        const bool invalid_result = error == kInvalidSynthesisResultError;
+        log->error_code = (invalid_audio || invalid_result) ? "invalid_audio"
+                          : check()                         ? "cancelled"
+                                    : "generation_failed";
         if (invalid_audio)
           error = "Qwen3-TTS produced invalid audio";
         if (sse && !check()) {
@@ -459,7 +469,9 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
       synthesis.on_audio = {};
       log->details =
           "model=" + service.model_id() + " stream=" + (sse ? "sse" : "pcm") +
-          " audio_ms=" + std::to_string(samples / 24) + " synthesis_ms=" +
+          " audio_ms=" +
+          std::to_string(AudioDurationMs(samples, service.sample_rate())) +
+          " synthesis_ms=" +
           std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - started)
                              .count());
@@ -474,8 +486,10 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
       return Error(499, "Client Closed Request", "audio generation cancelled",
                    "cancelled");
     }
-    return Error(500, "Internal Server Error", std::move(error),
-                 "generation_failed");
+    const std::string code = error == kInvalidSynthesisResultError
+                                 ? "invalid_audio"
+                                 : "generation_failed";
+    return Error(500, "Internal Server Error", std::move(error), code);
   }
   std::string wav = EncodeWav(result.samples, result.sample_rate);
   if (wav.empty()) {
@@ -501,8 +515,8 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
           std::to_string(result.codes.size() /
                          std::max<std::uint32_t>(1, result.code_groups)) +
           " audio_ms=" +
-          std::to_string(1000ULL * result.samples.size() /
-                         std::max(1U, result.sample_rate)) +
+          std::to_string(
+              AudioDurationMs(result.samples.size(), result.sample_rate)) +
           " synthesis_ms=" +
           std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - started)

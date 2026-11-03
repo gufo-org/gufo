@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Orchestrator input brief — instructions and planned commands only; nothing here is a result.
 
 # Card 08 — reviewer brief (independent, READ-ONLY, no edits)
@@ -98,7 +102,7 @@ diff is provided so you never need `jj`.
   artifact, Windows build or timing statement presented as a pass rather than PENDING?
   H3 weights are absent under `./models`, so all `minimax_h3_*` HIP/oracle rows are
   pending by definition.
-- **Provenance check:** `nix build .#checks.x86_64-linux.pr` and the Nix package/fileset
+- **Provenance check:** `legacy hosted PR check` and the Nix package/fileset
   read their sources from the **git-tracked tree**, and the working copy was dirty during
   the run (`nix` printed "Git tree … is dirty"). Determine precisely what the recorded
   hosted PASS can and cannot prove about *this* revision, and state the command that must

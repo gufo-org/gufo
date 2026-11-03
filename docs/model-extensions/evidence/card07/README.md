@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 07 evidence index — Extract acyclic Qwen family libraries
 
 Candidate: jj working copy `@` change `zwllvvnv` (commits move as the working copy is
@@ -42,7 +46,7 @@ Status (PENDING is never a pass; commands are the exact ones that were run):
 | 12 | Windows native build/run of the affected targets | PENDING — no Windows host here | `pending-commands.md` |
 | 13 | Shipped lock-mode HIP production artifact (`-DGUFO_EXTENSIONS_FROM_LOCK=ON`) | PENDING | `pending-commands.md` |
 | 14 | Qwen 27B / Flash-Next functional profiles, `long-context`/`cache`, `prompt_lookup.py`, matched per-request/phase timings, standard speed benchmark | PENDING — deferred by the 2026-10-31 user decision to the single post-Card-14 qualification window | `pending-commands.md` |
-| 15 | Hosted checks `nix build .#checks.x86_64-linux.pr` | see `orchestrator-gates.txt` (orchestrator runs it last, after every edit) | `pending-commands.md` |
+| 15 | Hosted checks `legacy hosted PR check` | see `orchestrator-gates.txt` (orchestrator runs it last, after every edit) | `pending-commands.md` |
 | 16 | Orchestrator closure re-run of the whole pinned set (identity, 82-test selection, target unit, CPU fresh build + tests, kernel resources, flags/device/host parity, format, API, docs, isolation) | PASS, every exit 0; two closure fixes to the new Card 07 tools recorded there | `orchestrator-gates.txt` |
 
 ## Library layout and header assignment (definition of done, item 1)

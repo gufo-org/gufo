@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import os
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -34,7 +35,7 @@ class ConfigureTests(unittest.TestCase):
                 cmake.append(f'gufo_extension(MANIFEST "{path.as_posix()}")')
             cmake.extend(["gufo_extensions_validate()", extra])
             (source / "CMakeLists.txt").write_text("\n".join(cmake))
-            result = subprocess.run(["cmake", "-S", str(source), "-B", str(source / "build")],
+            result = subprocess.run(["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             DIAGNOSTICS.append({"test": self.id(), "expected": expected,
                                 "extra": extra, "returncode": result.returncode, "output": result.stdout})
@@ -169,6 +170,7 @@ class ConfigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gufo-extension-edges-") as temp:
             source = Path(temp)
             cmake = ["cmake_minimum_required(VERSION 3.21)", "project(extension_edges LANGUAGES CXX)",
+                     f'include("{ROOT.as_posix()}/cmake/CompilerCache.cmake")',
                      "set(CMAKE_CXX_STANDARD 20)", "set(CMAKE_CXX_STANDARD_REQUIRED ON)",
                      f'set(PROJECT_SOURCE_DIR "{ROOT.as_posix()}")', "find_package(Threads REQUIRED)",
                      f'add_subdirectory("{ROOT.as_posix()}/src/core/platform" platform)',
@@ -210,11 +212,13 @@ class ConfigureTests(unittest.TestCase):
                 'if (p.id.ends_with("-extra")) { if (!p.options.empty()) return 3; continue; }'
                 'if (p.options.size() != 1 || p.options[0].help != "x\\\\u0000y") return 2; } return 0; }\n')
             # Ninja keeps the build's compiler (CXX); a Visual Studio generator
-            # would select MSVC instead.
+            # would select MSVC instead. Like discovery fixtures, these temporary
+            # builds can reuse objects without retaining debug directory paths.
             for command in (["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
-                            ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "4"],
+                            ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "2"],
                             ["ctest", "--test-dir", str(source / "build"), "-C", "Release", "--output-on-failure"]):
-                result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                result = subprocess.run(command, env=dict(os.environ, CCACHE_BASEDIR=str(source), CCACHE_NOHASHDIR="true"),
+                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 DIAGNOSTICS.append({"test": self.id(), "command": command,
                                     "returncode": result.returncode, "output": result.stdout})
                 self.assertEqual(result.returncode, 0, result.stdout)
@@ -282,7 +286,7 @@ class ConfigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gufo-extension-registry-") as temp:
             directories = [Path(temp) / name for name in ("first", "second", "available")]
             for directory in directories:
-                result = subprocess.run(["cmake", "-S", str(FIXTURES), "-B", str(directory),
+                result = subprocess.run(["cmake", "-S", str(FIXTURES), "-B", str(directory), "-GNinja",
                                          f"-DENGINE_ENABLE_HIP={'ON' if directory.name == 'available' else 'OFF'}",
                                          "-DCMAKE_DISABLE_FIND_PACKAGE_Python3=TRUE"],
                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

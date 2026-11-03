@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 05 — independent review EXECUTION PASS (raw results)
 
 Run at 2026-10-31 06:17–06:35 on /home/mixer/gufo (jj `@-` = kxnltrzq / git 381c1648, parent `@--` = 3d2ce45a).
@@ -191,7 +195,7 @@ No removed `assert`/`Require`/`self.assert*` beyond the substitutions above. The
 | Retained `nix-default-flags.json` byte-identical today | NO (explained) | `GUFO_REVISION` now `381c164` vs retained `3d2ce45-dirty` (worktree is now committed/clean) |
 | "Schema title/API drift" review finding | NOT INTRODUCED BY CARD 05 | title `0.1.0` already at 3d2ce45a; Card 05's only schema edit was the `api_version` pattern line |
 | "Schema accepts keys CMake rejects" review finding | PRE-EXISTING | no key `pattern` in schema at either revision; CMake check at `cmake/GufoExtension.cmake:263` |
-| Hosted `nix build .#checks.x86_64-linux.pr` (new lock-build block + `extension_discovery_test` in `gufo_pr_tests`) | NOT RUN — excluded by this pass's constraints | assigned to another agent; still PENDING |
+| Hosted `legacy hosted PR check` (new lock-build block + `extension_discovery_test` in `gufo_pr_tests`) | NOT RUN — excluded by this pass's constraints | assigned to another agent; still PENDING |
 | Any HIP/GPU, Windows, functional/numerical/performance gate | NOT RUN (out of scope by instruction) | still PENDING by card design |
 
 ## Discrepancies and observations (facts only, no disposition)
@@ -205,7 +209,7 @@ No removed `assert`/`Require`/`self.assert*` beyond the substitutions above. The
 7. Retained `default-version.txt` / `lock-version.txt` show `Extension selection: discovery|lock` and API `0.1.1` — reproduced byte-for-byte from a fresh binary.
 
 ## Commands not run (and why)
-- `nix build .#checks.x86_64-linux.pr` and any `nix build .#packages...` — explicitly excluded for this pass ("another agent owns that"). The flake's new mandatory lock-build block and `extension_discovery_test` in `cmake/Checks.cmake` therefore remain **unexecuted evidence**.
+- `legacy hosted PR check` and any `nix build .#packages...` — explicitly excluded for this pass ("another agent owns that"). The flake's new mandatory lock-build block and `extension_discovery_test` in `cmake/Checks.cmake` therefore remain **unexecuted evidence**.
 - GPU/HIP builds, `tests/functional/**`, model downloads, HTTP servers, full ctest sweeps — excluded by constraint; the card defers them.
 - `check-format.py --fix` — excluded (mutating).
 

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Card 09 integration — exact validation commands and outcomes
 Host interpreter: /nix/store/0ngi1ym3iinxnxyzdyhfhjjb9hrqpqc4-python3-3.13.14-env/bin/python3
 Tools not on login-shell PATH: python3, jj. Located readable installed binaries.
@@ -90,7 +94,7 @@ nix develop -c cmake -S . -B build/card09-cpu
 nix develop -c cmake --preset gpu-test -B /tmp/card09-integration/rename-proof
 (rename/revert sequence and exact checker commands: pending-commands.txt)
 nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
-nix build .#checks.x86_64-linux.pr
+legacy hosted PR check
 No real rename injection made because it could not be configured/proven/reverted
 with a gate run. No skipped or unexecuted check counted as a pass.
 

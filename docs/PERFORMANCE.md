@@ -113,7 +113,7 @@ Nix must see new files, so stage them before building:
 ```sh
 git add <changed-files>
 nix build
-nix build .#checks.x86_64-linux.pr
+nix flake check
 ```
 
 Run focused tests during iteration. Run the full hardware or full-logit suite
