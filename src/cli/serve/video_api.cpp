@@ -8,6 +8,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <optional>
 #include <ranges>
 #include <string>
@@ -15,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/image.hpp"
 #include "src/core/json.hpp"
 #include "src/ext/video.hpp"
 
@@ -264,8 +266,9 @@ std::optional<std::string> MultipartBoundary(std::string_view content_type) {
   return boundary;
 }
 
-std::optional<json::Value> ParseMultipartBody(const HttpRequest& request,
-                                              std::string* error) {
+std::optional<json::Value> ParseMultipartBody(
+    const HttpRequest& request,
+    std::map<std::string, std::string>* binary_fields, std::string* error) {
   const auto boundary = MultipartBoundary(request.header("content-type"));
   if (!boundary.has_value()) {
     *error = "multipart video request has an invalid boundary";
@@ -375,6 +378,12 @@ std::optional<json::Value> ParseMultipartBody(const HttpRequest& request,
         *error = "multipart 'gufo' field must contain valid JSON";
         return std::nullopt;
       }
+    } else if (filename_present && binary_fields != nullptr &&
+               (field_name == "first_frame" || field_name == "last_frame")) {
+      // Keyframe anchors keep their raw bytes out of the JSON value; the
+      // empty sentinel only marks presence for CreateVideo.
+      (*binary_fields)[field_name] = std::string(content);
+      result[field_name] = std::string();
     } else {
       result[field_name] =
           filename_present ? std::string() : std::string(content);
@@ -405,8 +414,8 @@ std::optional<int> JsonFrame(const json::Value* value) {
 }
 
 bool IsUnsupportedConditioning(const json::Value& body) {
-  static constexpr std::string_view kUnsupported[] = {
-      "input_reference", "first_frame", "last_frame", "references"};
+  static constexpr std::string_view kUnsupported[] = {"input_reference",
+                                                      "references"};
   return std::ranges::any_of(kUnsupported, [&](std::string_view key) {
     return body.contains(std::string(key));
   });
@@ -414,10 +423,11 @@ bool IsUnsupportedConditioning(const json::Value& body) {
 
 HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   json::Value body;
+  std::map<std::string, std::string> binary_fields;
   const std::string content_type = request.header("content-type");
   if (IsMultipartFormData(content_type)) {
     std::string multipart_error;
-    auto parsed = ParseMultipartBody(request, &multipart_error);
+    auto parsed = ParseMultipartBody(request, &binary_fields, &multipart_error);
     if (!parsed.has_value()) {
       return Error(400, "Bad Request", std::move(multipart_error),
                    "invalid_multipart_form");
@@ -448,7 +458,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   // known conditioning fields are refused rather than silently dropped.
   if (IsUnsupportedConditioning(body)) {
     return Error(400, "Bad Request",
-                 "image and ordered-reference conditioning are not supported",
+                 "ordered-reference conditioning is not supported",
                  "unsupported_input_reference");
   }
 
@@ -598,6 +608,68 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
                  "invalid_frames");
   }
 
+  // Keyframe anchors (issue #177): multipart file parts or base64 data URLs,
+  // validated to decodable PNG/JPEG/WebP (display orientation applied by
+  // the shared decoder) before admission; raw bytes are staged into the
+  // job directory by the service.
+  std::vector<std::uint8_t> first_frame;
+  std::vector<std::uint8_t> last_frame;
+  const auto load_keyframe = [&](std::string_view field,
+                                 std::vector<std::uint8_t>* out) {
+    const json::Value* value = body.find(std::string(field));
+    if (value == nullptr) {
+      return std::optional<std::string>{};
+    }
+    const auto uploaded = binary_fields.find(std::string(field));
+    if (uploaded != binary_fields.end()) {
+      out->assign(uploaded->second.begin(), uploaded->second.end());
+    } else if (value->is_string() && value->str().starts_with("data:")) {
+      // Only inline data URLs: the video endpoint never fetches remote
+      // imagery on the client's behalf.
+      try {
+        core::ImageReadBudget budget;
+        const std::vector<std::uint8_t> bytes =
+            core::ReadImageUrl(value->str(), budget);
+        out->assign(bytes.begin(), bytes.end());
+      } catch (const std::exception&) {
+        out->clear();
+        return std::optional<std::string>{
+            "'" + std::string(field) +
+            "' could not be read; provide an image data URL or file upload"};
+      }
+    } else {
+      return std::optional<std::string>{
+          "'" + std::string(field) +
+          "' must be a base64 image data URL or file upload"};
+    }
+    if (out->empty() || out->size() > core::kMaxEncodedImageBytes) {
+      return std::optional<std::string>{
+          "'" + std::string(field) +
+          "' is empty or exceeds the encoded image limit"};
+    }
+    try {
+      const core::Image decoded =
+          core::DecodeImage(std::span<const std::uint8_t>(*out));
+      if (decoded.width == 0 || decoded.height == 0) {
+        throw std::invalid_argument("empty decode");
+      }
+    } catch (const std::exception&) {
+      return std::optional<std::string>{
+          "'" + std::string(field) +
+          "' is not a decodable PNG, JPEG, or WebP image"};
+    }
+    return std::optional<std::string>{};
+  };
+  const std::optional<std::string> first_error =
+      load_keyframe("first_frame", &first_frame);
+  const std::optional<std::string> last_error =
+      load_keyframe("last_frame", &last_frame);
+  if (first_error.has_value() || last_error.has_value()) {
+    return Error(400, "Bad Request",
+                 first_error.has_value() ? *first_error : *last_error,
+                 "invalid_frame_image");
+  }
+
   const VideoJobCreateResult created = service.Create({
       .model = model,
       .prompt = prompt,
@@ -606,6 +678,8 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
       .output_format = output_format,
       .parameters = std::move(*parameters),
       .seed = seed,
+      .first_frame_bytes = std::move(first_frame),
+      .last_frame_bytes = std::move(last_frame),
   });
   if (created.result == VideoJobResult::kQueueFull) {
     HttpResponse response =

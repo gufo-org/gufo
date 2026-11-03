@@ -1001,6 +1001,7 @@ endfunction()
       src/cli/video/video.cpp
     )
     target_link_libraries(video_cli_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries} gufo_ext_runtime)
+    gufo_target_extensions(video_cli_test EXTENSIONS ${gufo_selected_extensions})
     add_test(NAME video_cli_test COMMAND video_cli_test)
     set_tests_properties(video_cli_test PROPERTIES
       LABELS "cpu;server;cli;minimax-h3;quality")
@@ -1216,6 +1217,14 @@ endfunction()
   add_test(NAME minimax_h3_sampling_test COMMAND minimax_h3_sampling_test)
   set_tests_properties(minimax_h3_sampling_test PROPERTIES
     LABELS "cpu;models;minimax-h3;layout;schedule;rng;quality")
+
+  add_executable(minimax_h3_presentation_test
+    tests/models/minimax_h3_presentation_test.cpp)
+  target_link_libraries(minimax_h3_presentation_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
+  add_test(NAME minimax_h3_presentation_test COMMAND minimax_h3_presentation_test)
+  set_tests_properties(minimax_h3_presentation_test PROPERTIES
+    LABELS "cpu;models;minimax-h3;presentation;tokenizer;external-model"
+    SKIP_RETURN_CODE 77)
 
   add_executable(minimax_h3_generation_test
     tests/models/minimax_h3_generation_test.cpp)
@@ -1474,6 +1483,32 @@ endfunction()
       COMMAND minimax_h3_video_vae_hip_test)
     set_tests_properties(minimax_h3_video_vae_real PROPERTIES
       LABELS "gpu;hip;gfx1151;minimax-h3;video;vae;quality;external-model;very-slow"
+      SKIP_RETURN_CODE 77)
+
+    add_executable(minimax_h3_video_vae_encoder_hip_test
+      tests/models/minimax_h3_video_vae_encoder_hip_test.hip)
+    target_compile_definitions(minimax_h3_video_vae_encoder_hip_test PRIVATE
+      GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+      GUFO_H3_VAE_ENCODER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/video-vae-encoder-oracle-v1.json")
+    target_link_libraries(minimax_h3_video_vae_encoder_hip_test PRIVATE
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
+    add_test(NAME minimax_h3_video_vae_encoder_real
+      COMMAND minimax_h3_video_vae_encoder_hip_test)
+    set_tests_properties(minimax_h3_video_vae_encoder_real PROPERTIES
+      LABELS "gpu;hip;gfx1151;minimax-h3;video;vae;encoder;quality;external-model;slow"
+      SKIP_RETURN_CODE 77)
+
+    add_executable(minimax_h3_vision_tower_hip_test
+      tests/models/minimax_h3_vision_tower_hip_test.hip)
+    target_compile_definitions(minimax_h3_vision_tower_hip_test PRIVATE
+      GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+      GUFO_H3_VISION_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/vision-tower-oracle-v1.json")
+    target_link_libraries(minimax_h3_vision_tower_hip_test PRIVATE
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
+    add_test(NAME minimax_h3_vision_tower_real
+      COMMAND minimax_h3_vision_tower_hip_test)
+    set_tests_properties(minimax_h3_vision_tower_real PROPERTIES
+      LABELS "gpu;hip;gfx1151;minimax-h3;vision;tower;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_audio_vae_hip_test

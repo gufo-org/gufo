@@ -521,6 +521,106 @@ inline void LaunchSwiGlu(const std::uint16_t* gate, const std::uint16_t* up,
                      dim3(kThreads), 0, stream, gate, up, output, elements);
 }
 
+// Interleaved mRoPE for FL2VA keyframe presentation (issue #177). Identical
+// to PrepareRopeKernel whenever all three axes agree (every text row), and
+// selects axis positions [d < 60 ? d % 3 : 0] per frequency index otherwise
+// (transformers' mrope_interleaved with mrope_section [24,20,20] over the
+// 64 rope pairs; theta 5e6). positions is int32 [sequence][3] (t, h, w).
+static __global__ void PrepareRopeMultiKernel(float* cosine, float* sine,
+                                              const std::int32_t* positions,
+                                              std::uint32_t sequence,
+                                              std::uint32_t head_dimension,
+                                              float theta) {
+  const std::uint32_t row = blockIdx.x;
+  const std::uint32_t dimension = threadIdx.x;
+  const std::uint32_t half = head_dimension / 2U;
+  if (row >= sequence || dimension >= half) {
+    return;
+  }
+  // transformers Qwen3VL interleaved mrope: sections [24,20,20] consume
+  // the first 60 pairs round-robin (t,h,w); the remaining four pairs stay
+  // on the temporal axis. Exact rule of the sibling reference port.
+  const std::uint32_t axis = dimension < 60U ? dimension % 3U : 0U;
+  const float inverse_frequency =
+      expf(-logf(theta) * (2.0F * static_cast<float>(dimension) /
+                           static_cast<float>(head_dimension)));
+  const std::int32_t selected =
+      positions[static_cast<std::size_t>(row) * 3U + axis];
+  const float angle = static_cast<float>(selected) * inverse_frequency;
+  const std::size_t index = static_cast<std::size_t>(row) * half + dimension;
+  cosine[index] = cosf(angle);
+  sine[index] = sinf(angle);
+}
+
+inline void LaunchPrepareRopeMulti(float* cosine, float* sine,
+                                   const std::int32_t* positions,
+                                   std::uint32_t sequence,
+                                   std::uint32_t head_dimension, float theta,
+                                   hipStream_t stream) {
+  hipLaunchKernelGGL(PrepareRopeMultiKernel, dim3(sequence),
+                     dim3(head_dimension / 2U), 0, stream, cosine, sine,
+                     positions, sequence, head_dimension, theta);
+}
+
+// Replace selected rows of a bf16 [rows, width] matrix with source rows in
+// list order (image_pad placeholders receive vision embeddings).
+static __global__ void ReplaceRowsKernel(const std::uint32_t* rows,
+                                         const std::uint16_t* source,
+                                         std::uint16_t* matrix,
+                                         std::uint32_t width,
+                                         std::size_t elements) {
+  const std::size_t index =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= elements) {
+    return;
+  }
+  const std::size_t row = index / width;
+  const std::size_t column = index % width;
+  matrix[static_cast<std::size_t>(rows[row]) * width + column] = source[index];
+}
+
+inline void LaunchReplaceRows(const std::uint32_t* rows,
+                              const std::uint16_t* source,
+                              std::uint16_t* matrix, std::uint32_t row_count,
+                              std::uint32_t width, hipStream_t stream) {
+  constexpr std::size_t kThreads = 256;
+  const std::size_t elements = static_cast<std::size_t>(row_count) * width;
+  hipLaunchKernelGGL(
+      ReplaceRowsKernel,
+      dim3(static_cast<std::uint32_t>((elements + kThreads - 1U) / kThreads)),
+      dim3(kThreads), 0, stream, rows, source, matrix, width, elements);
+}
+
+// DeepStack injection: add one source row (per index entry) into the hidden
+// matrix row, single bf16 rounding after an fp32 sum.
+static __global__ void AddRowsKernel(const std::uint32_t* rows,
+                                     const std::uint16_t* source,
+                                     std::uint16_t* matrix, std::uint32_t width,
+                                     std::size_t elements) {
+  const std::size_t index =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= elements) {
+    return;
+  }
+  const std::size_t row = index / width;
+  const std::size_t column = index % width;
+  std::uint16_t* target =
+      matrix + static_cast<std::size_t>(rows[row]) * width + column;
+  *target = FloatToBf16(Bf16ToFloat(*target) + Bf16ToFloat(source[index]));
+}
+
+inline void LaunchAddRows(const std::uint32_t* rows,
+                          const std::uint16_t* source, std::uint16_t* matrix,
+                          std::uint32_t row_count, std::uint32_t width,
+                          hipStream_t stream) {
+  constexpr std::size_t kThreads = 256;
+  const std::size_t elements = static_cast<std::size_t>(row_count) * width;
+  hipLaunchKernelGGL(
+      AddRowsKernel,
+      dim3(static_cast<std::uint32_t>((elements + kThreads - 1U) / kThreads)),
+      dim3(kThreads), 0, stream, rows, source, matrix, width, elements);
+}
+
 }  // namespace gufo::minimax_h3::ops
 
 #endif  // GUFO_MODELS_MINIMAX_H3_PROMPT_ENCODER_OPS_HIP_HPP_
