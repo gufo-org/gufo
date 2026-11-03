@@ -914,6 +914,29 @@ std::uint64_t PromptEncoderLiveRegisteredHostBytes() noexcept {
   return g_registered_host_bytes.load(std::memory_order_acquire);
 }
 
+namespace {
+
+// Device-side bundle of FL2VA vision data for one multimodal prompt
+// (issue #177). All pointers are device memory owned by the caller of
+// EncodePromptCore for the duration of the call.
+struct PromptVisionData {
+  std::uint32_t row_count{0};
+  const std::uint32_t* rows_device{nullptr};        // [row_count] image rows
+  const std::uint16_t* embeddings_device{nullptr};  // [row_count][width]
+  const std::uint16_t* deepstack_device{nullptr};   // 3 x [row_count][width]
+  const std::int32_t* positions_device{nullptr};    // [sequence][3] (t,h,w)
+};
+
+bool EncodePromptCore(const ModelInventory& inventory,
+                      std::span<const std::uint32_t> token_ids,
+                      const PromptEncoderOptions& options,
+                      const PromptVisionData* vision,
+                      const CancellationToken* cancellation,
+                      PromptEmbedding* output,
+                      PromptEncoderTelemetry* telemetry, std::string* error);
+
+}  // namespace
+
 bool EncodePromptLayer50(const ModelInventory& inventory,
                          std::span<const std::uint32_t> token_ids,
                          const PromptEncoderOptions& options,
@@ -921,6 +944,25 @@ bool EncodePromptLayer50(const ModelInventory& inventory,
                          PromptEmbedding* output,
                          PromptEncoderTelemetry* telemetry,
                          std::string* error) {
+  if (options.vision_inputs || options.deepstack_inputs) {
+    SetError(error,
+             "MiniMax H3 initial prompt encoder is text-only; vision and "
+             "deepstack inputs are rejected");
+    return false;
+  }
+  return EncodePromptCore(inventory, token_ids, options, nullptr, cancellation,
+                          output, telemetry, error);
+}
+
+namespace {
+
+bool EncodePromptCore(const ModelInventory& inventory,
+                      std::span<const std::uint32_t> token_ids,
+                      const PromptEncoderOptions& options,
+                      const PromptVisionData* vision,
+                      const CancellationToken* cancellation,
+                      PromptEmbedding* output,
+                      PromptEncoderTelemetry* telemetry, std::string* error) {
   if (output != nullptr) {
     *output = {};
   }
@@ -934,12 +976,6 @@ bool EncodePromptLayer50(const ModelInventory& inventory,
   if (output == nullptr || telemetry == nullptr || token_ids.empty() ||
       options.layer_count == 0 || options.layer_count > kPromptEncoderLayers) {
     SetError(error, "invalid MiniMax H3 prompt encoder arguments");
-    return false;
-  }
-  if (options.vision_inputs || options.deepstack_inputs) {
-    SetError(error,
-             "MiniMax H3 initial prompt encoder is text-only; vision and "
-             "deepstack inputs are rejected");
     return false;
   }
   for (const std::uint32_t token : token_ids) {
@@ -989,10 +1025,17 @@ bool EncodePromptLayer50(const ModelInventory& inventory,
     destroy_stream();
     return false;
   }
-  ops::LaunchPrepareRope(
-      activations.rope_cosine.As<float>(), activations.rope_sine.As<float>(),
-      static_cast<std::uint32_t>(token_ids.size()), kPromptEncoderHeadDimension,
-      kRopeTheta, compute_stream);
+  if (vision == nullptr) {
+    ops::LaunchPrepareRope(
+        activations.rope_cosine.As<float>(), activations.rope_sine.As<float>(),
+        static_cast<std::uint32_t>(token_ids.size()),
+        kPromptEncoderHeadDimension, kRopeTheta, compute_stream);
+  } else {
+    ops::LaunchPrepareRopeMulti(
+        activations.rope_cosine.As<float>(), activations.rope_sine.As<float>(),
+        vision->positions_device, static_cast<std::uint32_t>(token_ids.size()),
+        kPromptEncoderHeadDimension, kRopeTheta, compute_stream);
+  }
 
   const TensorDescriptor* embedding_descriptor = RequireTensor(
       inventory, "model.language_model.embed_tokens.weight",
@@ -1032,6 +1075,23 @@ bool EncodePromptLayer50(const ModelInventory& inventory,
     return false;
   }
   embedding = {};
+  if (vision != nullptr && vision->row_count != 0U) {
+    ops::LaunchReplaceRows(vision->rows_device, vision->embeddings_device,
+                           activations.hidden.As<std::uint16_t>(),
+                           vision->row_count, kPromptEncoderHiddenSize,
+                           compute_stream);
+    if (hipGetLastError() != hipSuccess) {
+      SetError(error, "MiniMax H3 prompt encoder vision row splice failed");
+      destroy_stream();
+      return false;
+    }
+    status = hipStreamSynchronize(compute_stream);
+    if (status != hipSuccess) {
+      SetError(error, HipError("H3 vision row splice", status));
+      destroy_stream();
+      return false;
+    }
+  }
 
   Bf16Gemm gemm;
   telemetry->peak_device_bytes = std::max<std::uint64_t>(
@@ -1100,6 +1160,25 @@ bool EncodePromptLayer50(const ModelInventory& inventory,
       destroy_stream();
       return false;
     }
+    if (vision != nullptr && layer < 3U && vision->row_count != 0U) {
+      // Qwen3-VL deepstack: tower taps (blocks 8/16/24) add into the hidden
+      // state at language layers 0, 1, 2 on the image rows.
+      ops::LaunchAddRows(
+          vision->rows_device,
+          vision->deepstack_device + static_cast<std::size_t>(layer) *
+                                         vision->row_count *
+                                         kPromptEncoderHiddenSize,
+          activations.hidden.As<std::uint16_t>(), vision->row_count,
+          kPromptEncoderHiddenSize, compute_stream);
+      if (hipGetLastError() != hipSuccess) {
+        if (future_valid) {
+          (void)next_future.get();
+        }
+        SetError(error, "MiniMax H3 prompt encoder deepstack add failed");
+        destroy_stream();
+        return false;
+      }
+    }
     telemetry->total_dispatches += layer_telemetry.dispatches;
     telemetry->layers.push_back(layer_telemetry);
 
@@ -1159,6 +1238,165 @@ bool EncodePromptLayer50(const ModelInventory& inventory,
     return false;
   }
   return true;
+}
+
+}  // namespace
+
+bool EncodePromptMultimodal(const ModelInventory& inventory,
+                            const Tokenizer& tokenizer,
+                            std::string_view prompt,
+                            const std::vector<KeyframeVision>& keyframes,
+                            const CancellationToken* cancellation,
+                            PromptEmbedding* output,
+                            PromptEncoderTelemetry* telemetry,
+                            std::string* error) {
+  if (output != nullptr) {
+    *output = {};
+  }
+  if (telemetry != nullptr) {
+    *telemetry = {};
+  }
+  if (output == nullptr || telemetry == nullptr || keyframes.empty()) {
+    SetError(error, "MiniMax H3 multimodal prompt requires keyframes");
+    return false;
+  }
+  // Presentation (host builder in prompt_encoder.cpp: "<Picture i>: " +
+  // vision_start / image_pad x N / vision_end, then the raw prompt).
+  std::vector<std::pair<int, int>> grids;
+  grids.reserve(keyframes.size());
+  for (const KeyframeVision& vision : keyframes) {
+    grids.emplace_back(vision.grid_h, vision.grid_w);
+  }
+  KeyframePresentation presentation;
+  if (!BuildKeyframePresentation(tokenizer, prompt, grids, &presentation,
+                                 error)) {
+    return false;
+  }
+
+  // Tower encodes, concatenated in presentation order; deepstack is laid out
+  // [tap][row][width] to match the core's per-layer offset.
+  std::size_t total_rows = presentation.image_rows.size();
+  std::vector<std::uint16_t> all_embeddings;
+  all_embeddings.reserve(total_rows * kPromptEncoderHiddenSize);
+  std::vector<std::uint16_t> all_deep;
+  all_deep.reserve(3U * total_rows * kPromptEncoderHiddenSize);
+  std::vector<std::vector<std::uint16_t>> tap_buffers(3);
+  for (const KeyframeVision& vision : keyframes) {
+    if (IsCancelled(cancellation)) {
+      SetError(error, "MiniMax H3 multimodal prompt cancelled");
+      return false;
+    }
+    std::vector<std::uint16_t> embedded;
+    std::vector<std::uint16_t> deep;
+    if (!EncodeVision(inventory, vision, cancellation, &embedded, &deep,
+                      error)) {
+      return false;
+    }
+    const std::size_t rows =
+        static_cast<std::size_t>(vision.grid_h / 2) * (vision.grid_w / 2);
+    if (embedded.size() != rows * kPromptEncoderHiddenSize ||
+        deep.size() != 3U * rows * kPromptEncoderHiddenSize) {
+      SetError(error, "MiniMax H3 vision tower output shape differs");
+      return false;
+    }
+    all_embeddings.insert(all_embeddings.end(), embedded.begin(),
+                          embedded.end());
+    const std::size_t tap_stride = rows * kPromptEncoderHiddenSize;
+    for (std::size_t tap = 0; tap < 3U; ++tap) {
+      tap_buffers[tap].insert(tap_buffers[tap].end(),
+                              deep.begin() +
+                                  static_cast<std::ptrdiff_t>(tap *
+                                                              tap_stride),
+                              deep.begin() + static_cast<std::ptrdiff_t>(
+                                                 (tap + 1U) * tap_stride));
+    }
+  }
+  for (const std::vector<std::uint16_t>& tap_buffer : tap_buffers) {
+    all_deep.insert(all_deep.end(), tap_buffer.begin(), tap_buffer.end());
+  }
+  std::vector<std::uint8_t>& tags = presentation.tags;
+  std::vector<std::uint32_t>& image_rows = presentation.image_rows;
+
+  // Device staging (synchronous copies on the default stream; freed below).
+  auto device_alloc = [](void** slot, std::size_t bytes,
+                         std::string* failure) -> bool {
+    if (hipMalloc(slot, bytes) != hipSuccess) {
+      SetError(failure, "MiniMax H3 multimodal device staging failed");
+      return false;
+    }
+    return true;
+  };
+  void* rows_device = nullptr;
+  void* embeddings_device = nullptr;
+  void* deep_device = nullptr;
+  void* positions_device = nullptr;
+  const auto free_all = [&]() {
+    if (rows_device != nullptr) {
+      (void)hipFree(rows_device);
+    }
+    if (embeddings_device != nullptr) {
+      (void)hipFree(embeddings_device);
+    }
+    if (deep_device != nullptr) {
+      (void)hipFree(deep_device);
+    }
+    if (positions_device != nullptr) {
+      (void)hipFree(positions_device);
+    }
+  };
+  bool staged =
+      device_alloc(&rows_device, image_rows.size() * sizeof(std::uint32_t),
+                   error) &&
+      device_alloc(&embeddings_device,
+                   all_embeddings.size() * sizeof(std::uint16_t), error) &&
+      device_alloc(&deep_device, all_deep.size() * sizeof(std::uint16_t),
+                   error) &&
+      device_alloc(&positions_device,
+                   presentation.rope_positions.size() * sizeof(std::int32_t),
+                   error);
+  if (staged) {
+    staged =
+        hipMemcpy(rows_device, image_rows.data(),
+                  image_rows.size() * sizeof(std::uint32_t),
+                  hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(embeddings_device, all_embeddings.data(),
+                  all_embeddings.size() * sizeof(std::uint16_t),
+                  hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(deep_device, all_deep.data(),
+                  all_deep.size() * sizeof(std::uint16_t),
+                  hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(positions_device, presentation.rope_positions.data(),
+                  presentation.rope_positions.size() * sizeof(std::int32_t),
+                  hipMemcpyHostToDevice) == hipSuccess;
+    if (!staged) {
+      SetError(error, "MiniMax H3 multimodal staging copy failed");
+    }
+  }
+  if (!staged) {
+    free_all();
+    return false;
+  }
+  const PromptVisionData data{static_cast<std::uint32_t>(image_rows.size()),
+                              static_cast<const std::uint32_t*>(rows_device),
+                              static_cast<const std::uint16_t*>(
+                                  embeddings_device),
+                              static_cast<const std::uint16_t*>(deep_device),
+                              static_cast<const std::int32_t*>(
+                                  positions_device)};
+  const PromptEncoderOptions options{
+      .layer_count = kPromptEncoderLayers,
+      .prefetch_layers = true,
+      .vision_inputs = true,
+      .deepstack_inputs = true,
+  };
+  const bool ok = EncodePromptCore(inventory, presentation.ids, options,
+                                   &data, cancellation,
+                                   output, telemetry, error);
+  free_all();
+  if (ok) {
+    output->tags = std::move(tags);
+  }
+  return ok;
 }
 
 }  // namespace gufo::minimax_h3

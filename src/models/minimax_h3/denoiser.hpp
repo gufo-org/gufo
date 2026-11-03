@@ -27,11 +27,19 @@ struct DenoiserOptions {
   int active_blocks{50};
   int reuse_interval{1};
   bool row_parallel_attention{true};
+  // FL2VA keyframe anchors ride as extra leading video rows; zero keeps the
+  // text-only packed sequence [text | audio | video].
+  std::size_t condition_video_rows{0};
 };
 
 struct DenoiserConditioning {
   std::span<const std::uint16_t> layer50;
   std::span<const std::uint8_t> tags;
+  // Patchified anchor rows in packed order (first, then last),
+  // condition_video_rows * kH3VideoPatchWidth F32, frozen for the loop.
+  std::span<const float> condition_rows;
+  // fp64 rotary time per anchor, same packed order; empty for text-only.
+  std::span<const double> anchor_temporal;
 };
 
 struct DenoiserVelocity {
