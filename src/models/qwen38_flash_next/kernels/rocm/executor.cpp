@@ -1611,15 +1611,16 @@ std::size_t Executor::SessionBytes(
           : state + (rollback_depth - 1) *
                         GdnRollbackRowFloats(1, c.ssm_num_k_heads,
                                              c.ssm_num_v_heads, c.ssm_head_dim);
+  // MTP keeps every verified trunk hidden row (target_hidden: the verifier
+  // width, or a wide copy's) plus the draft block's own row (h).
+  const std::size_t hidden_rows =
+      std::size_t{std::max(options_.max_speculative, max_copy_rows())} + 1;
   return ((linear * conv + ple) * (rollback_depth + 1) +
           linear * (state + rollback_state)) *
              sizeof(float) +
          attention * (kv + index) + sizeof(Session::Control) +
          (mode == core::SessionMode::kSpeculative
-              ? kv + index +
-                    std::size_t{std::max(options_.max_speculative + 1,
-                                         max_copy_rows())} *
-                        c.HcDim() * sizeof(float) +
+              ? kv + index + hidden_rows * c.HcDim() * sizeof(float) +
                     (model_->draft_output().empty()
                          ? 0
                          : std::size_t{speculative::kDraftVocabExtraRows} *
