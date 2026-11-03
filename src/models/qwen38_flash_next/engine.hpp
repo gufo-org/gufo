@@ -14,11 +14,11 @@
 #include <string_view>
 #include <vector>
 
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/families/qwen/vision/encoder.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
-#include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
@@ -357,7 +357,7 @@ private:
   bool valid_{true};
   ContinuationHooks* continuation_hooks_{nullptr};
   /// This request's draft vocabulary; the device table follows it.
-  MtpDraftVocab draft_vocab_;
+  speculative::DraftVocab draft_vocab_;
   bool draft_vocab_stale_{false};
   std::vector<std::int32_t> draft_added_;
   /// After the token history is replaced: the table restarts from it.

@@ -7,3 +7,9 @@ target_link_libraries(qwen_config_test PRIVATE gufo_core gufo_qwen_config)
 add_test(NAME qwen_config_test COMMAND qwen_config_test)
 set_tests_properties(qwen_config_test PROPERTIES
   LABELS "cpu;families;qwen;config;correctness")
+
+add_executable(qwen_draft_vocab_test qwen_draft_vocab_test.cpp)
+target_link_libraries(qwen_draft_vocab_test PRIVATE gufo_qwen_draft_vocab)
+add_test(NAME qwen_draft_vocab_test COMMAND qwen_draft_vocab_test)
+set_tests_properties(qwen_draft_vocab_test PROPERTIES
+  LABELS "cpu;families;qwen;speculative;correctness")

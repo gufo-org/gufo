@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "qfn_mmq.h"
-#include "src/models/qwen38_flash_next/draft_vocab.hpp"
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
@@ -1363,12 +1363,15 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         error_msg, &s->allocated_bytes_);
     s->mtp_.h = Alloc<float>(a, c.HcDim(), error_msg, &s->allocated_bytes_);
     if (!model_->draft_output().empty()) {
-      s->mtp_.draft_rows = Alloc<std::uint8_t>(
-          a,
-          std::size_t{kMtpDraftExtraRows} * model_->output_row_bytes() + 4096,
-          error_msg, &s->allocated_bytes_);
-      s->mtp_.draft_ids = Alloc<std::int32_t>(a, kMtpDraftExtraRows, error_msg,
-                                              &s->allocated_bytes_);
+      s->mtp_.draft_rows =
+          Alloc<std::uint8_t>(a,
+                              std::size_t{speculative::kDraftVocabExtraRows} *
+                                      model_->output_row_bytes() +
+                                  4096,
+                              error_msg, &s->allocated_bytes_);
+      s->mtp_.draft_ids =
+          Alloc<std::int32_t>(a, speculative::kDraftVocabExtraRows, error_msg,
+                              &s->allocated_bytes_);
     }
   }
   for (void* p : a) {
@@ -1397,7 +1400,8 @@ bool Executor::AppendDraftRows(Session& session, std::uint32_t first,
   if (ids.empty())
     return true;
   if (session.owner_ != this || session.mtp_.draft_rows == nullptr ||
-      first > kMtpDraftExtraRows || ids.size() > kMtpDraftExtraRows - first) {
+      first > speculative::kDraftVocabExtraRows ||
+      ids.size() > speculative::kDraftVocabExtraRows - first) {
     AssignError(error_msg, "invalid draft table append");
     return false;
   }
@@ -1426,23 +1430,23 @@ bool Executor::AppendDraftRows(Session& session, std::uint32_t first,
 bool Executor::ClearDraftRows(Session& session, std::uint32_t first,
                               std::string* error_msg) const {
   if (session.owner_ != this || session.mtp_.draft_ids == nullptr ||
-      first > kMtpDraftExtraRows) {
+      first > speculative::kDraftVocabExtraRows) {
     AssignError(error_msg, "invalid draft table clear");
     return false;
   }
   // Stale rows stay; an ID of -1 masks the slot.
-  return first == kMtpDraftExtraRows ||
-         Check(
-             hipMemsetAsync(session.mtp_.draft_ids + first, 0xFF,
-                            (kMtpDraftExtraRows - first) * sizeof(std::int32_t),
-                            stream_),
-             "draft table clear", error_msg);
+  return first == speculative::kDraftVocabExtraRows ||
+         Check(hipMemsetAsync(session.mtp_.draft_ids + first, 0xFF,
+                              (speculative::kDraftVocabExtraRows - first) *
+                                  sizeof(std::int32_t),
+                              stream_),
+               "draft table clear", error_msg);
 }
 
 DeviceTensor Executor::DraftTable(const Session& session) const noexcept {
   DeviceTensor table = model_->output();
   table.data = session.mtp_.draft_rows;
-  table.rows = kMtpDraftExtraRows;
+  table.rows = speculative::kDraftVocabExtraRows;
   return table;
 }
 
@@ -1453,7 +1457,7 @@ bool Executor::DraftLogits(const Session& session, const float* x,
       !Dense(DraftTable(session), x, logits + prefix.rows, 1, error_msg))
     return false;
   MaskDraftLogits(logits + prefix.rows, session.mtp_.draft_ids,
-                  kMtpDraftExtraRows, stream_);
+                  speculative::kDraftVocabExtraRows, stream_);
   return true;
 }
 
@@ -1618,7 +1622,7 @@ std::size_t Executor::SessionBytes(
                         c.HcDim() * sizeof(float) +
                     (model_->draft_output().empty()
                          ? 0
-                         : std::size_t{kMtpDraftExtraRows} *
+                         : std::size_t{speculative::kDraftVocabExtraRows} *
                                    (model_->output_row_bytes() +
                                     sizeof(std::int32_t)) +
                                4096)
@@ -3136,8 +3140,9 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
                        bool candidates, const Session* draft,
                        std::string* error_msg) const {
   const std::uint32_t prefix = model_->draft_output().rows;
-  const std::uint32_t rows =
-      draft != nullptr ? prefix + kMtpDraftExtraRows : model_->output().rows;
+  const std::uint32_t rows = draft != nullptr
+                                 ? prefix + speculative::kDraftVocabExtraRows
+                                 : model_->output().rows;
   if (!HcMix(head, res, false, s_.mixed, nullptr, 1, error_msg) ||
       !(draft != nullptr
             ? DraftLogits(*draft, s_.mixed, s_.logits, error_msg)
@@ -3150,14 +3155,15 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
                      rows, stream_);
     if (draft != nullptr)
       RemapDraftIds(s_.mtp_ids, count, prefix, draft->mtp_.draft_ids,
-                    kMtpDraftExtraRows, stream_);
+                    speculative::kDraftVocabExtraRows, stream_);
   }
   if (token) {
     Argmax(s_.logits, s_.mtp_argmax, s_.mtp_token, 1, rows, stream_);
     ArgmaxConfidence(s_.logits, s_.mtp_token, rows, stream_);
     if (draft != nullptr)
       RemapDraftIds(reinterpret_cast<std::uint32_t*>(s_.mtp_token), 1, prefix,
-                    draft->mtp_.draft_ids, kMtpDraftExtraRows, stream_);
+                    draft->mtp_.draft_ids, speculative::kDraftVocabExtraRows,
+                    stream_);
     if (!Check(hipMemcpyAsync(mtp_token_host_, s_.mtp_token,
                               2 * sizeof(std::int32_t), hipMemcpyDeviceToHost,
                               stream_),

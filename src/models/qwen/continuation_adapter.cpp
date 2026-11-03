@@ -952,6 +952,8 @@ bool ContinuationAdapter::Validate(
       draft.primed_ = draft_metadata.primed;
       draft.proposal_active_ = false;
       draft.proposed_tokens_.clear();
+      // The restore replaces the token history: the table restarts from it.
+      draft.draft_vocab_stale_ = true;
     }
     struct Scope {
       bool& flag;

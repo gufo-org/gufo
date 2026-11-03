@@ -14,6 +14,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/dflash_policy.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
@@ -51,6 +52,8 @@ struct QwenDFlashBlockRequest {
   std::span<const float> uniforms;
   DFlashTrace trace;
   const sampling::SamplerState* sampler{nullptr};
+  /// Score the executor's draft vocabulary instead of the full head.
+  bool draft_subset{false};
 };
 
 class QwenDFlashGpuSnapshot final {
@@ -122,6 +125,21 @@ public:
     return packed_weight_bytes_;
   }
 
+  /// Draft vocabulary (draft_vocab.hpp): the head's leading rows, scored in
+  /// place. Zero when every draft scores the full head.
+  [[nodiscard]] std::uint32_t DraftPrefixRows() const noexcept {
+    return draft_prefix_rows_;
+  }
+  /// Special tokens above the prefix; they open every request's table.
+  [[nodiscard]] std::span<const std::int32_t> DraftSpecials() const noexcept {
+    return draft_specials_;
+  }
+  [[nodiscard]] std::size_t DraftRowBytes() const noexcept {
+    return draft_row_bytes_;
+  }
+  /// In the prefix or special: never needs a table row.
+  [[nodiscard]] bool InDraftSubset(tokenization::TokenId token) const;
+
 private:
   QwenDFlashGpuModel(std::shared_ptr<const core::GgufReader> dflash_reader,
                      std::shared_ptr<const QwenGpuModel> target_model,
@@ -134,6 +152,9 @@ private:
   speculative::QwenDFlashWeights weights_;
   std::vector<void*> allocations_;
   std::size_t packed_weight_bytes_{0};
+  std::uint32_t draft_prefix_rows_{0};
+  std::vector<std::int32_t> draft_specials_;
+  std::size_t draft_row_bytes_{0};
 };
 
 /// Session executor for GPU DFlash / DFlash-2 parallel block drafting.
@@ -172,7 +193,13 @@ public:
       std::vector<tokenization::TokenId>* out_candidate_ids = nullptr,
       std::vector<float>* out_candidate_probabilities = nullptr,
       const DFlashTrace& trace = {},
-      const sampling::SamplerState* sampler = nullptr);
+      const sampling::SamplerState* sampler = nullptr,
+      bool draft_subset = false);
+
+  /// Clears the draft table from slot `first`: the slots score -inf.
+  void ClearDraftRows(std::uint32_t first);
+  /// Copies the head rows of `ids` into the draft table from slot `first`.
+  void AppendDraftRows(std::uint32_t first, std::span<const std::int32_t> ids);
 
   /// Shared projections with independent attention, convolution and selector
   /// boundaries. A single request retains the ordinary block execution.
@@ -229,6 +256,8 @@ private:
   void RunInjectGemm(const models::QwenTensorRef& weight, const float* input,
                      float* output, std::size_t num_tokens,
                      std::size_t output_size, std::size_t input_size);
+  /// The draft table as a head of speculative::kDraftVocabExtraRows rows.
+  [[nodiscard]] models::QwenTensorRef DraftTable() const noexcept;
 
   std::shared_ptr<const QwenDFlashGpuModel> model_;
   std::uint32_t max_context_{4096};
@@ -265,6 +294,12 @@ private:
   float* d_confidences_{nullptr};
   std::uint32_t* d_out_token_{nullptr};
   hip_bfloat16* d_bf16_input_{nullptr};
+  // The request's draft table (draft_vocab.hpp): head rows, their IDs (-1:
+  // empty) and one block of their scores. Rebuilt from the token history.
+  std::uint8_t* d_draft_rows_{nullptr};
+  std::int32_t* d_draft_ids_{nullptr};
+  float* d_draft_logits_{nullptr};
+  std::vector<std::int32_t> draft_upload_;
   std::size_t scratch_bytes_{0};
   void* d_batch_scratch_{nullptr};
   std::size_t batch_scratch_bytes_{0};
@@ -361,9 +396,19 @@ public:
   [[nodiscard]] std::uint32_t GetInjectedContextLength() const noexcept {
     return executor_->GetInjectedContextLength();
   }
+  /// Neural drafts that scored the draft vocabulary (draft_vocab.hpp).
+  [[nodiscard]] std::uint64_t DraftSubsetBlocks() const noexcept {
+    return draft_subset_blocks_;
+  }
 
 private:
   void InjectPendingFeatures(std::uint32_t position);
+  /// Brings the request's draft table up to its committed history and
+  /// returns whether this block, anchored on `tokens.back()`, drafts through
+  /// it. `allowed` is speculative::DraftSubsetAllowed for this step.
+  [[nodiscard]] bool UseDraftSubset(
+      std::span<const tokenization::TokenId> tokens, std::uint32_t position,
+      bool allowed);
   friend class models::qwen::ContinuationAdapter;
   void CheckContinuation() const {
     if (continuation_hooks_)
@@ -393,6 +438,12 @@ private:
   std::vector<tokenization::TokenId> proposed_tokens_;
   bool primed_{false};
   bool proposal_active_{false};
+  /// This request's draft vocabulary; the executor's table follows it.
+  speculative::DraftVocab draft_vocab_;
+  /// After the token history is replaced: the table restarts from it.
+  bool draft_vocab_stale_{true};
+  std::vector<std::int32_t> draft_added_;
+  std::uint64_t draft_subset_blocks_{0};
 };
 
 }  // namespace gufo::hip

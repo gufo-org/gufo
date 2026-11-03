@@ -33,7 +33,6 @@ add_qwen38_flash_next_test(rope_scaling gufo_qwen38_flash_next "cpu")
 # (like ngram) this stays out of cmake/Checks.cmake's hosted check-pr set.
 add_qwen38_flash_next_test(rope_scaling_oracle
   gufo_qwen38_flash_next_reference "cpu")
-add_qwen38_flash_next_test(draft_vocab gufo_core "cpu")
 add_qwen38_flash_next_test(prompt_lookup gufo_core "cpu")
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)

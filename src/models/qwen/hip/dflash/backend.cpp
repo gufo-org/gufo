@@ -418,6 +418,17 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
             static_cast<float>(sampling::Uniform(request.rng_state));
     }
     indices.push_back(index);
+    // Head eligibility is speculative::DraftSubsetAllowed: sampled requests
+    // and jointly planned greedy batches; a greedy request beside sampled
+    // peers keeps the full head. The table then decides from the request's
+    // own history, so a sampled request drafts the same way in any batch.
+    const bool draft_subset =
+        backend.UseDraftSubset(request.tokens, request.position,
+                               speculative::DraftSubsetAllowed(
+                                   request.temperature > 0.0F,
+                                   static_cast<std::uint32_t>(requests.size()),
+                                   static_cast<std::uint32_t>(requests.size()),
+                                   shared_count.has_value()));
     blocks.push_back({backend.executor_.get(),
                       request.tokens.back(),
                       request.position,
@@ -425,7 +436,8 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
                       request.temperature,
                       std::span(uniforms[index]).first(count),
                       {},
-                      request.sampler});
+                      request.sampler,
+                      draft_subset});
   }
   if (blocks.empty())
     return proposals;
@@ -438,6 +450,40 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
     proposals[index] = std::move(generated[block]);
   }
   return proposals;
+}
+
+bool QwenDFlashGpuDraftBackend::UseDraftSubset(
+    std::span<const tokenization::TokenId> tokens, std::uint32_t position,
+    bool allowed) {
+  const auto& model = executor_->GetModel();
+  // Some native callers supply only the anchor; the table needs the history.
+  if (!allowed || model.DraftPrefixRows() == 0 ||
+      tokens.size() != std::size_t{position} + 1)
+    return false;
+  const auto committed = tokens.first(position);
+  const auto specials =
+      static_cast<std::uint32_t>(model.DraftSpecials().size());
+  if (draft_vocab_stale_ || draft_vocab_.scanned() > committed.size()) {
+    executor_->ClearDraftRows(specials);
+    draft_vocab_ =
+        speculative::DraftVocab(speculative::kDraftVocabExtraRows - specials);
+    draft_vocab_stale_ = false;
+  }
+  const auto common = [&](std::int32_t token) {
+    return token >= 0 &&
+           model.InDraftSubset(static_cast<tokenization::TokenId>(token));
+  };
+  const auto tabled = static_cast<std::uint32_t>(draft_vocab_.rare().size());
+  draft_added_.clear();
+  draft_vocab_.CatchUp(
+      std::span(reinterpret_cast<const std::int32_t*>(committed.data()),
+                committed.size()),
+      common, &draft_added_);
+  executor_->AppendDraftRows(specials + tabled, draft_added_);
+  const bool fits =
+      draft_vocab_.Fits(static_cast<std::int32_t>(tokens.back()), common);
+  draft_subset_blocks_ += fits;
+  return fits;
 }
 
 std::optional<speculative::DraftProposal> QwenDFlashGpuDraftBackend::TryLookup(
@@ -611,11 +657,13 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
     proposal.candidates_per_token =
         executor_->GetModel().GetDFlashConfig().selector_top_k;
   }
+  // This request decodes alone: speculative::DraftSubsetAllowed holds.
+  const bool draft_subset = UseDraftSubset(prompt_tokens, current_pos, true);
   proposed_tokens_ = executor_->ForwardBlock(
       prompt_tokens.back(), current_pos, count, temperature, sample_uniforms,
       nullptr, temperature > 0.0F ? &proposal.candidate_ids : nullptr,
       temperature > 0.0F ? &proposal.candidate_probabilities : nullptr, {},
-      sampler);
+      sampler, draft_subset);
 
   proposal.tokens = proposed_tokens_;
   proposal_active_ = !proposal.tokens.empty();
@@ -718,6 +766,7 @@ void QwenDFlashGpuDraftBackend::RestoreSnapshot(
   proposed_tokens_.clear();
   primed_ = dflash_snapshot->primed;
   proposal_active_ = false;
+  draft_vocab_stale_ = true;
 }
 
 void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
@@ -812,6 +861,7 @@ void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
   proposed_tokens_.clear();
   primed_ = primed;
   proposal_active_ = false;
+  draft_vocab_stale_ = true;
 }
 
 void QwenDFlashGpuDraftBackend::Reset() noexcept {
@@ -830,6 +880,7 @@ void QwenDFlashGpuDraftBackend::Reset() noexcept {
   proposed_tokens_.clear();
   primed_ = false;
   proposal_active_ = false;
+  draft_vocab_stale_ = true;
 }
 
 }  // namespace gufo::hip
