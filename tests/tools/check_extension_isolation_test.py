@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Regression coverage for extension coupling inventory and header closure."""
 
+import contextlib
+from functools import cache
 import importlib.util
+import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -14,7 +19,31 @@ ISOLATION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ISOLATION)
 
 
+@cache
+def repository_inventory():
+    # These tests inspect one immutable checkout; scratch-tree tests still scan
+    # afresh so changes to their fixtures cannot be hidden by a cache.
+    return ISOLATION.inventory(ROOT)
+
+
 class ExtensionIsolationTest(unittest.TestCase):
+    def test_inventory_snapshot_keeps_boundary_enforcement(self):
+        files = {"src/models/demo/model.hpp": "struct Model {};\n",
+                 "src/core/use.cpp": '#include "src/models/demo/model.hpp"\n'}
+        report = self.inventory(files)
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "inventory.json"
+            snapshot.write_text(json.dumps(report))
+            for includes, expected in ((report["includes"], 1), ([], 0)):
+                with self.subTest(expected=expected):
+                    snapshot.write_text(json.dumps(dict(report, includes=includes)))
+                    arguments = ["checker", "--inventory", str(snapshot), "--details",
+                                 "--fail-on-core-model-includes"]
+                    with patch.object(sys, "argv", arguments), \
+                            patch.object(ISOLATION, "inventory", side_effect=AssertionError("rescanned")), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(ISOLATION.main(), expected)
+
     def test_parent_relative_edges_and_transitive_closure(self):
         files = {
             "src/models/qwen/a.hpp": '#include "../shared/bridge.hpp"\n',
@@ -296,12 +325,12 @@ qwen::Real real;
         # Card 07 split the Qwen family into libraries under src/families/qwen/.
         # If this fails, a family header moved or started including a model without
         # updating the owning library.json manifest, or the family graph became cyclic.
-        self.assertEqual(ISOLATION.inventory(ROOT)["family_violations"], [])
+        self.assertEqual(repository_inventory()["family_violations"], [])
 
     def test_repository_inventories_both_qwen_trees(self):
         # The RFC step-1 header analysis moved with the shared code: it must keep
         # covering the family libraries and the Qwen 27B model directory.
-        report = ISOLATION.inventory(ROOT)
+        report = repository_inventory()
         headers = report["qwen_headers"]
         self.assertIn("src/families/qwen/control_tokens/control_tokens.hpp", headers)
         self.assertIn("src/families/qwen/hip_common/rope.hpp", headers)
@@ -539,7 +568,7 @@ qwen::Real real;
         # this fails, production model, cache or runtime code started including
         # a serving or HTTP header again; use the neutral contract instead.
         violations = ISOLATION.serving_boundary_violations(
-            ISOLATION.inventory(ROOT))
+            repository_inventory())
         self.assertEqual(violations, [])
 
     def test_repository_satisfies_the_core_boundary(self):
@@ -547,7 +576,7 @@ qwen::Real real;
         # If this fails, a core source started including a model or family
         # header again; move the dependency behind a core-owned contract.
         violations = ISOLATION.core_boundary_violations(
-            ISOLATION.inventory(ROOT))
+            repository_inventory())
         self.assertEqual(violations, [])
 
     def test_model_core_boundary_blocks_core_and_cache_includes_from_production_models(self):
@@ -587,7 +616,7 @@ qwen::Real real;
         # If this fails, a production model source started including a private core
         # or cache header; include <gufo/ext/...> instead.
         violations = ISOLATION.model_core_boundary_violations(
-            ISOLATION.inventory(ROOT))
+            repository_inventory())
         self.assertEqual(violations, [])
 
     def test_extension_boundary_blocks_cli_includes_of_migrated_extensions(self):
@@ -630,7 +659,7 @@ qwen::Real real;
         # model extension header directly; use ext::Registry and neutral
         # extension interfaces instead.
         violations = ISOLATION.extension_boundary_violations(
-            ISOLATION.inventory(ROOT))
+            repository_inventory())
         self.assertEqual(violations, [])
 
     def test_edge_classification(self):
