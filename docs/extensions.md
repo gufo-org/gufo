@@ -43,6 +43,10 @@ are rejected for external extensions; keep your own implementation headers
 inside your repository. The include checks enforce the source API boundary.
 Extension code still has arbitrary native-code privileges during build and run.
 
+A text runner that provides continuation implements `cache::Adapter` and links
+`gufo_ext_cache`, the public target for the component cache and its HIP backing.
+It exists only in HIP builds, so list it under a target that requires `hip`.
+
 ## Start with the template
 
 Copy [examples/extension_template](../examples/extension_template/README.md) into

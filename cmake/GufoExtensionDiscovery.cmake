@@ -338,6 +338,8 @@ function(_gufo_validate_external_target tgt)
       gufo_cli gufo_compare gufo_bench gufo_diagnostics
       gufo_runtime_storage gufo_prompt_cache gufo_audio_cache gufo_tool_calls
       gufo_kernel_bench_support)
+  # Audited link contracts: their closure reaches private targets by design.
+  set(public_link_targets gufo_ext_cache)
   get_target_property(directory "${tgt}" SOURCE_DIR)
   set(base "${CMAKE_BINARY_DIR}")
   _gufo_external_property("${tgt}" "${tgt}" INCLUDE_DIRECTORIES paths)
@@ -413,6 +415,9 @@ function(_gufo_validate_external_target tgt)
       if(alias)
         set(current "${alias}")
       endif()
+    endif()
+    if(current IN_LIST public_link_targets)
+      continue()
     endif()
     if(current IN_LIST prohibited_private_targets)
       message(FATAL_ERROR "external extension target ${tgt} violates allowlist: links prohibited target '${current}'")
