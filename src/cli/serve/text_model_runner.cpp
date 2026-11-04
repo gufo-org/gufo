@@ -1344,9 +1344,17 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
       candidates.insert(std::ranges::upper_bound(candidates, target, {},
                                                  &InPassCapture::position),
                         {target, true});
+    const auto max_in_pass = std::max<std::size_t>(
+        1, impl_->runner->Descriptor().capabilities.max_in_pass_checkpoints);
     for (const auto& candidate : candidates) {
       if (candidate.position >= impl_->prefill_offset + max_input_tokens)
         break;
+      // The runner captures a bounded number of boundaries per call; the
+      // next one ends this chunk and is captured after it.
+      if (in_pass.size() == max_in_pass) {
+        stop = candidate.position;
+        break;
+      }
       // Only a component lease captures intermediate checkpoints and later
       // prompt targets in place.
       if ((!candidate.prompt || candidate.position != snapshot_position) &&

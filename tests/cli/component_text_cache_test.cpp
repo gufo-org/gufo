@@ -42,6 +42,8 @@ public:
   bool defer_idle{};
   bool in_pass{};
   bool partial{};
+  /// Overrides only the deprecated single-boundary PrefillThrough.
+  bool legacy{};
   std::size_t alignment{1};
   /// Every prefill step's end and in-pass checkpoint, in order.
   mutable std::vector<std::size_t> pass_ends;
@@ -62,7 +64,8 @@ public:
                              .prefix_reuse = true,
                              .in_pass_checkpoint = in_pass,
                              .partial_prefill_retention = partial,
-                             .prefill_alignment = alignment}};
+                             .prefill_alignment = alignment,
+                             .max_in_pass_checkpoints = legacy ? 1U : 64U}};
   }
   TextRunnerResourceClaim ResourceClaim() const override {
     return {.state_capacity_bytes = 1ULL << 30,
@@ -209,11 +212,15 @@ public:
                ? std::optional<std::size_t>(1)
                : std::nullopt;
   }
+  using TextModelRunner::PrefillThrough;
   TextPrefillStep PrefillThrough(TextRunnerState& state,
                                  std::span<const TextRunnerToken> prompt,
                                  std::size_t offset, std::size_t budget,
                                  std::span<const std::size_t> boundaries,
                                  const InPassConsumer& consume) const override {
+    if (legacy)
+      return TextModelRunner::PrefillThrough(state, prompt, offset, budget,
+                                             boundaries, consume);
     ++through_calls;
     auto& s = dynamic_cast<State&>(state);
     const auto count = std::min(budget, prompt.size() - offset);
@@ -226,6 +233,28 @@ public:
       in_pass_points.push_back(boundaries[i]);
     }
     const auto tail = prompt.subspan(at, offset + count - at);
+    s.adapter.Append(s.slot, tail, tail);
+    pass_ends.push_back(offset + count);
+    return {count, offset + count == prompt.size()};
+  }
+  TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& capture)
+      const override {
+    ++through_calls;
+    auto& s = dynamic_cast<State&>(state);
+    const auto count = std::min(budget, prompt.size() - offset);
+    const auto head = prompt.subspan(offset, boundary - offset);
+    s.adapter.Append(s.slot, head, head);
+    try {
+      *checkpoint = capture();
+    } catch (...) {
+      checkpoint->reset();
+    }
+    in_pass_points.push_back(boundary);
+    const auto tail = prompt.subspan(boundary, offset + count - boundary);
     s.adapter.Append(s.slot, tail, tail);
     pass_ends.push_back(offset + count);
     return {count, offset + count == prompt.size()};
@@ -301,9 +330,12 @@ void InPassCapturePreservesBoundaryAndLiveTail() {
   Prefill(cold);
   const auto expected = Generate(cold);
   cold.Invalidate();
-  for (const bool fail : {false, true}) {
+  for (const auto [fail, legacy] :
+       {std::pair{false, false}, std::pair{true, false},
+        std::pair{false, true}}) {
     auto runner = std::make_shared<Runner>();
     runner->in_pass = true;
+    runner->legacy = legacy;
     TextRunnerPool pool(runner, 2);
     auto seed =
         pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);

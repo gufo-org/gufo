@@ -300,6 +300,7 @@ public:
                 // start: one selection block (compress ratio).
                 .prefill_alignment =
                     std::max<std::size_t>(1, model_->config().compress_ratio),
+                .max_in_pass_checkpoints = rocm::kMaxPassCheckpoints,
             },
         .persistence = persistence_,
         .sampling_preset = sampling::TextModelPreset::kQwen38,
@@ -488,6 +489,7 @@ public:
     return bytes ? std::optional<std::size_t>(bytes) : std::nullopt;
   }
 
+  using TextModelRunner::PrefillThrough;
   [[nodiscard]] TextPrefillStep PrefillThrough(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t budget,
