@@ -311,11 +311,11 @@ int main(int argc, char** argv) {
   }
   if (sampled_head) {
     std::vector<std::int32_t> specials;
-    for (std::uint32_t id = q::speculative::kDraftVocabPrefix;
+    for (std::uint32_t id = gufo::speculative::kDraftVocabPrefix;
          id < c.vocab_size; ++id)
       if (tokenizer->IsSpecialToken(id))
         specials.push_back(id);
-    if (!device->SetDraftVocab(q::speculative::kDraftVocabPrefix,
+    if (!device->SetDraftVocab(gufo::speculative::kDraftVocabPrefix,
                                std::move(specials), &error)) {
       std::fprintf(stderr, "draft vocabulary failed: %s\n", error.c_str());
       return 1;

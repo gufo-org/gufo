@@ -17,9 +17,12 @@ for MTP), and restore on a multiple of four.
 """
 
 import argparse
+import hashlib
 import http.client
 import json
 from pathlib import Path
+import re
+import shutil
 import socket
 import sys
 import time
@@ -47,7 +50,7 @@ def conversation(pad, turns):
     return messages
 
 
-def request(port, messages, max_tokens):
+def request(port, messages, max_tokens, artifact):
     body = json.dumps({
         "model": "alignment", "messages": messages, "temperature": 0,
         "max_tokens": max_tokens, "stream": False,
@@ -60,6 +63,8 @@ def request(port, messages, max_tokens):
         payload = json.loads(response.read())
     finally:
         connection.close()
+    write_json(artifact, {"request": json.loads(body), "response": payload,
+                          "status": response.status})
     if response.status != 200:
         raise RuntimeError(f"HTTP {response.status}: {payload}")
     message = payload["choices"][0]["message"]
@@ -67,8 +72,12 @@ def request(port, messages, max_tokens):
     return {"reasoning": message.get("reasoning_content") or "",
             "content": message.get("content") or "",
             "prompt_tokens": usage["prompt_tokens"],
-            "cached_tokens": usage.get("prompt_tokens_details", {}).get(
-                "cached_tokens", 0)}
+            "cached_tokens": usage["cached_tokens"],
+            "disk_hit": usage["gufo"]["cache_disk_hit"],
+            "draft_tokens": usage["draft_tokens"],
+            "draft_tokens_accepted": usage["draft_tokens_accepted"],
+            "checkpoint_ids": usage["gufo"]["component_cache"][
+                "captured_checkpoint_ids"]}
 
 
 def main():
@@ -92,7 +101,12 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     disk = output / "disk-cache"
+    binary = Path(shutil.which(command[0]) or command[0]).resolve()
     report = {**provenance(), "command": command, "cases": {},
+              "binary": str(binary),
+              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "alignment_harness_sha256": hashlib.sha256(
+                  Path(__file__).read_bytes()).hexdigest(),
               "status": "running"}
 
     def save():
@@ -105,33 +119,68 @@ def main():
         full = command + list(extra) + ["--host", "127.0.0.1", "--port", str(port)]
         return port, server(full, output / f"{label}.log", 600)
 
+    request_number = 0
+
+    def recorded_request(port, messages, max_tokens):
+        nonlocal request_number
+        request_number += 1
+        return request(port, messages, max_tokens,
+                       output / f"request-{request_number:02d}.json")
+
+    def wait_for_publication(process, seed):
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError("disk seed server exited before publication")
+            log = (output / "disk-seed.log").read_text()
+            published = re.findall(
+                r"event=published tokens=(\d+) checkpoint_id=(\d+)", log)
+            if any(int(id_) in seed["checkpoint_ids"] and int(tokens) % 4 == 0
+                   and seed["prompt_tokens"] - 11 <= int(tokens)
+                   for tokens, id_ in published):
+                return
+            time.sleep(.1)
+        raise TimeoutError("aligned seed checkpoint was not published")
+
     try:
         save()
         cold = {}
         port, context = serve("cold")
         with context:
             for pad in PADS:
-                cold[pad] = request(port, conversation(pad, 2),
-                                    args.max_tokens)
+                cold[pad] = recorded_request(
+                    port, conversation(pad, 2), args.max_tokens)
         warm = {}
         port, context = serve("warm-ram")
         with context:
             for pad in PADS:
-                seed = request(port, conversation(pad, 1), args.max_tokens)
-                warm[pad] = (seed, request(port, conversation(pad, 2),
-                                           args.max_tokens))
+                seed = recorded_request(
+                    port, conversation(pad, 1), args.max_tokens)
+                warm[pad] = (seed, recorded_request(
+                    port, conversation(pad, 2), args.max_tokens))
         port, context = serve("disk-seed", ["--cache-disk", str(disk)])
-        with context:
-            seeds = {pad: request(port, conversation(pad, 1),
-                                  args.max_tokens) for pad in PADS}
-            time.sleep(10)  # let the disk writer finish before shutdown
+        with context as process:
+            seeds = {}
+            for pad in PADS:
+                seeds[pad] = recorded_request(
+                    port, conversation(pad, 1), args.max_tokens)
+                wait_for_publication(process, seeds[pad])
         restored = {}
         port, context = serve("disk-restore", ["--cache-disk", str(disk)])
         with context:
             for pad in PADS:
-                restored[pad] = request(port, conversation(pad, 2),
-                                        args.max_tokens)
+                restored[pad] = recorded_request(
+                    port, conversation(pad, 2), args.max_tokens)
         failures = []
+        if {warm[pad][0]["prompt_tokens"] % 4 for pad in PADS} != set(range(4)):
+            failures.append("seed prompts do not cover all four alignment residues")
+        mode = "mtp" if args.mtp_model else "off"
+        for label in ("cold", "warm-ram", "disk-seed", "disk-restore"):
+            log = (output / f"{label}.log").read_text()
+            modes = re.findall(
+                r"event=load_completed[^\n]*kind=text[^\n]*speculative=(\w+)", log)
+            if modes != [mode]:
+                failures.append(f"{label}: requested {mode}, loaded {modes}")
         for pad in PADS:
             reference = cold[pad]
             case = {"cold": reference, "ram_seed": warm[pad][0],
@@ -139,6 +188,12 @@ def main():
                     "disk": restored[pad]}
             for path in ("ram", "disk"):
                 got = case[path]
+                # Assistant framing plus alignment must fit the 11-row tail;
+                # a shallow grid restore would conceal a lost stable checkpoint.
+                if got["cached_tokens"] < case[path + "_seed"]["prompt_tokens"] - 11:
+                    failures.append(f"{pad!r} {path}: lost the stable checkpoint")
+                if got["disk_hit"] != (path == "disk"):
+                    failures.append(f"{pad!r} {path}: wrong cache tier")
                 same = (got["reasoning"], got["content"]) == (
                     reference["reasoning"], reference["content"])
                 case[path + "_identical"] = same
@@ -152,6 +207,13 @@ def main():
                                     f"({got['cached_tokens']} cached)")
             if reference["cached_tokens"]:
                 failures.append(f"{pad!r} cold: restored {reference['cached_tokens']}")
+            for label in ("cold", "ram_seed", "ram", "disk_seed", "disk"):
+                proposed = case[label]["draft_tokens"]
+                accepted = case[label]["draft_tokens_accepted"]
+                if not 0 <= accepted <= proposed or (mode == "off" and proposed):
+                    failures.append(f"{pad!r} {label}: invalid draft work")
+                if mode == "mtp" and proposed == 0:
+                    failures.append(f"{pad!r} {label}: no MTP drafts executed")
             report["cases"][pad] = case
             print(f"{pad!r}: prompt {reference['prompt_tokens']} cached "
                   f"ram {case['ram']['cached_tokens']} disk "
@@ -170,6 +232,13 @@ def main():
         report["error"] = repr(error)
         save()
         raise
+    finally:
+        # Every server context has exited; preserve the inventory, not payloads.
+        if disk.is_dir():
+            write_json(output / "disk-inventory.json", [
+                {"path": str(path.relative_to(disk)), "bytes": path.stat().st_size}
+                for path in sorted(disk.rglob("*")) if path.is_file()])
+            shutil.rmtree(disk)
 
 
 if __name__ == "__main__":

@@ -11,10 +11,12 @@ checkpoints and budget-limited passes beside decoders can end anywhere. The
 model now reports `TextRunnerCapabilities::prefill_alignment` (the compress
 ratio, 4): budget-limited passes end on a multiple of four (a budget below
 four runs to the next one), and the stable final-user-turn boundary, grid
-and shared checkpoints are rounded down to it, so a restore re-prefills at
-most three tokens. The complete-prompt checkpoint keeps its exact end: an
-unchanged retry continues it without prefill, and `ComponentTextCache`
-never restores an unaligned checkpoint for a longer prompt. An in-pass
+and shared checkpoints are rounded down to it, moving each boundary back
+by at most three tokens. The complete-prompt checkpoint keeps its exact
+end: an unchanged retry continues it without prefill. `ComponentTextCache`
+never restores an unaligned checkpoint for a longer prompt; that request
+falls back to an earlier aligned checkpoint, which can replay more than
+three additional tokens compared with the old unaligned prompt end. An in-pass
 checkpoint may leave up to eleven rows after its boundary (eight plus the
 three alignment can take), so the five-to-seven-token assistant framing after
 a rounded-down stable boundary still fits in the final pass instead of

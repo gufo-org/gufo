@@ -1,5 +1,22 @@
 # Qwen3.8 Flash-Next experiments
 
+## Cache readahead progress (November 4, 2026)
+
+Retained: skip files already consumed by the reader before computing the
+unsigned prefetch-window distance. Otherwise a reader that overtakes the
+helpers can stop all further hints. Four helpers and the 32 MiB window are
+unchanged; no larger allocation or new option is needed.
+
+On Strix Halo, ROCm 10.1, Flash-Next UD-Q4_K_XL with shared Q8_0 MTP,
+`--sessions 2 --context 32768`, old and fixed production builds alternated
+against reflinked copies of the same persisted records. The 200,142,032-byte
+restore measured 92.06/92.23 ms before and 74.03/84.34 ms after; the
+305,368,752-byte restore measured 135.29/127.41 ms before and
+118.25/122.94 ms after. These are retained observations, not a global speed
+claim. Both restore outputs remain exact. The deterministic cursor regression
+fails with the original scheduling and passes with the fix; the full
+`cache_streaming_test` takes 0.55 seconds.
+
 ## Wide prompt-lookup verification (November 1, 2026)
 
 Measured downstream, on a fork that runs Swift 1.5 IQ4_XS with its Q8_0 MTP
