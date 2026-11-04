@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "gufo/ext/text.hpp"
-#include "src/cli/serve/continuation_cache.hpp"
+#include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
 
@@ -68,10 +68,6 @@ public:
       std::size_t disk_queued_bytes{0};
       double disk_enqueue_ms{0.0};
       /// Shared-prefix snapshots queued for persistence during prefill.
-      std::size_t shared_prefix_snapshots{0};
-      std::size_t shared_prefix_bytes{0};
-      std::size_t shared_prefix_failures{0};
-      double shared_prefix_ms{0.0};
     };
 
     Request();

@@ -385,52 +385,14 @@ void Conflicts() {
     assert(store.Entries().empty());
   }
 }
-void Cleanup() {
-  Directory d, unrelated;
-  const std::array<std::uint8_t, 8> legacy{'G', 'U', 'F', 'O',
-                                           'K', 'V', 'C', '1'};
-  Write(d.path / "old.kvc", legacy);
-  fs::resize_file(d.path / "old.kvc", 1000000);
-  Write(d.path / ".tmp-owned", legacy);
-  Write(d.path / "unknown.kvc", std::array<std::uint8_t, 4>{1, 2, 3, 4});
-  Write(d.path / "unknown", legacy);
-  fs::create_directory(d.path / ".tmp-directory");
-  Write(d.path / ".tmp-directory/keep", legacy);
-  Write(unrelated.path / "old.kvc", legacy);
-  fs::create_directory_symlink(unrelated.path, d.path / "other");
-  fs::create_symlink(unrelated.path / "old.kvc", d.path / "link.kvc");
-  DiskStore store(ledger, d.path, 0);
-  assert(!fs::exists(d.path / "old.kvc") && !fs::exists(d.path / ".tmp-owned"));
-  assert(store.Stats().removed_legacy_bytes == 1000008);
-  assert(store.Stats().managed_bytes == 0);
-  for (const auto& p : {"unknown.kvc", "unknown", ".tmp-directory/keep",
-                        "other/old.kvc", "link.kvc"})
-    assert(fs::exists(d.path / p));
-}
-void InterruptedCleanup() {
-  Directory d;
-  const std::array<std::uint8_t, 4> legacy{'G', 'U', 'F', 'O'};
-  Write(d.path / "old.kvc", legacy);
-  fs::resize_file(d.path / "old.kvc", 1000000);
-  interrupt_next_read = true;
-  shorten_reads = true;
-  {
-    DiskStore store(ledger, d.path, 0);
-    assert(!fs::exists(d.path / "old.kvc"));
-    assert(store.Stats().removed_legacy_bytes == 1000000);
-    assert(store.Stats().legacy_probe_bytes_read == 4);
-  }
-  shorten_reads = false;
-}
 void RootSymlinks() {
   Directory d, target;
-  Write(target.path / "old.kvc",
-        std::array<std::uint8_t, 4>{'G', 'U', 'F', 'O'});
+  Write(target.path / "file", std::array<std::uint8_t, 4>{1, 2, 3, 4});
   auto link = d.path / "alias";
   fs::create_directory_symlink(target.path, link);
   for (const auto& suffix : {"", "/", "/.", "/./"}) {
     Reject([&] { DiskStore store(ledger, link.string() + suffix, 0); });
-    assert(fs::exists(target.path / "old.kvc"));
+    assert(fs::exists(target.path / "file"));
     assert(!fs::exists(target.path / "LOCK"));
   }
 }
@@ -438,14 +400,9 @@ void ParentPathResolution() {
   Directory base, target;
   fs::create_directory(target.path / "sub");
   fs::create_directory_symlink(target.path / "sub", base.path / "alias");
-  const std::array<std::uint8_t, 4> legacy{'G', 'U', 'F', 'O'};
-  Write(base.path / "old.kvc", legacy);
-  Write(target.path / "old.kvc", legacy);
   {
     DiskStore store(ledger, base.path / "alias/..", 0);
-    assert(!fs::exists(target.path / "old.kvc"));
     assert(fs::exists(target.path / "LOCK"));
-    assert(fs::exists(base.path / "old.kvc"));
     assert(!fs::exists(base.path / "LOCK"));
   }
 }
@@ -708,11 +665,9 @@ int main() {
   Ownership();
   Index();
   Conflicts();
-  Cleanup();
   BudgetAndDirectories();
   CapacityBeforePayloadReads();
   VerifiedDependencies();
-  InterruptedCleanup();
   RootSymlinks();
   ParentPathResolution();
   MetadataAdmission();

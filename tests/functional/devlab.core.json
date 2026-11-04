@@ -127,7 +127,6 @@
         "tests/cli/arg_parser_test.cpp",
         "tests/cli/bench_test.cpp",
         "tests/cli/component_text_cache_test.cpp",
-        "tests/cli/continuation_disk_store_test.cpp",
         "tests/cli/http_server_signals_test.cpp",
         "tests/cli/http_server_test.cpp",
         "tests/cli/http_server_test_support.hpp",

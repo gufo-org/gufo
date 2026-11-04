@@ -600,7 +600,6 @@ struct DiskStore::Impl {
     std::error_code ec;
     if (!platform::SyncAncestors(root, ec))
       IoError("sync cache ancestors", ec);
-    CleanupLegacy();
     std::size_t manifest_count{};
     for (const platform::Directory* directory :
          {&manifests, &chunks, &private_files})
@@ -1370,45 +1369,6 @@ struct DiskStore::Impl {
           "it): " +
           path.string());
     return lock;
-  }
-  void CleanupLegacy() {
-    Scan(root, [&](const std::string& name, const platform::FileInfo& st) {
-      if (!Regular(st))
-        return;
-      bool managed = name.starts_with(".tmp-");
-      if (!managed && name.ends_with(".kvc")) {
-        std::error_code ec;
-        const Fd file(
-            platform::OpenAt(root, name, platform::FileMode::kRead, ec));
-        platform::FileInfo current{};
-        if (!platform::FileValid(file.Get()) ||
-            !platform::Stat(file.Get(), &current, ec) || !Regular(current))
-          return;
-        std::array<char, 4> magic{};
-        std::size_t offset{};
-        while (offset < magic.size()) {
-          std::error_code read_ec;
-          const auto n = platform::Read(file.Get(), magic.data() + offset,
-                                        magic.size() - offset, read_ec);
-          if (n == 0 && read_ec == std::errc::interrupted)
-            continue;
-          if (n == 0 && read_ec)
-            IoError("read legacy cache magic", read_ec);
-          if (!n)
-            break;
-          offset += n;
-          stats.legacy_probe_bytes_read += n;
-        }
-        managed = offset == magic.size() &&
-                  magic == std::array<char, 4>{'G', 'U', 'F', 'O'};
-      }
-      if (managed) {
-        std::error_code ec;
-        if (!platform::Unlink(root, name, ec))
-          IoError("remove legacy cache file", ec);
-        stats.removed_legacy_bytes = Add(stats.removed_legacy_bytes, st.size);
-      }
-    });
   }
   DurableEntry ReadManifest(const std::string& name,
                             const platform::FileInfo& found) {

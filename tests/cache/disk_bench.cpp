@@ -88,7 +88,6 @@ int main() {
                          .count();
       assert(store.Entries().size() == count);
       assert(store.Stats().manifest_bytes_read == expected);
-      assert(store.Stats().legacy_probe_bytes_read == 0);
       std::cout << "manifests=" << count << " startup_ms=" << elapsed
                 << " manifest_bytes_read=" << store.Stats().manifest_bytes_read
                 << " dependency_stats=" << store.Stats().dependency_stats
