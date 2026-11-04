@@ -39,6 +39,28 @@ bool DiskCacheEnabled(const TextDiskCacheConfig& config) {
 
 }  // namespace
 
+std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    std::span<const tokenization::TokenId> open,
+    std::span<const tokenization::TokenId> close,
+    const std::function<bool(std::span<const tokenization::TokenId>)>& blank) {
+  if (close.empty())
+    return 0;
+  auto begin = tokens.begin();
+  if (!open.empty()) {
+    const auto at =
+        std::search(tokens.begin(), tokens.end(), open.begin(), open.end());
+    if (at == tokens.end())
+      return 0;
+    const auto prefix = static_cast<std::size_t>(at - tokens.begin());
+    if (prefix != 0 && !(blank && blank(tokens.first(prefix))))
+      return 0;
+    begin = at + static_cast<std::ptrdiff_t>(open.size());
+  }
+  const auto end = std::search(begin, tokens.end(), close.begin(), close.end());
+  return static_cast<std::size_t>(end - begin);
+}
+
 struct InferenceBackend::Impl {
 #if defined(ENGINE_ENABLE_HIP)
   struct State {
@@ -64,9 +86,14 @@ struct InferenceBackend::Impl {
           request_(std::move(scheduled_request)),
           tool_format_(tool_format),
           reasoning_(state_->scheduler->runner().ReasoningDelimiters()) {
-      if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ =
-            state_->scheduler->runner().TokenizeControl(reasoning_.close);
+      const auto& runner = state_->scheduler->runner();
+      if (initial == InitialOutputState::kReasoning ||
+          (initial == InitialOutputState::kAuto && !reasoning_.open.empty())) {
+        reasoning_end_ = runner.TokenizeControl(reasoning_.close);
+      }
+      // An automatic phase counts only a block the model opens itself.
+      if (initial == InitialOutputState::kAuto && !reasoning_.open.empty())
+        reasoning_open_ = runner.TokenizeControl(reasoning_.open);
     }
 
     Result Wait(const TokenCallback& on_token,
@@ -74,11 +101,15 @@ struct InferenceBackend::Impl {
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
       if (!reasoning_end_.empty()) {
-        const auto end =
-            std::search(result.tokens.begin(), result.tokens.end(),
-                        reasoning_end_.begin(), reasoning_end_.end());
-        result.reasoning_tokens =
-            static_cast<std::size_t>(end - result.tokens.begin());
+        const auto& runner = state_->scheduler->runner();
+        result.reasoning_tokens = CountReasoningTokens(
+            result.tokens, reasoning_open_, reasoning_end_,
+            [&runner](std::span<const tokenization::TokenId> prefix) {
+              const auto text = runner.Decode(prefix);
+              return std::ranges::all_of(text, [](unsigned char c) {
+                return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+              });
+            });
       }
       return result;
     }
@@ -98,6 +129,7 @@ struct InferenceBackend::Impl {
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
     std::vector<tokenization::TokenId> reasoning_end_;
+    std::vector<tokenization::TokenId> reasoning_open_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
     const ext::ReasoningMarkup reasoning_;
   };

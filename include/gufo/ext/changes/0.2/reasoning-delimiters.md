@@ -4,8 +4,8 @@ Text (`text_contracts.hpp`, `src/ext/text.hpp`): `ReasoningMarkup` declares the
 literal `open` and `close` delimiters of a provider's reasoning, and
 `TextModelRunner::ReasoningDelimiters()` returns it. The OpenAI-compatible
 chat, Responses and Messages endpoints use it, buffered and streamed, to split
-reasoning from content, and usage accounting uses `close` to count reasoning
-tokens. `ReasoningBudgetTags()` keeps its token-level meaning for budget
+reasoning from content, and usage accounting counts reasoning tokens with the
+same delimiters, including a block a `kAuto` output opens itself. `ReasoningBudgetTags()` keeps its token-level meaning for budget
 enforcement.
 
 - `close` must be non-empty; the host rejects a runner whose close is empty at

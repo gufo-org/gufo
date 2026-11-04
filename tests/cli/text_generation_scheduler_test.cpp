@@ -3173,12 +3173,42 @@ void TestBackendRejectsInvalidSamplingDefaults() {
 }
 #endif
 
+void TestReasoningTokenCount() {
+  using Tokens = std::vector<gufo::tokenization::TokenId>;
+  const Tokens open{7, 8};
+  const Tokens close{9};
+  const auto count = [](const Tokens& tokens, const Tokens& open,
+                        const Tokens& close) {
+    return gufo::server::CountReasoningTokens(tokens, open, close);
+  };
+  Expect(count({1, 2, 9, 3}, {}, close) == 2,
+         "output inside reasoning counts to the close");
+  Expect(count({1, 2, 3}, {}, close) == 3,
+         "unclosed reasoning counts to the end");
+  Expect(count({7, 8, 1, 2, 9, 3}, open, close) == 2,
+         "a model-opened block counts without its delimiters");
+  Expect(count({1, 7, 8, 2, 9}, open, close) == 0,
+         "an automatic phase counts only a leading block");
+  const auto blank = [](std::span<const gufo::tokenization::TokenId> prefix) {
+    return std::ranges::all_of(prefix, [](auto token) { return token == 0; });
+  };
+  Expect(gufo::server::CountReasoningTokens(Tokens{0, 7, 8, 2, 9}, open, close,
+                                            blank) == 1,
+         "a blank prefix may precede the opener");
+  Expect(gufo::server::CountReasoningTokens(Tokens{1, 7, 8, 2, 9}, open, close,
+                                            blank) == 0,
+         "text before the opener is not blank");
+  Expect(count({7}, open, close) == 0, "a partial opener is not reasoning");
+  Expect(count({1, 2}, {}, {}) == 0, "no close delimiter counts nothing");
+}
+
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   TestBackendPreservesModelSamplingPreset();
   TestBackendRejectsInvalidSamplingDefaults();
 #endif
   TestTokenLogprobs();
+  TestReasoningTokenCount();
   TestPublicationWaitUsesRecentSubstantialPrefill();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
   // captured from a redirected sink; a TTY stderr would tint the level tag.
