@@ -2644,22 +2644,20 @@ __global__ void PoolBlocksKernel(
 // `to` would have written. Each pair recomputes both rounded angles exactly as
 // the writing kernels do (base frequency, YarnFrequency, sincosf of the rope
 // position, YarnScale), inverts the old scaled rotation and applies the new
-// one. Row r of the cache sits at rope position r * pos_stride.
+// one. Row r of `source` sits at rope position (first_row + r) * pos_stride;
+// `destination` may alias it.
 template<bool kFrom, bool kTo>
-__global__ void RerotateKeysKernel(__half* rows, std::uint32_t row_width,
-                                   std::uint32_t head_dim, std::uint32_t rotary,
-                                   std::uint32_t pos_stride, float theta,
-                                   const qwen::vision::DeviceRope* rope,
-                                   [[maybe_unused]] YarnRope from,
-                                   [[maybe_unused]] YarnRope to) {
+__global__ void RerotateKeysKernel(
+    const __half* source, __half* destination, std::uint32_t first_row,
+    std::uint32_t row_width, std::uint32_t head_dim, std::uint32_t rotary,
+    std::uint32_t pos_stride, float theta, const qwen::vision::DeviceRope* rope,
+    [[maybe_unused]] YarnRope from, [[maybe_unused]] YarnRope to) {
   const std::uint32_t r = blockIdx.x, h = blockIdx.y, p = threadIdx.x;
   const std::uint32_t half = rotary / 2;
-  if (p >= half) {
-    return;
-  }
   const float base =
       powf(theta, -2.0f * static_cast<float>(p) / static_cast<float>(rotary));
-  const float position = qwen::vision::RopePosition(rope, r * pos_stride, p);
+  const float position =
+      qwen::vision::RopePosition(rope, (first_row + r) * pos_stride, p);
   float fa = base, fb = base;
   if constexpr (kFrom)
     fa = YarnFrequency(base, p, from);
@@ -2672,14 +2670,18 @@ __global__ void RerotateKeysKernel(__half* rows, std::uint32_t row_width,
     YarnScale(sa, ca, from);
   if constexpr (kTo)
     YarnScale(sb, cb, to);
-  __half* x = rows + static_cast<std::size_t>(r) * row_width +
-              static_cast<std::size_t>(h) * head_dim;
+  const std::size_t offset = static_cast<std::size_t>(r) * row_width +
+                             static_cast<std::size_t>(h) * head_dim;
+  const __half* x = source + offset;
+  __half* y = destination + offset;
   const float lo = __half2float(x[p]), hi = __half2float(x[p + half]);
   const float norm = ca * ca + sa * sa;
   const float a = (lo * ca + hi * sa) / norm;
   const float b = (hi * ca - lo * sa) / norm;
-  x[p] = __float2half_rn(__fmaf_rn(a, cb, -__fmul_rn(b, sb)));
-  x[p + half] = __float2half_rn(__fmaf_rn(a, sb, __fmul_rn(b, cb)));
+  y[p] = __float2half_rn(__fmaf_rn(a, cb, -__fmul_rn(b, sb)));
+  y[p + half] = __float2half_rn(__fmaf_rn(a, sb, __fmul_rn(b, cb)));
+  for (std::uint32_t i = rotary + p; i < head_dim; i += half)
+    y[i] = x[i];
 }
 
 // F16 WMMA fragments (wave32): sixteen halves per lane, eight F32
@@ -8842,28 +8844,29 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        theta, eps, capacity, rope, yarn);
 }
 
-void RerotateKeys(__half* rows, std::uint32_t n_rows, std::uint32_t heads,
-                  std::uint32_t head_dim, std::uint32_t rotary,
-                  std::uint32_t pos_stride, float theta,
+void RerotateKeys(const __half* source, __half* destination,
+                  std::uint32_t first_row, std::uint32_t n_rows,
+                  std::uint32_t heads, std::uint32_t head_dim,
+                  std::uint32_t rotary, std::uint32_t pos_stride, float theta,
                   const qwen::vision::DeviceRope* rope, const YarnRope& from,
                   const YarnRope& to, hipStream_t stream) {
-  if (n_rows == 0 || heads == 0 || rotary == 0 || rotary / 2 > 32U) {
+  if (n_rows == 0 || heads == 0 || rotary == 0) {
     return;
   }
-  const dim3 grid(n_rows, heads), block(32U);
+  const dim3 grid(n_rows, heads), block(rotary / 2);
   const std::uint32_t width = heads * head_dim;
   if (from.enabled != 0 && to.enabled != 0)
     hipLaunchKernelGGL((RerotateKeysKernel<true, true>), grid, block, 0, stream,
-                       rows, width, head_dim, rotary, pos_stride, theta, rope,
-                       from, to);
+                       source, destination, first_row, width, head_dim, rotary,
+                       pos_stride, theta, rope, from, to);
   else if (from.enabled != 0)
     hipLaunchKernelGGL((RerotateKeysKernel<true, false>), grid, block, 0,
-                       stream, rows, width, head_dim, rotary, pos_stride, theta,
-                       rope, from, to);
+                       stream, source, destination, first_row, width, head_dim,
+                       rotary, pos_stride, theta, rope, from, to);
   else if (to.enabled != 0)
     hipLaunchKernelGGL((RerotateKeysKernel<false, true>), grid, block, 0,
-                       stream, rows, width, head_dim, rotary, pos_stride, theta,
-                       rope, from, to);
+                       stream, source, destination, first_row, width, head_dim,
+                       rotary, pos_stride, theta, rope, from, to);
 }
 
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,

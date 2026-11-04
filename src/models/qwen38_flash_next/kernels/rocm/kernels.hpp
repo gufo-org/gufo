@@ -511,10 +511,12 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
 
 /// Dynamic YaRN: re-rotates `n_rows` cached post-RoPE key rows of `heads`
 /// heads (`head_dim` apart, first `rotary` dimensions rotated split-half)
-/// from the scaling `from` to `to`. Row r is at rope position r * pos_stride.
-void RerotateKeys(__half* rows, std::uint32_t n_rows, std::uint32_t heads,
-                  std::uint32_t head_dim, std::uint32_t rotary,
-                  std::uint32_t pos_stride, float theta,
+/// from the scaling `from` to `to`. Row r of `source` is at rope position
+/// (first_row + r) * pos_stride. `destination` may alias `source`.
+void RerotateKeys(const __half* source, __half* destination,
+                  std::uint32_t first_row, std::uint32_t n_rows,
+                  std::uint32_t heads, std::uint32_t head_dim,
+                  std::uint32_t rotary, std::uint32_t pos_stride, float theta,
                   const qwen::vision::DeviceRope* rope, const YarnRope& from,
                   const YarnRope& to, hipStream_t stream);
 

@@ -54,8 +54,8 @@ struct SessionSnapshotHeader {
   MtpLengthState draft_policy;
   std::uint32_t image_identity_bytes;
   std::uint32_t policy_concurrency;
-  /// Dynamic YaRN factor the saved keys are rotated with (0 or 1: native).
-  std::uint32_t yarn_factor{0};
+  /// Dynamic YaRN factor the saved keys are rotated with (1: native).
+  float yarn_factor{1.0F};
   speculative::PromptLookup<>::State lookup;
 };
 static_assert(std::is_trivially_copyable_v<SessionSnapshotHeader>);
@@ -477,8 +477,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
       .draft_policy = draft_length_.State(),
       .image_identity_bytes = static_cast<std::uint32_t>(identity.size()),
       .policy_concurrency = model_->DecodeConcurrency(),
-      .yarn_factor =
-          static_cast<std::uint32_t>(model_->executor_->YarnFactor(state)),
+      .yarn_factor = model_->executor_->YarnFactor(state),
       .lookup = lookup_.Save(),
   };
   std::memcpy(out, &header, sizeof(header));
@@ -617,9 +616,7 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
   valid_ = true;
   // The restored keys keep the factor they were saved with; the next Feed or
   // decode moves the session to the factor its positions need.
-  model_->executor_->AdoptYarnFactor(
-      *session_,
-      header.yarn_factor == 0 ? 1.0F : static_cast<float>(header.yarn_factor));
+  model_->executor_->AdoptYarnFactor(*session_, header.yarn_factor);
   return true;
 }
 

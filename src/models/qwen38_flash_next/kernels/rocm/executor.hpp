@@ -254,8 +254,15 @@ public:
     return s.yarn_factor_;
   }
   bool SetYarnFactor(Session& s, float factor, std::string* error_msg);
-  /// After a snapshot restore: the session's keys are rotated with `factor`.
+  /// After a restore: the session's keys are rotated with `factor`.
   void AdoptYarnFactor(Session& s, float factor);
+  /// Writes `count` key rows from `first` as the native rotation would have
+  /// written them, for a session whose factor is not 1. `pooled` selects the
+  /// indexer block layout; `destination` holds only the requested rows.
+  void CopyNativeKeys(const Session& s, const __half* rows, std::uint32_t first,
+                      std::uint32_t count, bool pooled,
+                      const qwen::vision::DeviceRope* rope, __half* destination,
+                      hipStream_t stream) const;
 
   struct Options {
     std::uint32_t max_batch{1};

@@ -1184,6 +1184,7 @@ unchanged. Unsloth UD-Q4_K_XL target, shared Q8_0 MTP.
 | Re-rotation of cached keys | Within one F16 ulp of each rotary pair against keys written directly at the new factor, positions 0 to 299,999, factors 1 to 2, 2 to 4 and 2 to 1 (`attention_ops_test`) |
 | Needle retrieval | Two codes planted before 262,144 tokens of a 309,326-token prompt both recalled after the session moved to factor 1.5625 (1,137 prompt tokens/s overall) |
 | Sessions at different factors | With the native length lowered to 8,192 in a local build, a 21,203-token session at factor 3 and a short native session decoding concurrently each produced their solo greedy output byte for byte |
+| Cached prefix restore | Cached keys always hold the native rotation, and a restore re-rotates them to the factor the session needs. With the native length lowered to 8,192, a 22,414-token restored prompt matched the cold greedy text over 160 tokens, with mean absolute logprob difference 0.00002 (0.00043 when scaled keys were cached as written) |
 
 Gaps: short-text quality under a fixed factor was measured only by the
 first multiple-choice check (dynamic YaRN keeps short sessions native);

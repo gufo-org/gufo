@@ -1751,37 +1751,60 @@ bool Executor::SetYarnFactor(Session& s, float factor, std::string* error_msg) {
     to = MakeYarnRope(scaling, c.rotary_dim, c.rope_theta);
   }
   const YarnRope from = s.yarn_rope_;
+  // Re-rotation rewrites rows that readers may still hold: retained snapshots
+  // and the rows the cache borrowed or is copying out.
+  s.PreserveSnapshots(0, 0);
+  if (s.continuation_hooks_) {
+    s.continuation_hooks_->BeforeWrite(false, 0, s.position_, 0, s.blocks_);
+    s.continuation_hooks_->BeforeWrite(true, 0, s.mtp_.position, 0,
+                                       s.mtp_.blocks);
+  }
   // A prefill checkpoint over these rows is consumed before the next
   // forward, which this precedes.
   for (auto& a : s.attention_) {
     if (a.k_cache != nullptr && s.position_ != 0)
-      RerotateKeys(a.k_cache, s.position_, c.num_kv_heads, c.head_dim,
-                   c.rotary_dim, 1, c.rope_theta, a.rope, from, to, stream_);
+      RerotateKeys(a.k_cache, a.k_cache, 0, s.position_, c.num_kv_heads,
+                   c.head_dim, c.rotary_dim, 1, c.rope_theta, a.rope, from, to,
+                   stream_);
     if (a.block_k != nullptr && s.blocks_ != 0 && c.compress_ratio != 0)
-      RerotateKeys(a.block_k, s.blocks_, 1, c.indexer_head_dim, c.rotary_dim,
-                   c.compress_ratio, c.rope_theta, a.rope, from, to, stream_);
+      RerotateKeys(a.block_k, a.block_k, 0, s.blocks_, 1, c.indexer_head_dim,
+                   c.rotary_dim, c.compress_ratio, c.rope_theta, a.rope, from,
+                   to, stream_);
   }
   const auto* mtp_rope = s.vision_input_.rope();
   if (s.mtp_.k_cache != nullptr && s.mtp_.position != 0)
-    RerotateKeys(s.mtp_.k_cache, s.mtp_.position, c.num_kv_heads, c.head_dim,
-                 c.rotary_dim, 1, c.rope_theta, mtp_rope, from, to, stream_);
+    RerotateKeys(s.mtp_.k_cache, s.mtp_.k_cache, 0, s.mtp_.position,
+                 c.num_kv_heads, c.head_dim, c.rotary_dim, 1, c.rope_theta,
+                 mtp_rope, from, to, stream_);
   if (s.mtp_.block_k != nullptr && s.mtp_.blocks != 0 && c.compress_ratio != 0)
-    RerotateKeys(s.mtp_.block_k, s.mtp_.blocks, 1, c.indexer_head_dim,
-                 c.rotary_dim, c.compress_ratio, c.rope_theta, mtp_rope, from,
-                 to, stream_);
-  // Captured decode graphs carry the old constants by value.
-  for (auto& [key, exec] : s.graphs_)
-    (void)hipGraphExecDestroy(exec);
-  s.graphs_.clear();
+    RerotateKeys(s.mtp_.block_k, s.mtp_.block_k, 0, s.mtp_.blocks, 1,
+                 c.indexer_head_dim, c.rotary_dim, c.compress_ratio,
+                 c.rope_theta, mtp_rope, from, to, stream_);
   if (hipStreamSynchronize(stream_) != hipSuccess ||
       hipGetLastError() != hipSuccess) {
     AssignError(error_msg, "dynamic YaRN re-rotation failed");
     return false;
   }
+  // Captured decode graphs carry the old constants by value.
+  for (auto& [key, exec] : s.graphs_)
+    (void)hipGraphExecDestroy(exec);
+  s.graphs_.clear();
   s.yarn_factor_ = factor;
   s.yarn_rope_ = to;
   UseYarn(s);
   return true;
+}
+
+void Executor::CopyNativeKeys(const Session& s, const __half* rows,
+                              std::uint32_t first, std::uint32_t count,
+                              bool pooled, const qwen::vision::DeviceRope* rope,
+                              __half* destination, hipStream_t stream) const {
+  const Config& c = config();
+  const auto heads = pooled ? 1U : c.num_kv_heads;
+  const auto dim = pooled ? c.indexer_head_dim : c.head_dim;
+  RerotateKeys(rows + std::size_t{first} * heads * dim, destination, first,
+               count, heads, dim, c.rotary_dim, pooled ? c.compress_ratio : 1,
+               c.rope_theta, rope, s.yarn_rope_, YarnRope{}, stream);
 }
 
 void Executor::AdoptYarnFactor(Session& s, float factor) {
