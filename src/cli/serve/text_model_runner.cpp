@@ -610,9 +610,20 @@ struct TextRunnerPool::Request::Impl {
       // aligned prompt tail too, or a longer request loses all reuse when
       // Acquire rejects the exact unaligned prompt checkpoint. Advancing this
       // target still captures the complete prompt for unchanged retries.
-      if (count > prefill_offset &&
-          (count < prompt.size() || Aligned(count) > prefill_offset))
+      if (count > prefill_offset && count < prompt.size()) {
         count = std::max(Aligned(count), prefill_offset);
+      } else if (const auto aligned = Aligned(count);
+                 aligned > prefill_offset && aligned < count &&
+                 (!lease.component() ||
+                  lease.TryReserveSnapshot(
+                      lease.CaptureBytes(aligned), aligned, retain_fallback,
+                      SnapshotPurpose::kContinuation,
+                      std::span<const TextRunnerToken>(prompt).first(
+                          aligned)))) {
+        // A disabled cache (or a refused disk-only capture) must not prepare
+        // checkpoint scratch or split a pass for a fallback it cannot keep.
+        count = aligned;
+      }
     }
     snapshot_tokens.reserve(prompt.size());
     snapshot_tokens.assign(prompt.begin(), prompt.begin() + count);

@@ -11,6 +11,12 @@ slot reuse for an unrelated request. Real AR/MTP checks above the sparse budget
 reuse all 3,094 tokens for an exact retry, restore at 3,092 for an extension,
 and match a cold continuation byte for byte in both modes.
 
+A further admission guard checks whether the cache can retain the raw fallback
+before asking the runner to prepare an in-pass checkpoint. Disabled RAM cache
+without disk storage consumes the unaligned raw prompt in one pass and never
+prepares checkpoint scratch; the focused regression fails without this guard.
+Refused disk-only captures also avoid an unhelpful raw-tail split.
+
 The original Devlab follow-up now reuses 1,548 tokens (main: 1,549), with
 TTFT 309 versus 307 ms, instead of the broken branch's 1.25 s. Its one-token
 replay is intentional. The timing fixture now uses a 1,548-token seed so both

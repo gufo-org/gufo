@@ -447,6 +447,28 @@ void UnalignedRawPromptKeepsAnAlignedContinuation() {
   (void)Generate(extended);
   extended.Invalidate();
 }
+void DisabledCacheDoesNotPrepareARawPromptCheckpoint() {
+  class NoCheckpointRunner final : public Runner {
+  public:
+    std::optional<std::size_t> PrefillCheckpointBytes(
+        const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
+        std::size_t, std::size_t) const override {
+      throw std::logic_error("disabled cache must not prepare a checkpoint");
+    }
+  };
+  auto runner = std::make_shared<NoCheckpointRunner>();
+  runner->alignment = 4;
+  runner->in_pass = true;
+  TextRunnerPool pool(runner, 1, std::nullopt, {.enabled = false});
+  std::vector<TextRunnerToken> prompt(41);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto request = pool.Acquire(prompt, sampling::SamplingConfig{});
+  (void)request.Prefill(64);
+  assert(request.prefill_complete());
+  assert((runner->pass_ends == std::vector<std::size_t>{41}));
+  (void)Generate(request);
+  (void)request.Commit();
+}
 void ColdAcquireResetsOnce() {
   auto runner = std::make_shared<Runner>();
   ComponentTextCache cache(runner, 1, 1 << 22, {});
@@ -2264,6 +2286,7 @@ int main() {
   AlignedPrefillKeepsAlignedBoundaries();
   UnalignedPromptEndPublishesBeforeDroppingTheFrontier();
   UnalignedRawPromptKeepsAnAlignedContinuation();
+  DisabledCacheDoesNotPrepareARawPromptCheckpoint();
   ColdAcquireResetsOnce();
   ColdAssignmentAvoidsDrainingCancelledSlot();
   ColdAssignmentAvoidsDrainingCancelledSlot(true);
