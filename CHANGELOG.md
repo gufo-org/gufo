@@ -4,6 +4,80 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.29.0](https://github.com/gufo-org/gufo/compare/v0.28.1...v0.29.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* make nix flake check the canonical hosted gate ([#981](https://github.com/gufo-org/gufo/issues/981))
+
+### Features
+
+* **core:** open IQ2_XS, IQ2_S, IQ3_XXS, IQ1_S and IQ1_M tensors and dequantize every GGML block format ([#930](https://github.com/gufo-org/gufo/issues/930)) ([b20b5bd](https://github.com/gufo-org/gufo/commit/b20b5bd49b970024493241f15d1e5d73ac605e5d))
+* **embedding:** select the EmbeddingGemma 2 video frame budget per request ([#888](https://github.com/gufo-org/gufo/issues/888)) ([eddcfea](https://github.com/gufo-org/gufo/commit/eddcfea65bd836f75eaa79c4203171ab8478c797))
+* **extensions:** add realtime speech, speak and decision contracts ([#942](https://github.com/gufo-org/gufo/issues/942)) ([13f6456](https://github.com/gufo-org/gufo/commit/13f6456628bfaa17aa5d5cef1ed0922a738a1f39))
+* **extensions:** add source extension infrastructure and separate model execution ([#911](https://github.com/gufo-org/gufo/issues/911)) ([6b6a6b0](https://github.com/gufo-org/gufo/commit/6b6a6b04fab46f610d1725368cdd2db3e5b2c3ce))
+* **extensions:** derive API revisions from permanent change records ([#940](https://github.com/gufo-org/gufo/issues/940)) ([f25f474](https://github.com/gufo-org/gufo/commit/f25f4744a6348e6c9670e2684a0a1f898c1b69ca))
+* **extensions:** generate infrastructure from model metadata ([#927](https://github.com/gufo-org/gufo/issues/927)) ([2ea2ccd](https://github.com/gufo-org/gufo/commit/2ea2ccd39efbea790957a8cc1215cd66ce27fee9))
+* **extensions:** generate Nix serving options from metadata ([#947](https://github.com/gufo-org/gufo/issues/947)) ([6bbb6bb](https://github.com/gufo-org/gufo/commit/6bbb6bb6bddcb26f18f9f845331c2f8755f3fd7c))
+* **extensions:** migrate embeddinggemma pilot to isolated extension ([#924](https://github.com/gufo-org/gufo/issues/924)) ([8fec1ce](https://github.com/gufo-org/gufo/commit/8fec1ce96bffc728e03a9e271e787cef4a48bbda))
+* **extensions:** migrate speech, audio, image, and video models to extensions ([#931](https://github.com/gufo-org/gufo/issues/931)) ([8f5aece](https://github.com/gufo-org/gufo/commit/8f5aece0c27ca35e3a0831da9ff960e8be78b30e))
+* **extensions:** migrate text generation models (Cards 19-22) ([#935](https://github.com/gufo-org/gufo/issues/935)) ([385d9a7](https://github.com/gufo-org/gufo/commit/385d9a7f83c0328fa2655bec1aee681606d53445))
+* **extensions:** publish public api surface, migrate model includes, and add test support ([#922](https://github.com/gufo-org/gufo/issues/922)) ([0071637](https://github.com/gufo-org/gufo/commit/00716376fd949c3c867b08497d5848ad9ccd57f5))
+* **extensions:** support external extension source trees (Card 23) ([#936](https://github.com/gufo-org/gufo/issues/936)) ([9d1e7c8](https://github.com/gufo-org/gufo/commit/9d1e7c8ef74f831aeb833befb522d3a31fb9cc33))
+* **image:** support Qwen Image 2.1 Turbo generation and editing ([#784](https://github.com/gufo-org/gufo/issues/784)) ([05f0a9a](https://github.com/gufo-org/gufo/commit/05f0a9a0f7cf9b72f7cfd92eca018265ad323aec))
+* **qwen38-flash-next:** read Q8_0 PLE n-gram tables ([#884](https://github.com/gufo-org/gufo/issues/884)) ([2a9dd9c](https://github.com/gufo-org/gufo/commit/2a9dd9c5d4e38289378ac98cc243899670b21418))
+* **qwen38-flash-next:** scale YaRN with the context a session holds ([#905](https://github.com/gufo-org/gufo/issues/905)) ([e28fef4](https://github.com/gufo-org/gufo/commit/e28fef40aaa4baa7d8a169e93214e145f888c0cf))
+* **serve:** drop API-key auth, accept model aliases in every modality, answer GET / with health ([#957](https://github.com/gufo-org/gufo/issues/957)) ([#967](https://github.com/gufo-org/gufo/issues/967)) ([9bd24d2](https://github.com/gufo-org/gufo/commit/9bd24d26b066ce08a463c2def8da9acb95c75338))
+* **serve:** report completion_tokens_details.reasoning_tokens on chat completions ([#915](https://github.com/gufo-org/gufo/issues/915)) ([6ab4569](https://github.com/gufo-org/gufo/commit/6ab4569ba127c4324f85aa8298f856c7eadb085a))
+* **tts:** declare voice and reference conditioning capabilities independently of Qwen variants ([#984](https://github.com/gufo-org/gufo/issues/984)) ([159f2b8](https://github.com/gufo-org/gufo/commit/159f2b846471355d9af3010edffa7943a0e3efb9))
+
+
+### Bug Fixes
+
+* **cache:** align Flash-Next prefill and keep disk readahead progressing ([#877](https://github.com/gufo-org/gufo/issues/877)) ([18c89e3](https://github.com/gufo-org/gufo/commit/18c89e3ba1308ae82b4d77c1b0f586c7002fc4dd))
+* **cache:** refuse a RAM-cache segment only when registering it cuts the heap below the reserve ([#903](https://github.com/gufo-org/gufo/issues/903)) ([8ab834a](https://github.com/gufo-org/gufo/commit/8ab834a5902bf19341750daecf27516a57840dd1))
+* **ds4:** default the served context to the GGUF native length ([#946](https://github.com/gufo-org/gufo/issues/946)) ([b6336a3](https://github.com/gufo-org/gufo/commit/b6336a34575e80ab0a8cc00b393d0988586ba92d))
+* **ds4:** keep caller text out of DeepSeek control tokens ([#691](https://github.com/gufo-org/gufo/issues/691)) ([6246d77](https://github.com/gufo-org/gufo/commit/6246d77a2214c08e813def5fe078779da34fee34))
+* **qwen38_flash_next:** restore serving concurrency and GPU tests ([#953](https://github.com/gufo-org/gufo/issues/953)) ([6a02743](https://github.com/gufo-org/gufo/commit/6a027439d7a00dd8fcd3717ef2bdf3795dc21818))
+* **qwen38-flash-next:** count the draft block's hidden row beside wide copy rows in session bytes ([#993](https://github.com/gufo-org/gufo/issues/993)) ([805c942](https://github.com/gufo-org/gufo/commit/805c9421550ab1379b6d83d277bd8957c4e2b4b2))
+* **qwen38-flash-next:** keep cached requests alive without snapshot device headroom and return to 4,096-row prefill passes ([#954](https://github.com/gufo-org/gufo/issues/954)) ([abb6aca](https://github.com/gufo-org/gufo/commit/abb6acabce3e7fed3bdf819e73c62c4e4518d16a))
+* **qwen38-flash-next:** sweep pre-budget rows densely in budget-crossing chains ([#876](https://github.com/gufo-org/gufo/issues/876)) ([2e6aa96](https://github.com/gufo-org/gufo/commit/2e6aa96ce20a0e244561cb86915dd79260042eac))
+* **qwen38-flash-next:** widen BF16 HC inject rows to F32 and keep the mixer's F32 rows beside a separate inject projection ([#950](https://github.com/gufo-org/gufo/issues/950)) ([67dd635](https://github.com/gufo-org/gufo/commit/67dd6354c73fb1325809c7a8f47dd3d30105638c))
+* **serve:** ignore unknown request fields on embeddings, audio, image and video routes ([#968](https://github.com/gufo-org/gufo/issues/968)) ([9b3b1f4](https://github.com/gufo-org/gufo/commit/9b3b1f4844c5845d007d762b0a33d8c346686a4d))
+* **serve:** mark realtime responses active before announcing them ([#999](https://github.com/gufo-org/gufo/issues/999)) ([6905be2](https://github.com/gufo-org/gufo/commit/6905be287ea9945e2f59ecb63a6d59b912ad5b58))
+* **serve:** report sizes and fitting sessions when request states exceed capacity ([#964](https://github.com/gufo-org/gufo/issues/964)) ([b911c15](https://github.com/gufo-org/gufo/commit/b911c150e9cd6e4d6daf842826d0df5242c5387f))
+* **tts:** use provider output sample rates in streaming metadata and metrics ([#983](https://github.com/gufo-org/gufo/issues/983)) ([6b58387](https://github.com/gufo-org/gufo/commit/6b583876e9b4d7c32f212b63d4e672b9d883a12f))
+* **windows:** keep same-named HIP sources from swapping device code ([#914](https://github.com/gufo-org/gufo/issues/914)) ([eb31391](https://github.com/gufo-org/gufo/commit/eb313910a53e9fa9029a488d68f17591cf935d39))
+
+
+### Performance
+
+* **cache:** back off idle-spill polling while another slot keeps the device busy ([#881](https://github.com/gufo-org/gufo/issues/881)) ([31c3b3a](https://github.com/gufo-org/gufo/commit/31c3b3a0f2def671a5d009eabed546678687524b))
+* **ds4:** faster DeepSeek V4 Flash decode, top-p sampling, and unaligned resumed prefill ([#897](https://github.com/gufo-org/gufo/issues/897)) ([bdf800d](https://github.com/gufo-org/gufo/commit/bdf800de477e980904c26aad483123af7dfa6583))
+* **qwen27b:** draft DFlash2 through the shared prefix-plus-table output head ([#988](https://github.com/gufo-org/gufo/issues/988)) ([49eeada](https://github.com/gufo-org/gufo/commit/49eeada660a08fbdb11b33eada60a79f4695bfe2))
+* **qwen27b:** verify long prompt-lookup copies in one wide pass ([#992](https://github.com/gufo-org/gufo/issues/992)) ([d2b01f2](https://github.com/gufo-org/gufo/commit/d2b01f24a9a70104170bfe69bd4752fb7ce8e4e1))
+* **qwen38-flash-next:** fuse the prefill DeltaNet norms, gates, recurrence and epilogue ([#895](https://github.com/gufo-org/gufo/issues/895)) ([a6c53a6](https://github.com/gufo-org/gufo/commit/a6c53a62736cb634c881cedc8b708ca739c0cbb9))
+* **qwen38-flash-next:** prefill lone prompts in 16,384-row passes with grouped GEMM rasters ([#933](https://github.com/gufo-org/gufo/issues/933)) ([0bc453f](https://github.com/gufo-org/gufo/commit/0bc453f22162bde72bbe6c32824caa797396dd15))
+* **qwen38-flash-next:** register-resident routed prefill experts over one 128-token map ([#890](https://github.com/gufo-org/gufo/issues/890)) ([9fbe751](https://github.com/gufo-org/gufo/commit/9fbe75107e9e1b6a662d4f3eae3d7510b247c3c5))
+* **qwen38-flash-next:** run a decode batch's HC combine and Q8_0 mixer in one launch ([#894](https://github.com/gufo-org/gufo/issues/894)) ([eb1d52e](https://github.com/gufo-org/gufo/commit/eb1d52e68a9e57a1dc03d2176ab2e10e5fbbcbac))
+* **qwen38-flash-next:** verify long prompt-lookup copies in one wide pass ([#961](https://github.com/gufo-org/gufo/issues/961)) ([96c9a0f](https://github.com/gufo-org/gufo/commit/96c9a0f535945a0a2c6330a1aa4ab4ad48aae052))
+* **qwen:** specialize the K-quant warp dot and run K-quant GEMV one row per warp ([#995](https://github.com/gufo-org/gufo/issues/995)) ([1c75887](https://github.com/gufo-org/gufo/commit/1c75887ba3e4c009c07518b7ffdc9b324ccf78e8))
+* **qwen:** step IQ4 small-batch K-quant tokens so ROCm 10.1 does not spill ([#990](https://github.com/gufo-org/gufo/issues/990)) ([56ed8f4](https://github.com/gufo-org/gufo/commit/56ed8f4d2308da6ff30b4502a850b4e5d2113d94))
+
+
+### Documentation
+
+* **extensions:** mark cards 27-29 won't do ([#955](https://github.com/gufo-org/gufo/issues/955)) ([c32136f](https://github.com/gufo-org/gufo/commit/c32136f87c29e83dd55ab66c5e703e895ab8f03e))
+* **extensions:** record Card 24 external LFM3 text provider conformance ([#938](https://github.com/gufo-org/gufo/issues/938)) ([7b9122f](https://github.com/gufo-org/gufo/commit/7b9122f279e953fb4dbf4d8006c7e856007e752f))
+* **serve:** document usage.gufo cache snapshot, disk and shared-prefix fields ([#919](https://github.com/gufo-org/gufo/issues/919)) ([c7c4177](https://github.com/gufo-org/gufo/commit/c7c4177ef0fc931cf928283e70cdbcf898171483))
+* **server:** document llama-swap readiness configuration ([#941](https://github.com/gufo-org/gufo/issues/941)) ([9be1f72](https://github.com/gufo-org/gufo/commit/9be1f725d8b9564ea3172ca4c08e6af10c5982e9))
+
+
+### Continuous Integration
+
+* make nix flake check the canonical hosted gate ([#981](https://github.com/gufo-org/gufo/issues/981)) ([108ade2](https://github.com/gufo-org/gufo/commit/108ade2718a7a2e2130cb2df02a568c228ec03f1))
+
 ## [0.28.1](https://github.com/gufo-org/gufo/compare/v0.28.0...v0.28.1) (2026-10-31)
 
 
