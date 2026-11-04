@@ -443,6 +443,91 @@ void AddServedModelNamesOption(ArgParser& parser,
       });
 }
 
+// Image provider options come from extension manifests (`serve image`, or the
+// bare `serve` command). Their tokens are taken out before the host parser
+// runs, so `ext::ParseOptions` owns their syntax and types; the provider that
+// claims the model then validates them (#974).
+std::vector<std::string_view> TakeProviderOptions(
+    const ext::Registry& registry, std::string_view command,
+    const ArgParser& parser, std::vector<const char*>* args) {
+  std::map<std::string, ext::OptionType, std::less<>> types;
+  for (const auto& provider : registry.Providers()) {
+    if (!provider.available)
+      continue;
+    for (const auto& option : provider.options) {
+      if (ext::OptionApplies(option, command))
+        types.emplace(option.name, option.type);
+    }
+  }
+  std::vector<const char*> host;
+  std::vector<std::string_view> taken;
+  for (std::size_t i = 0; i < args->size(); ++i) {
+    const std::string_view arg = (*args)[i];
+    const auto equals = arg.find('=');
+    const auto name = arg.substr(0, equals);
+    const bool has_next = i + 1 < args->size();
+    if (const auto type = types.find(name);
+        arg.starts_with("--") && type != types.end()) {
+      taken.push_back(arg);
+      if (equals == std::string_view::npos &&
+          type->second != ext::OptionType::kBoolean && has_next)
+        taken.emplace_back((*args)[++i]);
+      continue;
+    }
+    host.push_back((*args)[i]);
+    // A host option's separate value stays with it, even when it looks like a
+    // provider option (`--served-model-name --text-encoder`).
+    if (const auto* option = parser.FindOption(name);
+        option != nullptr && !option->is_flag &&
+        equals == std::string_view::npos && has_next)
+      host.push_back((*args)[++i]);
+  }
+  *args = std::move(host);
+  return taken;
+}
+
+void AddImageProviderOptionsForHelp(ArgParser& parser,
+                                    const ext::Registry& registry) {
+  struct Entry {
+    ext::OptionType type = ext::OptionType::kString;
+    std::string help;
+    std::vector<std::string> providers;
+  };
+  std::map<std::string, Entry, std::less<>> entries;
+  for (const auto& provider : registry.Providers()) {
+    if (!provider.available ||
+        provider.capability != ext::Capability::kImageGeneration)
+      continue;
+    for (const auto& option : provider.options) {
+      if (!ext::OptionApplies(option, ext::kImageServeCommand))
+        continue;
+      auto& entry = entries[option.name];
+      entry.type = option.type;
+      if (entry.help.empty())
+        entry.help = option.help;
+      entry.providers.push_back(provider.id);
+    }
+  }
+  for (const auto& [name, entry] : entries) {
+    std::string help = entry.help.empty() ? "Provider option" : entry.help;
+    help += " [";
+    for (std::size_t i = 0; i < entry.providers.size(); ++i)
+      help += (i ? ", " : "") + entry.providers[i];
+    help += "]";
+    if (entry.type == ext::OptionType::kBoolean) {
+      parser.AddFlag("", name, help, "Provider", nullptr);
+      continue;
+    }
+    const char* hint = entry.type == ext::OptionType::kPath      ? "PATH"
+                       : entry.type == ext::OptionType::kInteger ? "N"
+                       : entry.type == ext::OptionType::kNumber  ? "X"
+                                                                 : "VALUE";
+    parser.AddCustomOption(
+        "", name, hint, help, "Provider",
+        [](std::string_view, std::string_view, std::string*) { return true; });
+  }
+}
+
 // The primary served ID, or empty when the caller supplies none and the
 // service default applies.
 std::string PrimaryModelName(const std::vector<std::string>& names) {
@@ -583,10 +668,15 @@ void PrintServeHelp(std::string_view program_name,
     std::filesystem::path model;
     std::vector<std::string> names;
     ArgParser parser(std::string(program_name) + " serve image",
-                     "Serve Qwen-Image-2.1 generation and editing.");
+                     "Serve image generation and editing (Qwen-Image-2.1 or "
+                     "an image extension provider).");
     parser.AddOption("-m", "--model", "DIR",
-                     "Qwen-Image-2.1 safetensors directory", "Model", &model);
+                     "Image model directory (Diffusers layout)", "Model",
+                     &model);
     AddServedModelNamesOption(parser, &names);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    AddImageProviderOptionsForHelp(parser, registry);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
     parser.PrintHelp();
@@ -1120,11 +1210,15 @@ int RunServe(std::span<const char* const> args) {
     std::filesystem::path model;
     std::vector<std::string> names;
     ArgParser parser("gufo serve image",
-                     "Serve Qwen-Image-2.1 generation and editing.");
+                     "Serve image generation and editing (Qwen-Image-2.1 or "
+                     "an image extension provider).");
     parser.AddOption("-m", "--model", "DIR",
-                     "Qwen-Image-2.1 safetensors directory", "Model", &model);
+                     "Image model directory (Diffusers layout)", "Model",
+                     &model);
     AddServedModelNamesOption(parser, &names);
     add_server_options(parser, false);
+    const auto provider_args = TakeProviderOptions(
+        registry, ext::kImageServeCommand, parser, &sub_args);
     if (!parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
@@ -1133,23 +1227,48 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "image");
       return 0;
     }
+    ext::ParsedOptions provider_options;
+    try {
+      provider_options = ext::ParseOptions(registry, ext::kImageServeCommand,
+                                           provider_args);
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
+    }
     if (!prepare_server_options())
       return 2;
     if (model.empty()) {
       std::cerr << "Error: --model <DIR> is required for image server\n";
       return 2;
     }
-    ModelLoadLog load_log("qwen_image_21", model);
+    // Selection reads only the probe's metadata, so option errors (another
+    // provider's option, a missing sidecar path) stop before any weights load.
+    const ext::ImageProvider* provider = nullptr;
     try {
-      images = std::make_shared<server::ImageService>(
-          model, names.empty() ? "Qwen-Image-2.1" : names.front(),
-          server::ImageService::Runner{}, ModelAliases(names));
+      provider =
+          &server::SelectImageProvider(registry, model, provider_options);
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
     } catch (const std::exception& error) {
-      std::cerr << "Error loading Qwen-Image-2.1: " << error.what() << '\n';
+      std::cerr << "Error loading image model: " << error.what() << '\n';
       return 1;
     }
-    load_log.Complete("model=" + images->model_id() +
-                      " weights=mapped upload=on_demand");
+    std::string kind = provider->id;
+    std::ranges::replace(kind, '-', '_');
+    ModelLoadLog load_log(kind, model);
+    try {
+      images = std::make_shared<server::ImageService>(
+          server::CreateImageRunner(*provider, model, provider_options),
+          names.empty() ? "Qwen-Image-2.1" : names.front(),
+          ModelAliases(names));
+    } catch (const std::exception& error) {
+      std::cerr << "Error loading image model " << provider->id << ": "
+                << error.what() << '\n';
+      return 1;
+    }
+    load_log.Complete("model=" + images->model_id() + " provider=" +
+                      provider->id + " weights=mapped upload=on_demand");
   } else if (subcommand == "video") {
     std::filesystem::path video_model;
     std::filesystem::path video_root = "video-jobs";
