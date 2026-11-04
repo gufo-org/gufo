@@ -4,6 +4,13 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.30.1](https://github.com/gufo-org/gufo/compare/v0.30.0...v0.30.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **gguf:** open tensorless split shards that end without data padding ([#1021](https://github.com/gufo-org/gufo/issues/1021)) ([118b7c6](https://github.com/gufo-org/gufo/commit/118b7c63f825bb9dde2e6de2285ed2c9be005019))
+
 ## [0.30.0](https://github.com/gufo-org/gufo/compare/v0.29.0...v0.30.0) (2026-11-04)
 
 
