@@ -527,6 +527,54 @@ void TestBatchedAdvancePreservesIndependentRequests() {
   second.Invalidate();
 }
 
+void TestReasoningDelimitersFollowTheRunner() {
+  class MarkupRunner final : public FakeRunner {
+  public:
+    MarkupRunner(std::optional<gufo::ext::ReasoningTags> tags,
+                 std::optional<gufo::ext::ReasoningMarkup> markup)
+        : FakeRunner(std::make_shared<FakeStats>()),
+          tags_(std::move(tags)),
+          markup_(std::move(markup)) {}
+    gufo::ext::ReasoningTags ReasoningBudgetTags() const override {
+      return tags_ ? *tags_ : FakeRunner::ReasoningBudgetTags();
+    }
+    gufo::ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return markup_ ? *markup_ : FakeRunner::ReasoningDelimiters();
+    }
+
+  private:
+    std::optional<gufo::ext::ReasoningTags> tags_;
+    std::optional<gufo::ext::ReasoningMarkup> markup_;
+  };
+  using Markup = gufo::ext::ReasoningMarkup;
+  Expect(MarkupRunner({}, {}).ReasoningDelimiters() ==
+             Markup{"<think>", "</think>"},
+         "the default delimiters are the classic think pair");
+  Expect(MarkupRunner(
+             gufo::ext::ReasoningTags{
+                 "<think>", "\n</think>", {"</think>", "<tool_call>"}},
+             {})
+                 .ReasoningDelimiters() == Markup{"<think>", "</think>"},
+         "default delimiters follow the first budget end, not the forced text");
+  Expect(MarkupRunner(gufo::ext::ReasoningTags{"<a>", "<b>", {"<b>"}}, {})
+                 .ReasoningDelimiters() == Markup{"<a>", "<b>"},
+         "default delimiters follow the declared budget tags");
+  Expect(MarkupRunner(gufo::ext::ReasoningTags{}, {}).ReasoningDelimiters() ==
+             Markup{"<think>", "</think>"},
+         "undeclared budget tags keep the classic framing");
+  const Markup custom{"[[ponder>>\n", "<<ponder]]"};
+  Expect(MarkupRunner({}, custom).ReasoningDelimiters() == custom,
+         "a runner declares multi-token delimiters beyond its budget tags");
+  bool rejected = false;
+  try {
+    TextRunnerPool pool(
+        std::make_shared<MarkupRunner>(std::nullopt, Markup{"<a>", ""}), 1);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an empty close delimiter is rejected at load");
+}
+
 void TestResourceClaimsAreValidatedBeforeAllocation() {
   auto stats = std::make_shared<FakeStats>();
   std::string message;
@@ -998,6 +1046,7 @@ void TestServerInstructionsAreFraming() {
 int main() {
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
+  TestReasoningDelimitersFollowTheRunner();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();
   TestBoundedPrefillDecodeAndPrefixReuse();
   TestAbandonedRequestRollsBackState();

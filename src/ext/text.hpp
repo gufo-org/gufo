@@ -341,6 +341,13 @@ public:
   [[nodiscard]] virtual ReasoningTags ReasoningBudgetTags() const {
     return {"<think>", "</think>", {"</think>"}};
   }
+  /// Delimiters the OpenAI-compatible endpoints split reasoning by, buffered
+  /// and streamed alike. By default they follow the budget tags: `start` opens
+  /// and the first of `ends` closes (Qwen and DeepSeek: `<think>`, `</think>`);
+  /// runners that declare no budget tags keep `<think>`, `</think>`.
+  /// Override when the literal framing differs from the budget control tokens.
+  using ReasoningMarkup = ext::ReasoningMarkup;
+  [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const;
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,

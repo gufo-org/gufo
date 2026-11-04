@@ -62,10 +62,11 @@ struct InferenceBackend::Impl {
         std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {})
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)),
-          tool_format_(tool_format) {
+          tool_format_(tool_format),
+          reasoning_(state_->scheduler->runner().ReasoningDelimiters()) {
       if (initial == InitialOutputState::kReasoning)
         reasoning_end_ =
-            state_->scheduler->runner().TokenizeControl("</think>");
+            state_->scheduler->runner().TokenizeControl(reasoning_.close);
     }
 
     Result Wait(const TokenCallback& on_token,
@@ -84,6 +85,10 @@ struct InferenceBackend::Impl {
 
     void Cancel() noexcept override { request_.Cancel(); }
 
+    ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return reasoning_;
+    }
+
     std::optional<sampling::JsonConstraint::ToolFormat> ToolFormat()
         const override {
       return tool_format_;
@@ -94,6 +99,7 @@ struct InferenceBackend::Impl {
     TextGenerationScheduler::Request request_;
     std::vector<tokenization::TokenId> reasoning_end_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
+    const ext::ReasoningMarkup reasoning_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {

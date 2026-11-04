@@ -103,6 +103,15 @@ std::size_t TextModelRunner::PrepareConstraintVocabulary() const {
   return constraint_vocabulary_ ? constraint_vocabulary_->size() : 0;
 }
 
+ReasoningMarkup TextModelRunner::ReasoningDelimiters() const {
+  const auto tags = ReasoningBudgetTags();
+  const auto close = tags.ends.empty() ? tags.forced_end : tags.ends.front();
+  // A runner that declares no budget tags keeps the host's classic framing.
+  if (close.empty())
+    return {"<think>", "</think>"};
+  return {std::string(tags.start), std::string(close)};
+}
+
 std::shared_ptr<const sampling::ReasoningBudget>
 TextModelRunner::BuildReasoningBudget(
     std::size_t tokens, std::span<const TextRunnerToken> prompt) const {

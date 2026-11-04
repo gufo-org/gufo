@@ -131,6 +131,10 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     throw std::invalid_argument(
         "text runner maximum context must be at least one token");
   }
+  if (runner->ReasoningDelimiters().close.empty()) {
+    throw std::invalid_argument(
+        "text runner reasoning close delimiter must not be empty");
+  }
 
   auto resources = runner->ResourceClaim();
   const auto per_state_reservation = PerStateReservationBytes(resources);

@@ -31,6 +31,7 @@ using ext::InitialOutputState;
 using ext::kHostSnapshotHeadroomBytes;
 using ext::MeminfoAvailableBytes;
 using ext::ParseRamCacheOption;
+using ext::ReasoningMarkup;
 using ext::TextDecodeSelection;
 using ext::TextDecodeStep;
 using ext::TextExecutionPlan;
