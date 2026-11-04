@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <deque>
 #include <stdexcept>
 #include <utility>
 
@@ -174,7 +175,8 @@ TextModelRunner::BuildReasoningBudget(std::size_t tokens,
 // ---------------------------------------------------------------------------
 
 static std::vector<TextProvider> g_text_providers;
-static std::vector<ToolDialect> g_tool_dialects;
+// A deque keeps registered dialects at stable addresses.
+static std::deque<ToolDialect> g_tool_dialects;
 
 void RegisterTextProvider(TextProvider provider) {
   for (auto& existing : g_text_providers) {
@@ -213,9 +215,49 @@ const TextProvider* ProbeTextProvider(const core::GgufReader& reader) {
   return nullptr;
 }
 
+std::string_view BuiltinToolDialectId(
+    sampling::JsonConstraint::ToolFormat format) {
+  using Format = sampling::JsonConstraint::ToolFormat;
+  switch (format) {
+    case Format::kQwen:
+      return "qwen";
+    case Format::kDeepSeek:
+      return "deepseek";
+    case Format::kJson:
+      break;
+  }
+  return "json";
+}
+
+std::string TextModelRunner::ToolDialectId() const {
+  return std::string(BuiltinToolDialectId(ToolFormat()));
+}
+
 void RegisterToolDialect(ToolDialect dialect) {
+  using Format = sampling::JsonConstraint::ToolFormat;
+  if (dialect.id.empty())
+    dialect.id = std::string(BuiltinToolDialectId(dialect.format));
+  const auto fail = [&](std::string_view reason) {
+    throw std::invalid_argument("tool dialect '" + dialect.id + "' " +
+                                std::string(reason));
+  };
+  if (dialect.id == BuiltinToolDialectId(Format::kJson) ||
+      dialect.id == BuiltinToolDialectId(Format::kQwen))
+    fail("is built into the host");
+  if (dialect.markers.empty() || dialect.scan_tool_calls == nullptr)
+    fail("needs markers and scan_tool_calls");
+  if (std::ranges::any_of(dialect.markers, [](std::string_view marker) {
+        return marker.find('<') == std::string_view::npos;
+      }))
+    fail("has a marker without '<'");
+  if (dialect.syntax
+          ? std::ranges::find(dialect.markers,
+                              std::string_view(dialect.syntax->open)) ==
+                dialect.markers.end()
+          : dialect.format == Format::kJson)
+    fail("needs a syntax opened by one of its markers, or a native format");
   for (auto& existing : g_tool_dialects) {
-    if (existing.format == dialect.format) {
+    if (existing.id == dialect.id) {
       existing = std::move(dialect);
       return;
     }
@@ -223,14 +265,18 @@ void RegisterToolDialect(ToolDialect dialect) {
   g_tool_dialects.push_back(std::move(dialect));
 }
 
-const ToolDialect* FindToolDialect(
-    sampling::JsonConstraint::ToolFormat format) {
+const ToolDialect* FindToolDialect(std::string_view id) {
   for (const auto& dialect : g_tool_dialects) {
-    if (dialect.format == format) {
+    if (dialect.id == id) {
       return &dialect;
     }
   }
   return nullptr;
+}
+
+const ToolDialect* FindToolDialect(
+    sampling::JsonConstraint::ToolFormat format) {
+  return FindToolDialect(BuiltinToolDialectId(format));
 }
 
 std::vector<const ToolDialect*> AllToolDialects() {

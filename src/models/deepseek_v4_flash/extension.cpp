@@ -19,12 +19,10 @@ void RegisterToolDialect() {
               DeepSeekToolSyntax::kNativeCallOpenWithSeparator,
               DeepSeekToolSyntax::kNativeCallOpen,
           },
-      .closers =
-          {
-              DeepSeekToolSyntax::kParameterCloses[0],
-              DeepSeekToolSyntax::kInvokeCloses[0],
-              DeepSeekToolSyntax::kCallsClose,
-          },
+      // As in llama.cpp, DeepSeek content is everything outside its native
+      // call block, which ends the output: there is no echo to strip, and
+      // client envelope syntax the model writes stays visible text.
+      .closers = {},
       .scan_tool_calls = &ScanDeepSeekToolCalls,
   });
 }

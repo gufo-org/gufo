@@ -96,10 +96,12 @@ struct InferenceBackend::Impl {
         std::shared_ptr<const State> model_state,
         TextGenerationScheduler::Request scheduled_request,
         InitialOutputState initial = InitialOutputState::kContent,
-        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {})
+        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {},
+        std::string tool_dialect = {})
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)),
           tool_format_(tool_format),
+          tool_dialect_(std::move(tool_dialect)),
           initial_(initial),
           reasoning_(state_->scheduler->runner().ReasoningDelimiters()) {}
 
@@ -127,10 +129,15 @@ struct InferenceBackend::Impl {
       return tool_format_;
     }
 
+    std::optional<std::string> ToolDialectId() const override {
+      return tool_dialect_;
+    }
+
   private:
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
+    const std::string tool_dialect_;
     const InitialOutputState initial_;
     const ext::ReasoningMarkup reasoning_;
   };
@@ -630,8 +637,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 
   auto effective_sampling = sampling_config;
   std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
-  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
-                                          &effective_sampling, &tool_format);
+  std::string tool_dialect;
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(),
+                           &effective_sampling, &tool_format, &tool_dialect);
   const auto& effective_request = constrained ? *constrained : request;
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
@@ -663,7 +672,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .return_progress = request.return_progress,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
-      state, std::move(scheduled_request), initial, tool_format);
+      state, std::move(scheduled_request), initial, tool_format,
+      std::move(tool_dialect));
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);

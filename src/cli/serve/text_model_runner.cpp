@@ -18,14 +18,47 @@
 
 namespace gufo::server {
 
+namespace {
+
+using Format = sampling::JsonConstraint::ToolFormat;
+
+// The built-in format behind a dialect identity; null for a provider syntax.
+struct SelectedToolDialect {
+  std::optional<Format> format;
+  const ext::ToolDialect* dialect{nullptr};
+};
+
+SelectedToolDialect SelectToolDialect(const std::string& id) {
+  SelectedToolDialect selected{.dialect = ext::FindToolDialect(id)};
+  if (selected.dialect != nullptr) {
+    if (!selected.dialect->syntax)
+      selected.format = selected.dialect->format;
+    return selected;
+  }
+  // Built-in grammars need no registration; a missing DeepSeek registration
+  // only leaves its calls unparsed.
+  for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek})
+    if (id == ext::BuiltinToolDialectId(format))
+      return {.format = format};
+  throw std::invalid_argument("text runner tool dialect '" + id +
+                              "' is not registered");
+}
+
+}  // namespace
+
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
-    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format) {
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format,
+    std::string* tool_dialect) {
   // Output parsing needs the model's dialect even without tool constraints
   // (for example Qwen's whitespace boundary after </think>).
+  const auto dialect_id = runner.ToolDialectId();
+  const auto selected = SelectToolDialect(dialect_id);
   if (tool_format)
-    *tool_format = runner.ToolFormat();
+    *tool_format = selected.format;
+  if (tool_dialect)
+    *tool_dialect = dialect_id;
   if (!request.response_format &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
@@ -39,7 +72,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
     std::vector<sampling::JsonConstraint::Tool> tools;
     const bool required =
         request.tool_choice == ChatRequest::ToolChoice::kRequired;
-    auto format = runner.ToolFormat();
+    const auto* syntax = selected.format ? nullptr : &*selected.dialect->syntax;
+    const auto format = selected.format.value_or(Format::kJson);
     for (const auto& tool : request.tools) {
       const auto definition = tool.definition_json.empty()
                                   ? json::Value()
@@ -48,14 +82,20 @@ std::optional<ChatRequest> ConstrainChatRequest(
       const auto* strict = function ? function->find("strict") : nullptr;
       const bool enforce = strict && strict->as_bool();
       auto schema = json::parse(tool.parameters_json);
-      auto native =
-          sampling::JsonConstraint::ToolParameters(schema, enforce, format);
+      auto native = syntax ? sampling::JsonConstraint::ToolParameters(
+                                 schema, enforce, *syntax)
+                           : sampling::JsonConstraint::ToolParameters(
+                                 schema, enforce, format);
       tools.emplace_back(tool.name, std::move(native));
     }
-    grammar = sampling::JsonConstraint::WithTools(
-        grammar, std::move(tools), required,
-        !request.response_format && request.parallel_tool_calls, format);
-    if (format == sampling::JsonConstraint::ToolFormat::kJson)
+    const bool parallel =
+        !request.response_format && request.parallel_tool_calls;
+    grammar = syntax
+                  ? sampling::JsonConstraint::WithTools(
+                        grammar, std::move(tools), required, parallel, *syntax)
+                  : sampling::JsonConstraint::WithTools(
+                        grammar, std::move(tools), required, parallel, format);
+    if (!syntax && format == Format::kJson)
       instruction +=
           "\nIf a tool is needed, respond using the JSON tool-call form "
           "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
@@ -140,6 +180,7 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     throw std::invalid_argument(
         "text runner reasoning open delimiter must not begin with whitespace");
   }
+  (void)SelectToolDialect(runner->ToolDialectId());
 
   auto resources = runner->ResourceClaim();
   const auto per_state_reservation = PerStateReservationBytes(resources);

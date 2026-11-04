@@ -69,11 +69,13 @@ public:
                   std::optional<gufo::sampling::JsonConstraint::ToolFormat>
                       tool_format = {},
                   gufo::ext::ReasoningMarkup reasoning = {"<think>",
-                                                          "</think>"})
+                                                          "</think>"},
+                  std::optional<std::string> tool_dialect = {})
       : inner_(std::move(inner)),
         progress_(std::move(progress)),
         tool_format_(tool_format),
-        reasoning_(std::move(reasoning)) {}
+        reasoning_(std::move(reasoning)),
+        tool_dialect_(std::move(tool_dialect)) {}
 
   Backend::Result Wait(const Backend::TokenCallback& on_token,
                        const Backend::ProgressCallback& on_progress,
@@ -94,12 +96,16 @@ public:
   gufo::ext::ReasoningMarkup ReasoningDelimiters() const override {
     return reasoning_;
   }
+  std::optional<std::string> ToolDialectId() const override {
+    return tool_dialect_ ? tool_dialect_ : GenerationRequest::ToolDialectId();
+  }
 
 private:
   std::shared_ptr<GenerationRequest> inner_;
   std::vector<Backend::PromptProgress> progress_;
   const std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format_;
   const gufo::ext::ReasoningMarkup reasoning_;
+  const std::optional<std::string> tool_dialect_;
 };
 
 class FakeBackend final : public gufo::server::TextGenerationBackend {
@@ -215,7 +221,7 @@ public:
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                           is_cancelled, stream_output),
-        progress, tool_format, reasoning);
+        progress, tool_format, reasoning, tool_dialect);
   }
 
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
@@ -241,6 +247,8 @@ public:
   std::vector<std::string> pieces;
   std::vector<PromptProgress> progress;
   std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format;
+  // Selects the parsers by identity instead of tool_format.
+  std::optional<std::string> tool_dialect;
   gufo::ext::ReasoningMarkup reasoning{"<think>", "</think>"};
   std::string cache_miss_reason;
   FinishReason finish_reason{FinishReason::kStop};
@@ -6247,12 +6255,23 @@ struct ToolBoundaryOutput {
 
 // Exercise public serializers with independent fixtures. Validate event
 // ownership too: a delta cannot precede its header or follow its block's close.
+// A provider dialect request: its identity, tools and reasoning markup.
+struct DialectRequest {
+  std::string id;
+  std::string tool_choice{"auto"};
+  std::string tools;
+  gufo::ext::ReasoningMarkup reasoning{"<think>", "</think>"};
+  // Responses and Messages only: parse without the tool grammar's framing.
+  bool unconstrained{false};
+};
+
 ToolBoundaryOutput ToolBoundaryRequest(
     const std::vector<std::string>& pieces,
     gufo::sampling::JsonConstraint::ToolFormat format, int api, bool stream,
     FakeBackend::InitialOutputState initial =
         FakeBackend::InitialOutputState::kContent,
-    FakeBackend::FinishReason finish = FakeBackend::FinishReason::kStop) {
+    FakeBackend::FinishReason finish = FakeBackend::FinishReason::kStop,
+    const DialectRequest* dialect = nullptr) {
   using gufo::json::Value;
   FakeBackend backend;
   backend.pieces = pieces;
@@ -6260,6 +6279,10 @@ ToolBoundaryOutput ToolBoundaryRequest(
   backend.initial_output_state_override = initial;
   backend.finish_reason = finish;
   backend.stop_sequence = "HALT";
+  if (dialect) {
+    backend.tool_dialect = dialect->id;
+    backend.reasoning = dialect->reasoning;
+  }
   auto body = gufo::json::parse(R"({
     "model":"test-model","messages":[{"role":"user","content":"test framing"}],
     "tool_choice":"auto","tools":[
@@ -6272,6 +6295,11 @@ ToolBoundaryOutput ToolBoundaryRequest(
   body["stream"] = stream;
   body["reasoning_effort"] =
       initial == FakeBackend::InitialOutputState::kContent ? "none" : "low";
+  if (dialect) {
+    body["tool_choice"] = dialect->tool_choice;
+    if (!dialect->tools.empty())
+      body["tools"] = gufo::json::parse(dialect->tools);
+  }
   gufo::server::HttpResponse response;
   if (api == 0)
     response = gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
@@ -6279,6 +6307,8 @@ ToolBoundaryOutput ToolBoundaryRequest(
     gufo::server::ChatRequest chat;
     Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
            "tag boundary controls parse");
+    if (dialect && dialect->unconstrained)
+      chat.constrained_tools = false;
     response = api == 1 ? gufo::server::CreateOpenAiResponse(
                               Request("{}"), backend, chat, 4096, {}, stream)
                         : gufo::server::CreateAnthropicMessage(
@@ -7150,8 +7180,467 @@ void TestChatUsageReportsReasoningTokens() {
   }
 }
 
+// An invented provider dialect, absent from ToolFormat and distinct from the
+// Qwen, DeepSeek and Gemma framings, with non-JSON value framing:
+// `<<invoke:NAME>>{key:«text»,n:1,o:{k:true},a:[1]}<</invoke>>`.
+constexpr std::string_view kLedgerOpen = "<<invoke:";
+constexpr std::string_view kLedgerClose = "<</invoke>>";
+
+// Reads ledger values into JSON. kShort: the text ends inside the value.
+class LedgerReader {
+public:
+  enum class Read { kOk, kBad, kShort };
+  explicit LedgerReader(std::string_view text, std::size_t pos)
+      : text_(text), pos_(pos) {}
+  [[nodiscard]] std::size_t pos() const { return pos_; }
+  [[nodiscard]] bool AtEnd() const { return pos_ >= text_.size(); }
+  [[nodiscard]] char Peek() const { return text_[pos_]; }
+  void Skip() { ++pos_; }
+  [[nodiscard]] std::string_view Rest() const { return text_.substr(pos_); }
+
+  // A string's text, or its prefix so far when it is still open.
+  Read String(std::string* out) {
+    constexpr std::string_view open = "«", close = "»";
+    if (!Rest().starts_with(open))
+      return Read::kBad;
+    const auto end = text_.find(close, pos_ + open.size());
+    *out = std::string(
+        text_.substr(pos_ + open.size(), end == std::string_view::npos
+                                             ? std::string_view::npos
+                                             : end - pos_ - open.size()));
+    if (end == std::string_view::npos)
+      return Read::kShort;
+    pos_ = end + close.size();
+    return Read::kOk;
+  }
+  Read Key(std::string* out) {
+    if (AtEnd())
+      return Read::kShort;
+    if (Rest().starts_with("«"))
+      return String(out);
+    const auto end = text_.find(':', pos_);
+    if (end == std::string_view::npos)
+      return Read::kShort;
+    *out = std::string(text_.substr(pos_, end - pos_));
+    if (out->empty() || out->find_first_of("{}[],") != std::string::npos)
+      return Read::kBad;
+    pos_ = end;
+    return Read::kOk;
+  }
+  Read Value(gufo::json::Value* out, int depth = 0) {
+    if (AtEnd())
+      return Read::kShort;
+    if (depth > 16)
+      return Read::kBad;
+    if (Rest().starts_with("«")) {
+      std::string text;
+      const auto read = String(&text);
+      *out = gufo::json::Value(std::move(text));
+      return read;
+    }
+    if (Peek() == '{' || Peek() == '[') {
+      const bool object = Peek() == '{';
+      const char end = object ? '}' : ']';
+      *out = object ? gufo::json::Value::object() : gufo::json::Value::array();
+      Skip();
+      if (AtEnd())
+        return Read::kShort;
+      if (Peek() == end) {
+        Skip();
+        return Read::kOk;
+      }
+      while (true) {
+        std::string key;
+        if (object) {
+          if (const auto read = Key(&key); read != Read::kOk)
+            return read;
+          if (AtEnd())
+            return Read::kShort;
+          if (Peek() != ':')
+            return Read::kBad;
+          Skip();
+        }
+        gufo::json::Value item;
+        if (const auto read = Value(&item, depth + 1); read != Read::kOk)
+          return read;
+        if (object)
+          (*out)[key] = std::move(item);
+        else
+          out->push_back(std::move(item));
+        if (AtEnd())
+          return Read::kShort;
+        if (Peek() == end) {
+          Skip();
+          return Read::kOk;
+        }
+        if (Peek() != ',')
+          return Read::kBad;
+        Skip();
+      }
+    }
+    // A scalar ends at the next structural byte.
+    const auto end = text_.find_first_of(",}]", pos_);
+    if (end == std::string_view::npos)
+      return Read::kShort;
+    try {
+      *out = gufo::json::parse(text_.substr(pos_, end - pos_));
+    } catch (...) {
+      return Read::kBad;
+    }
+    if (out->is_string() || out->is_object() || out->is_array())
+      return Read::kBad;
+    pos_ = end;
+    return Read::kOk;
+  }
+
+private:
+  std::string_view text_;
+  std::size_t pos_;
+};
+
+void ScanLedgerToolCalls(
+    std::string_view text, std::span<const std::string_view> markers,
+    std::vector<gufo::ext::ScannedToolCall>* calls,
+    std::vector<std::pair<std::size_t, std::size_t>>* spans, bool partial) {
+  Expect(markers.size() == 1 && markers.front() == kLedgerOpen,
+         "the scanner receives its own markers");
+  using Read = LedgerReader::Read;
+  std::size_t cursor = 0;
+  while ((cursor = text.find(kLedgerOpen, cursor)) != std::string_view::npos) {
+    const auto begin = cursor;
+    gufo::ext::ScannedToolCall call;
+    const auto name_end = text.find(">>", begin + kLedgerOpen.size());
+    if (name_end == std::string_view::npos)
+      return;  // Nothing is known until the name ends.
+    call.name = std::string(text.substr(begin + kLedgerOpen.size(),
+                                        name_end - begin - kLedgerOpen.size()));
+    LedgerReader reader(text, name_end + 2);
+    // Top-level members are read one at a time so a partial call reports the
+    // members already closed and a string still open.
+    const auto members = [&]() -> Read {
+      if (reader.AtEnd())
+        return Read::kShort;
+      if (reader.Peek() != '{')
+        return Read::kBad;
+      reader.Skip();
+      if (!reader.AtEnd() && reader.Peek() == '}') {
+        reader.Skip();
+        return Read::kOk;
+      }
+      while (true) {
+        std::string key;
+        if (const auto read = reader.Key(&key); read != Read::kOk)
+          return read;
+        if (reader.AtEnd())
+          return Read::kShort;
+        if (reader.Peek() != ':')
+          return Read::kBad;
+        reader.Skip();
+        gufo::json::Value value;
+        const auto read = reader.Value(&value);
+        if (read == Read::kShort && value.is_string() && partial)
+          call.unfinished = gufo::ext::ScannedToolArgument{
+              .name = key, .value = value.get_str(), .is_string = true};
+        if (read != Read::kOk)
+          return read;
+        if (reader.AtEnd())
+          return Read::kShort;
+        if (reader.Peek() != ',' && reader.Peek() != '}')
+          return Read::kBad;
+        call.arguments.push_back(
+            {.name = key,
+             .value = value.is_string() ? value.get_str() : value.dump(),
+             .is_string = value.is_string()});
+        reader.Skip();
+        if (text[reader.pos() - 1] == '}')
+          return Read::kOk;
+      }
+    };
+    auto read = members();
+    if (read == Read::kOk) {
+      const auto rest = reader.Rest();
+      if (rest.starts_with(kLedgerClose)) {
+        call.valid = call.complete = true;
+        cursor = reader.pos() + kLedgerClose.size();
+        if (spans)
+          spans->emplace_back(begin, cursor);
+        calls->push_back(std::move(call));
+        continue;
+      }
+      read = kLedgerClose.starts_with(rest) ? Read::kShort : Read::kBad;
+    }
+    // Only a call later text could still complete is reported unfinished; a
+    // malformed one is rejected outright.
+    if (read == Read::kShort && partial)
+      calls->push_back(std::move(call));
+    return;
+  }
+}
+
+gufo::sampling::JsonConstraint::ToolSyntax LedgerSyntax() {
+  return {
+      .open = std::string(kLedgerOpen),
+      .name_suffix = ">>",
+      .close = std::string(kLedgerClose),
+      .name_delimiters = ">",
+      .values = {.string_open = "«",
+                 .string_close = "»",
+                 .bare_keys = true,
+                 .whitespace = false,
+                 .sorted_keys = true},
+      .reasoning_header = true,
+  };
+}
+
+void RegisterLedgerToolDialect() {
+  gufo::ext::RegisterToolDialect({
+      .markers = {kLedgerOpen},
+      .reasoning_markers = {kLedgerOpen},
+      .closers = {kLedgerClose},
+      .scan_tool_calls = &ScanLedgerToolCalls,
+      .id = "ledger",
+      .syntax = LedgerSyntax(),
+  });
+}
+
+void TestProviderToolDialect() {
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  using Initial = FakeBackend::InitialOutputState;
+  using Finish = FakeBackend::FinishReason;
+  const std::string tools = R"([
+    {"type":"function","function":{"name":"weather","parameters":{
+      "type":"object","properties":{"city":{"type":"string"},
+        "days":{"type":"integer"},"options":{"type":"object","properties":{
+          "metric":{"type":"boolean"}},"additionalProperties":false}},
+      "required":["city"],"additionalProperties":false}}},
+    {"type":"function","function":{"name":"clock","parameters":{
+      "type":"object","properties":{},"additionalProperties":false}}}])";
+  const std::string weather =
+      "<<invoke:weather>>{city:«Paris, \"FR\"»,days:3,"
+      "options:{metric:true}}<</invoke>>";
+  const std::string weather_arguments =
+      R"({"city":"Paris, \"FR\"","days":3,"options":{"metric":true}})";
+  const std::string clock = "<<invoke:clock>>{}<</invoke>>";
+  // Other dialects' markup, which this dialect treats as ordinary text.
+  const std::string foreign =
+      "Compare <tool_call>\n<function=weather>\n</function>\n</tool_call>, "
+      "<｜DSML｜tool_calls>, <|tool_call>call:clock{}<tool_call|> and "
+      "</invoke>.";
+  // The dialect's own marker, quoted as an example.
+  const std::string quoted = "Write `<<invoke:clock>>{}` to call it.";
+  struct Case {
+    std::string name;
+    std::string raw;
+    std::string choice;
+    std::vector<std::string> names;
+    std::vector<std::string> arguments;
+    std::string content;
+    std::string reasoning{};
+    Initial initial{Initial::kContent};
+    Finish finish{Finish::kStop};
+  };
+  const std::vector<Case> cases{
+      {"auto call after text",
+       "Checking. " + weather,
+       "auto",
+       {"weather"},
+       {weather_arguments},
+       "Checking."},
+      {"required call",
+       weather,
+       "required",
+       {"weather"},
+       {weather_arguments},
+       ""},
+      {"multiple calls",
+       weather + "\n" + clock,
+       "auto",
+       {"weather", "clock"},
+       {weather_arguments, "{}"},
+       ""},
+      {"echoed closer",
+       clock + kLedgerClose.data(),
+       "auto",
+       {"clock"},
+       {"{}"},
+       ""},
+      {"foreign markers are prose", foreign, "auto", {}, {}, foreign},
+      {"foreign markers before a call",
+       foreign + "\n" + clock,
+       "auto",
+       {"clock"},
+       {"{}"},
+       foreign},
+      {"quoted marker", quoted, "auto", {}, {}, quoted},
+      {"quoted marker before a call",
+       quoted + "\n" + clock,
+       "auto",
+       {"clock"},
+       {"{}"},
+       quoted},
+      {"tool choice none", weather, "none", {}, {}, weather},
+      {"malformed arguments",
+       "<<invoke:weather>>{city:«Paris»,days:}" + std::string(kLedgerClose),
+       "auto",
+       {},
+       {},
+       "<<invoke:weather>>{city:«Paris»,days:}" + std::string(kLedgerClose)},
+      {"undeclared tool",
+       "<<invoke:other>>{}" + std::string(kLedgerClose),
+       "auto",
+       {},
+       {},
+       "<<invoke:other>>{}" + std::string(kLedgerClose)},
+      {"reasoning ends at a call",
+       "Need data, not <tool_call>." + clock,
+       "auto",
+       {"clock"},
+       {"{}"},
+       "",
+       "Need data, not <tool_call>.",
+       Initial::kReasoning},
+      {"reasoning then call",
+       "Plan.<<ponder]]Calling. " + clock,
+       "auto",
+       {"clock"},
+       {"{}"},
+       "Calling.",
+       "Plan.",
+       Initial::kReasoning},
+      {"reasoning opened by the model",
+       "[[ponder>>\nPlan.<<ponder]]" + weather,
+       "auto",
+       {"weather"},
+       {weather_arguments},
+       "",
+       "Plan.",
+       Initial::kAuto},
+  };
+  for (const auto& item : cases)
+    for (const bool unconstrained : {false, true})
+      for (int api = 0; api < 3; ++api) {
+        // Unconstrained streaming stops at a marker whose quotation is still
+        // open; only constrained output is covered here.
+        if (unconstrained &&
+            (api == 0 || item.name == "quoted marker before a call"))
+          continue;
+        for (const bool stream : {false, true})
+          for (const bool bytewise : {false, true}) {
+            if (bytewise && !stream)
+              continue;
+            std::vector<std::string> pieces;
+            if (bytewise)
+              for (const char byte : item.raw)
+                pieces.emplace_back(1, byte);
+            else
+              pieces.push_back(item.raw);
+            const DialectRequest dialect{
+                .id = "ledger",
+                .tool_choice = item.choice,
+                .tools = tools,
+                .reasoning = {"[[ponder>>\n", "<<ponder]]"},
+                .unconstrained = unconstrained,
+            };
+            const auto out =
+                ToolBoundaryRequest(pieces, Format::kJson, api, stream,
+                                    item.initial, item.finish, &dialect);
+            if (bytewise && item.name == "malformed arguments") {
+              // The call was streamed while it could still complete; its
+              // rejection then ends the stream with an error, never a call.
+              Expect(out.failed, "a streamed call that fails is an error");
+              continue;
+            }
+            if (out.failed || out.names != item.names ||
+                out.arguments != item.arguments ||
+                Trimmed(out.content) != item.content ||
+                Trimmed(out.reasoning) != item.reasoning)
+              std::cerr << "Ledger case: " << item.name << " api=" << api
+                        << " stream=" << stream << " bytewise=" << bytewise
+                        << " unconstrained=" << unconstrained
+                        << "\ncontent: " << out.content
+                        << "\nreasoning: " << out.reasoning
+                        << "\ncalls: " << out.names.size() << '\n';
+            Expect(!out.failed && out.names == item.names &&
+                       out.arguments == item.arguments,
+                   "the provider dialect parses exactly its own calls");
+            Expect(Trimmed(out.content) == item.content &&
+                       Trimmed(out.reasoning) == item.reasoning,
+                   "content and reasoning exclude only provider markup");
+          }
+      }
+
+  // A truncated call streams the arguments it has closed, and its open string,
+  // but never becomes a final call.
+  const std::string truncated = "<<invoke:weather>>{days:3,city:«Par";
+  std::vector<std::string> bytes;
+  for (const char byte : truncated)
+    bytes.emplace_back(1, byte);
+  const DialectRequest dialect{.id = "ledger", .tools = tools};
+  const auto streamed =
+      ToolBoundaryRequest(bytes, Format::kJson, 0, true, Initial::kContent,
+                          Finish::kLength, &dialect);
+  Expect(!streamed.failed &&
+             streamed.names == std::vector<std::string>{"weather"} &&
+             streamed.arguments ==
+                 std::vector<std::string>{R"({"days":3,"city":"Par)"},
+         "partial provider calls stream closed members and open strings");
+  Expect(Trimmed(streamed.content).empty(),
+         "partial provider markup is not content");
+  for (int api = 0; api < 3; ++api) {
+    const auto buffered =
+        ToolBoundaryRequest({truncated}, Format::kJson, api, false,
+                            Initial::kContent, Finish::kLength, &dialect);
+    Expect(!buffered.failed && buffered.names.empty() &&
+               Trimmed(buffered.content).empty(),
+           "a truncated provider call is neither a call nor content");
+  }
+
+  // A required call that the model did not make is an error.
+  for (const bool stream : {false, true}) {
+    FakeBackend backend;
+    backend.tool_dialect = "ledger";
+    backend.pieces = {"No call."};
+    auto body = gufo::json::parse(R"({"model":"test-model",
+      "messages":[{"role":"user","content":"go"}],"tool_choice":"required"})");
+    body["tools"] = gufo::json::parse(tools);
+    body["stream"] = stream;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    std::string events;
+    if (stream)
+      response.streaming_body([&](std::string_view part) {
+        events += part;
+        return true;
+      });
+    Expect(stream ? events.find("\"error\"") != std::string::npos
+                  : response.status != 200,
+           "an unsatisfied required provider call is an error");
+  }
+
+  // Without the identity the same text is no call; an unknown identity
+  // recognizes none.
+  for (const std::optional<std::string>& id :
+       {std::optional<std::string>{}, std::optional<std::string>{"absent"}}) {
+    FakeBackend backend;
+    backend.tool_dialect = id;
+    backend.pieces = {clock};
+    auto body = gufo::json::parse(R"({"model":"test-model",
+      "messages":[{"role":"user","content":"go"}],"tool_choice":"auto"})");
+    body["tools"] = gufo::json::parse(tools);
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    const auto output = gufo::json::parse(response.body);
+    const auto* message = output.find("choices")->items()[0].find("message");
+    Expect(response.status == 200 && !message->contains("tool_calls") &&
+               message->member_str("content") == clock,
+           "only the selected dialect's markers start calls");
+  }
+}
+
 int main() {
   gufo::models::deepseek_v4_flash::RegisterToolDialect();
+  RegisterLedgerToolDialect();
+  TestProviderToolDialect();
   TestLogprobs();
   TestToolCallRenderParseRoundTrip();
   TestToolTagBoundaries();

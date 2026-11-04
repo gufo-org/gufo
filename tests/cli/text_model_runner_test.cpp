@@ -1076,10 +1076,158 @@ void TestServerInstructionsAreFraming() {
 
 }  // namespace
 
+// A dialect absent from ToolFormat: identity, grammar and parser come from
+// its registration alone.
+void ScanNothing(std::string_view, std::span<const std::string_view>,
+                 std::vector<gufo::ext::ScannedToolCall>*,
+                 std::vector<std::pair<std::size_t, std::size_t>>*, bool) {}
+
+void TestProviderToolDialectSelection() {
+  using Constraint = gufo::sampling::JsonConstraint;
+  const Constraint::ToolSyntax syntax{
+      .open = "<<invoke:",
+      .name_suffix = ">>",
+      .close = "<</invoke>>",
+      .name_delimiters = ">",
+      .values = {.string_open = "«",
+                 .string_close = "»",
+                 .bare_keys = true,
+                 .whitespace = false,
+                 .sorted_keys = true},
+  };
+  gufo::ext::RegisterToolDialect({
+      .markers = {"<<invoke:"},
+      .scan_tool_calls = &ScanNothing,
+      .id = "ledger-runner",
+      .syntax = syntax,
+  });
+  const auto rejects = [](gufo::ext::ToolDialect dialect) {
+    try {
+      gufo::ext::RegisterToolDialect(std::move(dialect));
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  Expect(rejects({.markers = {"<tool_call>"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "qwen",
+                  .syntax = syntax}),
+         "host-parsed identities cannot be registered");
+  Expect(rejects({.markers = {"[[call"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "bracket",
+                  .syntax = syntax}),
+         "markers must contain '<'");
+  Expect(rejects({.markers = {"<<call:"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "mismatch",
+                  .syntax = syntax}),
+         "the grammar's opener must be a parser marker");
+  Expect(rejects({.markers = {"<<invoke:"}, .id = "noscan", .syntax = syntax}),
+         "a dialect needs a parser");
+  Expect(rejects({.markers = {"<<invoke:"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "nogrammar"}),
+         "a dialect needs a grammar");
+  Expect(gufo::ext::FindToolDialect("ledger-runner") != nullptr &&
+             gufo::ext::FindToolDialect("ledger-runner")->syntax == syntax,
+         "registered dialects are found by identity");
+
+  class DialectRunner final : public FakeRunner {
+  public:
+    explicit DialectRunner(std::string id)
+        : FakeRunner(std::make_shared<FakeStats>()), id_(std::move(id)) {}
+    std::string ToolDialectId() const override { return id_; }
+    std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+    BuildConstraintVocabulary() const override {
+      return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+          256, [](std::uint32_t id) {
+            return gufo::sampling::ConstraintVocabulary::Piece{
+                std::string(1, static_cast<char>(id)), false};
+          });
+    }
+
+  private:
+    std::string id_;
+  };
+  const auto accepts = [](const Constraint& grammar, std::string_view text) {
+    auto state = grammar.Start();
+    for (const unsigned char byte : text) {
+      state = grammar.Advance(state, byte);
+      if (state.empty())
+        return false;
+    }
+    return grammar.Complete(state);
+  };
+  const DialectRunner runner("ledger-runner");
+  Expect(FakeRunner(std::make_shared<FakeStats>()).ToolDialectId() == "json",
+         "existing runners keep the identity of their format");
+  const std::string call = "<<invoke:record>>{text:«hi»}<</invoke>>";
+  for (const auto choice :
+       {ChatRequest::ToolChoice::kRequired, ChatRequest::ToolChoice::kAuto,
+        ChatRequest::ToolChoice::kNone}) {
+    ChatRequest request;
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kUser, "go");
+    request.tool_choice = choice;
+    request.tools = {
+        {.name = "record",
+         .parameters_json =
+             R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
+    gufo::sampling::SamplingConfig sampling;
+    std::optional<Constraint::ToolFormat> format{Constraint::ToolFormat::kQwen};
+    std::string dialect;
+    const auto constrained = gufo::server::ConstrainChatRequest(
+        request, runner, &sampling, &format, &dialect);
+    Expect(dialect == "ledger-runner" && !format,
+           "the runner's identity selects the provider dialect");
+    if (choice == ChatRequest::ToolChoice::kNone) {
+      Expect(!constrained && !sampling.constraint,
+             "tool_choice none leaves the output unconstrained");
+      continue;
+    }
+    Expect(constrained && sampling.constraint &&
+               constrained->messages.size() == 1 &&
+               constrained->messages.front().framing_suffix.empty(),
+           "a native dialect constrains without a JSON instruction");
+    const auto& grammar = *sampling.constraint->grammar;
+    Expect(accepts(grammar, call),
+           "the provider grammar constrains the request");
+    Expect(
+        accepts(
+            grammar,
+            R"(<tool_call>{"name":"record","arguments":{"text":"hi"}}</tool_call>)") ==
+            (choice == ChatRequest::ToolChoice::kAuto),
+        "the JSON envelope is no call of this dialect, only prose");
+    Expect(accepts(grammar, "Plain answer.") ==
+               (choice == ChatRequest::ToolChoice::kAuto),
+           "only automatic tool choice admits a plain answer");
+  }
+  bool rejected = false;
+  try {
+    gufo::sampling::SamplingConfig sampling;
+    (void)gufo::server::ConstrainChatRequest(
+        ChatRequest{}, DialectRunner("unregistered"), &sampling);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an unknown identity is a request error");
+  rejected = false;
+  try {
+    TextRunnerPool pool(std::make_shared<DialectRunner>("unregistered"), 1);
+  } catch (const std::invalid_argument& error) {
+    rejected = std::string_view(error.what()).find("unregistered") !=
+               std::string_view::npos;
+  }
+  Expect(rejected, "an unknown identity is rejected at load");
+  TextRunnerPool pool(std::make_shared<DialectRunner>("ledger-runner"), 1);
+}
+
 int main() {
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
   TestReasoningDelimitersFollowTheRunner();
+  TestProviderToolDialectSelection();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();
   TestBoundedPrefillDecodeAndPrefixReuse();
   TestAbandonedRequestRollsBackState();
