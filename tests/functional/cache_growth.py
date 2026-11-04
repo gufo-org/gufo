@@ -7,6 +7,9 @@ import sys
 # The assistant opening after a stable boundary, such as Qwen's
 # `<|im_start|>assistant\n<think>\n`, is a few tokens long.
 ASSISTANT_OPENING_TOKENS = 16
+# The largest TextRunnerCapabilities::prefill_alignment in tree (Flash-Next's
+# selection block). Such a runner rounds the stable boundary down to it.
+PREFILL_ALIGNMENT = 4
 
 
 def log_offset(server_log):
@@ -40,13 +43,17 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,
     another conversation's last checkpoint (docs/KV-CACHE.md); the retry then
     restores the stable boundary and prefills only the mutable suffix. For
     agent histories that includes the last user turn; its bound is measured
-    separately with the count-tokens endpoint, not padded with extra slack."""
+    separately with the count-tokens endpoint, not padded with extra slack.
+    An aligned runner may instead restore exactly the boundary rounded down to
+    its prefill alignment, replaying up to three more tokens."""
     if not prefilled:
         return
     usage = retry["usage"]
     total = usage.get("prompt_tokens", usage.get("input_tokens"))
     assert type(mutable_suffix_tokens) is int and mutable_suffix_tokens > 0
-    assert prefilled <= mutable_suffix_tokens and \
+    boundary = total - mutable_suffix_tokens
+    aligned_suffix = total - (boundary - boundary % PREFILL_ALIGNMENT)
+    assert (prefilled <= mutable_suffix_tokens or prefilled == aligned_suffix) and \
         retry_copy_refused(server_log, start, end, total), retry
     print(f"NOTE {label}: retry copy refused under memory pressure; "
           f"prefilled {prefilled} of {total} tokens", file=sys.stderr, flush=True)
