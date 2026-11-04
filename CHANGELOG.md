@@ -4,6 +4,26 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.30.0](https://github.com/gufo-org/gufo/compare/v0.29.0...v0.30.0) (2026-11-04)
+
+
+### Features
+
+* **cache:** migrate DeepSeek V4 Flash to the component cache ([#1003](https://github.com/gufo-org/gufo/issues/1003)) ([b29229e](https://github.com/gufo-org/gufo/commit/b29229e349c8a36ac284c8ff0134b9e0c1cf808f))
+* **cache:** remove the legacy continuation cache ([#1014](https://github.com/gufo-org/gufo/issues/1014)) ([4fc4a22](https://github.com/gufo-org/gufo/commit/4fc4a2236b5421b8feb13269c2acd55b30b5a804))
+* **ext:** add a public link target for the component cache ([#1006](https://github.com/gufo-org/gufo/issues/1006)) ([346db1d](https://github.com/gufo-org/gufo/commit/346db1d075fcb7fd47964b155ab9dda6bd7354a9))
+
+
+### Bug Fixes
+
+* **json:** keep tool argument schemas beside arrays without items ([#1012](https://github.com/gufo-org/gufo/issues/1012)) ([da04ba5](https://github.com/gufo-org/gufo/commit/da04ba521b801398facede6d323a6b2b77c3e9bc))
+* **qwen38-flash-next:** end capacity-limited prefill steps on the selection block ([#1016](https://github.com/gufo-org/gufo/issues/1016)) ([186a507](https://github.com/gufo-org/gufo/commit/186a507da77bcbb3e8f0cfbd49f688f88535e9e2))
+
+
+### Performance
+
+* **qwen38-flash-next:** capture prompt checkpoints inside prefill passes without splitting them ([#963](https://github.com/gufo-org/gufo/issues/963)) ([6667372](https://github.com/gufo-org/gufo/commit/6667372738422619691663e9afefd6e0d4c16c3d))
+
 ## [0.29.0](https://github.com/gufo-org/gufo/compare/v0.28.1...v0.29.0) (2026-11-04)
 
 
