@@ -11,6 +11,7 @@
 #include <numeric>
 #include <thread>
 
+#include "src/cache/prefetch_cursor.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
 using namespace gufo::cache;
@@ -1066,6 +1067,34 @@ void ConcurrentStop() {
   assert(queue.Stats().pending == 0);
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
 }
+void PrefetchReaderCanOvertakeHintWorkers() {
+  const std::array<std::uint64_t, 9> offsets{0, 4, 8, 12, 16, 20, 24, 28, 32};
+  gufo::cache::detail::PrefetchCursor cursor;
+  assert(cursor.Ready(offsets, 8));
+  assert(cursor.Take() == 0);
+  assert(cursor.Ready(offsets, 8));
+  assert(cursor.Take() == 1);
+  assert(!cursor.Ready(offsets, 8));
+
+  // Helpers are still hinting the first files when the reader reaches file 5.
+  // Their next work must skip consumed files and continue at the reader,
+  // rather than underflowing the unsigned distance and waiting forever.
+  cursor.Reading(5);
+  assert(cursor.Ready(offsets, 8));
+  assert(cursor.Take() == 5);
+  assert(cursor.Ready(offsets, 8));
+  assert(cursor.Take() == 6);
+  assert(!cursor.Ready(offsets, 8));
+  cursor.Reading(7);
+  assert(cursor.Ready(offsets, 8));
+  assert(cursor.Take() == 7);
+  cursor.Reading(8);
+  assert(!cursor.Ready(offsets, 8));
+
+  gufo::cache::detail::PrefetchCursor empty;
+  const std::array<std::uint64_t, 1> no_files{0};
+  assert(!empty.Ready(no_files, 8));
+}
 void MinimumStagingHoldsWidestRow() {
   // Private state streams in pieces of any size; rows never split.
   const std::array<ComponentDescriptor, 3> mixed{{
@@ -1078,6 +1107,7 @@ void MinimumStagingHoldsWidestRow() {
 }
 }  // namespace
 int main() {
+  PrefetchReaderCanOvertakeHintWorkers();
   MinimumStagingHoldsWidestRow();
   PrefetchDoesNotValidateOrAdmitPayload();
   RestoreGroupsAdjacentFilesWithinStaging();
