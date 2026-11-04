@@ -1,5 +1,33 @@
 # Qwen3.8 Flash-Next quality
 
+## Raw-completion follow-up, November 4, 2026
+
+GitHub exposed a case missing from the first qualification: a raw completion
+has no separate stable chat boundary, so retaining only its unaligned exact
+prompt loses reuse on a longer request. Runtime `96481a82` retains an aligned
+near-end fallback as well as the exact retry, captured in the same prefill pass.
+The fake-runner regression fails before the fix and passes afterward, including
+slot reuse for an unrelated request. Real AR/MTP checks above the sparse budget
+reuse all 3,094 tokens for an exact retry, restore at 3,092 for an extension,
+and match a cold continuation byte for byte in both modes.
+
+The original Devlab follow-up now reuses 1,548 tokens (main: 1,549), with
+TTFT 309 versus 307 ms, instead of the broken branch's 1.25 s. Its one-token
+replay is intentional. The timing fixture now uses a 1,548-token seed so both
+arms do identical work; two alternating controls retain exact output hashes
+and have no slower request phase under the unchanged 5%/10 ms rule. The full
+Nix CPU gate passes, as do 20 scheduler-test repeats after synchronizing the
+two active decoders in the test setup; its fairness assertions are unchanged.
+
+This raw case activates 136 MiB of already-reserved in-pass device checkpoint
+scratch that main does not touch in that history. Startup allocation and cache
+limits are unchanged, but measured peak GTT is higher by that amount; it is
+not a zero-memory-cost result. Paired aligned-history RSS peaks differ by
+5–16 MiB; the original unaligned history uses about 86 MiB more RSS for its
+additional retained fallback. These bounded costs are distinct from the earlier
+chat/concurrency measurements below. Follow-up evidence is retained in
+`/home/fbozzo/projects/validation/pr877-20261104/ci-followup/`.
+
 ## PR #877 qualification, November 4, 2026
 
 Pinned main `1c75887b` versus runtime candidate `e6b2a4c1`, Nix builds on

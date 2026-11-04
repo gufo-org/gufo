@@ -37,11 +37,14 @@ WORDS = ("river", "stone", "garden", "signal", "harbor", "window", "lantern", "m
          "forest", "engine", "silver", "candle", "planet", "ladder", "marble", "feather",
          "island", "rocket", "pepper", "shadow", "velvet", "glacier", "button", "compass")
 # Raw prompts keep the history identical on both revisions; the resume request
-# extends the short prompt, not its generated text, which may differ.
+# extends the short prompt, not its generated text, which may differ. The short
+# prefix is 1,548 tokens with the pinned Flash-Next tokenizer, a four-token
+# boundary. This measures identical cache work on main and aligned-prefill
+# runners; unaligned raw extensions have their own cache regression test.
 REQUESTS = (
-    ("short", "Short prompt", (1, 1500)),
+    ("short", "Short prompt", (1, 1499)),
     ("long", "Long prompt", (2, 12000)),
-    ("resume", "Follow-up", (1, 1500), (3, 400)),
+    ("resume", "Follow-up", (1, 1499), (3, 400)),
 )
 STARTUP = (
     ("init", "Process init"),

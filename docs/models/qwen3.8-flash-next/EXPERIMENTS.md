@@ -1,5 +1,17 @@
 # Qwen3.8 Flash-Next experiments
 
+## Raw completion fallback (November 4, 2026)
+
+Retained: capture the aligned prompt tail in-pass before retaining the exact
+raw prompt. Keeping only the exact unaligned prompt made the Devlab follow-up
+lose its entire cached prefix (1.23 s prefill versus about 0.30 s). The fix
+restores at 1,548 tokens and keeps zero-prefill exact retries. AR/MTP raw
+continuations above the sparse budget match cold output. This path activates
+136 MiB of existing reserved device checkpoint scratch and retains another
+fallback within the same cache budget; the measured memory cost is recorded
+in QUALITY.md. The timing fixture uses an aligned prefix for matched work;
+unaligned extensions retain a separate regression test and raw evidence.
+
 ## Cache readahead progress (November 4, 2026)
 
 Retained: skip files already consumed by the reader before computing the
