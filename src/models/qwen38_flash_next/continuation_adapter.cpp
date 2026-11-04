@@ -29,6 +29,12 @@ bool Draft(ContinuationPart part) {
          part == ContinuationPart::kDraftRawKeys ||
          part == ContinuationPart::kDraftResidual;
 }
+bool RotatedKeys(ContinuationPart part) {
+  return part == ContinuationPart::kKey ||
+         part == ContinuationPart::kPooledKeys ||
+         part == ContinuationPart::kDraftKey ||
+         part == ContinuationPart::kDraftPooledKeys;
+}
 bool Pool(ContinuationPart part) {
   return part == ContinuationPart::kPooledKeys ||
          part == ContinuationPart::kDraftPooledKeys;
@@ -708,10 +714,53 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
       state, false, stream, [&](gufo::hip::TransferStream& transfer) {
         if (component.part == ContinuationPart::kTokens && !bytes.empty())
           std::memcpy(bytes.data(), source, bytes.size());
+        else if (!bytes.empty() && RotatedKeys(component.part) &&
+                 native.yarn_factor_ != 1.0F)
+          CopyNativeKeys(native, component, first, end, bytes, transfer);
         else if (!bytes.empty())
           Check(hip::CopySnapshotToHost(bytes.data(), source, bytes.size(),
                                         transfer.Native()));
       });
+}
+void ContinuationAdapter::CopyNativeKeys(
+    const rocm::Session& native, const ContinuationComponent& component,
+    Rows first, Rows end, std::span<std::byte> bytes,
+    gufo::hip::TransferStream& transfer) const {
+  const auto stream = transfer.Native();
+  const bool draft = Draft(component.part);
+  const auto* rows = reinterpret_cast<const __half*>(
+      component.part == ContinuationPart::kKey
+          ? native.attention_[component.layer].k_cache
+      : component.part == ContinuationPart::kPooledKeys
+          ? native.attention_[component.layer].block_k
+      : component.part == ContinuationPart::kDraftKey ? native.mtp_.k_cache
+                                                      : native.mtp_.block_k);
+  const auto* rope = draft ? native.vision_input_.rope()
+                           : native.attention_[component.layer].rope;
+  const auto copy = [&](__half* destination) {
+    model_->executor_->CopyNativeKeys(
+        native, rows, static_cast<std::uint32_t>(first),
+        static_cast<std::uint32_t>(end - first), Pool(component.part), rope,
+        destination, stream);
+  };
+  void* mapped{};
+  if (hipHostGetDevicePointer(&mapped, bytes.data(), 0) == hipSuccess &&
+      mapped) {
+    copy(static_cast<__half*>(mapped));
+    Check(hipGetLastError());
+    return;
+  }
+  // Ordinary host buffers are not visible to the kernel.
+  (void)hipGetLastError();
+  void* staging{};
+  Check(hipMalloc(&staging, bytes.size()));
+  copy(static_cast<__half*>(staging));
+  const auto copied = hipMemcpyAsync(bytes.data(), staging, bytes.size(),
+                                     hipMemcpyDeviceToHost, stream);
+  const auto settled = hipStreamSynchronize(stream);
+  (void)hipFree(staging);
+  Check(copied);
+  Check(settled);
 }
 std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
     const cache::Slot& slot, cache::ComponentId id, Rows first,
@@ -731,6 +780,9 @@ std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
   const auto row = component.descriptor.row_bytes;
   if (position == positions.end() || first >= end || end > position->valid_rows)
     throw std::invalid_argument("invalid Flash-Next borrowed range");
+  // Cached keys hold the native rotation (CopyRowsOut converts them).
+  if (RotatedKeys(component.part) && state.CaptureState().yarn_factor_ != 1.0F)
+    return {};
   return {static_cast<const std::byte*>(
               RowData(const_cast<State&>(state), component)) +
               first * row,
@@ -837,6 +889,10 @@ bool ContinuationAdapter::Validate(
   native.spec_base_ = metadata.target;
   native.spec_tokens_ = 0;
   native.snapshot_lineage_.reset();
+  // Cached keys hold the native rotation whatever factor wrote them, so one
+  // history can serve sessions at any factor. The next Feed or decode moves
+  // this session to the factor its positions need.
+  model_->executor_->AdoptYarnFactor(native, 1.0F);
   session.hidden_base_ = metadata.hidden_base;
   session.draft_length_ = policy;
   session.lookup_.Restore(metadata.lookup);

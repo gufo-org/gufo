@@ -1,8 +1,11 @@
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 
+#include <hip/hip_fp16.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -37,6 +40,10 @@ void Reject(F&& call) {
   }
   Require(rejected, "invalid adapter operation was accepted");
 }
+constexpr std::uint32_t kYarnContext = 5120;
+// Measured on the repeated-text prompt: 0.31 with native cached keys, 0.72 when
+// scaled keys are cached as they are, 0 for a byte-exact restore.
+constexpr double kYarnLogitBound = 0.5;
 struct IncompatibleStream final : cache::Stream {
   cache::TransferResult Synchronize() noexcept override {
     return cache::TransferResult::kSucceeded;
@@ -229,6 +236,86 @@ void SameLogits(const qfn::Session& a, const qfn::Session& b) {
               std::memcmp(a.Logits().data(), b.Logits().data(),
                           a.Logits().size_bytes()) == 0,
           "restored next-step logits differ");
+}
+// Cached keys keep the native rotation at every session factor. Rows captured
+// before and after the session moves past the native length must agree, and a
+// restore must resume at the session's factor.
+void CheckDynamicYarn(const std::shared_ptr<qfn::Model>& model, bool mtp) {
+  const auto mode = mtp ? gufo::core::SessionMode::kSpeculative
+                        : gufo::core::SessionMode::kAutoregressive;
+  qfn::ContinuationAdapter adapter(model, mode, kYarnContext,
+                                   {'y', 'a', 'r', 'n'});
+  Guard guard;
+  gufo::hip::TransferPool streams(2);
+  auto slot = adapter.CreateSlot(guard);
+  auto& source = adapter.GetSession(*slot);
+  const auto pattern = model->Tokenize(
+      "The quick brown fox jumps over the lazy dog. Strix Halo executes this "
+      "deterministic benchmark sequence. ");
+  std::vector<std::int32_t> prompt(4500);
+  for (std::size_t i = 0; i < prompt.size(); ++i)
+    prompt[i] = pattern[i % pattern.size()];
+  std::string error;
+  Require(source.Sync(std::span(prompt).first(1024), &error), error);
+  const auto native = Capture(adapter, *slot, streams);
+  Require(source.Sync(prompt, &error), error);
+  const auto scaled = Capture(adapter, *slot, streams);
+  Require(Capture(adapter, *slot, streams, true).bytes == scaled.bytes,
+          "mapped and staged key captures differ");
+  for (const auto& component : adapter.Components()) {
+    const auto rows = native.positions[component.id.value - 1].valid_rows;
+    if (!component.row_bytes || !rows)
+      continue;
+    const auto& before = native.bytes[component.id.value - 1];
+    const auto& after = scaled.bytes[component.id.value - 1];
+    if (std::memcmp(before.data(), after.data(), before.size()) == 0)
+      continue;
+    const auto width = component.row_bytes / sizeof(__half);
+    const auto* a = reinterpret_cast<const __half*>(before.data());
+    const auto* b = reinterpret_cast<const __half*>(after.data());
+    for (cache::Rows row = 0; row < rows; ++row, a += width, b += width) {
+      float peak = 0.0F, difference = 0.0F;
+      for (std::size_t i = 0; i < width; ++i) {
+        const float x = __half2float(a[i]), y = __half2float(b[i]);
+        peak = std::max(peak, std::fabs(x));
+        difference = std::max(difference, std::fabs(x - y));
+      }
+      Require(difference <= peak / 512.0F,
+              "cached keys left the native rotation");
+    }
+  }
+  auto restored = adapter.CreateSlot(guard);
+  Load(adapter, *restored, scaled, streams);
+  Require(adapter.Validate(*restored, scaled.positions),
+          "dynamic YaRN restore rejected");
+  auto& resumed = adapter.GetSession(*restored);
+  // The round trip through the native rotation costs about one F16 ulp per
+  // key, so compare forced steps by distance rather than by exact tokens.
+  double worst = 0.0;
+  for (std::size_t i = 0; i < 16; ++i) {
+    Require(source.Evaluate(prompt[i], &error), error);
+    Require(resumed.Evaluate(prompt[i], &error), error);
+    const auto a = source.Logits(), b = resumed.Logits();
+    double total = 0.0;
+    for (std::size_t j = 0; j < a.size(); ++j)
+      total += std::fabs(static_cast<double>(a[j]) - b[j]);
+    worst = std::max(worst, total / static_cast<double>(a.size()));
+  }
+  std::cout << "dynamic YaRN restore: mean logit distance " << worst << "\n";
+  Require(worst < kYarnLogitBound, "restored session left its factor");
+
+  auto saved = model->CreateSession(mode, kYarnContext, &error);
+  auto loaded = model->CreateSession(mode, kYarnContext, &error);
+  Require(saved && loaded, error);
+  Require(saved->Sync(prompt, &error), error);
+  auto snapshot =
+      saved->SaveSnapshot(&error, qfn::Session::SnapshotMode::kMaterialized);
+  Require(bool(snapshot), error);
+  std::vector<std::uint8_t> payload(snapshot->SizeBytes());
+  Require(snapshot->CopyTo(payload), "materialize snapshot");
+  Require(loaded->RestoreSnapshot(payload, &error), error);
+  Require(Decode(*saved, 16) == Decode(*loaded, 16),
+          "snapshot lost a fractional YaRN factor");
 }
 void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   const auto mode = mtp ? gufo::core::SessionMode::kSpeculative
@@ -915,18 +1002,34 @@ int main(int argc, char** argv) {
       argc == 6 && std::string_view(argv[5]) == "--policy-only";
   const bool reuse_only =
       argc == 6 && std::string_view(argv[5]) == "--reuse-only";
+  const bool yarn_only =
+      argc == 6 && std::string_view(argv[5]) == "--yarn-only";
   if ((argc != 5 && !guard_only && !image_only && !in_pass_only &&
-       !policy_only && !reuse_only) ||
+       !policy_only && !reuse_only && !yarn_only) ||
       std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
     std::cerr << "Usage: continuation_adapter_test --model FIRST.gguf "
                  "--mtp-model MTP.gguf "
                  "[--guard-only|--image-only|--in-pass-only|--policy-only|"
-                 "--reuse-only]\n";
+                 "--reuse-only|--yarn-only]\n";
     return 77;
   }
   try {
     std::string error;
+    if (yarn_only) {
+      // The fractional ceiling is the common shape: --context 409600 is 1.5625.
+      auto model = qfn::Model::Load(
+          argv[2],
+          {.max_context = kYarnContext,
+           .mtp_model_path = argv[4],
+           .rope_scaling =
+               qfn::RopeScaling{.factor = 2.5F, .original_context = 2048}},
+          &error);
+      Require(bool(model), error);
+      CheckDynamicYarn(model, false);
+      CheckDynamicYarn(model, true);
+      return 0;
+    }
     auto model = qfn::Model::Load(
         argv[2], {.max_context = 16384, .mtp_model_path = argv[4]}, &error);
     Require(bool(model), error);

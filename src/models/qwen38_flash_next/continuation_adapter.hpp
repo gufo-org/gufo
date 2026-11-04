@@ -82,6 +82,9 @@ private:
   [[nodiscard]] Region PrivateRegion(State&, const ContinuationComponent&,
                                      bool loading) const;
   [[nodiscard]] void* RowData(State&, const ContinuationComponent&) const;
+  void CopyNativeKeys(const rocm::Session&, const ContinuationComponent&,
+                      cache::Rows first, cache::Rows end, std::span<std::byte>,
+                      gufo::hip::TransferStream&) const;
   [[nodiscard]] cache::Completion Transfer(
       State&, bool load, cache::Stream&,
       const std::function<void(gufo::hip::TransferStream&)>&);

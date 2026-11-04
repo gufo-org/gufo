@@ -173,9 +173,11 @@ correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
 Flash-Next's native context is 262144. `--context` above it requires
-`--enable-yarn`, which enables static YaRN with factor context / 262144; the
+`--enable-yarn`, which enables YaRN up to factor context / 262144; the
 server refuses to start without the flag, and the flag is an error at or below
-262144. The factor applies to every request, including short ones; see the
+262144. A session keeps the native rotation while it holds at most 262144
+tokens and takes the smallest whole factor covering its positions past that,
+re-rotating its cached keys when the factor changes; see the
 [measurements](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323981940),
 the
 [opt-in proposal](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323982386),
