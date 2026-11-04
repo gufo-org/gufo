@@ -296,6 +296,10 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
+                // Sparse prefill tiles group four queries from each pass
+                // start: one selection block (compress ratio).
+                .prefill_alignment =
+                    std::max<std::size_t>(1, model_->config().compress_ratio),
             },
         .persistence = persistence_,
         .sampling_preset = sampling::TextModelPreset::kQwen38,
@@ -478,7 +482,7 @@ public:
     const auto consumed = std::min<std::size_t>(
         {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
     if (boundary <= offset + 1 || boundary >= offset + consumed ||
-        offset + consumed - boundary > 8)
+        offset + consumed - boundary > model_->PrefillCheckpointTail())
       return std::nullopt;
     const auto bytes = qfn.session().PrefillCheckpointBytes(
         static_cast<std::uint32_t>(boundary));

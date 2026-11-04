@@ -1,6 +1,7 @@
 #include "src/cli/serve/text_model_runner.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <charconv>
 #include <chrono>
 #include <future>
@@ -552,6 +553,8 @@ struct TextRunnerPool::Request::Impl {
         context(std::move(prompt_context)),
         retain_fallback(cache_prefix_tokens != 0),
         overlap_snapshots(overlap_snapshots) {
+    alignment = std::max<std::size_t>(
+        1, runner->Descriptor().capabilities.prefill_alignment);
     // On a warm continuation the reused frontier is already a safe fallback.
     // Freeze it before prefill, then retain this turn's own stable boundary
     // before mutable assistant framing.
@@ -587,6 +590,41 @@ struct TextRunnerPool::Request::Impl {
     // immutable fallback and freeze the complete prompt before decoding.
     if (lease.component() && prefill_offset > count)
       count = prompt.size();
+    // Capture the aligned boundary at or before each later target instead:
+    // only it continues the prompt exactly (prefill_alignment). A reused
+    // frontier is already the state this request continues. The complete
+    // prompt stays exact: an unchanged retry continues it without prefill,
+    // and a longer prompt never restores it (ComponentTextCache::Acquire).
+    if (alignment > 1) {
+      for (auto& position : boundaries)
+        position = Aligned(position);
+      std::erase_if(boundaries, [&](std::size_t position) {
+        return position <= prefill_offset;
+      });
+      boundaries.erase(std::ranges::unique(boundaries).begin(),
+                       boundaries.end());
+      stable_prefix_position = Aligned(stable_prefix_position);
+      if (stable_prefix_position <= prefill_offset)
+        stable_prefix_position = 0;
+      // Raw completions have no earlier stable chat boundary. Retain the
+      // aligned prompt tail too, or a longer request loses all reuse when
+      // Acquire rejects the exact unaligned prompt checkpoint. Advancing this
+      // target still captures the complete prompt for unchanged retries.
+      if (count > prefill_offset && count < prompt.size()) {
+        count = std::max(Aligned(count), prefill_offset);
+      } else if (const auto aligned = Aligned(count);
+                 aligned > prefill_offset && aligned < count &&
+                 (!lease.component() ||
+                  lease.TryReserveSnapshot(
+                      lease.CaptureBytes(aligned), aligned, retain_fallback,
+                      SnapshotPurpose::kContinuation,
+                      std::span<const TextRunnerToken>(prompt).first(
+                          aligned)))) {
+        // A disabled cache (or a refused disk-only capture) must not prepare
+        // checkpoint scratch or split a pass for a fallback it cannot keep.
+        count = aligned;
+      }
+    }
     snapshot_tokens.reserve(prompt.size());
     snapshot_tokens.assign(prompt.begin(), prompt.begin() + count);
     // A live continuation can already be beyond the desired snapshot point.
@@ -629,6 +667,20 @@ struct TextRunnerPool::Request::Impl {
     }
     if (lease.component())
       checkpoints = lease.PlannedCaptures(cache_prefix_tokens);
+    if (alignment > 1) {
+      for (auto& position : checkpoints)
+        position = Aligned(position);
+      std::erase_if(checkpoints, [&](std::size_t position) {
+        return position <= prefill_offset;
+      });
+      std::ranges::sort(checkpoints);
+      checkpoints.erase(std::ranges::unique(checkpoints).begin(),
+                        checkpoints.end());
+    }
+  }
+
+  [[nodiscard]] std::size_t Aligned(std::size_t position) const noexcept {
+    return position - position % alignment;
   }
 
   ~Impl() {
@@ -974,6 +1026,8 @@ struct TextRunnerPool::Request::Impl {
   bool retain_fallback{false};
   bool overlap_snapshots{false};
   std::size_t fallback_position{0};
+  /// TextRunnerCapabilities::prefill_alignment.
+  std::size_t alignment{1};
   /// This turn's stable boundary when the reused frontier sits before it, so
   /// the boundary is checkpointed after the frozen fallback instead of being
   /// skipped. Zero once taken, or when the two positions coincide.
@@ -1112,7 +1166,8 @@ std::size_t TextRunnerPool::Request::ShareCheckpoint(
     return 0;
   // The complete prompt is retained only after decoding starts; share the
   // last prefill position instead so peers can start sooner.
-  const auto target = std::min(common_tokens, impl_->prompt.size() - 1);
+  const auto target =
+      impl_->Aligned(std::min(common_tokens, impl_->prompt.size() - 1));
   const auto offset = impl_->prefill_offset;
   if (target <= offset)
     return 0;
@@ -1185,6 +1240,11 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
         "text runner prefill budget must be at least one token");
   }
 
+  // A step after this request's own steps starts on the alignment: a pass
+  // continuing an unaligned prompt pass would not match one pass over the
+  // prompt (Flash-Next's sparse tiles group queries from the pass start).
+  assert(impl_->prefill_offset == impl_->lease.cached_tokens() ||
+         impl_->prefill_offset % impl_->alignment == 0);
   // Stop exactly on the next shared-prefix boundary so it can be persisted.
   // Direct callers join any capture before mutating its borrowed state.
   impl_->CapturePromptSnapshot();
@@ -1203,6 +1263,19 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   if (!impl_->checkpoints.empty())
     max_input_tokens = std::min(
         max_input_tokens, impl_->checkpoints.front() - impl_->prefill_offset);
+  // A budget-limited pass ends on an aligned position, so the next pass
+  // continues the prompt exactly: shorter, or a budget below the alignment
+  // runs to the next one. Every capture boundary is aligned already, so
+  // neither crosses one.
+  if (const auto end = impl_->prefill_offset + max_input_tokens;
+      end < impl_->prompt.size() && end % impl_->alignment != 0) {
+    const auto over = end % impl_->alignment;
+    max_input_tokens =
+        max_input_tokens > over
+            ? max_input_tokens - over
+            : std::min(max_input_tokens + impl_->alignment - over,
+                       impl_->prompt.size() - impl_->prefill_offset);
+  }
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
   bool in_pass = false;
@@ -1479,6 +1552,16 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
         " generated=" + std::to_string(impl_->generated.size()));
   }
   checkpoint.resize(position);
+  // As in Cancel: an unaligned prefill frontier is not kept live. The lease
+  // drops a component state after publishing the prompt snapshot, which
+  // reads its positions; other states are reset here.
+  if (position % impl_->alignment != 0 &&
+      position > impl_->lease.cached_tokens() &&
+      position <= impl_->prefill_offset) {
+    checkpoint.clear();
+    if (!impl_->lease.component())
+      state.Invalidate();
+  }
   if (capabilities.snapshot && capabilities.fork) {
     CommitMetrics metrics = impl_->snapshot_metrics;
     metrics.snapshot_bytes += impl_->lease.Commit(
@@ -1537,6 +1620,16 @@ TextRunnerPool::Request::Cancel() noexcept {
         throw std::runtime_error(
             "cancelled checkpoint is outside completed work");
       checkpoint.resize(position);
+      // This request's prefill frontier off the alignment cannot continue the
+      // prompt exactly; a decoded or reused frontier is kept there. As in
+      // Commit, the lease drops a component state after publishing.
+      if (position % impl_->alignment != 0 &&
+          position > impl_->lease.cached_tokens() &&
+          position <= impl_->prefill_offset) {
+        checkpoint.clear();
+        if (!impl_->lease.component())
+          state.Invalidate();
+      }
     } else {
       state.Invalidate();
     }

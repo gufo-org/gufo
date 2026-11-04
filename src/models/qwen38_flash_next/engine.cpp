@@ -250,6 +250,10 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
                   options_.max_context);
 }
 
+std::uint32_t Model::PrefillCheckpointTail() const noexcept {
+  return executor_->PrefillCheckpointTail();
+}
+
 bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
 }
@@ -719,12 +723,19 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
                    double* capture_ms, std::span<const std::int32_t> after,
                    const PrefillCapture& consume) {
   rocm::Executor& exec = *model_->executor_;
+  const std::size_t ratio =
+      std::max<std::uint32_t>(1, model_->config().compress_ratio);
   for (std::size_t off = 0; off < tokens.size();) {
     const auto remaining = tokens.size() - off;
     const auto capacity = remaining <= exec.max_batch()
                               ? exec.max_batch()
                               : model_->PrefillCapacity();
     std::size_t n = std::min<std::size_t>(capacity, remaining);
+    // A following pass starts on a selection block (WmmaCausalAttention).
+    if (const auto end = tokens_.size() + n;
+        prefill && off + n < tokens.size() && end % ratio != 0 &&
+        n > end % ratio)
+      n -= end % ratio;
     const bool captures = (checkpoint || consume) && boundary > tokens_.size();
     // Extended-context attention can fall back from WMMA to the per-token
     // kernel. Its checkpoint must end a pass: the fused in-pass path requires
@@ -814,7 +825,8 @@ bool Session::SyncThrough(std::span<const std::int32_t> prompt,
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
   if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
-      prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
+      prompt.size() - boundary > model_->PrefillCheckpointTail() ||
+      boundary <= tokens_.size()) {
     AssignError(error_msg,
                 "checkpoint must extend the frontier in the text tail");
     return false;
@@ -832,7 +844,8 @@ bool Session::SyncThroughComponents(std::span<const std::int32_t> prompt,
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
   if (!capture || boundary == 0 || boundary > prompt.size() ||
-      prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
+      prompt.size() - boundary > model_->PrefillCheckpointTail() ||
+      boundary <= tokens_.size()) {
     AssignError(
         error_msg,
         "component checkpoint must extend the frontier in the text tail");

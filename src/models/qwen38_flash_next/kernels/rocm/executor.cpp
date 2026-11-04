@@ -775,11 +775,15 @@ bool Executor::ReservePrefillCheckpoint(const Session& session) const {
   return true;
 }
 
+std::uint32_t Executor::PrefillCheckpointTail() const noexcept {
+  return kVecBatch + std::max<std::uint32_t>(1, config().compress_ratio) - 1;
+}
+
 std::unique_ptr<PrefillCheckpoint> Executor::MakePrefillCheckpoint(
     Session& source, std::span<const std::int32_t> tokens, std::uint32_t prefix,
     std::string* error_msg) const {
   if (source.owner_ != this || prefix == 0 || prefix > tokens.size() ||
-      tokens.size() - prefix > kVecBatch ||
+      tokens.size() - prefix > PrefillCheckpointTail() ||
       !source.VisionLayout().images.empty()) {
     AssignError(error_msg, "prefill checkpoint must be in the text tail");
     return nullptr;

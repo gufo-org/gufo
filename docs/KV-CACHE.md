@@ -301,7 +301,8 @@ history, and a one-row head computes the boundary logits. Attention queries
 on either side keep the grouping of separate passes. The final batch can
 include up to 128 tokens beyond the normal 2,048-token chunk, so a prompt that
 ends just past a chunk needs no separate tail pass; the stable boundary must be
-within eight tokens of that batch's end.
+within eleven tokens of that batch's end (an eight-token assistant suffix plus
+the up to three tokens a four-token-aligned boundary falls back).
 The cache reserves the full payload before enabling this capture. Disk,
 image, intermediate and learned-prefix checkpoints still stop prefill at
 their boundary.
