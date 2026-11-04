@@ -275,7 +275,23 @@ HttpResponse GenerationError(const TextGenerationError& exception) {
   error["message"] = exception.what();
   error["type"] = "server_error";
   error["code"] = exception.stable_code();
+  if (exception.required_bytes().has_value())
+    error["required_bytes"] = *exception.required_bytes();
+  if (exception.remaining_bytes().has_value())
+    error["remaining_bytes"] = *exception.remaining_bytes();
   response["error"] = std::move(error);
+  if (exception.required_bytes().has_value() ||
+      exception.remaining_bytes().has_value()) {
+    json::Value gufo = json::Value::object();
+    gufo["code"] = exception.stable_code();
+    if (exception.required_bytes().has_value())
+      gufo["required_bytes"] = *exception.required_bytes();
+    if (exception.remaining_bytes().has_value())
+      gufo["remaining_bytes"] = *exception.remaining_bytes();
+    json::Value usage = json::Value::object();
+    usage["gufo"] = std::move(gufo);
+    response["usage"] = std::move(usage);
+  }
   HttpResponse output{
       .status = exception.http_status(),
       .reason = StatusReason(exception.http_status()),

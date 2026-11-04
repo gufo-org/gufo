@@ -215,8 +215,9 @@ public:
       const gufo::sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled, bool stream_output) override {
     if (reject_on_start.has_value()) {
-      throw gufo::server::TextGenerationError(*reject_on_start,
-                                              "injected admission rejection");
+      throw gufo::server::TextGenerationError(
+          *reject_on_start, "injected admission rejection",
+          reject_required_bytes, reject_remaining_bytes);
     }
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
@@ -265,6 +266,8 @@ public:
   float last_temperature{0.0F};
   gufo::sampling::SamplingConfig last_sampling;
   std::optional<gufo::server::TextGenerationErrorCode> reject_on_start;
+  std::optional<std::size_t> reject_required_bytes;
+  std::optional<std::size_t> reject_remaining_bytes;
 
 private:
   std::mutex mutex;
@@ -2815,6 +2818,34 @@ void TestStreamingOverloadIsRejectedBeforeHeaders() {
     retry_after = retry_after || (name == "Retry-After" && value == "1");
   }
   Expect(retry_after, "retryable overload advertises Retry-After");
+}
+
+void TestInsufficientMemoryExplainsThePromptBudget() {
+  FakeBackend backend;
+  backend.reject_on_start =
+      gufo::server::TextGenerationErrorCode::kInsufficientMemory;
+  backend.reject_required_bytes = 4096;
+  backend.reject_remaining_bytes = 512;
+  const auto response = gufo::server::HandleOpenAiChat(Request(R"({
+        "model":"test-model",
+        "messages":[{"role":"user","content":"hello"}]
+      })"),
+                                                       backend);
+
+  Expect(response.status == 503, "an unaffordable prompt is refused with 503");
+  const auto body = gufo::json::parse(response.body);
+  const auto* error = body.find("error");
+  Expect(error != nullptr &&
+             error->member_str("code") == "insufficient_memory" &&
+             error->member_size("required_bytes") == 4096 &&
+             error->member_size("remaining_bytes") == 512,
+         "the error body names the budget shortfall");
+  const auto* usage = body.find("usage");
+  const auto* gufo = usage != nullptr ? usage->find("gufo") : nullptr;
+  Expect(gufo != nullptr && gufo->member_str("code") == "insufficient_memory" &&
+             gufo->member_size("required_bytes") == 4096 &&
+             gufo->member_size("remaining_bytes") == 512,
+         "usage.gufo repeats the machine-readable reason");
 }
 
 void TestImagePartsRetainOrderAndIdentity() {
@@ -7800,6 +7831,7 @@ int main() {
   TestServedModelNamesAreEchoed();
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();
+  TestInsufficientMemoryExplainsThePromptBudget();
   TestImagePartsRetainOrderAndIdentity();
   TestTextOnlyBackendRefusesImagesBeforeReading();
   TestImageCountAndByteBudget();

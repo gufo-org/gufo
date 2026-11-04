@@ -196,6 +196,12 @@ struct TextRunnerResourceClaim {
   std::optional<std::size_t> state_capacity_bytes;
   std::optional<std::size_t> per_request_state_bytes;
   std::optional<std::size_t> temporary_scratch_bytes;
+  /// Host bytes a prompt token writes into model state, currently the KV row.
+  /// Missing means the runner has no prompt-length state to charge.
+  std::optional<std::size_t> prompt_state_bytes_per_token;
+  /// Host bytes prompt state may claim before admission refuses. Missing
+  /// disables prompt-state admission for this runner.
+  std::optional<std::size_t> prompt_admission_budget_bytes;
   std::optional<std::size_t> retained_snapshot_capacity_bytes;
   std::optional<std::size_t> retained_snapshot_ceiling_bytes;
   bool requires_device_runtime_lock{false};

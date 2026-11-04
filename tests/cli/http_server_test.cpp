@@ -902,6 +902,23 @@ void TestLlamaSlotsAndMetrics() {
   }
   assert(metrics.find("# TYPE llamacpp:kv_cache_usage_ratio gauge\n") !=
          std::string::npos);
+  // A backend that publishes its prompt-state admission budget exposes it
+  // beside the KV ratio; a backend without one emits no budget gauges.
+  server.backend->prompt_budget =
+      gufo::server::TextGenerationBackend::PromptAdmissionBudget{
+          .budget_bytes = 4096,
+          .used_bytes = 1024,
+          .available_bytes = 3072,
+      };
+  const auto budget_metrics = get("/metrics");
+  assert(budget_metrics.find("gufo_prompt_state_budget_bytes 4096\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("gufo_prompt_state_reserved_bytes 1024\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("gufo_prompt_state_available_bytes 3072\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("# TYPE gufo_prompt_state_budget_bytes gauge\n") !=
+         std::string::npos);
 }
 
 void TestResponsesToolImages() {

@@ -34,6 +34,7 @@ enum class TextGenerationErrorCode : std::uint8_t {
   kOutputBackpressure,
   kSchedulerStopping,
   kToolChoiceUnsatisfied,
+  kInsufficientMemory,
   kDeviceLost,
 };
 
@@ -43,10 +44,21 @@ inline constexpr const char* kDeviceLostMessage =
 
 class TextGenerationError final : public std::runtime_error {
 public:
-  TextGenerationError(TextGenerationErrorCode code, const std::string& message)
-      : std::runtime_error(message), code_(code) {}
+  TextGenerationError(TextGenerationErrorCode code, const std::string& message,
+                      std::optional<std::size_t> required_bytes = std::nullopt,
+                      std::optional<std::size_t> remaining_bytes = std::nullopt)
+      : std::runtime_error(message),
+        code_(code),
+        required_bytes_(required_bytes),
+        remaining_bytes_(remaining_bytes) {}
 
   [[nodiscard]] TextGenerationErrorCode code() const noexcept { return code_; }
+  [[nodiscard]] std::optional<std::size_t> required_bytes() const noexcept {
+    return required_bytes_;
+  }
+  [[nodiscard]] std::optional<std::size_t> remaining_bytes() const noexcept {
+    return remaining_bytes_;
+  }
   [[nodiscard]] int http_status() const noexcept {
     switch (code_) {
       case TextGenerationErrorCode::kQueueFull:
@@ -57,6 +69,7 @@ public:
       case TextGenerationErrorCode::kOutputLimit:
       case TextGenerationErrorCode::kOutputBackpressure:
       case TextGenerationErrorCode::kSchedulerStopping:
+      case TextGenerationErrorCode::kInsufficientMemory:
       case TextGenerationErrorCode::kDeviceLost:
         return 503;
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
@@ -80,6 +93,8 @@ public:
         return "scheduler_stopping";
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return "tool_choice_unsatisfied";
+      case TextGenerationErrorCode::kInsufficientMemory:
+        return "insufficient_memory";
       case TextGenerationErrorCode::kDeviceLost:
         return "device_lost";
     }
@@ -93,6 +108,8 @@ public:
 
 private:
   TextGenerationErrorCode code_;
+  std::optional<std::size_t> required_bytes_;
+  std::optional<std::size_t> remaining_bytes_;
 };
 
 using ChatRequest = ext::ChatRequest;
@@ -299,6 +316,17 @@ public:
   /// Live execution sessions; empty when the backend has no session pool.
   [[nodiscard]] virtual std::vector<SessionState> session_states() const {
     return {};
+  }
+
+  /// Host prompt-state admission budget, when the backend accounts for it.
+  struct PromptAdmissionBudget {
+    std::size_t budget_bytes{0};
+    std::size_t used_bytes{0};
+    std::size_t available_bytes{0};
+  };
+  [[nodiscard]] virtual std::optional<PromptAdmissionBudget>
+  prompt_admission_budget() const {
+    return std::nullopt;
   }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }

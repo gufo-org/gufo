@@ -1706,6 +1706,21 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
          "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
       << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
+  if (const auto budget = b.prompt_admission_budget()) {
+    out << "# HELP gufo_prompt_state_budget_bytes Host RAM prompt state may "
+           "claim before admission refuses\n"
+        << "# TYPE gufo_prompt_state_budget_bytes gauge\n"
+        << "gufo_prompt_state_budget_bytes " << budget->budget_bytes << "\n"
+        << "# HELP gufo_prompt_state_reserved_bytes Host prompt state charged "
+           "to in-flight requests\n"
+        << "# TYPE gufo_prompt_state_reserved_bytes gauge\n"
+        << "gufo_prompt_state_reserved_bytes " << budget->used_bytes << "\n"
+        << "# HELP gufo_prompt_state_available_bytes Remaining host prompt "
+           "state budget\n"
+        << "# TYPE gufo_prompt_state_available_bytes gauge\n"
+        << "gufo_prompt_state_available_bytes " << budget->available_bytes
+        << "\n";
+  }
   return {.status = 200,
           .reason = "OK",
           .body = out.str(),

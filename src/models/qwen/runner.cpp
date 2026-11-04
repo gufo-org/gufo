@@ -774,11 +774,31 @@ public:
           *memory, *capacity,
           usage.request_state_bytes + usage.temporary_scratch_bytes, 0);
     }
+    // KV rows are allocated eagerly for the whole context, but on a unified
+    // memory part the host pages behind them are only committed as prefill
+    // writes them. Charge that deterministic growth at admission.
+    const auto& config = model_->GetConfig();
+    const std::size_t kv_element_bytes = execution_policy_.UsesFp16AttentionKv()
+                                             ? sizeof(std::uint16_t)
+                                             : sizeof(float);
+    auto prompt_bytes_per_token =
+        std::size_t{config.FullAttentionLayerCount()} *
+        config.num_key_value_heads * config.head_dim * 2 * kv_element_bytes;
+    if (dflash_model_ != nullptr) {
+      const auto& draft_config = dflash_model_->GetConfig();
+      const std::size_t draft_kv_width =
+          std::size_t{draft_config.num_key_value_heads} * draft_config.head_dim;
+      prompt_bytes_per_token +=
+          2 * std::size_t{dflash_model_->GetDFlashConfig().num_layers} *
+          draft_kv_width * sizeof(float);
+    }
     return {
         .resident_weights_bytes = resident_weights,
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = usage.request_state_bytes,
         .temporary_scratch_bytes = usage.temporary_scratch_bytes,
+        .prompt_state_bytes_per_token = prompt_bytes_per_token,
+        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
         .retained_snapshot_capacity_bytes = snapshot_capacity,
         .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,

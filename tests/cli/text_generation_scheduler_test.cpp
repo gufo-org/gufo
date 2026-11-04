@@ -208,6 +208,8 @@ struct FakeControl {
   bool vocabulary_failure{false};
   std::atomic<std::size_t> vocabulary_builds{0};
   std::atomic<std::size_t> decode_calls{0};
+  std::optional<std::size_t> prompt_state_bytes_per_token;
+  std::optional<std::size_t> prompt_admission_budget_bytes;
   std::atomic<std::size_t> batch_preparations{0};
   std::atomic<std::int64_t> first_request_advance_ns{0};
   bool incremental_prefill{true};
@@ -344,6 +346,9 @@ public:
         .state_capacity_bytes = 8 * 64,
         .per_request_state_bytes = 64,
         .temporary_scratch_bytes = 0,
+        .prompt_state_bytes_per_token = control_->prompt_state_bytes_per_token,
+        .prompt_admission_budget_bytes =
+            control_->prompt_admission_budget_bytes,
         .retained_snapshot_capacity_bytes = 1U << 25,
         .requires_device_runtime_lock = true,
     };
@@ -3510,6 +3515,50 @@ void TestReasoningTokenCount() {
   Expect(count({}, State::kThought) == 0, "no output counts nothing");
 }
 
+void TestPromptStateAdmissionBudget() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 256;
+  control->prompt_state_bytes_per_token = 16;
+  control->prompt_admission_budget_bytes = 64;
+  auto scheduler = MakeScheduler(control, 1);
+
+  auto initial = scheduler->PromptAdmissionBudgetSnapshot();
+  Expect(initial && initial->budget_bytes == 64 && initial->used_bytes == 0 &&
+             initial->available_bytes == 64,
+         "the prompt-state budget is published before any request");
+
+  // Hold one prefill so the admitted request keeps its charge visible.
+  control->block_prefill_label = 5;
+  auto first = scheduler->Submit({5, 6, 7}, 1, 0.0F);
+  control->WaitForPrefill(5);
+  auto in_flight = scheduler->PromptAdmissionBudgetSnapshot();
+  Expect(in_flight && in_flight->used_bytes == 3 * 16 &&
+             in_flight->available_bytes == 64 - 3 * 16,
+         "admitted prompt state is charged while prefill runs");
+
+  // Two more tokens need 32 bytes but only 16 remain.
+  bool refused = false;
+  try {
+    (void)scheduler->Submit({8, 9}, 1, 0.0F);
+  } catch (const TextGenerationError& error) {
+    refused = error.code() == TextGenerationErrorCode::kInsufficientMemory &&
+              error.http_status() == 503 && error.required_bytes() == 32 &&
+              error.remaining_bytes() == 16;
+  }
+  Expect(refused, "an unaffordable prompt is refused with stable byte details");
+
+  control->ReleasePrefill();
+  (void)first.Wait();
+  auto released = scheduler->PromptAdmissionBudgetSnapshot();
+  Expect(
+      released && released->used_bytes == 0 && released->available_bytes == 64,
+      "a terminal request returns its prompt-state charge");
+
+  // The same prompt is admitted once the earlier charge is back.
+  const auto second = scheduler->Submit({8, 9}, 1, 0.0F).Wait();
+  Expect(!second.cancelled, "a prompt that fits after release completes");
+}
+
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   TestBackendPreservesModelSamplingPreset();
@@ -3621,6 +3670,7 @@ int main() {
   TestPromptCancelledInsideYield();
   TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();
+  TestPromptStateAdmissionBudget();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
   TestExpiredQueuedRequestNeverConsumesState();
   TestSlowConsumerOutputIsBoundedAndReclaimed();

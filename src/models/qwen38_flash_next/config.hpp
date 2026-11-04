@@ -98,6 +98,17 @@ struct Config {
   [[nodiscard]] std::uint32_t AttentionKvDim() const noexcept {
     return num_kv_heads * head_dim;
   }
+  /// Host bytes one prompt token commits to full-attention K/V rows. K and V
+  /// are fp16; speculative decoding keeps one draft row beside each target
+  /// row, which mirrors the extra row `Executor::SessionBytes` reserves.
+  [[nodiscard]] std::size_t PromptKvBytesPerToken(
+      bool speculative) const noexcept {
+    const std::size_t row =
+        2 * std::size_t{AttentionKvDim()} * sizeof(std::uint16_t);
+    const std::size_t layers =
+        full_attention_interval == 0 ? 0 : num_layers / full_attention_interval;
+    return (layers + (speculative ? 1 : 0)) * row;
+  }
   [[nodiscard]] std::uint32_t PleEmbeddingDim() const noexcept {
     return ple_heads * ple_head_dim;
   }

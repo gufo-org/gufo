@@ -93,6 +93,11 @@ public:
   std::uint32_t max_context() const override { return 65536; }
   std::vector<SessionState> session_states() const override { return sessions; }
   std::vector<SessionState> sessions;
+  std::optional<PromptAdmissionBudget> prompt_admission_budget()
+      const override {
+    return prompt_budget;
+  }
+  std::optional<PromptAdmissionBudget> prompt_budget;
   std::string model_path() const override { return served_path; }
   std::string build_info() const override { return served_build; }
   std::string served_path;

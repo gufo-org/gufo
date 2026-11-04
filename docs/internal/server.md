@@ -1223,7 +1223,10 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable, or GPU context lost (`device_lost`)
+- `503` model or backend unavailable, GPU context lost (`device_lost`), or a
+  prompt whose host prompt-state bytes do not fit the admission budget
+  (`insufficient_memory`, with `error.required_bytes` and
+  `error.remaining_bytes` and the same values under `usage.gufo`)
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
@@ -1449,6 +1452,11 @@ even if the client disconnects before reading it; requests that fail in the
 scheduler, such as on a deadline or a runner error, add none of these.
 `llamacpp:kv_cache_usage_ratio` is the in-flight prompt and generated tokens
 over sessions times context; retained cache entries are not counted.
+`gufo_prompt_state_budget_bytes` is the host RAM prompt state may claim before
+admission refuses, `gufo_prompt_state_reserved_bytes` the bytes charged to
+in-flight requests, and `gufo_prompt_state_available_bytes` the remainder.
+The charge covers the deterministic KV rows a prompt writes, so a request that
+would exhaust host RAM is refused at admission instead of during prefill.
 `Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`
 provide request-level measurements.
 

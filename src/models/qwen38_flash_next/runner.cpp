@@ -346,6 +346,11 @@ public:
     }
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.
+    // KV rows are allocated eagerly for the whole context, but on a unified
+    // memory part the host pages behind them are only committed as prefill
+    // writes them. Charge that deterministic growth at admission.
+    const std::size_t prompt_bytes_per_token =
+        model_->config().PromptKvBytesPerToken(use_mtp_);
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
@@ -353,6 +358,8 @@ public:
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
         .temporary_scratch_bytes = 0,
+        .prompt_state_bytes_per_token = prompt_bytes_per_token,
+        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
