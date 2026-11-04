@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <semaphore>
 #include <sstream>
@@ -41,6 +42,8 @@ public:
   bool defer_idle{};
   bool in_pass{};
   bool partial{};
+  /// Overrides only the deprecated single-boundary PrefillThrough.
+  bool legacy{};
   std::size_t alignment{1};
   /// Every prefill step's end and in-pass checkpoint, in order.
   mutable std::vector<std::size_t> pass_ends;
@@ -61,7 +64,8 @@ public:
                              .prefix_reuse = true,
                              .in_pass_checkpoint = in_pass,
                              .partial_prefill_retention = partial,
-                             .prefill_alignment = alignment}};
+                             .prefill_alignment = alignment,
+                             .max_in_pass_checkpoints = legacy ? 1U : 64U}};
   }
   TextRunnerResourceClaim ResourceClaim() const override {
     return {.state_capacity_bytes = 1ULL << 30,
@@ -196,14 +200,42 @@ public:
     pass_ends.push_back(offset + count);
     return {count, offset + count == prompt.size()};
   }
+  /// Longest prefill tail an in-pass checkpoint may leave after it.
+  std::size_t max_in_pass_tail{8};
   std::optional<std::size_t> PrefillCheckpointBytes(
       const TextRunnerState&, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t budget,
       std::size_t boundary) const override {
     const auto end = offset + std::min(budget, prompt.size() - offset);
-    return boundary > offset && boundary < end && end - boundary <= 8
+    return boundary > offset && boundary < end &&
+                   end - boundary <= max_in_pass_tail
                ? std::optional<std::size_t>(1)
                : std::nullopt;
+  }
+  using TextModelRunner::PrefillThrough;
+  TextPrefillStep PrefillThrough(TextRunnerState& state,
+                                 std::span<const TextRunnerToken> prompt,
+                                 std::size_t offset, std::size_t budget,
+                                 std::span<const std::size_t> boundaries,
+                                 const InPassConsumer& consume) const override {
+    if (legacy)
+      return TextModelRunner::PrefillThrough(state, prompt, offset, budget,
+                                             boundaries, consume);
+    ++through_calls;
+    auto& s = dynamic_cast<State&>(state);
+    const auto count = std::min(budget, prompt.size() - offset);
+    auto at = offset;
+    for (std::size_t i = 0; i < boundaries.size(); ++i) {
+      const auto head = prompt.subspan(at, boundaries[i] - at);
+      s.adapter.Append(s.slot, head, head);
+      at = boundaries[i];
+      consume(i, nullptr);
+      in_pass_points.push_back(boundaries[i]);
+    }
+    const auto tail = prompt.subspan(at, offset + count - at);
+    s.adapter.Append(s.slot, tail, tail);
+    pass_ends.push_back(offset + count);
+    return {count, offset + count == prompt.size()};
   }
   TextPrefillStep PrefillThrough(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
@@ -221,9 +253,9 @@ public:
     } catch (...) {
       checkpoint->reset();
     }
+    in_pass_points.push_back(boundary);
     const auto tail = prompt.subspan(boundary, offset + count - boundary);
     s.adapter.Append(s.slot, tail, tail);
-    in_pass_points.push_back(boundary);
     pass_ends.push_back(offset + count);
     return {count, offset + count == prompt.size()};
   }
@@ -298,9 +330,12 @@ void InPassCapturePreservesBoundaryAndLiveTail() {
   Prefill(cold);
   const auto expected = Generate(cold);
   cold.Invalidate();
-  for (const bool fail : {false, true}) {
+  for (const auto [fail, legacy] :
+       {std::pair{false, false}, std::pair{true, false},
+        std::pair{false, true}}) {
     auto runner = std::make_shared<Runner>();
     runner->in_pass = true;
+    runner->legacy = legacy;
     TextRunnerPool pool(runner, 2);
     auto seed =
         pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
@@ -468,6 +503,89 @@ void DisabledCacheDoesNotPrepareARawPromptCheckpoint() {
   assert((runner->pass_ends == std::vector<std::size_t>{41}));
   (void)Generate(request);
   (void)request.Commit();
+}
+// A runner that captures in place anywhere in a pass takes the grid
+// checkpoint a long pass covers inside it, without splitting the pass, and
+// a branch past it restores that checkpoint like a pass-end capture.
+void GridCheckpointsCaptureInPass() {
+  std::vector<TextRunnerToken> prompt(4000);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto branch = prompt;
+  branch[3000] = 999;
+  auto cold_runner = std::make_shared<Runner>();
+  TextRunnerPool cold_pool(cold_runner, 1);
+  auto cold =
+      cold_pool.Acquire(branch, sampling::SamplingConfig{}, {}, {}, false);
+  Prefill(cold);
+  const auto expected = Generate(cold);
+  cold.Invalidate();
+  auto runner = std::make_shared<Runner>();
+  runner->in_pass = true;
+  runner->max_in_pass_tail = std::numeric_limits<std::size_t>::max();
+  TextRunnerPool pool(runner, 2);
+  auto seed =
+      pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 3990);
+  const auto step = seed.Prefill(8192);
+  assert(step.consumed_tokens == prompt.size() && step.decode_ready);
+  assert((runner->pass_ends == std::vector<std::size_t>{4000}));
+  assert(std::ranges::find(runner->in_pass_points, 2048) !=
+         runner->in_pass_points.end());
+  assert(std::ranges::find(runner->in_pass_points, 3990) !=
+         runner->in_pass_points.end());
+  (void)Generate(seed);
+  (void)seed.Commit();
+  runner->pass_ends.clear();
+  auto restored =
+      pool.Acquire(branch, sampling::SamplingConfig{}, {}, {}, true, 3990);
+  assert(restored.cached_prompt_tokens() == 2048);
+  Prefill(restored);
+  assert(Generate(restored) == expected);
+  restored.Invalidate();
+}
+// A prompt target captured in a pass before a grid checkpoint of the same
+// pass is admitted as a continuation boundary, not as the grid checkpoint
+// whose reservation the lease held last.
+void PromptTargetBeforeGridKeepsItsPurpose() {
+  std::vector<TextRunnerToken> prompt(4000);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto runner = std::make_shared<Runner>();
+  runner->in_pass = true;
+  runner->max_in_pass_tail = std::numeric_limits<std::size_t>::max();
+  const auto previous_level = Logger::Level();
+  Logger::SetLevel(LogLevel::kInfo);
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+  {
+    TextRunnerPool pool(runner, 1);
+    auto seed =
+        pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 2000);
+    (void)seed.Prefill(16384);
+    assert(seed.prefill_complete());
+    assert((runner->pass_ends == std::vector<std::size_t>{4000}));
+    assert(std::ranges::find(runner->in_pass_points, 2000) !=
+               runner->in_pass_points.end() &&
+           std::ranges::find(runner->in_pass_points, 2048) !=
+               runner->in_pass_points.end());
+    (void)Generate(seed);
+    (void)seed.Commit();
+  }
+  std::clog.rdbuf(previous_sink);
+  Logger::SetLevel(previous_level);
+  const auto purpose = [&](std::size_t tokens) {
+    std::istringstream lines(output.str());
+    const std::string admitted =
+        "event=retention action=" + std::to_string(static_cast<unsigned>(
+                                        cache::RetentionAction::kAdmitted));
+    const std::string at = " tokens=" + std::to_string(tokens) + " purpose=";
+    for (std::string line; std::getline(lines, line);)
+      if (line.find(admitted) != std::string::npos)
+        if (const auto i = line.find(at); i != std::string::npos)
+          return std::stoi(line.substr(i + at.size()));
+    return -1;
+  };
+  assert(purpose(2000) ==
+         static_cast<int>(cache::RetentionPurpose::kContinuation));
+  assert(purpose(2048) == static_cast<int>(cache::RetentionPurpose::kHistory));
 }
 void ColdAcquireResetsOnce() {
   auto runner = std::make_shared<Runner>();
@@ -2287,6 +2405,8 @@ int main() {
   UnalignedPromptEndPublishesBeforeDroppingTheFrontier();
   UnalignedRawPromptKeepsAnAlignedContinuation();
   DisabledCacheDoesNotPrepareARawPromptCheckpoint();
+  GridCheckpointsCaptureInPass();
+  PromptTargetBeforeGridKeepsItsPurpose();
   ColdAcquireResetsOnce();
   ColdAssignmentAvoidsDrainingCancelledSlot();
   ColdAssignmentAvoidsDrainingCancelledSlot(true);

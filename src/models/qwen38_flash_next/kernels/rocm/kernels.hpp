@@ -281,6 +281,16 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
+/// Most checkpoints one prefill pass captures in place.
+inline constexpr std::uint32_t kMaxPassCheckpoints = 4;
+
+/// Prefixes of a prefill pass, in rows from its start and ascending, whose
+/// state an in-pass checkpoint captures while the pass continues.
+struct PassCheckpoints {
+  std::uint32_t tokens[kMaxPassCheckpoints] = {};
+  std::uint32_t count = 0;
+};
+
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
 /// every Z row plus the QKV rows required for tile boundaries and rolling
@@ -296,7 +306,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0,
+                     hipStream_t stream, PassCheckpoints checkpoints = {},
                      hipStream_t z_stream = nullptr,
                      hipEvent_t z_start = nullptr);
 
@@ -377,10 +387,14 @@ void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
                    std::uint32_t channels, std::uint32_t history_rows,
                    hipStream_t stream);
 
+/// The recurrent state and rolling convolution history at each prefix of
+/// `tokens` (ascending rows from the pass start). Null entries skip that
+/// part of a checkpoint.
 struct GdnCheckpoint {
-  float* state = nullptr;
-  float* history = nullptr;
-  std::uint32_t tokens = 0;
+  float* state[kMaxPassCheckpoints] = {};
+  float* history[kMaxPassCheckpoints] = {};
+  std::uint32_t tokens[kMaxPassCheckpoints] = {};
+  std::uint32_t count = 0;
 };
 
 /// Gated DeltaNet over a chunk of tokens for one layer. Runs the causal

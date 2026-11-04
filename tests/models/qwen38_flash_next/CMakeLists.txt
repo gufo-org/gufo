@@ -66,6 +66,17 @@ if (ENGINE_ENABLE_HIP)
     device_headroom_fault.cpp)
   target_link_libraries(qwen38_flash_next_continuation_adapter_test PRIVATE
     qwen38_flash_next_test_hip ${CMAKE_DL_LIBS})
+  # In-pass checkpoints through the component path against split passes, in
+  # AR and MTP modes. Build it with qwen38_flash_next_model_tests. It needs
+  # the model: QWEN38_FLASH_NEXT_MODEL names the first GGUF shard and
+  # QWEN38_FLASH_NEXT_MTP_MODEL the MTP head. Without them it is skipped.
+  add_test(NAME qwen38_flash_next.in_pass_checkpoints
+    COMMAND qwen38_flash_next_continuation_adapter_test --in-pass-only)
+  set_tests_properties(qwen38_flash_next.in_pass_checkpoints PROPERTIES
+    LABELS "qwen38_flash_next;hip;gpu;gfx1151;external-model"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE
+    TIMEOUT 1800)
   add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL
     continuation_probe.cpp)
   target_link_libraries(qwen38_flash_next_continuation_probe PRIVATE

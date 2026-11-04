@@ -21,8 +21,11 @@ public:
   [[nodiscard]] Session& GetSession(cache::Slot&);
   // Capture synchronously while the coherent boundary is exposed; settle
   // all transfers before the callback returns and the shared arena is reused.
+  // The callback receives the index of each ascending boundary in turn.
   void PrefillThrough(cache::Slot&, std::span<const std::int32_t>,
-                      std::uint32_t boundary, const std::function<void()>&);
+                      std::span<const std::uint32_t> boundaries,
+                      const std::function<void(std::size_t)>&,
+                      std::span<const std::int32_t> next = {});
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
       std::size_t ram_bytes) const override {
     return layout_.BackingPlan(ram_bytes, model_->DecodeConcurrency());

@@ -152,7 +152,12 @@ For a text model, own tokenization, chat/control framing and tool syntax in the
 extension. Declare supported inputs, state/persistence/resource capabilities and
 sampling defaults accurately. Implement incremental execution, cancellation,
 state isolation, snapshot/restore and batching only under the contracts you
-advertise. Preserve sampler/constraint state and cache compatibility identities
+advertise. To capture prefill checkpoints without ending a pass at them, declare
+`in_pass_checkpoint` and `max_in_pass_checkpoints`, implement
+`PrefillCheckpointBytes` and override the boundaries form of `PrefillThrough`;
+each capture must equal the state a pass ending at its boundary leaves. The
+single-boundary form is deprecated and captures one checkpoint per call.
+Preserve sampler/constraint state and cache compatibility identities
 across rollback and continuation. Draft models/heads and sidecars stay with the
 target model's artifact set. Wire the CLI prompt/chat/benchmark drivers as well
 as the HTTP runner when those commands are supported.

@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "gufo/ext/adapter.hpp"
@@ -105,6 +106,9 @@ struct TextRunnerCapabilities {
   /// rounded down to it, except the complete prompt, which only an
   /// unchanged retry restores; one keeps every position.
   std::size_t prefill_alignment{1};
+  /// Boundaries one PrefillThrough call may capture in place. A runner that
+  /// overrides only the deprecated single-boundary form keeps one.
+  std::size_t max_in_pass_checkpoints{1};
 };
 
 struct TextRunnerPersistenceDescriptor {
@@ -439,11 +443,47 @@ public:
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
+  /// Returns a claim only when this chunk covers the boundary, ending
+  /// beyond it, and can capture it in place. Admission happens before
+  /// allocating checkpoint state.
   [[nodiscard]] virtual std::optional<std::size_t> PrefillCheckpointBytes(
       const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
       std::size_t, std::size_t) const {
     return std::nullopt;
   }
+  /// Prefills one chunk like Prefill, capturing each of the ascending
+  /// `boundaries` the chunk covers (at most max_in_pass_checkpoints, each
+  /// with a PrefillCheckpointBytes claim) without ending a pass there. Each
+  /// capture must equal the state a pass ending at its boundary leaves. The
+  /// runner invokes `consume` with each boundary's index, synchronously while
+  /// that boundary is readable as the lease's component state (it must drain
+  /// its captures before returning), or with the boundary's own snapshot
+  /// (native snapshot runners). Override this form; the default forwards one
+  /// boundary to the deprecated single-boundary form.
+  using InPassConsumer =
+      std::function<void(std::size_t, std::unique_ptr<TextRunnerSnapshot>)>;
+  [[nodiscard]] virtual TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::span<const std::size_t> boundaries,
+      const InPassConsumer& consume) const {
+    if (boundaries.size() != 1)
+      throw std::logic_error("runner captures one in-pass checkpoint per call");
+    bool captured = false;
+    std::unique_ptr<TextRunnerSnapshot> native;
+    auto step = PrefillThrough(state, prompt, offset, budget, boundaries[0],
+                               &native, [&] {
+                                 captured = true;
+                                 consume(0, nullptr);
+                                 return std::unique_ptr<TextRunnerSnapshot>{};
+                               });
+    if (!captured)
+      consume(0, std::move(native));
+    return step;
+  }
+  /// Deprecated: captures one boundary, into `checkpoint` or through
+  /// `capture` while the boundary is readable as the lease's component
+  /// state. Override the boundaries form instead.
   [[nodiscard]] virtual TextPrefillStep PrefillThrough(
       TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
       std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
