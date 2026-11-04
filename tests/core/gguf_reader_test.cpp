@@ -148,6 +148,53 @@ void TestSplitGgufDiscovery() {
   std::filesystem::remove_all(temp_dir);
 }
 
+void TestTensorlessFirstShard() {
+  // Unsloth's engram repack stores only metadata in shard 1 and ends it right
+  // after the header, without padding to the data alignment.
+  const auto temp_dir =
+      std::filesystem::temp_directory_path() /
+      ("gufo-gguf-tensorless-" + std::to_string(static_cast<long>(getpid())));
+  std::filesystem::create_directories(temp_dir);
+  const auto first_path = temp_dir / "model-00001-of-00002.gguf";
+  const auto second_path = temp_dir / "model-00002-of-00002.gguf";
+
+  GgufBuilder first;
+  first.AddMetadataUint32("split.no", 0);
+  first.AddMetadataUint32("split.count", 2);
+  first.AddMetadataInt32("split.tensors.count", 1);
+  first.AddMetadataString("general.architecture", "qwen35");
+  auto first_bytes = first.Build(0);
+  while (!first_bytes.empty() && first_bytes.back() == 0)
+    first_bytes.pop_back();
+  Expect(first_bytes.size() % 32 != 0, "Tensorless shard ends unaligned");
+
+  GgufBuilder second;
+  second.AddMetadataUint32("split.no", 1);
+  second.AddMetadataUint32("split.count", 2);
+  second.AddMetadataInt32("split.tensors.count", 1);
+  second.AddTensor("token_embd.weight", {32, 4}, gufo::core::GgmlType::kQ8_0,
+                   0);
+
+  WriteBinaryFile(first_path, first_bytes);
+  WriteBinaryFile(second_path, second.Build(0));
+
+  std::string err;
+  const auto shard = gufo::core::GgufReader::OpenMemory(
+      first_bytes.data(), first_bytes.size(), &err);
+  Expect(shard != nullptr, "Unpadded tensorless GGUF opens: " + err);
+  Expect(shard->GetTensorCount() == 0, "Tensorless GGUF has no tensors");
+
+  const auto reader = gufo::core::GgufReader::OpenFile(first_path, &err);
+  Expect(reader != nullptr, "Split set with tensorless shard opens: " + err);
+  Expect(reader->GetTensorCount() == 1, "Tensor shard supplies the tensor");
+  Expect(reader->FindTensor("token_embd.weight") != nullptr,
+         "Tensor from second shard found");
+  Expect(reader->GetMetadataString("general.architecture") == "qwen35",
+         "Metadata comes from the tensorless first shard");
+
+  std::filesystem::remove_all(temp_dir);
+}
+
 void TestQuantizationLabel() {
   // The label the benchmark table prints, derived from the tensor table rather
   // than from `general.file_type`: the Unsloth UD-Q8_K_XL artifact records
@@ -448,6 +495,7 @@ int main() {
   std::cout << "Running GgufReader unit tests...\n";
   TestBasicGgufParsing();
   TestSplitGgufDiscovery();
+  TestTensorlessFirstShard();
   TestQuantizationLabel();
   TestMalformedGgufRejection();
   TestHostileHeaders();
