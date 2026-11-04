@@ -90,7 +90,10 @@ server could split there: a turn's stable boundary, shared and in-pass
 checkpoints and budget-limited passes beside decoders can end anywhere. The
 model now reports `TextRunnerCapabilities::prefill_alignment` (the compress
 ratio, 4): budget-limited passes end on a multiple of four (a budget below
-four runs to the next one), and the stable final-user-turn boundary, grid
+four runs to the next one), as do passes the runner's 4,096-row capacity
+(4,224 for a final or in-pass checkpoint pass) ends before the prompt, also
+from a reused decoded frontier off that multiple (#1015), and the stable
+final-user-turn boundary, grid
 and shared checkpoints are rounded down to it, moving each boundary back
 by at most three tokens. The complete-prompt checkpoint keeps its exact
 end: an unchanged retry continues it without prefill. `ComponentTextCache`
