@@ -409,7 +409,7 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_rotation_checks_host_headroom_and_requested_limits(self):
         gib = 1024**3
         def log(capacity, sessions=1, entries=128):
-            return (f"event=snapshot_cache_configured sessions={sessions} "
+            return (f"schema=component-cache-v1 event=configured sessions={sessions} "
                     f"snapshot_entries={entries} capacity_bytes={capacity}\n")
         self.assertEqual(host_available_bytes("MemTotal: 9 kB\nMemAvailable: 4096 kB\n"),
                          4096 * 1024)
@@ -1856,7 +1856,7 @@ import json, sys
 from pathlib import Path
 output = Path(sys.argv[sys.argv.index("--output") + 1])
 (output.parent / "disk").mkdir(exist_ok=True)
-(output.parent / "disk" / "entry.kvc").write_bytes(b"x")
+(output.parent / "disk" / "entry").write_bytes(b"x")
 payload = ({continuation_report!r} if Path(__file__).name == "continuation.py"
            else {{"exact": {spacing_exact!r}}})
 output.write_text(json.dumps([payload]))

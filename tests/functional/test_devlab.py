@@ -75,7 +75,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'src/cli/serve/openai_chat.cpp'),
                          {'flash-next-q4'})
         self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'), {'qwen3-asr', 'qwen3-tts-base'})
-        self.assertEqual(self.models('tests/cli/continuation_cache_test.cpp'), self.models('CMakeLists.txt'))
+        self.assertEqual(self.models('tests/cli/unlisted_test.cpp'), self.models('CMakeLists.txt'))
 
     def test_category_and_fixture_ownership(self):
         for path, expected in [

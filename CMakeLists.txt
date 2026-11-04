@@ -365,8 +365,6 @@ add_subdirectory(src/ext)
 # live here; queueing, retention/admission and API policy stay on this core
 # side of the boundary, while models reach execution through gufo_ext_runtime.
 add_library(gufo_serving STATIC
-  src/cli/serve/continuation_cache.cpp
-  src/cli/serve/continuation_disk_store.cpp
   src/cli/serve/component_text_cache.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
@@ -918,12 +916,6 @@ endfunction()
       SKIP_RETURN_CODE 77)
   endif()
 
-  add_executable(continuation_cache_test tests/cli/continuation_cache_test.cpp)
-  target_link_libraries(continuation_cache_test PRIVATE gufo_serving)
-  add_test(NAME continuation_cache_test COMMAND continuation_cache_test)
-  set_tests_properties(continuation_cache_test PROPERTIES
-    LABELS "cpu;server;cache;state;lifecycle")
-
   add_executable(component_text_cache_test
     tests/cli/component_text_cache_test.cpp)
   target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake
@@ -934,16 +926,6 @@ endfunction()
   set_tests_properties(component_text_cache_test PROPERTIES
     LABELS "cpu;server;cache;state;lifecycle" COST 70)
 
-  # Legacy cache policy; deleted with the legacy cache.
-  add_executable(text_model_runner_legacy_test
-    tests/cli/text_model_runner_legacy_test.cpp)
-  target_link_libraries(text_model_runner_legacy_test PRIVATE gufo_serving
-    ${GUFO_QWEN_LIBRARIES})
-  add_test(NAME text_model_runner_legacy_test
-    COMMAND text_model_runner_legacy_test)
-  set_tests_properties(text_model_runner_legacy_test PROPERTIES
-    LABELS "cpu;server;cache;state;lifecycle")
-
   add_executable(text_model_runner_test tests/cli/text_model_runner_test.cpp)
   target_link_libraries(text_model_runner_test PRIVATE gufo_cache_fake gufo_serving
     ${GUFO_QWEN_LIBRARIES})
@@ -953,13 +935,6 @@ endfunction()
 
   # the disk-store suite exercises permission faults with chmod and lstat
   if (NOT WIN32)
-  add_executable(continuation_disk_store_test
-    tests/cli/continuation_disk_store_test.cpp)
-  target_link_libraries(continuation_disk_store_test PRIVATE gufo_serving)
-  add_test(NAME continuation_disk_store_test
-    COMMAND continuation_disk_store_test)
-  set_tests_properties(continuation_disk_store_test PROPERTIES
-    LABELS "cpu;server;cache;disk;state;lifecycle")
   endif()
 
   add_executable(logit_sampler_test tests/cli/logit_sampler_test.cpp)

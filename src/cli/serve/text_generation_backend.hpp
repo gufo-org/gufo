@@ -168,8 +168,6 @@ public:
     std::size_t cache_disk_queued_bytes{0};
     std::size_t cache_shared_bytes{0};
     /// Shared-prefix snapshots queued while prefilling this request.
-    std::size_t cache_shared_prefix_snapshots{0};
-    std::size_t cache_shared_prefix_bytes{0};
     std::size_t completion_tokens{0};
     /// Generated reasoning tokens, excluding the closing template delimiter.
     std::size_t reasoning_tokens{0};
@@ -204,7 +202,6 @@ public:
     double cache_restore_ms{0.0};
     double cache_snapshot_ms{0.0};
     double cache_disk_enqueue_ms{0.0};
-    double cache_shared_prefix_ms{0.0};
     double ttft_ms{0.0};
     double mean_inter_token_ms{0.0};
     double max_inter_token_ms{0.0};

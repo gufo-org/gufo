@@ -2204,10 +2204,6 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
   metrics["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;
   metrics["cache_disk_hit"] = result.cache_disk_hit;
-  metrics["cache_shared_prefix_snapshots"] =
-      result.cache_shared_prefix_snapshots;
-  metrics["cache_shared_prefix_bytes"] = result.cache_shared_prefix_bytes;
-  metrics["cache_shared_prefix_ms"] = result.cache_shared_prefix_ms;
   metrics["draft_rounds"] = result.draft_rounds;
   metrics["prefill_tokens"] = result.prefill_tokens;
   metrics["prefill_chunks"] = result.prefill_chunks;

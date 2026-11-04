@@ -24,7 +24,7 @@ set(gufo_pr_targets
   openai_chat_test http_server_test http_server_signals_test trace_test
   audio_websocket_test
   text_generation_scheduler_test
-  component_text_cache_test text_model_runner_test continuation_disk_store_test
+  component_text_cache_test text_model_runner_test
   bench_cli_test prompt_cli_test text_cli_dispatch_test eval_http_client_test
   # BEGIN GENERATED MODEL PR TARGETS
   deepseek_v4_flash_continuation_identity_test ds4_chat_template_test ds4_cli_test
@@ -75,7 +75,7 @@ if (WIN32)
   set(gufo_pr_linux_only
     gguf_reader_test gguf_identity_test platform_publish_test
     platform_prefault_test trace_test http_server_signals_test
-    http_server_test audio_websocket_test continuation_disk_store_test
+    http_server_test audio_websocket_test
     component_text_cache_test eval_http_client_test cache_disk_faults_test
     cache_boundary_test cache_adapter_test cache_slot_test cache_disk_test
     cache_streaming_test cache_tiered_test cache_disk_publication_test)

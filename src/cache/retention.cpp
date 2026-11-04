@@ -437,7 +437,7 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
     return source;
   // preserve_source protects byte admission while capture is incomplete. At
   // full-record publication, advance a redundant source before another
-  // family's last copy regardless of that flag (ContinuationCache::Commit).
+  // family's last copy regardless of that flag.
   if ((record_pressure || !r.preserve_source) && source != limit_ &&
       eligible(source) && Continuation(r.purpose) && priority(source) < 3 &&
       records_[source].checkpoint->Compatibility() == r.compatibility &&

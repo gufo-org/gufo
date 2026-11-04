@@ -479,16 +479,10 @@ must perform zero drafts. `state-edges` requires actual draft execution when
 enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
 draft limit for this suite. Audio and image/video generation have separate tests.
 
-Card 01's new cache workloads stay outside routine functional runs until the
-new cache lands in card 19. Both `run.py --suite all` and
-`openai_sdk.py --suite all` exclude `cache-compaction`, `cache-transforms`,
-`cache-pressure` and `cache-messages-loop`. The disk lifecycle runner is
-standalone and is never invoked by `all`. Existing functional suites and the
-passing CPU workload/gate checks remain active. Explicitly selecting a new
-workload still runs its strict assertions and may fail on the legacy cache;
-use that selection only to record a baseline or develop the new cache.
-Card 19 enables these workloads in routine qualification with their required
-RAM, disk and restart settings once their contracts pass.
+Both `run.py --suite all` and `openai_sdk.py --suite all` exclude
+`cache-compaction`, `cache-transforms`, `cache-pressure` and
+`cache-messages-loop`, which need their own RAM, disk and restart settings.
+The disk lifecycle runner is standalone and is never invoked by `all`.
 
 | Suite | Checks |
 | --- | --- |
@@ -753,7 +747,7 @@ request. The seed is a genuine model reply; tool calls/results and the summary
 are deterministic client-authored fixtures. This covers compaction mechanics,
 not a real client's summary generation or retention under RAM/disk pressure.
 The [card 01 results](../../docs/cache-redesign/cards/01-functional-coverage.md#results)
-record all scenario families, including failures on the legacy cache.
+record all scenario families.
 
 Run `cache-transforms` with a roomy RAM budget in its own invocation. Its
 retried prompts end with a user turn after a tool result, and Qwen templates
