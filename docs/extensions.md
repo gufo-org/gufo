@@ -185,6 +185,16 @@ across rollback and continuation. Draft models/heads and sidecars stay with the
 target model's artifact set. Wire the CLI prompt/chat/benchmark drivers as well
 as the HTTP runner when those commands are supported.
 
+A text provider supplies its recommended sampling through
+`TextRunnerDescriptor::sampling_defaults` (HTTP) and
+`TextProvider::sampling_defaults` (`prompt`/`chat`), both a
+`sampling::TextSamplingDefaults` holding one set of optional values for thinking
+enabled, disabled and unspecified. Set values, including zero, apply as written;
+unset controls stay neutral; the seed and output constraint are never defaults.
+Precedence is provider defaults, explicit server/CLI settings, then per-request
+overrides, identically for HTTP, `prompt` and `chat`. `sampling_preset` remains
+for existing extensions.
+
 Provider options use canonical names and manifest types. CMake checks conflicting
 declarations. The Nix serving helper derives provider arguments and validation
 from metadata, including optional `serving` declarations. New runtime controls

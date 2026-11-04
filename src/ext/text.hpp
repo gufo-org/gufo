@@ -112,6 +112,10 @@ struct TextRunnerDescriptor {
   std::string state_abi;
   std::uint32_t max_context{0};
   TextRunnerCapabilities capabilities;
+  /// Provider-defined sampling defaults. They take precedence over
+  /// `sampling_preset`; neither set leaves controls to the caller.
+  std::optional<sampling::TextSamplingDefaults> sampling_defaults;
+  /// Core preset kept for existing extensions.
   sampling::TextModelPreset sampling_preset{
       sampling::TextModelPreset::kUnspecified};
 };
@@ -627,6 +631,11 @@ struct ToolDialect {
 
 using TextProbe = bool (*)(std::string_view model_root);
 using TextProbeGguf = bool (*)(const core::GgufReader& reader);
+/// Sampling defaults of the model in `reader`, for prompt and chat; `nullopt`
+/// leaves controls to the command line.
+using TextSamplingDefaultsProbe =
+    std::optional<sampling::TextSamplingDefaults> (*)(
+        const core::GgufReader& reader);
 using TextRunnerFactory = std::shared_ptr<TextModelRunner> (*)(
     const TextRunnerOptions& options, std::string* error);
 using TextBenchDriver =
@@ -648,6 +657,7 @@ struct TextProvider {
   TextBenchDriver bench_driver = nullptr;
   TextPromptDriver prompt_driver = nullptr;
   TextChatDriver chat_driver = nullptr;
+  TextSamplingDefaultsProbe sampling_defaults = nullptr;
 };
 
 void RegisterTextProvider(TextProvider provider);

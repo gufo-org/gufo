@@ -90,7 +90,10 @@ conversation tokens. Reduce `--context` or `--sessions` if their state exceeds
 available memory.
 
 Text sampling follows each model's recommended defaults in `serve`, `prompt`
-and `chat`. Explicit request values override explicit server options, which
+and `chat`. Model providers
+supply these defaults, which explicit server or command-line settings override,
+and requests override in turn; explicit zero values stay explicit and provider
+defaults never replace a request's output grammar. Explicit request values override explicit server options, which
 otherwise inherit the effective thinking preset. Null request values inherit
 where supported; explicit zero values, including `top_p: 0`, are preserved.
 The startup sampling log reports server defaults; requests can override each

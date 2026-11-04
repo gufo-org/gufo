@@ -1626,7 +1626,8 @@ void TestBackendSamplingDefaults() {
 void TestModelSamplingDefaults() {
   using gufo::sampling::TextModelPreset;
   FakeBackend backend;
-  backend.defaults.model = TextModelPreset::kQwen38;
+  backend.defaults.provider =
+      gufo::sampling::PresetDefaults(TextModelPreset::kQwen38);
   backend.defaults.supplied = {};
   auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
   constraint->grammar = gufo::sampling::JsonConstraint::Object();
@@ -1676,7 +1677,8 @@ void TestModelSamplingDefaults() {
   Expect(config.temperature == 0.0F && config.presence_penalty == 0.0F &&
              config.top_k == 40,
          "Explicit request zero overrides server and model presets");
-  backend.defaults.model = TextModelPreset::kDeepSeekV4Flash;
+  backend.defaults.provider =
+      gufo::sampling::PresetDefaults(TextModelPreset::kDeepSeekV4Flash);
   backend.defaults.supplied = {};
   for (const bool thinking : {false, true}) {
     backend.reasoning_defaults_value.enabled = thinking;
@@ -1692,6 +1694,86 @@ void TestModelSamplingDefaults() {
   config = send("");
   Expect(config.constraint == backend.defaults.sampling.constraint,
          "Explicit public-API configuration preserves its output constraint");
+}
+
+// A provider-defined policy absent from core: different values per thinking
+// mode, including controls no preset sets and an explicit zero.
+void TestProviderSamplingDefaults() {
+  using gufo::sampling::TextSamplingDefaults;
+  using gufo::sampling::TextSamplingValues;
+  FakeBackend backend;
+  TextSamplingDefaults provider;
+  provider.thinking_enabled = {.temperature = 0.6F,
+                               .top_k = 64,
+                               .top_p = 0.9F,
+                               .min_p = 0.05F,
+                               .min_keep = 2,
+                               .repeat_penalty = 1.1F,
+                               .repeat_last_n = 32,
+                               .frequency_penalty = 0.3F};
+  provider.thinking_disabled = {
+      .temperature = 0.0F, .top_p = 0.5F, .presence_penalty = 0.25F};
+  provider.thinking_unspecified = {.temperature = 0.45F, .top_k = 7};
+  backend.defaults.provider = provider;
+  backend.defaults.supplied = {};
+  auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
+  constraint->grammar = gufo::sampling::JsonConstraint::Object();
+  constraint->vocabulary =
+      std::make_shared<gufo::sampling::ConstraintVocabulary>(
+          2, [](std::uint32_t id) {
+            return gufo::sampling::ConstraintVocabulary::Piece{
+                .text = id == 0 ? "{}" : "", .stop = id == 1};
+          });
+  backend.defaults.sampling.constraint = constraint;
+  auto send = [&](const std::string& fields) {
+    const auto response = gufo::server::HandleOpenAiChat(
+        Request("{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\","
+                "\"content\":\"hello\"}]" +
+                fields + "}"),
+        backend);
+    Expect(response.status == 200, "Provider default request accepted");
+    Expect(backend.last_sampling.constraint == constraint,
+           "Provider defaults preserve the caller's output constraint");
+    return backend.last_sampling;
+  };
+  backend.reasoning_defaults_value.enabled = true;
+  auto config = send("");
+  Expect(config.temperature == 0.6F && config.top_k == 64 &&
+             config.top_p == 0.9F && config.min_p == 0.05F &&
+             config.min_keep == 2 && config.repeat_penalty == 1.1F &&
+             config.repeat_last_n == 32 && config.frequency_penalty == 0.3F &&
+             config.presence_penalty == 0.0F && config.seed == -1,
+         "Provider thinking-on defaults apply; unset controls stay neutral");
+  config = send(R"(,"chat_template_kwargs":{"enable_thinking":false})");
+  Expect(config.temperature == 0.0F && config.top_p == 0.5F &&
+             config.presence_penalty == 0.25F && config.top_k == 0 &&
+             config.min_p == 0.0F && config.repeat_penalty == 1.0F &&
+             config.repeat_last_n == 64,
+         "Request thinking-off selects the provider's disabled defaults, "
+         "including a zero temperature");
+  backend.reasoning_defaults_value.enabled = std::nullopt;
+  config = send("");
+  Expect(
+      config.temperature == 0.45F && config.top_k == 7 && config.top_p == 1.0F,
+      "Unspecified thinking selects the provider's unspecified defaults");
+  backend.reasoning_defaults_value.enabled = true;
+  backend.defaults.sampling.temperature = 0.0F;
+  backend.defaults.sampling.top_k = 0;
+  backend.defaults.sampling.seed = 0;
+  backend.defaults.supplied.temperature = true;
+  backend.defaults.supplied.top_k = true;
+  backend.defaults.supplied.seed = true;
+  config = send("");
+  Expect(config.temperature == 0.0F && config.top_k == 0 && config.seed == 0 &&
+             config.top_p == 0.9F && config.min_p == 0.05F,
+         "Explicit server zeros beat provider defaults; the rest remain");
+  config = send(R"(,"temperature":0.8,"top_k":3,"top_p":0,"min_p":0)");
+  Expect(config.temperature == 0.8F && config.top_k == 3 &&
+             config.top_p == 0.0F && config.min_p == 0.0F && config.seed == 0,
+         "Request values, including zero, beat server and provider values");
+  config = send(R"(,"temperature":null,"top_p":null)");
+  Expect(config.temperature == 0.0F && config.top_p == 0.9F,
+         "Null request values inherit the resolved defaults");
 }
 
 void TestCompleteToolDefinitionsReachTemplate() {
@@ -6920,6 +7002,7 @@ int main() {
   TestCachedPrefillMetrics();
   TestBackendSamplingDefaults();
   TestModelSamplingDefaults();
+  TestProviderSamplingDefaults();
   TestCompleteToolDefinitionsReachTemplate();
   TestFlatToolFieldsReachTemplate();
   TestAllSamplingControlsReachBackend();

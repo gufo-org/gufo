@@ -173,7 +173,10 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
     auto new_state = std::make_unique<Impl::State>();
     new_state->model_path = desc.model_id;
     new_state->sampling_defaults.max_tokens = 0;
-    new_state->sampling_defaults.model = desc.sampling_preset;
+    new_state->sampling_defaults.provider =
+        desc.sampling_defaults.has_value()
+            ? desc.sampling_defaults
+            : sampling::PresetDefaults(desc.sampling_preset);
     new_state->sampling_defaults.sampling = sampling::SamplingConfig{};
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = desc.capabilities.supports_vision;

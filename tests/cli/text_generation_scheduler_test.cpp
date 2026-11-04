@@ -3134,7 +3134,8 @@ void TestBackendPreservesModelSamplingPreset() {
     gufo::server::InferenceBackend backend;
     std::string error;
     Expect(backend.load(std::make_shared<FakeRunner>(control), &error), error);
-    Expect(backend.sampling_defaults().model == preset,
+    Expect(backend.sampling_defaults().provider ==
+               gufo::sampling::PresetDefaults(preset),
            "loading an extension preserves its sampling preset");
     for (const bool thinking : {false, true}) {
       const auto defaults = backend.sampling_defaults().Resolve(thinking);
@@ -3150,7 +3151,8 @@ void TestBackendPreservesModelSamplingPreset() {
     configured.temperature = 0.25F;
     backend.set_sampling_defaults(32, configured, {.temperature = true});
     const auto defaults = backend.sampling_defaults();
-    Expect(defaults.model == preset && defaults.max_tokens == 32 &&
+    Expect(defaults.provider == gufo::sampling::PresetDefaults(preset) &&
+               defaults.max_tokens == 32 &&
                defaults.Resolve(true).temperature == 0.25F &&
                defaults.Resolve(true).top_p == 0.95F,
            "server overrides retain the model preset for omitted fields");

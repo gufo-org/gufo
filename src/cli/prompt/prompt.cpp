@@ -291,6 +291,24 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
   return opt;
 }
 
+// Applies the provider's recommended sampling defaults under the explicit
+// command-line settings, with the thinking mode `--think` selects.
+void ResolvePromptSampling(const ext::TextProvider& provider,
+                           const core::GgufReader& reader, PromptOptions* opt) {
+  if (provider.sampling_defaults == nullptr) {
+    return;
+  }
+  std::optional<bool> thinking;
+  if (opt->reasoning_mode == "on" || opt->reasoning_effort != "auto") {
+    thinking = true;
+  } else if (opt->reasoning_mode == "off") {
+    thinking = false;
+  }
+  opt->sampling = sampling::ResolveTextSampling(
+      provider.sampling_defaults(reader), thinking, opt->sampling,
+      opt->sampling_supplied);
+}
+
 }  // namespace
 
 static void PrintTextHelp(std::string_view program_name,
@@ -380,6 +398,7 @@ int RunPrompt(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
+  ResolvePromptSampling(*provider, *reader, &opt);
   return provider->prompt_driver(opt, *reader, model_load_start);
 }
 
@@ -423,6 +442,7 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
+  ResolvePromptSampling(*provider, *reader, &opt);
   return provider->chat_driver(opt, *reader, model_load_start);
 }
 
