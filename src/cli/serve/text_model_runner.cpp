@@ -606,7 +606,12 @@ struct TextRunnerPool::Request::Impl {
       stable_prefix_position = Aligned(stable_prefix_position);
       if (stable_prefix_position <= prefill_offset)
         stable_prefix_position = 0;
-      if (count > prefill_offset && count < prompt.size())
+      // Raw completions have no earlier stable chat boundary. Retain the
+      // aligned prompt tail too, or a longer request loses all reuse when
+      // Acquire rejects the exact unaligned prompt checkpoint. Advancing this
+      // target still captures the complete prompt for unchanged retries.
+      if (count > prefill_offset &&
+          (count < prompt.size() || Aligned(count) > prefill_offset))
         count = std::max(Aligned(count), prefill_offset);
     }
     snapshot_tokens.reserve(prompt.size());

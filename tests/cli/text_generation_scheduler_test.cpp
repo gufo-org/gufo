@@ -1365,13 +1365,16 @@ void TestPrefillYieldsToEveryDueDecoder(bool multi_token, bool batched) {
   control->multi_token_decode = multi_token;
   control->batched_multi_token_decode = batched;
   control->supports_batched_advance = multi_token;
-  control->block_advance_label = 2;
+  control->block_advance_label = 1;
   auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
 
   const std::size_t output_tokens = multi_token ? 30 : 10;
   auto request_a = scheduler->Submit({1}, output_tokens, 0.0F);
+  // Hold A before it can finish while the submitting thread is descheduled.
+  // Queue both peers before releasing it, so both decoders are still due
+  // between C's prefill chunks, regardless of host scheduling.
+  control->WaitForAdvance(1);
   auto request_b = scheduler->Submit({2}, output_tokens, 0.0F);
-  control->WaitForAdvance(2);
   auto request_c = scheduler->Submit({3, 30, 31, 32, 33, 34, 35}, 2, 0.0F);
   control->ReleaseAdvance();
 
