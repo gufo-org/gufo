@@ -7994,6 +7994,106 @@ static int rocm_graph_load_payload(ds4_rocm_graph* graph,
   return 0;
 }
 
+void* ds4_rocm_graph_continuation_tensor(const ds4_rocm_graph* graph,
+                                         ds4_continuation_tensor tensor,
+                                         uint32_t index) {
+  const ds4_gpu_tensor* selected = nullptr;
+  switch (tensor) {
+    case ds4_continuation_tensor::kRaw:
+      selected = graph->layer_raw_cache[index];
+      break;
+    case ds4_continuation_tensor::kAttentionRows:
+      selected = graph->layer_attn_comp_cache[index];
+      break;
+    case ds4_continuation_tensor::kAttentionValues:
+      selected = graph->layer_attn_state_kv[index];
+      break;
+    case ds4_continuation_tensor::kAttentionScores:
+      selected = graph->layer_attn_state_score[index];
+      break;
+    case ds4_continuation_tensor::kIndexerRows:
+      selected = graph->layer_index_comp_cache[index];
+      break;
+    case ds4_continuation_tensor::kIndexerValues:
+      selected = graph->layer_index_state_kv[index];
+      break;
+    case ds4_continuation_tensor::kIndexerScores:
+      selected = graph->layer_index_state_score[index];
+      break;
+    case ds4_continuation_tensor::kDraftWindow:
+      selected = graph->dspark_kv_cache[index];
+      break;
+  }
+  return ds4_gpu_tensor_device_pointer(selected);
+}
+
+ds4_continuation_ring ds4_rocm_graph_raw_ring(const ds4_rocm_graph* graph,
+                                              uint32_t position) {
+  return {graph->raw_cap, session_raw_live_rows(graph, position)};
+}
+
+ds4_continuation_ring ds4_rocm_graph_draft_ring(const ds4_rocm_graph* graph,
+                                                uint32_t position) {
+  return {graph->dspark_cache_cap, std::min(position, DS4_N_SWA)};
+}
+
+bool ds4_rocm_graph_draft_capture(const ds4_rocm_graph* graph) {
+  return graph->dspark && graph->dspark_capture_enabled;
+}
+
+bool ds4_rocm_graph_rows_at(const ds4_rocm_graph* graph, uint32_t position) {
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    if (ratio != 0 &&
+        (graph->layer_n_comp[il] != position / ratio ||
+         (ratio == 4 && graph->layer_n_index_comp[il] != position / ratio)))
+      return false;
+  }
+  return true;
+}
+
+// The same headroom as a snapshot restore, so the next chunk does not grow.
+bool ds4_rocm_graph_reserve_rows(ds4_rocm_graph* graph, uint32_t position) {
+  if (ds4_gpu_synchronize() == 0)
+    return false;
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    if (ratio == 0)
+      continue;
+    const uint64_t required =
+        static_cast<uint64_t>(position / ratio) +
+        (DS4_N_SWA + ratio - 1) / ratio + 2;
+    if (position / ratio > graph->layer_comp_cap[il] ||
+        !rocm_graph_reserve_compressed_rows(
+            graph, il,
+            static_cast<uint32_t>(
+                std::min<uint64_t>(graph->layer_comp_cap[il], required))))
+      return false;
+  }
+  return true;
+}
+
+bool ds4_rocm_graph_commit_rows(ds4_rocm_graph* graph, uint32_t position,
+                                uint32_t draft_tokens, bool draft_capture) {
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    graph->layer_n_comp[il] = ratio == 0 ? 0 : position / ratio;
+    graph->layer_n_index_comp[il] = ratio == 4 ? position / ratio : 0;
+    if (ratio == 4 && !rocm_graph_rebuild_attn_comp_mirror(
+                          graph, il, graph->layer_n_comp[il]))
+      return false;
+  }
+  if (ds4_gpu_synchronize() == 0)
+    return false;
+  graph->dspark_capture_enabled = draft_capture;
+  graph->dspark_context_len = draft_tokens;
+  graph->dspark_capture_mask = 0;
+  graph->dspark_capture_batch_mask = 0;
+  graph->dspark_capture_batch_start = 0;
+  graph->dspark_capture_batch_tokens = 0;
+  return true;
+}
+
 int ds4_rocm_graph_save_snapshot(const ds4_rocm_graph* graph,
                                  const ds4_tokens* checkpoint,
                                  const float* logits, uint32_t prefill_capacity,

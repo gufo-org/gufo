@@ -9,6 +9,14 @@ target_compile_definitions(deepseek_v4_flash_continuation_identity_test PRIVATE
 add_test(NAME deepseek_v4_flash_continuation_identity_test COMMAND deepseek_v4_flash_continuation_identity_test)
 set_tests_properties(deepseek_v4_flash_continuation_identity_test PROPERTIES LABELS "cpu;deepseek_v4_flash;cache;correctness")
 
+add_executable(deepseek_v4_flash_continuation_layout_test continuation_layout_test.cpp)
+target_link_libraries(deepseek_v4_flash_continuation_layout_test PRIVATE
+  gufo_deepseek_v4_flash)
+add_test(NAME deepseek_v4_flash_continuation_layout_test
+  COMMAND deepseek_v4_flash_continuation_layout_test)
+set_tests_properties(deepseek_v4_flash_continuation_layout_test PROPERTIES
+  LABELS "cpu;deepseek_v4_flash;cache;correctness")
+
 # DS4 CTest checks are registered here. Shared CLI/parser and scheduler
 # tests remain with their shared components.
 add_executable(ds4_sampling_test sampling_test.cpp)
@@ -78,6 +86,16 @@ if(ENGINE_ENABLE_HIP)
   add_test(NAME ds4.dspark COMMAND ds4_quality_test --dspark)
   set_tests_properties(ds4.target ds4.dspark PROPERTIES
     LABELS "gpu;hip;gfx1151;ds4;quality;external-model;slow"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
+  add_executable(ds4_continuation_adapter_test continuation_adapter_test.cpp)
+  target_link_libraries(ds4_continuation_adapter_test PRIVATE
+    gufo_deepseek_v4_flash_hip gufo_cache_hip hip::host)
+  add_test(NAME ds4.continuation_adapter
+    COMMAND ds4_continuation_adapter_test)
+  set_tests_properties(ds4.continuation_adapter PROPERTIES
+    LABELS "gpu;hip;ds4;cache;external-model;slow"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 

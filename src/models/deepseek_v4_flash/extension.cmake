@@ -4,6 +4,7 @@ gufo_extension_target(
   NAME gufo_deepseek_v4_flash
   SOURCES
     chat_template.cpp
+    continuation_layout.cpp
     runtime/sampling.cpp
     tool_calls.cpp
     probe.cpp
@@ -71,6 +72,7 @@ endif()
 gufo_extension_target(
   NAME gufo_deepseek_v4_flash_hip
   SOURCES
+    continuation_adapter.cpp
     engine.cpp
     runtime/model_data.cpp
     runtime/rocm_graph.cpp
@@ -81,6 +83,7 @@ gufo_extension_target(
     provider.cpp
   LINK_LIBRARIES
     gufo_deepseek_v4_flash
+    gufo_cache_hip
     gufo_deepseek_v4_flash_mmq
     gufo_logging
     gufo_compare
