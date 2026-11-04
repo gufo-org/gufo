@@ -149,6 +149,10 @@ public:
         std::shared_ptr<const ContinuationSnapshot> snapshot = nullptr,
         std::vector<ContinuationToken> live_tokens = {});
 
+    /// True when the cache retains immutable snapshots. Without them an entry
+    /// describes its live state, so a commit must name that state's tokens.
+    [[nodiscard]] bool retains_snapshots() const noexcept;
+
     /// Explicitly discards partial state. The destructor does the same if a
     /// lease is not committed.
     void Invalidate() noexcept;

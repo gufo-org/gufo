@@ -134,6 +134,8 @@ public:
                      std::shared_ptr<const ContinuationSnapshot> = {},
                      std::vector<ContinuationToken> = {});
   void Invalidate() noexcept;
+  /// False only for a legacy cache with the RAM snapshot tier off.
+  [[nodiscard]] bool retains_snapshots() const noexcept;
   [[nodiscard]] std::size_t CaptureBytes() const;
   [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
   [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Capture();

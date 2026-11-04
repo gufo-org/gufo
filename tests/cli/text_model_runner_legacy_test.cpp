@@ -1979,6 +1979,49 @@ void TestSnapshotCacheCapacityIsReportedAtStartup() {
 
 /// Off keeps no snapshot at all: nothing is captured or refused, the log says
 /// so, and a session still reuses its own live state.
+/// Off names the live state's tokens, reply included: a later prompt that
+/// shares only the earlier prompt must not reuse a state that has moved past
+/// it, while one that continues the reply does.
+void TestRamCacheOffCommitsLiveFrontier() {
+  // One request with a two-token reply: the state ends at position five.
+  const auto replied = [](TextRunnerPool& pool, bool cancelled) {
+    auto request = pool.Acquire({1, 2, 3});
+    Expect(request.Prefill(3).decode_ready, "prompt completes");
+    Expect(request.SelectNext().token == 90, "first reply token");
+    request.Advance();
+    Expect(request.SelectNext().token == 91, "second reply token");
+    request.Advance();
+    if (cancelled)
+      (void)request.Cancel();
+    else {
+      Expect(request.SelectNext().stop, "reply stops");
+      (void)request.Commit();
+    }
+  };
+  for (const bool cancelled : {false, true})
+    for (const bool continues : {false, true}) {
+      auto stats = std::make_shared<FakeStats>();
+      auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256,
+                                                     std::size_t{64} << 30);
+      TextRunnerPool pool(runner, 1, std::nullopt, {.enabled = false});
+      replied(pool, cancelled);
+      if (continues) {
+        auto next = pool.Acquire({1, 2, 3, 90, 91, 7});
+        Expect(next.cache_hit() && next.cached_prompt_tokens() == 5,
+               "a prompt continuing the reply reuses the live state");
+        next.Invalidate();
+      } else {
+        auto edited = pool.Acquire({1, 2, 3, 5});
+        Expect(!edited.cache_hit(),
+               "a prompt sharing only the old prompt "
+               "cannot reuse the live state");
+        Expect(edited.Prefill(4).decode_ready, "the edited prompt prefills");
+        edited.Invalidate();
+      }
+      Expect(stats->snapshot_captures == 0, "off captures no snapshot");
+    }
+}
+
 void TestRamCacheOffCapturesNothingAndKeepsLiveState() {
   // Counts reads of the runner's resource claim, which sizes the budget.
   struct ClaimCountingRunner final : SnapshotRunner {
@@ -2140,6 +2183,7 @@ int main() {
 
   TestSnapshotCacheCapacityIsReportedAtStartup();
   TestRamCacheOffCapturesNothingAndKeepsLiveState();
+  TestRamCacheOffCommitsLiveFrontier();
   TestSnapshotStartupReportsSelectedLimits();
   TestPersistentSnapshotRestoresAcrossPools();
   TestUnpersistedRequestStaysOffDisk();

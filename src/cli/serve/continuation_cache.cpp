@@ -331,6 +331,10 @@ std::size_t ContinuationCache::Lease::Commit(
   return retained;
 }
 
+bool ContinuationCache::Lease::retains_snapshots() const noexcept {
+  return cache_ != nullptr && cache_->impl_->snapshot_mode();
+}
+
 std::size_t ContinuationCache::Lease::PublishSnapshot(
     std::vector<ContinuationToken> tokens,
     std::shared_ptr<const ContinuationSnapshot> snapshot,

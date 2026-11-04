@@ -1734,7 +1734,10 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
     if (!impl_->lease.component())
       state.Invalidate();
   }
-  if (capabilities.snapshot && capabilities.fork) {
+  // With the RAM cache off a legacy entry names the live state, including
+  // generated tokens, rather than the earlier immutable prompt snapshot.
+  if (capabilities.snapshot && capabilities.fork &&
+      impl_->lease.retains_snapshots()) {
     CommitMetrics metrics = impl_->snapshot_metrics;
     metrics.snapshot_bytes += impl_->lease.Commit(
         std::move(impl_->snapshot_tokens), std::move(impl_->prompt_snapshot),
@@ -1806,7 +1809,8 @@ TextRunnerPool::Request::Cancel() noexcept {
       state.Invalidate();
     }
     CommitMetrics metrics = impl_->snapshot_metrics;
-    if (capabilities.snapshot && capabilities.fork) {
+    if (capabilities.snapshot && capabilities.fork &&
+        impl_->lease.retains_snapshots()) {
       metrics.snapshot_bytes += impl_->lease.Commit(
           std::move(impl_->snapshot_tokens), std::move(impl_->prompt_snapshot),
           std::move(checkpoint));
