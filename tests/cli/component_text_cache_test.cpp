@@ -21,6 +21,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "tests/cache/fake_adapter.hpp"
+#include "tests/cli/fake_cache_resources.hpp"
 #include "tests/support/temporary_directory.hpp"
 
 using namespace gufo;
@@ -95,90 +96,14 @@ public:
       std::shared_ptr<const TextPromptContext>) const override {}
   std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
       cache::ResourceLedger& ledger, std::size_t) const override {
-    struct Block {
-      cache::ResourceCharge pool;
-      std::span<std::byte> data;
-      std::shared_ptr<const void> owner;
-      bool private_state;
-    };
-    auto blocks = std::make_shared<std::vector<Block>>();
-    // Physical backing commits once, before any request; assigned owner tokens
-    // account for the entire block including unused bytes.
-    constexpr std::size_t kRowBackingBytes = 2048 * 16;
-    const auto row_bytes = row_backing_bytes;
-    const auto row_blocks = kRowBackingBytes / row_bytes;
-    auto data = std::make_shared<std::vector<std::byte>>(kRowBackingBytes +
-                                                         private_blocks * 64);
-    for (std::size_t i = 0; i < row_blocks + private_blocks; ++i) {
-      const bool private_state = i >= row_blocks;
-      const auto size = private_state ? 64ULL : row_bytes;
-      const auto offset = private_state
-                              ? kRowBackingBytes + (i - row_blocks) * 64
-                              : i * row_bytes;
-      auto reservation =
-          ledger.Reserve(cache::ResourceCategory::kBackingFree, size);
-      auto bytes = std::span(*data).subspan(offset, size);
-      blocks->push_back({reservation.Convert(), bytes,
-                         std::shared_ptr<const void>(data, bytes.data()),
-                         private_state});
-    }
-    auto resources = std::make_unique<ComponentCacheResources>();
-    resources->adapter = std::make_unique<FakeAdapter>(rows_per_chunk);
-    adapter = dynamic_cast<FakeAdapter*>(resources->adapter.get());
-    resources->owner = blocks;
-    resources->stream = [this, foreground = std::this_thread::get_id()]()
-        -> std::unique_ptr<cache::Stream> {
-      if (defer_idle && std::this_thread::get_id() != foreground)
-        return {};
-      return std::make_unique<FakeStream>(true);
-    };
-    resources->transfer_batch_size = 4;
-    resources->allocate = [this, blocks,
-                           data](const cache::PayloadRequest& request) {
-      for (const auto& block : *blocks) {
-        if (request.bytes > block.data.size())
-          continue;
-        if ((request.category == cache::ResourceCategory::kPrivateState) !=
-            block.private_state)
-          continue;
-        // Occupied blocks are normal, not allocation failures. Keep the
-        // reservation below authoritative if another thread races this scan.
-        if (block.pool.Info().category != cache::ResourceCategory::kBackingFree)
-          continue;
-        try {
-          auto reservation = std::make_shared<cache::ResourceReservation>(
-              block.pool.ReserveBacking(request.category));
-          ++captures;
-          return ComponentCaptureBuffer{
-              block.data,
-              [reservation, owner = block.owner] {
-                return cache::Payload::Committed(reservation->Convert(), owner);
-              },
-              data.get(),
-              [reservation, owner = block.owner, bytes = block.data, request](
-                  cache::SlotLease& lease, auto source) {
-                return cache::Payload::Borrowed(
-                    lease.Borrow(request.component, request.first, request.end,
-                                 std::move(*reservation), owner,
-                                 bytes.first(request.bytes), source));
-              }};
-        } catch (const std::bad_alloc&) {
-        }
-      }
-      throw cache::ResourceExhausted();
-    };
-    resources->staging = [](std::size_t size) {
-      auto data = std::make_shared<std::vector<std::uint8_t>>(size);
-      return cache::StagingAllocation{data, *data};
-    };
-    resources->copy_observed_rows = [](auto source, auto destination,
-                                       cache::Stream& stream) {
-      return dynamic_cast<FakeStream&>(stream).Submit([source, destination] {
-        std::memcpy(destination.data(), source.data(), destination.size());
-        return cache::TransferResult::kSucceeded;
-      });
-    };
-    return resources;
+    auto owned = std::make_unique<FakeAdapter>(rows_per_chunk);
+    adapter = owned.get();
+    return server::testing::MakeFakeCacheResources(
+        ledger, std::move(owned),
+        {.private_blocks = private_blocks,
+         .row_backing_bytes = row_backing_bytes,
+         .defer_idle = &defer_idle,
+         .captures = &captures});
   }
   std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
@@ -1187,6 +1112,245 @@ void ReuseAndBranches() {
   Prefill(cold);
   assert(Generate(cold) == edited);
   cold.Invalidate();
+}
+void Expect(bool condition, std::string_view message) {
+  if (!condition) {
+    std::cerr << "Assertion failed: " << message << '\n';
+    std::exit(1);
+  }
+}
+void Finish(TextRunnerPool::Request& request, std::size_t budget = 64) {
+  while (!request.prefill_complete())
+    (void)request.Prefill(budget);
+}
+void PromptReuseCanBeDisabledPerRequest() {
+  auto runner = std::make_shared<Runner>();
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt{1, 2};
+  {
+    auto initial = pool.Acquire(prompt);
+    Finish(initial);
+    prompt.push_back(Generate(initial));
+    (void)initial.Commit();
+  }
+  prompt.push_back(7);
+  auto cold = pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, false);
+  Expect(!cold.cache_hit() && cold.cached_prompt_tokens() == 0,
+         "cache_prompt=false bypasses live and retained frontiers");
+  Expect(cold.Prefill(8).consumed_tokens == prompt.size(),
+         "disabled reuse processes every prompt token");
+  (void)cold.Commit();
+  prompt.push_back(8);
+  auto retained = pool.Acquire(prompt);
+  Expect(retained.cached_prompt_tokens() == prompt.size() - 1,
+         "a no-reuse request can populate the cache for later requests");
+  retained.Invalidate();
+}
+void StableChatPrefixSurvivesInterruptedFraming() {
+  const TemporaryDirectory temp("gufo-component-stable-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 1 << 12,
+                                        .min_checkpoint_step_tokens = 0};
+  auto runner = std::make_shared<Runner>();
+  const std::vector<TextRunnerToken> resumed_prompt{1, 2, 3, 50, 51, 60};
+  {
+    TextRunnerPool pool(runner, 1, disk);
+    // {1,2,3} is stable history; {40,41} opens assistant reasoning.
+    auto initial = pool.Acquire({1, 2, 3, 40, 41}, sampling::SamplingConfig{},
+                                {}, {}, true, 3);
+    Expect(initial.Prefill(64).consumed_tokens == 3,
+           "prefill stops before mutable assistant framing");
+    Finish(initial);
+    (void)Generate(initial);
+    (void)initial.Cancel();
+    // The client omits unfinished reasoning and closes the assistant turn.
+    auto resumed = pool.Acquire(resumed_prompt, sampling::SamplingConfig{}, {},
+                                {}, true, 5);
+    Expect(resumed.cached_prompt_tokens() == 3,
+           "changed assistant framing retains all stable prompt tokens");
+    resumed.Invalidate();
+  }
+  TextRunnerPool restarted(runner, 1, disk);
+  auto restored = restarted.Acquire(resumed_prompt, sampling::SamplingConfig{},
+                                    {}, {}, true, 5);
+  Expect(restored.cache_disk_hit() && restored.cached_prompt_tokens() == 3,
+         "interrupted stable chat prefix survives server restart");
+  restored.Invalidate();
+}
+void WarmTurnsAdvanceTheStableCheckpoint() {
+  auto runner = std::make_shared<Runner>();
+  TextRunnerPool pool(runner, 1);
+  const auto acquire = [&](std::vector<TextRunnerToken> prompt,
+                           std::size_t stable) {
+    return pool.Acquire(std::move(prompt), sampling::SamplingConfig{}, {}, {},
+                        true, stable);
+  };
+  // Cold turn: the stable boundary is 3; 40,41 is the assistant framing.
+  auto first = acquire({1, 2, 3, 40, 41}, 3);
+  Expect(first.Prefill(64).consumed_tokens == 3,
+         "cold chat stops at its stable boundary");
+  Finish(first);
+  const auto reply = Generate(first);
+  (void)first.Commit();
+
+  // A warm turn replays the assistant, then a new user turn. Its stable
+  // boundary is 7, past the frontier of 6 that it reuses.
+  auto second = acquire({1, 2, 3, 40, 41, reply, 7, 40, 41}, 7);
+  Expect(
+      second.cached_prompt_tokens() == 6 && second.cache_restore_bytes() == 0,
+      "retained reasoning reuses generated tokens without a restore");
+  Expect(second.Prefill(64).consumed_tokens == 1,
+         "warm prefill stops at the stable boundary before framing");
+  Finish(second);
+  const auto again = Generate(second);
+  (void)second.Commit();
+
+  auto repeated = acquire({1, 2, 3, 40, 41, reply, 7, 40, 41}, 7);
+  Expect(repeated.cached_prompt_tokens() == 9 && repeated.prefill_complete(),
+         "an identical prompt reuses the complete prompt checkpoint");
+  Expect(Generate(repeated) == again,
+         "the complete checkpoint preserves greedy selection");
+  (void)repeated.Commit();
+
+  // Dropped reasoning rewrites 40,41 at token 7, the last stable boundary.
+  auto third = acquire({1, 2, 3, 40, 41, reply, 7, 50, 51, 8, 40, 41}, 10);
+  Expect(third.cached_prompt_tokens() == 7,
+         "a warm turn checkpoints its own stable boundary");
+  Finish(third);
+  (void)Generate(third);
+  (void)third.Commit();
+
+  // Dropping reasoning again keeps advancing instead of falling back.
+  auto fourth =
+      acquire({1, 2, 3, 40, 41, reply, 7, 50, 51, 8, 60, 61, 11, 40, 41}, 13);
+  Expect(fourth.cached_prompt_tokens() == 10,
+         "successive rewritten turns resume from the latest boundary");
+  (void)fourth.Cancel();
+}
+void FullChatCheckpointRestoresWithoutSuffixPrefill() {
+  const TemporaryDirectory temp("gufo-component-full-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 1 << 12,
+                                        .min_checkpoint_step_tokens = 0};
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 40, 41};
+  auto runner = std::make_shared<Runner>();
+  TextRunnerToken token{};
+  {
+    TextRunnerPool writer(runner, 1, disk);
+    auto first =
+        writer.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 3);
+    Finish(first);
+    token = Generate(first);
+    (void)first.Commit();
+  }
+  TextRunnerPool reader(runner, 1, disk);
+  auto exact =
+      reader.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 3);
+  Expect(exact.cache_disk_hit() &&
+             exact.cached_prompt_tokens() == prompt.size() &&
+             exact.prefill_complete(),
+         "disk restores the exact prompt instead of recomputing its suffix");
+  Expect(Generate(exact) == token, "a disk restore selects the same token");
+  (void)exact.Commit();
+  auto repeated =
+      reader.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 3);
+  Expect(!repeated.cache_disk_hit() && repeated.prefill_complete(),
+         "a disk-restored prompt is retained for cheap RAM retries");
+  (void)repeated.Commit();
+  auto changed = reader.Acquire({1, 2, 3, 50, 51, 60},
+                                sampling::SamplingConfig{}, {}, {}, true, 5);
+  Expect(changed.cached_prompt_tokens() == 3,
+         "the earlier fallback survives exact full-prompt restoration");
+  changed.Invalidate();
+}
+void GeneratedFrontierForksBeforeMutation() {
+  auto runner = std::make_shared<Runner>();
+  TextRunnerPool pool(runner, 2);
+  std::vector<TextRunnerToken> root{1, 2, 3, 4};
+  {
+    auto first = pool.Acquire(root);
+    Finish(first);
+    root.push_back(Generate(first));
+    (void)first.Commit();
+  }
+  auto left = root, right = root;
+  left.push_back(5);
+  right.push_back(6);
+  auto first = pool.Acquire(left);
+  auto second = pool.Acquire(right);
+  // The live frontier serves one fork. No checkpoint covers the generated
+  // token, so the peer restores the prompt and prefills that token again.
+  Expect(first.cached_prompt_tokens() == root.size() &&
+             first.cache_restore_bytes() == 0,
+         "the first fork continues the live generated frontier");
+  Expect(second.cached_prompt_tokens() == root.size() - 1 &&
+             second.cache_restore_bytes() > 0,
+         "the peer restores the retained prompt");
+  Expect(first.Prefill(64).consumed_tokens == 1 &&
+             second.Prefill(64).consumed_tokens == 2,
+         "each fork prefills only what its frontier lacks");
+  first.Invalidate();
+  second.Invalidate();
+  auto branch = pool.Acquire({1, 2, 3, 4, 7});
+  Expect(branch.cached_prompt_tokens() == 4,
+         "freezing a generated frontier preserves the prompt branch");
+  branch.Invalidate();
+}
+void InterruptedPrefillRetainsOnlyItsEntryFrontier() {
+  class InterruptedRunner final : public Runner {
+  public:
+    explicit InterruptedRunner(bool& cancelled) : cancelled_(cancelled) {}
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = Runner::Descriptor();
+      descriptor.capabilities.partial_prefill_retention = true;
+      descriptor.capabilities.prefill_rollback = rollback;
+      return descriptor;
+    }
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      if (!offset)
+        return Runner::Prefill(state, prompt, offset, budget);
+      cancelled_ = cancel;
+      return {.consumed_tokens = consumed, .interrupted = true};
+    }
+    bool rollback{true}, cancel{true};
+    std::size_t consumed{};
+
+  private:
+    bool& cancelled_;
+  };
+  for (int scenario = 0; scenario < 4; ++scenario) {
+    bool cancelled = false;
+    auto runner = std::make_shared<InterruptedRunner>(cancelled);
+    runner->rollback = scenario != 1;
+    runner->cancel = scenario != 2;
+    runner->consumed = scenario == 3 ? 1 : 0;
+    TextRunnerPool pool(runner, 1);
+    auto request = pool.Acquire(
+        {1, 2, 3, 4, 5, 6}, sampling::SamplingConfig{},
+        [&] { return cancelled; }, {}, true, 5);
+    Expect(request.Prefill(4).consumed_tokens == 4,
+           "a completed chunk precedes the interrupted pass");
+    std::string error;
+    try {
+      (void)request.Prefill(2);
+    } catch (const std::runtime_error& failure) {
+      error = failure.what();
+    }
+    Expect(error == (scenario == 0 ? "generation cancelled"
+                                   : "invalid interrupted prefill frontier"),
+           "only a cancelled, rolled-back pass may retain its entry frontier");
+    (void)request.Cancel();
+    cancelled = false;
+    auto resumed = pool.Acquire({1, 2, 3, 4, 5, 6, 7});
+    Expect(resumed.cached_prompt_tokens() == (scenario == 0 ? 4 : 0),
+           "invalid interrupted state must never become a cache hit");
+    resumed.Invalidate();
+  }
 }
 void EditBoundariesSurviveActualBackingPressure() {
   auto runner = std::make_shared<Runner>();
@@ -2392,6 +2556,12 @@ void RamCacheOffRefusesCapturesWithinTheDiskStep() {
   }
 }
 int main() {
+  PromptReuseCanBeDisabledPerRequest();
+  StableChatPrefixSurvivesInterruptedFraming();
+  WarmTurnsAdvanceTheStableCheckpoint();
+  FullChatCheckpointRestoresWithoutSuffixPrefill();
+  GeneratedFrontierForksBeforeMutation();
+  InterruptedPrefillRetainsOnlyItsEntryFrontier();
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
   SharedPeerReusesTheCurrentStableCapture();

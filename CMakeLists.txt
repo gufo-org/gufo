@@ -934,8 +934,18 @@ endfunction()
   set_tests_properties(component_text_cache_test PROPERTIES
     LABELS "cpu;server;cache;state;lifecycle" COST 70)
 
+  # Legacy cache policy; deleted with the legacy cache.
+  add_executable(text_model_runner_legacy_test
+    tests/cli/text_model_runner_legacy_test.cpp)
+  target_link_libraries(text_model_runner_legacy_test PRIVATE gufo_serving
+    ${GUFO_QWEN_LIBRARIES})
+  add_test(NAME text_model_runner_legacy_test
+    COMMAND text_model_runner_legacy_test)
+  set_tests_properties(text_model_runner_legacy_test PROPERTIES
+    LABELS "cpu;server;cache;state;lifecycle")
+
   add_executable(text_model_runner_test tests/cli/text_model_runner_test.cpp)
-  target_link_libraries(text_model_runner_test PRIVATE gufo_serving
+  target_link_libraries(text_model_runner_test PRIVATE gufo_cache_fake gufo_serving
     ${GUFO_QWEN_LIBRARIES})
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
@@ -960,7 +970,8 @@ endfunction()
 
   add_executable(text_generation_scheduler_test
     tests/cli/text_generation_scheduler_test.cpp)
-  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_serving)
+  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_cache_fake
+    gufo_serving)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES
