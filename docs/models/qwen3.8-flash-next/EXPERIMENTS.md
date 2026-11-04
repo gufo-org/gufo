@@ -17,6 +17,11 @@ claim. Both restore outputs remain exact. The deterministic cursor regression
 fails with the original scheduling and passes with the fix; the full
 `cache_streaming_test` takes 0.55 seconds.
 
+Those exploratory timings preceded discovery of an unrelated desktop crash
+reporter repeatedly writing cores. They remain advisory. Final qualification
+uses quiet, sequential controls against main `1c75887b`; variable disk
+restore timings remain explicitly inconclusive rather than a speed claim.
+
 ## Wide prompt-lookup verification (November 1, 2026)
 
 Measured downstream, on a fork that runs Swift 1.5 IQ4_XS with its Q8_0 MTP

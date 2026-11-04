@@ -1,5 +1,51 @@
 # Qwen3.8 Flash-Next quality
 
+## PR #877 qualification, November 4, 2026
+
+Pinned main `1c75887b` versus runtime candidate `e6b2a4c1`, Nix builds on
+Strix Halo gfx1151 with ROCm 10.1 and the cached Unsloth UD-Q4_K_XL target
+and shared Q8_0 MTP sidecar:
+
+- The final alignment harness passes in AR and MTP: all four prompt residues,
+  RAM and restarted-disk restore at token 2,944, and all 16 continuations
+  byte-identical to cold runs. It verifies useful stable checkpoints, actual
+  loaded mode and draft execution, and retains raw requests and checkpoint IDs.
+- Four F32-reference fixtures cover 2,479 scored positions. Paired current-main
+  KL and NLL deltas are zero, and all four logit dumps are byte-identical.
+  Independent reference mean KL remains 0.03409, top-1 agreement 0.951
+  and NLL 1.2049.
+- Ten focused cache/runner tests pass in 7.25 seconds. The real snapshot and
+  continuation-adapter checks also pass in AR/MTP, including eleven-row tails,
+  twelve-row rejection, seeded replay and host/device exhaustion fallback.
+- Current-base `cache` and `long-context` functional assertions pass for
+  Flash-Next AR/MTP and Qwen3.8-27B Q4/Q8 AR/DFlash2 (50 requests per build
+  and mode). Flash uses the same number of prefill passes as main. Earlier
+  aligned checkpoints intentionally replay extra tokens; an unaligned full
+  checkpoint can fall back farther than three tokens. Corrected sparse prefill
+  changes one reasoning trajectory from 64 to 55 tokens, with the same final
+  answer and exact same-build replay. The strict comparator retains these
+  intended output/work differences as flags.
+- With unchanged 5% and 10 ms per-request/per-phase margins, repeated Flash
+  controls have no confirmed timing failures: AR 674 passed/3 inconclusive,
+  MTP 667 passed/10 inconclusive. Q4 AR and Q8 DFlash2 pass the strict
+  comparison. Q4 DFlash2 and Q8 AR retain inconclusive disk timings; these
+  observations are unqualified, not a complete timing pass.
+- Image-count, image cancellation and restarted disk continuation pass in
+  AR/MTP with unchanged outputs. AR has 340/340 timing measurements within
+  margin; MTP has 339 passed and one inconclusive server-restart measurement.
+- Loaded device allocation is identical to main: AR 88,093 MiB, MTP
+  90,931 MiB with two sessions, context 32,768 and a 4 GiB RAM cache.
+  Sampled host RSS peaks are comparable (AR 4,290 → 4,258 MiB;
+  MTP 4,323 → 4,318 MiB). The readahead fix retains four workers and the
+  existing 32 MiB window.
+
+Raw evidence is retained under
+`/home/fbozzo/projects/validation/pr877-20261104/`. Earlier exploratory
+observations affected by unrelated crash-reporter disk activity are retained
+separately; final comparisons use quiet, sequential controls. DeepSeek's
+legacy cache does not execute the changed component readahead and was not
+model-qualified in this run.
+
 ## Four-token prefill alignment, October 28, 2026
 
 Sparse prefill (`WmmaCausalAttention` with a mask) packs four consecutive

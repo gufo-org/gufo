@@ -6,6 +6,47 @@ Gufo `fec4759d` (October 18, 2026); llama.cpp `b11069` AR and `6fcaa16f` MTP
 (September 22–23). Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
 
+## PR #877 controls, November 4, 2026
+
+Pinned main `1c75887b` versus runtime candidate `e6b2a4c1`, Nix production
+builds, ROCm 10.1 on the same Strix Halo. `gufo bench -p 2048 -n 128
+-d 0,4096 -r 2`, same UD-Q4_K_XL and shared Q8_0 MTP sidecar. Values are
+reported tok/s from two repetitions; these are regression controls, not a
+refresh of the historical llama.cpp comparisons below.
+
+| Mode | Depth | Main pp | Candidate pp | Main tg | Candidate tg |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 1,932.39 | 1,938.25 | 30.05 | 30.05 |
+| AR | 4,096 | 1,872.58 | 1,874.96 | 29.38 | 29.36 |
+| MTP | 0 | 1,870.13 | 1,870.21 | 62.70 | 62.65 |
+| MTP | 4,096 | 1,787.34 | 1,789.39 | 51.44 | 51.53 |
+
+The canonical HTTP serving tool also ran a fixed 619-token prompt (the
+pangram question repeated 32 times), homogeneous C1/C2/C4/C6/C8 cohorts,
+128 output tokens, greedy, thinking off, context 8,192, eight sessions,
+queue limit 16 and a 4 GiB RAM cache. Prompt reuse was disabled; one warmup
+and two measured rounds ran per concurrency. Each cell below is the median
+of two sums of individual request decode rates, not whole-request aggregate
+throughput. All output hashes and prompt/prefill/completion counts match.
+
+| Concurrency | Main AR | Candidate AR | Main MTP | Candidate MTP |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 30.23 | 30.22 | 53.24 | 53.25 |
+| 2 | 48.21 | 48.17 | 72.96 | 72.97 |
+| 4 | 74.72 | 74.68 | 109.52 | 109.60 |
+| 6 | 93.73 | 93.67 | 125.09 | 125.36 |
+| 8 | 106.78 | 106.79 | 143.64 | 143.82 |
+
+The simultaneous clients enter the scheduler in a different index order.
+Raw per-index latency flags remain retained (56 AR, 51 MTP); matching the
+identical histories by admission rank has no phase outside 5% and 10 ms,
+but is diagnostic, not a strict per-client timing pass. No request was
+rejected and MTP drafts executed at every concurrency. Separate continuation
+controls retain inconclusive disk timings; the rates above do not qualify
+those observations. Peak driver GTT is identical: AR 84,774.46 MiB and
+MTP 88,931.12 MiB. Host RSS peaks are AR 3,117 → 3,085 MiB and
+MTP 3,125 → 3,147 MiB (about 22 MiB variation).
+
 ## Single user, autoregressive
 
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.
