@@ -15,6 +15,9 @@
 
 namespace gufo::cache {
 inline constexpr std::uint32_t kDiskFormatVersion = 2;
+// Written only by manifests with window components, which also encode the
+// window size; version 2 manifests remain readable.
+inline constexpr std::uint32_t kDiskWindowFormatVersion = 3;
 inline constexpr std::size_t kMaxManifestBytes = std::size_t{16} * 1024 * 1024;
 class DiskCapacityExhausted : public ResourceExhausted {};
 using DiskFileId = std::array<std::uint8_t, 16>;

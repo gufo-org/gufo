@@ -758,7 +758,8 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
       throw std::logic_error("incomplete durable capture positions");
     pieces += d.kind == cache::ComponentKind::kPrivateState
                   ? 1
-                  : p->valid_rows / d.rows_per_chunk +
+                  : (p->valid_rows - cache::FirstChunkRow(d, p->valid_rows)) /
+                            d.rows_per_chunk +
                         bool(p->valid_rows % d.rows_per_chunk);
   }
   // Admit metadata before vectors/owners. No append payload allocation is
@@ -810,31 +811,41 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
         std::ranges::find(positions, d.id, &cache::ComponentPosition::id);
     cache::DiskComponent component{.descriptor = d, .position = *p};
     const auto completed =
-        d.kind == cache::ComponentKind::kAppendRows
+        cache::HasRows(d.kind)
             ? p->valid_rows / d.rows_per_chunk * d.rows_per_chunk
             : 0;
-    cache::Rows inherited = 0;
-    if (completed && ancestor) {
+    // Window components start at their first retained chunk, not row 0.
+    const auto start = cache::FirstChunkRow(d, p->valid_rows);
+    cache::Rows inherited = start;
+    if (completed > start && ancestor) {
       const auto& components = ancestor->Manifest().components;
       const auto previous = std::ranges::find_if(
           components, [&](const auto& c) { return c.descriptor.id == d.id; });
       if (previous != components.end()) {
-        const auto chunks = std::min<std::size_t>(previous->chunks.size(),
-                                                  completed / d.rows_per_chunk);
-        component.chunks.assign(previous->chunks.begin(),
-                                previous->chunks.begin() + chunks);
-        inherited = chunks * d.rows_per_chunk;
+        // The ancestor's chunk j covers row previous_first + j rows_per_chunk;
+        // its window never starts past this capture's.
+        const auto previous_first =
+            cache::FirstChunkRow(d, previous->position.valid_rows);
+        const auto skip =
+            std::min<std::size_t>(previous->chunks.size(),
+                                  (start - previous_first) / d.rows_per_chunk);
+        const auto chunks =
+            std::min<std::size_t>(previous->chunks.size() - skip,
+                                  (completed - start) / d.rows_per_chunk);
+        component.chunks.assign(previous->chunks.begin() + skip,
+                                previous->chunks.begin() + skip + chunks);
+        inherited = start + chunks * d.rows_per_chunk;
       }
     }
     std::shared_ptr<cache::BorrowedRows> rows;
-    if (completed) {
+    if (completed > start) {
       if (inherited != completed) {
         auto view = cache->resources->adapter->BorrowRowsView(
             slot.Execution(), d.id, inherited, completed);
         if (!view.empty())
           rows = slot.Observe(d.id, inherited, completed, view);
       }
-      component.chunks.reserve(completed / d.rows_per_chunk);
+      component.chunks.reserve((completed - start) / d.rows_per_chunk);
     }
     const auto capture = [&](cache::Rows first, cache::Rows end,
                              bool private_file) {
@@ -1799,10 +1810,14 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
   if (!impl_->cache->ram_enabled && !impl_->cache->queue)
     return {};
   const auto& adapter = *impl_->cache->resources->adapter;
+  // Grid checkpoints lie a whole grid step apart, beyond any window, so each
+  // keeps its own window as well as its private state.
   std::size_t private_bytes = 0;
   for (const auto& d : adapter.Components())
     if (d.kind == cache::ComponentKind::kPrivateState)
       private_bytes += d.state_bytes;
+    else if (d.kind == cache::ComponentKind::kWindowRows)
+      private_bytes += d.window_rows * d.row_bytes;
   const auto plan = cache::PlanCaptures(
       adapter, impl_->slot.Execution(),
       {impl_->prompt.size(),

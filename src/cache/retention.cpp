@@ -18,6 +18,15 @@ std::uint32_t MaxRank(RetentionPurpose p) {
          : p == RetentionPurpose::kHistory ? 1
                                            : 3;
 }
+// Chunk index of a component's first retained row. Window components start
+// past row 0, so peers align chunks by row, never by vector position.
+std::size_t FirstChunk(const CheckpointComponent& c) {
+  return HasRows(c.descriptor.kind)
+             ? static_cast<std::size_t>(
+                   FirstChunkRow(c.descriptor, c.position.valid_rows) /
+                   c.descriptor.rows_per_chunk)
+             : 0;
+}
 }  // namespace
 std::size_t GridLimit(std::size_t ram_bytes, std::size_t private_bytes) {
   return private_bytes
@@ -206,6 +215,10 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
   for (const auto& c : e.checkpoint->Components())
     if (c.descriptor.kind == ComponentKind::kPrivateState)
       state += c.descriptor.state_bytes;
+    else if (c.descriptor.kind == ComponentKind::kWindowRows)
+      // A window is a fixed cost per checkpoint, like private state.
+      state += std::min(c.position.valid_rows, c.descriptor.window_rows) *
+               c.descriptor.row_bytes;
     else
       rows += c.position.valid_rows * c.descriptor.row_bytes;
   const auto turnover = ledger_.Limits().ram_bytes;
@@ -256,58 +269,94 @@ std::size_t RetentionPolicy::UniqueBytes(std::size_t i) const {
       bytes += c.private_state->Bytes();
     if (c.tail)
       bytes += c.tail->Bytes();
-    // Admission age uses the longest shared-prefix estimate. Exact retained
-    // payload accounting below also handles sharing after a recreated hole.
-    std::size_t shared = 0;
+    // Admission age uses the longest shared-run estimate, from the first row
+    // both retain (row 0 unless windowed). Exact retained payload accounting
+    // below also handles sharing after a recreated hole.
+    const auto first = FirstChunk(c);
+    std::size_t shared_begin = 0, shared_end = 0;
     for (std::size_t j = 0; j < limit_; ++j) {
       if (j == i || !records_[j].checkpoint)
         continue;
       const auto peers = records_[j].checkpoint->Components();
       if (k >= peers.size() || peers[k].descriptor.id != c.descriptor.id)
         continue;
+      const auto& peer = peers[k];
+      const auto peer_first = FirstChunk(peer);
+      const auto start = std::max(first, peer_first);
+      const auto own = start - first, other = start - peer_first;
       std::size_t n = 0;
-      while (n < c.chunks.size() && n < peers[k].chunks.size() &&
-             c.chunks[n].SameChunk(peers[k].chunks[n]))
+      while (own + n < c.chunks.size() && other + n < peer.chunks.size() &&
+             c.chunks[own + n].SameChunk(peer.chunks[other + n]))
         ++n;
-      shared = std::max(shared, n);
+      if (n > shared_end - shared_begin) {
+        shared_begin = own;
+        shared_end = own + n;
+      }
     }
-    for (std::size_t n = shared; n < c.chunks.size(); ++n)
-      bytes += c.chunks[n].Storage().Bytes();
+    for (std::size_t n = 0; n < c.chunks.size(); ++n)
+      if (n < shared_begin || n >= shared_end)
+        bytes += c.chunks[n].Storage().Bytes();
   }
   return bytes;
 }
 std::size_t RetentionPolicy::UniquePayloadBytes(std::size_t i) const noexcept {
   std::size_t bytes = 0;
-  for (const auto& c : records_[i].checkpoint->Components()) {
+  const auto components = records_[i].checkpoint->Components();
+  for (std::size_t k = 0; k < components.size(); ++k) {
+    const auto& c = components[k];
     if (c.private_state)
       bytes += c.private_state->Bytes();
     if (c.tail)
       bytes += c.tail->Bytes();
     if (c.chunks.empty())
       continue;
-    std::array<const CheckpointComponent*, kRecordLimit> peers;
+    // Peers align by row: window components start past row 0.
+    struct Peer {
+      const CheckpointComponent* component;
+      std::size_t first, end;
+    };
+    std::array<Peer, kRecordLimit> peers;
     std::size_t count = 0;
     for (std::size_t j = 0; j < limit_; ++j) {
       if (j == i || !records_[j].checkpoint)
         continue;
-      for (const auto& peer : records_[j].checkpoint->Components())
-        if (peer.descriptor.id == c.descriptor.id && !peer.chunks.empty()) {
-          peers[count++] = &peer;
-          break;
-        }
+      // One adapter lists components in the same order everywhere.
+      const auto others = records_[j].checkpoint->Components();
+      const CheckpointComponent* peer =
+          k < others.size() && others[k].descriptor.id == c.descriptor.id
+              ? &others[k]
+              : nullptr;
+      if (!peer)
+        for (const auto& other : others)
+          if (other.descriptor.id == c.descriptor.id) {
+            peer = &other;
+            break;
+          }
+      if (peer && !peer->chunks.empty()) {
+        const auto peer_first = FirstChunk(*peer);
+        peers[count++] = {peer, peer_first, peer_first + peer->chunks.size()};
+      }
     }
-    // Try the longest peers first; shorter peers cannot own later rows.
+    // Try the deepest peers first; a peer ending at or before a row cannot
+    // own it. Shared rows come in runs, so the peer that held the previous
+    // chunk is tried before the rest.
     std::sort(peers.begin(), peers.begin() + count,
-              [](const auto* a, const auto* b) {
-                return a->chunks.size() > b->chunks.size();
-              });
+              [](const Peer& a, const Peer& b) { return a.end > b.end; });
+    const auto holds = [&](const Peer& peer, const CheckpointChunk& chunk,
+                           std::size_t row) {
+      return row >= peer.first && row < peer.end &&
+             chunk.SameChunk(peer.component->chunks[row - peer.first]);
+    };
+    const auto first = FirstChunk(c);
+    std::size_t previous = count;
     for (std::size_t n = 0; n < c.chunks.size(); ++n) {
       const auto& chunk = c.chunks[n];
-      bool shared = false;
-      for (std::size_t j = 0; j < count && peers[j]->chunks.size() > n; ++j)
-        if (chunk.SameChunk(peers[j]->chunks[n])) {
+      const auto row = first + n;
+      bool shared = previous < count && holds(peers[previous], chunk, row);
+      for (std::size_t j = 0; !shared && j < count && peers[j].end > row; ++j)
+        if (holds(peers[j], chunk, row)) {
           shared = true;
-          break;
+          previous = j;
         }
       if (!shared)
         bytes += chunk.Storage().Bytes();
@@ -647,24 +696,27 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
         continue;
       std::array<const CheckpointComponent*, kRecordLimit> peers;
       std::size_t peer_count = 0;
-      std::size_t rows = 0;
+      // Chunk index range across peers; windows start past row 0.
+      std::size_t first = std::numeric_limits<std::size_t>::max(), rows = 0;
       for (std::size_t j = i; j < limit_; ++j) {
         if (!records_[j].checkpoint)
           continue;
         for (const auto& peer : records_[j].checkpoint->Components())
           if (peer.descriptor.id == c.descriptor.id) {
             peers[peer_count++] = &peer;
-            rows = std::max(rows, peer.chunks.size());
+            first = std::min(first, FirstChunk(peer));
+            rows = std::max(rows, FirstChunk(peer) + peer.chunks.size());
             break;
           }
       }
-      for (std::size_t n = 0; n < rows; ++n) {
+      for (std::size_t n = first; n < rows; ++n) {
         std::array<const CheckpointChunk*, kRecordLimit> seen;
         std::size_t seen_count = 0;
         for (std::size_t peer = 0; peer < peer_count; ++peer) {
-          if (peers[peer]->chunks.size() <= n)
+          const auto peer_first = FirstChunk(*peers[peer]);
+          if (n < peer_first || peers[peer]->chunks.size() <= n - peer_first)
             continue;
-          const auto& chunk = peers[peer]->chunks[n];
+          const auto& chunk = peers[peer]->chunks[n - peer_first];
           const auto end = seen.begin() + seen_count;
           if (std::find_if(seen.begin(), end, [&](const auto* previous) {
                 return chunk.SameChunk(*previous);

@@ -275,7 +275,13 @@ rows still match.
 Each adapter describes every required component of a coherent checkpoint:
 
 - Stable component ID, layout version, element representation and byte size.
-- Kind: append-only shareable rows, or checkpoint-private mutable state.
+- Kind: append-only shareable rows, window rows, or checkpoint-private mutable
+  state. A window-rows component is append rows of which a continuation reads
+  only the last `window_rows` (sliding-window attention): a checkpoint at row n
+  keeps the chunks from the one containing row n - `window_rows`, and shares
+  them with neighbouring checkpoints, so older chunks become unreferenced and
+  evictable instead of being copied whole into every checkpoint as private
+  state.
 - Valid logical range, physical range and exact component position.
 - Opaque storage handle and bounded transfer operations.
 - Completion and lifetime requirements, including device synchronization.
