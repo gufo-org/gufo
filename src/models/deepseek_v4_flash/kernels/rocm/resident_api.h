@@ -229,6 +229,8 @@ int ds4_gpu_synchronize(void);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes);
 uint64_t ds4_gpu_tensor_bytes(const ds4_gpu_tensor *tensor);
+/// Device address for transfers on an independent stream; changes if the owner reallocates.
+void* ds4_gpu_tensor_device_pointer(const ds4_gpu_tensor* tensor);
 int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset, const ds4_gpu_tensor *src, uint64_t src_offset, uint64_t bytes);
 int ds4_gpu_tensor_convert_f32_to_f16(ds4_gpu_tensor *dst, const ds4_gpu_tensor *src, uint64_t count);
 int ds4_gpu_tensor_fill_f32(ds4_gpu_tensor *tensor, float value, uint64_t count);

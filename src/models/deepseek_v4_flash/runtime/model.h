@@ -12,6 +12,11 @@ struct ds4_tokens {
 
 struct ds4_engine;
 struct ds4_session;
+struct ds4_dspark_request_state;
+
+namespace gufo::models::deepseek_v4_flash {
+class ContinuationHooks;
+}
 
 using ds4_session_cancel_fn = bool (*)(void* user_data);
 
@@ -150,5 +155,54 @@ int ds4_session_pos(const ds4_session* session);
 int ds4_session_ctx(const ds4_session* session);
 uint32_t ds4_session_prefill_capacity(const ds4_session* session);
 uint64_t ds4_session_payload_bytes(const ds4_session* session);
+
+/* Continuation components. A session with hooks is owned by the cache adapter,
+ * which reads its state directly instead of through a serialized snapshot.
+ * Tensor addresses are valid until the session next executes or restores. */
+enum class ds4_continuation_tensor {
+  kRaw,
+  kAttentionRows,
+  kAttentionValues,
+  kAttentionScores,
+  kIndexerRows,
+  kIndexerValues,
+  kIndexerScores,
+  kDraftWindow,
+};
+struct ds4_continuation_ring {
+  uint32_t capacity;
+  uint32_t live;
+};
+uint32_t ds4_engine_dspark_stages(const ds4_engine* engine);
+uint32_t ds4_layer_ratio(uint32_t layer);
+void ds4_session_set_hooks(ds4_session* session,
+                           gufo::models::deepseek_v4_flash::ContinuationHooks*);
+/* True while the session holds a coherent frontier, including an empty one. */
+bool ds4_session_coherent(const ds4_session* session);
+void* ds4_session_continuation_tensor(const ds4_session* session,
+                                      ds4_continuation_tensor tensor,
+                                      uint32_t index);
+/* Rows of the sliding window, or the DSpark window, live at a frontier. */
+ds4_continuation_ring ds4_session_raw_ring(const ds4_session* session,
+                                           uint32_t position);
+ds4_continuation_ring ds4_session_draft_ring(const ds4_session* session,
+                                             uint32_t position);
+int* ds4_session_tokens(ds4_session* session);
+float* ds4_session_frontier_logits(ds4_session* session);
+const ds4_dspark_request_state* ds4_session_dspark_state(
+    const ds4_session* session);
+uint32_t ds4_session_draft_tokens(const ds4_session* session);
+bool ds4_session_draft_capture(const ds4_session* session);
+/* True when the compressed counters match `position`; a mismatch means the
+ * rows cannot be addressed from the frontier alone. */
+bool ds4_session_rows_at(const ds4_session* session, uint32_t position);
+/* Sizes every destination while the old state stays readable. On failure the
+ * session is unchanged. On success it has no frontier until finish. */
+bool ds4_session_begin_restore(ds4_session* session, uint32_t position);
+bool ds4_session_finish_restore(ds4_session* session, uint32_t position,
+                                uint32_t draft_tokens, bool draft_capture,
+                                const ds4_dspark_request_state* state);
+/* Forgets the frontier without device work; the next prefill resets the graph. */
+void ds4_session_clear(ds4_session* session);
 
 #endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_

@@ -971,6 +971,10 @@ extern "C" int ds4_gpu_tensor_read(const ds4_gpu_tensor *tensor, uint64_t offset
     return hip_ok(hipMemcpy(data, (const char *)tensor->ptr + offset, (size_t)bytes, hipMemcpyDeviceToHost), "tensor read");
 }
 
+extern "C" void* ds4_gpu_tensor_device_pointer(const ds4_gpu_tensor* tensor) {
+  return tensor ? tensor->ptr : nullptr;
+}
+
 extern "C" int ds4_gpu_tensor_snapshot_read(const ds4_gpu_tensor* tensor,
                                             uint64_t offset, void* data,
                                             uint64_t bytes) {

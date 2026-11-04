@@ -51,3 +51,8 @@ unreviewable PR.
 
 ## Review notes
 
+Serving did not follow this plan. Runners opt in through
+`TextModelRunner::UsesComponentCache()`, so each model moved on its own and both
+caches run side by side until the last runner migrates. Issue #1002 removes the
+legacy cache after that.
+
