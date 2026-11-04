@@ -45,6 +45,20 @@ struct TextPromptContext {
       std::size_t token_count) const {
     return PrefixInputIdentity(cache_identity, cache_prefixes, token_count);
   }
+  /// Moves a candidate prefill stop, a token count, to a position where
+  /// prefill may end: the nearest legal one at or before `position`, or at or
+  /// after it when `up`. A model whose input rows must be evaluated in one
+  /// forward, such as image rows attending each other, returns the first row
+  /// of the span containing `position` (down) or the position after its last
+  /// token (up). Positions at span edges and outside spans are legal and must
+  /// be returned unchanged, and the result must be a fixed point of this
+  /// function. The pool applies it to cache checkpoints, snapshot and shared
+  /// prefix boundaries; a step that starts at a span consumes the whole span
+  /// even beyond its token budget. The default declares no spans.
+  [[nodiscard]] virtual std::size_t PrefillStop(std::size_t position,
+                                                bool /*up*/) const {
+    return position;
+  }
 };
 
 struct TextPreparedPrompt {

@@ -310,6 +310,14 @@ The cache reserves the full payload before enabling this capture. Disk,
 image, intermediate and learned-prefix checkpoints still stop prefill at
 their boundary.
 
+**A checkpoint never splits an indivisible input.** A model whose prompt
+context declares spans through `TextPromptContext::PrefillStop`, such as image
+rows that must share one forward, never has a prefill step, grid or planned
+checkpoint, stable snapshot or shared-prefix boundary end inside one. Such a
+position moves to the span's first row, and a step that starts at a span takes
+it whole even beyond its token budget. Contexts that declare no spans change no
+position.
+
 **The reused frontier must be frozen before prefill.** Prefill mutates the
 leased state in place, so a frontier another request might branch from has to
 be captured first.
