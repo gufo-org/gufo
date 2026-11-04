@@ -534,6 +534,26 @@ class FunctionalRunnerTest(unittest.TestCase):
                 check_unchanged_retry("history", retry, 24, log, 0, log.stat().st_size,
                                       mutable_suffix_tokens=24)
 
+    def test_pressure_retry_allows_only_the_aligned_stable_boundary(self):
+        from cache_growth import check_unchanged_retry
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            # Flash-Next rounds the counted boundary 1305 down to 1304 (#1017).
+            log.write_text("schema=component-cache-v1 event=capture_refused "
+                           "reason=byte_capacity tokens=1329\n")
+            retry = {"usage": {"prompt_tokens": 1329}}
+            check_unchanged_retry("history", retry, 25, log, 0, log.stat().st_size,
+                                  mutable_suffix_tokens=24)
+            with self.assertRaises(AssertionError):
+                check_unchanged_retry("history", retry, 26, log, 0, log.stat().st_size,
+                                      mutable_suffix_tokens=24)
+            # An already aligned boundary 1304 leaves no extra token.
+            log.write_text("schema=component-cache-v1 event=capture_refused "
+                           "reason=byte_capacity tokens=1328\n")
+            with self.assertRaises(AssertionError):
+                check_unchanged_retry("history", {"usage": {"prompt_tokens": 1328}}, 25,
+                                      log, 0, log.stat().st_size, mutable_suffix_tokens=24)
+
     def test_disk_spacing_uses_capture_ids_for_delayed_publications(self):
         totals = (2400, 2680, 2960, 3240, 3520, 5960, 6240)
         report = {"turns": [{"measured": {"total": total, "checkpoint_ids": [i + 1]}}
