@@ -2125,17 +2125,21 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
-    std::shared_ptr<const JsonConstraint> answer) {
+    std::shared_ptr<const JsonConstraint> answer, std::string_view close,
+    std::string_view open) {
+  if (close.empty())
+    throw std::invalid_argument("reasoning close delimiter must not be empty");
   // Cache separately from schema compilation. No mutable phase belongs to the
   // model or cache: the normal grammar stack carries it through sampler copies,
   // draft rejection and request restart.
+  using Key = std::tuple<std::shared_ptr<const JsonConstraint>, std::string,
+                         std::string>;
   static std::mutex mutex;
-  static std::map<std::shared_ptr<const JsonConstraint>,
-                  std::shared_ptr<const JsonConstraint>>
-      cache;
+  static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
+  Key key{answer, std::string(close), std::string(open)};
   {
     const std::lock_guard lock(mutex);
-    if (const auto found = cache.find(answer); found != cache.end())
+    if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
@@ -2144,8 +2148,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
     const auto lexeme = [&](End end) {
       const auto id =
           static_cast<std::uint32_t>(kLexeme | grammar->lexemes_.size());
-      grammar->lexemes_.push_back(
-          JsonSchemaLexeme::Reasoning(answer->reasoning_tool_prefix_, end));
+      grammar->lexemes_.push_back(JsonSchemaLexeme::Reasoning(
+          answer->reasoning_tool_prefix_, end, std::string(close)));
       return id;
     };
     Rule roots{{lexeme(End::kExplicit), answer->root_},
@@ -2156,46 +2160,53 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
     }
     grammar->root_ = grammar->rules_.size();
     grammar->rules_.push_back(std::move(roots));
-    const std::lock_guard lock(mutex);
-    if (cache.size() >= 16)
-      cache.erase(cache.begin());
-    return cache.emplace(std::move(answer), std::move(grammar)).first->second;
-  }
-  constexpr std::string_view end = "</think>";
-  const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
-  grammar->rules_.resize(base + end.size());
-  for (std::size_t prefix = 0; prefix < end.size(); ++prefix) {
-    // Automatic calls must not turn a natural reasoning-only stop into a
-    // mandatory call. The request's output cap also remains independent.
-    if (grammar->automatic_tools_)
-      grammar->rules_[base + prefix].push_back({});
-    std::array<std::bitset<256>, end.size() + 1> transitions;
-    for (unsigned byte = 0; byte < 256; ++byte) {
-      std::string candidate(end.substr(0, prefix));
-      candidate += static_cast<char>(byte);
-      std::size_t matched = std::min(candidate.size(), end.size());
-      while (matched && !candidate.ends_with(end.substr(0, matched)))
-        --matched;
-      transitions[matched].set(byte);
+  } else {
+    const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.resize(base + close.size());
+    for (std::size_t prefix = 0; prefix < close.size(); ++prefix) {
+      // Automatic calls must not turn a natural reasoning-only stop into a
+      // mandatory call. The request's output cap also remains independent.
+      if (grammar->automatic_tools_)
+        grammar->rules_[base + prefix].push_back({});
+      std::vector<std::bitset<256>> transitions(close.size() + 1);
+      for (unsigned byte = 0; byte < 256; ++byte) {
+        std::string candidate(close.substr(0, prefix));
+        candidate += static_cast<char>(byte);
+        std::size_t matched = std::min(candidate.size(), close.size());
+        while (matched && !candidate.ends_with(close.substr(0, matched)))
+          --matched;
+        transitions[matched].set(byte);
+      }
+      for (std::size_t matched = 0; matched <= close.size(); ++matched) {
+        if (transitions[matched].none())
+          continue;
+        const auto terminal = kTerminal | grammar->classes_.size();
+        grammar->classes_.push_back(transitions[matched]);
+        grammar->rules_[base + prefix].push_back(
+            {static_cast<std::uint32_t>(terminal),
+             matched == close.size()
+                 ? answer->root_
+                 : base + static_cast<std::uint32_t>(matched)});
+      }
     }
-    for (std::size_t matched = 0; matched <= end.size(); ++matched) {
-      if (transitions[matched].none())
-        continue;
-      const auto terminal = kTerminal | grammar->classes_.size();
-      grammar->classes_.push_back(transitions[matched]);
-      grammar->rules_[base + prefix].push_back(
-          {static_cast<std::uint32_t>(terminal),
-           matched == end.size() ? answer->root_
-                                 : base + static_cast<std::uint32_t>(matched)});
-    }
+    grammar->root_ = base;
   }
-  grammar->root_ = base;
+  if (!open.empty()) {
+    // Reasoning is not open yet: the output either starts with the provider's
+    // opener, then reasons, or answers directly.
+    Sequence opened;
+    for (const unsigned char byte : open)
+      opened.push_back(kTerminal | byte);
+    opened.push_back(grammar->root_);
+    grammar->rules_.push_back({{answer->root_}, std::move(opened)});
+    grammar->root_ = grammar->rules_.size() - 1;
+  }
   const std::lock_guard lock(mutex);
-  if (const auto found = cache.find(answer); found != cache.end())
+  if (const auto found = cache.find(key); found != cache.end())
     return found->second;
   if (cache.size() >= 16)
     cache.erase(cache.begin());
-  return cache.emplace(std::move(answer), std::move(grammar)).first->second;
+  return cache.emplace(std::move(key), std::move(grammar)).first->second;
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(

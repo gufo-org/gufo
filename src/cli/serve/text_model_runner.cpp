@@ -121,8 +121,17 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  if (runner.InitialOutputState(request) == ext::InitialOutputState::kReasoning)
-    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  // The reasoning phase uses the provider's delimiters, as the response
+  // parsers do. Reasoning the prompt opened may still repeat the opener;
+  // otherwise the model may open it itself unless the request disabled it.
+  const auto initial = runner.InitialOutputState(request);
+  const auto reasoning = runner.ReasoningDelimiters();
+  if (initial == ext::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(grammar, reasoning.close);
+  else if (initial == ext::InitialOutputState::kAuto &&
+           request.reasoning.enabled.value_or(true) && !reasoning.open.empty())
+    grammar = sampling::JsonConstraint::WithReasoning(grammar, reasoning.close,
+                                                      reasoning.open);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }

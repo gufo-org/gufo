@@ -92,8 +92,7 @@ public:
     ValueSyntax values;
     std::optional<TaggedArguments> tagged;
     // A complete call header (`open` + `name_prefix`) written inside the
-    // reasoning phase ends it, as for the Qwen and DeepSeek grammars. The
-    // reasoning grammar recognizes only the `</think>` boundary.
+    // reasoning phase ends it, as for the Qwen and DeepSeek grammars.
     bool reasoning_header{false};
     auto operator<=>(const ToolSyntax&) const = default;
   };
@@ -145,8 +144,15 @@ public:
       const json::Value& schema, bool strict, const ToolSyntax& syntax);
   static std::shared_ptr<const JsonConstraint> OpenToolParameters(
       const ToolSyntax& syntax);
+  // Prefixes `answer` with a reasoning phase that ends at `close` (or, for a
+  // grammar with `reasoning_header` calls, at a complete call header). With an
+  // empty `open` the phase is already open, as when the prompt opened it. A
+  // non-empty `open` is the provider's complete opener (it may span tokens and
+  // include whitespace): the output either starts with it and reasons, or
+  // starts with the answer. An empty `close` is std::invalid_argument.
   static std::shared_ptr<const JsonConstraint> WithReasoning(
-      std::shared_ptr<const JsonConstraint> answer);
+      std::shared_ptr<const JsonConstraint> answer,
+      std::string_view close = "</think>", std::string_view open = {});
   using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
   static std::shared_ptr<const JsonConstraint> WithTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,

@@ -233,6 +233,11 @@ endpoints, and only its markers start calls. The registration supplies:
   of a streamed partial parse. Values that are not JSON are converted to JSON
   text, which the host checks against the declared schema.
 
+The constrained reasoning phase before an answer or call uses the runner's
+`ReasoningDelimiters()`, as the response parsers do: it ends at `close` or at a
+complete call header, and for `InitialOutputState::kAuto` the model may open it
+with the complete `open` literal.
+
 The contract, ownership and error rules are documented on `ToolDialect` in
 [`text.hpp`](../include/gufo/ext/text.hpp). Existing runners need no change:
 the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,

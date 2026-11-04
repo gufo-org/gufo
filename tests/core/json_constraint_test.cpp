@@ -2430,6 +2430,86 @@ void TestProviderToolSyntax() {
   assert(rejected);
 }
 
+// Reasoning framed by provider delimiters: a multi-token opener with a newline,
+// a close whose prefix overlaps itself, and both the prompt-opened phase and
+// the phase the model opens itself.
+void TestProviderReasoningMarkup() {
+  constexpr std::string_view open = "[[ponder>>\n", close = "<<ponder]]";
+  // The default markup is the classic grammar, for every answer shape.
+  const auto object = JsonConstraint::Object();
+  const auto qwen_tools = JsonConstraint::WithTools(
+      nullptr,
+      {{"a",
+        JsonConstraint::OpenToolParameters(JsonConstraint::ToolFormat::kQwen)}},
+      false, true, JsonConstraint::ToolFormat::kQwen);
+  const auto dsml_tools = JsonConstraint::WithTools(
+      object,
+      {{"a", JsonConstraint::OpenToolParameters(
+                 JsonConstraint::ToolFormat::kDeepSeek)}},
+      true, false, JsonConstraint::ToolFormat::kDeepSeek);
+  for (const auto& answer : {object, qwen_tools, dsml_tools}) {
+    assert(JsonConstraint::WithReasoning(answer) ==
+           JsonConstraint::WithReasoning(answer, "</think>"));
+    assert(JsonConstraint::WithReasoning(answer) ==
+           JsonConstraint::WithReasoning(answer, "</think>", ""));
+    assert(JsonConstraint::WithReasoning(answer, close) !=
+           JsonConstraint::WithReasoning(answer));
+  }
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::WithReasoning(object, "");
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  const auto syntax = LedgerSyntax();
+  const auto schema = parse(R"({"type":"object","properties":{
+    "city":{"type":"string"}},"required":["city"],
+    "additionalProperties":false})");
+  const std::vector<JsonConstraint::Tool> tools{
+      {"weather", JsonConstraint::ToolParameters(schema, true, syntax)}};
+  const std::string call = "<<invoke:weather>>{city:«Paris»}<</invoke>>";
+  const auto required =
+      JsonConstraint::WithTools(nullptr, tools, true, false, syntax);
+  // Prompt-opened reasoning, then a call.
+  const auto opened = JsonConstraint::WithReasoning(required, close);
+  assert(Accepts(*opened, "Need the weather.<<ponder]]" + call));
+  assert(Accepts(*opened, "Need the weather.<<ponder]]\n" + call));
+  assert(Accepts(*opened, "Need the weather." + call));
+  assert(Accepts(*opened, "Overlap <<<ponder]]" + call));
+  assert(Accepts(*opened, "Quoted `<<invoke:` stays.<<ponder]]" + call));
+  assert(!Accepts(*opened, "Need the weather.<<ponder]]no call"));
+  assert(!Accepts(*opened, "Need the weather.</think>no call"));
+  // Reasoning the model opens itself.
+  const auto automatic = JsonConstraint::WithReasoning(required, close, open);
+  assert(Accepts(*automatic, "[[ponder>>\nNeed the weather.<<ponder]]" + call));
+  assert(Accepts(*automatic, "[[ponder>>\nNeed the weather." + call));
+  assert(Accepts(*automatic, call));
+  assert(!Accepts(*automatic, "<think>\nNeed the weather.</think>" + call));
+  assert(!Accepts(*automatic, "[[ponder>>Need the weather.<<ponder]]" + call));
+  assert(!Accepts(*automatic, "Need the weather.<<ponder]]" + call));
+  // Automatic tool choice keeps reasoning-only and plain answers.
+  const auto optional = JsonConstraint::WithReasoning(
+      JsonConstraint::WithTools(nullptr, tools, false, false, syntax), close,
+      open);
+  assert(Accepts(*optional, "[[ponder>>\nThinking only"));
+  assert(Accepts(*optional, "[[ponder>>\nPlan.<<ponder]]Plain answer."));
+  assert(Accepts(*optional, "Plain answer."));
+  // A response format without tools: the provider's close alone ends the
+  // phase, including after an overlapping prefix.
+  const auto formatted = JsonConstraint::WithReasoning(object, close);
+  assert(Accepts(*formatted, "Plan.<<ponder]]{\"x\":1}"));
+  assert(Accepts(*formatted, "Plan <<<ponder]]{\"x\":1}"));
+  assert(Accepts(*formatted, "Plan.</think> is text.<<ponder]]{}"));
+  assert(!Accepts(*formatted, "Plan.</think>{\"x\":1}"));
+  const auto framed = JsonConstraint::WithReasoning(object, close, open);
+  assert(Accepts(*framed, "[[ponder>>\nPlan.<<ponder]]{}"));
+  assert(Accepts(*framed, "{}"));
+  assert(!Accepts(*framed, "<think>\nPlan.</think>{}"));
+  assert(!Accepts(*framed, "[[ponder>>\nPlan.</think>{}"));
+}
+
 // V4 DSML tag text in the V4.1 spelling: a space after ｜DSML｜ and the call
 // block named `calls`.
 std::string DsmlVariant(std::string text) {
@@ -2592,6 +2672,7 @@ int main(int argc, char** argv) {
   TestNativeToolSchemaMatrix();
   TestLlamaCppToolGrammarGoldens();
   TestProviderToolSyntax();
+  TestProviderReasoningMarkup();
   TestProviderTaggedSyntax();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";

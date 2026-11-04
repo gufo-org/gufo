@@ -29,8 +29,17 @@ format enum entry.
   and `qwen` are built into the host, and a dialect needs markers containing
   `<`, a scanner, and a syntax opened by one of its markers or a native
   `format`. Registered dialects keep stable addresses for the process.
+- Constrained reasoning uses the runner's `ReasoningDelimiters()`:
+  `JsonConstraint::WithReasoning(answer, close, open)` ends the reasoning phase
+  at `close` (or a complete call header) instead of `</think>`. Prompt-opened
+  reasoning (`kThought`) uses `close` alone; for `kAuto`, unless the request
+  disables reasoning, the output may start with the complete `open` (which may
+  span tokens and include whitespace) and reason, or answer directly. The
+  defaults (`</think>`, already open) build the previous grammar.
 - With `partial`, `scan_tool_calls` appends only an unfinished call that later
   text can still complete, and its arguments only grow.
 
-Additive for existing callers; a registration that the new validation rejects
+Additive for existing callers, except that constrained output of a `kAuto`
+runner with a non-empty opener now admits a leading reasoning block, as its
+response parsers already did; a registration that the new validation rejects
 must declare a scanner, `<` markers and a grammar.
