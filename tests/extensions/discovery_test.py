@@ -406,6 +406,40 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
             path.chmod(path.stat().st_mode | stat.S_IWUSR)
         return external
 
+    def test_external_public_link_targets(self):
+        external_dir = Path(self.temporary.name) / "linked_ext"
+        external_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema": 1, "name": "linked_ext", "version": "1.0.0", "api_version": ">= 0.2.0",
+            "entry": "linked_ext_register", "registration_target": "gufo_linked_ext",
+            "depends": [], "platforms": ["linux", "windows"], "options": [],
+            "providers": [{"id": "linked-provider", "capability": "embeddings",
+                           "keys": ["safetensors:linked"], "model_ids": ["linked-model"],
+                           "target": "gufo_linked_ext", "entry": "linked_ext_provider_register"}],
+            "targets": {"gufo_linked_ext": {"requires": []}},
+        }
+        (external_dir / "extension.json").write_text(json.dumps(manifest))
+        (external_dir / "linked.cpp").write_text("""extern "C" {
+void linked_ext_provider_register(void*) {}
+void linked_ext_register(void*) {}
+}
+""")
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_linked_ext
+  SOURCES linked.cpp
+  LINK_LIBRARIES gufo_ext_runtime gufo_ext_core gufo_ext_cache
+)
+""")
+        cmake = self.source / "CMakeLists.txt"
+        cmake.write_text(cmake.read_text().replace("gufo_build_discovered_extensions()", """add_library(gufo_core INTERFACE)
+add_library(gufo_cache INTERFACE)
+add_library(gufo_ext_core INTERFACE)
+target_link_libraries(gufo_ext_core INTERFACE $<LINK_ONLY:gufo_core>)
+add_library(gufo_ext_cache INTERFACE)
+target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
+gufo_build_discovered_extensions()"""))
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}")
+
     def test_external_template_installs_license(self):
         external = self.template()
         self.configure(f"-DGUFO_EXTENSION_DIRS={external}")

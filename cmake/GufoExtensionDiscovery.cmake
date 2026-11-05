@@ -339,7 +339,7 @@ function(_gufo_validate_external_target tgt)
       gufo_runtime_storage gufo_prompt_cache gufo_audio_cache gufo_tool_calls
       gufo_kernel_bench_support)
   # Audited link contracts: their closure reaches private targets by design.
-  set(public_link_targets gufo_ext_cache)
+  set(public_link_targets gufo_ext_core gufo_ext_cache gufo_ext_hip)
   get_target_property(directory "${tgt}" SOURCE_DIR)
   set(base "${CMAKE_BINARY_DIR}")
   _gufo_external_property("${tgt}" "${tgt}" INCLUDE_DIRECTORIES paths)
