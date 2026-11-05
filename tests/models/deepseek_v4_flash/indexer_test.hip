@@ -171,9 +171,8 @@ void check_indexer_selection(bool benchmark) {
   std::uniform_real_distribution<float> values(-4.F, 4.F);
   unsigned cases_passed = 0;
   for (uint32_t tokens : {1u, 6u, 33u, 2048u}) {
-    for (uint32_t n :
-         {1025u, 2048u, 2049u, 4096u, 8192u, 8704u, 16384u, 16385u, 32768u,
-          32769u, 47104u, 65536u}) {
+    for (uint32_t n : {1025u, 2048u, 2049u, 4096u, 8192u, 8704u, 9217u, 16384u,
+                       16385u, 32768u, 32769u, 47104u, 65536u}) {
       if ((tokens == 33 && n < 4096) ||
           (tokens == 2048 && n != 8704 && n != 16385))
         continue;
@@ -238,6 +237,20 @@ void check_indexer_selection(bool benchmark) {
                 "Top-k ordering mismatch: n=%u tokens=%u mode=%u repeat=%d\n",
                 n, tokens, mode, repeat);
             std::exit(8);
+          }
+          if (indexer_seeded_topk_fits(n, tokens, 512)) {
+            check(hipMemset(out, 0xff, actual.size() * sizeof(uint32_t)));
+            check(indexer_seeded_topk_launch(out, scores, n, tokens, scratch));
+            check(hipMemcpy(actual.data(), out,
+                            actual.size() * sizeof(uint32_t),
+                            hipMemcpyDeviceToHost));
+            if (actual != expected) {
+              std::fprintf(stderr,
+                           "Seeded top-k ordering mismatch: n=%u tokens=%u "
+                           "mode=%u repeat=%d\n",
+                           n, tokens, mode, repeat);
+              std::exit(8);
+            }
           }
         }
         ++cases_passed;

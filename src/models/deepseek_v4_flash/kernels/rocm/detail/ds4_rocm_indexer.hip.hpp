@@ -442,6 +442,16 @@ extern "C" int ds4_gpu_indexer_topk_tensor(
         selected->bytes < (uint64_t)n_tokens * top_k * sizeof(uint32_t)) {
         return 0;
     }
+    if (indexer_seeded_topk_fits(n_comp, n_tokens, top_k)) {
+        uint32_t *histogram = (uint32_t *)hip_tmp_alloc(
+                (uint64_t)n_tokens * indexer_topk_histogram_bins * sizeof(uint32_t),
+                "indexer topk histogram");
+        if (!histogram) return 0;
+        return hip_ok(indexer_seeded_topk_launch((uint32_t *)selected->ptr,
+                                                 (const float *)scores->ptr,
+                                                 n_comp, n_tokens, histogram),
+                      "indexer seeded topk launch");
+    }
     if (indexer_partial_topk_launch((uint32_t*)selected->ptr,
                                     (const float*)scores->ptr, n_comp, n_tokens,
                                     top_k)) {
