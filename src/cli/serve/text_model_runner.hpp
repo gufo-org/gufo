@@ -47,10 +47,8 @@ using ext::TextRunnerDescriptor;
 using ext::TextRunnerDiskCacheOptions;
 using ext::TextRunnerMeasuredResources;
 using ext::TextRunnerNgramRows;
-using ext::TextRunnerPersistenceDescriptor;
 using ext::TextRunnerRamCacheOptions;
 using ext::TextRunnerResourceClaim;
-using ext::TextRunnerSnapshot;
 using ext::TextRunnerState;
 using ext::TextRunnerToken;
 

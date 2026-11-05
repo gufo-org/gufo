@@ -58,7 +58,8 @@ public:
 
   [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
 
-  /// Stable model-owned byte payload used by persistent continuation caches.
+  /// Stable model-owned byte payload. Serving does not use it; model tests
+  /// compare it as a byte-exact oracle.
   [[nodiscard]] virtual std::size_t PersistentPayloadBytes() const {
     throw std::logic_error(
         "draft backend snapshot does not support persistent sizing");

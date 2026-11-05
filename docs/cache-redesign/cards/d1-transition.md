@@ -2,6 +2,10 @@
 
 **Type:** decision · **Blocks:** 19 · **Status:** agreed
 
+**Outcome:** the single switch-over did not happen. Serving routed by runner
+capability while DeepSeek V4 Flash and LFM3 migrated, and both caches ran side by
+side until the legacy cache was deleted. The routing went with it.
+
 ## Decision
 
 Serving never runs the old and the new cache side by side, and the new cache

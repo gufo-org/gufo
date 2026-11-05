@@ -21,9 +21,7 @@ include/gufo/ext/experimental/hip_utils.hpp
 include/gufo/ext/experimental/hipblaslt_plan_database.hpp
 include/gufo/ext/experimental/host_allocations.hpp
 include/gufo/ext/experimental/managed_alloc.hpp
-include/gufo/ext/experimental/snapshot_copy.hpp
 include/gufo/ext/experimental/snapshot_transfer.hpp
-include/gufo/ext/experimental/transfer_pool.hpp
 include/gufo/ext/experimental/weight_upload.hpp
 include/gufo/ext/gguf_identity.hpp
 include/gufo/ext/gguf_reader.hpp
@@ -49,9 +47,11 @@ include/gufo/ext/registry.hpp
 include/gufo/ext/sampling.hpp
 include/gufo/ext/session_mode.hpp
 include/gufo/ext/sha256.hpp
+include/gufo/ext/snapshot_copy.hpp
 include/gufo/ext/speculative_verifier.hpp
 include/gufo/ext/text.hpp
 include/gufo/ext/text_contracts.hpp
+include/gufo/ext/transfer_pool.hpp
 include/gufo/ext/tts.hpp
 include/gufo/ext/types.hpp
 include/gufo/ext/utf8.hpp

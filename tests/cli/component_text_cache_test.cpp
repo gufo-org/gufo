@@ -43,8 +43,6 @@ public:
   bool defer_idle{};
   bool in_pass{};
   bool partial{};
-  /// Overrides only the deprecated single-boundary PrefillThrough.
-  bool legacy{};
   std::size_t alignment{1};
   /// Every prefill step's end and in-pass checkpoint, in order.
   mutable std::vector<std::size_t> pass_ends;
@@ -53,20 +51,17 @@ public:
   cache::Rows rows_per_chunk{4};
   std::size_t row_backing_bytes{16};
   mutable std::size_t through_calls{};
-  bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
     return {.model_id = "component-fake",
             .state_abi = "component-fake-v1",
             .max_context = 4096,
             .capabilities = {.incremental_prefill = true,
-                             .snapshot = true,
-                             .fork = true,
                              .final_token_advance_required = false,
                              .prefix_reuse = true,
                              .in_pass_checkpoint = in_pass,
                              .partial_prefill_retention = partial,
                              .prefill_alignment = alignment,
-                             .max_in_pass_checkpoints = legacy ? 1U : 64U}};
+                             .max_in_pass_checkpoints = 64U}};
   }
   TextRunnerResourceClaim ResourceClaim() const override {
     return {.state_capacity_bytes = 1ULL << 30,
@@ -86,9 +81,6 @@ public:
   }
   std::string Decode(std::span<const TextRunnerToken>) const override {
     return "";
-  }
-  std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error("legacy state must never be constructed");
   }
   // Image prompts carry their cache identity in the context.
   void SetPromptContext(
@@ -137,15 +129,11 @@ public:
                ? std::optional<std::size_t>(1)
                : std::nullopt;
   }
-  using TextModelRunner::PrefillThrough;
   TextPrefillStep PrefillThrough(TextRunnerState& state,
                                  std::span<const TextRunnerToken> prompt,
                                  std::size_t offset, std::size_t budget,
                                  std::span<const std::size_t> boundaries,
                                  const InPassConsumer& consume) const override {
-    if (legacy)
-      return TextModelRunner::PrefillThrough(state, prompt, offset, budget,
-                                             boundaries, consume);
     ++through_calls;
     auto& s = dynamic_cast<State&>(state);
     const auto count = std::min(budget, prompt.size() - offset);
@@ -154,32 +142,10 @@ public:
       const auto head = prompt.subspan(at, boundaries[i] - at);
       s.adapter.Append(s.slot, head, head);
       at = boundaries[i];
-      consume(i, nullptr);
+      consume(i);
       in_pass_points.push_back(boundaries[i]);
     }
     const auto tail = prompt.subspan(at, offset + count - at);
-    s.adapter.Append(s.slot, tail, tail);
-    pass_ends.push_back(offset + count);
-    return {count, offset + count == prompt.size()};
-  }
-  TextPrefillStep PrefillThrough(
-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget, std::size_t boundary,
-      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& capture)
-      const override {
-    ++through_calls;
-    auto& s = dynamic_cast<State&>(state);
-    const auto count = std::min(budget, prompt.size() - offset);
-    const auto head = prompt.subspan(offset, boundary - offset);
-    s.adapter.Append(s.slot, head, head);
-    try {
-      *checkpoint = capture();
-    } catch (...) {
-      checkpoint->reset();
-    }
-    in_pass_points.push_back(boundary);
-    const auto tail = prompt.subspan(boundary, offset + count - boundary);
     s.adapter.Append(s.slot, tail, tail);
     pass_ends.push_back(offset + count);
     return {count, offset + count == prompt.size()};
@@ -255,12 +221,9 @@ void InPassCapturePreservesBoundaryAndLiveTail() {
   Prefill(cold);
   const auto expected = Generate(cold);
   cold.Invalidate();
-  for (const auto [fail, legacy] :
-       {std::pair{false, false}, std::pair{true, false},
-        std::pair{false, true}}) {
+  for (const bool fail : {false, true}) {
     auto runner = std::make_shared<Runner>();
     runner->in_pass = true;
-    runner->legacy = legacy;
     TextRunnerPool pool(runner, 2);
     auto seed =
         pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
@@ -651,7 +614,7 @@ void RestoreFromBusyBorrowedSource() {
   const auto hash = runner->adapter->RecurrentHash(state.slot);
   assert(source->TryReserveSnapshot(source->CaptureBytes(), prompt.size(),
                                     false, SnapshotPurpose::kContinuation, {}));
-  std::shared_ptr<const TextRunnerSnapshot> snapshot = source->Capture();
+  std::shared_ptr<const ContinuationSnapshot> snapshot = source->Capture();
   assert(source->PublishSnapshot(prompt, snapshot, false));
   auto gauges = source->Metrics().ledger;
   assert(gauges.reserved_bytes[static_cast<unsigned>(
@@ -683,7 +646,7 @@ void ColdAssignmentPrefersPreservedSlot() {
   runner->adapter->Append(state.slot, prompt, prompt);
   assert(source->TryReserveSnapshot(source->CaptureBytes(), prompt.size(),
                                     false, SnapshotPurpose::kContinuation, {}));
-  std::shared_ptr<const TextRunnerSnapshot> snapshot = source->Capture();
+  std::shared_ptr<const ContinuationSnapshot> snapshot = source->Capture();
   assert(source->PublishSnapshot(prompt, snapshot, false));
   (void)source->Commit(prompt, {}, prompt);
   // Idle streams are unavailable. Replacing the first slot would require
@@ -711,7 +674,7 @@ void ImageAfterCachedTextPrefixCaptures() {
     runner->adapter->Append(state.slot, text, text);
     assert(root->TryReserveSnapshot(root->CaptureBytes(), text.size(), false,
                                     SnapshotPurpose::kContinuation, {}));
-    std::shared_ptr<const TextRunnerSnapshot> snapshot = root->Capture();
+    std::shared_ptr<const ContinuationSnapshot> snapshot = root->Capture();
     assert(root->PublishSnapshot(text, snapshot, false));
   }
   auto image = text;
@@ -742,7 +705,7 @@ void ImageAfterCachedTextPrefixCaptures() {
     const auto hash = runner->adapter->RecurrentHash(state.slot);
     assert(lease->TryReserveSnapshot(lease->CaptureBytes(), image.size(), false,
                                      SnapshotPurpose::kContinuation, {}));
-    std::shared_ptr<const TextRunnerSnapshot> snapshot = lease->Capture();
+    std::shared_ptr<const ContinuationSnapshot> snapshot = lease->Capture();
     assert(lease->PublishSnapshot(image, snapshot, false));
 
     // Model the retry after discarding a cancelled assistant: the image prompt
@@ -1492,7 +1455,7 @@ void FailedCaptureKeepsPublishedBoundary() {
   const auto hash = runner->adapter->RecurrentHash(state.slot);
   assert(lease->TryReserveSnapshot(lease->CaptureBytes(), 40, false,
                                    SnapshotPurpose::kContinuation, {}));
-  std::shared_ptr<const TextRunnerSnapshot> snapshot = lease->Capture();
+  std::shared_ptr<const ContinuationSnapshot> snapshot = lease->Capture();
   assert(lease->PublishSnapshot({prompt.begin(), prompt.begin() + 40}, snapshot,
                                 false));
   snapshot.reset();
@@ -1644,7 +1607,7 @@ void FragmentedBackingKeepsCompletePrompt() {
   const auto hash = runner->adapter->RecurrentHash(state.slot);
   assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
                                    SnapshotPurpose::kContinuation, {}));
-  std::unique_ptr<TextRunnerSnapshot> snapshot;
+  std::unique_ptr<ContinuationSnapshot> snapshot;
   try {
     snapshot = lease->Capture();
   } catch (const cache::ResourceExhausted&) {

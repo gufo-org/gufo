@@ -12,10 +12,23 @@ namespace gufo::server {
 // The continuation bases and token id are runtime contracts (RFC step 6).
 // These aliases keep the serving spelling.
 using ext::ContinuationInputPrefix;
-using ext::ContinuationSnapshot;
 using ext::ContinuationState;
 using ext::ContinuationToken;
 using ext::PrefixInputIdentity;
+
+/// Immutable continuation payload retained by the cache.
+class ContinuationSnapshot {
+public:
+  ContinuationSnapshot() = default;
+  virtual ~ContinuationSnapshot() = default;
+
+  ContinuationSnapshot(const ContinuationSnapshot&) = delete;
+  ContinuationSnapshot& operator=(const ContinuationSnapshot&) = delete;
+  ContinuationSnapshot(ContinuationSnapshot&&) = delete;
+  ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
+
+  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
+};
 
 enum class SnapshotEventReason : std::uint8_t {
   kByteCapacity,

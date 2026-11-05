@@ -135,14 +135,10 @@ public:
         throw std::invalid_argument(
             "DSpark disk cache requires a support SHA-256 fingerprint");
       }
-      persistence_ = TextRunnerPersistenceDescriptor{
-          .compatibility_identity = DeepSeekCompatibilityIdentity(
-              artifact_fingerprint,
-              use_dspark_ ? support_fingerprint : std::string{}, max_context_,
-              max_draft_tokens_),
-          .payload_version = DS4_SESSION_PAYLOAD_VERSION,
-      };
-      component_identity_ = persistence_->compatibility_identity;
+      component_identity_ = DeepSeekCompatibilityIdentity(
+          artifact_fingerprint,
+          use_dspark_ ? support_fingerprint : std::string{}, max_context_,
+          max_draft_tokens_);
     } else {
       // Without file fingerprints the loaded model is the identity; durable
       // caches require the validated artifact identity above.
@@ -151,7 +147,6 @@ public:
     }
   }
 
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
@@ -187,8 +182,6 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = dspark,
@@ -196,7 +189,6 @@ public:
                 .batched_multi_token_decode_max_width = 8u,
                 .prefix_reuse = true,
             },
-        .persistence = persistence_,
         .sampling_preset = sampling::TextModelPreset::kDeepSeekV4Flash,
     };
   }
@@ -316,11 +308,6 @@ public:
       text += model_->DecodeToken(static_cast<int>(token));
     }
     return text;
-  }
-
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error(
-        "DeepSeek execution slots are owned by the component cache");
   }
 
   void PreparePrefixReuse(
@@ -723,7 +710,6 @@ private:
   std::uint32_t max_context_;
   bool use_dspark_;
   std::uint32_t max_draft_tokens_;
-  std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
 };
 

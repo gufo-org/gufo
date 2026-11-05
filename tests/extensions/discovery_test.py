@@ -81,7 +81,7 @@ gufo_target_extensions(fixture EXTENSIONS ${{selected}})
     def add(self, name, depends=None, family=False, hip=False):
         directory = self.source / (f"src/families/test/{name}" if family else f"src/models/{name}")
         directory.mkdir(parents=True, exist_ok=True)
-        manifest = {"schema": 1, "name": name, "version": "1.2.3", "api_version": ">= 0.1.0",
+        manifest = {"schema": 1, "name": name, "version": "1.2.3", "api_version": ">= 0.2.0",
                     "depends": depends or [], "platforms": ["linux", "windows"],
                     "targets": {f"{name}_registration": {"requires": []}}}
         if family:
@@ -287,7 +287,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
             "schema": 1,
             "name": "external_model",
             "version": "1.0.0",
-            "api_version": ">= 0.1.0",
+            "api_version": ">= 0.2.0",
             "entry": "external_model_register",
             "registration_target": "gufo_external_model",
             "depends": [],
@@ -328,7 +328,7 @@ void external_model_register(gufo::ext::Registry&) {}
             "schema": 1,
             "name": "bad_ext",
             "version": "1.0.0",
-            "api_version": ">= 0.1.0",
+            "api_version": ">= 0.2.0",
             "entry": "bad_ext_register",
             "registration_target": "gufo_bad_ext",
             "depends": [],
