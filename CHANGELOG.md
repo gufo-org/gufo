@@ -4,6 +4,28 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.31.0](https://github.com/gufo-org/gufo/compare/v0.30.0...v0.31.0) (2026-11-05)
+
+
+### Features
+
+* **cache:** add window-row components for sliding-window attention ([#1010](https://github.com/gufo-org/gufo/issues/1010)) ([555f859](https://github.com/gufo-org/gufo/commit/555f859fc3f6d4dd0c74cb42f4a3f7fbca8bef3a))
+* **ext:** add public link targets for extension executables ([#1032](https://github.com/gufo-org/gufo/issues/1032)) ([55c21af](https://github.com/gufo-org/gufo/commit/55c21af0753a9baff538373078f753b5878ae15f))
+* **ext:** keep indivisible prompt spans whole across prefill stops and checkpoints ([#1011](https://github.com/gufo-org/gufo/issues/1011)) ([d02a1d2](https://github.com/gufo-org/gufo/commit/d02a1d2d5fe36f6e5683b762cda05618283d13f5))
+* **ext:** let text providers declare their reasoning delimiters ([#1008](https://github.com/gufo-org/gufo/issues/1008)) ([2728aa7](https://github.com/gufo-org/gufo/commit/2728aa7e221f01e85792b4f9745834c76651a6f4))
+* **ext:** let text providers register native tool dialects ([#1013](https://github.com/gufo-org/gufo/issues/1013)) ([2c97b72](https://github.com/gufo-org/gufo/commit/2c97b72d8671ddd0c74ae7d517b8cef4ebb78871))
+* **ext:** let text providers supply sampling defaults and restore them in prompt and chat ([#1009](https://github.com/gufo-org/gufo/issues/1009)) ([3115315](https://github.com/gufo-org/gufo/commit/311531543e0470cc666097eabf1940be61378218))
+
+
+### Bug Fixes
+
+* **gguf:** open tensorless split shards that end without data padding ([#1021](https://github.com/gufo-org/gufo/issues/1021)) ([118b7c6](https://github.com/gufo-org/gufo/commit/118b7c63f825bb9dde2e6de2285ed2c9be005019))
+
+
+### Code Refactoring
+
+* **ext:** make the component cache the only continuation contract ([#1026](https://github.com/gufo-org/gufo/issues/1026)) ([65fe68a](https://github.com/gufo-org/gufo/commit/65fe68a9f39650a98a65ba80d6adcc80129992de))
+
 ## [0.30.0](https://github.com/gufo-org/gufo/compare/v0.29.0...v0.30.0) (2026-11-04)
 
 
