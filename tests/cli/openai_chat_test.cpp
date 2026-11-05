@@ -1477,6 +1477,78 @@ void TestToolChoiceEnforcement() {
          "ordinary text cannot fulfill required tool choice");
 }
 
+void TestStructuredRequiredHoldsCallSeparator() {
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  struct Case {
+    Format format;
+    std::vector<std::string> pieces;
+    const char* choice;
+    std::string content;
+  };
+  const std::vector<Case> cases{
+      {Format::kDeepSeek, {"\n\n"}, "required", ""},
+      {Format::kDeepSeek, {"\n", "\n"}, "required", ""},
+      {Format::kDeepSeek, {"\n\n"}, "auto", "\n\n"},
+      {Format::kDeepSeek, {"Plain."}, "required", "Plain."},
+      {Format::kQwen, {"\n\n"}, "required", "\n\n"},
+  };
+  for (const auto& item : cases)
+    for (const bool stream : {false, true}) {
+      auto body = gufo::json::parse(R"({"model":"test-model",
+        "reasoning_effort":"none","max_completion_tokens":1,
+        "messages":[{"role":"user","content":"Return the object."}],
+        "response_format":{"type":"json_schema","json_schema":{"name":"o",
+          "strict":true,"schema":{"type":"object","properties":{
+            "text":{"type":"string"}},"required":["text"],
+            "additionalProperties":false}}},
+        "tools":[{"type":"function","function":{"name":"echo","strict":true,
+          "parameters":{"type":"object","properties":{
+            "text":{"type":"string"}},"required":["text"],
+            "additionalProperties":false}}}]})");
+      body["tool_choice"] = item.choice;
+      body["stream"] = stream;
+      FakeBackend backend;
+      backend.tool_format = item.format;
+      backend.finish_reason = FakeBackend::FinishReason::kLength;
+      backend.pieces = item.pieces;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "limited structured tool request runs");
+      std::string output = response.body;
+      std::string content;
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          output += chunk;
+          return true;
+        });
+        for (std::size_t cursor = 0;
+             (cursor = output.find("data: ", cursor)) != std::string::npos;) {
+          const auto begin = cursor + 6;
+          cursor = output.find('\n', begin);
+          const auto payload = output.substr(begin, cursor - begin);
+          if (payload == "[DONE]")
+            break;
+          const auto event = gufo::json::parse(payload);
+          for (const auto& choice : event.find("choices")->items())
+            if (const auto* delta = choice.find("delta"))
+              content += delta->member_str("content");
+        }
+      } else {
+        content = gufo::json::parse(response.body)
+                      .find("choices")
+                      ->items()[0]
+                      .find("message")
+                      ->member_str("content");
+      }
+      Expect(content == item.content,
+             "only a held call opener is withheld from limited content");
+      Expect(
+          output.find("\"tool_calls\":") == std::string::npos &&
+              output.find(R"("finish_reason":"length")") != std::string::npos,
+          "a held call opener is not a call");
+    }
+}
+
 void TestDeepSeekToolCallsAreStructured() {
   FakeBackend backend;
   backend.pieces = {
@@ -7676,6 +7748,7 @@ int main() {
   TestCachePromptOption();
   TestCachePersistOption();
   TestToolChoiceEnforcement();
+  TestStructuredRequiredHoldsCallSeparator();
   TestStreamingIsLive();
   TestLessThanProseStreamsBeforeCompletion();
   TestStreamingWithoutUsage();
