@@ -81,7 +81,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  if (runner.InitialOutputState(request) == ext::InitialOutputState::kReasoning)
+  if (runner.ChatInitialOutputState(constrained) ==
+      ext::InitialOutputState::kReasoning)
     grammar = sampling::JsonConstraint::WithReasoning(grammar);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;

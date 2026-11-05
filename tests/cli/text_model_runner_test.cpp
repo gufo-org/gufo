@@ -375,6 +375,136 @@ private:
 
 using SnapshotRunner = FakeRunner;
 
+class TestChatRenderer final : public gufo::ext::ChatRenderer {
+public:
+  gufo::ext::RenderedChatPrompt Render(const ChatRequest& request,
+                                       std::size_t) const override {
+    return {"custom:" + request.messages.front().content,
+            {},
+            gufo::ext::InitialOutputState::kReasoning};
+  }
+};
+
+void TestExtensionChatRendering() {
+  using namespace gufo::ext;
+  auto factory =
+      +[](std::string_view provider,
+          const TextRunnerOptions&) -> std::shared_ptr<const ChatRenderer> {
+    return provider == "fixture" ? std::make_shared<TestChatRenderer>()
+                                 : nullptr;
+  };
+  RegisterChatRendererFactory("test-renderer", factory);
+  RegisterChatRendererFactory("test-renderer", factory);
+  Expect(!CreateChatRenderer("unmatched", {}), "unmatched model stays native");
+  const auto renderer = CreateChatRenderer("fixture", {});
+  ChatRequest request{{ChatMessage{ChatRole::kUser, "hello"}}};
+  Expect(renderer && renderer->Render(request, 1024).text == "custom:hello",
+         "registered renderer receives request");
+  // A new model exposes only native input preparation. The shared entry
+  // points handle every template operation without model-specific dispatch.
+  class InputRunner final : public FakeRunner {
+  public:
+    InputRunner() : FakeRunner(std::make_shared<FakeStats>()) {}
+    TextPreparedPrompt PrepareRenderedPrompt(
+        const ChatRequest& request, const RenderedChatPrompt& prompt,
+        std::uint32_t context) const override {
+      ++preparations;
+      last_context = context;
+      last_literals = prompt.literal_spans.size();
+      last_image_count = request.messages.front().images.size();
+      return {Tokenize(prompt.text), {}};
+    }
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = FakeRunner::Descriptor();
+      descriptor.model_id = "unlisted-model";
+      descriptor.capabilities.supports_vision = true;
+      return descriptor;
+    }
+    mutable std::size_t preparations = 0, last_literals = 0,
+                        last_image_count = 0;
+    mutable std::uint32_t last_context = 0;
+  } runner;
+  Expect(
+      runner.PrepareChatPrompt(request)->tokens == runner.Tokenize("hello") &&
+          runner.CountChatTokens(request) == 5 &&
+          !runner.RenderChatPrompt(request) &&
+          runner.ChatInitialOutputState(request) == InitialOutputState::kAuto,
+      "no extension preserves native dispatch");
+  runner.SetChatRenderer(renderer);
+  Expect(runner.RenderChatPrompt(request) == "custom:hello" &&
+             runner.ChatInitialOutputState(request) ==
+                 InitialOutputState::kReasoning &&
+             runner.ChatInitialOutputState({}) == InitialOutputState::kAuto,
+         "shared rendering and output state do not invoke model preparation");
+  Expect(runner.preparations == 0, "render-only operations avoid tokenization");
+  Expect(runner.PrepareChatPrompt(request)->tokens ==
+                 runner.Tokenize("custom:hello") &&
+             runner.last_context == runner.Descriptor().max_context,
+         "shared preparation delegates native framing with generation context");
+  request.messages.front().content.assign(80, 'x');
+  Expect(runner.CountChatTokens(request) == 87 && runner.last_context > 87,
+         "counting reports over-context prompts without truncation");
+  bool too_long = false;
+  try {
+    (void)runner.PrepareChatPrompt(request);
+  } catch (const std::length_error&) {
+    too_long = true;
+  }
+  Expect(too_long, "generation retains context validation");
+  request.messages.front().content = "hello";
+  class FixedRenderer final : public ChatRenderer {
+  public:
+    RenderedChatPrompt output{"frame hello", {}, InitialOutputState::kContent};
+    RenderedChatPrompt Render(const ChatRequest&, std::size_t) const override {
+      return output;
+    }
+  };
+  const auto fixed = std::make_shared<FixedRenderer>();
+  runner.SetChatRenderer(fixed);
+  fixed->output.literal_spans = {{6, 5}};
+  (void)runner.PrepareChatPrompt(request);
+  Expect(runner.last_literals == 1, "literal spans reach the model tokenizer");
+  const auto valid = fixed->output;
+  const auto invalid = [&] {
+    const auto before = runner.preparations;
+    bool failed = false;
+    try {
+      (void)runner.PrepareChatPrompt(request);
+    } catch (const std::invalid_argument&) {
+      failed = true;
+    }
+    Expect(failed && runner.preparations == before,
+           "shared validation rejects invalid framing before the model");
+    fixed->output = valid;
+  };
+  fixed->output.text.clear();
+  invalid();
+  fixed->output.initial_output_state = InitialOutputState::kAuto;
+  invalid();
+  fixed->output.literal_spans = {{6, 20}};
+  invalid();
+  fixed->output.literal_spans = {{6, 5}, {7, 1}};
+  invalid();
+  fixed->output.image_offsets = {0};
+  invalid();
+  request.messages.front().images.push_back(
+      {0, std::make_shared<const std::vector<std::uint8_t>>(1, 1)});
+  fixed->output.image_offsets = {100};
+  invalid();
+  fixed->output.image_offsets = {0};
+  (void)runner.PrepareChatPrompt(request);
+  Expect(runner.last_image_count == 1,
+         "shared dispatch preserves model-owned image inputs");
+  RegisterChatRendererFactory("conflicting-renderer", factory);
+  bool rejected = false;
+  try {
+    (void)CreateChatRenderer("fixture", {});
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "ambiguous renderers fail explicitly");
+}
+
 void TestPromptCountingValidatesCapabilitiesBeforeInference() {
   const auto stats = std::make_shared<FakeStats>();
   FakeRunner runner(stats);
@@ -775,6 +905,35 @@ void TestServerInstructionsAreFraming() {
   private:
     gufo::sampling::JsonConstraint::ToolFormat format_;
   };
+  // Constraint grammar follows the extension's assistant prefix, even when
+  // the underlying runner's native formatter would start in content mode.
+  class InstructionRenderer final : public gufo::ext::ChatRenderer {
+  public:
+    gufo::ext::RenderedChatPrompt Render(const ChatRequest& request,
+                                         std::size_t) const override {
+      const auto& suffix = request.messages.front().framing_suffix;
+      return {"prompt" + suffix,
+              {},
+              suffix.empty() ? gufo::ext::InitialOutputState::kContent
+                             : gufo::ext::InitialOutputState::kReasoning};
+    }
+  };
+  ConstraintRunner custom(gufo::sampling::JsonConstraint::ToolFormat::kJson);
+  custom.SetChatRenderer(std::make_shared<InstructionRenderer>());
+  ChatRequest custom_request({{ChatRole::kUser, "Return JSON."}});
+  custom_request.response_format = gufo::sampling::JsonConstraint::Object();
+  gufo::sampling::SamplingConfig custom_sampling;
+  const auto custom_constrained = gufo::server::ConstrainChatRequest(
+      custom_request, custom, &custom_sampling);
+  Expect(custom_constrained && custom_sampling.constraint,
+         "extension rendering retains structured-output constraints");
+  auto grammar_state = custom_sampling.constraint->grammar->Start();
+  for (const unsigned char byte : std::string("reasoning</think>{}"))
+    grammar_state =
+        custom_sampling.constraint->grammar->Advance(grammar_state, byte);
+  Expect(custom_sampling.constraint->grammar->Complete(grammar_state),
+         "constraint accepts reasoning opened by the extension template");
+
   // Only runners without a native call syntax use the JSON envelope and its
   // instruction; a native runner never switches syntax for a schema (#383).
   const ConstraintRunner runner(
@@ -996,6 +1155,7 @@ void TestServerInstructionsAreFraming() {
 }  // namespace
 
 int main() {
+  TestExtensionChatRendering();
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();

@@ -365,6 +365,22 @@ void TestPinnedArtifactTemplateValidation() {
   Expect(
       !gufo::models::deepseek_v4_flash::ValidateGgufTemplate(*reader, &error),
       "DeepSeek look-alike template is rejected by hash");
+  Expect(gufo::models::deepseek_v4_flash::ValidateGgufTemplate(*reader, &error,
+                                                               false),
+         "external renderer owns the template digest");
+  for (const bool wrong_architecture : {false, true}) {
+    GgufTemplateBuilder invalid;
+    invalid.AddString("general.architecture",
+                      wrong_architecture ? "qwen3" : "deepseek4");
+    invalid.AddString("general.name",
+                      wrong_architecture ? "DeepSeek V4 Flash" : "Other model");
+    binary = invalid.Build();
+    reader = gufo::core::GgufReader::OpenMemory(binary.data(), binary.size(),
+                                                &error);
+    Expect(reader && !gufo::models::deepseek_v4_flash::ValidateGgufTemplate(
+                         *reader, &error, false),
+           "external renderer preserves artifact validation");
+  }
 }
 
 // Every control-token spelling the renderer writes as framing.

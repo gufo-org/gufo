@@ -406,6 +406,41 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
             path.chmod(path.stat().st_mode | stat.S_IWUSR)
         return external
 
+    def test_external_chat_renderer_without_model_provider(self):
+        external = self.template()
+        manifest_path = external / "extension.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["providers"] = []
+        manifest_path.write_text(json.dumps(manifest))
+        (external / "src/template_model.cpp").write_text('''#include <gufo/ext/registry.hpp>
+#include <gufo/ext/generated/template_model_constants.hpp>
+#include <gufo/ext/text.hpp>
+class Renderer final : public gufo::ext::ChatRenderer {
+ public:
+  gufo::ext::RenderedChatPrompt Render(const gufo::ext::ChatRequest&,
+                                       std::size_t) const override {
+    return {"external", {}, gufo::ext::InitialOutputState::kContent};
+  }
+};
+void template_model_register(gufo::ext::Registry&) {
+  gufo::ext::RegisterChatRendererFactory("fixture-renderer",
+      +[](std::string_view id, const gufo::ext::TextRunnerOptions&)
+          -> std::shared_ptr<const gufo::ext::ChatRenderer> {
+        return id == "fixture" ? std::make_shared<Renderer>() : nullptr;
+      });
+}
+''')
+        main = self.source / "main.cpp"
+        main.write_text(main.read_text().replace(
+            '  if (argc > 1)',
+            '  auto renderer = gufo::ext::CreateChatRenderer("fixture", {});\n'
+            '  if (!renderer || renderer->Render({}, 1024).text != "external") return 1;\n'
+            '  if (argc > 1)'))
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external}")
+        report = self.run_fixture()
+        self.assertIn("template_model", [e["name"] for e in report["builtExtensions"]])
+        self.assertNotIn("template-model", [p["id"] for p in report["providers"]])
+
     def test_external_template_installs_license(self):
         external = self.template()
         self.configure(f"-DGUFO_EXTENSION_DIRS={external}")

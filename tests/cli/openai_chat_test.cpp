@@ -2111,12 +2111,16 @@ void TestPiReasoningControlsAndOutputFraming() {
         "chat_template_kwargs":{
           "enable_thinking":true,
           "reasoning_effort":"high",
-          "preserve_thinking":false
+          "preserve_thinking":false,
+          "custom_style":"brief"
         }
       })"),
                                                        backend);
 
   Expect(response.status == 200, "Pi reasoning request is accepted");
+  Expect(backend.last_request.chat_template_kwargs.member_str("custom_style") ==
+             "brief",
+         "extension receives arbitrary validated template kwargs");
   Expect(backend.last_request.reasoning.enabled == true,
          "Pi enable_thinking reaches the backend");
   Expect(backend.last_request.reasoning.effort == gufo::ReasoningEffort::kHigh,
@@ -2481,6 +2485,10 @@ void TestImagePartsRetainOrderAndIdentity() {
   Expect(backend.last_request.stop_sequences == std::vector<std::string>{"END"},
          "image requests preserve explicit stop sequences");
   const auto& message = backend.last_request.messages.front();
+  Expect(
+      message.content_parts.dump() ==
+          R"([{"type":"text","text":"left"},{"type":"image"},{"type":"text","text":"right"},{"type":"image"}])",
+      "renderer receives ordered content parts without transport URLs");
   Expect(message.content == "leftright" && message.images.size() == 2,
          "images do not become text placeholders before model preparation");
   Expect(message.images[0].offset == 4 && message.images[1].offset == 9,
@@ -2573,6 +2581,8 @@ void TestImageCountAndByteBudget() {
                                                     budget, &error) &&
                parsed.images.size() == 1,
            "Responses accepts more than sixteen images across messages");
+    Expect(parsed.content_parts.dump() == R"([{"type":"image"}])",
+           "Responses preserves sanitized image content parts");
   }
   gufo::tokenization::ChatMessage parsed;
   Expect(!gufo::server::ParseOpenAiResponseMessage(response_message, &parsed,
@@ -2676,7 +2686,22 @@ void TestToolImagesRetainOrderAndIdentity() {
            "string tool output stays literal text even when it spells an image "
            "URL");
   }
-  for (const auto* role : {"assistant", "system", "developer"}) {
+  // Templates may use developer images as examples. The model still validates
+  // which roles its formatter supports (native Qwen rejects developer images).
+  const auto example = gufo::server::HandleOpenAiChat(Request(R"({
+    "model":"test-model","messages":[{"role":"developer","content":[
+      {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}},
+      {"type":"text","text":"example output"}]}]
+  })"),
+                                                      backend);
+  Expect(
+      example.status == 200 &&
+          backend.last_request.messages.front().role == ChatRole::kDeveloper &&
+          backend.last_request.messages.front().images.size() == 1 &&
+          backend.last_request.messages.front().content_parts.dump() ==
+              R"([{"type":"image"},{"type":"text","text":"example output"}])",
+      "developer examples retain ordered image/text parts for the renderer");
+  for (const auto* role : {"assistant", "system"}) {
     auto message = parse(R"({"content":[
       {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}
     ]})");
@@ -6246,7 +6271,7 @@ void TestToolTagBoundaries() {
             continue;
           const auto prefix =
               initial == Initial::kContent ? std::string{}
-              : implicit                   ? std::string("Check tags.\n\n")
+              : implicit ? std::string("Check tags.\n\n")
                          : (initial == Initial::kAuto ? "<think>" : "") +
                                std::string("Check tags.</think>\n");
           const auto raw = prefix + call + "\n" + noop;

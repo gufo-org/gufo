@@ -23,6 +23,7 @@
 #include "gufo/ext/device_probe.hpp"
 #include "gufo/ext/gguf_reader.hpp"
 #include "gufo/ext/host_budget.hpp"
+#include "gufo/ext/json.hpp"
 #include "gufo/ext/ledger.hpp"
 #include "gufo/ext/reasoning.hpp"
 #include "gufo/ext/sampling.hpp"
@@ -243,6 +244,9 @@ struct ChatMessage {
 
   ChatRole role{ChatRole::kUser};
   std::string content;
+  /// Validated content-part array; null for string/null content. Images are
+  /// represented by {"type":"image"}, without transport URLs or pixel bytes.
+  json::Value content_parts;
   std::string framing_suffix;
   std::string name;
   std::string thought;
@@ -297,6 +301,7 @@ struct ChatRequest {
   bool constrained_tools{false};
   bool parallel_tool_calls{true};
   ReasoningOptions reasoning;
+  json::Value chat_template_kwargs{json::Value::object()};
   bool add_vision_id{false};
   bool cache_prompt{true};
   bool cache_persist{true};
@@ -304,6 +309,33 @@ struct ChatRequest {
   std::vector<std::string> stop_sequences;
   std::shared_ptr<const sampling::JsonConstraint> response_format;
   std::string response_format_description;
+};
+
+/// Model-native framing. Image offsets identify one native placeholder per
+/// request image, in message/image order. The model validates and expands them.
+/// Control-token spellings outside literal_spans are interpreted as framing.
+struct RenderedChatPrompt {
+  std::string text;
+  std::vector<std::size_t> image_offsets;
+  ext::InitialOutputState initial_output_state{
+      ext::InitialOutputState::kContent};
+  struct LiteralSpan {
+    std::size_t offset{0};
+    std::size_t size{0};
+  };
+  /// Sorted, disjoint byte ranges tokenized as ordinary text (no special
+  /// tokens).
+  std::vector<LiteralSpan> literal_spans{};
+};
+
+class ChatRenderer {
+public:
+  virtual ~ChatRenderer() = default;
+  /// Deterministic and safe for concurrent calls. Respect max_output_bytes;
+  /// throw invalid_argument for invalid inputs. Preserve the model's output
+  /// dialect. Resolved request.reasoning takes precedence over template kwargs.
+  [[nodiscard]] virtual RenderedChatPrompt Render(
+      const ChatRequest& request, std::size_t max_output_bytes) const = 0;
 };
 
 class TextModelRunner {
@@ -341,6 +373,27 @@ public:
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,
                        std::span<const TextRunnerToken> prompt) const;
+
+  /// Install once at load time, before publishing the runner to request
+  /// threads.
+  void SetChatRenderer(std::shared_ptr<const ChatRenderer> renderer);
+  /// Shared HTTP chat entry points. Without a renderer, dispatch to the
+  /// existing native methods below. Models never select or invoke external
+  /// renderers.
+  [[nodiscard]] std::optional<TextPreparedPrompt> PrepareChatPrompt(
+      const ChatRequest& request) const;
+  [[nodiscard]] std::optional<std::size_t> CountChatTokens(
+      const ChatRequest& request) const;
+  [[nodiscard]] std::optional<std::string> RenderChatPrompt(
+      const ChatRequest& request) const;
+  [[nodiscard]] ext::InitialOutputState ChatInitialOutputState(
+      const ChatRequest& request) const;
+  /// Model-owned tokenization and input processing of validated native framing.
+  /// Preserve literal spans and return image context where supported. The limit
+  /// is the model context for generation, or a larger bound for token counting.
+  [[nodiscard]] virtual TextPreparedPrompt PrepareRenderedPrompt(
+      const ChatRequest& request, const RenderedChatPrompt& rendered,
+      std::uint32_t max_context) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
@@ -459,6 +512,9 @@ public:
   [[nodiscard]] virtual bool DeviceUsable() const { return true; }
 
 private:
+  [[nodiscard]] std::optional<RenderedChatPrompt> RenderExternalChat(
+      const ChatRequest& request) const;
+  std::shared_ptr<const ChatRenderer> chat_renderer_;
   mutable std::mutex constraint_mutex_;
   mutable std::shared_ptr<const sampling::ConstraintVocabulary>
       constraint_vocabulary_;
@@ -545,7 +601,19 @@ struct TextRunnerOptions {
   TextDiskCacheConfig disk_cache{};
   TextRunnerRamCacheOptions ram_cache{};
   bool enable_yarn{false};
+  /// Optional formatter selected by the host; also identifies who owns template
+  /// validation at model loading. Rendering is dispatched by TextModelRunner.
+  std::shared_ptr<const ChatRenderer> chat_renderer{};
 };
+
+/// Return null to decline a model. Configuration and template compilation are
+/// extension-owned; factories run at model load, never per request. More than
+/// one accepting factory is an error. Register only during startup.
+using ChatRendererFactory = std::shared_ptr<const ChatRenderer> (*)(
+    std::string_view provider_id, const TextRunnerOptions& options);
+void RegisterChatRendererFactory(std::string id, ChatRendererFactory factory);
+[[nodiscard]] std::shared_ptr<const ChatRenderer> CreateChatRenderer(
+    std::string_view provider_id, const TextRunnerOptions& options);
 
 struct TextBenchOptions {
   std::string model_path;

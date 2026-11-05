@@ -116,7 +116,8 @@ std::optional<std::size_t> CountQwenPromptTokens(
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    const ext::RenderedChatPrompt* rendered = nullptr) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
   const auto options = QwenChatOptions(request, max_context);
@@ -128,7 +129,8 @@ TextPreparedPrompt PrepareQwenPrompt(
               : std::span<const tokenization::ChatTool>{request.tools},
           options,
           encoder && has_images ? encoder->identity() : std::string_view{},
-          max_context, request.cache_prompt ? &image_cache : nullptr));
+          max_context, request.cache_prompt ? &image_cache : nullptr,
+          rendered));
   const auto cache_prefix = prompt->stable_prefix_tokens;
   if (prompt->images.empty())
     return {std::move(prompt->tokens), {}, cache_prefix};
@@ -807,6 +809,14 @@ public:
                              image_cache_);
   }
 
+  [[nodiscard]] TextPreparedPrompt PrepareRenderedPrompt(
+      const ChatRequest& request, const ext::RenderedChatPrompt& rendered,
+      std::uint32_t max_context) const override {
+    return PrepareQwenPrompt(request, model_->GetTokenizer(),
+                             model_->VisionEncoder(), max_context, image_cache_,
+                             &rendered);
+  }
+
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
       const ChatRequest& request) const override {
     return CountQwenPromptTokens(request, model_->GetTokenizer(),
@@ -1118,8 +1128,8 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     return nullptr;
   }
   std::string load_error;
-  auto model =
-      hip::QwenGpuModel::CreateFromGguf(reader, &load_error, std::move(vision));
+  auto model = hip::QwenGpuModel::CreateFromGguf(
+      reader, &load_error, std::move(vision), options.chat_renderer == nullptr);
   if (!model) {
     if (error)
       *error = "Failed to create GPU model: " + load_error;

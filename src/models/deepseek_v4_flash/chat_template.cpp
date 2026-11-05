@@ -518,7 +518,7 @@ std::vector<PromptPiece> SplitControlTokens(
 }
 
 bool ValidateGgufTemplate(const core::GgufReader& reader,
-                          std::string* error_msg) {
+                          std::string* error_msg, bool use_native_template) {
   if (reader.GetMetadataString("general.architecture") != "deepseek4") {
     AssignError(error_msg,
                 "DeepSeek V4 Flash artifact has unexpected architecture");
@@ -531,6 +531,8 @@ bool ValidateGgufTemplate(const core::GgufReader& reader,
                 "DeepSeek artifact is not the supported V4 Flash revision");
     return false;
   }
+  if (!use_native_template)
+    return true;
   const auto raw_template = reader.GetMetadataString("tokenizer.chat_template");
   if (!raw_template.has_value() || raw_template->empty()) {
     AssignError(error_msg,

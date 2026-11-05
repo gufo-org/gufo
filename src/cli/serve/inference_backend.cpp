@@ -238,10 +238,17 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .ram_cache = ram_cache_config,
       .enable_yarn = enable_yarn,
   };
+  try {
+    options.chat_renderer = ext::CreateChatRenderer(provider->id, options);
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
   auto runner = provider->create(options, error);
   if (runner == nullptr) {
     return false;
   }
+  runner->SetChatRenderer(options.chat_renderer);
   return load(std::move(runner), error, session_count, prefill_policy,
               scheduler_policy, disk_cache_config, ram_cache_config);
 }
@@ -355,9 +362,13 @@ InferenceBackend::InitialOutputState InferenceBackend::initial_output_state(
     const ChatRequest& request) const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  return state != nullptr
-             ? state->scheduler->runner().InitialOutputState(request)
-             : InitialOutputState::kAuto;
+  if (state == nullptr)
+    return InitialOutputState::kAuto;
+  auto sampling = sampling::SamplingConfig{};
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
+  return state->scheduler->runner().ChatInitialOutputState(
+      constrained ? *constrained : request);
 #else
   (void)request;
   return InitialOutputState::kAuto;
@@ -501,12 +512,12 @@ InferenceBackend::Result InferenceBackend::chat(
   auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
                                           &effective_sampling);
   const auto& effective_request = constrained ? *constrained : request;
-  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
+  auto prompt = state->scheduler->runner().PrepareChatPrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
   }
   const auto initial =
-      state->scheduler->runner().InitialOutputState(effective_request);
+      state->scheduler->runner().ChatInitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
       initial == TextGenerationBackend::InitialOutputState::kReasoning)
     effective_sampling.reasoning_budget =
@@ -588,14 +599,14 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
                                           &effective_sampling, &tool_format);
   const auto& effective_request = constrained ? *constrained : request;
-  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
+  auto prompt = state->scheduler->runner().PrepareChatPrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return TextGenerationBackend::start_chat(
         request, max_tokens, sampling_config, is_cancelled, stream_output);
   }
 
   const auto initial =
-      state->scheduler->runner().InitialOutputState(effective_request);
+      state->scheduler->runner().ChatInitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
       initial == TextGenerationBackend::InitialOutputState::kReasoning)
     effective_sampling.reasoning_budget =
@@ -658,7 +669,7 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
   auto constrained =
       ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
   const auto& effective_request = constrained ? *constrained : request;
-  return state->scheduler->runner().CountPromptTokens(effective_request);
+  return state->scheduler->runner().CountChatTokens(effective_request);
 #else
   (void)request;
   return std::nullopt;
@@ -678,7 +689,7 @@ std::optional<std::string> InferenceBackend::render_chat_prompt(
   auto constrained =
       ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
   const auto& effective_request = constrained ? *constrained : request;
-  return state->scheduler->runner().RenderPrompt(effective_request);
+  return state->scheduler->runner().RenderChatPrompt(effective_request);
 #else
   (void)request;
   return std::nullopt;

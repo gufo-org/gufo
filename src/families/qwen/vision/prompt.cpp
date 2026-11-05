@@ -282,14 +282,69 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
                std::span<const tokenization::ChatTool> tools,
                const tokenization::ChatTemplateOptions& options,
                std::string_view encoder_identity, std::uint32_t max_context,
-               ImageCache* image_cache) {
+               ImageCache* image_cache,
+               const ext::RenderedChatPrompt* rendered_prompt) {
   std::vector<std::size_t> offsets;
   std::vector<tokenization::ContentSpan> content_spans;
   std::size_t stable_prefix_bytes = 0;
   std::string error;
-  const auto rendered = tokenization::QwenChatTemplate::Render(
-      messages, tools, options, &error, &offsets, &stable_prefix_bytes,
-      &content_spans);
+  std::optional<std::string> rendered;
+  if (rendered_prompt) {
+    rendered = rendered_prompt->text;
+    offsets = rendered_prompt->image_offsets;
+    std::size_t literal_end = 0;
+    for (const auto& span : rendered_prompt->literal_spans) {
+      if (span.offset < literal_end || span.offset > rendered->size() ||
+          span.size > rendered->size() - span.offset)
+        throw std::invalid_argument("invalid rendered literal spans");
+      content_spans.push_back({span.offset, span.size});
+      literal_end = span.offset + span.size;
+    }
+    const auto literal = [&](std::size_t begin, std::size_t size) {
+      return std::any_of(content_spans.begin(), content_spans.end(),
+                         [&](const auto& span) {
+                           return begin < span.offset + span.size &&
+                                  span.offset < begin + size;
+                         });
+    };
+    const auto next_placeholder = [&](std::size_t cursor) {
+      auto pos = rendered->find(tokenization::kImagePad, cursor);
+      while (pos != std::string::npos &&
+             literal(pos, tokenization::kImagePad.size()))
+        pos = rendered->find(tokenization::kImagePad,
+                             pos + tokenization::kImagePad.size());
+      return pos;
+    };
+    std::size_t image_count = 0;
+    for (const auto& message : messages)
+      image_count += message.images.size();
+    if (offsets.size() != image_count)
+      throw std::invalid_argument("chat renderer must preserve every image");
+    std::size_t cursor = 0;
+    for (const auto offset : offsets) {
+      const auto found = next_placeholder(cursor);
+      if (found == std::string::npos || found != offset ||
+          offset < tokenization::kVisionStart.size() ||
+          literal(offset - tokenization::kVisionStart.size(),
+                  tokenization::kVisionStart.size() +
+                      tokenization::kImagePad.size() +
+                      tokenization::kVisionEnd.size()) ||
+          rendered->substr(offset - tokenization::kVisionStart.size(),
+                           tokenization::kVisionStart.size()) !=
+              tokenization::kVisionStart ||
+          rendered->substr(offset + tokenization::kImagePad.size(),
+                           tokenization::kVisionEnd.size()) !=
+              tokenization::kVisionEnd)
+        throw std::invalid_argument("invalid Qwen rendered image placeholder");
+      cursor = offset + tokenization::kImagePad.size();
+    }
+    if (next_placeholder(cursor) != std::string::npos)
+      throw std::invalid_argument("unexpected Qwen rendered image placeholder");
+  } else {
+    rendered = tokenization::QwenChatTemplate::Render(
+        messages, tools, options, &error, &offsets, &stable_prefix_bytes,
+        &content_spans);
+  }
   if (!rendered)
     throw std::invalid_argument(error);
   Prompt prompt;
@@ -350,13 +405,16 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
   // The boundary starts a special token (the assistant turn, or a final user
   // turn an agent replaces each request), after every image.
   // Encode only the mutable suffix; never decode or resize images twice.
-  const auto suffix = tokenization::QwenChatTemplate::EncodeRendered(
-      tokenizer, *rendered, stable_prefix_bytes, rendered->size(),
-      content_spans, tok_options);
-  if (suffix.size() > prompt.tokens.size() ||
-      !std::ranges::equal(suffix, std::span(prompt.tokens).last(suffix.size())))
-    throw std::logic_error("Qwen stable prefix is not a token boundary");
-  prompt.stable_prefix_tokens = prompt.tokens.size() - suffix.size();
+  if (!rendered_prompt) {
+    const auto suffix = tokenization::QwenChatTemplate::EncodeRendered(
+        tokenizer, *rendered, stable_prefix_bytes, rendered->size(),
+        content_spans, tok_options);
+    if (suffix.size() > prompt.tokens.size() ||
+        !std::ranges::equal(suffix,
+                            std::span(prompt.tokens).last(suffix.size())))
+      throw std::logic_error("Qwen stable prefix is not a token boundary");
+    prompt.stable_prefix_tokens = prompt.tokens.size() - suffix.size();
+  }
   prompt.rope.Validate(max_context);
   if (!prompt.images.empty()) {
     const auto digest = identity.Finish();

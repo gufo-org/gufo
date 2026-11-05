@@ -687,7 +687,7 @@
         ],
         "properties": {
           "providers": {
-            "minItems": 1
+            "minItems": 0
           }
         }
       }

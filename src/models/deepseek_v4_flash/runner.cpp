@@ -247,6 +247,21 @@ public:
     return DeepSeekRunnerTokens(model_->Tokenize(text, true));
   }
 
+  [[nodiscard]] TextPreparedPrompt PrepareRenderedPrompt(
+      const ChatRequest&, const RenderedChatPrompt& rendered,
+      std::uint32_t) const override {
+    std::vector<ContentSpan> spans;
+    for (const auto& span : rendered.literal_spans)
+      spans.push_back({span.offset, span.size});
+    std::vector<TextRunnerToken> tokens;
+    for (const auto& piece : SplitControlTokens(rendered.text, spans)) {
+      const auto encoded = DeepSeekRunnerTokens(
+          model_->Tokenize(piece.text, piece.control.has_value()));
+      tokens.insert(tokens.end(), encoded.begin(), encoded.end());
+    }
+    return {std::move(tokens), {}};
+  }
+
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest& request) const override {
     const auto input = ConvertChat(request);
@@ -760,7 +775,7 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     return nullptr;
   }
   std::string load_error;
-  if (!ValidateGgufTemplate(*reader, &load_error)) {
+  if (!ValidateGgufTemplate(*reader, &load_error, !options.chat_renderer)) {
     if (error)
       *error = "Unsupported DeepSeek chat template: " + load_error;
     return nullptr;
