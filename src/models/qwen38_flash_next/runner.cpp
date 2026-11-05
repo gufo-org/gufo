@@ -121,7 +121,8 @@ std::optional<std::size_t> CountQwenPromptTokens(
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    bool projection_loaded) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
   const auto options = QwenChatOptions(request, max_context);
@@ -135,13 +136,30 @@ TextPreparedPrompt PrepareQwenPrompt(
           encoder && has_images ? encoder->identity() : std::string_view{},
           max_context, request.cache_prompt ? &image_cache : nullptr));
   const auto cache_prefix = prompt->stable_prefix_tokens;
+  // While a projection vector is loaded, its per-request state joins the
+  // cache identity: a prefix prefilled under one state must not be restored
+  // for a request running under the other, so cross-state requests re-prefill
+  // (the flag only reaches device control state, never the restored
+  // continuation).
+  if (projection_loaded && prompt->images.empty()) {
+    auto context = std::make_shared<QwenImageContext>();
+    context->cache_identity.assign(
+        1, request.projection.value_or(false) ? 1 : 0);
+    return {std::move(prompt->tokens), std::move(context), cache_prefix};
+  }
   if (prompt->images.empty())
     return {std::move(prompt->tokens), {}, cache_prefix};
   if (!encoder)
     throw std::invalid_argument(
         "image input requires a matching --mmproj BF16 sidecar");
   auto context = std::make_shared<QwenImageContext>();
-  context->cache_identity = prompt->cache_identity;
+  if (projection_loaded) {
+    context->cache_identity.assign(
+        1, request.projection.value_or(false) ? 1 : 0);
+  }
+  context->cache_identity.insert(context->cache_identity.end(),
+                                 prompt->cache_identity.begin(),
+                                 prompt->cache_identity.end());
   for (const auto& image : prompt->images) {
     const auto identity = prompt->IdentityForPrefix(image.grid.offset);
     context->cache_prefixes.push_back(
@@ -377,7 +395,7 @@ public:
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->tokenizer(),
                              model_->VisionEncoder(), max_context_,
-                             image_cache_);
+                             image_cache_, model_->ProjectionLoaded());
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
