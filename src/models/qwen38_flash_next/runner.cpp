@@ -216,6 +216,28 @@ const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
   return *qfn;
 }
 
+// Arms the model's layer hook from the host's yield for one prefill step.
+class PrefillYieldScope {
+public:
+  PrefillYieldScope(const QwenFlashNextModel& model,
+                    const TextRunnerState& state)
+      : model_(model) {
+    if (state.prefill_yield_groups() > 1)
+      model_.SetPrefillYield(state.prefill_yield_groups(),
+                             [&state] { state.YieldPrefill(); });
+  }
+  ~PrefillYieldScope() { model_.SetPrefillYield(1, {}); }
+  PrefillYieldScope(const PrefillYieldScope&) = delete;
+  PrefillYieldScope& operator=(const PrefillYieldScope&) = delete;
+
+private:
+  const QwenFlashNextModel& model_;
+};
+
+// Beside decoders, prompts keep the 4,096-row pass and split it into layer
+// groups: one pass takes about 2.1 s, a decode step about 34 ms.
+constexpr std::size_t kMaxPrefillLayerGroups = 8;
+
 class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
@@ -296,6 +318,12 @@ public:
                 .max_in_pass_checkpoints = rocm::kMaxPassCheckpoints,
             },
         .sampling_defaults = FlashNextSamplingDefaults(),
+        .scheduling =
+            TextSchedulingProfile{
+                .pass_tokens = model_->PrefillCapacity(),
+                .max_layer_groups = kMaxPrefillLayerGroups,
+                .max_yield_decode_width = 1,
+            },
     };
   }
 
@@ -451,6 +479,7 @@ public:
                                       ? model_->PrefillThroughCapacity()
                                       : model_->PrefillCapacity()})));
     std::string error;
+    const PrefillYieldScope yield(*model_, state);
     if (!qfn.session().Sync(prefix, &error, next)) {
       qfn.set_position(0);
       throw std::runtime_error("Qwen3.8-Flash-Next prefill failed: " + error);
@@ -500,6 +529,7 @@ public:
                                       : model_->PrefillCapacity()})));
     std::vector<std::uint32_t> points(boundaries.begin(), boundaries.end());
     double capture_ms = 0;
+    const PrefillYieldScope yield(*model_, state);
     try {
       qfn.adapter().PrefillThrough(
           qfn.slot(), prefix, points,
