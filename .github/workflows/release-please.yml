@@ -1,9 +1,7 @@
 name: Release automation
 
 on:
-  schedule:
-    # Daily at a non-round minute to reduce scheduler congestion.
-    - cron: "17 5 * * *"
+  # Releases are cut on demand from the Actions tab ("Run workflow").
   workflow_dispatch:
 
 permissions:
