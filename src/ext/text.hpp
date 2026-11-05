@@ -601,9 +601,9 @@ struct TextRunnerOptions {
   /// Optional llama.cpp control-vector GGUF for a runtime residual-stream
   /// projection (Qwen3.8-Flash-Next); empty leaves the feature off.
   std::string projection_vector_path{};
-  /// Inclusive steered layer range; hi == 0 selects the file's full range.
-  std::uint32_t projection_layer_lo{1};
-  std::uint32_t projection_layer_hi{0};
+  /// Inclusive steered layer range "LO-HI"; empty selects every layer the
+  /// vector carries. The runner rejects malformed or out-of-range specs.
+  std::string projection_layers{};
   TextDiskCacheConfig disk_cache{};
   TextRunnerRamCacheOptions ram_cache{};
   bool enable_yarn{false};

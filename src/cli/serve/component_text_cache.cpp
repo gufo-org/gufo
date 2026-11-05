@@ -990,7 +990,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
     const std::function<bool()>& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
-    std::size_t stable, bool stop_at_eos, bool projection, bool persist) {
+    std::size_t stable, bool stop_at_eos, bool persist, bool projection) {
   if (cancelled && cancelled())
     return {};
   auto input = Inputs(prompt.size(), context.get());

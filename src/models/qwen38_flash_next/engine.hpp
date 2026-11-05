@@ -54,10 +54,9 @@ struct ModelOptions {
   /// `direction.N` tensors). Empty leaves the feature off entirely and the
   /// engine on today's code path.
   std::string projection_vector_path;
-  /// Inclusive steered layer range at the FFN/MoE combine boundary. Zero
-  /// `hi` selects every layer the file carries (1..L-1).
-  std::uint32_t projection_layer_lo = 1;
-  std::uint32_t projection_layer_hi = 0;
+  /// Inclusive steered layer range "LO-HI" at the FFN/MoE combine boundary;
+  /// empty selects every layer the file carries (1..L-1).
+  std::string projection_layers;
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
@@ -100,11 +99,14 @@ public:
   }
   [[nodiscard]] bool HasMtp() const noexcept;
   /// Whether a runtime projection vector is loaded (see ModelOptions).
-  /// Loaded vectors steer sessions by default (Strata's request default);
-  /// Session::SetProjectionEnabled switches per session.
+  /// Sessions start unsteered; Session::SetProjectionEnabled switches each
+  /// one on.
   [[nodiscard]] bool ProjectionLoaded() const noexcept {
     return projection_loaded_;
   }
+  /// Durable-cache adapter identity: "none" without a vector, otherwise the
+  /// loaded vector's fingerprint and steered range.
+  [[nodiscard]] std::string ProjectionAdapterIdentity() const;
   /// Trunk tensors the official GGUF keeps in F32 but this artifact stores
   /// as Q8_0 (see `ExpandedQ8_0Tensors`). The official MTP sidecar ships its
   /// inject as Q8_0, so the draft block is not counted.

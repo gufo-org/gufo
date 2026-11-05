@@ -81,7 +81,7 @@ public:
   [[nodiscard]] std::unique_ptr<Lease> Acquire(
       std::span<const ContinuationToken>, const std::function<bool()>&,
       std::shared_ptr<const TextPromptContext>, bool, std::size_t, bool,
-      bool projection = false, bool persist = true);
+      bool persist = true, bool projection = false);
   // A disk job is writing a prefix of the prompt much deeper than any
   // restorable boundary; admission may wait for it instead of prefilling.
   // A nonzero checkpoint ID follows that one job, even if another deeper job

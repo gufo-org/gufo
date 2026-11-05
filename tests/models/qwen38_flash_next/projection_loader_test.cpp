@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -76,9 +78,20 @@ std::string WriteGguf(const std::vector<TensorSpec>& tensors,
   return out;
 }
 
+// One directory per run, so concurrent build trees never share fixtures.
+const std::filesystem::path& TempDir() {
+  static const std::filesystem::path dir = [] {
+    auto path =
+        std::filesystem::temp_directory_path() /
+        ("gufo_projection_test_" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(path);
+    return path;
+  }();
+  return dir;
+}
+
 std::filesystem::path TempFile(const std::string& blob, const char* tag) {
-  const auto path = std::filesystem::temp_directory_path() /
-                    (std::string("gufo_projection_") + tag + ".gguf");
+  const auto path = TempDir() / (std::string(tag) + ".gguf");
   std::ofstream file(path, std::ios::binary);
   file.write(blob.data(), static_cast<std::streamsize>(blob.size()));
   return path;
@@ -109,7 +122,13 @@ void TestLoadAndNormalize() {
     return;  // the checks below index the loaded tables
   }
   Check(error.empty(), "no error");
-  Check(warning.empty(), "no warning without model_hint");
+  Check(warning.find("model_hint") == std::string::npos,
+        "no hint warning without model_hint");
+  Check(warning.find("non-unit directions at layers 2, 3, 5") !=
+            std::string::npos,
+        "non-unit norms warn: " + warning);
+  Check(warning.find("ignoring direction.4") != std::string::npos,
+        "a zero direction warns: " + warning);
   Check(v.num_layers == 8 && v.hidden == kHidden, "geometry recorded");
   Check(v.first_layer == 1 && v.last_layer == 7, "full carried range");
   Check(v.scales.size() == 8, "one scale per layer");
@@ -130,11 +149,99 @@ void TestLoadAndNormalize() {
   Check(row5[1] == -1.0F, "direction.5 normalized to -e1");
   const float* row3 = v.directions.data() + 3 * kHidden;
   Check(row3[7] == 0.125F, "direction.3 normalized to 0.5/4");
+  std::filesystem::remove(path);
+}
+
+std::vector<float> Unit(std::uint32_t hidden, std::uint32_t axis) {
+  std::vector<float> d(hidden, 0.0F);
+  d[axis] = 1.0F;
+  return d;
+}
+
+void TestIgnoredTensors() {
+  constexpr std::uint32_t kHidden = 16;
+  const auto path = TempFile(WriteGguf({
+                                 {"direction.0", Unit(kHidden, 0), 0},
+                                 {"direction.3", Unit(kHidden, 1), 0},
+                                 {"direction.8", Unit(kHidden, 2), 0},
+                             }),
+                             "ignored");
+  qfn::ProjectionVector v;
+  std::string error;
+  std::string warning;
+  Check(qfn::LoadControlVector(path.string(), 8, kHidden, "qwen4exp", &v,
+                               &error, &warning),
+        "out-of-range directions still load the steerable ones");
+  Check(warning.find("ignoring direction.0") != std::string::npos,
+        "direction.0 warns: " + warning);
+  Check(warning.find("ignoring direction.8") != std::string::npos,
+        "direction.N past the last layer warns: " + warning);
+  Check(warning.find("non-unit") == std::string::npos,
+        "unit directions do not warn about their norm");
+  Check(v.scales.size() == 8 && v.scales[3] == 1.0F, "direction.3 loads");
+  std::filesystem::remove(path);
+}
+
+void TestSelectLayers() {
+  constexpr std::uint32_t kHidden = 16;
+  const auto path =
+      TempFile(WriteGguf({{"direction.3", Unit(kHidden, 0), 0}}), "layers");
+  qfn::ProjectionVector v;
+  std::string error;
+  Check(
+      qfn::LoadControlVector(path.string(), 8, kHidden, "qwen4exp", &v, &error),
+      "layer fixture loads");
+  std::filesystem::remove(path);
+  Check(qfn::SelectProjectionLayers("2-5", &v, &error) && v.first_layer == 2 &&
+            v.last_layer == 5,
+        "explicit range selected");
+  Check(qfn::SelectProjectionLayers("7-7", &v, &error) && v.first_layer == 7 &&
+            v.last_layer == 7,
+        "single last layer selected");
+  Check(qfn::SelectProjectionLayers("", &v, &error) && v.first_layer == 1 &&
+            v.last_layer == 7,
+        "empty spec selects the full range");
+  for (const char* bad : {"0-3", "3-2", "1-8", "5-0", "2-5x", "-1-5", "4",
+                          "a-b", "2-", "-3", " 2-5"}) {
+    error.clear();
+    Check(!qfn::SelectProjectionLayers(bad, &v, &error) && !error.empty(),
+          std::string("range '") + bad + "' rejected");
+  }
+  Check(v.first_layer == 1 && v.last_layer == 7,
+        "a rejected range leaves the selection unchanged");
+  qfn::ProjectionVector unloaded;
+  Check(!qfn::SelectProjectionLayers("", &unloaded, &error),
+        "selection needs a loaded vector");
+}
+
+void TestFingerprint() {
+  constexpr std::uint32_t kHidden = 16;
+  const auto a =
+      TempFile(WriteGguf({{"direction.3", Unit(kHidden, 0), 0}}), "print_a");
+  const auto b =
+      TempFile(WriteGguf({{"direction.3", Unit(kHidden, 1), 0}}), "print_b");
+  qfn::ProjectionVector va;
+  qfn::ProjectionVector vb;
+  std::string error;
+  Check(
+      qfn::LoadControlVector(a.string(), 8, kHidden, "qwen4exp", &va, &error) &&
+          qfn::LoadControlVector(b.string(), 8, kHidden, "qwen4exp", &vb,
+                                 &error),
+      "fingerprint fixtures load");
+  std::filesystem::remove(a);
+  std::filesystem::remove(b);
+  const std::string full = qfn::ProjectionFingerprint(va);
+  Check(full.size() == 64, "fingerprint is a SHA-256 hex digest");
+  Check(full == qfn::ProjectionFingerprint(va), "fingerprint is stable");
+  Check(full != qfn::ProjectionFingerprint(vb), "directions change it");
+  Check(qfn::SelectProjectionLayers("3-3", &va, &error) &&
+            full != qfn::ProjectionFingerprint(va),
+        "the steered range changes it");
 }
 
 void TestHintWarning() {
   constexpr std::uint32_t kHidden = 16;
-  std::vector<float> d(kHidden, 2.0F);  // norm 8
+  const std::vector<float> d(kHidden, 0.25F);  // unit norm
   const auto mismatch = TempFile(
       WriteGguf({{"direction.3", d, 0}}, "some-other-model"), "hint_mismatch");
   qfn::ProjectionVector v;
@@ -162,7 +269,7 @@ void TestRejections() {
   qfn::ProjectionVector v;
   std::string error;
 
-  Check(!qfn::LoadControlVector("/nonexistent/orcarouter.gguf", 8, kHidden,
+  Check(!qfn::LoadControlVector("/nonexistent/projection.gguf", 8, kHidden,
                                 "qwen4exp", &v, &error),
         "missing file rejected");
   Check(error.find("cannot open") != std::string::npos,
@@ -188,6 +295,43 @@ void TestRejections() {
         "non-F32 direction rejected");
   std::filesystem::remove(wrong_type);
 
+  // Non-finite values and an F32-overflowing norm fail the load instead of
+  // steering with NaN; the good layer beside them must not mask the error.
+  const float inf = std::numeric_limits<float>::infinity();
+  const float max = std::numeric_limits<float>::max();
+  const struct {
+    const char* tag;
+    float value;
+  } corrupt[] = {{"inf", inf},
+                 {"neg_inf", -inf},
+                 {"nan", std::numeric_limits<float>::quiet_NaN()},
+                 {"overflow", max}};
+  for (const auto& c : corrupt) {
+    std::vector<float> bad(kHidden, c.value);
+    const auto path = TempFile(
+        WriteGguf({{"direction.2", d, 0}, {"direction.3", bad, 0}}), c.tag);
+    error.clear();
+    Check(!qfn::LoadControlVector(path.string(), 8, kHidden, "qwen4exp", &v,
+                                  &error) &&
+              error.find("direction.3") != std::string::npos,
+          std::string("corrupt direction rejected: ") + c.tag + " (" + error +
+              ")");
+    std::filesystem::remove(path);
+  }
+
+  // A subnormal direction is valid: its F32 reciprocal would overflow, so it
+  // must still normalize to a finite unit row.
+  std::vector<float> tiny(kHidden, 0.0F);
+  tiny[5] = std::numeric_limits<float>::denorm_min();
+  const auto tiny_path =
+      TempFile(WriteGguf({{"direction.3", tiny, 0}}), "tiny");
+  error.clear();
+  Check(qfn::LoadControlVector(tiny_path.string(), 8, kHidden, "qwen4exp", &v,
+                               &error) &&
+            v.directions[3 * kHidden + 5] == 1.0F,
+        "subnormal direction normalizes to a unit row (" + error + ")");
+  std::filesystem::remove(tiny_path);
+
   const auto empty = TempFile(WriteGguf({}), "empty");
   error.clear();
   Check(!qfn::LoadControlVector(empty.string(), 8, kHidden, "qwen4exp", &v,
@@ -202,6 +346,10 @@ int main() {
   TestLoadAndNormalize();
   TestHintWarning();
   TestRejections();
+  TestIgnoredTensors();
+  TestSelectLayers();
+  TestFingerprint();
+  std::filesystem::remove_all(TempDir());
   if (failures != 0) {
     std::printf("%d projection loader check(s) failed\n", failures);
     return 1;

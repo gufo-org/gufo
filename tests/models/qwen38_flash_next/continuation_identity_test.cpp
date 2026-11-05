@@ -30,6 +30,10 @@ void FlashCases() {
   }
   Golden("artifact", QwenFlashNextCompatibilityIdentity(
                          draft, artifact, true, 4096, 4, 1, "absolute-v1"));
+  Golden("adapters",
+         QwenFlashNextCompatibilityIdentity(
+             artifact, draft, false, 4096, 4, 1, "absolute-v1",
+             "projection-v1;layers=4-44;sha256=" + std::string(64, 'c')));
 }
 
 void Validation() {

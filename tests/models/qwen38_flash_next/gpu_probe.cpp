@@ -296,18 +296,8 @@ int main(int argc, char** argv) {
     if (!warning.empty()) {
       std::fprintf(stderr, "warning: %s\n", warning.c_str());
     }
-    std::uint32_t lo = 1;
-    std::uint32_t hi = 0;
-    if (!projection_layers.empty() &&
-        std::sscanf(projection_layers.c_str(), "%u-%u", &lo, &hi) != 2) {
-      std::fprintf(stderr, "--projection-layers must be LO-HI\n");
-      return 2;
-    }
-    projection.first_layer = std::max<std::uint32_t>(1, lo);
-    projection.last_layer =
-        hi == 0 ? projection.last_layer : std::min(hi, projection.last_layer);
-    if (projection.first_layer > projection.last_layer) {
-      std::fprintf(stderr, "projection layer range is empty\n");
+    if (!q::SelectProjectionLayers(projection_layers, &projection, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
       return 2;
     }
     projection_loaded = true;

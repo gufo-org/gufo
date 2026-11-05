@@ -1631,15 +1631,9 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --model <PATH> is required\n";
       return 2;
     }
-    std::uint32_t projection_layer_lo = 1;
-    std::uint32_t projection_layer_hi = 0;
-    if (!projection_layers.empty()) {
-      if (std::sscanf(projection_layers.c_str(), "%u-%u",
-                      &projection_layer_lo,
-                      &projection_layer_hi) != 2) {
-        std::cerr << "Error: --projection-layers must be LO-HI\n";
-        return 2;
-      }
+    if (!projection_layers.empty() && projection_vector_path.empty()) {
+      std::cerr << "Error: --projection-layers requires --projection-vector\n";
+      return 2;
     }
     std::string err;
     ModelLoadLog load_log("text", model);
@@ -1677,7 +1671,7 @@ int RunServe(std::span<const char* const> args) {
             .model_artifact_fingerprint = {},
         },
         vision_model_path, cache_ram, enable_yarn, projection_vector_path,
-        projection_layer_lo, projection_layer_hi);
+        projection_layers);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";

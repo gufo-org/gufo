@@ -154,6 +154,23 @@ __device__ __forceinline__ float WaveSum(float v) {
   return v;
 }
 
+/// One direction-dot and square order for every steered combine. Each
+/// thread meets the same elements of a stream in the same order in
+/// HcCombineVec4Kernel and HcCombineMoeF16Kernel, so pinning the per-float4
+/// terms and their accumulation keeps the deferred MoE route bit-identical
+/// to the separate-store route, as the unsteered square sums are.
+__device__ __forceinline__ float ProjectionDot4(float4 v, float4 d) {
+  return __fmaf_rn(
+      v.w, d.w, __fmaf_rn(v.z, d.z, __fmaf_rn(v.y, d.y, __fmul_rn(v.x, d.x))));
+}
+
+__device__ __forceinline__ float ProjectionSquares4(float4 n, float ss) {
+  ss = __fmaf_rn(n.x, n.x, ss);
+  ss = __fmaf_rn(n.y, n.y, ss);
+  ss = __fmaf_rn(n.z, n.z, ss);
+  return __fmaf_rn(n.w, n.w, ss);
+}
+
 /// Block-wide sum over kThreads threads; every thread receives the total.
 __device__ float BlockSum(float v, float* shared) {
 #pragma unroll
@@ -941,11 +958,11 @@ __global__ void HcCombineVec4Kernel(
         v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
                       r.w + b.w * ws};
         const float4 d = *reinterpret_cast<const float4*>(proj.dir + i);
-        const float pd =
-            v[c].x * d.x + v[c].y * d.y + v[c].z * d.z + v[c].w * d.w;
+        const float pd = ProjectionDot4(v[c], d);
 #pragma unroll
         for (std::uint32_t k = 0; k < kStreams; ++k) {
-          dot[k] += (k == s) ? pd : 0.0F;
+          if (k == s)
+            dot[k] = __fadd_rn(dot[k], pd);
         }
       }
     }
@@ -981,11 +998,10 @@ __global__ void HcCombineVec4Kernel(
                       __fmaf_rn(-coeff[s], d.z, v[c].z),
                       __fmaf_rn(-coeff[s], d.w, v[c].w)};
         *reinterpret_cast<float4*>(dst + e) = v[c];
-        const float sq = v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z +
-                         v[c].w * v[c].w;
 #pragma unroll
         for (std::uint32_t k = 0; k < kStreams; ++k) {
-          ss[k] += (k == s) ? sq : 0.0F;
+          if (k == s)
+            ss[k] = ProjectionSquares4(v[c], ss[k]);
         }
       }
     }
@@ -1124,8 +1140,11 @@ __global__ void HcCombineVec4Kernel(
 /// output row is formed in registers from the routed experts' F16 rows,
 /// their weights and the gated shared expert (MoeEpilogueVec4Kernel), so the
 /// block output never round-trips memory. Threads own hidden lanes (up to
-/// three float4 each) across the four streams.
-template<bool kNormalize, bool kPrior = false, bool kInject = false>
+/// three float4 each) across the four streams. kSteer compiles the
+/// projection branch in only for executors that loaded a vector: its
+/// registers would otherwise cost the unsteered build occupancy.
+template<bool kNormalize, bool kPrior = false, bool kInject = false,
+         bool kSteer = false>
 __global__ void HcCombineMoeF16Kernel(
     float* res, const __half* expert_out, const float* weights,
     const float* shared_out, const float* gate, std::uint32_t gate_stride,
@@ -1154,7 +1173,7 @@ __global__ void HcCombineMoeF16Kernel(
     w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
   }
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
-  const bool steer = proj.dir != nullptr &&
+  const bool steer = kSteer && proj.dir != nullptr &&
                      (proj.enable_rows != nullptr
                           ? proj.enable_rows[t] != 0
                           : (proj.enable != nullptr && *proj.enable != 0));
@@ -1196,7 +1215,9 @@ __global__ void HcCombineMoeF16Kernel(
         b.z += g * sh.z;
         b.w += g * sh.w;
       }
-      const std::uint32_t ic = i < hidden ? i : hidden - 1;
+      // Lanes past the row load the row's last aligned float4 and discard
+      // it; clamping to hidden - 1 would read past the table's last row.
+      const std::uint32_t ic = i < hidden ? i : hidden - 4;
       const float4 d = *reinterpret_cast<const float4*>(proj.dir + ic);
 #pragma unroll
       for (std::uint32_t s = 0; s < kStreams; ++s) {
@@ -1214,9 +1235,7 @@ __global__ void HcCombineMoeF16Kernel(
           }
           v[s][c] = float4{r.x + b.x * w[s], r.y + b.y * w[s], r.z + b.z * w[s],
                            r.w + b.w * w[s]};
-          const float pd = v[s][c].x * d.x + v[s][c].y * d.y + v[s][c].z * d.z +
-                           v[s][c].w * d.w;
-          dot[s] += pd;
+          dot[s] = __fadd_rn(dot[s], ProjectionDot4(v[s][c], d));
         }
       }
     }
@@ -1243,7 +1262,7 @@ __global__ void HcCombineMoeF16Kernel(
 #pragma unroll
     for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
       const std::uint32_t i = (c * kThreads + threadIdx.x) * 4;
-      const std::uint32_t ic = i < hidden ? i : hidden - 1;
+      const std::uint32_t ic = i < hidden ? i : hidden - 4;
       const float4 d = *reinterpret_cast<const float4*>(proj.dir + ic);
 #pragma unroll
       for (std::uint32_t s = 0; s < kStreams; ++s) {
@@ -1254,11 +1273,7 @@ __global__ void HcCombineMoeF16Kernel(
                            __fmaf_rn(-coeff[s], d.z, v[s][c].z),
                            __fmaf_rn(-coeff[s], d.w, v[s][c].w)};
           *reinterpret_cast<float4*>(dst + e) = v[s][c];
-          const float4 n = v[s][c];
-          ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
-          ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
-          ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
-          ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
+          ss[s] = ProjectionSquares4(v[s][c], ss[s]);
         }
       }
     }
@@ -7434,12 +7449,19 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
       (inject_w != nullptr && (gamma == nullptr || prior_out == nullptr))) {
     return false;
   }
-  const auto combine =
-      inject_w != nullptr    ? HcCombineMoeF16Kernel<true, true, true>
-      : prior_out != nullptr ? (gamma ? HcCombineMoeF16Kernel<true, true>
-                                      : HcCombineMoeF16Kernel<false, true>)
-                             : (gamma ? HcCombineMoeF16Kernel<true>
-                                      : HcCombineMoeF16Kernel<false>);
+  // The direction table is fixed per executor, so the variant never changes
+  // between a graph's capture and its replays.
+  const auto select = [&]<bool kSteer>() {
+    return inject_w != nullptr ? HcCombineMoeF16Kernel<true, true, true, kSteer>
+           : prior_out != nullptr
+               ? (gamma ? HcCombineMoeF16Kernel<true, true, false, kSteer>
+                        : HcCombineMoeF16Kernel<false, true, false, kSteer>)
+               : (gamma ? HcCombineMoeF16Kernel<true, false, false, kSteer>
+                        : HcCombineMoeF16Kernel<false, false, false, kSteer>);
+  };
+  const auto combine = proj.dir != nullptr
+                           ? select.template operator()<true>()
+                           : select.template operator()<false>();
   hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                      expert_out, weights, shared_out, gate, gate_stride, used,
                      inject, inject_parts, gamma, xn, xn_q8, hidden, eps,

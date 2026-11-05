@@ -1,6 +1,7 @@
-// GPU gates for the optional runtime residual projection: per-request toggle
+// GPU gates for the optional runtime residual projection: a loaded but
+// disabled vector matches an executor without one, per-request toggle
 // sequencing under captured decode graphs, and per-session isolation in
-// multi-session batch decode. Both compare full-vocabulary logit rows
+// multi-session batch decode. All compare full-vocabulary logit rows
 // bitwise; a mismatch fails the run.
 //
 // projection_gate_test --model FIRST_SHARD.gguf
@@ -70,7 +71,7 @@ std::vector<float> DecodePattern(rocm::Executor& executor,
 int main(int argc, char** argv) {
   std::string model_path;
   std::string vector_path;
-  std::string layers = "1-0";
+  std::string layers;
   std::uint32_t context = 4096;
   std::size_t steps = 8;
   for (int i = 1; i < argc; ++i) {
@@ -119,20 +120,19 @@ int main(int argc, char** argv) {
   }
   const auto& c = weights->config;
   q::ProjectionVector projection;
-  std::uint32_t lo = 1;
-  std::uint32_t hi = 0;
-  if (std::sscanf(layers.c_str(), "%u-%u", &lo, &hi) != 2) {
-    std::fprintf(stderr, "--projection-layers must be LO-HI\n");
-    return 2;
-  }
+  std::string warning;
   if (!q::LoadControlVector(vector_path, c.num_layers, c.hidden_size,
-                            "qwen4exp", &projection, &error)) {
+                            "qwen4exp", &projection, &error, &warning)) {
     std::fprintf(stderr, "projection vector failed: %s\n", error.c_str());
     return 1;
   }
-  projection.first_layer = std::max<std::uint32_t>(1, lo);
-  projection.last_layer =
-      hi == 0 ? projection.last_layer : std::min(hi, projection.last_layer);
+  if (!warning.empty()) {
+    std::fprintf(stderr, "warning: %s\n", warning.c_str());
+  }
+  if (!q::SelectProjectionLayers(layers, &projection, &error)) {
+    std::fprintf(stderr, "%s\n", error.c_str());
+    return 2;
+  }
   std::printf("projection layers %u..%u\n", projection.first_layer,
               projection.last_layer);
 
@@ -153,16 +153,14 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "upload failed: %s\n", error.c_str());
     return 1;
   }
-  rocm::Executor::Options options;
-  options.max_batch = 64;
-  options.max_context = context;
-  options.max_logit_rows = 8;
-  options.projection = &projection;
-  auto executor = rocm::Executor::Create(*device, ngram.get(), options, &error);
-  if (!executor) {
-    std::fprintf(stderr, "executor failed: %s\n", error.c_str());
-    return 1;
-  }
+  const auto create_executor = [&](const q::ProjectionVector* vector) {
+    rocm::Executor::Options options;
+    options.max_batch = 64;
+    options.max_context = context;
+    options.max_logit_rows = 8;
+    options.projection = vector;
+    return rocm::Executor::Create(*device, ngram.get(), options, &error);
+  };
 
   const std::string prompt_text =
       "The capital of France is Paris. The largest planet in the solar "
@@ -181,13 +179,64 @@ int main(int argc, char** argv) {
   if (feed.size() > steps) {
     feed.resize(steps);
   }
-  const auto prefill = [&](rocm::Session& s, bool enabled,
-                           std::vector<float>& last_row) {
+  // Gates 1b/1c compare the first two decode steps.
+  if (feed.size() < 2) {
+    std::fprintf(stderr, "--steps must be at least 2\n");
+    return 2;
+  }
+  const auto prefill_with = [&](rocm::Executor& e, rocm::Session& s,
+                                bool enabled, std::vector<float>& last_row) {
     s.SetProjectionEnabled(enabled);
     last_row.assign(c.vocab_size, 0.0F);
-    return executor->Forward(s, tokens, 1, last_row.data(),
-                             rocm::Executor::ForwardMode::kPrefill, &error);
+    return e.Forward(s, tokens, 1, last_row.data(),
+                     rocm::Executor::ForwardMode::kPrefill, &error);
   };
+  const std::vector<bool> off(feed.size(), false);
+
+  // Gate 0: with the vector loaded but disabled, prefill and captured decode
+  // are bitwise identical to an executor that never loaded one. The
+  // unloaded executor is released before the gates below allocate theirs.
+  std::vector<float> unloaded_last;
+  std::vector<float> unloaded_rows;
+  {
+    auto unloaded = create_executor(nullptr);
+    if (!unloaded) {
+      std::fprintf(stderr, "executor failed: %s\n", error.c_str());
+      return 1;
+    }
+    auto s = unloaded->CreateSession(gufo::core::SessionMode::kAutoregressive,
+                                     context, &error);
+    if (!s || !prefill_with(*unloaded, *s, false, unloaded_last)) {
+      std::fprintf(stderr, "prefill failed: %s\n", error.c_str());
+      return 1;
+    }
+    unloaded_rows =
+        DecodePattern(*unloaded, *s, tokens, feed, off, c.vocab_size, &error);
+  }
+  auto executor = create_executor(&projection);
+  if (!executor) {
+    std::fprintf(stderr, "executor failed: %s\n", error.c_str());
+    return 1;
+  }
+  const auto prefill = [&](rocm::Session& s, bool enabled,
+                           std::vector<float>& last_row) {
+    return prefill_with(*executor, s, enabled, last_row);
+  };
+  {
+    std::vector<float> last;
+    auto s = executor->CreateSession(gufo::core::SessionMode::kAutoregressive,
+                                     context, &error);
+    if (!s || !prefill(*s, false, last)) {
+      std::fprintf(stderr, "prefill failed: %s\n", error.c_str());
+      return 1;
+    }
+    const auto rows =
+        DecodePattern(*executor, *s, tokens, feed, off, c.vocab_size, &error);
+    Check(SameRows(last, unloaded_last),
+          "gate 0a: disabled prefill matches an unloaded executor");
+    Check(!rows.empty() && SameRows(rows, unloaded_rows),
+          "gate 0b: disabled decode matches an unloaded executor");
+  }
 
   // Gate 1: an alternating toggle pattern replays bitwise-identically on a
   // fresh session (deterministic graph replay across projection states) and
@@ -222,7 +271,6 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "prefill failed: %s\n", error.c_str());
       return 1;
     }
-    const std::vector<bool> off(feed.size(), false);
     const auto rows3 =
         DecodePattern(*executor, *s3, tokens, feed, off, c.vocab_size, &error);
     std::vector<float> prefix1(rows1.begin(),

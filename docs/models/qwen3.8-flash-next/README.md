@@ -132,32 +132,43 @@ creating sessions.
 
 ## Runtime residual projection
 
-`--projection-vector CV.gguf` optionally loads a llama.cpp control-vector
-file (`direction.N` F32 tensors, one unit direction per layer, layers
+`--projection-vector CV.gguf` (serve only) optionally loads a file in the
+llama.cpp control-vector format (`direction.N` F32 tensors for layers
 `1..L-1`; a missing layer is never steered). At the FFN/MoE combine boundary
-of each configured layer, every hyper-connection stream loses its component
-along that layer's direction — `h <- h - s * (h . v) * v`, applied between
-the residual write and the next mixer's grouped norm, matching the llama.cpp
-project-mode loader (each direction is normalized and its norm becomes that
-layer's scale `s`). The GGUF weights are never modified. `--projection-layers
-LO-HI` restricts steering to an inclusive sub-range; the default uses every
-layer the file carries.
+of each configured layer, every hyper-connection stream is updated as
+`h <- h - s * (h . v) * v`, applied between the residual write and the next
+mixer's grouped norm. The loader normalizes each direction to `v` and keeps
+its norm as that layer's scale `s`, so a unit-norm file removes the
+component along `v` exactly; any other norm scales the update instead (2
+reflects the component) and the loader warns. This is a projection, not
+llama.cpp's additive `--control-vector` steering, so the same file does
+different things in the two engines. `direction.0`, tensors past the last
+layer and all-zero directions are ignored with a warning; non-finite values
+or a norm beyond the F32 range fail the load. The GGUF weights are never
+modified. `--projection-layers LO-HI` restricts steering
+to an inclusive sub-range with `1 <= LO <= HI <= L-1`; the default uses every
+layer the file carries, and malformed ranges are rejected at startup.
 
 The feature is off unless a request opts in: a chat request with
 `"projection": true` steers that request, any request without the field does
 not, and nothing carries into later requests. The flag is read from
 device-side control state, so toggling between requests neither recaptures
 decode graphs nor affects other sessions in a shared batch; with projection
-off — vector loaded or not — every steered kernel compiles to exactly the
-unpatched arithmetic and logits are bitwise identical to a server started
-without the option. A request that enables projection on a server started
-without `--projection-vector` fails with a 400 error rather than silently
-running unsteered. The value must be a boolean.
+off the steered kernels take the unpatched arithmetic, and logits are
+bitwise identical to a server started without the option
+(`projection_gate_test` gate 0). A request that enables projection on a
+server started without `--projection-vector` fails with a 400 error rather
+than silently running unsteered, and `--projection-vector` on a model
+without the feature fails at startup. The value must be a boolean.
+
+Prompt caching keeps the two states apart: while a vector is loaded, every
+cache identity (including each image-prefix boundary) carries the request's
+projection state, and the disk-cache compatibility identity records the
+loaded vector's SHA-256 fingerprint and steered range, so changing either
+invalidates persisted entries.
 
 Steered layers and the direction table add one `[layers][hidden]` F32 device
 buffer (480 KiB at 48 x 2560) plus one word of per-request control state.
-The extra block-wide dot in the combine kernels measured below one percent
-of end-to-end throughput in both directions (see QUALITY.md).
 
 Direction files declare optional model provenance via a
 `controlvector.model_hint` string; a mismatching hint logs a warning and
@@ -166,8 +177,8 @@ runs on activations, but its *effect* depends on the direction being
 meaningful for the loaded model: a direction recovered from a different
 model family may do nothing, or may remove behavior it was not measured
 against, including safety behavior and factual reliability. Measure any
-loaded vector against your own evaluation set; refusal-marker counts are
-not a quality signal.
+loaded vector against your own evaluation set; a single behavioral metric
+is not a quality signal.
 
 ## Images
 

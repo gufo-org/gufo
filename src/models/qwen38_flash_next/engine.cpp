@@ -154,19 +154,10 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                            error_msg, &warning)) {
       return nullptr;
     }
-    const std::uint32_t lo =
-        std::max<std::uint32_t>(1, options.projection_layer_lo);
-    const std::uint32_t hi =
-        options.projection_layer_hi == 0
-            ? m->projection_.last_layer
-            : std::min(options.projection_layer_hi, m->projection_.last_layer);
-    if (lo > hi) {
-      AssignError(error_msg, "projection layer range " + std::to_string(lo) +
-                                 ".." + std::to_string(hi) + " is empty");
+    if (!SelectProjectionLayers(options.projection_layers, &m->projection_,
+                                error_msg)) {
       return nullptr;
     }
-    m->projection_.first_layer = lo;
-    m->projection_.last_layer = hi;
     m->projection_loaded_ = true;
     if (!warning.empty()) {
       std::fprintf(stderr, "gufo: warning: %s\n", warning.c_str());
@@ -279,6 +270,15 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
 
 bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
+}
+
+std::string Model::ProjectionAdapterIdentity() const {
+  if (!projection_loaded_) {
+    return "none";
+  }
+  return "projection-v1;layers=" + std::to_string(projection_.first_layer) +
+         "-" + std::to_string(projection_.last_layer) +
+         ";sha256=" + ProjectionFingerprint(projection_);
 }
 
 std::size_t Model::ExpandedQ8_0Tensors() const noexcept {
