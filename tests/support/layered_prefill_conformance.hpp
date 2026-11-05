@@ -25,6 +25,9 @@ struct LayeredPrefillCase {
   std::uint32_t top_logprobs{8};
   /// Layer groups per pass; zero takes the profile's maximum.
   std::size_t layer_groups{0};
+  /// Plan the cache's prompt checkpoints, as serving does, so passes may
+  /// capture them in place (PrefillThrough). Nothing is reused across runs.
+  bool cache_prompt{false};
 };
 
 /// Runs `runner` through three fresh state pools, greedily: the prompt alone,

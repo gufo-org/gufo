@@ -27,11 +27,12 @@ sampling::SamplingConfig Greedy(std::uint32_t top_logprobs) {
 
 TextRunnerPool::Request Acquire(TextRunnerPool& pool,
                                 std::vector<ext::TextRunnerToken> prompt,
-                                const sampling::SamplingConfig& sampling) {
-  // Nothing is reused or persisted, so every run computes its whole prompt.
-  return pool.Acquire(std::move(prompt), sampling, {}, {},
-                      /*reuse_prompt=*/false, 0, /*stop_at_eos=*/false,
-                      /*persist=*/false);
+                                const sampling::SamplingConfig& sampling,
+                                bool cache_prompt) {
+  // Every run has a fresh pool and persists nothing, so it computes its
+  // whole prompt.
+  return pool.Acquire(std::move(prompt), sampling, {}, {}, cache_prompt, 0,
+                      /*stop_at_eos=*/false, /*persist=*/false);
 }
 
 void PrefillAll(TextRunnerPool::Request& request, std::size_t width,
@@ -111,14 +112,15 @@ std::vector<std::string> CheckLayeredPrefill(
     Output prompt_alone;
     {
       TextRunnerPool pool(runner, 1);
-      auto request = Acquire(pool, test.prompt, sampling);
+      auto request = Acquire(pool, test.prompt, sampling, test.cache_prompt);
       PrefillAll(request, width);
       Finish(request, prompt_alone, test.prompt_output_tokens);
     }
     Output decoder_alone;
     {
       TextRunnerPool pool(runner, 1);
-      auto request = Acquire(pool, test.decoder_prompt, sampling);
+      auto request =
+          Acquire(pool, test.decoder_prompt, sampling, test.cache_prompt);
       PrefillAll(request, width);
       Finish(request, decoder_alone, test.decoder_output_tokens);
     }
@@ -129,11 +131,12 @@ std::vector<std::string> CheckLayeredPrefill(
     std::size_t yielded_tokens = 0;
     {
       TextRunnerPool pool(runner, 2);
-      auto decoder = Acquire(pool, test.decoder_prompt, sampling);
+      auto decoder =
+          Acquire(pool, test.decoder_prompt, sampling, test.cache_prompt);
       PrefillAll(decoder, width);
       Step(decoder, decoder_split, test.decoder_output_tokens);
       const auto before = decoder_split.selections.size();
-      auto request = Acquire(pool, test.prompt, sampling);
+      auto request = Acquire(pool, test.prompt, sampling, test.cache_prompt);
       PrefillAll(request, width, groups, [&] {
         ++yields;
         Step(decoder, decoder_split, test.decoder_output_tokens);

@@ -221,6 +221,8 @@ struct FakeControl {
   bool prefix_reuse{true};
   bool preview_first_token{false};
   std::optional<gufo::ext::TextSchedulingProfile> scheduling;
+  // Runs on the scheduler thread before each yield of a layered pass.
+  std::function<void()> before_yield;
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
@@ -463,6 +465,8 @@ public:
                      .label = fake.label,
                      .index = fake.position,
                      .count = group});
+      if (control_->before_yield)
+        control_->before_yield();
       fake.YieldPrefill();
       control_->Log({.kind = EventKind::kResume,
                      .label = fake.label,
@@ -1622,6 +1626,77 @@ void TestLayeredPrefillBatchesDecodersPerRound(std::size_t width) {
            "a yield round decodes as many sessions as the profile batches");
   if (width == 1)
     Expect(rounds[0] != rounds[1], "single-session rounds take turns");
+}
+
+void TestPromptCancelledInsideYield() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+
+  auto decoder = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto prompt = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  std::atomic<bool> cancelled{false};
+  control->before_yield = [&] {
+    if (!cancelled.exchange(true))
+      prompt.Cancel();
+  };
+  control->ReleaseAdvance();
+
+  const auto result = prompt.Wait();
+  Expect(result.cancelled, "a prompt cancelled between its layer groups ends");
+  Expect(decoder.Wait().tokens == ExpectedTokens(1, 30),
+         "the decoder keeps its trajectory after the cancellation");
+  const auto events = control->Events();
+  Expect(EventIndex(events, EventKind::kPrefill, 2, 1) == events.size() &&
+             EventIndex(events, EventKind::kAdvance, 2) == events.size(),
+         "the cancelled prompt takes no further pass and never decodes");
+}
+
+void TestCaptureWaitsForThePassEnd() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->preview_first_token = true;
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 8, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  control->block_prefill_label = 3;
+  // The second capture (B's prompt) is held until the test releases it.
+  std::binary_semaphore entered(0), release(0), finished(0);
+  std::atomic<unsigned> captures{0};
+  control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 1) {
+      entered.release();
+      release.acquire();
+      finished.release();
+    }
+  };
+  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+
+  auto a = scheduler->Submit({1, 10}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto b = scheduler->Submit({2, 20}, 30, 0.0F);
+  auto c = scheduler->Submit({3, 30, 31, 32, 33, 34, 35}, 2, 0.0F);
+  control->ReleaseAdvance();
+  // B is capturing; C's pass starts and holds before its first yield.
+  Expect(entered.try_acquire_for(kTestTimeout), "B's capture starts");
+  control->WaitForPrefill(3);
+  release.release();
+  Expect(finished.try_acquire_for(kTestTimeout), "B's capture finishes");
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  control->ReleasePrefill();
+
+  Expect(a.Wait().tokens == ExpectedTokens(1, 30) &&
+             b.Wait().tokens == ExpectedTokens(2, 30) &&
+             c.Wait().tokens == ExpectedTokens(3, 2),
+         "a capture finishing mid-pass keeps every trajectory");
+  const auto rounds = AdvancesPerYield(control->Events(), 3);
+  Expect(rounds.size() == 2, "C's pass yields twice");
+  for (const auto& round : rounds)
+    Expect(round == std::vector<TextRunnerToken>{1},
+           "a request leaving capture waits for the pass end, not a yield");
 }
 
 void TestSchedulingProfileRequiresIncrementalPrefill() {
@@ -3477,6 +3552,8 @@ int main() {
   TestLayeredPrefillBatchesDecodersPerRound(1);
   TestLayeredPrefillBatchesDecodersPerRound(2);
   TestSchedulingProfileRequiresIncrementalPrefill();
+  TestPromptCancelledInsideYield();
+  TestCaptureWaitsForThePassEnd();
   TestPendingLimitsRejectBeforeStateAdmission();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
   TestExpiredQueuedRequestNeverConsumesState();
