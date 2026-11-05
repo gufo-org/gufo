@@ -839,6 +839,13 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
       *error = "Failed to load Flash-Next model: " + load_error;
     return nullptr;
   }
+  try {
+    models::qwen::vision::PrepareForServing(model->VisionEncoder());
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return nullptr;
+  }
   // Each eight rows of wide copy verification past the first reserve
   // rollback rows beside the sessions (ResourceClaim). Narrow the width
   // until the configured sessions fit, rather than refusing a session count

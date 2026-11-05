@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -18,6 +19,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/core/logging/logging.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/vision/encoder.hpp"
 
@@ -769,5 +771,33 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
   observe("embedding", embedding->data_,
           std::size_t{merged} * embedding->width_);
   return embedding;
+}
+
+void PrepareForServing(const std::shared_ptr<Encoder>& encoder) {
+  if (!encoder)
+    return;
+  using Clock = std::chrono::steady_clock;
+  const auto started = Clock::now();
+  (void)encoder->identity();
+  const auto hashed = Clock::now();
+  try {
+    encoder->Upload();
+  } catch (const std::exception& e) {
+    throw std::runtime_error(
+        std::string("could not upload the Qwen vision sidecar: ") + e.what());
+  }
+  const auto uploaded = Clock::now();
+  std::size_t heap_free = 0, heap_total = 0;
+  (void)hipMemGetInfo(&heap_free, &heap_total);
+  using Milliseconds = std::chrono::duration<double, std::milli>;
+  server::Logger::Info(
+      "loader",
+      "event=vision_prepared resident_bytes=" +
+          std::to_string(encoder->ResidentBytes()) + " identity_ms=" +
+          std::to_string(Milliseconds(hashed - started).count()) +
+          " upload_ms=" +
+          std::to_string(Milliseconds(uploaded - hashed).count()) +
+          " device_heap_free_bytes=" + std::to_string(heap_free) + " " +
+          server::Logger::MemoryStatus());
 }
 }  // namespace gufo::models::qwen::vision
