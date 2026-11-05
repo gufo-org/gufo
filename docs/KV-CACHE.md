@@ -322,6 +322,17 @@ A same-session rewind allocates backing blocks for only the rows it would
 overwrite and copies them once for checkpoints sharing those rows. Appending
 allocates no K/V backing blocks. Restore keeps the still-live prefix without
 a K/V upload.
+
+A model with a sliding attention window declares that attention as a
+window-rows component (`ComponentKind::kWindowRows` with `window_rows`) instead
+of private state. A checkpoint at row n keeps only the chunks from the one
+containing row n - `window_rows` to n and shares them with neighbouring
+checkpoints. Restore loads just those chunks, and the disk manifest records the
+window size (format version 3, written only when a window component is
+present; version 2 manifests remain readable). Retention counts the window as
+a fixed cost per checkpoint, like private state, and frees a chunk once no
+checkpoint's window reaches it.
+
 Reset leaves append-only rows intact; the first write that would overwrite
 them preserves pending checkpoints. Session destruction preserves remaining
 rows before releasing device buffers. Byte readers assemble a complete
