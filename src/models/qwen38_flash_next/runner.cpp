@@ -237,6 +237,9 @@ private:
 // Beside decoders, prompts keep the 4,096-row pass and split it into layer
 // groups: one pass takes about 2.1 s, a decode step about 34 ms.
 constexpr std::size_t kMaxPrefillLayerGroups = 8;
+// Every batched plan runs inside a layer hook (Executor::kHookParkedRows),
+// so each round decodes all decoders at once rather than one in turn.
+constexpr std::size_t kMaxBatchWidth = 8;
 
 class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
@@ -307,7 +310,8 @@ public:
                 .incremental_text_is_exact = true,
                 .multi_token_decode = use_mtp_,
                 .batched_multi_token_decode = use_mtp_,
-                .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
+                .batched_multi_token_decode_max_width =
+                    use_mtp_ ? kMaxBatchWidth : 0u,
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
@@ -322,7 +326,7 @@ public:
             TextSchedulingProfile{
                 .pass_tokens = model_->PrefillCapacity(),
                 .max_layer_groups = kMaxPrefillLayerGroups,
-                .max_yield_decode_width = 1,
+                .max_yield_decode_width = kMaxBatchWidth,
             },
     };
   }
@@ -356,7 +360,7 @@ public:
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
     std::vector<TextExecutionPlan> plans{
         {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
-    for (std::size_t width = 2; width <= 8; ++width) {
+    for (std::size_t width = 2; width <= kMaxBatchWidth; ++width) {
       plans.push_back(
           {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
     }
