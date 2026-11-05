@@ -35,6 +35,7 @@
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
+#include "src/models/qwen/probe.hpp"
 
 namespace gufo::models::qwen {
 namespace {
@@ -697,7 +698,7 @@ public:
                 .partial_prefill_retention = true,
                 .prefill_rollback = true,
             },
-        .sampling_preset = sampling::TextPreset(model_->GetConfig()),
+        .sampling_defaults = QwenSamplingDefaults(model_->GetConfig()),
     };
   }
 

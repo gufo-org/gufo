@@ -973,7 +973,8 @@ void TestCompatibilityRequests() {
     auto body = parse(endpoint.body);
     response_body(server.Post(endpoint.path, body.dump()));
     assert(server.backend->LastCall().max_tokens == 0);
-    server.backend->defaults.model = gufo::sampling::TextModelPreset::kQwen38;
+    server.backend->defaults.provider = gufo::sampling::PresetDefaults(
+        gufo::sampling::TextModelPreset::kQwen38);
     server.backend->defaults.supplied = {};
     server.backend->reasoning.enabled = false;
     response_body(server.Post(endpoint.path, body.dump()));
@@ -2761,7 +2762,7 @@ void TestResponseSamplingDefaults() {
   using gufo::sampling::TextModelPreset;
   for (const auto model :
        {TextModelPreset::kQwen38, TextModelPreset::kDeepSeekV4Flash}) {
-    server.backend->defaults.model = model;
+    server.backend->defaults.provider = gufo::sampling::PresetDefaults(model);
     for (const bool server_thinking : {false, true}) {
       server.backend->reasoning.enabled = server_thinking;
       for (const char* effort :

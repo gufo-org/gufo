@@ -146,12 +146,14 @@ public:
     /// Zero means generate until EOS or the remaining context is exhausted.
     std::size_t max_tokens{0};
     sampling::SamplingConfig sampling;
-    sampling::TextModelPreset model{sampling::TextModelPreset::kUnspecified};
+    /// Provider defaults; unset leaves unsupplied controls at `sampling`.
+    std::optional<sampling::TextSamplingDefaults> provider;
     sampling::SamplingOverrides supplied{sampling::SamplingOverrides::All()};
 
     [[nodiscard]] sampling::SamplingConfig Resolve(
         std::optional<bool> thinking) const {
-      return sampling::ResolveTextSampling(model, thinking, sampling, supplied);
+      return sampling::ResolveTextSampling(provider, thinking, sampling,
+                                           supplied);
     }
   };
 

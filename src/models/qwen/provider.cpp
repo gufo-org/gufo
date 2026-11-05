@@ -35,6 +35,7 @@ void qwen_provider_register(gufo::ext::Registry& registry) {
       .bench_driver = &gufo::models::qwen::RunQwenBenchmark,
       .prompt_driver = &gufo::models::qwen::RunQwenPrompt,
       .chat_driver = &gufo::models::qwen::RunQwenChat,
+      .sampling_defaults = &gufo::models::qwen::QwenSamplingDefaults,
   });
 #endif
 }

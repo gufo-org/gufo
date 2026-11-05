@@ -11,6 +11,15 @@ bool ProbeFlashNextGguf(const core::GgufReader& reader) {
   return architecture == "qwen4exp";
 }
 
+std::optional<sampling::TextSamplingDefaults> FlashNextSamplingDefaults() {
+  return sampling::PresetDefaults(sampling::TextModelPreset::kQwen38);
+}
+
+std::optional<sampling::TextSamplingDefaults> FlashNextSamplingDefaults(
+    const core::GgufReader&) {
+  return FlashNextSamplingDefaults();
+}
+
 bool ProbeFlashNext(std::string_view model_root) {
   try {
     std::filesystem::path p(model_root);
