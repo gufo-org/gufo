@@ -415,8 +415,7 @@ int main(int argc, char** argv) {
     if (!executor->Forward(
             *session, std::span<const std::int32_t>(tokens.data() + off, n),
             rows, out.data(), q::rocm::Executor::ForwardMode::kPrefill, &error,
-            nullptr,
-            std::span<const std::int32_t>(tokens.data() + off + n, next))) {
+            {}, std::span<const std::int32_t>(tokens.data() + off + n, next))) {
       std::fprintf(stderr, "prefill failed: %s\n", error.c_str());
       return 1;
     }
