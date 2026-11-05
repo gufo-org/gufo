@@ -1140,7 +1140,13 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       return boundary < prompt.size() ||
              impl_->runner->HasDecodeFrontier(*request.state);
     };
-    if (live && !decodable(found.selected->boundary)) {
+    // Prefill must not resume inside an indivisible input of this prompt,
+    // which a checkpoint from another prompt with the same tokens can do.
+    const auto whole_inputs = [&](std::size_t boundary) {
+      return !context || context->PrefillStop(boundary, false) == boundary;
+    };
+    if (live && (!decodable(found.selected->boundary) ||
+                 !whole_inputs(found.selected->boundary))) {
       live.reset();
       const std::lock_guard lock(impl_->mutex);
       entry->branch = std::make_shared<const std::uint8_t>(0);
@@ -1158,8 +1164,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     for (const auto& candidate : found.candidates) {
       if (restored || (cancelled && cancelled()))
         break;
-      if (candidate.live || (candidate.boundary % alignment != 0 &&
-                             candidate.boundary < prompt.size()))
+      if (candidate.live || !whole_inputs(candidate.boundary) ||
+          (candidate.boundary % alignment != 0 &&
+           candidate.boundary < prompt.size()))
         continue;
       try {
         if (candidate.checkpoint) {

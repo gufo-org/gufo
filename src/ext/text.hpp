@@ -53,8 +53,11 @@ struct TextPromptContext {
   /// token (up). Positions at span edges and outside spans are legal and must
   /// be returned unchanged, and the result must be a fixed point of this
   /// function. The pool applies it to cache checkpoints, snapshot and shared
-  /// prefix boundaries; a step that starts at a span consumes the whole span
-  /// even beyond its token budget. The default declares no spans.
+  /// prefix boundaries, and never restores a checkpoint inside a span. A step
+  /// that starts at a span consumes the whole span even beyond its token
+  /// budget, so the runner's scratch must fit its largest span, and a runner
+  /// consuming less than a step must not stop inside one. The default declares
+  /// no spans.
   [[nodiscard]] virtual std::size_t PrefillStop(std::size_t position,
                                                 bool /*up*/) const {
     return position;

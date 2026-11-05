@@ -284,8 +284,7 @@ struct TextRunnerPool::Request::Impl {
     // Neither snapshots nor any other planned stop may split an indivisible
     // input. Without declared spans every position is unchanged.
     // A stable boundary inside the first input leaves nothing to retain.
-    if (context)
-      count = context->PrefillStop(count, false);
+    count = LegalStop(count, false);
     if (count == 0)
       count = prompt.size();
     // A newly consumed image needs its own stable checkpoint. Otherwise the
@@ -370,13 +369,23 @@ struct TextRunnerPool::Request::Impl {
     }
   }
 
+  /// The prompt context's stop for `position`. A hook moving the wrong way
+  /// would keep the loops below from ending.
+  [[nodiscard]] std::size_t LegalStop(std::size_t position, bool up) const {
+    if (!context)
+      return position;
+    const auto stop = context->PrefillStop(position, up);
+    if (up ? stop < position : stop > position)
+      throw std::logic_error(
+          "prompt context moved a prefill stop the wrong way");
+    return stop;
+  }
+
   /// The nearest position at or before `position` where a pass may end: on
   /// the prefill alignment and outside every indivisible input.
   [[nodiscard]] std::size_t Aligned(std::size_t position) const {
     for (;;) {
-      auto next = position - position % alignment;
-      if (context)
-        next = context->PrefillStop(next, false);
+      const auto next = LegalStop(position - position % alignment, false);
       if (next == position)
         return position;
       position = next;
@@ -391,8 +400,8 @@ struct TextRunnerPool::Request::Impl {
       auto next = position;
       if (const auto over = next % alignment; over != 0)
         next += alignment - over;
-      if (context && next < prompt.size())
-        next = context->PrefillStop(next, true);
+      if (next < prompt.size())
+        next = LegalStop(next, true);
       if (next == position)
         return position;
       position = next;
@@ -1142,6 +1151,10 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   }
 
   impl_->prefill_offset += step.consumed_tokens;
+  if (impl_->LegalStop(impl_->prefill_offset, false) != impl_->prefill_offset) {
+    throw std::runtime_error(
+        "text runner stopped prefill inside an indivisible input");
+  }
   const bool reached_frontier = impl_->prefill_offset == impl_->prompt.size();
   if (step.decode_ready != (impl_->prefill_offset == model_prompt.size())) {
     throw std::runtime_error(

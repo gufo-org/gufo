@@ -2749,6 +2749,89 @@ void IndivisibleInputsAreNotSplit() {
     assert(runner->pass_ends.front() == 900);
     leader.Invalidate();
   }
+  // A checkpoint or live frontier from a prompt without the input cannot
+  // resume inside it, even with the same tokens.
+  {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1);
+    const auto prompt = SpanPrompt(20);
+    auto first =
+        pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 10);
+    Prefill(first);
+    (void)first.Commit();
+    auto edited = prompt;
+    edited[15] += 1000;
+    auto plain =
+        pool.Acquire(edited, sampling::SamplingConfig{}, {}, {}, true, 0);
+    assert(plain.cached_prompt_tokens() == 10);
+    plain.Invalidate();
+    auto spanned = pool.Acquire(edited, sampling::SamplingConfig{}, {},
+                                Spans({{4, 14}}), true, 0);
+    assert(spanned.cached_prompt_tokens() == 0);
+    spanned.Invalidate();
+  }
+  for (const bool spanned : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1);
+    auto history = SpanPrompt(10);
+    auto first = pool.Acquire(history);
+    Prefill(first);
+    history.push_back(Generate(first));
+    (void)first.Commit();
+    history.resize(30, 7);
+    Context context;
+    if (spanned)
+      context = Spans({{4, 14}});
+    auto next =
+        pool.Acquire(history, sampling::SamplingConfig{}, {}, context, true, 0);
+    assert(next.cached_prompt_tokens() == (spanned ? 0 : 11));
+    next.Invalidate();
+  }
+  // A runner stopping inside an input fails the request.
+  {
+    class ShortStepRunner final : public Runner {
+    public:
+      TextPrefillStep Prefill(TextRunnerState& state,
+                              std::span<const TextRunnerToken> prompt,
+                              std::size_t offset,
+                              std::size_t budget) const override {
+        return Runner::Prefill(state, prompt, offset,
+                               std::min<std::size_t>(budget, 6));
+      }
+    };
+    TextRunnerPool pool(std::make_shared<ShortStepRunner>(), 1);
+    auto request = pool.Acquire(SpanPrompt(20), sampling::SamplingConfig{}, {},
+                                Spans({{4, 14}}));
+    bool failed = false;
+    try {
+      (void)request.Prefill(64);
+    } catch (const std::runtime_error&) {
+      failed = true;
+    }
+    assert(failed);
+    request.Invalidate();
+  }
+  // A hook moving a stop the wrong way fails instead of hanging.
+  {
+    struct WrongWayContext final : TextPromptContext {
+      std::size_t PrefillStop(std::size_t position, bool) const override {
+        return position > 4 && position < 14 ? 4 : position;
+      }
+    };
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1);
+    auto request = pool.Acquire(SpanPrompt(20), sampling::SamplingConfig{}, {},
+                                std::make_shared<WrongWayContext>());
+    bool failed = false;
+    try {
+      while (!request.prefill_complete())
+        (void)request.Prefill(3);
+    } catch (const std::logic_error&) {
+      failed = true;
+    }
+    assert(failed);
+    request.Invalidate();
+  }
 }
 int main() {
   IndivisibleInputsAreNotSplit();
