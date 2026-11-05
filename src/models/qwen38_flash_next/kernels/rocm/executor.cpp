@@ -3649,6 +3649,8 @@ bool Executor::RunLayerHook(Session& session, std::string* error_msg) const {
   const auto selected = selected_logits_;
   const auto wide_rows = wide_rows_;
   const auto prefetch_next = prefetch_next_;
+  // A decode's Forward clears both on return.
+  const bool prefetch_deferred = prefetch_deferred_;
   const auto routed_max_rows = routed_max_rows_;
   const auto routed_n_tiles = routed_n_tiles_;
   const auto routed_wide_tiles = routed_wide_tiles_;
@@ -3746,8 +3748,8 @@ bool Executor::RunLayerHook(Session& session, std::string* error_msg) const {
   routed_tile_rows_ = routed_tile_rows;
   routed_tile_cols_ = routed_tile_cols;
   UseYarn(session);
-  if (prefetch_deferred_) {
-    prefetch_deferred_ = false;
+  prefetch_deferred_ = false;
+  if (prefetch_deferred) {
     PrefetchPle(session, prefetch_next_);
     prefetch_next_ = {};
   }
