@@ -1,4 +1,10 @@
-"""Check project includes and reviewed CPU dependencies of the common cache."""
+"""Check project includes and reviewed CPU dependencies of a common package.
+
+The component cache (src/cache) and the scheduler policy (src/sched) are built
+without serving, model or HIP code. Usage:
+
+    package_boundary_test.py SOURCE_DIR LINK_METADATA [ALLOWED_LINK ...]
+"""
 
 from pathlib import Path
 import posixpath
@@ -31,7 +37,7 @@ def strip_comments(source: str) -> str:
 
 def violations(root: Path, project_root: Path | None = None) -> list[str]:
     if not root.is_dir():
-        return [f"{root}: cache source directory is missing"]
+        return [f"{root}: package source directory is missing"]
     project_root = (project_root or root.parents[1]).resolve()
     failures = []
     visited = set()
@@ -64,13 +70,12 @@ def violations(root: Path, project_root: Path | None = None) -> list[str]:
     return failures
 
 
-def link_violations(metadata: Path) -> list[str]:
+def link_violations(metadata: Path, allowed: set[str], target: str = "gufo_cache") -> list[str]:
     if not metadata.is_file():
-        return [f"{metadata}: cache link metadata is missing"]
-    # Only this reviewed CPU platform dependency may be linked. Arbitrary relay
-    # targets are rejected too, so they cannot hide a transitive model/HIP link.
-    allowed = {"Threads::Threads", "gufo_platform"}
-    return [f"gufo_cache: unapproved dependency {library}"
+        return [f"{metadata}: {target} link metadata is missing"]
+    # Only the reviewed CPU dependencies may be linked. Arbitrary relay targets
+    # are rejected too, so they cannot hide a transitive model/HIP link.
+    return [f"{target}: unapproved dependency {library}"
             for line in metadata.read_text().splitlines()
             for library in line.split(";") if library and library not in allowed]
 
@@ -128,21 +133,24 @@ class BoundaryTests(unittest.TestCase):
     def test_linked_targets_and_libraries(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "links.txt"
-            self.assertTrue(link_violations(metadata))
+            allowed = {"Threads::Threads", "gufo_platform"}
+            self.assertTrue(link_violations(metadata, allowed))
             metadata.write_text("\nThreads::Threads\ngufo_platform\n")
-            self.assertEqual(link_violations(metadata), [])
+            self.assertEqual(link_violations(metadata, allowed), [])
+            self.assertEqual(len(link_violations(metadata, set())), 2)
             for dependency in ("gufo_core", "gufo_http", "gufo_model_relay", "hip::host", "/opt/rocm/lib/libamdhip64.so"):
                 with self.subTest(dependency=dependency):
                     metadata.write_text(dependency + "\n")
-                    self.assertEqual(len(link_violations(metadata)), 1)
+                    self.assertEqual(len(link_violations(metadata, allowed)), 1)
 
 
 if __name__ == "__main__":
-    failures = violations(Path(sys.argv[1]))
-    failures.extend(link_violations(Path(sys.argv[2])))
+    root = Path(sys.argv[1])
+    failures = violations(root)
+    failures.extend(link_violations(Path(sys.argv[2]), set(sys.argv[3:]), f"gufo_{root.name}"))
     if failures:
         sys.exit("\n".join(failures))
     tests = unittest.main(argv=[sys.argv[0]], exit=False)
     if not tests.result.wasSuccessful():
         sys.exit(1)
-    print("cache package boundary passed")
+    print(f"{root.name} package boundary passed")

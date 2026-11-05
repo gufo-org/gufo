@@ -27,6 +27,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
+#include "src/sched/policy.hpp"
 
 namespace gufo::server {
 namespace {
@@ -530,10 +531,6 @@ struct TextGenerationScheduler::Impl {
           "text generation scheduler runner pool must not be null");
     }
     sessions = std::make_shared<SessionTable>(runner_pool->capacity());
-    if (prefill_policy.decode_active_tokens == 0) {
-      throw std::invalid_argument(
-          "active-decode prefill budget must be at least one token");
-    }
     if (scheduler_policy.max_pending_requests == 0 ||
         scheduler_policy.max_pending_requests_per_client == 0 ||
         scheduler_policy.max_pending_requests_per_client >
@@ -547,6 +544,9 @@ struct TextGenerationScheduler::Impl {
     }
     incremental_prefill_supported =
         runner_pool->runner().Descriptor().capabilities.incremental_prefill;
+    policy = sched::Policy(
+        {.decode_active_tokens = prefill_policy.decode_active_tokens,
+         .incremental_prefill = incremental_prefill_supported});
     final_token_advance_required =
         runner_pool->runner()
             .Descriptor()
@@ -1293,7 +1293,9 @@ struct TextGenerationScheduler::Impl {
   }
 
   void StepPrefill(const std::shared_ptr<ScheduledRequest>& request,
-                   bool decoder_runnable, bool peer_waiting = false) {
+                   const sched::PrefillWork& work) {
+    const bool decoder_runnable = work.beside_decoders;
+    const bool peer_waiting = work.peer_waiting;
     try {
       if (CompleteIfStopped(request)) {
         return;
@@ -1302,13 +1304,8 @@ struct TextGenerationScheduler::Impl {
       request->phase.store(TextRequestPhase::kPrefilling,
                            std::memory_order_release);
       last_prefill_request_id = request->id;
-      // Bound work for short waiting prefills and captures as well as decoders.
-      // Long prefills alone retain the model's efficient chunk size.
-      const bool bounded_prefill =
-          incremental_prefill_supported && (decoder_runnable || peer_waiting);
-      const std::size_t budget = bounded_prefill
-                                     ? prefill_policy.decode_active_tokens
-                                     : request->runner_request.prompt_tokens();
+      const std::size_t budget =
+          work.max_tokens.value_or(request->runner_request.prompt_tokens());
       if ((decoder_runnable || runner_pool->capacity() > 1) &&
           !incremental_prefill_supported) {
         request->result.prefill_fallback_reason =
@@ -1890,12 +1887,6 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
-  [[nodiscard]] static bool HasDueDecoder(
-      const std::deque<std::shared_ptr<ScheduledRequest>>& decoding) {
-    return std::any_of(decoding.begin(), decoding.end(),
-                       [](const auto& request) { return request->decode_due; });
-  }
-
   static void MarkAllDecodersDue(
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding) {
     for (const auto& request : decoding) {
@@ -2022,7 +2013,6 @@ struct TextGenerationScheduler::Impl {
       }
 
       progress.fetch_add(1, std::memory_order_relaxed);
-      const bool due_decoder = HasDueDecoder(decoding);
       const std::size_t resident_count = prefilling.size() + decoding.size();
       const bool preparing_multi_token_batch =
           multi_token_decode && resident_count > 1 && !prefilling.empty() &&
@@ -2036,53 +2026,32 @@ struct TextGenerationScheduler::Impl {
           ready->runner_request.PrepareBatchExecution();
         }
       }
-      // Give simultaneous new requests one bounded chunk to form their first
-      // batch. Once decoding starts, every due decoder runs before more
-      // prefill.
-      const bool assemble_initial_batch =
-          preparing_multi_token_batch &&
-          consecutive_active_prefill_chunks == 0 &&
-          prefilling.front()->runner_request.prompt_tokens() -
-                  prefilling.front()->runner_request.prefill_position() <=
-              prefill_policy.decode_active_tokens &&
-          std::all_of(decoding.begin(), decoding.end(),
-                      [](const auto& request) {
-                        return request->result.tokens.empty();
-                      });
-      if (!prefilling.empty() && !decoding.empty() &&
-          (!due_decoder || assemble_initial_batch)) {
-        auto request = std::move(prefilling.front());
-        prefilling.pop_front();
-        StepPrefill(request, true);
-        if (!IsTerminal(request)) {
-          if (request->runner_request.SnapshotPending()) {
-            capturing.push_back(std::move(request));
-          } else if (request->runner_request.prefill_complete()) {
-            decoding.push_back(std::move(request));
-          } else {
-            prefilling.push_back(std::move(request));
-          }
-        }
-        MarkAllDecodersDue(decoding);
-        continue;
-      }
+      prefilling_view.clear();
+      for (const auto& request : prefilling)
+        prefilling_view.push_back(
+            {.remaining_tokens = request->runner_request.prompt_tokens() -
+                                 request->runner_request.prefill_position()});
+      decoding_view.clear();
+      for (const auto& request : decoding)
+        decoding_view.push_back({.due = request->decode_due,
+                                 .started = !request->result.tokens.empty()});
+      const auto work =
+          policy.Next({.prefilling = prefilling_view,
+                       .decoding = decoding_view,
+                       .capturing = !capturing.empty(),
+                       .forming_batch = preparing_multi_token_batch,
+                       .after_decode = consecutive_active_prefill_chunks == 0});
 
-      if (!decoding.empty()) {
-        const std::size_t candidate_count =
-            due_decoder
-                ? static_cast<std::size_t>(std::count_if(
-                      decoding.begin(), decoding.end(),
-                      [](const auto& request) { return request->decode_due; }))
-                : decoding.size();
-        const auto plan = runner_pool->SelectDecodePlan(candidate_count);
+      if (const auto* decode = std::get_if<sched::DecodeWork>(&work)) {
+        const auto plan = runner_pool->SelectDecodePlan(decode->candidates);
         const std::size_t batch_size =
             plan.kind == TextExecutionPlanKind::kBatched
-                ? std::min(candidate_count, plan.physical_width)
+                ? std::min(decode->candidates, plan.physical_width)
                 : 1;
         std::vector<std::shared_ptr<ScheduledRequest>> batch;
         batch.reserve(batch_size);
         for (std::size_t index = 0; index < batch_size; ++index) {
-          auto request = PopDecoder(decoding, due_decoder);
+          auto request = PopDecoder(decoding, decode->due_only);
           request->decode_due = false;
           batch.push_back(std::move(request));
         }
@@ -2098,15 +2067,10 @@ struct TextGenerationScheduler::Impl {
         continue;
       }
 
+      const auto& prefill = std::get<sched::PrefillWork>(work);
       auto request = std::move(prefilling.front());
       prefilling.pop_front();
-      const bool short_peer_waiting = std::any_of(
-          prefilling.begin(), prefilling.end(), [&](const auto& peer) {
-            return peer->runner_request.prompt_tokens() -
-                       peer->runner_request.prefill_position() <=
-                   prefill_policy.decode_active_tokens;
-          });
-      StepPrefill(request, false, !capturing.empty() || short_peer_waiting);
+      StepPrefill(request, prefill);
       if (!IsTerminal(request)) {
         if (request->runner_request.SnapshotPending()) {
           capturing.push_back(std::move(request));
@@ -2117,6 +2081,8 @@ struct TextGenerationScheduler::Impl {
           prefilling.push_back(std::move(request));
         }
       }
+      if (prefill.beside_decoders)
+        MarkAllDecodersDue(decoding);
     }
     for (auto& request : capturing)
       decoding.push_back(std::move(request));
@@ -2126,6 +2092,10 @@ struct TextGenerationScheduler::Impl {
   std::shared_ptr<TextRunnerPool> runner_pool;
   TextPrefillPolicy prefill_policy;
   TextSchedulerPolicy scheduler_policy;
+  sched::Policy policy;
+  // Reused by every work-unit decision.
+  std::vector<sched::PrefillingRequest> prefilling_view;
+  std::vector<sched::DecodingRequest> decoding_view;
   detail::PublicationWaitEstimate publication_prefill;
   std::shared_ptr<OutputBudget> output_budget;
   std::shared_ptr<SessionTable> sessions;
