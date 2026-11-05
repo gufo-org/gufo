@@ -130,6 +130,45 @@ context and selected rollback depth (about 27.5 KiB per context token with
 MTP, measured on gfx1151); admission reserves the configured capacity before
 creating sessions.
 
+## Runtime residual projection
+
+`--projection-vector CV.gguf` optionally loads a llama.cpp control-vector
+file (`direction.N` F32 tensors, one unit direction per layer, layers
+`1..L-1`; a missing layer is never steered). At the FFN/MoE combine boundary
+of each configured layer, every hyper-connection stream loses its component
+along that layer's direction — `h <- h - s * (h . v) * v`, applied between
+the residual write and the next mixer's grouped norm, matching the llama.cpp
+project-mode loader (each direction is normalized and its norm becomes that
+layer's scale `s`). The GGUF weights are never modified. `--projection-layers
+LO-HI` restricts steering to an inclusive sub-range; the default uses every
+layer the file carries.
+
+The feature is off unless a request opts in: a chat request with
+`"projection": true` steers that request, any request without the field does
+not, and nothing carries into later requests. The flag is read from
+device-side control state, so toggling between requests neither recaptures
+decode graphs nor affects other sessions in a shared batch; with projection
+off — vector loaded or not — every steered kernel compiles to exactly the
+unpatched arithmetic and logits are bitwise identical to a server started
+without the option. A request that enables projection on a server started
+without `--projection-vector` fails with a 400 error rather than silently
+running unsteered. The value must be a boolean.
+
+Steered layers and the direction table add one `[layers][hidden]` F32 device
+buffer (480 KiB at 48 x 2560) plus one word of per-request control state.
+The extra block-wide dot in the combine kernels measured below one percent
+of end-to-end throughput in both directions (see QUALITY.md).
+
+Direction files declare optional model provenance via a
+`controlvector.model_hint` string; a mismatching hint logs a warning and
+loads anyway. The projection is checkpoint-agnostic in the sense that it
+runs on activations, but its *effect* depends on the direction being
+meaningful for the loaded model: a direction recovered from a different
+model family may do nothing, or may remove behavior it was not measured
+against, including safety behavior and factual reliability. Measure any
+loaded vector against your own evaluation set; refusal-marker counts are
+not a quality signal.
+
 ## Images
 
 Use this model's `mmproj-BF16.gguf`, discovered beside the target or selected
