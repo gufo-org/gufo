@@ -212,10 +212,11 @@ public:
 
   /// Set by the host for the next Prefill or PrefillThrough call only. A
   /// runner whose descriptor has a scheduling profile splits each pass into
-  /// at most `groups` layer groups and calls YieldPrefill() between them;
-  /// every layer keeps the arithmetic of an unsplit pass. A runner may
-  /// ignore it and run unsplit passes. While yielding, it must hold no lock
-  /// or scratch its decode paths take.
+  /// about `groups` layer groups of similar duration and calls YieldPrefill()
+  /// between them; it may add a boundary where the pass would otherwise
+  /// stall, such as a wait for input rows. Every layer keeps the arithmetic
+  /// of an unsplit pass. A runner may ignore it and run unsplit passes.
+  /// While yielding, it must hold no lock or scratch its decode paths take.
   void SetPrefillYield(std::size_t groups, PrefillYield yield) {
     prefill_yield_groups_ = yield ? std::max<std::size_t>(groups, 1) : 1;
     prefill_yield_ = std::move(yield);

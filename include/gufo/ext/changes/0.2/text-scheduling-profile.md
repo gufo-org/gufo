@@ -12,9 +12,11 @@ sessions between them.
   decode-active passes. A profile requires `incremental_prefill`, and every
   field must be at least one; the host rejects the runner at load otherwise.
 - `TextRunnerState::SetPrefillYield(groups, yield)` arms the next `Prefill` or
-  `PrefillThrough` call only. A profiled runner splits the pass into at most
-  `groups` layer groups and calls `YieldPrefill()` between them;
-  `prefill_yield_groups()` is one when the host asked for unsplit passes. Every
+  `PrefillThrough` call only. A profiled runner splits the pass into about
+  `groups` layer groups of similar duration, adding a boundary where the pass
+  would otherwise stall (such as a wait for input rows), and calls
+  `YieldPrefill()` between them; `prefill_yield_groups()` is one when the host
+  asked for unsplit passes. Every
   layer must keep the arithmetic of an unsplit pass, so outputs stay
   bit-identical, and the runner must hold no lock or scratch its decode paths
   take while yielding. A runner may ignore the request and run unsplit passes.

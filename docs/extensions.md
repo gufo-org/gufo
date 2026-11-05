@@ -98,9 +98,11 @@ in `TextRunnerDescriptor::scheduling` and split its passes by layers instead:
   normally the model's own prefill pass. A lone prompt is not bounded.
 - Before such a pass, the host calls `SetPrefillYield(groups, yield)` on the
   prompt's state, with `groups` chosen from the measured pass time and capped
-  at `max_layer_groups`. Between layer groups, the runner calls
-  `state.YieldPrefill()`, which decodes up to `max_yield_decode_width` other
-  sessions in one round and returns.
+  at `max_layer_groups`. Split the pass into about that many groups of similar
+  duration, not layer count, and add a boundary right after any point where the
+  pass waits, such as an input read: decoders wait for the longest group.
+  Between groups, the runner calls `state.YieldPrefill()`, which decodes up to
+  `max_yield_decode_width` other sessions in one round and returns.
 - Every layer must do the same arithmetic as in an unsplit pass. Keep the
   rows the pass carries from one layer to the next, and any flags or graphs
   that depend on them, out of reach of the decode paths, and hold no lock they
