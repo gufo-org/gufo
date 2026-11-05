@@ -176,11 +176,14 @@ are applied in request order, and the result is rounded to BF16. The published
 Qwen-Image-2.1 checkpoint is all BF16, so a merged weight is rounded once; an
 FP32 checkpoint tensor is rounded once at upload and once more after merging.
 Kernels, step time and resident weight memory are those of the base model;
-merge scratch comes from the runtime's bounded buffer pool and is reused. When the selected set changes, the weights whose
-adapter terms change are rebuilt from the mapped checkpoint before the request
-starts (never by subtracting; on the first such request this includes their
-upload, other weights still load on first use), so returning to a previous set
-or to none is bit-identical; the request log reports this as `lora_ms`. If a
+merge scratch comes from the runtime's bounded buffer pool and is reused.
+When the selected set changes, the weights whose adapter terms change are
+rebuilt from the checkpoint before the request starts, never by subtracting,
+so returning to a previous set or to none is bit-identical; the request log
+reports this as `lora_ms`. Rebuilt weights stream from the safetensors files
+through the same bounded upload as the first load (on the first switch, the
+rest of the transformer comes with them), not through the file mapping, so a
+switch does not grow the host working set on Windows. If a
 switch fails or is cancelled, the remaining weights rebuild with the new set on
 first use, or before the next request that selects it.
 Without `--lora`, generation is unchanged and pixel-identical to a server
