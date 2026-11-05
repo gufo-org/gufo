@@ -217,6 +217,7 @@ if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 add_subdirectory(src/cache)
+add_subdirectory(src/sched)
 
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
@@ -385,7 +386,7 @@ add_library(gufo_serving STATIC
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp)
 target_link_libraries(gufo_serving PUBLIC gufo_ext_runtime gufo_logging
-  gufo_core gufo_cache)
+  gufo_core gufo_cache gufo_sched)
 # The executable's own objects carried production NDEBUG, the test binaries that
 # re-compiled these sources forced assertions on. One library can only pick
 # one: test builds keep assertions, so a test-preset `gufo` now asserts where it
@@ -535,6 +536,7 @@ if (BUILD_TESTING)
   target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
 
   add_subdirectory(tests/cache)
+  add_subdirectory(tests/sched)
   add_subdirectory(tests/extensions)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or
