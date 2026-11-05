@@ -682,6 +682,11 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// True only while Run records a graph. Overlapped launches check it so a
+  /// side stream that failed to join the capture is an error rather than a
+  /// silently missing node; it is false on every replay, so the check costs
+  /// nothing outside capture.
+  mutable bool capturing_{false};
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;

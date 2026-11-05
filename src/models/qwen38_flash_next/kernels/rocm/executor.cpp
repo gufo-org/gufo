@@ -3044,15 +3044,21 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // The shared expert (gated by the last router row) does not depend on
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
-  // A wide batch runs them on the side stream beside the routed experts,
-  // which leave compute idle while they stream expert weights. The shared
-  // expert writes its own scratch and may quantize x into s_.x_q8t, so no
-  // main-stream work may use s_.x_q8t before JoinSide.
+  // The side stream runs them beside the routed experts, which leave memory
+  // idle while they stream expert weights: a wide batch's tiled GEMMs are
+  // compute bound, and a decode batch's single-token GEMV launches too few
+  // blocks to saturate DRAM. The shared expert writes its own scratch and may
+  // quantize x into s_.x_q8t, so no main-stream work may use s_.x_q8t before
+  // JoinSide.
   // Only the Q8_0 shared expert overlaps: its kernels take stream_, while
   // the BF16, F16 and F32 routes go through BLAS handles bound to the main
   // stream.
-  const bool overlap = ExpertMatrixRows(n_tokens) && !last_only &&
-                       l.shexp_gate.type == GgmlType::kQ8_0 &&
+  // A decode pass replays from a captured graph, so the fork and join below
+  // must stay inside the capture region: side_stream_ joins the capture
+  // through side_start_, and the main stream joins back through side_done_.
+  // The gate below is not restricted to wide batches for that reason, and the
+  // fork asserts the side stream really joined the capture.
+  const bool overlap = !last_only && l.shexp_gate.type == GgmlType::kQ8_0 &&
                        l.shexp_up.type == GgmlType::kQ8_0 &&
                        l.shexp_down.type == GgmlType::kQ8_0;
   const hipStream_t main = stream_;
@@ -3062,6 +3068,20 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
         !Check(hipStreamWaitEvent(side_stream_, side_start_, 0),
                "side stream wait", error_msg)) {
       return false;
+    }
+    // Waiting on an event recorded inside the capture is what makes the side
+    // stream part of it. Confirm that happened: a capture that kept the fork
+    // but dropped the side-stream nodes would replay a graph without the
+    // shared expert and produce wrong logits instead of an error.
+    if (capturing_) {
+      hipStreamCaptureStatus side_status = hipStreamCaptureStatusNone;
+      if (!Check(hipStreamIsCapturing(side_stream_, &side_status),
+                 "side stream capture query", error_msg) ||
+          side_status != hipStreamCaptureStatusActive) {
+        AssignError(error_msg,
+                    "shared-expert overlap did not join the graph capture");
+        return false;
+      }
     }
     stream_ = side_stream_;
   }
@@ -3378,7 +3398,16 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
               "graph capture", error_msg)) {
         return false;
       }
+      // Overlapped launches verify that their side stream joined this
+      // capture (see Moe). The flag is cleared before EndCapture so an
+      // exception out of `body` cannot leave it set for a later pass.
+      struct CaptureScope {
+        const Executor* executor;
+        ~CaptureScope() { executor->capturing_ = false; }
+      } capture_scope{this};
+      capturing_ = true;
       const bool ok = body();
+      capturing_ = false;
       if (!Check(hipStreamEndCapture(stream_, &captured), "graph capture end",
                  error_msg) ||
           !ok) {
