@@ -155,7 +155,7 @@ def check_diff(read_old, read_new, labels, old_records=None, new_records=None):
                 name, title = legacy
                 normalized = f"{RECORDS}/0.1/{name}.md"
                 description = re.sub(r"^# [0-9]+\.[0-9]+\.[0-9]+\n\n", "", body, count=1)
-                description = description.replace('`api_version: ">= 0.1.0"`',
+                description = description.replace('`api_version: ">= 0.2.0"`',
                     'an `api_version` floor in the active compatibility series')
                 if (not body.startswith(f"# {title}\n\n")
                         and new_records.get(normalized) == f"# {title}\n\n{description}"):

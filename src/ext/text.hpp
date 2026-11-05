@@ -56,7 +56,6 @@ struct TextPreparedPrompt {
 
 struct TextRunnerRamCacheOptions {
   static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
-  static constexpr std::size_t kMaxEntries = 128;
   std::size_t capacity_bytes{0};
   bool enabled{true};
 };
@@ -90,8 +89,6 @@ struct TextExecutionPlan {
 struct TextRunnerCapabilities {
   bool supports_vision{false};
   bool incremental_prefill{false};
-  bool snapshot{false};
-  bool fork{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
@@ -106,16 +103,8 @@ struct TextRunnerCapabilities {
   /// rounded down to it, except the complete prompt, which only an
   /// unchanged retry restores; one keeps every position.
   std::size_t prefill_alignment{1};
-  /// Boundaries one PrefillThrough call may capture in place. A runner that
-  /// overrides only the deprecated single-boundary form keeps one.
+  /// Boundaries one PrefillThrough call may capture in place.
   std::size_t max_in_pass_checkpoints{1};
-};
-
-struct TextRunnerPersistenceDescriptor {
-  std::vector<std::uint8_t> compatibility_identity;
-  std::uint32_t payload_version{0};
-
-  bool operator==(const TextRunnerPersistenceDescriptor&) const = default;
 };
 
 struct TextRunnerDescriptor {
@@ -123,7 +112,6 @@ struct TextRunnerDescriptor {
   std::string state_abi;
   std::uint32_t max_context{0};
   TextRunnerCapabilities capabilities;
-  std::optional<TextRunnerPersistenceDescriptor> persistence;
   sampling::TextModelPreset sampling_preset{
       sampling::TextModelPreset::kUnspecified};
 };
@@ -202,17 +190,6 @@ public:
 private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
-};
-
-class TextRunnerSnapshot : public ContinuationSnapshot {
-public:
-  TextRunnerSnapshot() = default;
-  ~TextRunnerSnapshot() override = default;
-
-  TextRunnerSnapshot(const TextRunnerSnapshot&) = delete;
-  TextRunnerSnapshot& operator=(const TextRunnerSnapshot&) = delete;
-  TextRunnerSnapshot(TextRunnerSnapshot&&) = delete;
-  TextRunnerSnapshot& operator=(TextRunnerSnapshot&&) = delete;
 };
 
 struct TextRunnerAdvance {
@@ -410,15 +387,14 @@ public:
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
 
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
-      const = 0;
-
-  [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
+  /// Continuation contract. The cache owns every execution slot: it creates
+  /// the resources once, binds a state to each slot, and reconciles a state
+  /// after restoring rows into its slot at the given position.
   [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
-  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
+  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const = 0;
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
-      cache::Adapter&, cache::Slot&) const;
-  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
+      cache::Adapter&, cache::Slot&) const = 0;
+  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const = 0;
   [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
     return true;
   }
@@ -456,38 +432,12 @@ public:
   /// with a PrefillCheckpointBytes claim) without ending a pass there. Each
   /// capture must equal the state a pass ending at its boundary leaves. The
   /// runner invokes `consume` with each boundary's index, synchronously while
-  /// that boundary is readable as the lease's component state (it must drain
-  /// its captures before returning), or with the boundary's own snapshot
-  /// (native snapshot runners). Override this form; the default forwards one
-  /// boundary to the deprecated single-boundary form.
-  using InPassConsumer =
-      std::function<void(std::size_t, std::unique_ptr<TextRunnerSnapshot>)>;
-  [[nodiscard]] virtual TextPrefillStep PrefillThrough(
-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget,
-      std::span<const std::size_t> boundaries,
-      const InPassConsumer& consume) const {
-    if (boundaries.size() != 1)
-      throw std::logic_error("runner captures one in-pass checkpoint per call");
-    bool captured = false;
-    std::unique_ptr<TextRunnerSnapshot> native;
-    auto step = PrefillThrough(state, prompt, offset, budget, boundaries[0],
-                               &native, [&] {
-                                 captured = true;
-                                 consume(0, nullptr);
-                                 return std::unique_ptr<TextRunnerSnapshot>{};
-                               });
-    if (!captured)
-      consume(0, std::move(native));
-    return step;
-  }
-  /// Deprecated: captures one boundary, into `checkpoint` or through
-  /// `capture` while the boundary is readable as the lease's component
-  /// state. Override the boundaries form instead.
+  /// that boundary is readable as the lease's component state; it must drain
+  /// its captures before returning.
+  using InPassConsumer = std::function<void(std::size_t)>;
   [[nodiscard]] virtual TextPrefillStep PrefillThrough(
       TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
-      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
+      std::size_t, std::span<const std::size_t>, const InPassConsumer&) const {
     throw std::logic_error("runner does not support in-pass checkpoints");
   }
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
@@ -507,30 +457,6 @@ public:
     return DeviceProbeStatus::kUsable;
   }
   [[nodiscard]] virtual bool DeviceUsable() const { return true; }
-
-  [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
-      const TextRunnerState& state) const;
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
-      const TextRunnerState& state) const;
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot>
-  SnapshotForPersistence(const TextRunnerState& state) const;
-
-  virtual void RestoreOrFork(TextRunnerState& state,
-                             const TextRunnerSnapshot& snapshot) const;
-
-  [[nodiscard]] virtual std::size_t PersistentSnapshotPayloadBytes(
-      const TextRunnerSnapshot& snapshot) const;
-
-  [[nodiscard]] virtual std::size_t SerializePersistentSnapshot(
-      const TextRunnerSnapshot& snapshot,
-      std::span<std::uint8_t> destination) const;
-
-  using SnapshotSink = std::function<void(std::span<const std::uint8_t>)>;
-  virtual void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
-                                        const SnapshotSink& sink) const;
-
-  virtual void RestorePersistentSnapshot(
-      TextRunnerState& state, std::span<const std::uint8_t> payload) const;
 
 private:
   mutable std::mutex constraint_mutex_;

@@ -43,9 +43,33 @@ are rejected for external extensions; keep your own implementation headers
 inside your repository. The include checks enforce the source API boundary.
 Extension code still has arbitrary native-code privileges during build and run.
 
-A text runner that provides continuation implements `cache::Adapter` and links
-`gufo_ext_cache`, the public target for the component cache and its HIP backing.
-It exists only in HIP builds, so list it under a target that requires `hip`.
+Every text runner provides continuation through the component cache. It
+implements `cache::Adapter` and links `gufo_ext_cache`, the public target for the
+component cache and its HIP backing. That target exists only in HIP builds, so
+list it under a target that requires `hip`.
+
+## Provide continuation
+
+The cache owns every execution slot and decides what to retain, evict and write
+to disk. A runner describes its state and moves bytes on request:
+
+- `CreateComponentCacheResources` returns the adapter and its backing. Build the
+  backing with `hip::CreateHipComponentCacheResources`, and charge memory to the
+  ledger it receives.
+- `BindComponentState` wraps one slot in the runner's `TextRunnerState`.
+- `ReconcileComponentState` runs after the cache restores rows into a slot, and
+  brings the runner's own bookkeeping to that position.
+- `cache::Adapter` declares each component as append rows or whole private state
+  and copies it in and out. [adapter.hpp](../src/cache/adapter.hpp) states the
+  ordering and failure rules. Report positions per component, never from prompt
+  length.
+
+`gufo/ext/transfer_pool.hpp` and `gufo/ext/snapshot_copy.hpp` are the supported
+helpers for those copies. Set `prefix_reuse` to false only for a runner which must
+start each request cold. The cache identity must change whenever retained bytes
+stop being valid: include the model artifact, context size and every setting that
+alters state. An adapter test should restore each component and compare the
+result byte for byte with an uninterrupted run.
 
 ## Start with the template
 
@@ -149,14 +173,13 @@ matches must remain errors; do not steal another provider's artifacts with an
 overly broad probe.
 
 For a text model, own tokenization, chat/control framing and tool syntax in the
-extension. Declare supported inputs, state/persistence/resource capabilities and
-sampling defaults accurately. Implement incremental execution, cancellation,
-state isolation, snapshot/restore and batching only under the contracts you
-advertise. To capture prefill checkpoints without ending a pass at them, declare
-`in_pass_checkpoint` and `max_in_pass_checkpoints`, implement
-`PrefillCheckpointBytes` and override the boundaries form of `PrefillThrough`;
-each capture must equal the state a pass ending at its boundary leaves. The
-single-boundary form is deprecated and captures one checkpoint per call.
+extension. Declare supported inputs, state/resource capabilities and sampling
+defaults accurately. Implement incremental execution, cancellation, state
+isolation and batching only under the contracts you advertise. To capture prefill
+checkpoints without ending a pass at them, declare `in_pass_checkpoint` and
+`max_in_pass_checkpoints`, and implement `PrefillCheckpointBytes` and
+`PrefillThrough`; each capture must equal the state a pass ending at its boundary
+leaves.
 Preserve sampler/constraint state and cache compatibility identities
 across rollback and continuation. Draft models/heads and sidecars stay with the
 target model's artifact set. Wire the CLI prompt/chat/benchmark drivers as well

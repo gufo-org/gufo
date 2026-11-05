@@ -11,10 +11,10 @@
 #include <gufo/ext/experimental/hipblaslt_plan_database.hpp>
 #include <gufo/ext/experimental/host_allocations.hpp>
 #include <gufo/ext/experimental/managed_alloc.hpp>
-#include <gufo/ext/experimental/snapshot_copy.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
-#include <gufo/ext/experimental/transfer_pool.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
+#include <gufo/ext/snapshot_copy.hpp>
+#include <gufo/ext/transfer_pool.hpp>
 #endif
 
 // This symbol and registration function must be absent from a CPU executable.

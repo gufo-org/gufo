@@ -220,7 +220,7 @@ struct FakeControl {
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
   std::optional<std::size_t> eos_after;
-  // Retained state needs snapshot capabilities; a capture observer implies it.
+  // Requests share nothing unless asked; a capture observer implies it.
   bool snapshots{false};
   std::function<void()> snapshot_callback;
   [[nodiscard]] bool Retains() const {
@@ -312,8 +312,6 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = control_->incremental_prefill,
-                .snapshot = control_->Retains(),
-                .fork = control_->Retains(),
                 .final_token_advance_required =
                     control_->final_token_advance_required,
                 .incremental_text_is_exact =
@@ -322,9 +320,8 @@ public:
                 .batched_multi_token_decode =
                     control_->batched_multi_token_decode,
                 .batched_multi_token_decode_max_width = 4,
-                .prefix_reuse = control_->prefix_reuse,
+                .prefix_reuse = control_->prefix_reuse && control_->Retains(),
             },
-        .persistence = std::nullopt,
         .sampling_preset = control_->sampling_preset,
     };
   }
@@ -395,11 +392,6 @@ public:
     return text;
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error("slots are owned by the component cache");
-  }
-
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<gufo::server::ComponentCacheResources>
   CreateComponentCacheResources(gufo::cache::ResourceLedger& ledger,
                                 std::size_t) const override {
@@ -820,7 +812,7 @@ void TestParkedFollowerSurvivesLeaderCancellation() {
   }
 }
 
-void TestSharedPrefixWaitRequiresSnapshots() {
+void TestSharedPrefixWaitRequiresPrefixReuse() {
   auto control = SharedPrefixControl(false);
   control->block_prefill_label = 1;
   auto scheduler = MakeScheduler(control, 2);
@@ -833,7 +825,7 @@ void TestSharedPrefixWaitRequiresSnapshots() {
   const auto b = follower.Wait();
   Expect(b.tokens == ExpectedTokens(1, 2) && b.shared_prefix_wait_ms == 0.0 &&
              b.prefill_tokens == prompt.size(),
-         "runners without snapshots never park concurrent requests");
+         "runners without prefix reuse never park concurrent requests");
 }
 
 void TestParkedFollowersReserveVisibleSessions() {
@@ -3238,7 +3230,7 @@ int main() {
   TestConcurrentSharedPrefixesPrefillOnce();
   TestLeaderCancelledBeforeFollowerIsAdmitted();
   TestParkedFollowerSurvivesLeaderCancellation();
-  TestSharedPrefixWaitRequiresSnapshots();
+  TestSharedPrefixWaitRequiresPrefixReuse();
   TestParkedFollowersReserveVisibleSessions();
   TestRetainedHistoryBeatsSharedPrefixWait();
   TestAwaitedCheckpointSurvivesCachePressure();

@@ -76,55 +76,6 @@ std::vector<TextDecodeStep> TextModelRunner::DecodeBatch(
   return steps;
 }
 
-std::unique_ptr<TextRunnerSnapshot> TextModelRunner::Snapshot(
-    const TextRunnerState&) const {
-  throw std::logic_error("runner does not support snapshots");
-}
-
-std::unique_ptr<TextRunnerSnapshot> TextModelRunner::SnapshotForPersistence(
-    const TextRunnerState& state) const {
-  return Snapshot(state);
-}
-
-std::size_t TextModelRunner::SnapshotPayloadBytes(
-    const TextRunnerState&) const {
-  return 0;
-}
-
-void TextModelRunner::RestoreOrFork(TextRunnerState&,
-                                    const TextRunnerSnapshot&) const {
-  throw std::logic_error("runner does not support snapshots");
-}
-
-std::size_t TextModelRunner::PersistentSnapshotPayloadBytes(
-    const TextRunnerSnapshot&) const {
-  return 0;
-}
-
-std::size_t TextModelRunner::SerializePersistentSnapshot(
-    const TextRunnerSnapshot&, std::span<std::uint8_t>) const {
-  return 0;
-}
-
-void TextModelRunner::RestorePersistentSnapshot(
-    TextRunnerState&, std::span<const std::uint8_t>) const {
-  throw std::logic_error("runner does not support persistent snapshots");
-}
-
-std::unique_ptr<ComponentCacheResources>
-TextModelRunner::CreateComponentCacheResources(cache::ResourceLedger&,
-                                               std::size_t) const {
-  return nullptr;
-}
-
-std::unique_ptr<TextRunnerState> TextModelRunner::BindComponentState(
-    cache::Adapter&, cache::Slot&) const {
-  throw std::logic_error("runner does not support component cache");
-}
-
-void TextModelRunner::ReconcileComponentState(TextRunnerState&,
-                                              std::size_t) const {}
-
 std::shared_ptr<const sampling::TokenConstraint>
 TextModelRunner::BindConstraint(
     std::shared_ptr<const sampling::JsonConstraint> grammar) const {
@@ -195,16 +146,6 @@ TextModelRunner::BuildReasoningBudget(
   }
   budget->partial_utf8 = partial_utf8_;
   return budget;
-}
-
-void TextModelRunner::StreamPersistentSnapshot(
-    const TextRunnerSnapshot& snapshot, const SnapshotSink& sink) const {
-  std::vector<std::uint8_t> payload(PersistentSnapshotPayloadBytes(snapshot));
-  if (SerializePersistentSnapshot(snapshot, payload) != payload.size()) {
-    throw std::runtime_error(
-        "persistent snapshot serialized byte count mismatch");
-  }
-  sink(payload);
 }
 
 // ---------------------------------------------------------------------------

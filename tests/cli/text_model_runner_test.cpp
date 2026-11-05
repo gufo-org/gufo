@@ -47,7 +47,6 @@ using gufo::server::TextRunnerDiskCacheOptions;
 using gufo::server::TextRunnerMeasuredResources;
 using gufo::server::TextRunnerPool;
 using gufo::server::TextRunnerResourceClaim;
-using gufo::server::TextRunnerSnapshot;
 using gufo::server::TextRunnerState;
 using gufo::server::TextRunnerToken;
 
@@ -188,7 +187,6 @@ public:
             TextRunnerCapabilities{
                 .incremental_prefill = true,
             },
-        .persistence = std::nullopt,
     };
   }
 
@@ -248,11 +246,6 @@ public:
     return text;
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error("slots are owned by the component cache");
-  }
-
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<gufo::server::ComponentCacheResources>
   CreateComponentCacheResources(gufo::cache::ResourceLedger& ledger,
                                 std::size_t) const override {
@@ -380,17 +373,7 @@ public:
 private:
 };
 
-class SnapshotRunner : public FakeRunner {
-public:
-  using FakeRunner::FakeRunner;
-
-  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
-    auto descriptor = FakeRunner::Descriptor();
-    descriptor.capabilities.snapshot = true;
-    descriptor.capabilities.fork = true;
-    return descriptor;
-  }
-};
+using SnapshotRunner = FakeRunner;
 
 void TestPromptCountingValidatesCapabilitiesBeforeInference() {
   const auto stats = std::make_shared<FakeStats>();
@@ -563,8 +546,6 @@ void TestResourceClaimsAreValidatedBeforeAllocation() {
          "invalid resource claim is rejected before state allocation");
 }
 
-// A runner written against the single-boundary PrefillThrough keeps working
-// through the default boundaries form, one checkpoint per call.
 std::size_t RegularFiles(const std::filesystem::path& directory) {
   std::size_t files = 0;
   for (const auto& entry :

@@ -72,6 +72,8 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 Cards 02–19 change no runtime behavior until card 19 wires them in and deletes
 the legacy cache (D1).
 
+That was the plan; [D1](d1-transition.md) records what happened instead.
+
 ## Dependency graph
 
 ```mermaid

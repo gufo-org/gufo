@@ -4,7 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
-#include <gufo/ext/experimental/snapshot_copy.hpp>
+#include <gufo/ext/snapshot_copy.hpp>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
