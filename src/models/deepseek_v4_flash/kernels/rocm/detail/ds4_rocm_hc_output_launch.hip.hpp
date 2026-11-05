@@ -144,11 +144,14 @@ extern "C" int ds4_gpu_hc_norm_mix_split_weighted_sum_tensor(
             model_map, scale_offset, 3ull * sizeof(float), "hc_scale");
     const float *base = (const float *)hip_model_range_ptr(
             model_map, base_offset, mix_hc * sizeof(float), "hc_base");
-    const __half *mix_w = (const __half *)hip_model_range_ptr(
-            model_map, mix_weight_offset, weight_bytes, "hc_mix_fused");
-    if (!scale || !base || !mix_w) return 0;
+    hip_f16_matrix mix_w;
+    if (!scale || !base ||
+        !hip_f16_matrix_get(model_map, mix_weight_offset, hc_dim, mix_hc,
+                            "hc_mix_fused", &mix_w)) {
+        return 0;
+    }
     /* The weight is read eight halves at a time and the row in float4. */
-    if (((uintptr_t)mix_w & 15u) != 0u ||
+    if (((uintptr_t)mix_w.w & 15u) != 0u ||
         ((uintptr_t)residual_hc->ptr & 15u) != 0u ||
         ((uintptr_t)out->ptr & 15u) != 0u) {
         return 0;
@@ -159,7 +162,8 @@ extern "C" int ds4_gpu_hc_norm_mix_split_weighted_sum_tensor(
             (float *)mix->ptr,
             (float *)split->ptr,
             (const float *)residual_hc->ptr,
-            mix_w,
+            mix_w.w,
+            mix_w.row_stride,
             scale,
             base,
             n_embd,

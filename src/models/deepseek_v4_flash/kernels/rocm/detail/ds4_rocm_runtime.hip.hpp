@@ -83,6 +83,25 @@ static std::vector<hip_model_range> g_model_ranges;
 static std::vector<void*> g_model_allocations;
 static std::unordered_map<uint64_t, size_t> g_model_range_by_offset;
 
+/* On gfx1151 a power-of-two row stride halves F16 GEMV bandwidth. 8 KiB rows
+ * stream at about 103 GB/s, and at about 204 GB/s with 512 B of padding. */
+#define DS4_ROCM_F16_ROW_PAD_HALVES 256u
+
+struct hip_f16_matrix {
+    const __half *w;
+    uint32_t row_stride;
+};
+
+struct hip_f16_padded_range {
+    uint64_t packed_offset;
+    uint64_t packed_bytes;
+    uint64_t in_dim;
+    uint64_t out_dim;
+    __half *device_ptr;
+};
+static std::vector<hip_f16_padded_range> g_f16_padded_ranges;
+static std::unordered_map<uint64_t, size_t> g_f16_padded_by_offset;
+
 /*
  * Optional DSpark support-model mapping.
  *
@@ -308,6 +327,61 @@ static const char *hip_model_range_ptr(const void *model_map, uint64_t offset, u
     }
 
     return hip_model_range_ptr_from_fd(model_map, offset, bytes, what);
+}
+
+static const hip_f16_padded_range *hip_f16_padded_overlap(
+        const void *model_map, uint64_t offset, uint64_t bytes) {
+    if (model_map != g_model_host_base) return NULL;
+    for (const hip_f16_padded_range &r : g_f16_padded_ranges) {
+        if (offset < r.packed_offset + r.packed_bytes &&
+            r.packed_offset < offset + bytes) {
+            return &r;
+        }
+    }
+    return NULL;
+}
+
+static int hip_f16_matrix_get(
+        const void *model_map,
+        uint64_t offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const char *what,
+        hip_f16_matrix *m) {
+    if (model_map == g_model_host_base) {
+        auto padded = g_f16_padded_by_offset.find(offset);
+        if (padded != g_f16_padded_by_offset.end()) {
+            const hip_f16_padded_range &r = g_f16_padded_ranges[padded->second];
+            if (r.in_dim != in_dim || r.out_dim != out_dim) {
+                fprintf(stderr,
+                        DS4_GPU_LOG_PREFIX "%s reads the padded F16 weight at "
+                        "offset %llu as %llux%llu, but it holds %llux%llu\n",
+                        what, (unsigned long long)offset,
+                        (unsigned long long)in_dim, (unsigned long long)out_dim,
+                        (unsigned long long)r.in_dim,
+                        (unsigned long long)r.out_dim);
+                return 0;
+            }
+            *m = {r.device_ptr, (uint32_t)(in_dim + DS4_ROCM_F16_ROW_PAD_HALVES)};
+            return 1;
+        }
+    }
+    uint64_t bytes = 0;
+    if (!hip_u64_mul3_checked(out_dim, in_dim, sizeof(__half), &bytes)) return 0;
+    const char *w = hip_model_range_ptr(model_map, offset, bytes, what);
+    if (!w) return 0;
+    *m = {(const __half *)w, (uint32_t)in_dim};
+    return 1;
+}
+
+static int hip_f16_matrix_pair_stride(const hip_f16_matrix &a,
+                                      const hip_f16_matrix &b,
+                                      const char *what) {
+    if (a.row_stride == b.row_stride) return 1;
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX "%s pairs F16 weights with row strides %u and %u\n",
+            what, a.row_stride, b.row_stride);
+    return 0;
 }
 
 static int hip_model_range_is_cached(const void *model_map, uint64_t offset, uint64_t bytes) {
@@ -613,6 +687,19 @@ static char* hip_model_range_alloc(uint64_t bytes, const char* what) {
   return (char*)dev;
 }
 
+static gufo::hip::WeightUpload *hip_model_uploader(const void *model_map,
+                                                   std::string *error) {
+    if (!g_model_uploader) {
+        const gufo::core::GgufMappedRegion region{
+            .data = model_map,
+            .size = static_cast<size_t>(g_model_registered_size),
+            .file_descriptor = g_model_fd,
+        };
+        g_model_uploader = gufo::hip::WeightUpload::Create({&region, 1}, error);
+    }
+    return g_model_uploader.get();
+}
+
 static const char *hip_model_range_ptr_from_fd(
         const void *model_map,
         uint64_t offset,
@@ -620,20 +707,21 @@ static const char *hip_model_range_ptr_from_fd(
         const char *what, bool wait) {
     if (!gufo::platform::FileValid(g_model_fd) || bytes == 0) return NULL;
     if (g_model_fd_host_base != NULL && model_map != g_model_fd_host_base) return NULL;
+    if (const hip_f16_padded_range *padded =
+            hip_f16_padded_overlap(model_map, offset, bytes)) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "%s reads %llu bytes at offset %llu as packed "
+                "bytes, but the F16 weight at offset %llu has padded rows\n",
+                what ? what : "weights", (unsigned long long)bytes,
+                (unsigned long long)offset, (unsigned long long)padded->packed_offset);
+        return NULL;
+    }
     char* dev = hip_model_range_alloc(bytes, what);
     if (!dev) {
         return NULL;
     }
     std::string error;
-    if (!g_model_uploader) {
-        const gufo::core::GgufMappedRegion region{
-            .data = model_map,
-            .size = static_cast<size_t>(g_model_registered_size),
-            .file_descriptor = g_model_fd,
-        };
-        g_model_uploader = gufo::hip::WeightUpload::Create({&region, 1}, &error);
-    }
-    if (!g_model_uploader ||
+    if (!hip_model_uploader(model_map, &error) ||
         !g_model_uploader->Copy(0, offset, bytes, dev, &error) ||
         (wait && !g_model_uploader->Finish(&error))) {
         fprintf(stderr, DS4_GPU_LOG_PREFIX "model upload failed for %s: %s\n",
@@ -655,6 +743,8 @@ static void hip_model_range_release_all(void) {
   g_model_allocations.clear();
   g_model_ranges.clear();
   g_model_range_by_offset.clear();
+  g_f16_padded_ranges.clear();
+  g_f16_padded_by_offset.clear();
   g_model_range_bytes = 0;
   g_model_weight_alloc.reset();
   hip_model_load_progress_reset();
@@ -939,6 +1029,62 @@ extern "C" int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_s
     if (!hip_model_range_ptr_from_fd(model_map, offset, bytes,
                                      label ? label : "model_tensor", false)) return 0;
     return hip_model_range_is_cached(model_map, offset, bytes);
+}
+
+extern "C" int ds4_gpu_cache_model_f16_rows(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t in_dim, uint64_t out_dim, const char *label) {
+    const char *what = label ? label : "f16_rows";
+    const uint64_t stride = in_dim + DS4_ROCM_F16_ROW_PAD_HALVES;
+    uint64_t bytes = 0, padded_bytes = 0;
+    if (!model_map || model_map != g_model_host_base ||
+        (g_model_fd_host_base != NULL && model_map != g_model_fd_host_base) ||
+        in_dim == 0 || out_dim == 0 || stride > UINT32_MAX ||
+        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(__half), &bytes) ||
+        !hip_u64_mul3_checked(out_dim, stride, sizeof(__half), &padded_bytes) ||
+        offset > model_size || bytes > model_size - offset) {
+        return 0;
+    }
+    auto exact = g_f16_padded_by_offset.find(offset);
+    if (exact != g_f16_padded_by_offset.end()) {
+        const hip_f16_padded_range &r = g_f16_padded_ranges[exact->second];
+        return r.in_dim == in_dim && r.out_dim == out_dim;
+    }
+    if (hip_f16_padded_overlap(model_map, offset, bytes)) return 0;
+    for (const hip_model_range &r : g_model_ranges) {
+        if (r.host_base == model_map && offset < r.offset + r.bytes &&
+            r.offset < offset + bytes) {
+            fprintf(stderr,
+                    DS4_GPU_LOG_PREFIX "%s is already resident with packed rows\n",
+                    what);
+            return 0;
+        }
+    }
+    char *dev = hip_model_range_alloc(padded_bytes, what);
+    if (!dev) return 0;
+    void *packed = NULL;
+    if (!hip_ok(hipMalloc(&packed, (size_t)bytes), "f16 row staging alloc")) {
+        return 0;
+    }
+    std::string error;
+    bool ok = gufo::platform::FileValid(g_model_fd) &&
+              hip_model_uploader(model_map, &error) &&
+              g_model_uploader->Copy(0, offset, bytes, packed, &error);
+    if (g_model_uploader) ok = g_model_uploader->Finish(&error) && ok;
+    if (!ok) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "model upload failed for %s: %s\n",
+                what, error.c_str());
+    }
+    const uint64_t row_bytes = in_dim * sizeof(__half);
+    ok = ok && hip_ok(hipMemcpy2D(dev, (size_t)(stride * sizeof(__half)), packed,
+                                  (size_t)row_bytes, (size_t)row_bytes,
+                                  (size_t)out_dim, hipMemcpyDeviceToDevice),
+                      "f16 row padding copy");
+    ok = hip_ok(hipFree(packed), "f16 row staging free") && ok;
+    if (!ok) return 0;
+    g_f16_padded_ranges.push_back({offset, bytes, in_dim, out_dim, (__half *)dev});
+    g_f16_padded_by_offset[offset] = g_f16_padded_ranges.size() - 1u;
+    g_model_range_bytes += bytes;
+    hip_model_load_progress_note(g_model_range_bytes);
+    return 1;
 }
 
 /*

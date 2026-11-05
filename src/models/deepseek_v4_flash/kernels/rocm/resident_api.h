@@ -34,6 +34,7 @@ int ds4_gpu_attention_prefill_raw_heads_tensor(ds4_gpu_tensor *heads, const void
 int ds4_gpu_attention_prefill_static_mixed_heads_tensor(ds4_gpu_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_gpu_tensor *q, const ds4_gpu_tensor *raw_kv, const ds4_gpu_tensor *comp_kv, uint32_t comp_kv_f16, uint32_t n_tokens, uint32_t n_comp, uint32_t window, uint32_t ratio, uint32_t n_head, uint32_t head_dim);
 int ds4_gpu_begin_commands(void);
 int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, const char *label);
+int ds4_gpu_cache_model_f16_rows(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t in_dim, uint64_t out_dim, const char *label);
 int ds4_gpu_release_model_staging(void);
 /* A Q8_0 weight that the hipBLAS prefill routes read as an F16 copy.
  * `transposed` selects the out_dim-major layout of attention output B. */

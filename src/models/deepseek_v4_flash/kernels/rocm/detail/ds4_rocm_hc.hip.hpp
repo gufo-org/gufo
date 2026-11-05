@@ -460,6 +460,7 @@ __global__ static void hc4_norm_mix_split_weighted_sum_kernel(
         float *split_out,
         const float *residual_hc,
         const __half *mix_w,
+        uint32_t w_stride,
         const float *scale,
         const float *base,
         uint32_t n_embd,
@@ -520,7 +521,7 @@ __global__ static void hc4_norm_mix_split_weighted_sum_kernel(
     /* Apply RMS scaling after projecting the raw F32 row. Reduce one output
      * column before starting the next to limit live registers. */
     for (uint32_t j = 0; j < MIX_HC; j++) {
-        const __half *wrow = mix_w + (uint64_t)j * hc_dim + col0;
+        const __half *wrow = mix_w + (uint64_t)j * w_stride + col0;
         float a = 0.0f;
 #pragma unroll
         for (uint32_t h = 0; h < 4u; h++) {

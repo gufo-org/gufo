@@ -65,6 +65,14 @@ if(ENGINE_ENABLE_HIP)
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
+  add_executable(ds4_f16_rows_test f16_rows_test.cpp)
+  target_link_libraries(ds4_f16_rows_test PRIVATE gufo_deepseek_v4_flash_hip)
+  add_test(NAME ds4.f16_rows COMMAND ds4_f16_rows_test)
+  set_tests_properties(ds4.f16_rows PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_router_test router_test.cpp)
   target_link_libraries(ds4_router_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.router COMMAND ds4_router_test)
