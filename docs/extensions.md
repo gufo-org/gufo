@@ -258,8 +258,9 @@ The contract, ownership and error rules are documented on `ToolDialect` in
 the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,
 `deepseek`) of `ToolFormat()`.
 
-Provider options use canonical names and manifest types. CMake checks conflicting
-declarations. The Nix serving helper derives provider arguments and validation
+Provider options use canonical names and manifest types. Extensions may declare
+the same option when the type agrees, as providers sharing `--mtp-model` do; CMake
+rejects conflicting types. The Nix serving helper derives provider arguments and validation
 from metadata, including optional `serving` declarations. New runtime controls
 also need actual command parsing/execution support; metadata alone cannot
 implement them. See [Nix serving](model-extensions/serving.md).

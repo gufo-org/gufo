@@ -246,12 +246,22 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         path = self.source / "src/models/beta/extension.json"
         original = json.loads(path.read_text())
         self.lock(["alpha", "base"])
-        for field in ("keys", "model_ids", "options"):
+        for field in ("keys", "model_ids"):
             data = copy.deepcopy(original)
-            if field == "options": data["options"][0]["name"] = "--alpha-path"
-            else: data["providers"][0][field] = ["gguf:alpha" if field == "keys" else "alpha-model"]
+            data["providers"][0][field] = ["gguf:alpha" if field == "keys" else "alpha-model"]
             path.write_text(json.dumps(data))
             self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error=f"{field} collision")
+
+    def test_shipped_unshipped_options_share_one_type(self):
+        path = self.source / "src/models/beta/extension.json"
+        data = json.loads(path.read_text())
+        self.lock(["alpha", "base"])
+        data["options"][0]["name"] = "--alpha-path"
+        path.write_text(json.dumps(data))
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON")
+        data["options"][0]["type"] = "string"
+        path.write_text(json.dumps(data))
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="conflicting option types")
 
     def test_disabled_target_dependency(self):
         path = self.source / "src/models/alpha/extension.cmake"
