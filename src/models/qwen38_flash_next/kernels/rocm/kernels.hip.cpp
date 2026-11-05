@@ -660,7 +660,7 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
                                 const float* inject, std::uint32_t inject_parts,
                                 const float* gamma, XnT* xn, void* xn_q8,
                                 std::uint32_t hidden, std::uint32_t streams,
-                                float eps, void* xn_q8_1) {
+                                float eps, void* xn_q8_1, ProjectionArgs proj) {
   __shared__ float shared[32];
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t s = blockIdx.y;
@@ -670,6 +670,12 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
   float* dst = res + base;
   const float* src = block_out + static_cast<std::size_t>(t) * hidden;
   const float* g = gamma + static_cast<std::size_t>(s) * hidden;
+  // The projection is uniform per block: a scalar enable word read at
+  // execution (graph-safe) or this token's row of the batch enables.
+  const bool steer = proj.dir != nullptr &&
+                     (proj.enable_rows != nullptr
+                          ? proj.enable_rows[t] != 0
+                          : (proj.enable != nullptr && *proj.enable != 0));
   // A row of up to kHeld elements per thread stays in registers between the
   // two passes, every read issued up front (a strided loop of loads behind
   // stores to `res` would wait out each one): the inject partials first, as
@@ -694,13 +700,49 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
     const float w =
         2.0f * SigmoidF(inject_sum.Sum() / static_cast<float>(streams));
     float ss = 0.0f;
+    if (steer) {
+      // write -> project -> norm: the updated row loses its direction
+      // component before the square accumulation consumes it. One extra
+      // block-wide dot over the register-resident row, one extra BlockSum.
+      float dv[kHeld];
 #pragma unroll
-    for (std::uint32_t c = 0; c < kHeld; ++c) {
-      const std::uint32_t i = threadIdx.x + c * blockDim.x;
-      if (i < hidden) {
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        const std::uint32_t k = i < hidden ? i : hidden - 1;
+        dv[c] = proj.dir[k];
+      }
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
         r[c] = r[c] + b[c] * w;
-        dst[i] = r[c];
-        ss = Materialize(ss + r[c] * r[c]);
+      }
+      float dot = 0.0f;
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        if (i < hidden) {
+          dot = Materialize(dot + r[c] * dv[c]);
+        }
+      }
+      dot = BlockSum(dot, shared);
+      const float k = dot * proj.scale;
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        if (i < hidden) {
+          r[c] = __fmaf_rn(-k, dv[c], r[c]);
+          dst[i] = r[c];
+          ss = Materialize(ss + r[c] * r[c]);
+        }
+      }
+    } else {
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        if (i < hidden) {
+          r[c] = r[c] + b[c] * w;
+          dst[i] = r[c];
+          ss = Materialize(ss + r[c] * r[c]);
+        }
       }
     }
     if (gamma == nullptr) {
@@ -727,10 +769,29 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
   const float w = 2.0f * SigmoidF(InjectParts(parts, inject_parts).Sum() /
                                   static_cast<float>(streams));
   float ss = 0.0f;
-  for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
-    const float v = dst[i] + src[i] * w;
-    dst[i] = v;
-    ss += v * v;
+  if (steer) {
+    // The strided rows of a geometry beyond kHeld registers: update and
+    // dot, reduce, subtract in place, then square the projected residual.
+    float dot = 0.0f;
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
+      const float v = dst[i] + src[i] * w;
+      dst[i] = v;
+      dot += v * proj.dir[i];
+    }
+    dot = BlockSum(dot, shared);
+    const float k = dot * proj.scale;
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
+      dst[i] = __fmaf_rn(-k, proj.dir[i], dst[i]);
+    }
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
+      ss += dst[i] * dst[i];
+    }
+  } else {
+    for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
+      const float v = dst[i] + src[i] * w;
+      dst[i] = v;
+      ss += v * v;
+    }
   }
   if (gamma == nullptr) {
     return;
@@ -819,7 +880,8 @@ __global__ void HcCombineVec4Kernel(
     float* res, const float* block_out, const float* inject,
     std::uint32_t inject_parts, const float* gamma, XnT* xn, void* xn_q8,
     std::uint32_t hidden, float eps, float* defer_w,
-    const float* inject_w = nullptr, float* inject_out = nullptr) {
+    const float* inject_w = nullptr, float* inject_out = nullptr,
+    ProjectionArgs proj = {}) {
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
   __shared__ float shared[kStreams][kThreads / 32];
@@ -853,28 +915,102 @@ __global__ void HcCombineVec4Kernel(
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
   const float* src = block_out + static_cast<std::size_t>(t) * hidden;
   const std::uint32_t chunks = static_cast<std::uint32_t>(hc_dim / 4);
+  // A deferring combine is always an attention boundary; only the FFN
+  // boundary carries a direction.
+  const bool steer = !kDefer && proj.dir != nullptr &&
+                     (proj.enable_rows != nullptr
+                          ? proj.enable_rows[t] != 0
+                          : (proj.enable != nullptr && *proj.enable != 0));
   float4 v[kMaxChunks];
   float ss[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
+  if (steer) {
+    // write -> project -> norm across the whole four-stream row: pass one
+    // forms the update in registers and reduces each stream's direction
+    // dot; pass two removes the component, stores and squares.
+    float dot[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
 #pragma unroll
-  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
-    const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
-    v[c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
-    if (e < hc_dim) {
-      const std::uint32_t s = e / hidden;
-      const std::uint32_t i = e - (s * hidden);
-      const float ws = w[s];
-      const float4 r = *reinterpret_cast<const float4*>(dst + e);
-      const float4 b = *reinterpret_cast<const float4*>(src + i);
-      v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
-                    r.w + b.w * ws};
-      if constexpr (!kDefer) {
-        *reinterpret_cast<float4*>(dst + e) = v[c];
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
+      v[c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
+      if (e < hc_dim) {
+        const std::uint32_t s = e / hidden;
+        const std::uint32_t i = e - (s * hidden);
+        const float ws = w[s];
+        const float4 r = *reinterpret_cast<const float4*>(dst + e);
+        const float4 b = *reinterpret_cast<const float4*>(src + i);
+        v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
+                      r.w + b.w * ws};
+        const float4 d = *reinterpret_cast<const float4*>(proj.dir + i);
+        const float pd =
+            v[c].x * d.x + v[c].y * d.y + v[c].z * d.z + v[c].w * d.w;
+#pragma unroll
+        for (std::uint32_t k = 0; k < kStreams; ++k) {
+          dot[k] += (k == s) ? pd : 0.0F;
+        }
       }
-      const float sq =
-          v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z + v[c].w * v[c].w;
+    }
+    const std::uint32_t lane = threadIdx.x & 31u;
+    const std::uint32_t wave = threadIdx.x >> 5u;
 #pragma unroll
-      for (std::uint32_t k = 0; k < kStreams; ++k) {
-        ss[k] += (k == s) ? sq : 0.0F;
+    for (std::uint32_t k = 0; k < kStreams; ++k) {
+      dot[k] = WaveSum(dot[k]);
+      if (lane == 0) {
+        shared[k][wave] = dot[k];
+      }
+    }
+    __syncthreads();
+    float coeff[kStreams];
+#pragma unroll
+    for (std::uint32_t k = 0; k < kStreams; ++k) {
+      float total = 0.0F;
+      for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
+        total += shared[k][q];
+      }
+      coeff[k] = total * proj.scale;
+    }
+    __syncthreads();  // shared is reused by the square reduction below
+#pragma unroll
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
+      if (e < hc_dim) {
+        const std::uint32_t s = e / hidden;
+        const std::uint32_t i = e - (s * hidden);
+        const float4 d = *reinterpret_cast<const float4*>(proj.dir + i);
+        v[c] = float4{__fmaf_rn(-coeff[s], d.x, v[c].x),
+                      __fmaf_rn(-coeff[s], d.y, v[c].y),
+                      __fmaf_rn(-coeff[s], d.z, v[c].z),
+                      __fmaf_rn(-coeff[s], d.w, v[c].w)};
+        *reinterpret_cast<float4*>(dst + e) = v[c];
+        const float sq = v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z +
+                         v[c].w * v[c].w;
+#pragma unroll
+        for (std::uint32_t k = 0; k < kStreams; ++k) {
+          ss[k] += (k == s) ? sq : 0.0F;
+        }
+      }
+    }
+  } else {
+#pragma unroll
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t e = (c * kThreads + threadIdx.x) * 4;
+      v[c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
+      if (e < hc_dim) {
+        const std::uint32_t s = e / hidden;
+        const std::uint32_t i = e - (s * hidden);
+        const float ws = w[s];
+        const float4 r = *reinterpret_cast<const float4*>(dst + e);
+        const float4 b = *reinterpret_cast<const float4*>(src + i);
+        v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
+                      r.w + b.w * ws};
+        if constexpr (!kDefer) {
+          *reinterpret_cast<float4*>(dst + e) = v[c];
+        }
+        const float sq = v[c].x * v[c].x + v[c].y * v[c].y + v[c].z * v[c].z +
+                         v[c].w * v[c].w;
+#pragma unroll
+        for (std::uint32_t k = 0; k < kStreams; ++k) {
+          ss[k] += (k == s) ? sq : 0.0F;
+        }
       }
     }
   }
@@ -996,7 +1132,7 @@ __global__ void HcCombineMoeF16Kernel(
     std::uint32_t used, const float* inject, std::uint32_t inject_parts,
     const float* gamma, __half* xn, void* xn_q8, std::uint32_t hidden,
     float eps, const float* prior_out, const float* prior_w,
-    const float* inject_w, float* inject_out) {
+    const float* inject_w, float* inject_out, ProjectionArgs proj) {
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 3;  // 2560 / 4 / kThreads, rounded up
   __shared__ float shared[kStreams][kThreads / 32];
@@ -1018,79 +1154,186 @@ __global__ void HcCombineMoeF16Kernel(
     w[s] = 2.0f * SigmoidF(logit / static_cast<float>(kStreams));
   }
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
+  const bool steer = proj.dir != nullptr &&
+                     (proj.enable_rows != nullptr
+                          ? proj.enable_rows[t] != 0
+                          : (proj.enable != nullptr && *proj.enable != 0));
   // The block output: sum of the weighted expert rows plus the gated shared
   // expert, per hidden chunk.
   const float g = SigmoidF(gate[static_cast<std::size_t>(t) * gate_stride]);
   const __half* rows = expert_out + static_cast<std::size_t>(t) * used * hidden;
   float4 v[kStreams][kMaxChunks];
   float ss[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
+  if (steer) {
+    // write -> project -> norm: the fused expert output and any settled
+    // prior update form the row in registers; each stream's direction dot
+    // reduces before the store, matching the separate-store kernels.
+    float dot[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
 #pragma unroll
-  for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
-    const std::uint32_t i = (c * kThreads + threadIdx.x) * 4;
-    float4 prior{0.0F, 0.0F, 0.0F, 0.0F};
-    if constexpr (kPrior) {
-      if (i < hidden)
-        prior = *reinterpret_cast<const float4*>(
-            prior_out + static_cast<std::size_t>(t) * hidden + i);
-    }
-    float4 b{0.0F, 0.0F, 0.0F, 0.0F};
-    if (i < hidden) {
-      for (std::uint32_t k = 0; k < used; ++k) {
-        const float wk = weights[t * used + k];
-        const float4 e = Load4(rows + static_cast<std::size_t>(k) * hidden + i);
-        b.x += wk * e.x;
-        b.y += wk * e.y;
-        b.z += wk * e.z;
-        b.w += wk * e.w;
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t i = (c * kThreads + threadIdx.x) * 4;
+      float4 prior{0.0F, 0.0F, 0.0F, 0.0F};
+      if constexpr (kPrior) {
+        if (i < hidden)
+          prior = *reinterpret_cast<const float4*>(
+              prior_out + static_cast<std::size_t>(t) * hidden + i);
       }
-      const float4 sh = *reinterpret_cast<const float4*>(
-          shared_out + static_cast<std::size_t>(t) * hidden + i);
-      b.x += g * sh.x;
-      b.y += g * sh.y;
-      b.z += g * sh.z;
-      b.w += g * sh.w;
-    }
-#pragma unroll
-    for (std::uint32_t s = 0; s < kStreams; ++s) {
-      v[s][c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
+      float4 b{0.0F, 0.0F, 0.0F, 0.0F};
       if (i < hidden) {
-        const std::size_t e = (static_cast<std::size_t>(s) * hidden) + i;
-        float4 r = *reinterpret_cast<const float4*>(dst + e);
-        if constexpr (kPrior) {
-          const float pw = prior_w[static_cast<std::size_t>(t) * kStreams + s];
-          r = float4{__fmaf_rn(prior.x, pw, r.x), __fmaf_rn(prior.y, pw, r.y),
-                     __fmaf_rn(prior.z, pw, r.z), __fmaf_rn(prior.w, pw, r.w)};
-          // Retain the previous combine's F32 rounding boundary without
-          // storing and reloading the intermediate residual.
-          asm volatile("" : "+v"(r.x), "+v"(r.y), "+v"(r.z), "+v"(r.w));
+        for (std::uint32_t k = 0; k < used; ++k) {
+          const float wk = weights[t * used + k];
+          const float4 e =
+              Load4(rows + static_cast<std::size_t>(k) * hidden + i);
+          b.x += wk * e.x;
+          b.y += wk * e.y;
+          b.z += wk * e.z;
+          b.w += wk * e.w;
         }
-        v[s][c] = float4{r.x + b.x * w[s], r.y + b.y * w[s], r.z + b.z * w[s],
-                         r.w + b.w * w[s]};
-        *reinterpret_cast<float4*>(dst + e) = v[s][c];
-        {
-          // One square-accumulation order for every instantiation. The
-          // deferred path must stay bit-identical to the separate-store
-          // path, and fast-math reorders a plain `ss += x*x + ...`
-          // differently per template instantiation (gfx1151 stream 3), so
-          // the two would start from sums differing in the last F32 bits
-          // and disagree in the Q8 block scales. The pinned order is the
-          // compiled order of the separate-store build this defers.
+        const float4 sh = *reinterpret_cast<const float4*>(
+            shared_out + static_cast<std::size_t>(t) * hidden + i);
+        b.x += g * sh.x;
+        b.y += g * sh.y;
+        b.z += g * sh.z;
+        b.w += g * sh.w;
+      }
+      const std::uint32_t ic = i < hidden ? i : hidden - 1;
+      const float4 d = *reinterpret_cast<const float4*>(proj.dir + ic);
+#pragma unroll
+      for (std::uint32_t s = 0; s < kStreams; ++s) {
+        v[s][c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
+        if (i < hidden) {
+          const std::size_t e = (static_cast<std::size_t>(s) * hidden) + i;
+          float4 r = *reinterpret_cast<const float4*>(dst + e);
+          if constexpr (kPrior) {
+            const float pw =
+                prior_w[static_cast<std::size_t>(t) * kStreams + s];
+            r = float4{__fmaf_rn(prior.x, pw, r.x), __fmaf_rn(prior.y, pw, r.y),
+                       __fmaf_rn(prior.z, pw, r.z),
+                       __fmaf_rn(prior.w, pw, r.w)};
+            asm volatile("" : "+v"(r.x), "+v"(r.y), "+v"(r.z), "+v"(r.w));
+          }
+          v[s][c] = float4{r.x + b.x * w[s], r.y + b.y * w[s], r.z + b.z * w[s],
+                           r.w + b.w * w[s]};
+          const float pd = v[s][c].x * d.x + v[s][c].y * d.y + v[s][c].z * d.z +
+                           v[s][c].w * d.w;
+          dot[s] += pd;
+        }
+      }
+    }
+    const std::uint32_t lane = threadIdx.x & 31u;
+    const std::uint32_t wave = threadIdx.x >> 5u;
+#pragma unroll
+    for (std::uint32_t k = 0; k < kStreams; ++k) {
+      dot[k] = WaveSum(dot[k]);
+      if (lane == 0) {
+        shared[k][wave] = dot[k];
+      }
+    }
+    __syncthreads();
+    float coeff[kStreams];
+#pragma unroll
+    for (std::uint32_t k = 0; k < kStreams; ++k) {
+      float total = 0.0F;
+      for (std::uint32_t q = 0; q < kThreads / 32; ++q) {
+        total += shared[k][q];
+      }
+      coeff[k] = total * proj.scale;
+    }
+    __syncthreads();  // shared is reused by the norm reduction below
+#pragma unroll
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t i = (c * kThreads + threadIdx.x) * 4;
+      const std::uint32_t ic = i < hidden ? i : hidden - 1;
+      const float4 d = *reinterpret_cast<const float4*>(proj.dir + ic);
+#pragma unroll
+      for (std::uint32_t s = 0; s < kStreams; ++s) {
+        if (i < hidden) {
+          const std::size_t e = (static_cast<std::size_t>(s) * hidden) + i;
+          v[s][c] = float4{__fmaf_rn(-coeff[s], d.x, v[s][c].x),
+                           __fmaf_rn(-coeff[s], d.y, v[s][c].y),
+                           __fmaf_rn(-coeff[s], d.z, v[s][c].z),
+                           __fmaf_rn(-coeff[s], d.w, v[s][c].w)};
+          *reinterpret_cast<float4*>(dst + e) = v[s][c];
           const float4 n = v[s][c];
-          if (s == 3) {
-            ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
-            ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
-            ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
-            ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
-          } else {
-            if (s == 0 && c == 0) {
-              ss[s] = __fmul_rn(n.y, n.y);
+          ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
+          ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
+          ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
+          ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
+        }
+      }
+    }
+  } else {
+#pragma unroll
+    for (std::uint32_t c = 0; c < kMaxChunks; ++c) {
+      const std::uint32_t i = (c * kThreads + threadIdx.x) * 4;
+      float4 prior{0.0F, 0.0F, 0.0F, 0.0F};
+      if constexpr (kPrior) {
+        if (i < hidden)
+          prior = *reinterpret_cast<const float4*>(
+              prior_out + static_cast<std::size_t>(t) * hidden + i);
+      }
+      float4 b{0.0F, 0.0F, 0.0F, 0.0F};
+      if (i < hidden) {
+        for (std::uint32_t k = 0; k < used; ++k) {
+          const float wk = weights[t * used + k];
+          const float4 e =
+              Load4(rows + static_cast<std::size_t>(k) * hidden + i);
+          b.x += wk * e.x;
+          b.y += wk * e.y;
+          b.z += wk * e.z;
+          b.w += wk * e.w;
+        }
+        const float4 sh = *reinterpret_cast<const float4*>(
+            shared_out + static_cast<std::size_t>(t) * hidden + i);
+        b.x += g * sh.x;
+        b.y += g * sh.y;
+        b.z += g * sh.z;
+        b.w += g * sh.w;
+      }
+#pragma unroll
+      for (std::uint32_t s = 0; s < kStreams; ++s) {
+        v[s][c] = float4{0.0F, 0.0F, 0.0F, 0.0F};
+        if (i < hidden) {
+          const std::size_t e = (static_cast<std::size_t>(s) * hidden) + i;
+          float4 r = *reinterpret_cast<const float4*>(dst + e);
+          if constexpr (kPrior) {
+            const float pw =
+                prior_w[static_cast<std::size_t>(t) * kStreams + s];
+            r = float4{__fmaf_rn(prior.x, pw, r.x), __fmaf_rn(prior.y, pw, r.y),
+                       __fmaf_rn(prior.z, pw, r.z),
+                       __fmaf_rn(prior.w, pw, r.w)};
+            // Retain the previous combine's F32 rounding boundary without
+            // storing and reloading the intermediate residual.
+            asm volatile("" : "+v"(r.x), "+v"(r.y), "+v"(r.z), "+v"(r.w));
+          }
+          v[s][c] = float4{r.x + b.x * w[s], r.y + b.y * w[s], r.z + b.z * w[s],
+                           r.w + b.w * w[s]};
+          *reinterpret_cast<float4*>(dst + e) = v[s][c];
+          {
+            // One square-accumulation order for every instantiation. The
+            // deferred path must stay bit-identical to the separate-store
+            // path, and fast-math reorders a plain `ss += x*x + ...`
+            // differently per template instantiation (gfx1151 stream 3), so
+            // the two would start from sums differing in the last F32 bits
+            // and disagree in the Q8 block scales. The pinned order is the
+            // compiled order of the separate-store build this defers.
+            const float4 n = v[s][c];
+            if (s == 3) {
+              ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
+              ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
+              ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
               ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
             } else {
-              ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
-              ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
+              if (s == 0 && c == 0) {
+                ss[s] = __fmul_rn(n.y, n.y);
+                ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
+              } else {
+                ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
+                ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
+              }
+              ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
+              ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
             }
-            ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
-            ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
           }
         }
       }
@@ -6665,6 +6908,11 @@ __launch_bounds__(kThreads) __global__
     const std::uint32_t streams = a.streams;
     const std::uint32_t t = u / kFusedStreams;
     const std::uint32_t s = u % kFusedStreams;
+    const bool steer =
+        a.proj.dir != nullptr &&
+        (a.proj.enable_rows != nullptr
+             ? a.proj.enable_rows[t] != 0
+             : (a.proj.enable != nullptr && *a.proj.enable != 0));
     const float* parts =
         a.inject + (static_cast<std::size_t>(t) * streams + s) * a.inject_parts;
     const std::size_t base =
@@ -6688,13 +6936,47 @@ __launch_bounds__(kThreads) __global__
     const float w =
         2.0f * SigmoidF(inject_sum.Sum() / static_cast<float>(streams));
     float ss = 0.0f;
+    if (steer) {
+      // write -> project -> norm, as HcCombineKernel's steered path.
+      float dv[kHeld];
 #pragma unroll
-    for (std::uint32_t c = 0; c < kHeld; ++c) {
-      const std::uint32_t i = threadIdx.x + c * blockDim.x;
-      if (i < hidden) {
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        const std::uint32_t k = i < hidden ? i : hidden - 1;
+        dv[c] = a.proj.dir[k];
+      }
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
         r[c] = r[c] + b[c] * w;
-        dst[i] = r[c];
-        ss = Materialize(ss + r[c] * r[c]);
+      }
+      float dot = 0.0f;
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        if (i < hidden) {
+          dot = Materialize(dot + r[c] * dv[c]);
+        }
+      }
+      dot = BlockSum(dot, shared);
+      const float k = dot * a.proj.scale;
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        if (i < hidden) {
+          r[c] = __fmaf_rn(-k, dv[c], r[c]);
+          dst[i] = r[c];
+          ss = Materialize(ss + r[c] * r[c]);
+        }
+      }
+    } else {
+#pragma unroll
+      for (std::uint32_t c = 0; c < kHeld; ++c) {
+        const std::uint32_t i = threadIdx.x + c * blockDim.x;
+        if (i < hidden) {
+          r[c] = r[c] + b[c] * w;
+          dst[i] = r[c];
+          ss = Materialize(ss + r[c] * r[c]);
+        }
       }
     }
     ss = BlockSum(ss, shared);
@@ -7073,33 +7355,35 @@ void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
-               bool decode) {
+               bool decode, const ProjectionArgs& proj) {
   // One block per token wants a batch: a decode step keeps the
   // one-block-per-stream kernel's parallelism.
   if (!decode && n_tokens >= 16 && streams == 4 && hidden % 128 == 0 &&
       hidden <= 2560) {
     hipLaunchKernelGGL(HcCombineVec4Kernel<float>, dim3(n_tokens),
                        dim3(kThreads), 0, stream, res, block_out, inject,
-                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr);
+                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr,
+                       nullptr, nullptr, proj);
     return;
   }
   hipLaunchKernelGGL(HcCombineKernel<float>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, nullptr, hidden, streams, eps,
-                     nullptr);
+                     nullptr, proj);
 }
 
 bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
                    std::uint32_t inject_parts, const float* gamma, float* xn,
                    void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
-                   std::uint32_t streams, float eps, hipStream_t stream) {
+                   std::uint32_t streams, float eps, hipStream_t stream,
+                   const ProjectionArgs& proj) {
   if (gamma == nullptr || hidden % 32 != 0) {
     return false;
   }
   hipLaunchKernelGGL(HcCombineKernel<float>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, nullptr, hidden, streams, eps,
-                     xn_q8);
+                     xn_q8, proj);
   return true;
 }
 
@@ -7143,7 +7427,8 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      std::uint32_t n_tokens, std::uint32_t hidden,
                      std::uint32_t streams, float eps, hipStream_t stream,
                      const float* prior_out, const float* prior_w,
-                     float* inject_out, const float* inject_w) {
+                     float* inject_out, const float* inject_w,
+                     const ProjectionArgs& proj) {
   if (streams != 4 || hidden % 128 != 0 || hidden > 3 * 4 * kThreads ||
       (gamma != nullptr && xn_q8 == nullptr) ||
       (inject_w != nullptr && (gamma == nullptr || prior_out == nullptr))) {
@@ -7158,7 +7443,7 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
   hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                      expert_out, weights, shared_out, gate, gate_stride, used,
                      inject, inject_parts, gamma, xn, xn_q8, hidden, eps,
-                     prior_out, prior_w, inject_w, inject_out);
+                     prior_out, prior_w, inject_w, inject_out, proj);
   return true;
 }
 
@@ -7194,7 +7479,8 @@ bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                   std::uint32_t streams, float eps, hipStream_t stream,
-                  float* defer_w, float* inject_out, const float* inject_w) {
+                  float* defer_w, float* inject_out, const float* inject_w,
+                  const ProjectionArgs& proj) {
   // F16 prefill keeps the same reduction even for a one-token tail.
   if (streams == 4 && hidden % 128 == 0 && hidden <= 2560) {
     if (inject_w != nullptr && defer_w != nullptr && gamma != nullptr) {
@@ -7203,20 +7489,20 @@ bool HcCombineF16(float* res, const float* block_out, const float* inject,
       hipLaunchKernelGGL((HcCombineVec4Kernel<__half, true, true>),
                          dim3(n_tokens), dim3(kThreads), 0, stream, res,
                          block_out, inject, inject_parts, gamma, xn, xn_q8,
-                         hidden, eps, defer_w, inject_w, inject_out);
+                         hidden, eps, defer_w, inject_w, inject_out, proj);
       return true;
     }
     const auto combine = defer_w != nullptr ? HcCombineVec4Kernel<__half, true>
                                             : HcCombineVec4Kernel<__half>;
     hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                        block_out, inject, inject_parts, gamma, xn, xn_q8,
-                       hidden, eps, defer_w, nullptr, nullptr);
+                       hidden, eps, defer_w, nullptr, nullptr, proj);
     return defer_w != nullptr;
   }
   hipLaunchKernelGGL(HcCombineKernel<__half>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, xn_q8, hidden, streams, eps,
-                     nullptr);
+                     nullptr, proj);
   return false;
 }
 

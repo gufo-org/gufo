@@ -27,6 +27,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/projection.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 
@@ -117,6 +118,15 @@ public:
   void SetCancellationCheck(std::function<bool()> check);
   [[nodiscard]] bool CheckCancellation(std::string* error) const;
   [[nodiscard]] bool Cancelled() const noexcept { return cancelled_; }
+  /// Host mirror of Control::projection; the per-forward control upload
+  /// copies it into the device word the captured decode graphs reread at
+  /// execution, so a toggle needs no re-capture.
+  void SetProjectionEnabled(bool enabled) noexcept {
+    projection_enabled_ = enabled;
+  }
+  [[nodiscard]] bool ProjectionEnabled() const noexcept {
+    return projection_enabled_;
+  }
   [[nodiscard]] std::uint64_t MutationEpoch() const noexcept {
     return mutation_epoch_;
   }
@@ -166,6 +176,7 @@ private:
     std::uint32_t mtp_position;  ///< first position of the draft batch
     std::int32_t hidden_row;     ///< kept trunk row the draft reads, or -1
     std::uint32_t mtp_blocks;    ///< complete predictor indexer blocks
+    std::uint32_t projection;    ///< 1 steers this forward's FFN/MoE combines
   };
   struct MtpState {
     __half* k_cache{nullptr};
@@ -190,6 +201,9 @@ private:
   qwen::vision::DeviceInput vision_input_;
   std::uint32_t max_context_{0};
   bool mtp_enabled_{false};
+  /// Host mirror of Control::projection for this session's requests; the
+  /// upload at each forward copies it into the captured-graph control word.
+  bool projection_enabled_{false};
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
   /// Dynamic YaRN: the factor this session's cached keys are rotated with,
@@ -273,6 +287,9 @@ public:
     /// Largest session context. Zero selects the native context; values
     /// above it require YaRN (Config::MaxContextLength()).
     std::uint32_t max_context{0};
+    /// Optional runtime projection (see projection.hpp). Null leaves every
+    /// combine on the stock code path.
+    const ProjectionVector* projection{nullptr};
   };
 
   ~Executor();
@@ -572,7 +589,8 @@ private:
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                   float* mixed, float* inject, std::uint32_t rows,
                   std::string* error) const;
-  void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
+  void CombineBatch(float* res, const float* gamma, std::uint32_t rows,
+                    const ProjectionArgs& proj = {}) const;
   /// Residual update by the block output plus the grouped norm for the next
   /// mixer (`gamma`); wide batches write it as F16 and tiled Q8. With that
   /// mixer's F32 `inject_w`, the fused MoE combine also leaves its inject
@@ -581,7 +599,16 @@ private:
   /// between, is left to that mixer's single launch (FusedMixer).
   void Combine(float* res, const float* gamma, std::uint32_t n_tokens,
                const float* inject_w = nullptr,
-               const DeviceMixer* next = nullptr) const;
+               const DeviceMixer* next = nullptr,
+               const ProjectionArgs& proj = {}) const;
+  /// The projection operands for layer `il`'s FFN/MoE combine in `session`:
+  /// a null dir when no vector is loaded, the layer sits outside the steered
+  /// range, or its scale is zero. `enable` is the session's control word, so
+  /// captured decode graphs reread the toggle at execution.
+  ProjectionArgs ProjectionFor(std::uint32_t il, const Session& session) const;
+  /// The batch-decode counterpart of ProjectionFor: the enable is the
+  /// per-row array ForwardBatchImpl fills from each item's session.
+  ProjectionArgs ProjectionRowsFor(std::uint32_t il) const;
   /// Whether HcMix runs a decode batch of `m` as one HcMixQ8Fused launch.
   bool FusedMixer(const DeviceMixer& m, std::uint32_t n_tokens) const;
   /// Hashes the batch's n-gram rows and starts reading them from disk, so
@@ -894,6 +921,18 @@ private:
   MtpCandidateLogits* mtp_candidates_host_{nullptr};
   /// The model geometry allows the wide mixer route (see Combine).
   bool wide_mixer_{false};
+  /// Optional residual-stream projection: device unit directions
+  /// [layers][hidden] with per-layer scales, applied by the steered
+  /// FFN/MoE combines. Null directions disable every projection branch.
+  float* projection_dirs_{nullptr};
+  std::vector<float> projection_scales_;
+  std::uint32_t projection_first_{0};
+  std::uint32_t projection_last_{0};
+  /// Mapped pinned per-row enables ([max_batch]) for multi-session batch
+  /// combines: `projection_rows_host_` is written per forward, and the
+  /// kernels read the device alias `projection_rows_`.
+  std::uint32_t* projection_rows_host_{nullptr};
+  std::uint32_t* projection_rows_{nullptr};
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
   /// Set before an attention-side combine whose FFN combine fuses the MoE
@@ -943,6 +982,7 @@ private:
     float* xn{nullptr};
     void* xn_q8{nullptr};
     std::uint32_t n{0};
+    ProjectionArgs proj;
   };
   mutable PendingCombine pending_combine_;
   void* hc_fused_state_{nullptr};  ///< HcMixQ8Fused's counters (zeroed)

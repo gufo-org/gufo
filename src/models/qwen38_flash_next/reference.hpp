@@ -9,6 +9,7 @@
 
 #include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/projection.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -51,6 +52,16 @@ public:
   [[nodiscard]] std::uint32_t Position() const noexcept { return position_; }
   void Reset();
 
+  /// Arms the runtime projection for parity against the GPU feature (see
+  /// projection.hpp): layers inside the vector's steered range project the
+  /// FFN/MoE combine's residual; a disabled projection keeps the plain
+  /// combine exactly.
+  void SetProjection(const ProjectionVector& v) { projection_ = v; }
+  void SetProjectionEnabled(bool enabled) { projection_enabled_ = enabled; }
+  [[nodiscard]] bool ProjectionLoaded() const noexcept {
+    return !projection_.scales.empty();
+  }
+
 private:
   void MatVec(const TensorRef& weight, std::uint64_t expert,
               std::span<const float> x, std::span<float> out,
@@ -69,8 +80,12 @@ private:
 
   void HcMix(const HcMixer& m, std::span<const float> res,
              std::span<float> mixed, std::span<float> inject);
+  /// The residual update; a non-null `proj_dir` removes the direction's
+  /// component from each stream after the write (`h <- h - scale *
+  /// (h . v) * v`), mirroring the GPU combine kernels.
   void HcCombine(std::span<float> res, std::span<const float> block_out,
-                 std::span<const float> inject);
+                 std::span<const float> inject, const float* proj_dir = nullptr,
+                 float proj_scale = 0.0F);
   bool Ple(const LayerWeights& l, std::int32_t token, std::span<float> res,
            std::string* error_msg);
   void LinearAttention(const LayerWeights& l, LinearState& s,
@@ -96,6 +111,8 @@ private:
   std::uint32_t mtp_position_{0};
   NgramHistory ngram_history_;
   std::vector<float> ple_conv_history_;  ///< [PleConvHistory()][hc_dim]
+  ProjectionVector projection_;
+  bool projection_enabled_{false};
 };
 
 }  // namespace gufo::models::qwen38_flash_next

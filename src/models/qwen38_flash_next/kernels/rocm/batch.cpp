@@ -167,12 +167,12 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
   return true;
 }
 
-void Executor::CombineBatch(float* res, const float* gamma,
-                            std::uint32_t rows) const {
+void Executor::CombineBatch(float* res, const float* gamma, std::uint32_t rows,
+                            const ProjectionArgs& proj) const {
   const auto& c = config();
   DropReadyQ8();
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, rows,
-            c.hidden_size, c.hc_count, c.rms_eps, stream_, true);
+            c.hidden_size, c.hc_count, c.rms_eps, stream_, true, proj);
 }
 
 bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
@@ -1054,6 +1054,16 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
           c.hc_count, stream_);
     }
     const auto& layers = model_->layers();
+    // The mapped per-row enables: the steered FFN combines of this batch read
+    // each row's session toggle at execution, so mixed batches steer exactly
+    // their enabled sessions.
+    if (projection_rows_host_ != nullptr) {
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto flag = items[i].session->projection_enabled_ ? 1u : 0u;
+        std::fill_n(projection_rows_host_ + offsets[i], items[i].tokens.size(),
+                    flag);
+      }
+    }
     bool normed = false;
     for (std::uint32_t il = 0; il < c.num_layers; ++il) {
       if (!AnyActive(items))
@@ -1248,7 +1258,7 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
                                       : layers[il + 1].hc_attn.norm.f32())
               : model_->hc_head().norm.f32();
       UseScratch(base);
-      CombineBatch(base.res, next_norm, rows);
+      CombineBatch(base.res, next_norm, rows, ProjectionRowsFor(il));
       normed = next_norm != nullptr;
     }
     for (std::size_t i = 0; i < items.size(); ++i) {

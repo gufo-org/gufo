@@ -1257,6 +1257,40 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->wide_mixer_ = c.hc_count == 4 && c.hidden_size % 32 == 0 &&
                    !model.layers().empty() &&
                    model.layers()[0].hc_ffn.down.type == GgmlType::kQ8_0;
+  // The optional residual projection: one [layers][hidden] direction table
+  // plus the mapped per-row enables for multi-session batch combines. The
+  // buffers' addresses stay fixed for captured graphs; only the enables
+  // change, per forward.
+  if (options.projection != nullptr && !options.projection->Empty()) {
+    const ProjectionVector& v = *options.projection;
+    void* dirs = nullptr;
+    const std::size_t bytes = v.directions.size() * sizeof(float);
+    if (!Check(hipMalloc(&dirs, bytes), "projection directions", error_msg)) {
+      return nullptr;
+    }
+    e->allocations_.push_back(dirs);
+    if (!Check(hipMemcpyAsync(dirs, v.directions.data(), bytes,
+                              hipMemcpyHostToDevice, e->stream_),
+               "projection upload", error_msg)) {
+      return nullptr;
+    }
+    e->projection_dirs_ = static_cast<float*>(dirs);
+    e->projection_scales_ = v.scales;
+    e->projection_first_ = v.first_layer;
+    e->projection_last_ = v.last_layer;
+    void* rows = nullptr;
+    if (!Check(e->host_allocations_.Allocate(
+                   &rows, e->options_.max_batch * sizeof(std::uint32_t),
+                   hipHostMallocMapped | hipHostMallocCoherent),
+               "pinned projection rows", error_msg) ||
+        !Check(hipHostGetDevicePointer(
+                   reinterpret_cast<void**>(&e->projection_rows_), rows, 0),
+               "mapped projection rows", error_msg)) {
+      return nullptr;
+    }
+    e->projection_rows_host_ = static_cast<std::uint32_t*>(rows);
+    std::fill_n(e->projection_rows_host_, e->options_.max_batch, 0u);
+  }
   if (model.has_mtp()) {
     // The trunk's kept rows are session-owned. Its transient residual and
     // mixer buffers are free while MTP constructs its input. The split
@@ -2220,8 +2254,36 @@ bool Executor::FusedMixer(const DeviceMixer& m, std::uint32_t n_tokens) const {
          m.up.cols == c.hc_low_rank;
 }
 
+ProjectionArgs Executor::ProjectionFor(std::uint32_t il,
+                                       const Session& session) const {
+  if (projection_dirs_ == nullptr || il < projection_first_ ||
+      il > projection_last_ || projection_scales_[il] == 0.0F) {
+    return {};
+  }
+  ProjectionArgs p;
+  p.dir =
+      projection_dirs_ + static_cast<std::size_t>(il) * config().hidden_size;
+  p.enable = &session.control_->projection;
+  p.scale = projection_scales_[il];
+  return p;
+}
+
+ProjectionArgs Executor::ProjectionRowsFor(std::uint32_t il) const {
+  if (projection_dirs_ == nullptr || il < projection_first_ ||
+      il > projection_last_ || projection_scales_[il] == 0.0F) {
+    return {};
+  }
+  ProjectionArgs p;
+  p.dir =
+      projection_dirs_ + static_cast<std::size_t>(il) * config().hidden_size;
+  p.enable_rows = projection_rows_;
+  p.scale = projection_scales_[il];
+  return p;
+}
+
 void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
-                       const float* inject_w, const DeviceMixer* next) const {
+                       const float* inject_w, const DeviceMixer* next,
+                       const ProjectionArgs& proj) const {
   const Config& c = config();
   inject_fused_ = nullptr;
   // Wide batches hand the next mixer an F16 norm for its epilogue and the
@@ -2248,7 +2310,7 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
             c.num_experts + 1, c.num_experts_used, s_.inject, inject_parts_,
             gamma, s_.xn_half, s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count,
             c.rms_eps, stream_, deferred ? s_.block_out : nullptr,
-            deferred ? s_.hc_defer_w : nullptr, s_.inject, fused_w)) {
+            deferred ? s_.hc_defer_w : nullptr, s_.inject, fused_w, proj)) {
       inject_fused_ = fused_w;
       return;
     }
@@ -2276,7 +2338,7 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
         HcCombineF16(res, s_.block_out, s_.inject, inject_parts_, gamma,
                      s_.xn_half, s_.xn_q8t, n_tokens, c.hidden_size, c.hc_count,
                      c.rms_eps, stream_, defer_now ? s_.hc_defer_w : nullptr,
-                     s_.inject, defer_now ? fused_inject : nullptr);
+                     s_.inject, defer_now ? fused_inject : nullptr, proj);
     if (res_deferred_)
       inject_fused_ = fused_inject;
     return;
@@ -2284,21 +2346,21 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
   // A decode batch's next mixer quantizes xn for its down projection: the
   // combine writes those rows as well, or joins that mixer's single launch.
   if (next != nullptr && gamma != nullptr && FusedMixer(*next, n_tokens)) {
-    pending_combine_ = {next,         res,        gamma,
-                        s_.block_out, s_.inject,  inject_parts_,
-                        s_.xn,        s_.xn_q8_1, n_tokens};
+    pending_combine_ = {next,      res,           gamma, s_.block_out,
+                        s_.inject, inject_parts_, s_.xn, s_.xn_q8_1,
+                        n_tokens,  proj};
     xn_q8_ready_ = {s_.xn, s_.xn_q8_1, n_tokens, c.HcDim()};
     return;
   }
   if (!MatrixRows(n_tokens) && UnpaddedQ8(c.HcDim()) &&
       HcCombineQ8_1(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn,
                     s_.xn_q8_1, n_tokens, c.hidden_size, c.hc_count, c.rms_eps,
-                    stream_)) {
+                    stream_, proj)) {
     xn_q8_ready_ = {s_.xn, s_.xn_q8_1, n_tokens, c.HcDim()};
     return;
   }
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, n_tokens,
-            c.hidden_size, c.hc_count, c.rms_eps, stream_);
+            c.hidden_size, c.hc_count, c.rms_eps, stream_, false, proj);
 }
 
 bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
@@ -2338,7 +2400,8 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
           c.hc_count,
           c.hc_low_rank,
           c.rms_eps,
-          1.0F / static_cast<float>(c.hc_count)};
+          1.0F / static_cast<float>(c.hc_count),
+          p.proj};
       if (!HcMixQ8Fused(hc_fused_state_, mix, n_tokens, stream_)) {
         AssignError(error_msg, "fused HC mixer failed");
         return false;
@@ -2353,7 +2416,8 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
     }
     // Another mixer follows after all: run the combine Combine left.
     HcCombineQ8_1(p.res, p.block_out, p.inject, p.inject_parts, p.gamma, p.xn,
-                  p.xn_q8, p.n, c.hidden_size, c.hc_count, c.rms_eps, stream_);
+                  p.xn_q8, p.n, c.hidden_size, c.hc_count, c.rms_eps, stream_,
+                  p.proj);
   }
   // Without `normed` this mixer's grouped norm of res is computed here (F32);
   // otherwise the previous combine produced it, as F16 plus tiled Q8 on the
@@ -3522,6 +3586,8 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   control_host_->mtp_position = session.mtp_.position;
   control_host_->mtp_blocks = session.mtp_.blocks;
   control_host_->hidden_row = -1;
+  control_host_->projection =
+      projection_dirs_ != nullptr && session.projection_enabled_ ? 1u : 0u;
   // Sparse selection only changes the result once a query can see more
   // than the token budget; every layer of this model shares one ratio.
   const bool sparse = c.compress_ratio > 0 && start_pos + n > c.indexer_top_k;
@@ -3697,7 +3763,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
       // The next layer's mixer follows in this pass (without a PLE step:
       // next_norm is null before a PLE layer).
       Combine(s_.res, next_norm, rows, next_inject,
-              il + 1 < end_layer ? &layers[il + 1].hc_attn : nullptr);
+              il + 1 < end_layer ? &layers[il + 1].hc_attn : nullptr,
+              ProjectionFor(il, session));
       return true;
     };
     if (skipped != 0) {
@@ -4876,6 +4943,7 @@ bool Executor::MtpForward(Session& session,
   control_host_->mtp_position = pos;
   control_host_->hidden_row = hidden_row;
   control_host_->mtp_blocks = session.mtp_.blocks;
+  control_host_->projection = 0;  // the draft block is never steered
   const auto& c = config();
   const bool sparse = pos + n > c.indexer_top_k;
   const auto complete = (pos + n) / c.compress_ratio;
