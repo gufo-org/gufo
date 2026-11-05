@@ -19,6 +19,11 @@ struct LayeredPrefillCase {
   std::vector<ext::TextRunnerToken> prompt;
   /// The other session, decoding between the prompt's layer groups.
   std::vector<ext::TextRunnerToken> decoder_prompt;
+  /// Further sessions decoding beside the first. With any, every decode step
+  /// batches all unfinished decoders, alone and inside the yields, as the
+  /// host does for a profile whose rounds are wider than one session; their
+  /// lone reference is the same batches without the prompt.
+  std::vector<std::vector<ext::TextRunnerToken>> more_decoder_prompts;
   std::size_t prompt_output_tokens{4};
   std::size_t decoder_output_tokens{16};
   /// Top log-probabilities compared at every output position.
@@ -31,8 +36,8 @@ struct LayeredPrefillCase {
 };
 
 /// Runs `runner` through three fresh state pools, greedily: the prompt alone,
-/// the decoder alone, then the decoder decoding one step in each yield of the
-/// prompt's layered passes. Returns every difference in tokens or
+/// the decoders alone, then the decoders decoding one step in each yield of
+/// the prompt's layered passes. Returns every difference in tokens or
 /// log-probabilities against the lone runs; empty means bit-identical.
 [[nodiscard]] std::vector<std::string> CheckLayeredPrefill(
     const std::shared_ptr<ext::TextModelRunner>& runner,

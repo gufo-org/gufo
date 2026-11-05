@@ -101,7 +101,8 @@ public:
       std::span<const DecodingRequest> decoding) const;
 
 private:
-  [[nodiscard]] std::size_t LayerGroups(const PrefillRate& rate) const;
+  [[nodiscard]] std::size_t LayerGroups(const PrefillRate& rate,
+                                        std::size_t remaining_tokens) const;
   [[nodiscard]] bool Short(const PrefillingRequest& request) const noexcept {
     return request.remaining_tokens <= options_.decode_active_tokens;
   }

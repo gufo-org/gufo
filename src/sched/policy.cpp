@@ -20,14 +20,23 @@ Policy::Policy(PolicyOptions options) : options_(options) {
   }
 }
 
-std::size_t Policy::LayerGroups(const PrefillRate& rate) const {
+std::size_t Policy::LayerGroups(const PrefillRate& rate,
+                                std::size_t remaining_tokens) const {
   const auto& profile = *options_.profile;
-  // Until a lone pass has been measured, keep decoder waits short.
-  const auto pass = rate.Estimate(profile.pass_tokens);
-  if (!pass)
-    return profile.max_layer_groups;
-  const auto groups =
-      std::ceil(*pass / PrefillRate::Milliseconds(kTargetDecoderWait));
+  // A short remainder, such as a cached continuation, is a short pass: each
+  // group adds a decode round to its time to first token. One within the
+  // legacy budget runs unsplit, as it would without a profile.
+  if (remaining_tokens <= options_.decode_active_tokens)
+    return 1;
+  const std::size_t tokens = std::min(remaining_tokens, profile.pass_tokens);
+  const auto pass = rate.Estimate(tokens);
+  // Until a lone pass has been measured, assume a full pass needs the most
+  // groups.
+  const double groups =
+      pass ? std::ceil(*pass / PrefillRate::Milliseconds(kTargetDecoderWait))
+           : std::ceil(static_cast<double>(profile.max_layer_groups) *
+                       static_cast<double>(tokens) /
+                       static_cast<double>(profile.pass_tokens));
   return std::clamp<std::size_t>(static_cast<std::size_t>(groups), 1,
                                  profile.max_layer_groups);
 }
@@ -61,7 +70,8 @@ Work Policy::Next(const WorkQueues& queues, const PrefillRate& rate) const {
     if (options_.profile)
       return PrefillWork{.beside_decoders = true,
                          .max_tokens = options_.profile->pass_tokens,
-                         .layer_groups = LayerGroups(rate)};
+                         .layer_groups = LayerGroups(
+                             rate, queues.prefilling.front().remaining_tokens)};
     return PrefillWork{
         .beside_decoders = true,
         .max_tokens = options_.incremental_prefill

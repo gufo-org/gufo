@@ -52,6 +52,8 @@ enum class Fault : std::uint8_t {
   kSharedScratch,
   // The pass never yields.
   kNoYield,
+  // Only batched decoding reuses the pass's scratch.
+  kBatchedScratch,
 };
 
 class HashRunner final : public TextModelRunner {
@@ -77,7 +79,9 @@ public:
   [[nodiscard]] std::vector<gufo::ext::TextExecutionPlan> SupportedPlans()
       const override {
     return {{.kind = gufo::ext::TextExecutionPlanKind::kSerial,
-             .physical_width = 1}};
+             .physical_width = 1},
+            {.kind = gufo::ext::TextExecutionPlanKind::kBatched,
+             .physical_width = 4}};
   }
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
@@ -147,6 +151,13 @@ public:
     state.adapter.Append(state.slot, {&token, 1}, {&token, 1});
     ++state.position;
   }
+  void AdvanceBatch(
+      std::span<const gufo::ext::TextRunnerAdvance> advances) const override {
+    if (fault_ == Fault::kBatchedScratch && !scratch_.empty())
+      scratch_.front() = advances.front().token;
+    for (const auto& advance : advances)
+      Advance(advance.state, advance.token);
+  }
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return dynamic_cast<const HashState&>(state).position;
@@ -189,6 +200,32 @@ void TestMissingYieldIsCaught() {
       "a profiled runner must yield");
 }
 
+gufo::test::LayeredPrefillCase BatchedCase() {
+  auto test = Case();
+  test.more_decoder_prompts = {{600, 601}, {700}};
+  return test;
+}
+
+void TestBatchedDecodersPass() {
+  const auto failures = gufo::test::CheckLayeredPrefill(
+      std::make_shared<HashRunner>(Fault::kNone), BatchedCase());
+  for (const auto& failure : failures)
+    std::fprintf(stderr, "%s\n", failure.c_str());
+  Expect(failures.empty(), "batched decoders inside the yields pass");
+}
+
+void TestBatchedScratchIsCaught() {
+  // A single decoder never takes the batched route.
+  Expect(gufo::test::CheckLayeredPrefill(
+             std::make_shared<HashRunner>(Fault::kBatchedScratch), Case())
+             .empty(),
+         "a lone decoder does not batch");
+  const auto failures = gufo::test::CheckLayeredPrefill(
+      std::make_shared<HashRunner>(Fault::kBatchedScratch), BatchedCase());
+  Expect(!failures.empty() && failures.front().starts_with("prompt token 0"),
+         "a batched decode into the pass's scratch changes the prompt");
+}
+
 void TestCaseValidation() {
   auto test = Case();
   test.prompt.resize(8);
@@ -205,5 +242,7 @@ int main() {
   TestConformingRunnerPasses();
   TestSharedScratchIsCaught();
   TestMissingYieldIsCaught();
+  TestBatchedDecodersPass();
+  TestBatchedScratchIsCaught();
   TestCaseValidation();
 }
