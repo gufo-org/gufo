@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,16 @@ using ext::TextDFlashDraftPolicyName;
   return ext::TextDFlashDraftPolicyName(policy);
 }
 }  // namespace speculative
+
+/// Generated tokens with reasoning text, excluding the delimiters. Text output
+/// has none. Reasoning the prompt opened ends at `close`, after any repeated
+/// `open`; an automatic output counts only a block it opens itself, after blank
+/// text. An unclosed block counts to the end.
+[[nodiscard]] std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning,
+    const std::function<std::string(tokenization::TokenId)>& decode);
 
 /// Thread-safe HTTP inference facade over shared immutable GPU model resources
 /// and a bounded pool of request-owned executor sessions.

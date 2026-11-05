@@ -694,12 +694,21 @@ void SamplerState::StartReasoning() {
   const auto& budget = config_.reasoning_budget;
   if (!budget)
     return;
-  reasoning_remaining_ = budget->tokens;
-  reasoning_forced_ = 0;
-  reasoning_phase_ = budget->tokens == 0 ? ReasoningPhase::kForcing
-                                         : ReasoningPhase::kCounting;
+  if (budget->opener) {
+    reasoning_phase_ = ReasoningPhase::kWaitingOpen;
+    return;
+  }
+  OpenReasoning();
   for (const auto token : budget->prompt)
     AdvanceReasoning(token);
+}
+
+void SamplerState::OpenReasoning() {
+  const auto& budget = *config_.reasoning_budget;
+  reasoning_remaining_ = budget.tokens;
+  reasoning_forced_ = 0;
+  reasoning_phase_ =
+      budget.tokens == 0 ? ReasoningPhase::kForcing : ReasoningPhase::kCounting;
 }
 
 // Mirrors llama.cpp common_reasoning_budget_accept: the forcing phase advances
@@ -709,6 +718,13 @@ void SamplerState::AdvanceReasoning(TokenId token) {
   const auto& budget = *config_.reasoning_budget;
   switch (reasoning_phase_) {
     case ReasoningPhase::kOff:
+      return;
+    case ReasoningPhase::kWaitingOpen:
+      if (token == *budget.opener)
+        OpenReasoning();
+      else if (!budget.blank || token >= budget.blank->size() ||
+               !(*budget.blank)[token])
+        reasoning_phase_ = ReasoningPhase::kOff;
       return;
     case ReasoningPhase::kForcing:
       if (++reasoning_forced_ >= budget.forced.size())

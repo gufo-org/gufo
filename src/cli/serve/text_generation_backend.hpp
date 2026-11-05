@@ -141,6 +141,7 @@ public:
   };
 
   using InitialOutputState = gufo::ext::InitialOutputState;
+  using ReasoningMarkup = gufo::ext::ReasoningMarkup;
 
   struct SamplingDefaults {
     /// Zero means generate until EOS or the remaining context is exhausted.
@@ -247,6 +248,11 @@ public:
     [[nodiscard]] virtual std::optional<sampling::JsonConstraint::ToolFormat>
     ToolFormat() const {
       return std::nullopt;
+    }
+    /// Reasoning delimiters the response parsers use for this admitted
+    /// request. Backends without this metadata retain `<think>`/`</think>`.
+    [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const {
+      return {"<think>", "</think>"};
     }
   };
 

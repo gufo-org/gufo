@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <semaphore>
 #include <span>
@@ -3173,12 +3174,49 @@ void TestBackendRejectsInvalidSamplingDefaults() {
 }
 #endif
 
+void TestReasoningTokenCount() {
+  using State = gufo::server::TextGenerationBackend::InitialOutputState;
+  using Pieces = std::vector<std::string>;
+  const gufo::ext::ReasoningMarkup markup{"<a>\n", "</a>"};
+  const auto count = [&markup](const Pieces& pieces, State initial) {
+    std::vector<gufo::tokenization::TokenId> tokens(pieces.size());
+    std::iota(tokens.begin(), tokens.end(), 0);
+    return gufo::server::CountReasoningTokens(
+        tokens, initial, markup,
+        [&pieces](gufo::tokenization::TokenId token) { return pieces[token]; });
+  };
+  Expect(count({"x", "y", "</a>", "z"}, State::kThought) == 2,
+         "output inside reasoning counts to the close");
+  Expect(count({"x", "y", "z"}, State::kThought) == 3,
+         "unclosed reasoning counts to the end");
+  Expect(count({"<a>", "\n", "x", "</a>"}, State::kThought) == 1,
+         "a repeated opener is not reasoning");
+  Expect(count({"<a>", "\n", "x", "y", "</a>", "z"}, State::kAuto) == 2,
+         "a model-opened block counts without its delimiters");
+  Expect(count({"<a>", "\n\n", "x", "</a>"}, State::kAuto) == 2,
+         "a delimiter token merged with its neighbour still opens the block");
+  Expect(count({"<a>\n", "x", "y</", "a>"}, State::kAuto) == 2,
+         "a token holding text before the close counts");
+  Expect(count({"x", "<a>\n", "y", "</a>"}, State::kAuto) == 0,
+         "an automatic phase counts only a leading block");
+  Expect(count({" \n", "<a>\n", "y", "</a>"}, State::kAuto) == 1,
+         "blank text may precede the opener");
+  Expect(count({"<a>"}, State::kAuto) == 0,
+         "a partial opener is not reasoning");
+  Expect(count({"<a>\n", "x"}, State::kAuto) == 1,
+         "an unclosed model-opened block counts to the end");
+  Expect(count({"<a>\n", "x", "</a>"}, State::kText) == 0,
+         "text output has no reasoning");
+  Expect(count({}, State::kThought) == 0, "no output counts nothing");
+}
+
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   TestBackendPreservesModelSamplingPreset();
   TestBackendRejectsInvalidSamplingDefaults();
 #endif
   TestTokenLogprobs();
+  TestReasoningTokenCount();
   TestPublicationWaitUsesRecentSubstantialPrefill();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
   // captured from a redirected sink; a TTY stderr would tint the level tag.

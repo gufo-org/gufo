@@ -39,6 +39,43 @@ bool DiskCacheEnabled(const TextDiskCacheConfig& config) {
 
 }  // namespace
 
+std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning,
+    const std::function<std::string(tokenization::TokenId)>& decode) {
+  using State = TextGenerationBackend::InitialOutputState;
+  if (initial == State::kContent || reasoning.close.empty() ||
+      (initial == State::kAuto && reasoning.open.empty()))
+    return 0;
+  // The parsers match delimiters in text, and tokens at their edges can merge
+  // with neighbouring output, so match in text too and map back to tokens.
+  std::string text;
+  std::vector<std::size_t> ends;
+  ends.reserve(tokens.size());
+  for (const auto token : tokens) {
+    text += decode(token);
+    ends.push_back(text.size());
+  }
+  const std::string_view view = text;
+  std::size_t begin = 0;
+  if (initial == State::kAuto) {
+    const auto leading = view.find_first_not_of(" \t\r\n");
+    if (leading == std::string_view::npos ||
+        !view.substr(leading).starts_with(reasoning.open))
+      return 0;
+    begin = leading + reasoning.open.size();
+  } else if (view.starts_with(reasoning.open)) {
+    begin = reasoning.open.size();
+  }
+  const auto end = std::min(view.find(reasoning.close, begin), view.size());
+  if (begin >= end)
+    return 0;
+  const auto first = std::ranges::upper_bound(ends, begin);
+  const auto last = std::lower_bound(first, ends.end(), end);
+  return static_cast<std::size_t>(last - first) + 1;
+}
+
 struct InferenceBackend::Impl {
 #if defined(ENGINE_ENABLE_HIP)
   struct State {
@@ -62,27 +99,28 @@ struct InferenceBackend::Impl {
         std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {})
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)),
-          tool_format_(tool_format) {
-      if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ =
-            state_->scheduler->runner().TokenizeControl("</think>");
-    }
+          tool_format_(tool_format),
+          initial_(initial),
+          reasoning_(state_->scheduler->runner().ReasoningDelimiters()) {}
 
     Result Wait(const TokenCallback& on_token,
                 const ProgressCallback& on_progress,
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
-      if (!reasoning_end_.empty()) {
-        const auto end =
-            std::search(result.tokens.begin(), result.tokens.end(),
-                        reasoning_end_.begin(), reasoning_end_.end());
-        result.reasoning_tokens =
-            static_cast<std::size_t>(end - result.tokens.begin());
-      }
+      const auto& runner = state_->scheduler->runner();
+      result.reasoning_tokens =
+          CountReasoningTokens(result.tokens, initial_, reasoning_,
+                               [&runner](tokenization::TokenId token) {
+                                 return runner.Decode(std::span(&token, 1));
+                               });
       return result;
     }
 
     void Cancel() noexcept override { request_.Cancel(); }
+
+    ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return reasoning_;
+    }
 
     std::optional<sampling::JsonConstraint::ToolFormat> ToolFormat()
         const override {
@@ -92,8 +130,9 @@ struct InferenceBackend::Impl {
   private:
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
-    std::vector<tokenization::TokenId> reasoning_end_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
+    const InitialOutputState initial_;
+    const ext::ReasoningMarkup reasoning_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {
@@ -514,10 +553,10 @@ InferenceBackend::Result InferenceBackend::chat(
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+      initial != TextGenerationBackend::InitialOutputState::kContent)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            *request.reasoning.budget_tokens, prompt->tokens, initial);
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
@@ -603,10 +642,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+      initial != TextGenerationBackend::InitialOutputState::kContent)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            *request.reasoning.budget_tokens, prompt->tokens, initial);
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(

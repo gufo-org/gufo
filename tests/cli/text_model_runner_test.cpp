@@ -527,6 +527,87 @@ void TestBatchedAdvancePreservesIndependentRequests() {
   second.Invalidate();
 }
 
+void TestReasoningDelimitersFollowTheRunner() {
+  class MarkupRunner final : public FakeRunner {
+  public:
+    MarkupRunner(std::optional<gufo::ext::ReasoningTags> tags,
+                 std::optional<gufo::ext::ReasoningMarkup> markup)
+        : FakeRunner(std::make_shared<FakeStats>()),
+          tags_(std::move(tags)),
+          markup_(std::move(markup)) {}
+    gufo::ext::ReasoningTags ReasoningBudgetTags() const override {
+      return tags_ ? *tags_ : FakeRunner::ReasoningBudgetTags();
+    }
+    gufo::ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return markup_ ? *markup_ : FakeRunner::ReasoningDelimiters();
+    }
+
+  private:
+    std::optional<gufo::ext::ReasoningTags> tags_;
+    std::optional<gufo::ext::ReasoningMarkup> markup_;
+  };
+  using Markup = gufo::ext::ReasoningMarkup;
+  Expect(MarkupRunner({}, {}).ReasoningDelimiters() ==
+             Markup{"<think>", "</think>"},
+         "the default delimiters are the classic think pair");
+  Expect(MarkupRunner(
+             gufo::ext::ReasoningTags{
+                 "<think>", "\n</think>", {"</think>", "<tool_call>"}},
+             {})
+                 .ReasoningDelimiters() == Markup{"<think>", "</think>"},
+         "default delimiters follow the first budget end, not the forced text");
+  Expect(MarkupRunner(gufo::ext::ReasoningTags{"<a>", "<b>", {"<b>"}}, {})
+                 .ReasoningDelimiters() == Markup{"<a>", "<b>"},
+         "default delimiters follow the declared budget tags");
+  Expect(MarkupRunner(gufo::ext::ReasoningTags{}, {}).ReasoningDelimiters() ==
+             Markup{"<think>", "</think>"},
+         "undeclared budget tags keep the classic framing");
+  const Markup custom{"[[ponder>>\n", "<<ponder]]"};
+  Expect(MarkupRunner({}, custom).ReasoningDelimiters() == custom,
+         "a runner declares multi-token delimiters beyond its budget tags");
+  bool rejected = false;
+  try {
+    TextRunnerPool pool(
+        std::make_shared<MarkupRunner>(std::nullopt, Markup{"<a>", ""}), 1);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an empty close delimiter is rejected at load");
+  rejected = false;
+  try {
+    TextRunnerPool pool(
+        std::make_shared<MarkupRunner>(std::nullopt, Markup{"\n<a>", "</a>"}),
+        1);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an open delimiter with leading whitespace is rejected");
+
+  // An automatic budget waits for the output's own opener, ignoring the
+  // opener of an earlier turn in the prompt.
+  class BudgetRunner final : public FakeRunner {
+  public:
+    BudgetRunner() : FakeRunner(std::make_shared<FakeStats>()) {}
+    gufo::ext::ReasoningTags ReasoningBudgetTags() const override {
+      return {"7", "8", {"8"}};
+    }
+    std::vector<TextRunnerToken> TokenizeControl(
+        std::string_view text) const override {
+      return {static_cast<TextRunnerToken>(text.front() - '0')};
+    }
+  };
+  const BudgetRunner budget_runner;
+  const std::vector<TextRunnerToken> prompt{1, 7, 2};
+  const auto automatic = budget_runner.BuildReasoningBudget(
+      4, prompt, gufo::ext::InitialOutputState::kAuto);
+  Expect(automatic && automatic->opener == 7 && automatic->prompt.empty(),
+         "an automatic budget starts at the output's opener");
+  const auto opened = budget_runner.BuildReasoningBudget(4, prompt);
+  Expect(opened && !opened->opener &&
+             opened->prompt == std::vector<TextRunnerToken>{2},
+         "a prompt-opened budget counts the prompt's open block");
+}
+
 void TestResourceClaimsAreValidatedBeforeAllocation() {
   auto stats = std::make_shared<FakeStats>();
   std::string message;
@@ -998,6 +1079,7 @@ void TestServerInstructionsAreFraming() {
 int main() {
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
+  TestReasoningDelimitersFollowTheRunner();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();
   TestBoundedPrefillDecodeAndPrefixReuse();
   TestAbandonedRequestRollsBackState();

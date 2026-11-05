@@ -199,6 +199,19 @@ then per-request overrides, identically for HTTP, `prompt` and `chat`.
 `sampling_preset` remains for existing extensions; in-tree models no longer use
 it.
 
+A text runner declares the literal framing of its reasoning with
+`TextModelRunner::ReasoningDelimiters()`. The default follows
+`ReasoningBudgetTags()`; override it when the model's text differs from those
+control tokens, such as an opener spanning several tokens. Both describe the same
+block: `ReasoningBudgetTags().start` is the one control token that begins `open`,
+and `ends` include the control token for `close`. `close` must be non-empty and
+`open` must not begin with whitespace; model load rejects either. With
+`InitialOutputState::kThought` the prompt opened reasoning; with `kAuto` the
+output opens it, and the parsers, usage accounting and reasoning budget all
+start at a leading `open`. The budget counts from `start`, so the rest of `open`
+counts toward it. Line breaks after `close` are framing and dropped, and Qwen's
+tool dialect also drops other whitespace there.
+
 Provider options use canonical names and manifest types. CMake checks conflicting
 declarations. The Nix serving helper derives provider arguments and validation
 from metadata, including optional `serving` declarations. New runtime controls

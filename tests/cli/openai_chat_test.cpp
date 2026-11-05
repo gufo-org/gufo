@@ -67,10 +67,13 @@ public:
   ProgressRequest(std::shared_ptr<GenerationRequest> inner,
                   std::vector<Backend::PromptProgress> progress,
                   std::optional<gufo::sampling::JsonConstraint::ToolFormat>
-                      tool_format = {})
+                      tool_format = {},
+                  gufo::ext::ReasoningMarkup reasoning = {"<think>",
+                                                          "</think>"})
       : inner_(std::move(inner)),
         progress_(std::move(progress)),
-        tool_format_(tool_format) {}
+        tool_format_(tool_format),
+        reasoning_(std::move(reasoning)) {}
 
   Backend::Result Wait(const Backend::TokenCallback& on_token,
                        const Backend::ProgressCallback& on_progress,
@@ -88,11 +91,15 @@ public:
       const override {
     return tool_format_;
   }
+  gufo::ext::ReasoningMarkup ReasoningDelimiters() const override {
+    return reasoning_;
+  }
 
 private:
   std::shared_ptr<GenerationRequest> inner_;
   std::vector<Backend::PromptProgress> progress_;
   const std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format_;
+  const gufo::ext::ReasoningMarkup reasoning_;
 };
 
 class FakeBackend final : public gufo::server::TextGenerationBackend {
@@ -208,7 +215,7 @@ public:
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                           is_cancelled, stream_output),
-        progress, tool_format);
+        progress, tool_format, reasoning);
   }
 
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
@@ -234,6 +241,7 @@ public:
   std::vector<std::string> pieces;
   std::vector<PromptProgress> progress;
   std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format;
+  gufo::ext::ReasoningMarkup reasoning{"<think>", "</think>"};
   std::string cache_miss_reason;
   FinishReason finish_reason{FinishReason::kStop};
   std::string stop_sequence;
@@ -2275,6 +2283,190 @@ void TestPiNativeDeepSeekThinkingObject() {
          "Pi native DeepSeek disabled thinking object is accepted");
   Expect(backend.last_request.reasoning.enabled == false,
          "Pi DeepSeek thinking.type disables reasoning");
+}
+
+/// An external provider whose reasoning framing shares nothing with Qwen or
+/// DeepSeek. The opener spans several tokens and carries a newline, as native
+/// channel framing does.
+struct ExternalDialect {
+  static constexpr std::string_view kOpen = "[[ponder>>\n";
+  static constexpr std::string_view kClose = "<<ponder]]";
+};
+
+struct DialectResult {
+  std::string content;
+  std::string reasoning;
+  std::string tools;
+};
+
+DialectResult RunExternalDialect(const std::vector<std::string>& pieces,
+                                 FakeBackend::InitialOutputState initial,
+                                 bool stream, bool responses,
+                                 std::string_view tool_json = {}) {
+  using gufo::json::Value;
+  FakeBackend backend;
+  backend.pieces = pieces;
+  backend.initial_output_state_override = initial;
+  backend.reasoning = {std::string(ExternalDialect::kOpen),
+                       std::string(ExternalDialect::kClose)};
+  auto body = gufo::json::parse(R"({"model":"test-model","messages":[
+    {"role":"user","content":"Reason about it."}]})");
+  body["stream"] = stream;
+  if (!tool_json.empty()) {
+    backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+    body["tools"] = gufo::json::parse(tool_json);
+    if (responses) {
+      auto flat = *body["tools"].items()[0].find("function");
+      flat["type"] = "function";
+      body["tools"] = Value::array();
+      body["tools"].push_back(std::move(flat));
+    }
+  }
+  DialectResult out;
+  if (responses) {
+    gufo::server::ChatRequest chat;
+    chat.reasoning.enabled = true;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "external dialect fixture has valid Responses controls");
+    const auto response = gufo::server::CreateOpenAiResponse(
+        Request(body.dump()), backend, chat, 512, {}, stream);
+    Expect(response.status == 200, "external dialect Responses request works");
+    Value result;
+    if (!stream)
+      result = gufo::json::parse(response.body);
+    else
+      response.streaming_body([&](std::string_view piece) {
+        if (piece == "data: [DONE]\n\n")
+          return true;
+        const auto event =
+            gufo::json::parse(piece.substr(piece.find("data: ") + 6));
+        if (event.member_str("type") == "response.reasoning_summary_text.delta")
+          out.reasoning += event.member_str("delta");
+        if (event.member_str("type") == "response.output_text.delta")
+          out.content += event.member_str("delta");
+        if (event.member_str("type") == "response.completed")
+          result = *event.find("response");
+        return true;
+      });
+    for (const auto& item : result.find("output")->items()) {
+      if (item.member_str("type") == "function_call")
+        out.tools += item.member_str("name") + ";";
+      if (stream)
+        continue;
+      for (const auto* field : {"summary", "content"})
+        if (const auto* parts = item.find(field))
+          for (const auto& part : parts->items())
+            (std::string_view(field) == "summary" ? out.reasoning
+                                                  : out.content) +=
+                part.member_str("text");
+    }
+    return out;
+  }
+  const auto response =
+      gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+  Expect(response.status == 200, "external dialect chat request works");
+  const auto collect = [&](const Value& message) {
+    out.content += message.member_str("content");
+    out.reasoning += message.member_str("reasoning_content");
+    if (const auto* calls = message.find("tool_calls"))
+      for (const auto& call : calls->items())
+        if (const auto* function = call.find("function"))
+          if (!function->member_str("name").empty())
+            out.tools += function->member_str("name") + ";";
+  };
+  if (stream) {
+    response.streaming_body([&](std::string_view chunk) {
+      const auto payload = chunk.substr(chunk.find("data: ") + 6);
+      if (!payload.starts_with("[DONE]")) {
+        const auto event = gufo::json::parse(payload);
+        for (const auto& choice : event.find("choices")->items())
+          collect(*choice.find("delta"));
+      }
+      return true;
+    });
+  } else {
+    const auto output = gufo::json::parse(response.body);
+    collect(*output.find("choices")->items()[0].find("message"));
+  }
+  return out;
+}
+
+/// Every two-way and every single-byte split of `text`.
+std::vector<std::vector<std::string>> Splits(const std::string& text) {
+  std::vector<std::vector<std::string>> all;
+  all.push_back({text});
+  for (std::size_t cut = 1; cut < text.size(); ++cut)
+    all.push_back({text.substr(0, cut), text.substr(cut)});
+  std::vector<std::string> bytes;
+  for (const char byte : text)
+    bytes.emplace_back(1, byte);
+  all.push_back(std::move(bytes));
+  return all;
+}
+
+void TestExternalReasoningDialect() {
+  using Initial = FakeBackend::InitialOutputState;
+  const std::string open(ExternalDialect::kOpen);
+  const std::string close(ExternalDialect::kClose);
+  const auto check = [&](const std::string& text, Initial initial,
+                         const std::string& reasoning,
+                         const std::string& content, const char* what) {
+    for (const auto& pieces : Splits(text))
+      for (const bool stream : {false, true})
+        for (const bool responses : {false, true}) {
+          const auto got =
+              RunExternalDialect(pieces, initial, stream, responses);
+          Expect(got.reasoning == reasoning && got.content == content, what);
+        }
+  };
+  // Prompt-opened reasoning, with and without a repeated opener.
+  check("Plan the steps." + close + "\n\nAnswer.", Initial::kReasoning,
+        "Plan the steps.", "Answer.", "open-at-start reasoning splits");
+  check(open + "Plan the steps." + close + "\n\nAnswer.", Initial::kReasoning,
+        "Plan the steps.", "Answer.", "a repeated opener is framing");
+  // Initially open reasoning that never closes is reasoning, not content.
+  check("Still thinking", Initial::kReasoning, "Still thinking", "",
+        "unfinished reasoning never reaches content");
+  check(open + "Still thinking", Initial::kReasoning, "Still thinking", "",
+        "unfinished reasoning after an opener never reaches content");
+  // Automatic detection needs the declared opener.
+  check(open + "Weigh it." + close + "Done.", Initial::kAuto, "Weigh it.",
+        "Done.", "an auto-detected opener starts reasoning");
+  check("Done.", Initial::kAuto, "", "Done.", "no opener means content");
+  // Think tags of other dialects, and this dialect's markers in content, are
+  // literal text.
+  check("<think>a</think>b", Initial::kAuto, "", "<think>a</think>b",
+        "foreign reasoning tags stay content");
+  check("<think>a</think>b", Initial::kReasoning, "<think>a</think>b", "",
+        "foreign tags do not close dialect reasoning");
+  check("see " + open + "x" + close + " here", Initial::kContent, "",
+        "see " + open + "x" + close + " here",
+        "markers in content-phase output are data");
+  // Incomplete closers are held and then released as the text they are.
+  check("Mind <<ponder] only", Initial::kReasoning, "Mind <<ponder] only", "",
+        "an incomplete closer remains reasoning text");
+  check("Mind " + close.substr(0, close.size() - 1), Initial::kReasoning,
+        "Mind " + close.substr(0, close.size() - 1), "",
+        "an unfinished closer at the end is reasoning");
+
+  // Reasoning that ends in a tool call keeps the call, with and without a
+  // closer, through chat and Responses, buffered and streamed.
+  const char* tools = R"([{"type":"function","function":{"name":"read",
+    "parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}])";
+  const std::string call =
+      "<tool_call>\n<function=read>\n<parameter=path>\nf.txt\n</parameter>\n"
+      "</function>\n</tool_call>";
+  for (const bool closed : {false, true})
+    for (const bool responses : {false, true})
+      for (const bool stream : {false, true})
+        for (const auto& pieces :
+             Splits("Read it." + (closed ? close : std::string()) + call)) {
+          const auto got = RunExternalDialect(pieces, Initial::kReasoning,
+                                              stream, responses, tools);
+          Expect(got.reasoning == "Read it." && got.content.empty() &&
+                     got.tools == "read;",
+                 "reasoning to tool transition keeps reasoning and call");
+        }
 }
 
 void TestStreamingPromptOpenedReasoning() {
@@ -7013,6 +7205,7 @@ int main() {
   TestPiReasoningControlsAndOutputFraming();
   TestPiNativeDeepSeekThinkingObject();
   TestStreamingPromptOpenedReasoning();
+  TestExternalReasoningDialect();
   TestInitialOutputPhases();
   TestReasoningAnswerSeparator();
   TestConflictingReasoningControlsAreRejected();

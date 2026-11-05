@@ -103,9 +103,19 @@ std::size_t TextModelRunner::PrepareConstraintVocabulary() const {
   return constraint_vocabulary_ ? constraint_vocabulary_->size() : 0;
 }
 
+ReasoningMarkup TextModelRunner::ReasoningDelimiters() const {
+  const auto tags = ReasoningBudgetTags();
+  const auto close = tags.ends.empty() ? tags.forced_end : tags.ends.front();
+  // A runner that declares no budget tags keeps the host's classic framing.
+  if (close.empty())
+    return {"<think>", "</think>"};
+  return {std::string(tags.start), std::string(close)};
+}
+
 std::shared_ptr<const sampling::ReasoningBudget>
-TextModelRunner::BuildReasoningBudget(
-    std::size_t tokens, std::span<const TextRunnerToken> prompt) const {
+TextModelRunner::BuildReasoningBudget(std::size_t tokens,
+                                      std::span<const TextRunnerToken> prompt,
+                                      ext::InitialOutputState initial) const {
   const auto tags = ReasoningBudgetTags();
   const auto start = TokenizeControl(tags.start);
   auto forced = TokenizeControl(tags.forced_end);
@@ -120,13 +130,20 @@ TextModelRunner::BuildReasoningBudget(
       return nullptr;
     budget->ends.push_back(token.front());
   }
-  const auto opened =
-      std::ranges::find(prompt.rbegin(), prompt.rend(), start.front());
-  if (opened != prompt.rend())
-    budget->prompt.assign(opened.base(), prompt.end());
+  // An automatic output opens its own block; an opener in the prompt belongs
+  // to an earlier turn.
+  if (initial == ext::InitialOutputState::kAuto) {
+    budget->opener = start.front();
+  } else {
+    const auto opened =
+        std::ranges::find(prompt.rbegin(), prompt.rend(), start.front());
+    if (opened != prompt.rend())
+      budget->prompt.assign(opened.base(), prompt.end());
+  }
   const std::lock_guard lock(constraint_mutex_);
   if (!partial_utf8_ && VocabularySize() != 0) {
     auto partial = std::make_shared<std::vector<bool>>(VocabularySize());
+    auto blank = std::make_shared<std::vector<bool>>(VocabularySize());
     for (TextRunnerToken token = 0; token < partial->size(); ++token) {
       const auto text = Decode(std::span(&token, 1));
       bool complete = text.empty();
@@ -141,10 +158,14 @@ TextModelRunner::BuildReasoningBudget(
         }
       }
       (*partial)[token] = !complete;
+      (*blank)[token] = !text.empty() &&
+                        text.find_first_not_of(" \t\r\n") == std::string::npos;
     }
     partial_utf8_ = std::move(partial);
+    blank_tokens_ = std::move(blank);
   }
   budget->partial_utf8 = partial_utf8_;
+  budget->blank = blank_tokens_;
   return budget;
 }
 
