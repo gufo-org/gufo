@@ -170,6 +170,9 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
   }
   try {
     const auto desc = runner->Descriptor();
+    if (desc.sampling_defaults.has_value()) {
+      sampling::ValidateTextSamplingDefaults(*desc.sampling_defaults);
+    }
     auto new_state = std::make_unique<Impl::State>();
     new_state->model_path = desc.model_id;
     new_state->sampling_defaults.max_tokens = 0;

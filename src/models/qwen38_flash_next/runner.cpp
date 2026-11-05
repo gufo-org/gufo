@@ -28,6 +28,7 @@
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
+#include "src/models/qwen38_flash_next/probe.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -294,7 +295,7 @@ public:
                     std::max<std::size_t>(1, model_->config().compress_ratio),
                 .max_in_pass_checkpoints = rocm::kMaxPassCheckpoints,
             },
-        .sampling_preset = sampling::TextModelPreset::kQwen38,
+        .sampling_defaults = FlashNextSamplingDefaults(),
     };
   }
 

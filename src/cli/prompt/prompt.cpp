@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -293,20 +294,22 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
 
 // Applies the provider's recommended sampling defaults under the explicit
 // command-line settings, with the thinking mode `--think` selects.
-void ResolvePromptSampling(const ext::TextProvider& provider,
+bool ResolvePromptSampling(const ext::TextProvider& provider,
                            const core::GgufReader& reader, PromptOptions* opt) {
   if (provider.sampling_defaults == nullptr) {
-    return;
-  }
-  std::optional<bool> thinking;
-  if (opt->reasoning_mode == "on" || opt->reasoning_effort != "auto") {
-    thinking = true;
-  } else if (opt->reasoning_mode == "off") {
-    thinking = false;
+    return true;
   }
   opt->sampling = sampling::ResolveTextSampling(
-      provider.sampling_defaults(reader), thinking, opt->sampling,
+      provider.sampling_defaults(reader), opt->thinking_mode(), opt->sampling,
       opt->sampling_supplied);
+  try {
+    opt->sampling.Validate();
+  } catch (const std::invalid_argument& exception) {
+    std::cerr << "Error: invalid model sampling defaults: " << exception.what()
+              << "\n";
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -398,7 +401,10 @@ int RunPrompt(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  ResolvePromptSampling(*provider, *reader, &opt);
+  if (!ResolvePromptSampling(*provider, *reader, &opt)) {
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   return provider->prompt_driver(opt, *reader, model_load_start);
 }
 
@@ -442,7 +448,10 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  ResolvePromptSampling(*provider, *reader, &opt);
+  if (!ResolvePromptSampling(*provider, *reader, &opt)) {
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   return provider->chat_driver(opt, *reader, model_load_start);
 }
 

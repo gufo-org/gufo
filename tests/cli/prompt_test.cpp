@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 
 void TestDefaultOptions() {
@@ -239,6 +240,26 @@ void TestPresetFixtures() {
   assert(unspecified.temperature == 0.0F && unspecified.top_p == 1.0F);
 }
 
+void TestDefaultsValidation() {
+  gufo::sampling::TextSamplingDefaults defaults;
+  defaults.thinking_enabled.temperature = 0.0F;
+  gufo::sampling::ValidateTextSamplingDefaults(defaults);
+  for (auto* values :
+       {&defaults.thinking_unspecified, &defaults.thinking_enabled,
+        &defaults.thinking_disabled}) {
+    const auto valid = *values;
+    values->temperature = -1.0F;
+    bool rejected = false;
+    try {
+      gufo::sampling::ValidateTextSamplingDefaults(defaults);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+    *values = valid;
+  }
+}
+
 void TestProviderDefaults() {
   using gufo::sampling::ResolveTextSampling;
   gufo::sampling::TextSamplingDefaults provider;
@@ -274,6 +295,7 @@ void TestProviderDefaults() {
 int main() {
   TestPresetFixtures();
   TestProviderDefaults();
+  TestDefaultsValidation();
   TestDefaultOptions();
   TestExplicitFlags();
   TestSamplingAndReasoningFlags();

@@ -118,6 +118,7 @@ struct Event {
 struct FakeControl {
   gufo::sampling::TextModelPreset sampling_preset{
       gufo::sampling::TextModelPreset::kUnspecified};
+  std::optional<gufo::sampling::TextSamplingDefaults> sampling_defaults;
   void Log(Event event) {
     const std::lock_guard<std::mutex> lock(mutex);
     events.push_back(event);
@@ -322,6 +323,7 @@ public:
                 .batched_multi_token_decode_max_width = 4,
                 .prefix_reuse = control_->prefix_reuse && control_->Retains(),
             },
+        .sampling_defaults = control_->sampling_defaults,
         .sampling_preset = control_->sampling_preset,
     };
   }
@@ -3158,11 +3160,23 @@ void TestBackendPreservesModelSamplingPreset() {
            "server overrides retain the model preset for omitted fields");
   }
 }
+
+void TestBackendRejectsInvalidSamplingDefaults() {
+  auto control = std::make_shared<FakeControl>();
+  control->sampling_defaults.emplace();
+  control->sampling_defaults->thinking_disabled.temperature = -1.0F;
+  gufo::server::InferenceBackend backend;
+  std::string error;
+  Expect(!backend.load(std::make_shared<FakeRunner>(control), &error) &&
+             !error.empty(),
+         "invalid provider sampling defaults fail model load");
+}
 #endif
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   TestBackendPreservesModelSamplingPreset();
+  TestBackendRejectsInvalidSamplingDefaults();
 #endif
   TestTokenLogprobs();
   TestPublicationWaitUsesRecentSubstantialPrefill();

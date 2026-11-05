@@ -27,6 +27,7 @@
 #include "src/models/deepseek_v4_flash/continuation_identity.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/deepseek_v4_flash/probe.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
 namespace {
@@ -189,7 +190,7 @@ public:
                 .batched_multi_token_decode_max_width = 8u,
                 .prefix_reuse = true,
             },
-        .sampling_preset = sampling::TextModelPreset::kDeepSeekV4Flash,
+        .sampling_defaults = DeepSeekSamplingDefaults(),
     };
   }
 

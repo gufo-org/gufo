@@ -600,6 +600,15 @@ struct TextPromptOptions {
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+
+  /// Thinking mode these options select; a reasoning effort implies enabled.
+  [[nodiscard]] std::optional<bool> thinking_mode() const {
+    if (reasoning_mode == "on" || reasoning_effort != "auto")
+      return true;
+    if (reasoning_mode == "off")
+      return false;
+    return std::nullopt;
+  }
 };
 
 struct ScannedToolArgument {

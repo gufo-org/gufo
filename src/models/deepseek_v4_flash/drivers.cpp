@@ -643,14 +643,9 @@ static std::optional<gufo::ReasoningEffort> ParseReasoningEffort(
 static gufo::ReasoningOptions PromptReasoningOptions(
     const ext::TextPromptOptions& options) {
   gufo::ReasoningOptions reasoning;
-  if (options.reasoning_mode == "on") {
-    reasoning.enabled = true;
-  } else if (options.reasoning_mode == "off") {
-    reasoning.enabled = false;
-  }
+  reasoning.enabled = options.thinking_mode();
   if (options.reasoning_effort != "auto") {
     reasoning.effort = ParseReasoningEffort(options.reasoning_effort);
-    reasoning.enabled = true;
   }
   if (options.preserve_thinking == "on") {
     reasoning.preserve_thinking = true;

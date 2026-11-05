@@ -12,8 +12,14 @@ provider supplies typed sampling defaults without a core preset enum value.
   `thinking_unspecified`).
 - `TextRunnerDescriptor::sampling_defaults` (HTTP and server paths) and
   `TextProvider::sampling_defaults` (a probe over the GGUF reader, used by
-  `prompt` and `chat`) both return the same value. The descriptor field takes
-  precedence over `sampling_preset`.
+  `prompt` and `chat`). A provider with `prompt` or `chat` drivers sets both to
+  the same value. The descriptor field takes precedence over `sampling_preset`.
+- `sampling::ValidateTextSamplingDefaults` throws `std::invalid_argument` for
+  values `SamplingConfig` rejects. Model load fails on invalid descriptor
+  defaults; `prompt` and `chat` fail on invalid resolved values.
+- `TextPromptOptions::thinking_mode()` returns the thinking mode selected by
+  `--think` and `--reasoning-effort`, and is what selects the defaults for
+  `prompt` and `chat`.
 - Precedence is provider defaults, then explicit server/CLI settings, then
   per-request overrides. Explicit zero and false settings stay explicit.
   `bench` keeps its explicit greedy defaults.

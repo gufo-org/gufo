@@ -26,12 +26,17 @@ bool ProbeQwenGguf(const core::GgufReader& reader) {
 }
 
 std::optional<sampling::TextSamplingDefaults> QwenSamplingDefaults(
+    const core::ModelConfig& config) {
+  return sampling::PresetDefaults(sampling::TextPreset(config));
+}
+
+std::optional<sampling::TextSamplingDefaults> QwenSamplingDefaults(
     const core::GgufReader& reader) {
   const auto config = ExtractQwenConfig(reader);
   if (!config.has_value()) {
     return std::nullopt;
   }
-  return sampling::PresetDefaults(sampling::TextPreset(*config));
+  return QwenSamplingDefaults(*config);
 }
 
 bool ProbeQwen(std::string_view model_root) {

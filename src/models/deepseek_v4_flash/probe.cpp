@@ -11,9 +11,13 @@ bool ProbeDeepSeekGguf(const core::GgufReader& reader) {
   return architecture == "deepseek4";
 }
 
+std::optional<sampling::TextSamplingDefaults> DeepSeekSamplingDefaults() {
+  return sampling::PresetDefaults(sampling::TextModelPreset::kDeepSeekV4Flash);
+}
+
 std::optional<sampling::TextSamplingDefaults> DeepSeekSamplingDefaults(
     const core::GgufReader&) {
-  return sampling::PresetDefaults(sampling::TextModelPreset::kDeepSeekV4Flash);
+  return DeepSeekSamplingDefaults();
 }
 
 bool ProbeDeepSeek(std::string_view model_root) {

@@ -137,6 +137,15 @@ inline SamplingConfig ResolveTextSampling(
   return result;
 }
 
+/// Throws `std::invalid_argument` when a thinking mode's values are invalid.
+inline void ValidateTextSamplingDefaults(const TextSamplingDefaults& defaults) {
+  for (const std::optional<bool> thinking :
+       {std::optional<bool>{}, std::optional<bool>{true},
+        std::optional<bool>{false}}) {
+    ResolveTextSampling(defaults, thinking, {}, {}).Validate();
+  }
+}
+
 inline SamplingConfig ResolveTextSampling(TextModelPreset model,
                                           std::optional<bool> thinking,
                                           const SamplingConfig& configured,
