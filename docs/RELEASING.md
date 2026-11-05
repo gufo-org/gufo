@@ -67,19 +67,20 @@ of the release version.
 
 ## Release flow
 
-`version.txt` is the canonical release version. A daily GitHub workflow reads
-the Conventional Commit history after the latest release and opens or updates
-one release pull request. That pull request updates `version.txt`,
-`CHANGELOG.md` and the release manifest. It receives the same CI as any other
-change, plus the complete Devlab functional suite on Strix Halo (other pull
-requests run its smaller PR tier). The workflow waits up to 160 minutes for the
-pull request title, the repository checks and `devlab/functional`. If any of
-them fails, errors or is still pending, it leaves the pull request open without
-publishing a release and comments on it to notify the maintainers.
+`version.txt` is the canonical release version. A maintainer starts a release
+by running the *Release automation* workflow from the GitHub Actions tab ("Run
+workflow" on `main`); it has no schedule. The workflow reads the Conventional
+Commit history after the latest release and opens or updates one release pull
+request. That pull request updates `version.txt`, `CHANGELOG.md` and the
+release manifest. It receives the same CI as any other change, plus the
+complete Devlab functional suite on Strix Halo (other pull requests run its
+smaller PR tier). The workflow waits up to 160 minutes for the pull request
+title, the repository checks and `devlab/functional`. If any of them fails,
+errors or is still pending, it leaves the pull request open without publishing
+a release and comments on it to notify the maintainers.
 
 After the checks pass, the workflow squash-merges the release pull request and
-immediately creates the immutable tag and GitHub Release. A manually dispatched
-run follows the same process and is available for recovery. Do not edit the
+immediately creates the immutable tag and GitHub Release. Do not edit the
 version, changelog or release manifest in an ordinary feature or fix pull
 request.
 
