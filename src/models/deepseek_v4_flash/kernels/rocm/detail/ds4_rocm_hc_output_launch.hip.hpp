@@ -192,8 +192,9 @@ extern "C" int ds4_gpu_hc_split_weighted_sum_norm_tensor(
         uint32_t                sinkhorn_iters,
         float                   eps,
         float                   norm_eps) {
+    constexpr uint32_t slices = 16u;
     if (!out || !norm_out || !split || !mix || !residual_hc || !model_map ||
-        n_embd == 0 || n_hc != 4) {
+        n_embd != slices * 256u || n_hc != 4) {
         return 0;
     }
     const uint64_t mix_hc = 2ull * n_hc + (uint64_t)n_hc * n_hc;
@@ -225,32 +226,22 @@ extern "C" int ds4_gpu_hc_split_weighted_sum_norm_tensor(
     float *q8_scale = NULL;
     if (norm_q8k && !norm_q8) return 0;
     if (norm_q8) {
-        constexpr uint32_t qcols = 16u;
-        if (n_embd != qcols * 256u || !hip_q8_0_act(norm_q8, n_rows, n_embd / 32u, &q8, &q8_scale) ||
+        if (!hip_q8_0_act(norm_q8, n_rows, n_embd / 32u, &q8, &q8_scale) ||
             (norm_q8k && !hip_tensor_has_elems2(norm_q8k, n_rows, n_embd / ROCM_QK_K,
                                                 sizeof(hip_block_q8_K)))) {
             return 0;
         }
-        hc_split_weighted_sum_norm_fused_kernel<qcols><<<(uint32_t)n_rows, 256>>>(
+        hc_split_weighted_sum_norm_fused_kernel<slices, true><<<(uint32_t)n_rows * slices, 256>>>(
                 (float *)out->ptr, (float *)norm_out->ptr, q8, q8_scale,
                 norm_q8k ? (hip_block_q8_K *)norm_q8k->ptr : NULL, (float *)split->ptr,
                 (const float *)mix->ptr, (const float *)residual_hc->ptr, scale, base, norm_w,
-                n_embd, n_hc, (uint32_t)n_rows, sinkhorn_iters, eps, norm_eps);
+                n_embd, (uint32_t)n_rows, sinkhorn_iters, eps, norm_eps);
         return hip_ok(hipGetLastError(), "hc split weighted sum norm quantize launch");
     }
-    hc_split_weighted_sum_norm_fused_kernel<0><<<(uint32_t)n_rows, 256>>>(
-            (float *)out->ptr,
-            (float *)norm_out->ptr,
-            NULL,
-            NULL,
-            NULL,
-            (float *)split->ptr,
-            (const float *)mix->ptr,
-            (const float *)residual_hc->ptr,
-            scale,
-            base,
-            norm_w,
-            n_embd, n_hc, (uint32_t)n_rows, sinkhorn_iters, eps, norm_eps);
+    hc_split_weighted_sum_norm_fused_kernel<1, false><<<(uint32_t)n_rows, 256>>>(
+            (float *)out->ptr, (float *)norm_out->ptr, NULL, NULL, NULL, (float *)split->ptr,
+            (const float *)mix->ptr, (const float *)residual_hc->ptr, scale, base, norm_w,
+            n_embd, (uint32_t)n_rows, sinkhorn_iters, eps, norm_eps);
     return hip_ok(hipGetLastError(), "hc split weighted sum norm launch");
 }
 extern "C" int ds4_gpu_output_hc_weights_tensor(

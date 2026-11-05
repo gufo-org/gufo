@@ -121,7 +121,7 @@ int ds4_gpu_hc_expand_split_tensor(ds4_gpu_tensor* out_hc,
                                    uint32_t n_hc);
 /* norm_q8 may be NULL; when set it also receives norm_out's Q8_0 form
  * (ds4_gpu_q8_0_act_bytes per row), and norm_q8k, if also set, its Q8_K form
- * (ds4_gpu_q8_K_act_bytes per row). Quantized outputs need n_embd == 4096. */
+ * (ds4_gpu_q8_K_act_bytes per row). Every form needs n_embd == 4096. */
 int ds4_gpu_hc_split_weighted_sum_norm_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *norm_out, ds4_gpu_tensor *norm_q8, ds4_gpu_tensor *norm_q8k, ds4_gpu_tensor *split, const ds4_gpu_tensor *mix, const ds4_gpu_tensor *residual_hc, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint64_t norm_weight_offset, uint32_t n_embd, uint32_t n_hc, uint32_t sinkhorn_iters, float eps, float norm_eps);
 int ds4_gpu_hc_split_weighted_sum_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *split, const ds4_gpu_tensor *mix, const ds4_gpu_tensor *residual_hc, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_embd, uint32_t n_hc, uint32_t sinkhorn_iters, float eps);
 /* The whole pre-block chain -- norm, mix projection, split, weighted sum -- in
