@@ -97,6 +97,20 @@ int main(int argc, char** argv) {
     const auto with_mtp =
         qfn::CreateQwenFlashNextTextRunner(model, kContext, speculative);
     bool passed = true;
+    // Three decoders batched in every round, as the profile lets the host
+    // run them: batched AR and batched MTP chains inside the hook.
+    {
+      auto batched = test;
+      batched.layer_groups = 8;
+      batched.more_decoder_prompts = {
+          Tokens(*model,
+                 "List the planets of the solar system with one fact each."),
+          Tokens(*model,
+                 "Translate 'the quick brown fox jumps over the lazy "
+                 "dog' into French, German and Italian.")};
+      passed = Check("AR,batched_3", ar, batched) && passed;
+      passed = Check("MTP,batched_3", with_mtp, batched) && passed;
+    }
     // With the cache, passes also capture prompt checkpoints in place.
     for (const bool cache_prompt : {false, true}) {
       for (const std::size_t groups : {8u, 3u}) {
