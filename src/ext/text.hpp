@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +27,7 @@
 #include "gufo/ext/ledger.hpp"
 #include "gufo/ext/reasoning.hpp"
 #include "gufo/ext/sampling.hpp"
+#include "gufo/ext/scheduling.hpp"
 #include "gufo/ext/text_contracts.hpp"
 #include "src/cache/component_resources.hpp"
 #include "src/core/text_sampling_defaults.hpp"
@@ -33,6 +35,8 @@
 namespace gufo::ext {
 
 using ComponentCacheResources = cache::ComponentCacheResources;
+using TextSchedulingProfile = sched::TextSchedulingProfile;
+using PrefillYield = sched::PrefillYield;
 using TextRunnerToken = ContinuationToken;
 
 /// Immutable model-owned input which travels with one scheduled request.
@@ -135,6 +139,9 @@ struct TextRunnerDescriptor {
   /// Core preset kept for existing extensions.
   sampling::TextModelPreset sampling_preset{
       sampling::TextModelPreset::kUnspecified};
+  /// Prompt scheduling beside other sessions' decoding. Empty keeps passes
+  /// bounded by the host's decode-active budget.
+  std::optional<TextSchedulingProfile> scheduling{};
 };
 
 struct TextRunnerResourceClaim {
@@ -203,6 +210,26 @@ public:
 
   virtual void SetCancellationCheck(const CancellationCheck&) {}
 
+  /// Set by the host for the next Prefill or PrefillThrough call only. A
+  /// runner whose descriptor has a scheduling profile splits each pass into
+  /// at most `groups` layer groups and calls YieldPrefill() between them;
+  /// every layer keeps the arithmetic of an unsplit pass. A runner may
+  /// ignore it and run unsplit passes. While yielding, it must hold no lock
+  /// or scratch its decode paths take.
+  void SetPrefillYield(std::size_t groups, PrefillYield yield) {
+    prefill_yield_groups_ = yield ? std::max<std::size_t>(groups, 1) : 1;
+    prefill_yield_ = std::move(yield);
+  }
+  /// One when the host asked for unsplit passes.
+  [[nodiscard]] std::size_t prefill_yield_groups() const noexcept {
+    return prefill_yield_groups_;
+  }
+  /// Runs the host's decode round between two layer groups.
+  void YieldPrefill() const {
+    if (prefill_yield_)
+      prefill_yield_();
+  }
+
   [[nodiscard]] virtual TextRunnerMeasuredResources MeasuredResources()
       const noexcept {
     return {};
@@ -211,6 +238,8 @@ public:
 private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
+  std::size_t prefill_yield_groups_{1};
+  PrefillYield prefill_yield_;
 };
 
 struct TextRunnerAdvance {

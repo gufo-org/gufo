@@ -191,6 +191,10 @@ public:
     std::size_t active_decode_prefill_chunks{0};
     std::size_t max_prefill_chunk_tokens{0};
     std::size_t max_consecutive_active_prefill_chunks{0};
+    /// Most layer groups one of this request's passes was split into.
+    std::size_t max_prefill_layer_groups{1};
+    /// Decode rounds other sessions ran between those groups.
+    std::size_t prefill_yield_rounds{0};
     std::size_t configured_active_prefill_tokens{0};
     std::size_t queue_depth_at_submit{0};
     std::size_t client_queue_depth_at_submit{0};

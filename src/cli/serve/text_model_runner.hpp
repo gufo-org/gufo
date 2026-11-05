@@ -31,6 +31,7 @@ using ext::InitialOutputState;
 using ext::kHostSnapshotHeadroomBytes;
 using ext::MeminfoAvailableBytes;
 using ext::ParseRamCacheOption;
+using ext::PrefillYield;
 using ext::ReasoningMarkup;
 using ext::TextDecodeSelection;
 using ext::TextDecodeStep;
@@ -114,7 +115,11 @@ public:
     static constexpr std::size_t kSharedPrefixMinTokens = 512;
 
     void PrepareBatchExecution();
-    [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+    /// With `yield`, a runner with a scheduling profile splits the pass into
+    /// at most `layer_groups` layer groups and runs it between them.
+    [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens,
+                                          std::size_t layer_groups = 1,
+                                          const PrefillYield& yield = {});
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);

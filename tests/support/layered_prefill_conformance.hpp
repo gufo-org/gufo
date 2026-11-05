@@ -1,0 +1,40 @@
+#ifndef GUFO_TESTS_SUPPORT_LAYERED_PREFILL_CONFORMANCE_HPP_
+#define GUFO_TESTS_SUPPORT_LAYERED_PREFILL_CONFORMANCE_HPP_
+
+// Shared conformance check for runners whose scheduling profile splits prompt
+// passes into layer groups (SetPrefillYield). Every such runner must pass it.
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "gufo/ext/text.hpp"
+
+namespace gufo::test {
+
+struct LayeredPrefillCase {
+  /// Prefilled in passes of the profile's width, split by layers.
+  std::vector<ext::TextRunnerToken> prompt;
+  /// The other session, decoding between the prompt's layer groups.
+  std::vector<ext::TextRunnerToken> decoder_prompt;
+  std::size_t prompt_output_tokens{4};
+  std::size_t decoder_output_tokens{16};
+  /// Top log-probabilities compared at every output position.
+  std::uint32_t top_logprobs{8};
+  /// Layer groups per pass; zero takes the profile's maximum.
+  std::size_t layer_groups{0};
+};
+
+/// Runs `runner` through three fresh state pools, greedily: the prompt alone,
+/// the decoder alone, then the decoder decoding one step in each yield of the
+/// prompt's layered passes. Returns every difference in tokens or
+/// log-probabilities against the lone runs; empty means bit-identical.
+[[nodiscard]] std::vector<std::string> CheckLayeredPrefill(
+    const std::shared_ptr<ext::TextModelRunner>& runner,
+    const LayeredPrefillCase& test);
+
+}  // namespace gufo::test
+
+#endif  // GUFO_TESTS_SUPPORT_LAYERED_PREFILL_CONFORMANCE_HPP_
