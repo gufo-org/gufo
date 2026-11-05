@@ -50,8 +50,10 @@ public:
   // tokens in a ring of ring_rows slots, like sliding-window attention: a
   // continuation reads the last window_rows, and appending past the ring
   // evicts the oldest rows. Requires ring_rows % 4 == 0 and room for a whole
-  // window plus a partial leading chunk.
-  FakeAdapter(Rows window_rows, Rows ring_rows);
+  // window plus a partial leading chunk. Without private state the recurrent
+  // component is dropped, the shape of a model that has only attention, and
+  // the hash chains are rebuilt from the restored rows.
+  FakeAdapter(Rows window_rows, Rows ring_rows, bool private_state = true);
   [[nodiscard]] Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const ComponentDescriptor> Components()
       const override;
@@ -115,6 +117,7 @@ private:
                                       std::function<TransferResult()>);
   std::vector<ComponentDescriptor> components_;
   Rows ring_rows_{0};
+  bool private_state_{true};
   bool fail_allocation_{false};
   bool fail_transfer_{false};
   std::atomic<std::size_t> invalidations_{};

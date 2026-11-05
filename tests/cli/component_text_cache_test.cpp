@@ -51,6 +51,7 @@ public:
   // Nonzero: the adapter adds a ring-backed window component, and the next
   // token also depends on the window rows, so a wrong restore changes it.
   cache::Rows window_rows{}, ring_rows{};
+  bool private_state{true};
   cache::Rows rows_per_chunk{4};
   std::size_t row_backing_bytes{16};
   mutable std::size_t through_calls{};
@@ -91,9 +92,9 @@ public:
       std::shared_ptr<const TextPromptContext>) const override {}
   std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
       cache::ResourceLedger& ledger, std::size_t) const override {
-    auto owned = window_rows
-                     ? std::make_unique<FakeAdapter>(window_rows, ring_rows)
-                     : std::make_unique<FakeAdapter>(rows_per_chunk);
+    auto owned = window_rows ? std::make_unique<FakeAdapter>(
+                                   window_rows, ring_rows, private_state)
+                             : std::make_unique<FakeAdapter>(rows_per_chunk);
     adapter = owned.get();
     return server::testing::MakeFakeCacheResources(
         ledger, std::move(owned),
@@ -2291,14 +2292,15 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 }
 // Window components through serving: RAM retries, continuations and edits
 // match an uncached control. Window 6 rows, ring 16, chunks of 4.
-std::shared_ptr<Runner> WindowRunner() {
+std::shared_ptr<Runner> WindowRunner(bool private_state) {
   auto runner = std::make_shared<Runner>();
   runner->window_rows = 6;
   runner->ring_rows = 16;
+  runner->private_state = private_state;
   return runner;
 }
-void WindowRowsReuseAndBranches() {
-  auto runner = WindowRunner();
+void WindowRowsReuseAndBranches(bool private_state) {
+  auto runner = WindowRunner(private_state);
   TextRunnerPool pool(runner, 2);
   std::vector<TextRunnerToken> prompt(40);
   std::iota(prompt.begin(), prompt.end(), 10);
@@ -2339,9 +2341,9 @@ void WindowRowsReuseAndBranches() {
 // Rows beyond the RAM pool go to disk only. A later capture three tokens
 // deeper inherits the parent's second window chunk as its first, and both
 // restore with the window a continuation reads.
-void WindowedDeepRowsSurviveDiskRestart() {
-  char pattern[] = "/tmp/gufo-component-window-test-XXXXXX";
-  const std::filesystem::path directory = mkdtemp(pattern);
+void WindowedDeepRowsSurviveDiskRestart(bool private_state) {
+  const TemporaryDirectory temp("gufo-component-window-test");
+  const std::filesystem::path directory = temp.path();
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                         .capacity_bytes = 1 << 20,
                                         .staging_capacity_bytes = 8,
@@ -2363,7 +2365,7 @@ void WindowedDeepRowsSurviveDiskRestart() {
   };
   std::uint64_t hash;
   {
-    auto runner = WindowRunner();
+    auto runner = WindowRunner(private_state);
     ComponentTextCache cache(runner, 1, 1 << 24, disk);
     auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
     auto& state = dynamic_cast<State&>(lease->state());
@@ -2375,7 +2377,7 @@ void WindowedDeepRowsSurviveDiskRestart() {
     const auto seed_size = prompt.size();
     const std::vector<TextRunnerToken> appended{8000, 8001, 8002};
     prompt.insert(prompt.end(), appended.begin(), appended.end());
-    auto runner = WindowRunner();
+    auto runner = WindowRunner(private_state);
     ComponentTextCache cache(runner, 1, 1 << 24, disk);
     auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
     assert(lease->restored_from_disk() && lease->cached_tokens() == seed_size);
@@ -2405,7 +2407,7 @@ void WindowedDeepRowsSurviveDiskRestart() {
     assert(before.tail->file != after.chunks[1].file);
   }
   {
-    auto runner = WindowRunner();
+    auto runner = WindowRunner(private_state);
     ComponentTextCache cache(runner, 1, 1 << 24, disk);
     auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
     assert(lease->restored_from_disk() &&
@@ -2414,7 +2416,6 @@ void WindowedDeepRowsSurviveDiskRestart() {
     assert(runner->adapter->RecurrentHash(state.slot) == hash);
     assert(runner->adapter->WindowTokens(state.slot) == window(prompt.size()));
   }
-  std::filesystem::remove_all(directory);
 }
 void OverRamCaptureStagesPrivateStateUnderPressure(bool protect) {
   // An over-RAM checkpoint is captured for disk only. Its rows are borrowed
@@ -2705,8 +2706,11 @@ int main() {
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
   UnbackedDeepRowsSurviveDiskRestart();
-  WindowRowsReuseAndBranches();
-  WindowedDeepRowsSurviveDiskRestart();
+  // Without private state is the shape of a model with only attention.
+  for (const bool private_state : {true, false}) {
+    WindowRowsReuseAndBranches(private_state);
+    WindowedDeepRowsSurviveDiskRestart(private_state);
+  }
   OverRamCaptureStagesPrivateStateUnderPressure(false);
   OverRamCaptureStagesPrivateStateUnderPressure(true);
   RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers();

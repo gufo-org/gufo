@@ -264,12 +264,18 @@ Rows WindowLoadedEnd(const FakeSlot& slot, const ComponentDescriptor& d) {
   return row;
 }
 }  // namespace
-FakeAdapter::FakeAdapter(Rows window_rows, Rows ring_rows) : FakeAdapter() {
+FakeAdapter::FakeAdapter(Rows window_rows, Rows ring_rows, bool private_state)
+    : FakeAdapter() {
   if (!window_rows || ring_rows % 4 || ring_rows < window_rows + 3)
     throw std::invalid_argument("fake window ring cannot hold a window");
   components_.push_back({kWindow, 1, ComponentKind::kWindowRows, sizeof(Token),
                          4, 0, window_rows});
   ring_rows_ = ring_rows;
+  private_state_ = private_state;
+  if (!private_state)
+    std::erase_if(components_, [](const auto& component) {
+      return component.id == kRecurrent;
+    });
 }
 Capabilities FakeAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
@@ -295,7 +301,8 @@ Identity FakeAdapter::CompatibilityIdentity() const {
           2,
           'w',
           static_cast<std::uint8_t>(components_.back().window_rows),
-          static_cast<std::uint8_t>(ring_rows_)};
+          static_cast<std::uint8_t>(ring_rows_),
+          static_cast<std::uint8_t>(private_state_)};
 }
 std::unique_ptr<Slot> FakeAdapter::CreateSlot(MutationGuard& guard) {
   if (std::exchange(fail_allocation_, false))
@@ -327,8 +334,9 @@ std::vector<ComponentPosition> FakeAdapter::Positions(const Slot& slot) const {
       {kTarget, state.restoring ? ContiguousRows(state.target_loaded)
                                 : state.target.size()},
       {kDraft, state.restoring ? ContiguousRows(state.draft_loaded)
-                               : state.draft.size()},
-      {kRecurrent, state.recurrent[0]}};
+                               : state.draft.size()}};
+  if (private_state_)
+    positions.push_back({kRecurrent, state.recurrent[0]});
   if (const auto* window = WindowDescriptor(components_))
     positions.push_back({kWindow, state.restoring
                                       ? WindowLoadedEnd(state, *window)
@@ -343,8 +351,9 @@ std::vector<ComponentPosition> FakeAdapter::PrefillCheckpointPositions(
   // The serving fixture advances target and draft by the same prefill tail.
   std::vector<ComponentPosition> positions{
       {kTarget, boundary},
-      {kDraft, state.draft.size() + boundary - state.target.size()},
-      {kRecurrent, boundary}};
+      {kDraft, state.draft.size() + boundary - state.target.size()}};
+  if (private_state_)
+    positions.push_back({kRecurrent, boundary});
   if (ring_rows_)
     positions.push_back({kWindow, boundary});
   return positions;
@@ -359,7 +368,7 @@ void FakeAdapter::BeginRestore(Slot& slot,
     throw std::invalid_argument("restore requires every component position");
   const Rows target_end = Position(positions, kTarget);
   const Rows draft_end = Position(positions, kDraft);
-  if (Position(positions, kRecurrent) != target_end ||
+  if ((private_state_ && Position(positions, kRecurrent) != target_end) ||
       (ring_rows_ && Position(positions, kWindow) != target_end))
     throw std::invalid_argument(
         "private boundary differs from target boundary");
@@ -388,8 +397,9 @@ void FakeAdapter::BeginRestore(Slot& slot,
   state.draft = std::move(draft);
   state.target_loaded = std::move(target_loaded);
   state.draft_loaded = std::move(draft_loaded);
-  state.expected = {
-      {kTarget, target_end}, {kDraft, draft_end}, {kRecurrent, target_end}};
+  state.expected = {{kTarget, target_end}, {kDraft, draft_end}};
+  if (private_state_)
+    state.expected.push_back({kRecurrent, target_end});
   if (ring_rows_) {
     state.expected.push_back({kWindow, target_end});
     std::ranges::fill(state.occupant, kEmptyRingSlot);
@@ -590,9 +600,14 @@ bool FakeAdapter::Validate(Slot& slot,
   auto& state = AsSlot(slot);
   if (!state.restoring)
     throw std::logic_error("validation requires an active restore");
+  if (!private_state_)
+    state.recurrent = {state.target.size(), state.draft.size(),
+                       AdvanceHash(kSeed, state.target, 0),
+                       AdvanceHash(kSeed, state.draft, 0)};
   const auto actual = Positions(slot);
   const bool complete =
-      !state.Busy() && !state.failed && state.private_loaded &&
+      !state.Busy() && !state.failed &&
+      (state.private_loaded || !private_state_) &&
       positions.size() == components_.size() &&
       ContiguousRows(state.target_loaded) == state.target.size() &&
       ContiguousRows(state.draft_loaded) == state.draft.size() &&

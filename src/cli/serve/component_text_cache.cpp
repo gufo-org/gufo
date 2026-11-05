@@ -1810,14 +1810,15 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
   if (!impl_->cache->ram_enabled && !impl_->cache->queue)
     return {};
   const auto& adapter = *impl_->cache->resources->adapter;
-  // Grid checkpoints lie a whole grid step apart, beyond any window, so each
-  // keeps its own window as well as its private state.
+  // Each grid checkpoint keeps its private state and at most a window plus a
+  // partial leading chunk. Checkpoints closer than a window share those rows,
+  // so this bound can only plan fewer captures than RAM holds.
   std::size_t private_bytes = 0;
   for (const auto& d : adapter.Components())
     if (d.kind == cache::ComponentKind::kPrivateState)
       private_bytes += d.state_bytes;
     else if (d.kind == cache::ComponentKind::kWindowRows)
-      private_bytes += d.window_rows * d.row_bytes;
+      private_bytes += (d.window_rows + d.rows_per_chunk - 1) * d.row_bytes;
   const auto plan = cache::PlanCaptures(
       adapter, impl_->slot.Execution(),
       {impl_->prompt.size(),

@@ -217,7 +217,8 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
       state += c.descriptor.state_bytes;
     else if (c.descriptor.kind == ComponentKind::kWindowRows)
       // A window is a fixed cost per checkpoint, like private state.
-      state += std::min(c.position.valid_rows, c.descriptor.window_rows) *
+      state += (c.position.valid_rows -
+                FirstChunkRow(c.descriptor, c.position.valid_rows)) *
                c.descriptor.row_bytes;
     else
       rows += c.position.valid_rows * c.descriptor.row_bytes;
