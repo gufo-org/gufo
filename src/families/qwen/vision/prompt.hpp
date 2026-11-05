@@ -72,7 +72,8 @@ struct Prompt {
     std::span<const tokenization::ChatTool> tools,
     const tokenization::ChatTemplateOptions& options,
     std::string_view encoder_identity, std::uint32_t max_context,
-    ImageCache* image_cache = nullptr);
+    ImageCache* image_cache = nullptr,
+    const ext::RenderedChatPrompt* rendered_prompt = nullptr);
 
 }  // namespace gufo::models::qwen::vision
 #endif

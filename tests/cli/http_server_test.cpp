@@ -2756,6 +2756,48 @@ void TestCompatibilityThinkingDefaults() {
   }
 }
 
+void TestResponsesTemplateOptions() {
+  RunningServer server;
+  server.backend->SetOutput("answer");
+  server.backend->reasoning.enabled = true;
+  server.backend->chat_token_count = 42;
+  auto body = gufo::json::parse(R"({"input":"hello","chat_template_kwargs":{
+    "custom_schema":{"name":"string"},"enable_thinking":false,
+    "preserve_thinking":false,"add_vision_id":true}})");
+  for (const bool stream : {false, true}) {
+    body["stream"] = stream;
+    ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+    const auto chat = server.backend->LastCall().chat;
+    assert(chat.chat_template_kwargs.dump() ==
+           body.find("chat_template_kwargs")->dump());
+    assert(chat.reasoning.enabled == false &&
+           chat.reasoning.preserve_thinking == false && chat.add_vision_id);
+    ExpectStatus(server.Post("/v1/responses/input_tokens", body.dump()), 200);
+    assert(server.backend->counted_chat.chat_template_kwargs.dump() ==
+           chat.chat_template_kwargs.dump());
+    assert(server.backend->counted_chat.reasoning.enabled == false);
+  }
+  // Native Responses controls override template kwargs, which override
+  // defaults.
+  body["reasoning"]["effort"] = "low";
+  ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+  assert(server.backend->LastCall().chat.reasoning.enabled == true);
+  assert(server.backend->LastCall().chat.reasoning.effort ==
+         gufo::ReasoningEffort::kLow);
+  body["reasoning"]["effort"] = "none";
+  body["chat_template_kwargs"]["enable_thinking"] = true;
+  ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
+  assert(server.backend->LastCall().chat.reasoning.enabled == false);
+  for (const auto* invalid :
+       {"null", "[]", "42", R"({"enable_thinking":"yes"})",
+        R"({"add_vision_id":1})", R"({"reasoning_effort":"bogus"})",
+        R"({"preserve_thinking":"false"})"}) {
+    body["chat_template_kwargs"] = gufo::json::parse(invalid);
+    for (const auto* path : {"/v1/responses", "/v1/responses/input_tokens"})
+      ExpectStatus(server.Post(path, body.dump()), 400);
+  }
+}
+
 void TestResponseSamplingDefaults() {
   RunningServer server;
   using gufo::sampling::TextModelPreset;
@@ -3536,6 +3578,7 @@ int main() {
   TestCachePersistEcho();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
+  TestResponsesTemplateOptions();
   TestResponseSamplingDefaults();
   TestCompatibilityUtf8();
   TestPeerDisconnect();

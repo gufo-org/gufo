@@ -583,6 +583,7 @@ bool ReadTextMessages(const json::Value* input,
         messages->back().role == tokenization::ChatRole::kAssistant &&
         messages->back().content.empty() && !messages->back().thought.empty()) {
       messages->back().content = std::move(message.content);
+      messages->back().content_parts = std::move(message.content_parts);
     } else {
       push(std::move(message));
     }
@@ -692,7 +693,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
            field == "tool_choice" || field == "parallel_tool_calls" ||
-           field == "include" || field == "top_logprobs"))) {
+           field == "include" || field == "top_logprobs" ||
+           field == "chat_template_kwargs"))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }

@@ -103,7 +103,8 @@ public:
   [[nodiscard]] static std::shared_ptr<const QwenGpuModel> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr,
-      std::shared_ptr<models::qwen::vision::Encoder> vision = {});
+      std::shared_ptr<models::qwen::vision::Encoder> vision = {},
+      bool use_native_chat_template = true);
 
   [[nodiscard]] const std::shared_ptr<models::qwen::vision::Encoder>&
   VisionEncoder() const noexcept {

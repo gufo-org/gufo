@@ -109,8 +109,10 @@ struct PromptPiece {
 
 /// Rejects DeepSeek artifacts whose embedded template is not the pinned
 /// converter version implemented by the compiled formatter.
+/// External renderers skip that digest check, retaining model identity checks.
 [[nodiscard]] bool ValidateGgufTemplate(const core::GgufReader& reader,
-                                        std::string* error_msg = nullptr);
+                                        std::string* error_msg = nullptr,
+                                        bool use_native_template = true);
 
 [[nodiscard]] constexpr std::string_view ChatTemplateId() noexcept {
   return "deepseek-v4-flash-0731-compiled-v3";

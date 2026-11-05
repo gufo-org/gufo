@@ -191,6 +191,58 @@ from metadata, including optional `serving` declarations. New runtime controls
 also need actual command parsing/execution support; metadata alone cannot
 implement them. See [Nix serving](model-extensions/serving.md).
 
+## Rendering chat for an existing text provider
+
+An extension already owns its provider's formatter through `TextModelRunner`'s
+`PreparePrompt`, `RenderPrompt`, `CountPromptTokens` and `InitialOutputState`.
+A separate formatter extension can reuse a cooperating provider by registering a
+`ChatRendererFactory` from its `entry`, with `"providers": []` in its manifest:
+
+```cpp
+void my_templates_register(gufo::ext::Registry&) {
+  gufo::ext::RegisterChatRendererFactory(
+      "my-templates",
+      +[](std::string_view, const gufo::ext::TextRunnerOptions& options)
+          -> std::shared_ptr<const gufo::ext::ChatRenderer> {
+        return std::make_shared<MyRenderer>(options.reader);
+      });
+}
+```
+
+HTTP model loading selects one renderer in `TextRunnerOptions::chat_renderer`
+and installs it with `TextModelRunner::SetChatRenderer` before publishing the
+runner. Multiple accepting factories fail loading. Shared `PrepareChatPrompt`,
+`CountChatTokens`, `RenderChatPrompt` and `ChatInitialOutputState` entry points
+invoke and validate the renderer; without one they call the native methods.
+
+Models expose only `PrepareRenderedPrompt`: tokenize validated native framing
+and prepare any supported image context. Implement this primitive once for a new
+model; template dispatch, counting and reasoning-state handling are shared.
+Generation supplies the model's context limit, while counting supplies a larger
+limit so an over-context request can still be measured. All shipped text
+providers implement this primitive. Raw completions are unchanged. Native
+formatters retain pinned-template digest checks; external rendering retains
+weight, architecture, tokenizer and vision validation.
+
+The immutable renderer receives the effective `ChatRequest`, including host
+constraint instructions. Preserve `framing_suffix`; resolved `reasoning` controls
+win over `chat_template_kwargs`, accepted by Chat Completions and Responses
+(including token-count routes). Responses' native `reasoning` object takes
+precedence over the reasoning controls in those kwargs. `content_parts` contains
+validated text/image parts without URLs or bytes; null means use typed
+content/images. Developer image parts can supply examples; each model validates
+which roles its formatter accepts. Return native framing, ordered
+image-placeholder byte offsets, literal spans whose special-token spellings stay
+ordinary text, and an explicit initial output state. Respect the provided byte
+limit and preserve the model's output/tool dialect.
+
+For Qwen, emit one `<|vision_start|><|image_pad|><|vision_end|>` per image, in input
+order, with the offset pointing to `<|image_pad|>`. The model validates and expands
+the placeholders through its existing resizing, projector, RoPE and image-cache
+pipeline. Prompt tokens and image identities retain cache correctness; custom
+rendering currently leaves the optional stable-prefix checkpoint boundary unset.
+Template loading, configuration, language and dependencies belong to the extension.
+
 ## Build and exercise the extension
 
 From a Gufo checkout with its documented dependencies or pinned development

@@ -144,6 +144,70 @@ auto MakeTokenizer() {
   return tokenizer;
 }
 
+void TestExternalRenderedImages() {
+  using namespace gufo::tokenization;
+  const auto tokenizer = MakeTokenizer();
+  std::vector<ChatMessage> messages{{ChatRole::kUser, "ignored by renderer"}};
+  messages.front().images = {{0, Encoded(17)}, {0, Encoded(42)}};
+  // Independent literal result of an external template, with adjacent images.
+  gufo::ext::RenderedChatPrompt rendered{
+      "<|im_start|>user\ncustom<|vision_start|><|image_pad|><|vision_end|>"
+      "<|vision_start|><|image_pad|><|vision_end|>tail<|im_end|>\n"
+      "<|im_start|>assistant\n",
+      {}};
+  const auto first = rendered.text.find("<|image_pad|>");
+  const auto second = rendered.text.find("<|image_pad|>", first + 1);
+  rendered.image_offsets = {first, second};
+  ImageCache cache;
+  const auto prepare = [&](std::string_view encoder = "encoder",
+                           std::uint32_t limit = 8192) {
+    return Prepare(*tokenizer, messages, {}, {}, encoder, limit, &cache,
+                   &rendered);
+  };
+  const auto prompt = prepare();
+  assert(prompt.images.size() == 2 &&
+         prompt.images[0].pixels->pixels[0] == 17 &&
+         prompt.images[1].pixels->pixels[0] == 42);
+  assert(prompt.rope.images[0].height == 8 && prompt.rope.images[0].width == 8);
+  assert(prompt.rope.images[1].offset == prompt.rope.images[0].offset + 66);
+  const auto count =
+      std::count(prompt.tokens.begin(), prompt.tokens.end(), kImageToken);
+  assert(count == 128 && prompt.stable_prefix_tokens == 0);
+  EqualPrompts(prompt, prepare());
+  assert(cache.GetStats().hits == 2);
+  messages.front().images[0].bytes = Encoded(99);
+  assert(prepare().cache_identity != prompt.cache_identity);
+  const auto rejects = [&](auto action) {
+    bool rejected = false;
+    try {
+      action();
+    } catch (const std::exception&) {
+      rejected = true;
+    }
+    assert(rejected);
+  };
+  rejects([&] { (void)prepare(""); });
+  rejects([&] { (void)prepare("encoder", 32); });
+  rendered.image_offsets = {second, first};
+  rejects([&] { (void)prepare(); });
+  rendered.image_offsets = {first};
+  rejects([&] { (void)prepare(); });
+  rendered.image_offsets = {first, rendered.text.size() + 1};
+  rejects([&] { (void)prepare(); });
+  rendered.image_offsets = {first, second};
+  const auto literal_offset = rendered.text.size();
+  rendered.text += "<|image_pad|>";
+  rejects([&] { (void)prepare(); });
+  rendered.literal_spans = {{literal_offset, 13}};
+  const auto with_literal = prepare();
+  assert(std::count(with_literal.tokens.begin(), with_literal.tokens.end(),
+                    kImageToken) == 128);
+  rendered.literal_spans = {{first, 13}};
+  rejects([&] { (void)prepare(); });
+  rendered.literal_spans = {{rendered.text.size(), 1}};
+  rejects([&] { (void)prepare(); });
+}
+
 void TestPromptIdentities() {
   using namespace gufo::tokenization;
   const auto tokenizer = MakeTokenizer();
@@ -255,6 +319,7 @@ void TestDetailPrompts() {
 int main(int argc, char** argv) {
   TestReuseAndEviction();
   TestConcurrentMisses();
+  TestExternalRenderedImages();
   TestPromptIdentities();
   TestDetailKeysCache();
   TestDetailPrompts();

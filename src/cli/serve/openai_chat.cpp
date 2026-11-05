@@ -312,6 +312,7 @@ bool ParseContent(const json::Value* content,
     return false;
   }
 
+  message->content_parts = json::Value::array();
   for (const auto& part : content->items()) {
     if (!part.is_object()) {
       *error = "message content parts must be objects";
@@ -323,9 +324,12 @@ bool ParseContent(const json::Value* content,
       const auto* url =
           image != nullptr && image->is_object() ? image->find("url") : nullptr;
       if ((message->role != tokenization::ChatRole::kUser &&
-           message->role != tokenization::ChatRole::kTool) ||
+           message->role != tokenization::ChatRole::kTool &&
+           message->role != tokenization::ChatRole::kDeveloper) ||
           url == nullptr || !url->is_string()) {
-        *error = "image_url requires a user or tool message and a string URL";
+        *error =
+            "image_url requires a user, tool or developer message and a string "
+            "URL";
         return false;
       }
       // Resolution is model-owned, except that 'low' bounds it. The other
@@ -353,6 +357,9 @@ bool ParseContent(const json::Value* content,
         *error = exception.what();
         return false;
       }
+      auto placeholder = json::Value::object();
+      placeholder["type"] = "image";
+      message->content_parts.push_back(std::move(placeholder));
       continue;
     }
     if (type != "text" && type != "input_text") {
@@ -364,6 +371,10 @@ bool ParseContent(const json::Value* content,
       *error = "text message content parts require a string 'text'";
       return false;
     }
+    auto preserved = json::Value::object();
+    preserved["type"] = "text";
+    preserved["text"] = *text;
+    message->content_parts.push_back(std::move(preserved));
     output->append(text->get_str());
   }
   return true;
@@ -783,6 +794,33 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
   return true;
 }
 
+// Parse request controls independently of server defaults, then apply only
+// explicit values. Responses' native reasoning object takes precedence below.
+std::optional<HttpResponse> ParseReasoningAndTemplateOptions(
+    const json::Value& body, ChatRequest* chat) {
+  ReasoningOptions options;
+  std::string error;
+  if (!ParseReasoningOptions(body, &options, &error))
+    return Error(400, "Bad Request", std::move(error), "invalid_reasoning");
+  if (options.enabled)
+    chat->reasoning.enabled = options.enabled;
+  if (options.effort)
+    chat->reasoning.effort = options.effort;
+  if (options.preserve_thinking)
+    chat->reasoning.preserve_thinking = options.preserve_thinking;
+  if (const auto* kwargs = body.find("chat_template_kwargs")) {
+    chat->chat_template_kwargs = *kwargs;
+    if (const auto* vision_id = kwargs->find("add_vision_id")) {
+      if (!vision_id->is_bool())
+        return Error(400, "Bad Request",
+                     "'chat_template_kwargs.add_vision_id' must be a boolean",
+                     "invalid_template_options");
+      chat->add_vision_id = vision_id->as_bool();
+    }
+  }
+  return {};
+}
+
 // Match llama.cpp's canonical field and its older compatibility spelling.
 // An explicit canonical value takes precedence; -1 keeps the server default.
 std::optional<HttpResponse> ParseReasoningBudget(const json::Value& body,
@@ -930,23 +968,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
 
   if (auto error = ParseToolControls(body, output))
     return error;
-  std::string parse_error;
-
-  if (!ParseReasoningOptions(body, &output->chat.reasoning, &parse_error)) {
-    return Error(400, "Bad Request", std::move(parse_error),
-                 "invalid_reasoning");
-  }
+  if (auto error = ParseReasoningAndTemplateOptions(body, &output->chat))
+    return error;
   if (auto error = ParseReasoningBudget(body, &output->chat.reasoning))
     return error;
-  if (const auto* kwargs = body.find("chat_template_kwargs")) {
-    if (const auto* vision_id = kwargs->find("add_vision_id")) {
-      if (!vision_id->is_bool())
-        return Error(400, "Bad Request",
-                     "'chat_template_kwargs.add_vision_id' must be a boolean",
-                     "invalid_template_options");
-      output->chat.add_vision_id = vision_id->as_bool();
-    }
-  }
   const ReasoningOptions defaults = backend.reasoning_defaults();
   if (!output->chat.reasoning.enabled.has_value()) {
     output->chat.reasoning.enabled = defaults.enabled;
@@ -3369,6 +3394,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
   // to invent values. ParseToolControls still validates explicit strict:true
   // and enables tool constraints regardless of strictness.
   *chat = std::move(parsed.chat);
+  if (auto error = ParseReasoningAndTemplateOptions(body, chat))
+    return error;
 
   if (const auto* progress = body.find("return_progress");
       progress != nullptr && !progress->is_null()) {

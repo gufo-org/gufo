@@ -61,6 +61,12 @@ class ConfigureTests(unittest.TestCase):
             with self.subTest(option_field=field):
                 self.invalid(lambda m: m[0]["options"][0].pop(field), field)
 
+    def test_registration_only_extension(self):
+        manifests = copy.deepcopy(BASE)
+        manifests[1]["providers"] = []
+        manifests[1]["options"] = []
+        self.configure(manifests)
+
     def test_decision_capability(self):
         manifests = copy.deepcopy(BASE)
         manifests[0]["providers"][0]["capability"] = "decision"
@@ -109,7 +115,6 @@ class ConfigureTests(unittest.TestCase):
             (lambda m: m[0]["providers"][0].update(keys=["arbitrary:key"]), "unsupported artifact key"),
             (lambda m: m[0]["providers"][0].update(keys=[]), "keys cannot be empty"),
             (lambda m: m[0]["providers"][0].update(keys=["gguf:x", "gguf:x"]), "duplicate value"),
-            (lambda m: m[0].update(providers=[]), "providers cannot be empty"),
             (lambda m: m[0].update(targets={}), "targets cannot be empty"),
             (lambda m: m[0].update(platforms=[]), "platforms cannot be empty"),
             (lambda m: m[0].update(platforms=["other"]), "unsupported platform"),
@@ -318,6 +323,10 @@ class SchemaTests(unittest.TestCase):
         schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
         jsonschema.Draft202012Validator.check_schema(schema)
         validator = jsonschema.Draft202012Validator(schema)
+        registration_only = copy.deepcopy(BASE[1])
+        registration_only["providers"] = []
+        registration_only["options"] = []
+        validator.validate(registration_only)
         for manifest in BASE:
             validator.validate(manifest)
         for path in sorted((ROOT / "src").glob("**/extension.json")):

@@ -2,10 +2,121 @@
 
 #include <algorithm>
 #include <charconv>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
 namespace gufo::ext {
+
+namespace {
+std::map<std::string, ChatRendererFactory, std::less<>> chat_renderer_factories;
+}
+
+void RegisterChatRendererFactory(std::string id, ChatRendererFactory factory) {
+  if (id.empty() || factory == nullptr)
+    throw std::invalid_argument("chat renderer requires an ID and factory");
+  const auto [it, inserted] =
+      chat_renderer_factories.emplace(std::move(id), factory);
+  if (!inserted && it->second != factory)
+    throw std::invalid_argument("duplicate chat renderer ID");
+}
+
+std::shared_ptr<const ChatRenderer> CreateChatRenderer(
+    std::string_view provider_id, const TextRunnerOptions& options) {
+  std::shared_ptr<const ChatRenderer> selected;
+  for (const auto& [id, factory] : chat_renderer_factories) {
+    auto renderer = factory(provider_id, options);
+    if (!renderer)
+      continue;
+    if (selected)
+      throw std::invalid_argument(
+          "multiple chat renderers selected for provider " +
+          std::string(provider_id));
+    selected = std::move(renderer);
+  }
+  return selected;
+}
+
+void TextModelRunner::SetChatRenderer(
+    std::shared_ptr<const ChatRenderer> renderer) {
+  chat_renderer_ = std::move(renderer);
+}
+
+std::optional<RenderedChatPrompt> TextModelRunner::RenderExternalChat(
+    const ChatRequest& request) const {
+  if (!chat_renderer_)
+    return std::nullopt;
+  const auto limit = std::max<std::size_t>(
+      1024 * 1024, std::size_t(Descriptor().max_context) * 128);
+  auto rendered = chat_renderer_->Render(request, limit);
+  if (rendered.text.empty() || rendered.text.size() > limit ||
+      rendered.initial_output_state == ext::InitialOutputState::kAuto)
+    throw std::invalid_argument("invalid chat renderer output");
+  std::size_t end = 0;
+  for (const auto& span : rendered.literal_spans) {
+    if (span.offset < end || span.offset > rendered.text.size() ||
+        span.size > rendered.text.size() - span.offset)
+      throw std::invalid_argument("invalid rendered literal spans");
+    end = span.offset + span.size;
+  }
+  std::size_t images = 0;
+  for (const auto& message : request.messages)
+    images += message.images.size();
+  if (rendered.image_offsets.size() != images)
+    throw std::invalid_argument("chat renderer must preserve every image");
+  if (images && !Descriptor().capabilities.supports_vision)
+    throw std::invalid_argument("model does not support image input");
+  end = 0;
+  for (const auto offset : rendered.image_offsets) {
+    if (offset < end || offset >= rendered.text.size())
+      throw std::invalid_argument("invalid rendered image offsets");
+    end = offset + 1;
+  }
+  return rendered;
+}
+
+TextPreparedPrompt TextModelRunner::PrepareRenderedPrompt(
+    const ChatRequest&, const RenderedChatPrompt&, std::uint32_t) const {
+  throw std::invalid_argument("model does not support preformatted chat input");
+}
+
+std::optional<TextPreparedPrompt> TextModelRunner::PrepareChatPrompt(
+    const ChatRequest& request) const {
+  const auto rendered = RenderExternalChat(request);
+  if (!rendered)
+    return PreparePrompt(request);
+  const auto context = Descriptor().max_context;
+  auto prompt = PrepareRenderedPrompt(request, *rendered, context);
+  if (prompt.tokens.size() > context)
+    throw std::length_error("prompt exceeds the model context");
+  return prompt;
+}
+
+std::optional<std::size_t> TextModelRunner::CountChatTokens(
+    const ChatRequest& request) const {
+  if (const auto rendered = RenderExternalChat(request))
+    return PrepareRenderedPrompt(request, *rendered,
+                                 std::numeric_limits<std::int32_t>::max())
+        .tokens.size();
+  return CountPromptTokens(request);
+}
+
+std::optional<std::string> TextModelRunner::RenderChatPrompt(
+    const ChatRequest& request) const {
+  if (const auto rendered = RenderExternalChat(request))
+    return rendered->text;
+  return RenderPrompt(request);
+}
+
+ext::InitialOutputState TextModelRunner::ChatInitialOutputState(
+    const ChatRequest& request) const {
+  // Startup diagnostics have no conversation from which to derive state.
+  if (chat_renderer_ && request.messages.empty())
+    return ext::InitialOutputState::kAuto;
+  if (const auto rendered = RenderExternalChat(request))
+    return rendered->initial_output_state;
+  return InitialOutputState(request);
+}
 
 std::optional<TextRunnerRamCacheOptions> ParseRamCacheOption(
     std::string_view text, std::string* error) {

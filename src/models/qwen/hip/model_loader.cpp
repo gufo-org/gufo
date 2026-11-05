@@ -326,7 +326,8 @@ std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
 
 std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::shared_ptr<models::qwen::vision::Encoder> vision) {
+    std::shared_ptr<models::qwen::vision::Encoder> vision,
+    bool use_native_chat_template) {
   if (reader == nullptr) {
     if (error_msg != nullptr) {
       *error_msg = "GGUF reader must not be null";
@@ -334,7 +335,9 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     return nullptr;
   }
 
-  if (!tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader,
+  // The pinned template is required only by the compiled native formatter.
+  if (use_native_chat_template &&
+      !tokenization::QwenChatTemplate::ValidateGgufTemplate(*reader,
                                                             error_msg)) {
     return nullptr;
   }
