@@ -1126,6 +1126,13 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
       *error = "Failed to create GPU model: " + load_error;
     return nullptr;
   }
+  try {
+    models::qwen::vision::PrepareForServing(model->VisionEncoder());
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return nullptr;
+  }
   std::uint32_t max_context = options.max_context;
   if (max_context == 0) {
     max_context = model->GetConfig().context_length;
