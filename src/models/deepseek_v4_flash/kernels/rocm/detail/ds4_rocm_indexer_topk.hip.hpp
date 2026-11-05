@@ -510,7 +510,7 @@ __global__ static void indexer_partial_topk_kernel(uint32_t* selected,
     for (uint32_t item = 0; item < items; ++item) {
       const uint32_t base = item * threads;
       if (base >= n)
-        break;
+        continue;
       const uint32_t i = base + tid;
       const uint64_t key = input_keys[item];
       const uint32_t digit = uint32_t(key >> shift) & 15u;
@@ -559,7 +559,7 @@ __global__ static void indexer_partial_topk_kernel(uint32_t* selected,
   for (uint32_t item = 0; item < items; ++item) {
     const uint32_t base = item * threads;
     if (base >= n)
-      break;
+      continue;
     const uint32_t i = base + tid;
     const uint64_t key = input_keys[item];
     const bool keep = i < n && key >= prefix;
@@ -592,16 +592,22 @@ __global__ static void indexer_partial_topk_kernel(uint32_t* selected,
 static bool indexer_partial_topk_launch(uint32_t* selected, const float* scores,
                                         uint32_t n_comp, uint32_t n_tokens,
                                         uint32_t top_k) {
-  if (top_k != 512u || n_comp <= 1024u || n_comp > 32768u || n_tokens == 0u)
+  if (top_k != 512u || n_comp <= 1024u || n_comp > 65536u || n_tokens == 0u)
     return false;
-  if (n_comp <= 8192u)
+  if (n_comp <= 8192u && n_tokens <= 8u)
+    indexer_partial_topk_kernel<8192, 512>
+        <<<n_tokens, 512>>>(selected, scores, n_comp, n_tokens);
+  else if (n_comp <= 8192u)
     indexer_partial_topk_kernel<8192>
         <<<n_tokens, 256>>>(selected, scores, n_comp, n_tokens);
   else if (n_comp <= 16384u)
-    indexer_partial_topk_kernel<16384>
-        <<<n_tokens, 256>>>(selected, scores, n_comp, n_tokens);
-  else
+    indexer_partial_topk_kernel<16384, 512>
+        <<<n_tokens, 512>>>(selected, scores, n_comp, n_tokens);
+  else if (n_comp <= 32768u)
     indexer_partial_topk_kernel<32768, 512>
         <<<n_tokens, 512>>>(selected, scores, n_comp, n_tokens);
+  else
+    indexer_partial_topk_kernel<65536, 1024>
+        <<<n_tokens, 1024>>>(selected, scores, n_comp, n_tokens);
   return true;
 }
