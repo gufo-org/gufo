@@ -557,7 +557,7 @@ struct Model::Impl {
                      const CancellationCheck& cancelled);
 };
 
-// Called under `mutex`. Switched weights rebuild from the mapped originals,
+// Called under `mutex`. Switched weights rebuild from the checkpoint originals,
 // so returning to an earlier set reproduces its weights exactly. Every
 // target whose terms change is built here, so the merge cost is in
 // `lora_ms` and not in denoising. Weights left unbuilt by a failed switch
@@ -585,7 +585,17 @@ double Model::Impl::SelectLoras(const std::vector<Lora>& requested,
   }
   installed.reset();
   try {
-    for (const auto& name : runtime.SetLoras(std::move(terms))) {
+    const auto rebuild = runtime.SetLoras(std::move(terms));
+    // Stream the dropped weights from the files in bounded batches, as on
+    // first load (#830): rebuilding them through the mapping would leave the
+    // touched pages in the process working set on Windows. Every adapter
+    // target is a transformer weight; the loop below then finds them resident
+    // and only falls back to the mapping when the files cannot be streamed.
+    if (!rebuild.empty()) {
+      Cancel(cancelled);
+      runtime.UploadMissing("transformer.");
+    }
+    for (const auto& name : rebuild) {
       Cancel(cancelled);
       runtime.Weight(name);
     }

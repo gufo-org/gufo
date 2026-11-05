@@ -91,11 +91,15 @@ public:
   Matrix UploadFloat(std::span<const float> values, int rows, int cols);
   Matrix Weight(std::string_view name);
   /// Replace the adapter terms by target name. Weights whose terms change
-  /// are dropped and rebuild from the mapped originals on next use. Returns
+  /// are dropped and rebuild from the checkpoint originals on next use. Returns
   /// the names to rebuild for the switch: every target whose terms change or
   /// that is not resident, and the dropped weights that lost their terms.
   std::vector<std::string> SetLoras(
       std::map<std::string, std::vector<LoraTerm>, std::less<>> terms);
+  /// Upload every weight under `prefix` that is not resident through the
+  /// bounded file-streaming path, merging adapter terms as on first load.
+  /// False when the files cannot be streamed; Weight() then reads the mapping.
+  bool UploadMissing(std::string_view prefix) { return UploadGroup(prefix); }
   Matrix Linear(const Matrix& x, const std::string& name);
   Matrix Normalize(const Matrix& x, Norm kind, const std::string& weight = {},
                    float epsilon = 1e-6F, bool silu = false);
