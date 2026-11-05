@@ -8,6 +8,9 @@ Model::Model(const std::filesystem::path&) {
   throw std::runtime_error("Qwen-Image requires HIP");
 }
 Model::~Model() = default;
+const SamplingConfig& Model::sampling() const {
+  throw std::runtime_error("Qwen-Image requires HIP");
+}
 Result Model::Generate(const Request&, const CancellationCheck&,
                        const Observer&) {
   throw std::runtime_error("Qwen-Image requires HIP");

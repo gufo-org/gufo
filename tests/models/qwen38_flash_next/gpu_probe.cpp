@@ -30,8 +30,8 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen/tokenizer.hpp"
-#include "src/models/qwen38_flash_next/draft_vocab.hpp"
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
@@ -311,11 +311,12 @@ int main(int argc, char** argv) {
   }
   if (sampled_head) {
     std::vector<std::int32_t> specials;
-    for (std::uint32_t id = q::kMtpDraftVocab; id < c.vocab_size; ++id)
+    for (std::uint32_t id = gufo::speculative::kDraftVocabPrefix;
+         id < c.vocab_size; ++id)
       if (tokenizer->IsSpecialToken(id))
         specials.push_back(id);
-    if (!device->SetDraftVocab(q::kMtpDraftVocab, std::move(specials),
-                               &error)) {
+    if (!device->SetDraftVocab(gufo::speculative::kDraftVocabPrefix,
+                               std::move(specials), &error)) {
       std::fprintf(stderr, "draft vocabulary failed: %s\n", error.c_str());
       return 1;
     }

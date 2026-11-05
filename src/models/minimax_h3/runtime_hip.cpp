@@ -1,10 +1,10 @@
 #include <hip/hip_runtime.h>
 
 #include <cstring>
+#include <gufo/ext/experimental/arch.hpp>
 #include <memory>
 #include <string>
 
-#include "src/core/hip/arch.hpp"
 #include "src/models/minimax_h3/runtime.hpp"
 
 namespace gufo::minimax_h3 {

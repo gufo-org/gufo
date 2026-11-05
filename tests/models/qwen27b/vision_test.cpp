@@ -11,8 +11,8 @@
 #include <unordered_map>
 
 #include "src/core/platform/net.hpp"
-#include "src/models/qwen/control_tokens.hpp"
-#include "src/models/qwen/vision/prompt.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
+#include "src/families/qwen/vision/prompt.hpp"
 
 using gufo::tokenization::kImagePad;
 using gufo::tokenization::kImEnd;
@@ -21,7 +21,7 @@ using gufo::tokenization::kVisionEnd;
 using gufo::tokenization::kVisionStart;
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/vision/encoder.hpp"
+#include "src/families/qwen/vision/encoder.hpp"
 #endif
 
 namespace {
@@ -316,7 +316,7 @@ void TestToolReasoningCheckpoint() {
               {ChatRole::kUser, "Read the fixture."},
               {ChatRole::kAssistant, "", "", thought},
               {ChatRole::kTool, "The fixture is ready."}};
-          messages[1].tool_calls.push_back({"call", "read_fixture", {}});
+          messages[1].tool_calls.push_back({"call", "read_fixture", {}, {}});
           if (images)
             messages[0].images.push_back({0, pixels});
           ChatTemplateOptions options;

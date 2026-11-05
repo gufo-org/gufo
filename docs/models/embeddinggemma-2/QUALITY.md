@@ -162,6 +162,14 @@ The teacher uses float32; no Gufo code participates in fixture generation.
 Thirteen probes cover sub-second and fractional-FPS clips, portrait and landscape,
 32-frame and overflow boundaries, floating linspace rounding, uniform/truncate selection, timestamped
 upsampling, repeated clips, embedded soundtracks, and joint text/video/image/audio.
+Six more cover the non-default per-frame budgets (`max_soft_tokens` 70, 280,
+560 and 1120, on fractional-FPS, portrait, sub-second and timestamped clips),
+64 frames from two clips at budget 70, and the joint text/video/image/audio
+input at budget 560 (the image keeps its own 280 default).
+They were generated with `--case` in the same pinned transformers revision with
+Torch 2.15.0+cpu and PyAV 19.0.2; regenerating `short`, `portrait` and
+`timestamps` there reproduced their token IDs and patch hashes exactly, with
+reference values at most 1.41e-7 from the retained ones.
 All selected frame indices, unpadded patch shapes and resized patch bytes match
 in the CPU test. HTTP expanded-token usage agrees with reference token counts;
 the worst cosine across thirteen video/mixed vectors is 0.99997998 versus the teacher, with

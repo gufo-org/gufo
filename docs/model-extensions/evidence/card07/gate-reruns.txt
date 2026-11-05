@@ -1,0 +1,7 @@
+python3 tests/tools/check_extension_isolation_test.py
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 11.421s
+
+OK
+EXIT=0

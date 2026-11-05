@@ -11,14 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/sampling.hpp"
 #include "src/core/speculative/draft_backend.hpp"
-#include "src/models/qwen/dflash_policy.hpp"
-#include "src/models/qwen/generator.hpp"
-#include "src/models/qwen/tokenizer.hpp"
-
-#if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/executor.hpp"
-#endif
 
 namespace gufo::speculative {
 
@@ -31,7 +25,14 @@ struct SpeculativeOptions {
   bool enable_adaptive_draft_length{true};
   bool use_batched_verification{false};
   bool retain_frontier_logits{false};
-  DFlashDraftPolicy dflash_policy{DFlashDraftPolicy::kAdaptive};
+};
+
+/// Generation contract for speculative decoding: a token budget plus the
+/// core-owned sampling configuration. Model generators own their own option
+/// structs; the verifier must not borrow one.
+struct GenerationOptions {
+  std::size_t max_new_tokens{128};
+  sampling::SamplingConfig sampling;
 };
 
 struct SpeculativeStats {
@@ -50,7 +51,7 @@ struct SpeculativeStats {
 #if defined(ENGINE_ENABLE_HIP)
 
 struct VerificationChunkResult {
-  std::vector<tokenization::TokenId> predictions;
+  std::vector<sampling::TokenId> predictions;
   std::vector<float> hidden_states;
   std::vector<float> logits;
   std::size_t hidden_width{0};
@@ -58,7 +59,7 @@ struct VerificationChunkResult {
 };
 
 struct SampledVerificationResult {
-  tokenization::TokenId token{0};
+  sampling::TokenId token{0};
   bool accepted{false};
 };
 
@@ -66,7 +67,7 @@ class ISpeculativeTargetExecutor;
 
 struct TargetVerificationItem {
   ISpeculativeTargetExecutor* executor;
-  std::span<const tokenization::TokenId> tokens;
+  std::span<const sampling::TokenId> tokens;
   std::uint32_t position;
   bool capture_hidden;
   bool capture_logits;
@@ -82,18 +83,18 @@ public:
   virtual ~ISpeculativeTargetExecutor() = default;
 
   virtual void Reset() noexcept = 0;
-  [[nodiscard]] virtual tokenization::TokenId ForwardPromptBatch(
-      std::span<const tokenization::TokenId> prompt_tokens) = 0;
-  [[nodiscard]] virtual tokenization::TokenId ForwardPromptSuffix(
-      std::span<const tokenization::TokenId> tokens, std::uint32_t position,
+  [[nodiscard]] virtual sampling::TokenId ForwardPromptBatch(
+      std::span<const sampling::TokenId> prompt_tokens) = 0;
+  [[nodiscard]] virtual sampling::TokenId ForwardPromptSuffix(
+      std::span<const sampling::TokenId> tokens, std::uint32_t position,
       bool compute_logits = true) {
     (void)compute_logits;
     if (position == 0)
       return ForwardPromptBatch(tokens);
     throw std::logic_error("target does not support batched prompt extension");
   }
-  [[nodiscard]] virtual tokenization::TokenId ForwardToken(
-      tokenization::TokenId token_id, std::uint32_t pos,
+  [[nodiscard]] virtual sampling::TokenId ForwardToken(
+      sampling::TokenId token_id, std::uint32_t pos,
       bool compute_logits = true) = 0;
   virtual void SaveState(std::uint32_t valid_context) = 0;
   virtual void RestoreState() = 0;
@@ -122,7 +123,7 @@ public:
   [[nodiscard]] virtual std::size_t VocabularySize() const noexcept {
     return 0;
   }
-  [[nodiscard]] virtual tokenization::TokenId SampleLastLogits(
+  [[nodiscard]] virtual sampling::TokenId SampleLastLogits(
       sampling::SamplerState& sampler) {
     const auto logits = CopyLastLogits();
     if (logits.empty()) {
@@ -131,7 +132,7 @@ public:
     }
     return sampler.Sample(logits);
   }
-  [[nodiscard]] virtual tokenization::TokenId SampleVerificationLogits(
+  [[nodiscard]] virtual sampling::TokenId SampleVerificationLogits(
       std::size_t row, sampling::SamplerState& sampler) {
     const auto logits = CopyVerificationLogits(row);
     if (logits.empty()) {
@@ -141,8 +142,8 @@ public:
     return sampler.Sample(logits);
   }
   [[nodiscard]] virtual SampledVerificationResult VerifySampledToken(
-      std::size_t row, tokenization::TokenId draft_token,
-      std::span<const tokenization::TokenId> draft_candidate_ids,
+      std::size_t row, sampling::TokenId draft_token,
+      std::span<const sampling::TokenId> draft_candidate_ids,
       std::span<const float> draft_candidate_probabilities,
       double draft_token_probability, sampling::SamplerState& sampler) {
     const auto logits = CopyVerificationLogits(row);
@@ -165,7 +166,7 @@ public:
     };
   }
   [[nodiscard]] virtual VerificationChunkResult ForwardVerificationChunk(
-      std::span<const tokenization::TokenId> candidate_tokens,
+      std::span<const sampling::TokenId> candidate_tokens,
       std::uint32_t start_pos, bool capture_hidden, bool capture_logits) {
     VerificationChunkResult result;
     result.predictions.reserve(candidate_tokens.size());
@@ -218,21 +219,20 @@ public:
     return result;
   }
   virtual void CommitVerificationChunk(
-      std::span<const tokenization::TokenId> committed_tokens,
+      std::span<const sampling::TokenId> committed_tokens,
       std::uint32_t start_pos) {
     std::uint32_t pos = start_pos;
     for (const auto token : committed_tokens) {
       (void)ForwardToken(token, pos++, false);
     }
   }
-  [[nodiscard]] virtual tokenization::TokenId GetEosTokenId()
-      const noexcept = 0;
+  [[nodiscard]] virtual sampling::TokenId GetEosTokenId() const noexcept = 0;
   [[nodiscard]] virtual bool IsStopToken(
-      tokenization::TokenId token) const noexcept {
+      sampling::TokenId token) const noexcept {
     return token == GetEosTokenId();
   }
   [[nodiscard]] virtual std::string_view DecodeToken(
-      tokenization::TokenId token_id) const noexcept = 0;
+      sampling::TokenId token_id) const noexcept = 0;
 };
 
 class SpeculativeVerifierSnapshot final {
@@ -266,44 +266,46 @@ private:
 class SpeculativeVerifier {
 public:
   void BeginRequest() noexcept;
-  SpeculativeVerifier(hip::QwenGpuExecutor& target_executor,
-                      std::unique_ptr<IDraftBackend> draft_backend,
-                      SpeculativeOptions options = {});
+  /// The verifier takes ownership of a model-built target executor adapter.
+  SpeculativeVerifier(
+      std::unique_ptr<ISpeculativeTargetExecutor> target_executor,
+      std::unique_ptr<IDraftBackend> draft_backend,
+      SpeculativeOptions options = {});
   // Component-cache slots own both executors and outlive the bound runner.
-  SpeculativeVerifier(hip::QwenGpuExecutor& target_executor,
-                      IDraftBackend& draft_backend,
-                      SpeculativeOptions options = {});
+  SpeculativeVerifier(
+      std::unique_ptr<ISpeculativeTargetExecutor> target_executor,
+      IDraftBackend& draft_backend, SpeculativeOptions options = {});
   SpeculativeVerifier(ISpeculativeTargetExecutor& target_executor,
                       std::unique_ptr<IDraftBackend> draft_backend,
                       SpeculativeOptions options = {});
 
   /// Runs speculative auto-regressive generation
-  std::vector<tokenization::TokenId> Generate(
-      std::span<const tokenization::TokenId> prompt_tokens,
-      const models::GenerationOptions& options,
-      const std::function<bool(tokenization::TokenId, std::string_view)>&
-          on_token = nullptr);
+  std::vector<sampling::TokenId> Generate(
+      std::span<const sampling::TokenId> prompt_tokens,
+      const GenerationOptions& options,
+      const std::function<bool(sampling::TokenId, std::string_view)>& on_token =
+          nullptr);
 
   /// Resets target and draft state, prefills the prompt, and returns the first
   /// target token. This setup is outside benchmarked decode regions.
-  [[nodiscard]] tokenization::TokenId Prime(
-      std::span<const tokenization::TokenId> prompt_tokens,
+  [[nodiscard]] sampling::TokenId Prime(
+      std::span<const sampling::TokenId> prompt_tokens,
       bool compute_logits = true);
-  [[nodiscard]] tokenization::TokenId ExtendPrompt(
-      std::span<const tokenization::TokenId> tokens, std::uint32_t position,
+  [[nodiscard]] sampling::TokenId ExtendPrompt(
+      std::span<const sampling::TokenId> tokens, std::uint32_t position,
       bool compute_logits = true);
 
   /// Commits one externally supplied continuation token through the target
   /// model and updates draft-provider state with the matching target features.
-  [[nodiscard]] tokenization::TokenId AdvanceCommittedToken(
-      tokenization::TokenId token, std::uint32_t position);
+  [[nodiscard]] sampling::TokenId AdvanceCommittedToken(sampling::TokenId token,
+                                                        std::uint32_t position);
 
   /// Performs a single speculative verification step
   struct StepResult {
-    std::vector<tokenization::TokenId> emitted_tokens;
+    std::vector<sampling::TokenId> emitted_tokens;
     std::size_t accepted_count{0};
     std::size_t draft_count{0};
-    tokenization::TokenId next_token{0};
+    sampling::TokenId next_token{0};
     std::vector<float> next_token_logits;
     bool hit_eos{false};
     std::size_t physical_width{1};
@@ -314,10 +316,10 @@ public:
 
   struct StepRequest {
     SpeculativeVerifier& verifier;
-    std::span<const tokenization::TokenId> sequence;
+    std::span<const sampling::TokenId> sequence;
     std::uint32_t position;
-    tokenization::TokenId current_token;
-    tokenization::TokenId eos_id;
+    sampling::TokenId current_token;
+    sampling::TokenId eos_id;
     std::uint32_t max_emitted_tokens;
     sampling::SamplerState& sampler;
   };
@@ -329,25 +331,21 @@ public:
     return target_executor_->CopyLastLogits();
   }
 
-  StepResult VerifyStep(std::vector<tokenization::TokenId>& current_sequence,
-                        std::uint32_t cur_pos,
-                        tokenization::TokenId current_token,
-                        tokenization::TokenId eos_id);
-  StepResult VerifyStep(std::vector<tokenization::TokenId>& current_sequence,
-                        std::uint32_t cur_pos,
-                        tokenization::TokenId current_token,
-                        tokenization::TokenId eos_id,
+  StepResult VerifyStep(std::vector<sampling::TokenId>& current_sequence,
+                        std::uint32_t cur_pos, sampling::TokenId current_token,
+                        sampling::TokenId eos_id);
+  StepResult VerifyStep(std::vector<sampling::TokenId>& current_sequence,
+                        std::uint32_t cur_pos, sampling::TokenId current_token,
+                        sampling::TokenId eos_id,
                         std::uint32_t max_emitted_tokens);
-  StepResult VerifyStep(std::vector<tokenization::TokenId>& current_sequence,
-                        std::uint32_t cur_pos,
-                        tokenization::TokenId current_token,
-                        tokenization::TokenId eos_id,
+  StepResult VerifyStep(std::vector<sampling::TokenId>& current_sequence,
+                        std::uint32_t cur_pos, sampling::TokenId current_token,
+                        sampling::TokenId eos_id,
                         std::uint32_t max_emitted_tokens, float temperature,
                         std::uint64_t* rng_state);
-  StepResult VerifyStep(std::span<const tokenization::TokenId> current_sequence,
-                        std::uint32_t cur_pos,
-                        tokenization::TokenId current_token,
-                        tokenization::TokenId eos_id,
+  StepResult VerifyStep(std::span<const sampling::TokenId> current_sequence,
+                        std::uint32_t cur_pos, sampling::TokenId current_token,
+                        sampling::TokenId eos_id,
                         std::uint32_t max_emitted_tokens,
                         sampling::SamplerState& sampler);
 
@@ -367,8 +365,8 @@ public:
   void Reset() noexcept;
 
 private:
-  [[nodiscard]] bool IsStopToken(tokenization::TokenId token,
-                                 tokenization::TokenId eos_id) const noexcept;
+  [[nodiscard]] bool IsStopToken(sampling::TokenId token,
+                                 sampling::TokenId eos_id) const noexcept;
   void ConfigureAdaptiveDraftPolicy();
   void ResetAdaptiveDraftLength() noexcept;
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);
@@ -385,9 +383,9 @@ private:
       PreparedStep& prepared, VerificationChunkResult verification,
       sampling::SamplerState& sampler);
   [[nodiscard]] StepResult VerifySequentialStep(
-      std::span<const tokenization::TokenId> current_sequence,
-      std::uint32_t cur_pos, tokenization::TokenId current_token,
-      tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens,
+      std::span<const sampling::TokenId> current_sequence,
+      std::uint32_t cur_pos, sampling::TokenId current_token,
+      sampling::TokenId eos_id, std::uint32_t max_emitted_tokens,
       std::optional<std::uint32_t> logprobs);
 
   std::unique_ptr<ISpeculativeTargetExecutor> owned_target_executor_;

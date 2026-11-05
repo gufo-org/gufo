@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/reference/cpu_encoder.hpp"
+#include "reference/cpu_encoder.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "src/models/embedding_gemma2/loader.hpp"
+#include "loader.hpp"
 
 namespace gufo::models::embedding_gemma2::reference {
 namespace {

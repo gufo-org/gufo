@@ -15,13 +15,14 @@
 #include <utility>
 #include <vector>
 
+#include "gufo/ext/text.hpp"
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/logprobs.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
 #include "src/core/text_sampling_defaults.hpp"
-#include "src/models/qwen/chat_template.hpp"
-#include "src/models/qwen/tokenizer.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 
 namespace gufo::server {
 
@@ -94,40 +95,7 @@ private:
   TextGenerationErrorCode code_;
 };
 
-struct ChatRequest {
-  enum class ToolChoice : std::uint8_t {
-    kAuto,
-    kNone,
-    kRequired,
-  };
-
-  ChatRequest() = default;
-  explicit ChatRequest(std::vector<tokenization::ChatMessage> chat_messages)
-      : messages(std::move(chat_messages)) {}
-
-  std::vector<tokenization::ChatMessage> messages;
-  std::vector<tokenization::ChatTool> tools;
-  std::string client_id{"anonymous"};
-  ToolChoice tool_choice{ToolChoice::kAuto};
-  std::string forced_tool_name;
-  /// Responses namespace of each flattened function, echoed on its calls.
-  std::map<std::string, std::string> tool_namespaces;
-  bool constrained_tools{false};
-  bool parallel_tool_calls{true};
-  ReasoningOptions reasoning;
-  bool add_vision_id{false};
-  /// Bypass prompt reuse for this request; its completed state may be retained.
-  bool cache_prompt{true};
-  /// False keeps this request's checkpoints out of the disk cache; it may
-  /// still read existing disk checkpoints and use the RAM cache.
-  bool cache_persist{true};
-  /// Optional streaming prompt progress; never changes prompt or cache
-  /// identity.
-  bool return_progress{false};
-  std::vector<std::string> stop_sequences;
-  std::shared_ptr<const sampling::JsonConstraint> response_format;
-  std::string response_format_description;
-};
+using ChatRequest = ext::ChatRequest;
 
 /// Model-agnostic text generation boundary used by the HTTP transport.
 ///
@@ -172,11 +140,7 @@ public:
     kCancelled,
   };
 
-  enum class InitialOutputState : std::uint8_t {
-    kAuto,
-    kReasoning,
-    kContent,
-  };
+  using InitialOutputState = gufo::ext::InitialOutputState;
 
   struct SamplingDefaults {
     /// Zero means generate until EOS or the remaining context is exhausted.
@@ -204,8 +168,6 @@ public:
     std::size_t cache_disk_queued_bytes{0};
     std::size_t cache_shared_bytes{0};
     /// Shared-prefix snapshots queued while prefilling this request.
-    std::size_t cache_shared_prefix_snapshots{0};
-    std::size_t cache_shared_prefix_bytes{0};
     std::size_t completion_tokens{0};
     /// Generated reasoning tokens, excluding the closing template delimiter.
     std::size_t reasoning_tokens{0};
@@ -240,7 +202,6 @@ public:
     double cache_restore_ms{0.0};
     double cache_snapshot_ms{0.0};
     double cache_disk_enqueue_ms{0.0};
-    double cache_shared_prefix_ms{0.0};
     double ttft_ms{0.0};
     double mean_inter_token_ms{0.0};
     double max_inter_token_ms{0.0};

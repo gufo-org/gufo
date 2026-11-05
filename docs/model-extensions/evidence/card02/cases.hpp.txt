@@ -1,0 +1,68 @@
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <iterator>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include "src/core/speculative/speculative_verifier.hpp"
+#include "src/models/qwen/hip/execution_policy.hpp"
+namespace identity_test {
+using namespace gufo;
+using namespace gufo::server;
+const std::string artifact(64, 'a');
+const std::string draft(64, 'b');
+using Emit = std::function<void(std::string, const std::vector<std::uint8_t>&)>;
+void QwenCases(const Emit& emit) {
+  for (bool fp16 : {false, true}) {
+    for (bool bf16 : {false, true}) {
+      for (bool spec : {false, true}) {
+        hip::QwenExecutionPolicy p;
+        p.kv_cache_storage = fp16 ? hip::QwenKvCacheStorage::kFp16 : hip::QwenKvCacheStorage::kFp32;
+        p.recurrent_state_storage = bf16 ? hip::QwenRecurrentStateStorage::kBf16 : hip::QwenRecurrentStateStorage::kFp32;
+        emit("storage-" + std::to_string(fp16) + std::to_string(bf16) + "-draft-" + std::to_string(spec), QwenCompatibilityIdentity(artifact, draft, 4096, p, spec, {}));
+      }
+    }
+  }
+  auto p = hip::QwenExecutionPolicy::Production();
+  emit("context", QwenCompatibilityIdentity(artifact, draft, 131072, p, true, {}));
+  emit("artifact", QwenCompatibilityIdentity(draft, artifact, 4096, p, true, {}));
+  for (unsigned variant = 0; variant < 10; ++variant) {
+    speculative::SpeculativeOptions o;
+    switch (variant) {
+      case 0: o.dflash_policy = speculative::DFlashDraftPolicy::kFixed; break;
+      case 1: o.max_draft_tokens = 7; break;
+      case 2: o.min_draft_tokens = 2; break;
+      case 3: o.initial_draft_tokens = 2; break;
+      case 4: o.rolling_window = 32; break;
+      case 5: o.target_acceptance_rate = 0.81234568F; break;
+      case 6: o.enable_adaptive_draft_length = false; break;
+      case 7: o.use_batched_verification = true; break;
+      case 8: o.retain_frontier_logits = true; break;
+      case 9: p.fuse_qk_norm_rope_kv = false; break;
+    }
+    emit("option-" + std::to_string(variant), QwenCompatibilityIdentity(artifact, draft, 4096, p, true, o));
+  }
+}
+void FlashCases(const Emit& emit) {
+  for (bool mtp : {false, true}) {
+    emit("draft-" + std::to_string(mtp), QwenFlashNextCompatibilityIdentity(artifact, draft, mtp, 4096, 4, 1, "absolute-v1"));
+    emit("context-" + std::to_string(mtp), QwenFlashNextCompatibilityIdentity(artifact, draft, mtp, 131072, 4, 1, "absolute-v1"));
+    emit("position-" + std::to_string(mtp), QwenFlashNextCompatibilityIdentity(artifact, draft, mtp, 4096, 4, 1, "absolute-yarn-v1;factor=0x1p+1;original=262144;beta_fast=0x1p+5;beta_slow=0x1p+0"));
+    emit("concurrency-" + std::to_string(mtp), QwenFlashNextCompatibilityIdentity(artifact, draft, mtp, 4096, 4, 8, "absolute-v1"));
+    emit("tokens-" + std::to_string(mtp), QwenFlashNextCompatibilityIdentity(artifact, draft, mtp, 4096, 7, 1, "absolute-v1"));
+  }
+  emit("artifact", QwenFlashNextCompatibilityIdentity(draft, artifact, true, 4096, 4, 1, "absolute-v1"));
+}
+void DeepSeekCases(const Emit& emit) {
+  emit("dspark", DeepSeekCompatibilityIdentity(artifact, draft, 4096, 4));
+  emit("target-only", DeepSeekCompatibilityIdentity(artifact, "", 4096, 4));
+  emit("target-only-minimum", DeepSeekCompatibilityIdentity(artifact, "", 4096, 1));
+  emit("no-draft", DeepSeekCompatibilityIdentity(artifact, draft, 4096, 0));
+  emit("context", DeepSeekCompatibilityIdentity(artifact, draft, 131072, 4));
+  emit("draft-limit", DeepSeekCompatibilityIdentity(artifact, draft, 4096, 7));
+  emit("artifact", DeepSeekCompatibilityIdentity(draft, artifact, 4096, 4));
+  emit("empty-support", DeepSeekCompatibilityIdentity(artifact, "", 4096, 0));
+}
+}

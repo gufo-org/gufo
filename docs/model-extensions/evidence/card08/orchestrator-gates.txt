@@ -1,0 +1,79 @@
+# Card 08 — orchestrator closure gates (2026-10-31, pinned `nix develop`, host gfx1151)
+
+Run by the orchestrator once, after every agent edit, on working copy `@`
+(`uytorytnmtrqmxqtrnynzrtuuurlpnpu`, parent `zwllvvnv ec59bed0`, git HEAD `ec59bed0`).
+Toolchain from the pinned dev shell: `CMAKE_CXX_COMPILER=gcc-wrapper-16.2.0/bin/g++`,
+`CMAKE_HIP_COMPILER=hipClang/bin/clang++` (ROCm 10.1, `clr-10.1`).
+113 GiB RAM available before the runs; llama-swap services untouched; no
+functional harness, timing or benchmark command was executed.
+Parent baselines `build/card06-release` and `build/card07-{gpu,cpu,release}` stayed
+intact: no `.o`, `.a`, `gufo` or `compile_commands.json` in those directories is newer
+than this card's start (newest critical artifacts 11:58–12:20).
+Candidate directories: `build/card08-gpu` (HIP, tests, tools), `build/card08-cpu`
+(HIP OFF, tests), `build/card08-release` (production, tests off),
+`build/card08-sanitizer` (Debug, `GUFO_ENABLE_SANITIZERS=ON`, HIP OFF).
+
+| Gate | Command (verbatim) | Result |
+| --- | --- | --- |
+| Formatting | `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py` | `PASS: Checked 730 C++ files`, exit 0 |
+| Extension API | `python3 tools/ci/check-extension-api.py --write` then `python3 tools/ci/check-extension-api.py` | `PASS: extension API surface (6 paths)` both, exit 0/0, `--write` changed no file → no ext-api surface change |
+| Docs | `python3 tools/ci/check-docs.py` | `PASSED: 273 markdown files and 1499 local links/anchors … zero broken links`, exit 0 |
+| Isolation | `python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-family-graph` | `PASS: core boundary` + `PASS: family graph (6 libraries, 7 declared edges, acyclic)`, exit 0 |
+| Target ownership | `python3 tools/ci/check-extension-isolation.py --fail-on-target-ownership` | `PASS: target ownership (17 libraries, 183 dependency edges)`, exit 0 |
+| Gate fixtures | `python3 tests/tools/check_extension_isolation_test.py` | `Ran 19 tests … OK`, exit 0 (includes the new unrelated-claim negative) |
+| Reconfigure | `nix develop -c cmake -S . -B build/card08-{gpu,cpu,release,sanitizer} …` | all exit 0; sanitizer cache `CMAKE_BUILD_TYPE=Debug`, `ENGINE_ENABLE_HIP=OFF`, `GUFO_ENABLE_SANITIZERS=ON` |
+| Builds | `nix develop -c cmake --build build/card08-{gpu,cpu,release,sanitizer} --parallel 12` (sanitizer: the affected target list only) | all exit 0; CPU build recompiled both text-tier sources after the F1 flag scoping; 0 errors |
+| Identity goldens | `nix develop -c ctest --test-dir build/card08-gpu -R '^(qwen27b_continuation_identity_test\|qwen38_flash_next_continuation_identity_test\|deepseek_v4_flash_continuation_identity_test)$'` | `100% tests passed out of 3`, exit 0 (identity bytes asserted by the tests) |
+| Affected HIP selection | `nix develop -c ctest --test-dir build/card08-gpu -R '^(minimax_h3_.*\|h3_.*\|video_.*\|eval_.*\|ds4.*\|strix_video_help\|check_.*\|extension_.*\|json.*\|sampling_test\|logit_sampler_test\|openai_chat_test\|logprobs_test\|quote_tracker_test)$' --output-on-failure` | `100% tests passed out of 70`, exit 0; **13 Skipped, PENDING not passes**: `minimax_h3_runtime_hip_test`, `minimax_h3_prompt_encoder_real`, `minimax_h3_dit_block0_real`, `minimax_h3_denoiser_smoke`, `minimax_h3_denoiser_oracle`, `minimax_h3_denoiser_production_shape_oracle`, `minimax_h3_denoiser_reuse_smoke`, `minimax_h3_video_vae_real`, `minimax_h3_audio_vae_real`, `ds4.chat`, `ds4.target`, `ds4.dspark`, `ds4.serving` (no H3 weights, no DeepSeek weights in this selection) |
+| Qwen selection (F2 impact) | `nix develop -c ctest --test-dir build/card08-gpu -R '^(qwen_.*\|qwen27b.*\|qwen38_flash_next.*)$' --output-on-failure` | `100% tests passed out of 75` in 172.09 s, exit 0, 8 asset-gated skips; the four `CompareLogits` consumers ran and passed (`qwen_oracle_test` 0.06 s, `qwen_l1_norm_module_test` 0.06 s, `qwen_l1_ffn_module_test`, `qwen_l1_ssm_module_test`) → **F2 RESOLVED** |
+| CPU exclusion case | `nix develop -c ctest --test-dir build/card08-cpu -R '^(minimax_h3_.*\|eval_.*\|ds4.*\|video_.*\|json.*\|sampling_test\|openai_chat_test\|logit_sampler_test\|logprobs_test\|extension_.*\|check_extension_isolation_test)$' --output-on-failure` | `100% tests passed out of 36` in 85.14 s, 0 skipped, exit 0 with `ENGINE_ENABLE_HIP=OFF` (HIP-only model libraries absent, no dangling model reference) |
+| Flags parity | `nix develop -c python3 tools/prof/card08_parity.py --mode flags --before build/card07-release/compile_commands.json --after build/card08-release/compile_commands.json` | `flags: compared=27 failures=0` (21 identical, 6 justified), exit 0 |
+| Host-object parity | same with `--mode object` | `object: compared=27 failures=0` (19 symbol-identical, 8 identical apart from the TU id), exit 0 |
+| Device ISA parity | same with `--mode device --scratch /tmp/card08-parity` | `device: compared=8 failures=0`; `.text`, `.rodata` and `.note` byte-identical for all 8 moved `.hip` translation units (24 sections), exit 0. `runtime_hip.cpp` is a host TU (the candidate release build holds exactly 8 `gufo_minimax_h3` HIP objects), so 8 is the complete moved device set |
+| Kernel resources | `nix develop -c python3 tools/ci/check-kernel-resources.py build/card08-release/gufo --compare build/card07-release/gufo` | `0 worse, 0 better, 2692 same, 0 one side only; scratch increased in 0`, exit 0 |
+| Sanitizer/assertion audit (F1c) | per-source scan of `build/card08-sanitizer/compile_commands.json` | `h3` 12/12 sources `-fsanitize=address,undefined` + `-Wall`, `NDEBUG`; `eval` 5/5; `compare` 1/1; `ds4text` 2/2 sanitized **and** `-UNDEBUG` (the model library copy never was sanitized, the duplicated test copies were — the moved pair now gets the strongest of both). Reference: `gufo_qwen27b` 19/19 sanitized |
+| Sanitizer tests | `nix develop -c ctest --test-dir build/card08-sanitizer -R '^(ds4\.(sampling\|template\|eval)\|eval_regrade_test\|openai_chat_test\|minimax_h3_(runtime\|tokenizer\|sampling\|generation\|media)_test\|video_cli_test)$' --output-on-failure` | `100% tests passed out of 11` in 30.94 s, exit 0, **0** `AddressSanitizer`/`runtime error:` lines → **F1 RESOLVED** |
+| Text-tier flag scoping check | grep of the three release/CPU/GPU `compile_commands.json` for `chat_template.cpp` and `runtime/sampling.cpp` | one entry per source per build; CPU: `-O2 -UNDEBUG -Wall` (parent test-copy state, no fast-math); HIP test: `-O3 -ffast-math -UNDEBUG`; production release: `-O3 -ffast-math`, `NDEBUG` (parent library state) |
+
+## Orchestrator code fix made during closure
+
+`tools/prof/card08_parity.py` (F5 hardening as integrated) failed its own pinned
+invocation: `flags: FAIL sources present on one side only:
+build/card07-release/extensions/gufo/extension_registry.cpp,
+build/card08-release/extensions/gufo/extension_registry.cpp`. The new symmetric source-set
+check compared whole build databases, and CMake generates the per-executable extension
+registry *inside* each build directory, so the same generated source appears under two
+different paths and the gate could no longer run against the baselines the card uses.
+Fix: `load()` now skips any entry whose source lives below that entry's own compile
+`directory` (i.e. a generated file), which is path-independent, and keeps failing on a
+real source compiled by two targets or present on one side only.
+
+Failure power proven afterwards with doctored databases in `/tmp/card08-selftest`
+(deleted):
+
+```text
+flags: FAIL /tmp/card08-selftest/dup.json: duplicate compilation of src/eval/dataset.cpp: gufo_eval, gufo_core
+flags: FAIL sources present on one side only: src/models/minimax_h3/tokenizer.cpp
+```
+
+so the duplicate-compilation check is now a machine proof of the Card 08 "one
+implementation per source" clause, and a dropped moved source cannot pass silently.
+After the fix the three pinned modes were re-run and are the rows above.
+
+A second closure fix came from the mandated `codex exec review` (see
+`codex-review.txt`): the ownership gate discarded any source argument that still held a
+CMake directory variable, which made `${PROJECT_SOURCE_DIR}/…` and
+`${CMAKE_CURRENT_SOURCE_DIR}/…` compiled sources invisible to the gate. Fixed in
+`expand_cmake()` with the regression fixture
+`test_target_ownership_resolves_directory_variable_sources`; fixtures 20/20 and all three
+isolation modes re-run clean afterwards.
+
+## Still pending after closure (see `pending-commands.md`)
+
+Functional/performance half (post-Card-14 qualification window), Windows native
+execution (plus the pre-existing `windows-platform-tests` fileset gap that admits two of
+the three `cmake/PlatformTests.cmake` sources), the nine asset-blocked H3/DeepSeek oracle
+rows above, per-model extension exclusion (no `extension.json` before later cards),
+shipped lock-mode runtime behaviour, the production Nix derivation build, the stale
+`kernel_resources_test` budget (unchanged, owned outside this card), and the authoritative
+post-commit hosted/source-snapshot proof recorded in `hosted-post-commit.txt`.

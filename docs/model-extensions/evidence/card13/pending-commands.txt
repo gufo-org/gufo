@@ -1,0 +1,15 @@
+# Card 13 Pending Commands
+#
+# As specified in the Card 13 brief and overall model-extensions plan:
+# Full functional regression harness (tests/functional/run.py), prompt_lookup.py,
+# and speed benchmark sweeps are deferred until after Card 14 (Migration of all remaining models)
+# to avoid duplicate full sweeps during incremental model migrations.
+
+# 1. Functional regression harness for EmbeddingGemma embeddings:
+# python3 tests/functional/run.py --model embeddinggemma-2 --suites embedding
+
+# 2. Prompt lookup verification:
+# python3 tests/functional/prompt_lookup.py --model embeddinggemma-2
+
+# 3. Speed benchmark sweep:
+# nix develop -c python3 tools/bench/speed.py --model embeddinggemma-2

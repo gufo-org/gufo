@@ -1,0 +1,56 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+Test project /home/mixer/gufo/build/card06-gpu
+    Start 196: qwen_mtp_gpu_test
+Could not find executable /home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/qwen_mtp_gpu_test
+Looked in the following places:
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Release/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Release/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Debug/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Debug/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/MinSizeRel/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/MinSizeRel/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/RelWithDebInfo/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/RelWithDebInfo/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Deployment/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Deployment/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Development/qwen_mtp_gpu_test
+/home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Development/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Release/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Release/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Debug/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Debug/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/MinSizeRel/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/MinSizeRel/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/RelWithDebInfo/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/RelWithDebInfo/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Deployment/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Deployment/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Development/qwen_mtp_gpu_test
+home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/Development/qwen_mtp_gpu_test
+Unable to find executable: /home/mixer/gufo/build/card06-gpu/tests/models/qwen27b/qwen_mtp_gpu_test
+1/2 Test #196: qwen_mtp_gpu_test ................***Not Run   0.00 sec
+    Start 197: qwen_dflash_gpu_test
+2/2 Test #197: qwen_dflash_gpu_test .............   Passed   12.25 sec
+
+50% tests passed, 1 tests failed out of 2
+
+Label Time Summary:
+dflash            =  12.25 sec*proc (1 test)
+dflash2           =  12.25 sec*proc (1 test)
+external-model    =  12.25 sec*proc (2 tests)
+gpu               =  12.25 sec*proc (2 tests)
+hip               =  12.25 sec*proc (2 tests)
+mtp               =   0.00 sec*proc (1 test)
+qwen27b           =  12.25 sec*proc (2 tests)
+
+Total Test time (real) =  12.25 sec
+
+The following tests FAILED:
+	196 - qwen_mtp_gpu_test (Not Run)                       external-model gpu hip mtp qwen27b
+Errors while running CTest

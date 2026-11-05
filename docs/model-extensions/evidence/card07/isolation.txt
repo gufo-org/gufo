@@ -1,0 +1,86 @@
+G10 isolation (tools/ci/check-extension-isolation.py), both enforcement flags:
+  $ python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-family-graph
+  EXIT=0
+    files: 1243
+    includes: 8362
+    cross_owner_includes: 1175
+    namespace_references: 1387
+    name_references: 15247
+    configuration_mentions: 1879
+    qwen_headers: 61
+    family_libraries: 6
+    family_edges: 7
+    configuration -> src/core: 1
+    families/qwen -> src/core: 56
+
+  family edges (declared == real, acyclic):
+    qwen/kernels -> qwen/hip_common
+    qwen/text -> qwen/config
+    qwen/text -> qwen/control_tokens
+    qwen/vision -> qwen/control_tokens
+    qwen/vision -> qwen/hip_common
+    qwen/vision -> qwen/kernels
+    qwen/vision -> qwen/text
+    violations: []
+    libraries: {'qwen/config': 'static', 'qwen/control_tokens': 'interface', 'qwen/hip_common': 'interface', 'qwen/kernels': 'static', 'qwen/text': 'static', 'qwen/vision': 'static'}
+
+  Before (Card 06 tree, /tmp/card07-work/isolation-before.txt):
+    files: 1225
+    includes: 8331
+    cross_owner_includes: 1114
+    namespace_references: 1039
+    name_references: 12546
+    configuration_mentions: 1426
+    qwen_headers: 60
+
+  Interim edges after the split (RFC 'between steps 5 and 6'):
+    models/minimax_h3 -> families/qwen: 1
+    models/qwen -> families/qwen: 52
+    models/qwen38_flash_next -> families/qwen: 8
+    models/qwen3_tts -> families/qwen: 2
+    models/qwen_image_21 -> families/qwen: 2
+    src/cli -> families/qwen: 17
+    src/cli -> models/deepseek_v4_flash: 9
+    src/cli -> models/embedding_gemma2: 8
+    src/cli -> models/minimax_h3: 4
+    src/cli -> models/qwen: 16
+    src/cli -> models/qwen38_flash_next: 6
+    src/cli -> models/qwen3_asr: 5
+    src/cli -> models/qwen3_tts: 8
+    src/cli -> models/qwen_image_21: 1
+    tests/cli -> families/qwen: 3
+    tests/cli -> models/deepseek_v4_flash: 1
+    tests/families -> families/qwen: 1
+    tests/kernels -> families/qwen: 2
+    tests/kernels -> models/qwen: 1
+    tests/models/chat_template_hf_token_golden_test.cpp -> families/qwen: 2
+    tests/models/deepseek_v4_flash -> families/qwen: 1
+    tests/models/deepseek_v4_flash -> models/deepseek_v4_flash: 27
+    tests/models/embedding_gemma2 -> models/embedding_gemma2: 22
+    tests/models/minimax_h3_audio_vae_hip_test.hip -> models/minimax_h3: 5
+    tests/models/minimax_h3_denoiser_hip_test.hip -> models/minimax_h3: 4
+    tests/models/minimax_h3_dit_hip_test.hip -> models/minimax_h3: 5
+    tests/models/minimax_h3_generation_test.cpp -> models/minimax_h3: 2
+    tests/models/minimax_h3_media_test.cpp -> models/minimax_h3: 1
+    tests/models/minimax_h3_prompt_encoder_hip_test.hip -> models/minimax_h3: 4
+    tests/models/minimax_h3_runtime_hip_test.cpp -> models/minimax_h3: 1
+    tests/models/minimax_h3_runtime_test.cpp -> models/minimax_h3: 3
+    tests/models/minimax_h3_sampling_hip_test.hip -> models/minimax_h3: 1
+    tests/models/minimax_h3_sampling_test.cpp -> models/minimax_h3: 2
+    tests/models/minimax_h3_tokenizer_test.cpp -> families/qwen: 1
+    tests/models/minimax_h3_tokenizer_test.cpp -> models/minimax_h3: 2
+    tests/models/minimax_h3_video_vae_hip_test.hip -> models/minimax_h3: 4
+    tests/models/minimax_h3_video_vae_test.cpp -> models/minimax_h3: 2
+    tests/models/qwen -> families/qwen: 48
+    tests/models/qwen -> models/qwen: 96
+    tests/models/qwen -> models/qwen38_flash_next: 1
+    tests/models/qwen27b -> families/qwen: 9
+    tests/models/qwen27b -> models/qwen: 16
+    tests/models/qwen38_flash_next -> families/qwen: 7
+    tests/models/qwen38_flash_next -> models/qwen38_flash_next: 54
+    tests/models/qwen3_tts -> models/qwen3_tts: 20
+    tests/models/qwen_image_21 -> models/qwen_image_21: 6
+    tests/quality -> models/qwen: 2
+    tools/bench -> families/qwen: 1
+    tools/models -> models/qwen_image_21: 2
+    tools/qwen27b -> families/qwen: 12

@@ -1,0 +1,2 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+PASS: Checked 725 C++ files

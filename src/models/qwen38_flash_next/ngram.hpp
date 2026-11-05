@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/gguf_reader.hpp>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -13,7 +14,6 @@
 #include <thread>
 #include <vector>
 
-#include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 
 namespace gufo::models::qwen38_flash_next {

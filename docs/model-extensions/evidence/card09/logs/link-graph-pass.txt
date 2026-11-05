@@ -1,0 +1,1 @@
+[check-target-graph] PASS: link graph (24 protected targets, no edge to gufo_http or gufo_serving)

@@ -8,18 +8,11 @@
 #include <string_view>
 #include <vector>
 
+#include "src/ext/tts.hpp"
+
 namespace gufo::models::qwen3_tts {
 
-struct AudioBuffer {
-  std::uint32_t sample_rate{0};
-  std::uint32_t channels{0};
-  // Interleaved float samples.
-  std::vector<float> samples;
-};
-
-[[nodiscard]] bool DecodeBase64Wav(std::string_view encoded,
-                                   AudioBuffer* output,
-                                   std::string* error = nullptr);
+using AudioBuffer = ext::TtsAudioBuffer;
 
 [[nodiscard]] bool DecodeWav(std::span<const std::byte> bytes,
                              AudioBuffer* output, std::string* error = nullptr);

@@ -5,16 +5,16 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/hip_utils.hpp"
+#include "src/families/qwen/kernels/dflash_kernels.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
-#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
-#include "src/models/qwen/hip/ops.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -59,6 +59,7 @@ struct BlockWorkspace {
     up = take(rows * config.intermediate_size);
     down = take(rows * hidden_size);
     logits = take(rows * config.vocab_size);
+    draft_logits = take(rows * speculative::kDraftVocabExtraRows);
     selector = take(rows * draft.selector_rank);
     tokens = reinterpret_cast<std::uint32_t*>(take(rows));
     uniforms = take(rows);
@@ -79,7 +80,7 @@ struct BlockWorkspace {
   [[nodiscard]] std::size_t Bytes() const { return elements_ * sizeof(float); }
 
   float *hidden, *normed, *conv, *dynamic, *query, *key, *value, *attention;
-  float *projected, *gate, *up, *down, *logits, *selector;
+  float *projected, *gate, *up, *down, *logits, *draft_logits, *selector;
   std::uint32_t *tokens, *candidates, *partial_ids;
   float *uniforms, *probabilities, *confidences, *partial_scores;
 
@@ -94,6 +95,20 @@ void TraceBlock(const DFlashTrace& trace, std::string_view name,
   std::vector<float> values(count);
   HIP_CHECK(hipMemcpyAsync(values.data(), source, count * sizeof(float),
                            hipMemcpyDeviceToHost, stream));
+  HIP_CHECK(hipStreamSynchronize(stream));
+  trace(name, values);
+}
+
+/// Traces `rows` rows of `width` scores that lie `stride` apart.
+void TraceRows(const DFlashTrace& trace, std::string_view name,
+               const float* source, std::size_t rows, std::size_t width,
+               std::size_t stride, hipStream_t stream) {
+  if (!trace)
+    return;
+  std::vector<float> values(rows * width);
+  HIP_CHECK(hipMemcpy2DAsync(values.data(), width * sizeof(float), source,
+                             stride * sizeof(float), width * sizeof(float),
+                             rows, hipMemcpyDeviceToHost, stream));
   HIP_CHECK(hipStreamSynchronize(stream));
   trace(name, values);
 }
@@ -281,7 +296,8 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
         draft.mask_token_id >= config.vocab_size ||
         request.position != executor->injected_context_len_ ||
         request.position >= executor->max_context_ ||
-        !std::isfinite(request.temperature) || request.temperature < 0.0F)
+        !std::isfinite(request.temperature) || request.temperature < 0.0F ||
+        (request.draft_subset && executor->d_draft_ids_ == nullptr))
       throw std::invalid_argument("DFlash2 block batch has an invalid request");
     for (std::size_t previous = 0; previous < index; ++previous) {
       if (requests[previous].executor == executor)
@@ -311,7 +327,7 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
           request.temperature > 0.0F ? &proposal.candidate_ids : nullptr,
           request.temperature > 0.0F ? &proposal.candidate_probabilities
                                      : nullptr,
-          request.trace, request.sampler);
+          request.trace, request.sampler, request.draft_subset);
     }
     return proposals;
   }
@@ -490,21 +506,73 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
   ProjectBlock(weights.selector_hidden, scratch.hidden, scratch.selector,
                proposal_rows, draft.selector_rank, hidden_size, stream);
   emit("selector_hidden", scratch.selector, draft.selector_rank, true);
+  // Each request keeps the head it chose. When every request drafts through
+  // its draft vocabulary, one projection reads the shared prefix and each
+  // request's table follows. A mixed batch reads the full head anyway, so all
+  // rows go through it once (main's cost) and each draft-vocabulary request
+  // reads its table scores from its own full rows.
+  const auto subset_requests = static_cast<std::size_t>(std::ranges::count_if(
+      requests, [](const auto& request) { return request.draft_subset; }));
+  const std::uint32_t prefix = coordinator.model_->DraftPrefixRows();
+  const std::size_t stride =
+      subset_requests == requests.size() ? prefix : config.vocab_size;
+  constexpr std::uint32_t kDraftRows = speculative::kDraftVocabExtraRows;
   ProjectBlock(weights.output, scratch.hidden, scratch.logits, proposal_rows,
-               config.vocab_size, hidden_size, stream);
-  emit("logits", scratch.logits, config.vocab_size, true);
+               stride, hidden_size, stream);
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    if (!request.draft_subset)
+      continue;
+    const auto row = offsets[index] - index;
+    auto* table = scratch.draft_logits + row * kDraftRows;
+    if (stride == prefix) {
+      ProjectBlock(request.executor->DraftTable(),
+                   scratch.hidden + row * hidden_size, table, counts[index],
+                   kDraftRows, hidden_size, stream);
+      kernels::LaunchDFlashDraftTableLogits(
+          nullptr, 0, request.executor->d_draft_ids_, table, counts[index],
+          kDraftRows, stream);
+    } else {
+      kernels::LaunchDFlashDraftTableLogits(
+          scratch.logits + row * stride, static_cast<std::uint32_t>(stride),
+          request.executor->d_draft_ids_, table, counts[index], kDraftRows,
+          stream);
+    }
+  }
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    const auto row = offsets[index] - index;
+    TraceRows(request.trace, "logits", scratch.logits + row * stride,
+              counts[index], request.draft_subset ? prefix : config.vocab_size,
+              stride, stream);
+    if (request.draft_subset)
+      TraceBlock(request.trace, "draft_table_logits",
+                 scratch.draft_logits + row * kDraftRows,
+                 counts[index] * kDraftRows, stream);
+  }
   std::array<kernels::DFlashSelectorSequence, 8> sequences{};
-  for (std::size_t index = 0; index < requests.size(); ++index)
-    sequences[index] = {counts[index], requests[index].temperature,
-                        requests[index].executor->PrepareDraftSampling(
-                            requests[index].sampler, stream)};
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    sequences[index] = {
+        counts[index], request.temperature,
+        request.executor->PrepareDraftSampling(request.sampler, stream),
+        request.draft_subset
+            ? kernels::DFlashSelectorVocab{prefix,
+                                           scratch.draft_logits +
+                                               (offsets[index] - index) *
+                                                   kDraftRows,
+                                           request.executor->d_draft_ids_,
+                                           kDraftRows}
+            : kernels::DFlashSelectorVocab{}};
+  }
   kernels::LaunchDFlashSelectorBatch(
       scratch.logits, scratch.selector, weights.selector_predecessor.data,
       weights.selector_successor.data, scratch.tokens, scratch.confidences,
       scratch.partial_scores, scratch.partial_ids, scratch.uniforms,
       scratch.candidates, scratch.probabilities,
       std::span(sequences).first(requests.size()), config.vocab_size,
-      draft.selector_rank, draft.selector_top_k, stream);
+      draft.selector_rank, draft.selector_top_k, stream,
+      static_cast<std::uint32_t>(stride));
   for (std::size_t index = 0; index < requests.size(); ++index) {
     const auto& request = requests[index];
     auto& proposal = proposals[index];

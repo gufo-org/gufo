@@ -24,6 +24,7 @@ class TtsService;
 class AsrService;
 class ImageService;
 class EmbeddingService;
+struct DecisionService;
 class WebSocket;
 
 struct HttpRequest {
@@ -93,7 +94,6 @@ using Handler =
 struct HttpServerOptions {
   std::size_t max_request_body_bytes{static_cast<std::size_t>(8) * 1024 * 1024};
   std::size_t max_connections{16};
-  std::string api_key;
   std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
   /// Called once, on the listener or a request thread, when the text backend or
   /// the embedding service reports a lost device. Health, readiness and
@@ -116,7 +116,8 @@ public:
              std::shared_ptr<AsrService> asr = nullptr,
              HttpServerOptions options = {},
              std::shared_ptr<ImageService> images = nullptr,
-             std::shared_ptr<EmbeddingService> embeddings = nullptr);
+             std::shared_ptr<EmbeddingService> embeddings = nullptr,
+             std::shared_ptr<DecisionService> decisions = nullptr);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -154,8 +155,8 @@ private:
   std::shared_ptr<AsrService> asr_;
   std::shared_ptr<ImageService> images_;
   std::shared_ptr<EmbeddingService> embeddings_;
+  std::shared_ptr<DecisionService> decisions_;
   HttpServerOptions options_;
-  std::string api_key_hash_;
   int listen_fd_ = -1;
   std::atomic<bool> stopped_{false};
   std::atomic<bool> device_lost_reported_{false};

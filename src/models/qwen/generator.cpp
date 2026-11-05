@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 
 namespace gufo::models {
 

@@ -15,8 +15,9 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
-#include "src/models/minimax_h3/sha256.hpp"
+#include "src/ext/video.hpp"
 
 #ifndef GUFO_H3_SOURCE_MANIFEST
 #define GUFO_H3_SOURCE_MANIFEST \
@@ -206,12 +207,52 @@ bool WriteAtomic(const std::filesystem::path& path, std::string_view contents,
 }
 
 std::string PromptSha256(std::string_view prompt) {
-  return minimax_h3::Sha256(std::span(
-      reinterpret_cast<const unsigned char*>(prompt.data()), prompt.size()));
+  return crypto::Sha256Hex(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(prompt.data()), prompt.size()));
+}
+
+std::optional<ext::VideoParameters> ResolveGenerationPreset(
+    std::string_view preset, std::string* error = nullptr) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->resolve_preset) {
+    return provider->resolve_preset(preset, error);
+  }
+  if (error)
+    *error = "video provider 'minimax-h3' not available";
+  return std::nullopt;
+}
+
+bool ValidateGenerationParameters(const ext::VideoParameters& parameters,
+                                  std::string* error = nullptr) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->validate_parameters) {
+    return provider->validate_parameters(parameters, error);
+  }
+  if (error)
+    *error = "video provider 'minimax-h3' not available";
+  return false;
+}
+
+std::string GenerationParametersJson(const ext::VideoParameters& parameters,
+                                     std::uint64_t seed,
+                                     std::string_view prompt_sha256) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->parameters_json) {
+    return provider->parameters_json(parameters, seed, prompt_sha256);
+  }
+  return "{}";
+}
+
+std::string GenerationTelemetryJson(const ext::VideoTelemetry& telemetry) {
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->telemetry_json) {
+    return provider->telemetry_json(telemetry);
+  }
+  return "{}";
 }
 
 struct CliProgress {
-  minimax_h3::CancellationToken* cancellation{nullptr};
+  std::atomic<bool>* cancellation{nullptr};
   bool profile{false};
 };
 
@@ -222,7 +263,7 @@ void PrintProgress(std::string_view phase, int completed, int total,
     return;
   }
   if (g_cancel_requested != 0 && state->cancellation != nullptr) {
-    state->cancellation->Cancel();
+    state->cancellation->store(true, std::memory_order_relaxed);
   }
   if (state->profile) {
     std::cerr << "h3: " << phase << ' ' << completed << '/' << total << '\n';
@@ -263,8 +304,7 @@ std::optional<VideoCliOptions> ParseVideoOptions(
   if (!parser.Parse(args, error) || parser.IsHelpRequested()) {
     return std::nullopt;
   }
-  auto parameters =
-      minimax_h3::ResolveGenerationPreset(overrides.preset, error);
+  auto parameters = ResolveGenerationPreset(overrides.preset, error);
   if (!parameters)
     return std::nullopt;
   auto& p = *parameters;
@@ -311,8 +351,7 @@ std::optional<VideoCliOptions> ParseVideoOptions(
     SetError(error, "the selected H3 preset requires --output");
     return std::nullopt;
   }
-  if (!minimax_h3::ValidateGenerationParameters(options.request.parameters,
-                                                error)) {
+  if (!ValidateGenerationParameters(options.request.parameters, error)) {
     return std::nullopt;
   }
   const std::filesystem::path report_base =
@@ -340,7 +379,7 @@ int RunVideo(std::span<const char* const> args) {
     return 2;
   }
   if (!WriteAtomic(options->parameters_path,
-                   minimax_h3::GenerationParametersJson(
+                   GenerationParametersJson(
                        options->request.parameters, options->request.seed,
                        PromptSha256(options->request.prompt)),
                    &error)) {
@@ -354,29 +393,40 @@ int RunVideo(std::span<const char* const> args) {
     interrupt_guard.emplace(HandleInterrupt);
   } catch (const std::system_error&) {
   }
-  minimax_h3::CancellationToken cancellation;
+  std::atomic<bool> cancellation{false};
   std::jthread interrupt_watcher([&cancellation](const std::stop_token& stop) {
     while (!stop.stop_requested()) {
       if (g_cancel_requested != 0) {
-        cancellation.Cancel();
+        cancellation.store(true, std::memory_order_relaxed);
         return;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   });
   CliProgress progress{&cancellation, options->profile};
-  minimax_h3::GenerationTelemetry telemetry;
-  const bool generated = minimax_h3::GenerateTextVideo(
-      options->request, &cancellation, PrintProgress, &progress, &telemetry,
-      &error);
+  ext::VideoTelemetry telemetry;
+  const auto* provider = ext::FindVideoProvider("minimax-h3");
+  if (!provider || !provider->create) {
+    std::cerr << "Error: MiniMax H3 video provider not registered\n";
+    return 1;
+  }
+  auto runner = provider->create(options->request.model_root.string(), &error);
+  if (!runner) {
+    std::cerr << "Error: " << error << '\n';
+    return 1;
+  }
+  const bool generated = runner->Generate(
+      options->request,
+      [&] { return cancellation.load(std::memory_order_relaxed); },
+      PrintProgress, &progress, &telemetry, &error);
   interrupt_watcher.request_stop();
   interrupt_watcher.join();
   interrupt_guard.reset();
   if (!generated) {
     std::cerr << "Error: " << error << '\n';
-    return cancellation.IsCancelled() ? 130 : 1;
+    return cancellation.load(std::memory_order_relaxed) ? 130 : 1;
   }
-  const std::string report = minimax_h3::GenerationTelemetryJson(telemetry);
+  const std::string report = GenerationTelemetryJson(telemetry);
   if (!WriteAtomic(options->telemetry_path, report, &error)) {
     std::cerr << "Error: " << error << '\n';
     return 1;

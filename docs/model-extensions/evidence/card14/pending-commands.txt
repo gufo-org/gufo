@@ -1,0 +1,17 @@
+Card 14: Pending and Deferred Commands
+
+The following commands are deferred per project instructions and task constraints:
+1. Full functional test harness runs across unmigrated or unconfigured models:
+   - Command: python3 tests/functional/run.py
+   - Status: PENDING / DEFERRED
+   - Reason: Functional harness runs require full remote weights and live model deployments; Card 14 only covers infrastructure generation and registry aggregation.
+
+2. Benchmark measurements and throughput sweeps:
+   - Command: ./result/bin/gufo bench ...
+   - Status: PENDING / DEFERRED
+   - Reason: No kernel or runtime performance changes were introduced in Card 14.
+
+3. Video and heavy multimodal quality CI runs:
+   - Command: nix develop -c ctest --preset gpu-full -R 'video_ci'
+   - Status: PENDING / DEFERRED
+   - Reason: Card 14 only authored manifests, functional fragments, and generator tooling; no video codec logic modified.

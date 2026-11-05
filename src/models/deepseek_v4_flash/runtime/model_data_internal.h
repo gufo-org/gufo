@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/core/platform/mapped_file.hpp"
+#include <gufo/ext/platform/mapped_file.hpp>
 
 #include "model.h"
 #include "tensor_types.h"

@@ -2,12 +2,11 @@
 #define GUFO_MODELS_QWEN_HIP_PROMPT_HIDDEN_BUFFER_HPP_
 
 #include <cstddef>
+#include <gufo/ext/experimental/host_allocations.hpp>
+#include <gufo/ext/ledger.hpp>
 #include <memory>
 #include <span>
 #include <vector>
-
-#include "src/cache/ledger.hpp"
-#include "src/core/hip/host_allocations.hpp"
 
 namespace gufo::hip {
 

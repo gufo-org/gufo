@@ -3,39 +3,19 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
-#include <cmath>
-#include <cstdlib>
-#include <iomanip>
 #include <iostream>
-#include <limits>
 #include <memory>
-#include <numeric>
 #include <optional>
-#include <sstream>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/registry.hpp"
+#include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
-#include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
-#include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
-#include "src/models/deepseek_v4_flash/engine.hpp"
-#include "src/models/qwen38_flash_next/engine.hpp"
-#include "src/testing/compare/logit_comparator.hpp"
-
-#if defined(ENGINE_ENABLE_HIP)
-#include <hip/hip_runtime.h>
-
-#include "src/core/hip/hip_utils.hpp"
-#include "src/core/speculative/speculative_verifier.hpp"
-#include "src/models/qwen/hip/dflash.hpp"
-#include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/mtp.hpp"
-#endif
 
 namespace gufo::cli {
 
@@ -100,8 +80,7 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
 
   parser.AddCustomOption(
       "-n", "--n-gen", "n,n,...",
-      "Number of text generation tokens to benchmark (default: 128)",
-      "Workload",
+      "Generation token counts to benchmark (default: 128)", "Workload",
       [&opt, &explicit_n](std::string_view flag, std::string_view val,
                           std::string* error) -> bool {
         auto sizes = ParseCommaSeparatedSizes(val);
@@ -117,14 +96,13 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
 
   parser.AddCustomOption(
       "-d", "--n-depth", "n,n,...",
-      "Context depths prepared before timed region (default: 0)", "Workload",
-      [&opt](std::string_view flag_name, std::string_view val,
-             std::string* err) -> bool {
+      "Prefix context lengths to benchmark (default: 0)", "Workload",
+      [&opt](std::string_view flag, std::string_view val,
+             std::string* error) -> bool {
         auto sizes = ParseCommaSeparatedSizes(val, true);
         if (!sizes) {
-          if (err != nullptr) {
-            *err = "Invalid argument for " + std::string(flag_name);
-          }
+          if (error)
+            *error = "Invalid prefix lengths for " + std::string(flag);
           return false;
         }
         opt.n_depths = std::move(*sizes);
@@ -150,1054 +128,83 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
         return true;
       });
 
-  parser.AddOption(
-      "-r", "--repetitions", "N",
-      "Repetitions per test point for variance reduction (default: 1)",
-      "Workload", &opt.repetitions);
+  parser.AddOption("-r", "--repetitions", "N",
+                   "Number of repetitions per measurement (default: 1)",
+                   "Workload", &opt.repetitions);
+
+  parser.AddOption("", "--validate-prefill", "N",
+                   "Validate prefill logits against reference for N tokens "
+                   "(default: 0 = disabled)",
+                   "Workload", &opt.validate_prefill_tokens);
 
   parser.AddCustomOption(
-      "", "--validate-prefill", "N",
-      "Compare batched prefill logits against sequential reference",
-      "Validation",
-      [&opt](std::string_view, std::string_view val, std::string* err) -> bool {
-        std::size_t num = 0;
-        const auto [ptr, ec] =
-            std::from_chars(val.data(), val.data() + val.size(), num);
-        if (ec != std::errc{} || ptr != val.data() + val.size() || num == 0) {
-          if (err != nullptr) {
-            *err = "Invalid argument for --validate-prefill";
-          }
-          return false;
-        }
-        opt.validate_prefill_tokens = num;
-        return true;
-      });
-
-  const auto parse_speculative_backend =
-      [&opt, &speculative_explicit](std::string_view, std::string_view value,
+      "", "--speculative", "none|mtp|dflash2|dspark",
+      "Speculative decoding backend (default: none)", "Speculative",
+      [&opt, &speculative_explicit](std::string_view flag, std::string_view val,
                                     std::string* error) -> bool {
-    speculative_explicit = true;
-    if (value == "off") {
-      opt.speculative_backend.clear();
-    } else if (value == "dspark" || value == "dflash2" || value == "mtp") {
-      opt.speculative_backend = value;
-    } else {
-      if (error != nullptr)
-        *error = "Unknown speculative backend: " + std::string(value);
-      return false;
-    }
-    return true;
-  };
-  parser.AddCustomOption("", "--speculative", "MODE",
-                         "Draft backend: dflash2, mtp, dspark, or off",
-                         "Speculative", parse_speculative_backend);
-  parser.AddOption("", "--dflash-model", "PATH",
-                   "Path to Qwen DFlash2 GGUF file", "Speculative",
-                   &opt.dflash_model_path);
-  parser.AddOption(
-      "", "--draft-policy", "POLICY",
-      "DFlash2 block length: fixed or adaptive (default: adaptive)",
-      "Speculative", &opt.draft_policy);
-  parser.AddOption("", "--dspark-model", "PATH",
-                   "DeepSeek V4 Flash DSpark support GGUF", "Speculative",
-                   &opt.dspark_model_path);
-  parser.AddOption("", "--mtp-model", "PATH",
-                   "Path to quantized Qwen MTP draft head GGUF file",
-                   "Speculative", &opt.mtp_model_path);
-  parser.AddCustomOption(
-      "", "--draft-tokens", "N",
-      "Maximum speculative draft tokens per verification step (default: 7)",
-      "Speculative",
-      [&opt](std::string_view, std::string_view value,
-             std::string* error) -> bool {
-        std::uint32_t count = 0;
-        const auto [ptr, ec] =
-            std::from_chars(value.data(), value.data() + value.size(), count);
-        if (ec != std::errc{} || ptr != value.data() + value.size() ||
-            count == 0) {
-          if (error != nullptr) {
-            *error = "Invalid argument for --draft-tokens";
-          }
-          return false;
+        speculative_explicit = true;
+        if (val == "off" || val == "none") {
+          opt.speculative_backend.clear();
+          return true;
         }
-        opt.draft_tokens = count;
-        return true;
+        if (val == "mtp" || val == "dflash2" || val == "dspark") {
+          opt.speculative_backend = std::string(val);
+          return true;
+        }
+        if (error) {
+          *error = "Unknown speculative backend: " + std::string(val);
+        }
+        return false;
       });
 
-  parser.AddCustomOption(
-      "", "--min-draft-tokens", "N", "Adaptive draft floor (default: 1)",
-      "Speculative",
-      [&opt](std::string_view, std::string_view value,
-             std::string* error) -> bool {
-        std::uint32_t count = 0;
-        const auto [ptr, ec] =
-            std::from_chars(value.data(), value.data() + value.size(), count);
-        if (ec != std::errc{} || ptr != value.data() + value.size() ||
-            count == 0) {
-          if (error != nullptr) {
-            *error = "Invalid argument for --min-draft-tokens";
-          }
-          return false;
-        }
-        opt.min_draft_tokens = count;
-        return true;
-      });
+  parser.AddOption("", "--mtp-model", "PATH",
+                   "Path to GGUF model containing MTP draft weights",
+                   "Speculative", &opt.mtp_model_path);
+
+  parser.AddOption("", "--dflash-model", "PATH",
+                   "Path to GGUF model containing DFlash draft weights",
+                   "Speculative", &opt.dflash_model_path);
+
+  parser.AddOption("", "--draft-policy", "POLICY",
+                   "DFlash2 draft length policy: fixed or adaptive "
+                   "(default: adaptive)",
+                   "Speculative", &opt.draft_policy);
+
+  parser.AddOption("", "--dspark-model", "PATH",
+                   "Path to GGUF model containing DSpark support weights",
+                   "Speculative", &opt.dspark_model_path);
+
+  parser.AddOption("", "--draft-tokens", "N",
+                   "Maximum draft tokens per speculative step (default: 7)",
+                   "Speculative", &opt.draft_tokens);
+
+  parser.AddOption("", "--min-draft-tokens", "N",
+                   "Minimum draft tokens per speculative step (default: 1)",
+                   "Speculative", &opt.min_draft_tokens);
+
   RegisterSamplingOptions(parser, &opt.sampling, "Sampling", false);
+
   parser.AddFlag("", "--enable-yarn",
-                 "Flash-Next: static YaRN, required when depth + prompt or "
+                 "Flash-Next: YaRN, required when depth + prompt or "
                  "generation exceeds the native 262144",
                  "Model", &opt.enable_yarn);
+
   parser.AddFlag("-v", "--verbose",
                  "Print detailed timing, latency breakdown, and tok/s metrics",
                  "General", &opt.verbose);
-
-  parser.SetPositionalHandler(
-      [&opt](std::string_view arg, std::string*) -> bool {
-        opt.model_path = std::string(arg);
-        return true;
-      });
 }
-
-#if defined(ENGINE_ENABLE_HIP)
-struct BenchStats {
-  double mean{0.0};
-  double stddev{0.0};
-};
-
-BenchStats ComputeStats(const std::vector<double>& values) {
-  if (values.empty()) {
-    return {.mean = 0.0, .stddev = 0.0};
-  }
-  const double sum = std::accumulate(values.begin(), values.end(), 0.0);
-  const double mean = sum / static_cast<double>(values.size());
-  if (values.size() <= 1) {
-    return {.mean = mean, .stddev = 0.0};
-  }
-  double sq_sum = 0.0;
-  for (const double v : values) {
-    sq_sum += (v - mean) * (v - mean);
-  }
-  const double variance = sq_sum / static_cast<double>(values.size() - 1);
-  return {.mean = mean, .stddev = std::sqrt(variance)};
-}
-
-std::vector<tokenization::TokenId> MakeBenchmarkTokens(
-    std::size_t count, std::size_t start_pos = 0) {
-  std::vector<tokenization::TokenId> tokens(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    tokens[i] =
-        static_cast<tokenization::TokenId>(((start_pos + i) % 1000) + 100);
-  }
-  return tokens;
-}
-
-std::string MakeTestName(std::string_view prefix, std::size_t count,
-                         std::size_t depth) {
-  std::string result = std::string(prefix) + std::to_string(count);
-  if (depth > 0) {
-    result += " @ d" + std::to_string(depth);
-  }
-  return result;
-}
-
-bool ValidatePrefill(hip::QwenGpuExecutor& executor,
-                     std::size_t prompt_length) {
-  if (prompt_length == 0 || prompt_length > executor.GetMaxPromptBatch()) {
-    std::cerr << "Error: --validate-prefill must be between 1 and "
-              << executor.GetMaxPromptBatch() << " tokens.\n";
-    return false;
-  }
-
-  const auto prompt_tokens = MakeBenchmarkTokens(prompt_length);
-
-  executor.Reset();
-  tokenization::TokenId sequential_token = 0;
-  for (std::size_t i = 0; i < prompt_tokens.size(); ++i) {
-    sequential_token =
-        executor.ForwardToken(prompt_tokens[i], static_cast<std::uint32_t>(i),
-                              i + 1 == prompt_tokens.size());
-  }
-  const auto sequential_logits_view = executor.CopyLastLogits();
-  const std::vector<float> sequential_logits(sequential_logits_view.begin(),
-                                             sequential_logits_view.end());
-
-  executor.Reset();
-  const auto batched_token = executor.ForwardPromptBatch(prompt_tokens);
-  const auto batched_logits = executor.CopyLastLogits();
-  const auto comparison =
-      testing::CompareLogits(sequential_logits, batched_logits);
-
-  std::cout << std::fixed << std::setprecision(8)
-            << "[Prefill Validation] tokens=" << prompt_length
-            << " sequential_top1=" << sequential_token
-            << " batched_top1=" << batched_token
-            << " top1_match=" << (comparison.top1_match ? "yes" : "no")
-            << " finite=" << (comparison.finite ? "yes" : "no") << '\n'
-            << "  max_abs_diff=" << comparison.max_abs_diff
-            << " mean_abs_diff=" << comparison.mean_abs_diff
-            << " rmse=" << comparison.root_mean_square_error
-            << " cosine_similarity=" << comparison.cosine_similarity << '\n';
-
-  return comparison.finite && comparison.top1_match &&
-         sequential_token == batched_token;
-}
-
-bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
-  return reader.GetMetadataString("general.architecture") == "deepseek4";
-}
-
-std::vector<int> MakeDeepSeekBenchmarkTokens(
-    const models::deepseek_v4_flash::Model& model, std::size_t count) {
-  const auto pattern = model.Tokenize(
-      "The quick brown fox jumps over the lazy dog. "
-      "Strix Halo executes this deterministic benchmark sequence. ");
-  if (pattern.empty()) {
-    throw std::runtime_error("DeepSeek benchmark token pattern is empty");
-  }
-  std::vector<int> tokens(count);
-  for (std::size_t index = 0; index < count; ++index) {
-    tokens[index] = pattern[index % pattern.size()];
-  }
-  return tokens;
-}
-
-int RunDeepSeekBenchmark(
-    const BenchOptions& options,
-    const std::shared_ptr<const core::GgufReader>& reader,
-    std::chrono::steady_clock::time_point model_load_start) {
-  int device_count = 0;
-  if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
-    std::cerr << "Error: no HIP GPU is available for DeepSeek V4 Flash\n";
-    PrintModelLoadTime(model_load_start, false);
-    return 1;
-  }
-
-  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
-    return values.empty() ? std::size_t{0}
-                          : *std::max_element(values.begin(), values.end());
-  };
-  const std::size_t max_depth = max_or_zero(options.n_depths);
-  const std::size_t max_prompt = max_or_zero(options.n_prompts);
-  const std::size_t max_generation = max_or_zero(options.n_gens);
-  constexpr std::size_t context_limit = std::numeric_limits<int>::max() - 1;
-  if (max_depth > context_limit || max_prompt > context_limit - max_depth ||
-      max_generation > context_limit - std::max<std::size_t>(max_depth, 16) ||
-      options.validate_prefill_tokens > context_limit) {
-    std::cerr << "Error: requested DeepSeek benchmark context is too large\n";
-    return 1;
-  }
-  const std::size_t required_context =
-      std::max({std::size_t{4096}, max_depth + max_prompt + 1,
-                std::max<std::size_t>(max_depth, 16) + max_generation + 1,
-                options.validate_prefill_tokens + 1});
-  const bool dspark = options.speculative_backend == "dspark";
-  if (!options.speculative_backend.empty() && !dspark) {
-    std::cerr << "Error: DeepSeek supports only --speculative dspark or off\n";
-    return 1;
-  }
-  if (dspark && options.dspark_model_path.empty()) {
-    std::cerr << "Error: --speculative dspark requires --dspark-model\n";
-    return 1;
-  }
-  if (dspark && options.min_draft_tokens != 1) {
-    std::cerr << "Error: DSpark uses model-owned adaptive drafting; custom "
-                 "draft floors are unsupported\n";
-    return 1;
-  }
-
-  // Both paths use the server's target distribution. Stochastic DSpark
-  // preserves that distribution, with its own reproducible RNG trace.
-  const bool sampled = !options.sampling.can_use_unmodified_argmax();
-  const auto sampling_config = options.sampling;
-  const auto sample_next = [&](models::deepseek_v4_flash::Session& session,
-                               sampling::SamplerState& sampler,
-                               std::string* error_msg) -> int {
-    int token = session.TakePendingDsparkToken();
-    if (token < 0) {
-      const auto logits = session.CopyLogits(error_msg);
-      if (logits.empty())
-        return -1;
-      token = static_cast<int>(sampler.Sample(logits));
-    }
-    sampler.Accept(static_cast<sampling::TokenId>(token));
-    return token;
-  };
-
-  std::string error;
-  auto model = models::deepseek_v4_flash::Model::Load(
-      options.model_path,
-      models::deepseek_v4_flash::ModelOptions{
-          .max_context = static_cast<std::uint32_t>(required_context),
-          .dspark_model_path = dspark ? options.dspark_model_path : "",
-      },
-      &error);
-  if (model == nullptr) {
-    std::cerr << "Error creating DeepSeek V4 Flash model: " << error << '\n';
-    PrintModelLoadTime(model_load_start, false);
-    return 1;
-  }
-  PrintModelLoadTime(model_load_start);
-
-  const auto tokens = MakeDeepSeekBenchmarkTokens(*model, required_context);
-  if (options.validate_prefill_tokens != 0) {
-    auto sequential =
-        model->CreateSession(options.speculative_backend.empty()
-                                 ? gufo::core::SessionMode::kAutoregressive
-                                 : gufo::core::SessionMode::kSpeculative,
-                             required_context, &error);
-    auto batched =
-        model->CreateSession(options.speculative_backend.empty()
-                                 ? gufo::core::SessionMode::kAutoregressive
-                                 : gufo::core::SessionMode::kSpeculative,
-                             required_context, &error);
-    const auto prefix =
-        std::span(tokens).first(options.validate_prefill_tokens);
-    if (!sequential || !batched || !sequential->Sync(prefix.first(1), &error) ||
-        !batched->Sync(prefix, &error)) {
-      std::cerr << "DeepSeek prefill validation failed: " << error << '\n';
-      return 1;
-    }
-    for (const int token : prefix.subspan(1)) {
-      if (!sequential->Evaluate(token, &error)) {
-        std::cerr << "DeepSeek scalar reference failed: " << error << '\n';
-        return 1;
-      }
-    }
-    const auto reference = sequential->CopyLogits(&error);
-    const auto candidate = batched->CopyLogits(&error);
-    if (reference.empty() || reference.size() != candidate.size()) {
-      std::cerr << "DeepSeek validation logit readback failed: " << error
-                << '\n';
-      return 1;
-    }
-    const auto comparison = testing::CompareLogits(reference, candidate);
-    const std::size_t rank =
-        1 + std::count_if(candidate.begin(), candidate.end(), [&](float value) {
-          return value > candidate[comparison.reference_argmax];
-        });
-    std::cout << "[Prefill Validation] tokens=" << prefix.size()
-              << " finite=" << comparison.finite
-              << " scalar_winner_rank=" << rank
-              << " rmse=" << comparison.root_mean_square_error
-              << " cosine=" << comparison.cosine_similarity
-              << " max_error=" << comparison.max_abs_diff << '\n';
-    if (!comparison.finite || rank > 3 ||
-        comparison.root_mean_square_error > 1.12F ||
-        comparison.cosine_similarity < 0.979F ||
-        comparison.max_abs_diff > 5.0F) {
-      return 1;
-    }
-  }
-  const double size_gib =
-      static_cast<double>(reader->GetSize()) / (1024.0 * 1024.0 * 1024.0);
-  const auto model_name = model->ModelName();
-
-  std::cout << "| " << std::left << std::setw(32) << "model"
-            << " | " << std::right << std::setw(10) << "size"
-            << " | " << std::left << std::setw(10) << "backend"
-            << " | " << std::right << std::setw(18) << "test"
-            << " | " << std::right << std::setw(21) << "t/s"
-            << " |\n"
-            << "| " << std::string(32, '-') << " | " << std::string(10, '-')
-            << " | " << std::string(10, '-') << " | " << std::string(18, '-')
-            << " | " << std::string(21, '-') << " |\n";
-
-  std::ostringstream size_text;
-  size_text << std::fixed << std::setprecision(2) << size_gib << " GiB";
-  const auto print_result = [&](std::string_view test_name,
-                                const BenchStats& stats) {
-    std::ostringstream throughput;
-    throughput << std::fixed << std::setprecision(2) << stats.mean << " ± "
-               << stats.stddev;
-    std::cout << "| " << std::left << std::setw(32) << model_name << " | "
-              << std::right << std::setw(10) << size_text.str() << " | "
-              << std::left << std::setw(10) << "ROCm (HIP)"
-              << " | " << std::right << std::setw(18) << test_name << " | "
-              << std::right << std::setw(21) << throughput.str() << " |\n"
-              << std::flush;
-  };
-
-  for (const std::size_t concurrency : options.concurrency) {
-    if (concurrency > 1) {
-      using models::deepseek_v4_flash::Session;
-      for (const std::size_t depth : options.n_depths) {
-        auto base = model->CreateSession(
-            options.speculative_backend.empty()
-                ? gufo::core::SessionMode::kAutoregressive
-                : gufo::core::SessionMode::kSpeculative,
-            static_cast<uint32_t>(required_context), &error);
-        const std::size_t prefix = depth > 0 ? depth : 16;
-        if (!base || !base->Sync(std::span(tokens).first(prefix), &error)) {
-          std::cerr << "Error preparing concurrent depth: " << error << '\n';
-          return 1;
-        }
-        auto snapshot = base->SaveSnapshot(&error);
-        if (!snapshot) {
-          std::cerr << "Error preparing concurrent snapshot: " << error << '\n';
-          return 1;
-        }
-        base.reset();
-        for (const bool generate : {false, true}) {
-          for (const std::size_t count :
-               generate ? options.n_gens : options.n_prompts) {
-            std::vector<double> runs;
-            for (std::size_t repeat = 0; repeat < options.repetitions;
-                 ++repeat) {
-              std::vector<std::unique_ptr<Session>> sessions;
-              std::vector<std::vector<int>> generated(concurrency);
-              const std::vector<sampling::TokenId> history(
-                  tokens.begin(), tokens.begin() + prefix);
-              std::vector<sampling::SamplerState> samplers(
-                  concurrency,
-                  sampling::SamplerState(sampling_config, history));
-              for (std::size_t i = 0; i < concurrency; ++i) {
-                auto session = model->CreateSession(
-                    options.speculative_backend.empty()
-                        ? gufo::core::SessionMode::kAutoregressive
-                        : gufo::core::SessionMode::kSpeculative,
-                    static_cast<uint32_t>(required_context), &error);
-                if (!session ||
-                    ((generate || depth > 0) &&
-                     !session->RestoreSnapshot(*snapshot, &error))) {
-                  std::cerr << "Error restoring concurrent depth: " << error
-                            << '\n';
-                  return 1;
-                }
-                sessions.push_back(std::move(session));
-                generated[i].reserve(count);
-              }
-              const auto start = std::chrono::steady_clock::now();
-              if (!generate) {
-                for (auto& session : sessions) {
-                  if (!session->Sync(std::span(tokens).first(depth + count),
-                                     &error)) {
-                    std::cerr << "Error in concurrent prefill: " << error
-                              << '\n';
-                    return 1;
-                  }
-                }
-              } else if (dspark) {
-                std::vector<std::vector<int>> emitted(concurrency);
-                while (true) {
-                  std::vector<models::deepseek_v4_flash::SessionDsparkBatchItem>
-                      items;
-                  std::vector<std::size_t> active;
-                  std::vector<std::unique_ptr<
-                      models::deepseek_v4_flash::DsparkSamplerBridge>>
-                      bridges;
-                  for (std::size_t i = 0; i < concurrency; ++i) {
-                    if (generated[i].size() == count)
-                      continue;
-                    active.push_back(i);
-                    const ds4_dspark_sampler* hook = nullptr;
-                    if (sampled) {
-                      bridges.push_back(
-                          std::make_unique<
-                              models::deepseek_v4_flash::DsparkSamplerBridge>(
-                              samplers[i]));
-                      hook = bridges.back()->hook();
-                    }
-                    items.push_back({.session = sessions[i].get(),
-                                     .max_tokens = count - generated[i].size(),
-                                     .max_draft_tokens = options.draft_tokens,
-                                     .emitted = &emitted[i],
-                                     .sampler = hook});
-                  }
-                  if (items.empty())
-                    break;
-                  if (!model->DsparkStepBatch(items, &error)) {
-                    std::cerr << "Error in concurrent DSpark: " << error
-                              << '\n';
-                    return 1;
-                  }
-                  for (std::size_t slot = 0; slot < active.size(); ++slot) {
-                    const auto i = active[slot];
-                    if (emitted[i].empty() ||
-                        emitted[i].size() > count - generated[i].size()) {
-                      std::cerr << "Error: DSpark returned an invalid "
-                                   "benchmark token count\n";
-                      return 1;
-                    }
-                    if (sampled) {
-                      samplers[i].SetRngState(bridges[slot]->rng_state());
-                      for (const int token : emitted[i]) {
-                        samplers[i].Accept(
-                            static_cast<sampling::TokenId>(token));
-                      }
-                    }
-                    generated[i].insert(generated[i].end(), emitted[i].begin(),
-                                        emitted[i].end());
-                  }
-                }
-              } else {
-                for (std::size_t step = 0; step < count; ++step) {
-                  std::vector<models::deepseek_v4_flash::SessionBatchItem>
-                      items;
-                  for (std::size_t i = 0; i < concurrency; ++i) {
-                    const int token =
-                        sampled ? sample_next(*sessions[i], samplers[i], &error)
-                                : sessions[i]->SelectNext(0.0F, nullptr);
-                    if (token < 0) {
-                      std::cerr << "Error in concurrent sampling: " << error
-                                << '\n';
-                      return 1;
-                    }
-                    generated[i].push_back(token);
-                    items.push_back(
-                        {.session = sessions[i].get(), .token = token});
-                  }
-                  if (!model->EvaluateBatch(items, &error)) {
-                    std::cerr << "Error in concurrent target decode: " << error
-                              << '\n';
-                    return 1;
-                  }
-                }
-              }
-              const double seconds =
-                  std::chrono::duration<double>(
-                      std::chrono::steady_clock::now() - start)
-                      .count();
-              runs.push_back(
-                  static_cast<double>(count) *
-                  (generate ? 1.0 : static_cast<double>(concurrency)) /
-                  seconds);
-              if (options.verbose && generate) {
-                for (std::size_t i = 0; i < concurrency; ++i) {
-                  const auto stats = sessions[i]->DsparkStatistics();
-                  const auto* bytes =
-                      reinterpret_cast<const uint8_t*>(generated[i].data());
-                  std::cerr << "DeepSeek tg C=" << concurrency
-                            << " depth=" << depth << " request=" << i
-                            << " accepted=" << stats.support_accepted
-                            << " drafted=" << stats.support_drafted
-                            << " steps=" << stats.steps
-                            << " skipped=" << stats.skipped << " output_sha256="
-                            << crypto::Sha256Hex(std::span(
-                                   bytes, generated[i].size() * sizeof(int)))
-                            << '\n';
-                }
-              }
-            }
-            print_result(MakeTestName(generate ? "tg" : "pp", count, depth) +
-                             " C" + std::to_string(concurrency),
-                         ComputeStats(runs));
-          }
-        }
-      }
-      continue;
-    }
-    std::unique_ptr<models::deepseek_v4_flash::Session> prepared_session;
-    std::size_t prepared_depth = 0;
-    for (const std::size_t depth : options.n_depths) {
-      std::unique_ptr<models::deepseek_v4_flash::SessionSnapshot> snapshot;
-      if (depth > 0) {
-        if (prepared_session == nullptr || depth < prepared_depth) {
-          prepared_session = model->CreateSession(
-              options.speculative_backend.empty()
-                  ? gufo::core::SessionMode::kAutoregressive
-                  : gufo::core::SessionMode::kSpeculative,
-              static_cast<std::uint32_t>(required_context), &error);
-          prepared_depth = 0;
-        }
-        if (prepared_session == nullptr ||
-            !prepared_session->Sync(std::span(tokens.data(), depth), &error)) {
-          std::cerr << "Error preparing DeepSeek depth " << depth << ": "
-                    << error << '\n';
-          return 1;
-        }
-        prepared_depth = depth;
-        snapshot = prepared_session->SaveSnapshot(&error);
-        if (snapshot == nullptr) {
-          std::cerr << "Error snapshotting DeepSeek depth " << depth << ": "
-                    << error << '\n';
-          return 1;
-        }
-        if (options.verbose) {
-          std::cerr << "Prepared DeepSeek depth " << depth
-                    << " snapshot_bytes=" << snapshot->SizeBytes() << '\n';
-        }
-      }
-
-      for (const std::size_t prompt_length : options.n_prompts) {
-        if (depth + prompt_length >= required_context) {
-          std::cerr << "Error: DeepSeek prompt benchmark exceeds context\n";
-          return 1;
-        }
-        std::vector<double> runs;
-        runs.reserve(options.repetitions);
-        for (std::size_t repetition = 0; repetition < options.repetitions;
-             ++repetition) {
-          std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
-          models::deepseek_v4_flash::Session* session = prepared_session.get();
-          if (snapshot == nullptr) {
-            local_session = model->CreateSession(
-                options.speculative_backend.empty()
-                    ? gufo::core::SessionMode::kAutoregressive
-                    : gufo::core::SessionMode::kSpeculative,
-                static_cast<std::uint32_t>(required_context), &error);
-            session = local_session.get();
-            if (session != nullptr && depth > 0 &&
-                !session->Sync(std::span(tokens).first(depth), &error)) {
-              session = nullptr;
-            }
-          } else if (!prepared_session->RestoreSnapshot(*snapshot, &error)) {
-            std::cerr << "Error restoring DeepSeek depth: " << error << '\n';
-            return 1;
-          }
-          if (session == nullptr) {
-            std::cerr << "Error creating DeepSeek session: " << error << '\n';
-            return 1;
-          }
-          const auto start = std::chrono::steady_clock::now();
-          if (!session->Sync(std::span(tokens.data(), depth + prompt_length),
-                             &error)) {
-            std::cerr << "Error running DeepSeek prefill: " << error << '\n';
-            return 1;
-          }
-          const double seconds = std::chrono::duration<double>(
-                                     std::chrono::steady_clock::now() - start)
-                                     .count();
-          runs.push_back(static_cast<double>(prompt_length) / seconds);
-          if (options.verbose) {
-            std::cerr << "DeepSeek pp depth=" << depth
-                      << " payload_bytes=" << session->PayloadBytes() << '\n';
-          }
-        }
-        print_result(MakeTestName("pp", prompt_length, depth),
-                     ComputeStats(runs));
-      }
-
-      for (const std::size_t generation_length : options.n_gens) {
-        const std::size_t prefix_length = depth > 0 ? depth : 16;
-        if (prefix_length + generation_length >= required_context) {
-          std::cerr << "Error: DeepSeek generation benchmark exceeds context\n";
-          return 1;
-        }
-        std::vector<double> runs;
-        runs.reserve(options.repetitions);
-        for (std::size_t repetition = 0; repetition < options.repetitions;
-             ++repetition) {
-          std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
-          models::deepseek_v4_flash::Session* session = prepared_session.get();
-          if (snapshot == nullptr) {
-            local_session = model->CreateSession(
-                options.speculative_backend.empty()
-                    ? gufo::core::SessionMode::kAutoregressive
-                    : gufo::core::SessionMode::kSpeculative,
-                static_cast<std::uint32_t>(required_context), &error);
-            session = local_session.get();
-            if (session != nullptr &&
-                !session->Sync(std::span(tokens.data(), prefix_length),
-                               &error)) {
-              session = nullptr;
-            }
-          } else if (!prepared_session->RestoreSnapshot(*snapshot, &error)) {
-            session = nullptr;
-          }
-          if (session == nullptr) {
-            std::cerr << "Error preparing DeepSeek generation: " << error
-                      << '\n';
-            return 1;
-          }
-
-          std::vector<int> generated;
-          generated.reserve(generation_length);
-          const std::vector<sampling::TokenId> history(
-              tokens.begin(), tokens.begin() + prefix_length);
-          sampling::SamplerState sampler(sampling_config, history);
-          const auto start = std::chrono::steady_clock::now();
-          for (std::size_t step = 0; step < generation_length;) {
-            if (dspark) {
-              std::vector<int> emitted;
-              std::optional<models::deepseek_v4_flash::DsparkSamplerBridge>
-                  bridge;
-              if (sampled)
-                bridge.emplace(sampler);
-              if (!session->DsparkStep(generation_length - step,
-                                       options.draft_tokens, &emitted, &error,
-                                       bridge ? bridge->hook() : nullptr) ||
-                  emitted.empty()) {
-                std::cerr << "Error running DSpark decode: " << error << '\n';
-                return 1;
-              }
-              if (bridge) {
-                sampler.SetRngState(bridge->rng_state());
-                for (const int token : emitted) {
-                  sampler.Accept(static_cast<sampling::TokenId>(token));
-                }
-              }
-              generated.insert(generated.end(), emitted.begin(), emitted.end());
-              step += emitted.size();
-            } else {
-              const int token = sampled ? sample_next(*session, sampler, &error)
-                                        : session->SelectNext(0.0F, nullptr);
-              if (token < 0 || !session->Evaluate(token, &error)) {
-                std::cerr << "Error running DeepSeek decode: " << error << '\n';
-                return 1;
-              }
-              generated.push_back(token);
-              ++step;
-            }
-          }
-          const double seconds = std::chrono::duration<double>(
-                                     std::chrono::steady_clock::now() - start)
-                                     .count();
-          runs.push_back(static_cast<double>(generation_length) / seconds);
-          if (options.verbose) {
-            const auto stats = session->DsparkStatistics();
-            const auto* bytes =
-                reinterpret_cast<const uint8_t*>(generated.data());
-            std::cerr << "DeepSeek tg C=1 depth=" << depth
-                      << " request=0 accepted=" << stats.support_accepted
-                      << " drafted=" << stats.support_drafted
-                      << " steps=" << stats.steps
-                      << " skipped=" << stats.skipped << " output_sha256="
-                      << crypto::Sha256Hex(
-                             std::span(bytes, generated.size() * sizeof(int)))
-                      << '\n';
-          }
-        }
-        print_result(MakeTestName("tg", generation_length, depth),
-                     ComputeStats(runs));
-      }
-
-      if (snapshot && !prepared_session->RestoreSnapshot(*snapshot, &error)) {
-        std::cerr << "Error restoring final DeepSeek depth: " << error << '\n';
-        return 1;
-      }
-    }
-  }
-  std::cout << '\n';
-  return 0;
-}
-
-bool IsQwen38FlashNext(const core::GgufReader& reader) {
-  return reader.GetMetadataString("general.architecture") == "qwen4exp";
-}
-
-int RunQwen38FlashNextBenchmark(
-    const BenchOptions& options,
-    const std::shared_ptr<const core::GgufReader>& reader,
-    std::chrono::steady_clock::time_point model_load_start) {
-  namespace qfn = models::qwen38_flash_next;
-  int device_count = 0;
-  if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
-    std::cerr << "Error: no HIP GPU is available for Qwen3.8-Flash-Next\n";
-    PrintModelLoadTime(model_load_start, false);
-    return 1;
-  }
-  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
-    return values.empty() ? std::size_t{0}
-                          : *std::max_element(values.begin(), values.end());
-  };
-  if (std::max({max_or_zero(options.n_depths), max_or_zero(options.n_prompts),
-                max_or_zero(options.n_gens), options.validate_prefill_tokens}) >
-      std::numeric_limits<std::uint32_t>::max()) {
-    std::cerr << "Error: benchmark workload exceeds the context range\n";
-    return 1;
-  }
-  const std::size_t required_context = FlashNextBenchContext(options);
-  const bool mtp = options.speculative_backend == "mtp";
-  if (!options.speculative_backend.empty() && !mtp) {
-    std::cerr << "Error: Qwen3.8-Flash-Next supports only --speculative mtp "
-                 "or off\n";
-    return 1;
-  }
-  if (mtp && options.mtp_model_path.empty()) {
-    std::cerr << "Error: --speculative mtp requires --mtp-model\n";
-    return 1;
-  }
-  if (options.concurrency != std::vector<std::size_t>{1}) {
-    std::cerr << "Error: Flash-Next bench supports C1; use the serving "
-                 "benchmark for concurrent requests\n";
-    return 1;
-  }
-  if (mtp && options.min_draft_tokens != 1) {
-    std::cerr << "Error: Flash-Next MTP requires --min-draft-tokens 1\n";
-    return 1;
-  }
-  if (required_context > std::numeric_limits<std::uint32_t>::max()) {
-    std::cerr << "Error: Flash-Next context is out of range\n";
-    return 1;
-  }
-
-  // The same --enable-yarn rule as serve, applied to the context that sizes
-  // the benchmark's own requests.
-  const std::uint32_t qwen4exp_native_context =
-      reader->GetMetadataUint32("qwen4exp.context_length").value_or(0);
-  std::optional<qfn::RopeScaling> rope_scaling;
-  std::string yarn_error;
-  if (!ResolveFlashNextBenchYarn(options, qwen4exp_native_context,
-                                 &rope_scaling, &yarn_error)) {
-    std::cerr << "Error: Flash-Next benchmark: " << yarn_error << '\n';
-    return 1;
-  }
-
-  std::string error;
-  auto model = qfn::Model::Load(
-      options.model_path,
-      qfn::ModelOptions{
-          .max_context = static_cast<std::uint32_t>(required_context),
-          .mtp_model_path = mtp ? options.mtp_model_path : "",
-          .max_draft_tokens = std::max<std::uint32_t>(1, options.draft_tokens),
-          .rope_scaling = rope_scaling,
-      },
-      &error);
-  if (model == nullptr) {
-    std::cerr << "Error creating Qwen3.8-Flash-Next model: " << error << '\n';
-    PrintModelLoadTime(model_load_start, false);
-    return 1;
-  }
-  PrintModelLoadTime(model_load_start);
-  if (rope_scaling) {
-    std::cout << "[YaRN]: factor=" << rope_scaling->factor
-              << " original_context=" << qwen4exp_native_context
-              << " context=" << required_context << '\n';
-  }
-
-  // Repeat a fixed token pattern for reproducible timing. It uses far fewer
-  // distinct PLE rows than varied requests.
-  std::vector<std::int32_t> tokens;
-  {
-    const auto pattern = model->Tokenize(
-        "The quick brown fox jumps over the lazy dog. "
-        "Strix Halo executes this deterministic benchmark sequence. ");
-    if (pattern.empty()) {
-      std::cerr << "Error: benchmark token pattern is empty\n";
-      return 1;
-    }
-    tokens.resize(required_context);
-    for (std::size_t i = 0; i < tokens.size(); ++i) {
-      tokens[i] = pattern[i % pattern.size()];
-    }
-  }
-
-  if (options.validate_prefill_tokens != 0) {
-    // Batched prefill against one-token-at-a-time evaluation of the same
-    // prefix; both run on the GPU, so this checks the batched kernels.
-    auto sequential = model->CreateSession(
-        options.speculative_backend.empty()
-            ? gufo::core::SessionMode::kAutoregressive
-            : gufo::core::SessionMode::kSpeculative,
-        static_cast<std::uint32_t>(required_context), &error);
-    auto batched = model->CreateSession(
-        options.speculative_backend.empty()
-            ? gufo::core::SessionMode::kAutoregressive
-            : gufo::core::SessionMode::kSpeculative,
-        static_cast<std::uint32_t>(required_context), &error);
-    const auto prefix =
-        std::span(tokens).first(options.validate_prefill_tokens);
-    if (!sequential || !batched || !sequential->Sync(prefix.first(1), &error) ||
-        !batched->Sync(prefix, &error)) {
-      std::cerr << "Qwen3.8-Flash-Next prefill validation failed: " << error
-                << '\n';
-      return 1;
-    }
-    for (const std::int32_t token : prefix.subspan(1)) {
-      if (!sequential->Evaluate(token, &error)) {
-        std::cerr << "Qwen3.8-Flash-Next sequential reference failed: " << error
-                  << '\n';
-        return 1;
-      }
-    }
-    const auto reference = sequential->Logits();
-    const auto candidate = batched->Logits();
-    const auto comparison = testing::CompareLogits(reference, candidate);
-    const std::size_t rank =
-        1 + std::count_if(candidate.begin(), candidate.end(), [&](float value) {
-          return value > candidate[comparison.reference_argmax];
-        });
-    std::cout << "[Prefill Validation] tokens=" << prefix.size()
-              << " finite=" << comparison.finite
-              << " scalar_winner_rank=" << rank
-              << " rmse=" << comparison.root_mean_square_error
-              << " cosine=" << comparison.cosine_similarity
-              << " max_error=" << comparison.max_abs_diff << '\n';
-    if (!comparison.finite || rank > 3 ||
-        comparison.root_mean_square_error > 1.12F ||
-        comparison.cosine_similarity < 0.979F ||
-        comparison.max_abs_diff > 5.0F) {
-      return 1;
-    }
-  }
-
-  const double size_gib =
-      static_cast<double>(reader->GetSize()) / (1024.0 * 1024.0 * 1024.0);
-  const auto model_name = model->ModelName();
-  std::cout << "| " << std::left << std::setw(32) << "model"
-            << " | " << std::right << std::setw(10) << "size"
-            << " | " << std::left << std::setw(10) << "backend"
-            << " | " << std::right << std::setw(18) << "test"
-            << " | " << std::right << std::setw(21) << "t/s"
-            << " |\n"
-            << "| " << std::string(32, '-') << " | " << std::string(10, '-')
-            << " | " << std::string(10, '-') << " | " << std::string(18, '-')
-            << " | " << std::string(21, '-') << " |\n";
-  std::ostringstream size_text;
-  size_text << std::fixed << std::setprecision(2) << size_gib << " GiB";
-  const auto print_result = [&](std::string_view test_name,
-                                const BenchStats& stats) {
-    std::ostringstream throughput;
-    throughput << std::fixed << std::setprecision(2) << stats.mean << " ± "
-               << stats.stddev;
-    std::cout << "| " << std::left << std::setw(32) << model_name << " | "
-              << std::right << std::setw(10) << size_text.str() << " | "
-              << std::left << std::setw(10) << "ROCm (HIP)"
-              << " | " << std::right << std::setw(18) << test_name << " | "
-              << std::right << std::setw(21) << throughput.str() << " |\n"
-              << std::flush;
-  };
-
-  for (const std::size_t depth : options.n_depths) {
-    for (const std::size_t prompt_length : options.n_prompts) {
-      if (depth + prompt_length >= required_context) {
-        std::cerr << "Error: prompt benchmark exceeds context\n";
-        return 1;
-      }
-      std::vector<double> runs;
-      // A full aligned prefix already warms the same chunk shapes and GEMM
-      // plans. Other shapes still need an untimed pass before measurement.
-      const auto chunk = model->PrefillCapacity();
-      const bool warm_prefix = chunk > 0 && depth >= chunk &&
-                               depth % chunk == 0 && prompt_length > 0 &&
-                               prompt_length % chunk == 0;
-      for (std::size_t repetition = warm_prefix ? 1 : 0;
-           repetition <= options.repetitions; ++repetition) {
-        auto session = model->CreateSession(
-            options.speculative_backend.empty()
-                ? gufo::core::SessionMode::kAutoregressive
-                : gufo::core::SessionMode::kSpeculative,
-            static_cast<std::uint32_t>(required_context), &error);
-        if (!session ||
-            (depth > 0 &&
-             !session->Sync(std::span(tokens).first(depth), &error))) {
-          std::cerr << "Error preparing depth: " << error << '\n';
-          return 1;
-        }
-        const auto start = std::chrono::steady_clock::now();
-        if (!session->Sync(std::span(tokens).first(depth + prompt_length),
-                           &error)) {
-          std::cerr << "Error running prefill: " << error << '\n';
-          return 1;
-        }
-        const double seconds = std::chrono::duration<double>(
-                                   std::chrono::steady_clock::now() - start)
-                                   .count();
-        if (repetition > 0) {
-          runs.push_back(static_cast<double>(prompt_length) / seconds);
-        }
-      }
-      print_result(MakeTestName("pp", prompt_length, depth),
-                   ComputeStats(runs));
-    }
-
-    for (const std::size_t generation_length : options.n_gens) {
-      const std::size_t prefix_length = depth > 0 ? depth : 16;
-      if (prefix_length + generation_length >= required_context) {
-        std::cerr << "Error: generation benchmark exceeds context\n";
-        return 1;
-      }
-      std::vector<double> runs;
-      for (std::size_t repetition = 0; repetition < options.repetitions;
-           ++repetition) {
-        auto session = model->CreateSession(
-            options.speculative_backend.empty()
-                ? gufo::core::SessionMode::kAutoregressive
-                : gufo::core::SessionMode::kSpeculative,
-            static_cast<std::uint32_t>(required_context), &error);
-        if (!session ||
-            !session->Sync(std::span(tokens).first(prefix_length), &error)) {
-          std::cerr << "Error preparing generation: " << error << '\n';
-          return 1;
-        }
-        std::vector<std::int32_t> generated;
-        const std::vector<sampling::TokenId> history(
-            tokens.begin(), tokens.begin() + prefix_length);
-        sampling::SamplerState sampler(options.sampling, history);
-        const auto start = std::chrono::steady_clock::now();
-        while (generated.size() < generation_length) {
-          qfn::Session::DecodeResult decoded;
-          if (!session->DecodeStep(generation_length - generated.size(),
-                                   sampler, &decoded, &error, false) ||
-              decoded.tokens.empty()) {
-            std::cerr << "Error running Flash-Next decode: " << error << '\n';
-            return 1;
-          }
-          generated.insert(generated.end(), decoded.tokens.begin(),
-                           decoded.tokens.end());
-        }
-        const double seconds = std::chrono::duration<double>(
-                                   std::chrono::steady_clock::now() - start)
-                                   .count();
-        runs.push_back(static_cast<double>(generation_length) / seconds);
-        if (options.verbose) {
-          const auto stats = session->Statistics();
-          std::cerr << "Qwen3.8-Flash-Next tg depth=" << depth
-                    << " cycles=" << stats.cycles
-                    << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted
-                    << " lookup_proposed=" << stats.lookup
-                    << " lookup_accepted=" << stats.lookup_accepted
-                    << " output_sha256="
-                    << crypto::Sha256Hex(
-                           std::span(reinterpret_cast<const std::uint8_t*>(
-                                         generated.data()),
-                                     generated.size() * sizeof(std::int32_t)))
-                    << " text="
-                    << model->Decode(std::span(generated).first(
-                           std::min<std::size_t>(generated.size(), 48)))
-                    << '\n';
-        }
-      }
-      print_result(MakeTestName("tg", generation_length, depth),
-                   ComputeStats(runs));
-    }
-  }
-  std::cout << '\n';
-  return 0;
-}
-
-#endif
 
 }  // namespace
 
-std::size_t FlashNextBenchContext(const BenchOptions& options) {
-  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
-    return values.empty() ? std::size_t{0}
-                          : *std::max_element(values.begin(), values.end());
-  };
-  const std::size_t max_depth = max_or_zero(options.n_depths);
-  return std::max(
-      {std::size_t{4096}, max_depth + max_or_zero(options.n_prompts) + 1,
-       std::max<std::size_t>(max_depth, 16) + max_or_zero(options.n_gens) + 1,
-       options.validate_prefill_tokens + 1});
-}
-
-bool ResolveFlashNextBenchYarn(
-    const BenchOptions& options, std::uint32_t native,
-    std::optional<models::qwen38_flash_next::RopeScaling>* scaling,
-    std::string* error) {
-  const std::size_t context = FlashNextBenchContext(options);
-  if (context > std::numeric_limits<std::uint32_t>::max()) {
-    *scaling = std::nullopt;
-    if (error != nullptr)
-      *error = "benchmark workload exceeds the context range";
-    return false;
-  }
-  return models::qwen38_flash_next::ResolveRopeScaling(
-      static_cast<std::uint32_t>(context), native, options.enable_yarn, scaling,
-      error);
-}
-
 void PrintBenchHelp(std::string_view program_name) {
-  BenchOptions opt;
+  BenchOptions dummy_opt;
   bool explicit_p = false;
   bool explicit_n = false;
   bool speculative_explicit = false;
   ArgParser parser(
       std::string(program_name) + " bench",
       "Benchmark prompt processing (pp) and token generation (tg) throughput.");
-  RegisterBenchOptions(parser, opt, explicit_p, explicit_n,
+  RegisterBenchOptions(parser, dummy_opt, explicit_p, explicit_n,
                        speculative_explicit);
   parser.PrintHelp();
 }
@@ -1207,12 +214,10 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   BenchOptions opt;
   bool explicit_p = false;
   bool explicit_n = false;
-
-  gufo::cli::ArgParser parser(
-      "gufo bench",
-      "Benchmark prompt processing (pp) and token generation (tg) "
-      "throughput.");
   bool speculative_explicit = false;
+  ArgParser parser(
+      "gufo bench",
+      "Benchmark prompt processing (pp) and token generation (tg) throughput.");
   RegisterBenchOptions(parser, opt, explicit_p, explicit_n,
                        speculative_explicit);
 
@@ -1237,10 +242,6 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     return std::nullopt;
   }
 
-  if (!speculative_explicit && !opt.dspark_model_path.empty()) {
-    opt.speculative_backend = "dspark";
-  }
-
   if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
       opt.min_draft_tokens > opt.draft_tokens) {
     if (error_msg != nullptr) {
@@ -1248,6 +249,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     }
     return std::nullopt;
   }
+
   try {
     opt.sampling.Validate();
     if (opt.sampling.seed < 0) {
@@ -1258,6 +260,11 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       *error_msg = error.what();
     return std::nullopt;
   }
+
+  if (!speculative_explicit && !opt.dspark_model_path.empty()) {
+    opt.speculative_backend = "dspark";
+  }
+
   if (!opt.draft_policy.empty() &&
       ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
        opt.speculative_backend != "dflash2")) {
@@ -1307,458 +314,15 @@ int RunBench(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
-#if defined(ENGINE_ENABLE_HIP)
-  if (opt.enable_yarn && !IsQwen38FlashNext(*reader)) {
-    std::cerr << "Error: --enable-yarn applies only to Qwen3.8-Flash-Next\n";
-    return 1;
-  }
-  if (IsDeepSeekV4Flash(*reader)) {
-    return RunDeepSeekBenchmark(opt, reader, model_load_start);
-  }
-  if (IsQwen38FlashNext(*reader)) {
-    return RunQwen38FlashNextBenchmark(opt, reader, model_load_start);
-  }
-
-  if (opt.concurrency != std::vector<std::size_t>{1}) {
-    std::cerr << "Error: concurrent model benchmarks currently support DS4 "
-                 "only; use the serving benchmark for Qwen\n";
-    return 1;
-  }
-  if (!opt.sampling.can_use_unmodified_argmax()) {
-    std::cerr << "Error: sampled model benchmarks support DS4 and Flash-Next; "
-                 "use the serving benchmark for Qwen\n";
-    return 1;
-  }
-
-  int device_count = 0;
-  if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
-    std::cerr << "Error: No HIP GPU devices available for benchmarking.\n";
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr || provider->bench_driver == nullptr) {
+    std::cerr << "Error: unsupported model architecture for benchmark\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-
-  hipDeviceProp_t prop{};
-  HIP_CHECK(hipGetDeviceProperties(&prop, 0));
-  const double total_vram_mib =
-      static_cast<double>(prop.totalGlobalMem) / (1024.0 * 1024.0);
-
-  std::cout << "HIP: found " << device_count << " ROCm devices (Total VRAM: "
-            << static_cast<std::size_t>(total_vram_mib) << " MiB):\n"
-            << "  Device 0: " << prop.name << ", " << prop.gcnArchName
-            << ", Wave Size: " << prop.warpSize
-            << ", VRAM: " << static_cast<std::size_t>(total_vram_mib)
-            << " MiB\n";
-
-  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
-    return values.empty() ? std::size_t{0}
-                          : *std::max_element(values.begin(), values.end());
-  };
-  const std::size_t max_depth = max_or_zero(opt.n_depths);
-  const std::size_t max_test_tokens =
-      std::max({max_or_zero(opt.n_prompts), max_or_zero(opt.n_gens),
-                opt.validate_prefill_tokens});
-  if (max_depth > std::numeric_limits<std::uint32_t>::max() - max_test_tokens) {
-    std::cerr << "Error: requested benchmark context is too large.\n";
-    PrintModelLoadTime(model_load_start, false);
-    return 1;
-  }
-  const std::size_t required_context =
-      std::max<std::size_t>(4096, max_depth + max_test_tokens);
-
-  auto gpu_exec = hip::QwenGpuExecutor::CreateFromGguf(
-      reader, &err, static_cast<std::uint32_t>(required_context));
-  if (!gpu_exec) {
-    std::cerr << "Error creating Qwen GPU executor: " << err << "\n";
-    PrintModelLoadTime(model_load_start, false);
-    return 1;
-  }
-  PrintModelLoadTime(model_load_start);
-
-  const auto& config = gpu_exec->GetConfig();
-  std::shared_ptr<const hip::QwenMtpGpuModel> mtp_gpu_model;
-  if (opt.speculative_backend == "mtp") {
-    std::string mtp_path = opt.mtp_model_path;
-    if (mtp_path.empty()) {
-      std::cerr << "MTP requires --mtp-model\n";
-      return 1;
-    }
-    auto mtp_reader_owner = core::GgufReader::OpenFile(mtp_path, &err);
-    if (mtp_reader_owner == nullptr) {
-      std::cerr << "Error loading MTP GGUF model: " << err << '\n';
-      return 1;
-    }
-    std::shared_ptr<const core::GgufReader> mtp_reader(
-        std::move(mtp_reader_owner));
-    mtp_gpu_model = hip::QwenMtpGpuModel::Create(
-        std::move(mtp_reader), gpu_exec->GetSharedModel(), &err);
-    if (mtp_gpu_model == nullptr) {
-      std::cerr << "Error creating GPU MTP model: " << err << '\n';
-      return 1;
-    }
-    if (opt.verbose) {
-      std::cerr << "Packed GPU MTP view: "
-                << mtp_gpu_model->GetPackedWeightBytes() << " bytes in "
-                << mtp_gpu_model->GetPackTimeSeconds() << " s\n";
-    }
-  }
-  // A DFlash2 pp row includes the same feature capture and draft injection as
-  // prompt/serving. Keep one backend alive across warmup, depth restores and
-  // TG.
-  std::unique_ptr<speculative::SpeculativeVerifier> dflash_verifier;
-  if (opt.speculative_backend == "dflash2") {
-    hip::QwenDFlashGpuDraftConfig draft_config{
-        .max_context = static_cast<std::uint32_t>(required_context),
-        .max_draft_tokens = opt.draft_tokens,
-        .policy = speculative::ParseDFlashDraftPolicy(opt.draft_policy),
-    };
-    auto draft = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
-        opt.dflash_model_path, gpu_exec->GetSharedModel(), draft_config, &err);
-    if (!draft) {
-      throw std::runtime_error("DFlash2 initialization failed: " + err);
-    }
-    speculative::SpeculativeOptions options;
-    options.max_draft_tokens = opt.draft_tokens;
-    options.min_draft_tokens = opt.min_draft_tokens;
-    options.initial_draft_tokens = opt.draft_tokens;
-    options.enable_adaptive_draft_length = false;
-    options.use_batched_verification = true;
-    dflash_verifier = std::make_unique<speculative::SpeculativeVerifier>(
-        *gpu_exec, std::move(draft), options);
-  }
-  const std::string model_name =
-      config.model_name + " " + reader->GetQuantizationLabel();
-  const double model_size_gib =
-      static_cast<double>(reader->GetSize()) / (1024.0 * 1024.0 * 1024.0);
-  std::uint64_t parameter_count = 0;
-  for (const auto& tensor : reader->GetTensors()) {
-    parameter_count += tensor.ElementCount();
-  }
-  const double model_params_b =
-      static_cast<double>(parameter_count) / 1'000'000'000.0;
-
-  if (opt.validate_prefill_tokens > 0 &&
-      !ValidatePrefill(*gpu_exec, opt.validate_prefill_tokens)) {
-    return 1;
-  }
-
-  std::cout << "| " << std::left << std::setw(30) << "model"
-            << " | " << std::right << std::setw(10) << "size"
-            << " | " << std::right << std::setw(10) << "params"
-            << " | " << std::left << std::setw(10) << "backend"
-            << " | " << std::right << std::setw(15) << "test"
-            << " | " << std::right << std::setw(21) << "t/s"
-            << " |\n";
-  std::cout << "| " << std::string(30, '-') << " | " << std::string(10, '-')
-            << " | " << std::string(10, '-') << " | " << std::string(10, '-')
-            << " | " << std::string(15, '-') << " | " << std::string(21, '-')
-            << " |\n";
-
-  // Warmup run
-  {
-    const auto warmup_tokens = MakeBenchmarkTokens(32);
-    gpu_exec->Reset();
-    (void)gpu_exec->ForwardPromptBatch(warmup_tokens);
-    HIP_CHECK(hipDeviceSynchronize());
-  }
-
-  std::ostringstream ss_size, ss_params;
-  ss_size << std::fixed << std::setprecision(2) << model_size_gib << " GiB";
-  ss_params << std::fixed << std::setprecision(2) << model_params_b << " B";
-
-  const std::string_view backend_name = "ROCm (HIP)";
-  const auto print_result = [&](std::string_view test_name,
-                                const BenchStats& stats) {
-    std::ostringstream ss_ts;
-    ss_ts << std::fixed << std::setprecision(2) << stats.mean << " ± "
-          << stats.stddev;
-
-    std::cout << "| " << std::left << std::setw(30) << model_name << " | "
-              << std::right << std::setw(10) << ss_size.str() << " | "
-              << std::right << std::setw(10) << ss_params.str() << " | "
-              << std::left << std::setw(10) << backend_name << " | "
-              << std::right << std::setw(15) << test_name << " | " << std::right
-              << std::setw(21) << ss_ts.str() << " |\n"
-              << std::flush;
-  };
-
-  // Verification owns the executor's SaveState rollback slot. A benchmark
-  // prefix must have an independent snapshot across speculative TG repeats.
-  std::unique_ptr<hip::QwenGpuSnapshot> prepared_target;
-  std::unique_ptr<speculative::SpeculativeVerifierSnapshot> prepared_draft;
-  std::size_t prepared_depth = 0;
-  bool has_prepared_depth = false;
-  tokenization::TokenId prepared_next_token = 0;
-  bool has_prepared_next_token = false;
-  for (const std::size_t depth : opt.n_depths) {
-    if (depth > 0) {
-      if (opt.verbose) {
-        std::cerr << "Preparing context depth " << depth << "...\n";
-      }
-      std::size_t preparation_start = 0;
-      double restore_ms = 0.0;
-      if (has_prepared_depth && depth >= prepared_depth) {
-        const auto restore_start = std::chrono::steady_clock::now();
-        gpu_exec->RestoreSnapshot(*prepared_target);
-        if (dflash_verifier)
-          dflash_verifier->RestoreSnapshot(*prepared_draft);
-        const auto restore_end = std::chrono::steady_clock::now();
-        restore_ms = std::chrono::duration<double, std::milli>(restore_end -
-                                                               restore_start)
-                         .count();
-        preparation_start = prepared_depth;
-      } else {
-        gpu_exec->Reset();
-      }
-      HIP_CHECK(hipDeviceSynchronize());
-      const auto depth_tokens =
-          MakeBenchmarkTokens(depth - preparation_start, preparation_start);
-      const auto preparation_begin = std::chrono::steady_clock::now();
-      const bool compute_next_token = !opt.n_gens.empty();
-      if (!depth_tokens.empty()) {
-        const auto next_token =
-            dflash_verifier
-                ? (preparation_start == 0
-                       ? dflash_verifier->Prime(depth_tokens,
-                                                compute_next_token)
-                       : dflash_verifier->ExtendPrompt(
-                             depth_tokens,
-                             static_cast<std::uint32_t>(preparation_start),
-                             compute_next_token))
-                : gpu_exec->ForwardPromptBatch(
-                      depth_tokens,
-                      static_cast<std::uint32_t>(preparation_start),
-                      compute_next_token);
-        if (compute_next_token) {
-          prepared_next_token = next_token;
-          has_prepared_next_token = true;
-        }
-      }
-      HIP_CHECK(hipDeviceSynchronize());
-      const auto preparation_end = std::chrono::steady_clock::now();
-      const auto cache_begin = preparation_end;
-      prepared_target =
-          gpu_exec->SaveSnapshot(static_cast<std::uint32_t>(depth));
-      if (dflash_verifier)
-        prepared_draft = dflash_verifier->Snapshot();
-      const auto cache_end = std::chrono::steady_clock::now();
-      if (opt.verbose) {
-        const double preparation_seconds =
-            std::chrono::duration<double>(preparation_end - preparation_begin)
-                .count();
-        const double cache_ms =
-            std::chrono::duration<double, std::milli>(cache_end - cache_begin)
-                .count();
-        std::cerr << "Prepared " << (depth - preparation_start)
-                  << " new tokens in " << std::fixed << std::setprecision(3)
-                  << preparation_seconds << " s; cached depth " << depth
-                  << " in " << std::setprecision(2) << cache_ms << " ms";
-        if (preparation_start > 0) {
-          std::cerr << " after restoring depth " << preparation_start << " in "
-                    << restore_ms << " ms";
-        }
-        std::cerr << "\n";
-      }
-      prepared_depth = depth;
-      has_prepared_depth = true;
-    }
-
-    const auto restore_depth = [&] {
-      if (depth == 0) {
-        gpu_exec->Reset();
-      } else {
-        gpu_exec->RestoreSnapshot(*prepared_target);
-        if (dflash_verifier)
-          dflash_verifier->RestoreSnapshot(*prepared_draft);
-      }
-      HIP_CHECK(hipDeviceSynchronize());
-    };
-
-    for (const std::size_t p_len : opt.n_prompts) {
-      const auto prompt_tokens = MakeBenchmarkTokens(p_len, depth);
-
-      const auto prefill = [&] {
-        if (dflash_verifier) {
-          if (depth == 0) {
-            (void)dflash_verifier->Prime(prompt_tokens);
-          } else {
-            (void)dflash_verifier->ExtendPrompt(
-                prompt_tokens, static_cast<std::uint32_t>(depth));
-          }
-        } else {
-          (void)gpu_exec->ForwardPromptBatch(prompt_tokens,
-                                             static_cast<std::uint32_t>(depth));
-        }
-        HIP_CHECK(hipDeviceSynchronize());
-      };
-      restore_depth();
-      prefill();
-
-      std::vector<double> runs;
-      runs.reserve(opt.repetitions);
-      for (std::size_t r = 0; r < opt.repetitions; ++r) {
-        restore_depth();
-
-        const auto t0 = std::chrono::high_resolution_clock::now();
-        prefill();
-        const auto t1 = std::chrono::high_resolution_clock::now();
-
-        const double elapsed_sec =
-            std::chrono::duration<double>(t1 - t0).count();
-        if (elapsed_sec > 0.0) {
-          runs.push_back(static_cast<double>(p_len) / elapsed_sec);
-        }
-      }
-
-      print_result(MakeTestName("pp", p_len, depth), ComputeStats(runs));
-    }
-
-    for (const std::size_t g_len : opt.n_gens) {
-      restore_depth();
-      (void)gpu_exec->ForwardToken(
-          static_cast<tokenization::TokenId>((depth % 1000) + 100),
-          static_cast<std::uint32_t>(depth));
-      HIP_CHECK(hipDeviceSynchronize());
-
-      std::vector<double> runs;
-      runs.reserve(opt.repetitions);
-      std::vector<double> acceptance_runs;
-      acceptance_runs.reserve(opt.repetitions);
-      for (std::size_t r = 0; r < opt.repetitions; ++r) {
-        restore_depth();
-
-        std::unique_ptr<speculative::IDraftBackend> draft_backend;
-        if (opt.speculative_backend == "mtp") {
-          hip::QwenMtpGpuDraftConfig cfg{
-              .max_context = static_cast<std::uint32_t>(required_context),
-              .max_draft_tokens = opt.draft_tokens,
-          };
-          draft_backend =
-              hip::QwenMtpGpuDraftBackend::Create(mtp_gpu_model, cfg, &err);
-          if (draft_backend == nullptr) {
-            throw std::runtime_error("MTP initialization failed: " + err);
-          }
-        }
-
-        std::unique_ptr<speculative::SpeculativeVerifier> owned_spec_verifier;
-        auto* spec_verifier = dflash_verifier.get();
-        if (draft_backend) {
-          speculative::SpeculativeOptions s_opts;
-          s_opts.max_draft_tokens = opt.draft_tokens;
-          s_opts.min_draft_tokens = opt.min_draft_tokens;
-          s_opts.initial_draft_tokens = opt.draft_tokens;
-          s_opts.use_batched_verification = true;
-          owned_spec_verifier =
-              std::make_unique<speculative::SpeculativeVerifier>(
-                  *gpu_exec, std::move(draft_backend), s_opts);
-          spec_verifier = owned_spec_verifier.get();
-        }
-
-        std::vector<tokenization::TokenId> speculative_sequence;
-        tokenization::TokenId speculative_current_token = 0;
-        std::uint32_t speculative_current_pos = 0;
-        if (spec_verifier) {
-          speculative_sequence =
-              MakeBenchmarkTokens(depth > 0 ? depth : std::size_t{16});
-          speculative_current_token =
-              dflash_verifier && depth > 0
-                  ? prepared_next_token
-                  : spec_verifier->Prime(speculative_sequence);
-          speculative_current_pos =
-              static_cast<std::uint32_t>(speculative_sequence.size());
-          speculative_sequence.push_back(speculative_current_token);
-        }
-        tokenization::TokenId greedy_current_token = 0;
-        std::uint32_t greedy_current_pos = 0;
-        if (!spec_verifier) {
-          if (depth > 0) {
-            if (!has_prepared_next_token) {
-              throw std::logic_error(
-                  "prepared generation depth has no target token");
-            }
-            greedy_current_token = prepared_next_token;
-            greedy_current_pos = static_cast<std::uint32_t>(depth);
-          } else {
-            const auto prompt = MakeBenchmarkTokens(16);
-            greedy_current_token = gpu_exec->ForwardPromptBatch(prompt);
-            greedy_current_pos = static_cast<std::uint32_t>(prompt.size());
-          }
-        }
-        HIP_CHECK(hipDeviceSynchronize());
-
-        std::vector<tokenization::TokenId> generated;
-        if (opt.verbose)
-          generated.reserve(g_len);
-        const auto t0 = std::chrono::high_resolution_clock::now();
-        if (spec_verifier) {
-          std::size_t emitted = 0;
-          while (emitted < g_len) {
-            const auto step_res = spec_verifier->VerifyStep(
-                speculative_sequence, speculative_current_pos,
-                speculative_current_token, 999999,
-                static_cast<std::uint32_t>(g_len - emitted));
-            for (const auto t : step_res.emitted_tokens) {
-              speculative_sequence.push_back(t);
-              if (opt.verbose)
-                generated.push_back(t);
-              ++speculative_current_pos;
-              ++emitted;
-              if (emitted >= g_len) {
-                break;
-              }
-            }
-            speculative_current_token = step_res.next_token;
-          }
-          acceptance_runs.push_back(spec_verifier->GetStats().AcceptanceRate());
-        } else {
-          for (std::size_t step = 0; step < g_len; ++step) {
-            greedy_current_token = gpu_exec->ForwardToken(greedy_current_token,
-                                                          greedy_current_pos);
-            ++greedy_current_pos;
-            if (opt.verbose)
-              generated.push_back(greedy_current_token);
-          }
-        }
-        HIP_CHECK(hipDeviceSynchronize());
-        const auto t1 = std::chrono::high_resolution_clock::now();
-        if (opt.verbose) {
-          const auto* bytes =
-              reinterpret_cast<const std::uint8_t*>(generated.data());
-          std::cerr << "[QwenBenchTrace]: depth=" << depth
-                    << " count=" << generated.size() << " sha256="
-                    << crypto::Sha256Hex(std::span(
-                           bytes,
-                           generated.size() * sizeof(tokenization::TokenId)))
-                    << '\n';
-        }
-
-        const double elapsed_sec =
-            std::chrono::duration<double>(t1 - t0).count();
-        if (elapsed_sec > 0.0) {
-          runs.push_back(static_cast<double>(g_len) / elapsed_sec);
-        }
-      }
-
-      std::string test_name = MakeTestName("tg", g_len, depth);
-      if (!opt.speculative_backend.empty()) {
-        test_name += "-" + opt.speculative_backend;
-      }
-      print_result(test_name, ComputeStats(runs));
-      if (opt.verbose && !acceptance_runs.empty()) {
-        const auto acceptance = ComputeStats(acceptance_runs);
-        std::cerr << test_name << " acceptance=" << std::fixed
-                  << std::setprecision(3) << acceptance.mean << " +/- "
-                  << acceptance.stddev << '\n';
-      }
-    }
-  }
-
-  std::cout << "\n";
-  return 0;
-#else
-  std::cerr << "Error: Gufo GPU benchmark requires ENGINE_ENABLE_HIP=ON\n";
-  PrintModelLoadTime(model_load_start, false);
-  return 1;
-#endif
+  return provider->bench_driver(opt, reader, model_load_start);
 }
 
 }  // namespace gufo::cli

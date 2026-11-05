@@ -26,9 +26,9 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/arch.hpp"
-#include "src/core/mapped_prefetch.hpp"
-#include "src/core/platform/mapped_file.hpp"
+#include <gufo/ext/mapped_prefetch.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
+#include <gufo/ext/experimental/arch.hpp>
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 #include "src/models/minimax_h3/prompt_encoder_ops.hip.hpp"
 

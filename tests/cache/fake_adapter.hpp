@@ -42,7 +42,7 @@ private:
   bool fail_submission_{false};
 };
 
-class FakeAdapter final : public Adapter {
+class FakeAdapter : public Adapter {
 public:
   // Wider chunks need less capture metadata for the same row bytes.
   explicit FakeAdapter(Rows rows_per_chunk = 4);

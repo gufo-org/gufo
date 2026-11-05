@@ -1,0 +1,13 @@
+{
+  "checked_extensions": [
+    "deepseek_v4_flash",
+    "embedding_gemma2",
+    "minimax_h3",
+    "qwen",
+    "qwen38_flash_next",
+    "qwen3_asr",
+    "qwen3_tts",
+    "qwen_image_21"
+  ],
+  "errors": []
+}

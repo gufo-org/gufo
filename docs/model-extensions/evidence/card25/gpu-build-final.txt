@@ -1,0 +1,45 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+error (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/e5e48730ecef42dfcae6f123198b755faed00216e0c7a572a6e3a93c84c12118.sqlite' is busy
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+[0/2] Re-checking globbed directories...
+-- GLOB mismatch!
+The following files were added:
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/baseline.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/embedding-contracts.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/embedding-video-token-budget.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/extension-provenance.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/external-extension-sources.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/ggml-block-formats.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/image-default-steps.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/media-provider-contracts.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/metadata-only-discovery.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/public-forwarding-headers.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/sampler-logit-scratch.md
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/text-generation-contracts.md
+The following files were removed:
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/0.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/1.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/10.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/2.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/3.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/4.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/5.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/6.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/7.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/784-image-default-steps.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/8.md
+  -/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/9.md
+[1/2] Re-running CMake...
+-- gufo: compiling C and CXX through /nix/store/j0yrxqvaka4xky3xca88jbnwzbp42lil-ccache-4.14.1/bin/ccache
+-- gufo: unshipped discovered extension lfm3
+-- gufo: extension mode=discovery; included=[deepseek_v4_flash;embedding_gemma2;lfm3;minimax_h3;qwen;qwen38_flash_next;qwen3_asr;qwen3_tts;qwen_image_21]; excluded=[]
+-- gufo: HIP target gfx1151
+-- gufo: ROCr runtime /nix/store/88jjsz00km321bcl9851aiwwdig79b4l-rocm-runtime-10.1/lib/libhsa-runtime64.so
+-- Configuring done (0.7s)
+-- Generating done (0.4s)
+-- Build files have been written to: /home/mixer/gufo/build/gpu-test
+[0/4] Re-checking globbed directories...
+ninja: no work to do.

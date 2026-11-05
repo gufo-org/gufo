@@ -1,25 +1,33 @@
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 
+#include <hip/hip_fp16.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/cache/slot.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "tests/models/qwen38_flash_next/mtp_replay.hpp"
+#include "tests/models/qwen38_flash_next/split_plan.hpp"
 
 namespace qfn = gufo::models::qwen38_flash_next;
 namespace cache = gufo::cache;
 namespace sampling = gufo::sampling;
 void FailNextResetSubmission();
 void FailNextTransferWait();
+void LimitReportedDeviceFree(std::size_t bytes);
 namespace {
 void Require(bool ok, const std::string& message) {
   if (!ok)
@@ -35,6 +43,10 @@ void Reject(F&& call) {
   }
   Require(rejected, "invalid adapter operation was accepted");
 }
+constexpr std::uint32_t kYarnContext = 5120;
+// Measured on the repeated-text prompt: 0.31 with native cached keys, 0.72 when
+// scaled keys are cached as they are, 0 for a byte-exact restore.
+constexpr double kYarnLogitBound = 0.5;
 struct IncompatibleStream final : cache::Stream {
   cache::TransferResult Synchronize() noexcept override {
     return cache::TransferResult::kSucceeded;
@@ -228,6 +240,86 @@ void SameLogits(const qfn::Session& a, const qfn::Session& b) {
                           a.Logits().size_bytes()) == 0,
           "restored next-step logits differ");
 }
+// Cached keys keep the native rotation at every session factor. Rows captured
+// before and after the session moves past the native length must agree, and a
+// restore must resume at the session's factor.
+void CheckDynamicYarn(const std::shared_ptr<qfn::Model>& model, bool mtp) {
+  const auto mode = mtp ? gufo::core::SessionMode::kSpeculative
+                        : gufo::core::SessionMode::kAutoregressive;
+  qfn::ContinuationAdapter adapter(model, mode, kYarnContext,
+                                   {'y', 'a', 'r', 'n'});
+  Guard guard;
+  gufo::hip::TransferPool streams(2);
+  auto slot = adapter.CreateSlot(guard);
+  auto& source = adapter.GetSession(*slot);
+  const auto pattern = model->Tokenize(
+      "The quick brown fox jumps over the lazy dog. Strix Halo executes this "
+      "deterministic benchmark sequence. ");
+  std::vector<std::int32_t> prompt(4500);
+  for (std::size_t i = 0; i < prompt.size(); ++i)
+    prompt[i] = pattern[i % pattern.size()];
+  std::string error;
+  Require(source.Sync(std::span(prompt).first(1024), &error), error);
+  const auto native = Capture(adapter, *slot, streams);
+  Require(source.Sync(prompt, &error), error);
+  const auto scaled = Capture(adapter, *slot, streams);
+  Require(Capture(adapter, *slot, streams, true).bytes == scaled.bytes,
+          "mapped and staged key captures differ");
+  for (const auto& component : adapter.Components()) {
+    const auto rows = native.positions[component.id.value - 1].valid_rows;
+    if (!component.row_bytes || !rows)
+      continue;
+    const auto& before = native.bytes[component.id.value - 1];
+    const auto& after = scaled.bytes[component.id.value - 1];
+    if (std::memcmp(before.data(), after.data(), before.size()) == 0)
+      continue;
+    const auto width = component.row_bytes / sizeof(__half);
+    const auto* a = reinterpret_cast<const __half*>(before.data());
+    const auto* b = reinterpret_cast<const __half*>(after.data());
+    for (cache::Rows row = 0; row < rows; ++row, a += width, b += width) {
+      float peak = 0.0F, difference = 0.0F;
+      for (std::size_t i = 0; i < width; ++i) {
+        const float x = __half2float(a[i]), y = __half2float(b[i]);
+        peak = std::max(peak, std::fabs(x));
+        difference = std::max(difference, std::fabs(x - y));
+      }
+      Require(difference <= peak / 512.0F,
+              "cached keys left the native rotation");
+    }
+  }
+  auto restored = adapter.CreateSlot(guard);
+  Load(adapter, *restored, scaled, streams);
+  Require(adapter.Validate(*restored, scaled.positions),
+          "dynamic YaRN restore rejected");
+  auto& resumed = adapter.GetSession(*restored);
+  // The round trip through the native rotation costs about one F16 ulp per
+  // key, so compare forced steps by distance rather than by exact tokens.
+  double worst = 0.0;
+  for (std::size_t i = 0; i < 16; ++i) {
+    Require(source.Evaluate(prompt[i], &error), error);
+    Require(resumed.Evaluate(prompt[i], &error), error);
+    const auto a = source.Logits(), b = resumed.Logits();
+    double total = 0.0;
+    for (std::size_t j = 0; j < a.size(); ++j)
+      total += std::fabs(static_cast<double>(a[j]) - b[j]);
+    worst = std::max(worst, total / static_cast<double>(a.size()));
+  }
+  std::cout << "dynamic YaRN restore: mean logit distance " << worst << "\n";
+  Require(worst < kYarnLogitBound, "restored session left its factor");
+
+  auto saved = model->CreateSession(mode, kYarnContext, &error);
+  auto loaded = model->CreateSession(mode, kYarnContext, &error);
+  Require(saved && loaded, error);
+  Require(saved->Sync(prompt, &error), error);
+  auto snapshot =
+      saved->SaveSnapshot(&error, qfn::Session::SnapshotMode::kMaterialized);
+  Require(bool(snapshot), error);
+  std::vector<std::uint8_t> payload(snapshot->SizeBytes());
+  Require(snapshot->CopyTo(payload), "materialize snapshot");
+  Require(loaded->RestoreSnapshot(payload, &error), error);
+  Require(Decode(*saved, 16) == Decode(*loaded, 16),
+          "snapshot lost a fractional YaRN factor");
+}
 void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   const auto mode = mtp ? gufo::core::SessionMode::kSpeculative
                         : gufo::core::SessionMode::kAutoregressive;
@@ -285,6 +377,90 @@ void CheckSlotReuse(const std::shared_ptr<qfn::Model>& model, bool mtp) {
   std::cout << (mtp ? "MTP" : "AR")
             << ",slot_reuse,sampled/greedy/cancellation/reset,PASS\n";
 }
+/// Several component checkpoints captured in prefill passes, through the
+/// production adapter path, against a prompt split at every point and at
+/// the same pass ends: a point five rows into the first pass, one four rows
+/// later (closer than the draft depth), one on a selection block and one off
+/// the alignment. Each frozen checkpoint, the live frontier and a resumed
+/// checkpoint equal the split. `in_pass` is false when the device has no
+/// room for the checkpoint arena, so each point ends a pass.
+void CheckInPassMany(const std::shared_ptr<qfn::Model>& model, bool mtp,
+                     std::span<const std::int32_t> prompt,
+                     bool in_pass = true) {
+  gufo::hip::TransferPool streams(2);
+  qfn::ContinuationAdapter adapter(
+      model,
+      mtp ? gufo::core::SessionMode::kSpeculative
+          : gufo::core::SessionMode::kAutoregressive,
+      16384, {'i', 'n', 'p', 'a', 's', 's'});
+  Guard source_guard, reference_guard;
+  auto source = adapter.CreateSlot(source_guard);
+  auto reference = adapter.CreateSlot(reference_guard);
+  auto& a = adapter.GetSession(*source);
+  auto& b = adapter.GetSession(*reference);
+  std::string error;
+  constexpr std::uint32_t kEnd = 10000;
+  const std::uint32_t points[] = {5, 9, 6144, 9001};
+  std::vector<Checkpoint> frozen(std::size(points));
+  std::vector<std::size_t> order;
+  adapter.PrefillThrough(*source, prompt.first(kEnd), points,
+                         [&](std::size_t i) {
+                           order.push_back(i);
+                           frozen[i] = Capture(adapter, *source, streams);
+                         });
+  Require(
+      (order == std::vector<std::size_t>{0, 1, 2, 3}) && a.Position() == kEnd,
+      "in-pass captures out of order or frontier changed");
+  const auto splits = gufo::test::SplitPlan(*model, 0, kEnd, points, in_pass);
+  auto split_at = splits.begin();
+  for (std::size_t i = 0; i < std::size(points); ++i) {
+    for (; split_at != splits.end() && *split_at <= points[i]; ++split_at)
+      Require(b.Sync(prompt.first(*split_at), &error), error);
+    const auto split = Capture(adapter, *reference, streams);
+    std::string differing;
+    for (std::size_t c = 0; c < split.bytes.size(); ++c) {
+      const auto& x = frozen[i].bytes.at(c);
+      const auto& y = split.bytes[c];
+      if (x == y)
+        continue;
+      std::size_t first = 0, count = 0;
+      for (std::size_t j = 0; j < std::min(x.size(), y.size()); ++j)
+        if (x[j] != y[j] && count++ == 0)
+          first = j;
+      differing +=
+          " [component " + std::to_string(c) + " kind " +
+          std::to_string(static_cast<int>(adapter.Components()[c].kind)) +
+          " bytes " + std::to_string(y.size()) + " first " +
+          std::to_string(first) + " differing " + std::to_string(count) + "]";
+    }
+    if (frozen[i].positions != split.positions)
+      differing += " [positions]";
+    Require(differing.empty(),
+            "component in-pass checkpoint at " + std::to_string(points[i]) +
+                " differs from a pass ending there:" + differing);
+  }
+  for (; split_at != splits.end(); ++split_at)
+    Require(b.Sync(prompt.first(*split_at), &error), error);
+  SameLogits(a, b);
+  {
+    const auto live = Capture(adapter, *source, streams);
+    const auto split = Capture(adapter, *reference, streams);
+    Require(live.positions == split.positions && live.bytes == split.bytes,
+            "in-pass checkpoints changed the live frontier");
+  }
+  // Resume the unaligned checkpoint against the split there.
+  Load(adapter, *source, frozen[3], streams);
+  Require(adapter.Validate(*source, frozen[3].positions),
+          "component in-pass restore rejected");
+  Require(a.Sync(prompt.first(kEnd), &error), error);
+  SameLogits(a, b);
+  Require(Decode(a, 24, mtp) == Decode(b, 24, mtp),
+          "resumed in-pass checkpoint continued differently");
+  Require(adapter.Invalidate(*source) && adapter.Invalidate(*reference),
+          "in-pass reset failed");
+  std::cout << (mtp ? "MTP" : "AR") << ",in_pass_many,PASS\n";
+}
+
 void CheckInPass(const std::shared_ptr<qfn::Model>& model, bool mtp,
                  std::span<const std::int32_t> prompt) {
   gufo::hip::TransferPool streams(2);
@@ -304,17 +480,19 @@ void CheckInPass(const std::shared_ptr<qfn::Model>& model, bool mtp,
         adapter.PrefillCheckpointPositions(*source, boundary);
     Checkpoint frozen;
     bool called = false;
-    adapter.PrefillThrough(*source, prompt.first(boundary + 5), boundary, [&] {
-      called = true;
-      Require(adapter.Positions(*source) == predicted,
-              "in-pass positions differ from admission prediction");
-      Reject([&] { (void)adapter.GetSession(*source); });
-      Reject([&] { (void)a.Sync(prompt.first(boundary + 5), &error); });
-      Reject([&] { a.Reset(); });
-      Require(!adapter.Invalidate(*source),
-              "in-pass consumer invalidated its capture frontier");
-      frozen = Capture(adapter, *source, streams);
-    });
+    const std::uint32_t points[] = {boundary};
+    adapter.PrefillThrough(
+        *source, prompt.first(boundary + 5), points, [&](std::size_t) {
+          called = true;
+          Require(adapter.Positions(*source) == predicted,
+                  "in-pass positions differ from admission prediction");
+          Reject([&] { (void)adapter.GetSession(*source); });
+          Reject([&] { (void)a.Sync(prompt.first(boundary + 5), &error); });
+          Reject([&] { a.Reset(); });
+          Require(!adapter.Invalidate(*source),
+                  "in-pass consumer invalidated its capture frontier");
+          frozen = Capture(adapter, *source, streams);
+        });
     Require(called && a.Position() == boundary + 5,
             "in-pass capture changed the completed live frontier");
     std::unique_ptr<qfn::SessionSnapshot> native;
@@ -351,12 +529,14 @@ void CheckInPass(const std::shared_ptr<qfn::Model>& model, bool mtp,
         std::min<std::size_t>(64, component->state_bytes));
     std::optional<cache::Completion> pending;
     Reject([&] {
-      adapter.PrefillThrough(*source, prompt.first(2052), 2047, [&] {
-        pending.emplace(adapter.CapturePrivatePiece(*source, component->id, 0,
-                                                    bytes, *stream));
-        if (throw_consumer)
-          throw std::runtime_error("rejected in-pass consumer");
-      });
+      const std::uint32_t points[] = {2047};
+      adapter.PrefillThrough(
+          *source, prompt.first(2052), points, [&](std::size_t) {
+            pending.emplace(adapter.CapturePrivatePiece(*source, component->id,
+                                                        0, bytes, *stream));
+            if (throw_consumer)
+              throw std::runtime_error("rejected in-pass consumer");
+          });
     });
     Require(pending && pending->Ready() &&
                 pending->Wait() == cache::TransferResult::kSucceeded,
@@ -903,6 +1083,22 @@ void CheckLearnedDraftPolicy(const std::shared_ptr<qfn::Model>& model) {
 }
 }  // namespace
 int main(int argc, char** argv) {
+  // ctest runs the in-pass checks with the model named by the environment and
+  // skips them without it.
+  std::array<char*, 6> from_env{};
+  if (argc == 2 && std::string_view(argv[1]) == "--in-pass-only") {
+    char* first = std::getenv("QWEN38_FLASH_NEXT_MODEL");
+    char* mtp = std::getenv("QWEN38_FLASH_NEXT_MTP_MODEL");
+    if (!first || !*first || !mtp || !*mtp) {
+      std::cerr << "QWEN38_FLASH_NEXT_MODEL and QWEN38_FLASH_NEXT_MTP_MODEL "
+                   "are not set; skipping\n";
+      return 77;
+    }
+    static char model_flag[] = "--model", mtp_flag[] = "--mtp-model";
+    from_env = {argv[0], model_flag, first, mtp_flag, mtp, argv[1]};
+    argc = 6;
+    argv = from_env.data();
+  }
   const bool guard_only =
       argc == 6 && std::string_view(argv[5]) == "--guard-only";
   const bool image_only =
@@ -913,18 +1109,34 @@ int main(int argc, char** argv) {
       argc == 6 && std::string_view(argv[5]) == "--policy-only";
   const bool reuse_only =
       argc == 6 && std::string_view(argv[5]) == "--reuse-only";
+  const bool yarn_only =
+      argc == 6 && std::string_view(argv[5]) == "--yarn-only";
   if ((argc != 5 && !guard_only && !image_only && !in_pass_only &&
-       !policy_only && !reuse_only) ||
+       !policy_only && !reuse_only && !yarn_only) ||
       std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
     std::cerr << "Usage: continuation_adapter_test --model FIRST.gguf "
                  "--mtp-model MTP.gguf "
                  "[--guard-only|--image-only|--in-pass-only|--policy-only|"
-                 "--reuse-only]\n";
+                 "--reuse-only|--yarn-only]\n";
     return 77;
   }
   try {
     std::string error;
+    if (yarn_only) {
+      // The fractional ceiling is the common shape: --context 409600 is 1.5625.
+      auto model = qfn::Model::Load(
+          argv[2],
+          {.max_context = kYarnContext,
+           .mtp_model_path = argv[4],
+           .rope_scaling =
+               qfn::RopeScaling{.factor = 2.5F, .original_context = 2048}},
+          &error);
+      Require(bool(model), error);
+      CheckDynamicYarn(model, false);
+      CheckDynamicYarn(model, true);
+      return 0;
+    }
     auto model = qfn::Model::Load(
         argv[2], {.max_context = 16384, .mtp_model_path = argv[4]}, &error);
     Require(bool(model), error);
@@ -957,6 +1169,23 @@ int main(int argc, char** argv) {
     Require(sampled_tail && sampled_tail->size() < 8203, error);
     std::copy(sampled_tail->begin(), sampled_tail->end(),
               prompt.begin() + 8203 - sampled_tail->size());
+    if (!image_only && !guard_only) {
+      // Before any capture commits the in-pass checkpoint arena: without
+      // device headroom for it, the consumer reads the live session at a
+      // pass split at the boundary (#937).
+      struct Unlimit {
+        ~Unlimit() {
+          LimitReportedDeviceFree(std::numeric_limits<std::size_t>::max());
+        }
+      } unlimit;
+      LimitReportedDeviceFree(0);
+      std::cout << "device exhaustion:\n";
+      CheckInPass(model, false, prompt);
+      CheckInPass(model, true, prompt);
+      // Each boundary then ends a pass of its own.
+      CheckInPassMany(model, false, prompt, false);
+      CheckInPassMany(model, true, prompt, false);
+    }
     if (!image_only && !in_pass_only) {
       CheckTransferAndGuardLifetime(model, false, prompt);
       CheckTransferAndGuardLifetime(model, true, prompt);
@@ -966,6 +1195,8 @@ int main(int argc, char** argv) {
     if (!image_only) {
       CheckInPass(model, false, prompt);
       CheckInPass(model, true, prompt);
+      CheckInPassMany(model, false, prompt);
+      CheckInPassMany(model, true, prompt);
     }
     if (in_pass_only)
       return 0;

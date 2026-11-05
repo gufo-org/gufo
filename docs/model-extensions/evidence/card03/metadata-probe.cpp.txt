@@ -1,0 +1,46 @@
+#include "src/models/qwen38_flash_next/text_provider.hpp"
+
+#include <cassert>
+#include <iostream>
+#include <map>
+#include <type_traits>
+
+using Metadata = gufo::server::FlashNextProviderMetadata;
+using Options = gufo::server::FlashNextTextProviderOptions;
+using Factory = std::shared_ptr<gufo::server::TextModelRunner> (*)(
+    std::shared_ptr<gufo::models::qwen38_flash_next::Model>, const Options&);
+static_assert(std::is_same_v<decltype(&gufo::server::CreateFlashNextTextProvider),
+                             Factory>);
+
+int main() {
+  // Fixture mapping only: production selection/parser registration is not
+  // implemented by this spike. This executable never links the factory or HIP.
+  const std::map<std::string_view, std::string> provider_values{
+      {Metadata::draft_option, "/fixtures/mtp.gguf"},
+      {Metadata::draft_tokens_option, "7"},
+      {"speculative", std::string(Metadata::speculative_value)}};
+  Options options{
+      .max_context = 8192,
+      .use_mtp = provider_values.at("speculative") == Metadata::speculative_value,
+      .max_draft_tokens = static_cast<std::uint32_t>(
+          std::stoul(provider_values.at(Metadata::draft_tokens_option))),
+      .artifact_fingerprint = "main-sha256",
+      .mtp_fingerprint = "mtp-sha256",
+  };
+  assert(Metadata::key == "qwen38-flash-next");
+  assert(Metadata::draft_option == "--mtp-model");
+  assert(Metadata::draft_tokens_option == "--draft-tokens");
+  assert(Metadata::speculative_value == "mtp");
+  assert(Metadata::model_owned_cli_drivers);
+  assert(provider_values.at(Metadata::draft_option) == "/fixtures/mtp.gguf");
+  assert(options.max_context == 8192);
+  assert(options.use_mtp);
+  assert(options.max_draft_tokens == 7);
+  assert(options.artifact_fingerprint == "main-sha256");
+  assert(options.mtp_fingerprint == "mtp-sha256");
+  std::cout << "artifact_key=" << Metadata::key << '\n'
+            << "draft_option=" << Metadata::draft_option << '\n'
+            << "draft_tokens_option=" << Metadata::draft_tokens_option << '\n'
+            << "speculative_value=" << Metadata::speculative_value << '\n'
+            << "all typed option fields represented; factory signature checked\n";
+}

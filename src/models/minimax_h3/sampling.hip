@@ -13,7 +13,7 @@
 #include <string_view>
 #include <utility>
 
-#include "src/core/hip/arch.hpp"
+#include <gufo/ext/experimental/arch.hpp>
 #include "src/models/minimax_h3/sampling.hpp"
 
 namespace gufo::minimax_h3 {

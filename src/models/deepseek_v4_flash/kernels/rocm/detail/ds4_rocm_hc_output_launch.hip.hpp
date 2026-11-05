@@ -173,6 +173,8 @@ extern "C" int ds4_gpu_hc_norm_mix_split_weighted_sum_tensor(
 extern "C" int ds4_gpu_hc_split_weighted_sum_norm_tensor(
         ds4_gpu_tensor       *out,
         ds4_gpu_tensor       *norm_out,
+        ds4_gpu_tensor       *norm_q8,
+        ds4_gpu_tensor       *norm_q8k,
         ds4_gpu_tensor       *split,
         const ds4_gpu_tensor *mix,
         const ds4_gpu_tensor *residual_hc,
@@ -215,9 +217,29 @@ extern "C" int ds4_gpu_hc_split_weighted_sum_norm_tensor(
     const float *norm_w = (const float *)hip_model_range_ptr(model_map, norm_weight_offset,
             (uint64_t)n_embd * sizeof(float), "hc_norm_weight");
     if (!scale || !base || !norm_w) return 0;
-    hc_split_weighted_sum_norm_fused_kernel<<<(uint32_t)n_rows, 256>>>(
+    int8_t *q8 = NULL;
+    float *q8_scale = NULL;
+    if (norm_q8k && !norm_q8) return 0;
+    if (norm_q8) {
+        constexpr uint32_t qcols = 16u;
+        if (n_embd != qcols * 256u || !hip_q8_0_act(norm_q8, n_rows, n_embd / 32u, &q8, &q8_scale) ||
+            (norm_q8k && !hip_tensor_has_elems2(norm_q8k, n_rows, n_embd / ROCM_QK_K,
+                                                sizeof(hip_block_q8_K)))) {
+            return 0;
+        }
+        hc_split_weighted_sum_norm_fused_kernel<qcols><<<(uint32_t)n_rows, 256>>>(
+                (float *)out->ptr, (float *)norm_out->ptr, q8, q8_scale,
+                norm_q8k ? (hip_block_q8_K *)norm_q8k->ptr : NULL, (float *)split->ptr,
+                (const float *)mix->ptr, (const float *)residual_hc->ptr, scale, base, norm_w,
+                n_embd, n_hc, (uint32_t)n_rows, sinkhorn_iters, eps, norm_eps);
+        return hip_ok(hipGetLastError(), "hc split weighted sum norm quantize launch");
+    }
+    hc_split_weighted_sum_norm_fused_kernel<0><<<(uint32_t)n_rows, 256>>>(
             (float *)out->ptr,
             (float *)norm_out->ptr,
+            NULL,
+            NULL,
+            NULL,
             (float *)split->ptr,
             (const float *)mix->ptr,
             (const float *)residual_hc->ptr,
@@ -382,6 +404,7 @@ extern "C" int ds4_gpu_shared_down_hc_expand_q8_0_tensor(
         uint64_t                in_dim,
         uint64_t                out_dim,
         const ds4_gpu_tensor *shared_mid,
+        const ds4_gpu_tensor *shared_mid_q8,
         const ds4_gpu_tensor *routed_out,
         const ds4_gpu_tensor *residual_hc,
         const ds4_gpu_tensor *split,
@@ -392,6 +415,7 @@ extern "C" int ds4_gpu_shared_down_hc_expand_q8_0_tensor(
                                                     weight_offset,
                                                     in_dim, out_dim,
                                                     shared_mid,
+                                                    shared_mid_q8,
                                                     routed_out,
                                                     residual_hc,
                                                     split,
@@ -408,6 +432,7 @@ extern "C" int ds4_gpu_matmul_q8_0_hc_expand_tensor(
         uint64_t                in_dim,
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
+        const ds4_gpu_tensor *x_q8,
         const ds4_gpu_tensor *residual_hc,
         const ds4_gpu_tensor *split,
         uint32_t                n_embd,
@@ -417,6 +442,7 @@ extern "C" int ds4_gpu_matmul_q8_0_hc_expand_tensor(
                                                     weight_offset,
                                                     in_dim, out_dim,
                                                     x,
+                                                    x_q8,
                                                     NULL,
                                                     residual_hc,
                                                     split,

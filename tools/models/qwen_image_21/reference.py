@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import diffusers
 from diffusers import QwenImage21Pipeline
 from PIL import Image
 
@@ -20,17 +21,23 @@ from PIL import Image
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--model-revision", help="Verified checkpoint commit for the report")
+    parser.add_argument("--diffusers-revision", help="Pinned source commit for the report")
     parser.add_argument("--native", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default="A red cube on a white table.")
     parser.add_argument("--size", type=int, default=64)
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--height", type=int)
     parser.add_argument("--steps", type=int, default=2)
-    parser.add_argument("--image", type=Path)
+    parser.add_argument("--image", type=Path, action="append",
+                        help="Ordered input reference; repeat for multi-image editing")
     parser.add_argument("--teacher-force", action="store_true",
                         help="Replay each official block with Gufo's saved block inputs")
     parser.add_argument("--skip-decode", action="store_true",
                         help="Compare denoising latents without running the VAE decoder")
     args = parser.parse_args()
+    width, height = args.width or args.size, args.height or args.size
     torch.set_num_threads(8)
     args.output.mkdir(parents=True, exist_ok=True)
     pipe = QwenImage21Pipeline.from_pretrained(
@@ -38,8 +45,11 @@ def main():
     ).to("cuda")
     records = {"reference": {"torch": torch.__version__,
                              "transformers": version("transformers"),
-                             "diffusers": version("diffusers"),
-                             "model_revision": Path(args.model).name,
+                             "diffusers": diffusers.__version__,
+                             "model_revision": args.model_revision,
+                             "model_directory": Path(args.model).name,
+                             "model_index_sha256": hashlib.sha256((Path(args.model) / "model_index.json").read_bytes()).hexdigest(),
+                             "diffusers_revision": args.diffusers_revision,
                              "teacher_forced": args.teacher_force,
                              "decoded": not args.skip_decode}}
     step = [0]
@@ -142,7 +152,7 @@ def main():
         layer.register_forward_hook(
             lambda module, inputs, out, i=i: compare(f"dit.{step[0]}.block.{i}", out)
         )
-    target_rows = (args.size // 16) ** 2
+    target_rows = (width // 16) * (height // 16)
     pipe.transformer.proj_out.register_forward_hook(
         lambda module, inputs, out: compare(f"dit.{step[0]}.output", out[:, -target_rows:])
     )
@@ -176,10 +186,10 @@ def main():
     latent = torch.from_numpy(noise).to(device="cuda", dtype=torch.bfloat16)
     kwargs = {}
     if args.image:
-        kwargs["image"] = Image.open(args.image)
+        kwargs["image"] = [Image.open(path).convert("RGBA") for path in args.image]
     with torch.inference_mode():
         result = pipe(
-            prompt=args.prompt, width=args.size, height=args.size,
+            prompt=args.prompt, width=width, height=height,
             num_inference_steps=args.steps, latents=latent,
             output_type="latent" if args.skip_decode else "pil",
             callback_on_step_end=callback, **kwargs

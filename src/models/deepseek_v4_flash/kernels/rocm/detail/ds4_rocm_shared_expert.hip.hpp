@@ -6,9 +6,11 @@ extern "C" int ds4_gpu_swiglu_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *
 }
 extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
     ds4_gpu_tensor* gate, ds4_gpu_tensor* up, ds4_gpu_tensor* mid,
+    ds4_gpu_tensor* mid_q8,
     const void* model_map, uint64_t model_size, uint64_t gate_offset,
     uint64_t up_offset, uint64_t in_dim, uint64_t out_dim,
-    const ds4_gpu_tensor* x, float clamp, uint32_t n_tok) {
+    const ds4_gpu_tensor* x, const ds4_gpu_tensor* xq8, float clamp,
+    uint32_t n_tok) {
   if (!gate || !up || !mid || !model_map || !x || in_dim == 0u ||
       out_dim == 0u || n_tok == 0u || out_dim > UINT32_MAX / n_tok ||
       in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
@@ -30,9 +32,23 @@ extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
       return 0;
     }
 
-    return ds4_gpu_matmul_q8_0_pair_tensor(gate, up, model_map, model_size,
-                                           gate_offset, up_offset, in_dim,
-                                           out_dim, out_dim, x, n_tok) &&
-           ds4_gpu_swiglu_tensor(mid, gate, up, (uint32_t)(out_dim * n_tok),
-                                 clamp, 1.0f);
+    if (!ds4_gpu_matmul_q8_0_pair_tensor(gate, up, model_map, model_size,
+                                         gate_offset, up_offset, in_dim,
+                                         out_dim, out_dim, x, xq8, n_tok)) {
+      return 0;
+    }
+    if (!mid_q8) {
+      return ds4_gpu_swiglu_tensor(mid, gate, up, (uint32_t)(out_dim * n_tok),
+                                   clamp, 1.0f);
+    }
+    int8_t* q = NULL;
+    float* q_scale = NULL;
+    if (n_tok != 1u || out_dim % 256u != 0u ||
+        !hip_q8_0_act(mid_q8, 1u, out_dim / 32u, &q, &q_scale)) {
+      return 0;
+    }
+    swiglu_quantize_q8_0_kernel<<<(uint32_t)(out_dim / 256u), 256>>>(
+        (float*)mid->ptr, q, q_scale, (const float*)gate->ptr,
+        (const float*)up->ptr, clamp, 1.0f);
+    return hip_ok(hipGetLastError(), "swiglu quantize launch");
 }

@@ -150,6 +150,7 @@ public:
               std::to_string(static_cast<unsigned>(e.action)) +
               " reason=" + std::to_string(static_cast<unsigned>(e.reason)) +
               " tokens=" + std::to_string(e.boundary) +
+              " purpose=" + std::to_string(static_cast<unsigned>(e.purpose)) +
               " rank=" + std::to_string(e.rank) +
               " unique_bytes_freed=" + std::to_string(e.unique_bytes_freed) +
               " ledger_bytes=" + std::to_string(e.ledger_bytes));
@@ -976,7 +977,7 @@ std::size_t ComponentTextCache::capacity() const noexcept {
 
 std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
-    const ContinuationCache::CancellationCheck& cancelled,
+    const std::function<bool()>& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
     std::size_t stable, bool stop_at_eos, bool persist) {
   if (cancelled && cancelled())
@@ -1137,10 +1138,17 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     bool restored = bool(live);
     if (live)
       request.cached = found.selected->boundary;
+    // Prefill continues a checkpoint exactly only from an aligned position.
+    // The complete prompt stays off the alignment for an unchanged retry,
+    // which continues it without prefill; a longer prompt takes an aligned
+    // boundary instead (TextRunnerCapabilities::prefill_alignment).
+    const std::size_t alignment = std::max<std::size_t>(
+        1, impl_->runner->Descriptor().capabilities.prefill_alignment);
     for (const auto& candidate : found.candidates) {
       if (restored || (cancelled && cancelled()))
         break;
-      if (candidate.live)
+      if (candidate.live || (candidate.boundary % alignment != 0 &&
+                             candidate.boundary < prompt.size()))
         continue;
       try {
         if (candidate.checkpoint) {
@@ -1378,6 +1386,8 @@ std::optional<TextPendingPublication> ComponentTextCache::PendingPublication(
   if (!impl_->queue)
     return std::nullopt;
   const auto input = Inputs(prompt.size(), context);
+  const std::size_t alignment = std::max<std::size_t>(
+      1, impl_->runner->Descriptor().capabilities.prefill_alignment);
   const std::lock_guard lock(impl_->mutex);
   const auto found =
       impl_->index.Lookup({impl_->identity, prompt, input, 0, true});
@@ -1390,7 +1400,9 @@ std::optional<TextPendingPublication> ComponentTextCache::PendingPublication(
     if (checkpoint_id && id != checkpoint_id)
       continue;
     const auto& tokens = capture->manifest.tokens;
+    // Acquire skips an unaligned checkpoint below the prompt end.
     if (tokens.size() > prompt.size() ||
+        (tokens.size() % alignment != 0 && tokens.size() < prompt.size()) ||
         capture->manifest.input != At(input, tokens.size()) ||
         !std::equal(tokens.begin(), tokens.end(), prompt.begin()))
       continue;
@@ -1809,11 +1821,6 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
       boundaries.push_back(capture.boundary);
   return boundaries;
 }
-std::vector<std::size_t> ServingCacheLease::PlannedCaptures(
-    std::size_t stable) const {
-  return component_->PlannedCaptures(stable);
-}
-
 ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   auto report = impl_->metrics;
   report.ledger = impl_->cache->ledger.Snapshot();
@@ -1832,62 +1839,5 @@ ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   }
   return report;
 }
-std::optional<ComponentCacheMetrics> ServingCacheLease::Metrics() const {
-  return component_ ? std::optional(component_->Metrics()) : std::nullopt;
-}
 
-#define FORWARD_RESULT(type, name, qualifiers, args, call)         \
-  type ServingCacheLease::name args qualifiers {                   \
-    return component_ ? component_->name call : legacy_.name call; \
-  }
-FORWARD_RESULT(ContinuationState&, state, const, (), ())
-FORWARD_RESULT(bool, cache_hit, const noexcept, (), ())
-FORWARD_RESULT(std::size_t, cached_tokens, const noexcept, (), ())
-FORWARD_RESULT(std::size_t, restored_snapshot_bytes, const noexcept, (), ())
-FORWARD_RESULT(double, restore_ms, const noexcept, (), ())
-FORWARD_RESULT(bool, restored_from_disk, const noexcept, (), ())
-FORWARD_RESULT(ContinuationLookup, lookup, const noexcept, (), ())
-FORWARD_RESULT(bool, HasSnapshotFor, const,
-               (std::span<const ContinuationToken> tokens), (tokens))
-FORWARD_RESULT(bool, TryReserveSnapshot, ,
-               (std::size_t bytes, std::size_t boundary, bool preserve,
-                SnapshotPurpose purpose,
-                std::span<const ContinuationToken> tokens),
-               (bytes, boundary, preserve, purpose, tokens))
-FORWARD_RESULT(void, SkipSnapshot, noexcept,
-               (SnapshotEventReason reason, std::size_t bytes,
-                std::size_t boundary),
-               (reason, bytes, boundary))
-FORWARD_RESULT(std::size_t, PublishSnapshot, ,
-               (std::vector<ContinuationToken> tokens,
-                std::shared_ptr<const ContinuationSnapshot> snapshot,
-                bool preserve),
-               (std::move(tokens), std::move(snapshot), preserve))
-FORWARD_RESULT(std::size_t, Commit, ,
-               (std::vector<ContinuationToken> tokens,
-                std::shared_ptr<const ContinuationSnapshot> snapshot,
-                std::vector<ContinuationToken> live),
-               (std::move(tokens), std::move(snapshot), std::move(live)))
-FORWARD_RESULT(void, Invalidate, noexcept, (), ())
-#undef FORWARD_RESULT
-void ServingCacheLease::AdoptRestoredPrefix(std::size_t tokens,
-                                            std::size_t bytes, double ms) {
-  if (component_)
-    throw std::logic_error("component restore is owned by the component cache");
-  legacy_.AdoptRestoredPrefix(tokens, bytes, ms);
-}
-void ServingCacheLease::PreparePrefill(std::size_t tokens) {
-  if (component_)
-    component_->PreparePrefill(tokens);
-}
-
-std::size_t ServingCacheLease::CaptureBytes() const {
-  return component_->CaptureBytes();
-}
-std::size_t ServingCacheLease::CaptureBytes(std::size_t boundary) const {
-  return component_->CaptureBytes(boundary);
-}
-std::unique_ptr<TextRunnerSnapshot> ServingCacheLease::Capture() {
-  return component_->Capture();
-}
 }  // namespace gufo::server

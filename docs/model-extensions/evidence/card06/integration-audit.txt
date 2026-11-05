@@ -1,0 +1,12 @@
+$ git diff --check
+exit=0
+$ git diff --cached --name-only
+exit=0
+$ sha256sum docs/model-extensions/RFC.md
+2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448  docs/model-extensions/RFC.md
+exit=0
+$ du -sh docs/model-extensions/evidence/card06
+544K	docs/model-extensions/evidence/card06
+exit=0
+$ find docs/model-extensions/evidence/card06 -type f -size +5M
+exit=0

@@ -174,9 +174,11 @@ correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
 Flash-Next's native context is 262144. `--context` above it requires
-`--enable-yarn`, which enables static YaRN with factor context / 262144; the
+`--enable-yarn`, which enables YaRN up to factor context / 262144; the
 server refuses to start without the flag, and the flag is an error at or below
-262144. The factor applies to every request, including short ones; see the
+262144. A session keeps the native rotation while it holds at most 262144
+tokens and takes the smallest whole factor covering its positions past that,
+re-rotating its cached keys when the factor changes; see the
 [measurements](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323981940),
 the
 [opt-in proposal](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323982386),
@@ -213,9 +215,8 @@ movable pages, not GPU allocations. 27B also checks HIP free memory. A
 positive value sets a byte cap that may exceed the automatic budget, up to the
 available host RAM minus 4 GiB; the startup line reports both as
 `automatic_bytes` and `max_bytes`.
-On Qwen27B and Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
-`max_bytes` excludes it. Other models' disk staging and temporary disk-save
-buffers are separate from this RAM budget.
+The pinned disk staging buffer comes out of that ceiling, and `max_bytes`
+excludes it.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
 Qwen27B and Qwen3.8-Flash-Next pin pages for up to about 89% of its budget as captures
@@ -227,8 +228,7 @@ registered with HIP: `hipHostMalloc` asks for high-order pages, and compacting
 host memory for them stalled decode for seconds when most RAM belonged to the GPU.
 Growth stops early while the host would keep less than 4 GiB available. The pages hold checkpoint state and KV rows, partial
 tails and idle-session spill; there is no separate spill option.
-Other models allocate payloads only when captured. Under pressure, optional
-copies give way before another conversation's last useful checkpoint.
+Under pressure, optional copies give way before another conversation's last useful checkpoint.
 
 `--cache-ram-bytes off` keeps no RAM cache. The server retains and captures no
 checkpoint in RAM and pins no cache memory, except up to 512 MiB of backing that
@@ -293,20 +293,18 @@ encoding scratch is still allocated per image.
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
 
-On Qwen27B and Flash-Next, `--cache-disk-bytes` counts every file the cache manages,
+`--cache-disk-bytes` counts every file the cache manages,
 including temporary files of unfinished writes and files a crash left
 unreferenced. Restarting with a lower budget removes those first, then the
 oldest checkpoints by creation order, until the directory fits; use history does not
-survive a restart. One Qwen27B or Flash-Next server owns the directory: a second one fails
+survive a restart. One server owns the directory: a second one fails
 at startup, after loading its model but before committing its RAM budget, with
 an ownership error naming the directory. The lock does not wait: a restarted
 server fails if its predecessor is still draining disk writes when the new one
-finishes loading its model. Other models do not take this lock.
-The first start on a directory written by an earlier release removes its old
-checkpoint files (`*.kvc`), and the cache refills as conversations run. Do not
-share a directory with another model server; the component cache removes
+finishes loading its model.
+Do not share a directory with another model server; the component cache removes
 their checkpoint and temporary files too, including writes in progress.
-Qwen27B and Flash-Next ignore `--cache-disk-staging-bytes` and logs
+The server ignores `--cache-disk-staging-bytes` and logs
 `event=option_ignored`. Writes and restores stream each checkpoint through an
 internal 1 MiB pinned buffer, piece by piece; a larger buffer did not change
 restore or write speed and took pinned RAM and device heap from the cache and
@@ -482,7 +480,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/responses` | Text/images, structured output, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
-| `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`) |
+| `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`, `/`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
 | `GET` | `/metrics` | Prometheus-format operational metrics (text LLM serving only) |
 
@@ -494,12 +492,20 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/embeddings`, `/embedding` | llama.cpp's non-OpenAI embeddings form, on the same `gufo serve embedding` process; other servers answer 404 |
 | `POST` | `/v1/audio/transcriptions` | An STT implementation is compiled and loaded |
 | `POST` | `/v1/audio/speech` | A TTS implementation is compiled and loaded |
+| `GET` | `/v1/realtime` | `serve asr`: transcription sessions, and spoken conversations for models that hear and speak |
+| `GET` | `/voice` | `serve asr` with a conversational model: a browser client of `/v1/realtime` |
+| `POST` | `/v1/systemone` | A decision model is configured with `gufo serve decision` |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/videos` | A validated operator-supplied MiniMax H3 checkpoint is configured |
 | `GET` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
 | `DELETE` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
+
+As in llama.cpp, vLLM, TEI and Ollama, these routes ignore request fields they
+do not know, so a client that adds one still works. Known fields whose behavior
+a route cannot provide, such as transcription timestamps or video image
+conditioning, are refused with 400 rather than dropped.
 
 Use `gufo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](models/qwen-image-2.1/README.md). Generation accepts JSON;
@@ -575,19 +581,24 @@ transcript: synthesis runs to the `max_new_tokens` cap, so a short input can
 return several minutes of unusable audio. Preset names join
 `voice-clone` in `/v1/audio/voices`, and a request naming a preset must not
 also send `reference_audio`, `reference_text`, or `voice_clone_mode` --- the
-preset already supplies them. Presets require a Base checkpoint; CustomVoice
-selects a trained embedding and VoiceDesign is driven by `instructions`, so
-neither has anything to apply them to.
+preset already supplies them. Presets require a checkpoint that supports
+reference presets (such as Qwen3-TTS Base); CustomVoice selects a trained
+embedding and VoiceDesign is driven by `instructions`, so neither has anything
+to apply them to. A request that omits `voice` gets the model's declared
+default voice (such as `voice-clone`), falling back to the first name in
+`/v1/audio/voices`; a preset is never chosen implicitly.
 
 `POST /v1/audio/speech` accepts `model`, `input`, `voice`, `response_format`,
 `speed`, `language`, `instructions`, `seed`, `max_new_tokens`, `greedy`,
 `stream_format`, talker `temperature`/`top_k`/`top_p`/`repetition_penalty`, and
 predictor `subtalker_dosample`/`subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p`.
-Base additionally accepts `reference_audio`, `reference_text`, `voice_clone_mode`.
-Unknown fields are rejected. `response_format` supports buffered `wav` and
+Checkpoints that support reference conditioning additionally accept
+`reference_audio`, `reference_text`, `voice_clone_mode`.
+Unknown fields are ignored. `response_format` supports buffered `wav` and
 streaming `pcm`; `stream_format: "sse"` emits OpenAI audio events with base64
 PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
-`max_new_tokens` at 8192 (default 3000). Output is 24 kHz mono 16-bit PCM.
+`max_new_tokens` at 8192 (default 3000). Output is mono 16-bit PCM at the
+model's output sample rate (24 kHz for Qwen3-TTS).
 
 `GET /v1/audio/speech/stream` upgrades to the vLLM-Omni incremental-text
 WebSocket protocol. [TTS streaming examples](models/qwen3-tts/README.md#sampling-and-streaming)
@@ -609,15 +620,32 @@ Qwen3-ASR serving uses its own model process:
 `max_tokens`, and `stream`. The native route is deterministic (`temperature=0`)
 and supports `json`, `text`, and `verbose_json`. `stream=true` with JSON emits
 OpenAI transcript delta/done events. Long uploads are split within model
-capacity; `max_tokens` applies per chunk. Timestamp requests are rejected.
+capacity; `max_tokens` applies per chunk. Timestamp (`timestamp_granularities[]`)
+and logprobs (`include[]`) requests are rejected; unknown fields are ignored.
 
 `GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
 transcription WebSocket interface. [ASR streaming examples](models/qwen3-asr/README.md#streaming)
 describe PCM format, append/commit/clear, event IDs and limits. WebSockets use
-the same bearer authentication and connection limits as HTTP. Messages are
+the same connection limits as HTTP. Messages are
 bounded to 4 MiB, queued input to 8 MiB/128 messages, and unconsumed output to
 a five-second socket timeout. Native generation observes close/disconnect;
 no per-server streaming flag or extra model is required.
+
+Models with live transcription stream text deltas while audio is still being
+appended, and `turn_detection: {"type": "server_vad"}` lets the server find
+turns (`input_audio_buffer.speech_started`/`speech_stopped`, then the
+commit). Without `intent`, models that hear and speak hold an OpenAI Realtime
+conversation on the same path: audio and text input, streamed text and 24 kHz
+speech replies, function tools, `response.cancel`, interruption by user
+speech and `conversation.item.truncate`. The handshake selects the
+`realtime` subprotocol a client offers. `GET /voice`, served when the model
+holds conversations, is a browser client for it. Event-level behavior is
+documented by the model's provider (for example the LFM3-Audio extension).
+
+`POST /v1/systemone` (`gufo serve decision`) answers one JSON decision
+request with the loaded model; a `model` field, when present, must name it.
+Malformed JSON and requests the model rejects return 400, and requests are
+serialized over the one loaded model.
 
 The MiniMax H3 subset follows the asynchronous OpenAI-style video resource
 shape and is versioned independently as `gufo.video-api.v1`. Its supported
@@ -685,16 +713,17 @@ The response holds one embedding per input in request order:
 - `dimensions` is optional and must be 128, 256, 512, or 768, which is the default.  Any other value returns 400 `invalid_dimensions`.  A smaller value keeps the leading components of the normalized vector, which is Matryoshka truncation, and renormalizes them to unit length.
 - `user` is accepted and ignored when it is a string, and a non-string `user` returns 400 `invalid_parameter_type`.
 - `prompt_name` is optional; see task prefixes below.
-- `video_options` optionally selects video FPS, frame cap, overflow strategy and timestamps; see [video inputs](models/embeddinggemma-2/README.md#video).
-- `mm_processor_kwargs` is optional, as in vLLM.  Its only key, `max_soft_tokens`, selects the image budget of the checkpoint's `Gemma4ImageProcessor` for every image of the request: 70, 140, 280 (the default), 560, or 1120 soft tokens.  Absent, null or empty `mm_processor_kwargs` keeps the default. Any other key or value returns 400 `invalid_mm_processor_kwargs`, and a non-object returns 400 `invalid_parameter_type`. Video frames retain their separate 140-token budget. The 32-image request cap is a server resource limit across all inputs, independent of the selected budget; see [image limits and memory](models/embeddinggemma-2/README.md#images).
-- `truncate` is optional and `false` by default; see the token limit below.  A non-boolean `truncate` returns 400 `invalid_parameter_type`.  The server rejects other members with 400 `unsupported_field`.
+- `video_options` optionally selects video FPS, frame cap, overflow strategy, timestamps and the per-frame vision budget (`max_soft_tokens`: 70, 140, 280, 560 or 1120; 140 is the default); see [video inputs](models/embeddinggemma-2/README.md#video).
+- `mm_processor_kwargs` is optional, as in vLLM.  Its only key, `max_soft_tokens`, selects the image budget of the checkpoint's `Gemma4ImageProcessor` for every image of the request: 70, 140, 280 (the default), 560, or 1120 soft tokens.  Absent, null or empty `mm_processor_kwargs` keeps the default. Any other key or value returns 400 `invalid_mm_processor_kwargs`, and a non-object returns 400 `invalid_parameter_type`. Video frames keep their separate budget, `video_options.max_soft_tokens`. The 32-image request cap is a server resource limit across all inputs, independent of the selected budget; see [image limits and memory](models/embeddinggemma-2/README.md#images).
+- `truncate` is optional and `false` by default; see the token limit below.  A non-boolean `truncate` returns 400 `invalid_parameter_type`.  As in llama.cpp, TEI and vLLM, the server ignores members it does not know.
+- As in llama.cpp, `embd_normalize` and `content` are accepted here too; see the native route below.  A request with `content` and no `input` gets the native response.
 - Every vector is mean-pooled and L2-normalized, so the dot product of two vectors is their cosine similarity.
 - Each input may hold at most 8192 tokens, counting the `<bos>` and `<eos>` markers the tokenizer adds.  By default the server refuses longer inputs instead of truncating them, with 400 `context_length_exceeded`, and the message names the input index.  With `"truncate": true` it keeps the first 8190 tokens of each longer input between the markers instead; only `--max-request-bytes` then limits a text input's length.  An input with images, video or audio is truncated only when all of its media tokens fit in the kept tokens; otherwise it is still refused.  `usage.prompt_tokens` and `usage.total_tokens` count every token embedded for every input, markers included.
-- Errors use the standard error object.  Other 400 codes are `too_many_videos`, `invalid_video_input`, `invalid_video_options`, `too_many_audio`, `invalid_audio_input`, `too_many_images`, `invalid_image_input`, `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, `invalid_mm_processor_kwargs`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`, and a request whose client disconnects before its next batch does not use the device again.  A failed encode returns 500 `embedding_failed` to every request with inputs in the failed batch.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual authentication, `--max-request-bytes`, and request logging apply.
+- Errors use the standard error object.  Other 400 codes are `too_many_videos`, `invalid_video_input`, `invalid_video_options`, `too_many_audio`, `invalid_audio_input`, `too_many_images`, `invalid_image_input`, `parse_error`, `invalid_request_body`, `missing_input`, `empty_input`, `too_many_inputs`, `invalid_encoding_format`, `invalid_mm_processor_kwargs`, and `invalid_parameter_type`.  A client disconnect returns 499 `cancelled`, and a request whose client disconnects before its next batch does not use the device again.  A failed encode returns 500 `embedding_failed` to every request with inputs in the failed batch.  A service that is not ready returns 503 `embedding_service_unavailable`.  A GPU failure that the device probe confirms returns 503 `device_lost` and shuts the server down as described under [Lifecycle and limits](#lifecycle-and-limits).  The usual `--max-request-bytes` and request logging apply.
 
-Typed items follow llama.cpp's form: `{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}},{"type":"text","text":"\n"}]}`. Each item produces one vector in the same space as text. Text parts retain their order and whitespace. PNG, JPEG and WebP use the existing image reader, including public-HTTPS checks and the shared 20 MiB / 15-second budget. Embeddings accept at most 32 images per request, 32 megapixels per image, and 32,768 pixels on either side. Image soft tokens and their markers count toward context and usage. A request with images runs in its own device batch, in arrival order, and its soft tokens count toward the 8,192-token batch. The first image request loads the vision weights in that batch. See [image embeddings](models/embeddinggemma-2/README.md#images) for exact preprocessing and index migration. Audio uses typed `input_audio` parts with raw base64, audio data URLs or public HTTPS URLs; WAV, FLAC, MP3 and Ogg are supported. Up to 32 clips of 30 seconds each share the image read budget. Actual subsampled audio tokens and their boundary markers count toward context and usage. See [audio embeddings](models/embeddinggemma-2/README.md#audio) for decoding, preprocessing, bounds and examples. Video uses typed `input_video` parts with raw base64, video data URLs or public HTTPS URLs, producing one jointly encoded vector per input. MP4/MOV and WebM/Matroska share the same media read budget. Defaults sample 1 FPS, uniformly capped at 32 frames with 140 soft tokens per frame. See [video embeddings](models/embeddinggemma-2/README.md#video) for `video_options`, timestamp framing, audio-track treatment and decoding limits.
+Typed items follow llama.cpp's form: `{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}},{"type":"text","text":"\n"}]}`. Each item produces one vector in the same space as text. Text parts retain their order and whitespace. PNG, JPEG and WebP use the existing image reader, including public-HTTPS checks and the shared 20 MiB / 15-second budget. Embeddings accept at most 32 images per request, 32 megapixels per image, and 32,768 pixels on either side. Image soft tokens and their markers count toward context and usage. A request with images runs in its own device batch, in arrival order, and its soft tokens count toward the 8,192-token batch. The first image request loads the vision weights in that batch. See [image embeddings](models/embeddinggemma-2/README.md#images) for exact preprocessing and index migration. Audio uses typed `input_audio` parts with raw base64, audio data URLs or public HTTPS URLs; WAV, FLAC, MP3 and Ogg are supported. Up to 32 clips of 30 seconds each share the image read budget. Actual subsampled audio tokens and their boundary markers count toward context and usage. See [audio embeddings](models/embeddinggemma-2/README.md#audio) for decoding, preprocessing, bounds and examples. Video uses typed `input_video` parts with raw base64, video data URLs or public HTTPS URLs, producing one jointly encoded vector per input. MP4/MOV and WebM/Matroska share the same media read budget. Defaults sample 1 FPS, uniformly capped at 32 frames with 140 soft tokens per frame; a request holds at most 64 selected frames and 8,960 video soft tokens. See [video embeddings](models/embeddinggemma-2/README.md#video) for `video_options`, timestamp framing, audio-track treatment and decoding limits.
 
-**llama.cpp's `POST /embeddings`.** Clients written for llama-server's non-OpenAI route, such as Frigate 0.18's semantic search, can use `POST /embeddings` (or its older alias `POST /embedding`) on the same process.  It shares the model, tokenization, image reader, pooling, limits and errors of `/v1/embeddings`, and differs in three ways:
+**llama.cpp's `POST /embeddings`.** Clients written for llama-server's non-OpenAI route, such as Frigate 0.18's semantic search, can use `POST /embeddings` (or its older alias `POST /embedding`) on the same process.  It shares the model, tokenization, image reader, pooling, limits and errors of `/v1/embeddings`, and differs in two ways:
 
 - The input is `input`, or llama.cpp's older `content` when `input` is absent.  Besides strings and typed content objects, an item may be `{"prompt_string": "...", "multimodal_data": ["<base64>", ...]}`: each `<__media__>` marker in the string stands for the next base64 file, in place.  As in llama.cpp, a file that starts like WAV, MP3 or FLAC is audio, as is Ogg here; anything else must be a PNG, JPEG or WebP image.  The number of markers must equal the number of files, or the request returns 400 `invalid_multimodal_data`.  Gufo always uses llama.cpp's default marker; it serves no `/props`, and clients such as Frigate fall back to that marker when `/props` is missing.
 - The response is llama.cpp's bare array, one item per input in request order, with the pooled vector nested in a one-element list and no `model` or `usage`:
@@ -703,7 +732,7 @@ Typed items follow llama.cpp's form: `{"content":[{"type":"image_url","image_url
   [{"index": 0, "embedding": [[0.0123, -0.0456, "..."]]}]
   ```
 
-- `embd_normalize` is accepted only as `2`, the Euclidean default that every EmbeddingGemma 2 vector already has; other values return 400 `unsupported_embd_normalize`.  As in llama.cpp, `encoding_format` is validated but the vectors are always floats.  `dimensions`, `mm_processor_kwargs`, `prompt_name`, `truncate` and `user` behave as on `/v1/embeddings`.  Token arrays and per-token (`--pooling none`) output stay unsupported, and other members return 400 `unsupported_field`.
+On both routes, `embd_normalize` is accepted only as `2`, the Euclidean default that every EmbeddingGemma 2 vector already has; other values return 400 `unsupported_embd_normalize`.  As in llama.cpp, the native form validates `encoding_format` but always returns floats.  `dimensions`, `mm_processor_kwargs`, `prompt_name`, `truncate` and `user` behave as on `/v1/embeddings`.  Token arrays and per-token (`--pooling none`) output stay unsupported, and unknown members are ignored.
 
 **Task prefixes.** EmbeddingGemma 2 was trained with short task prefixes, and by default the server does not add them, so clients must.  Queries use `task: search result | query: {text}`, and documents use `title: none | text: {text}`, or `title: {title} | text: {text}` when a title is known.  Omitting the prefixes still works but lowers retrieval quality.  Embed a query and its documents with matching conventions.  A client that cannot change its input can send `"prompt_name"` with a name from the checkpoint's `config_sentence_transformers.json` `prompts` (for example `query` or `document`), and `--default-prompt-name NAME` applies one to requests that name none.  As the model card advises, the default skips inputs without text, so images and audio alone embed unprefixed; a requested `prompt_name` prefixes every input, as in sentence-transformers.  An empty `prompt_name` applies none, even with a default.  An unknown name returns 400 `invalid_prompt_name`, and an unknown `--default-prompt-name` fails startup.  `usage` counts the prompt's tokens.
 
@@ -1179,9 +1208,13 @@ for text-only serving or `["text", "image"]` when a vision encoder is loaded.
 Image support reflects the loaded projector, not the model name; launching a
 vision-capable model without its projector advertises text only. Audio/video
 entries describe their capability. Send the returned model ID in requests.
-Repeat `--served-model-name` to list the text model under several IDs; the
-first is primary, and responses report the ID the request named. Text
-requests naming another model return 404.
+Repeat `--served-model-name` to serve one model under several IDs; the
+first is primary. Text routes report the ID the request named; the other
+modalities report the primary ID, with video aliases acting as the root
+`minimax-h3`. Every `gufo serve` modality accepts the repeated option, so
+llama-swap `aliases:` entries can reach the process unchanged (#957).
+Requests naming another model return 404, except on audio and video routes,
+which answer `400 invalid_model`.
 
 ## Errors
 
@@ -1201,7 +1234,6 @@ Return an OpenAI-style error object:
 Use appropriate HTTP status codes:
 
 - `400` invalid request or unsupported field
-- `401` missing or invalid configured bearer token
 - `404` unknown model or endpoint object
 - `409` incompatible session state
 - `413` request or prompt too large
@@ -1213,31 +1245,85 @@ Use appropriate HTTP status codes:
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
 
-## Authentication and Exposure
+## llama-swap
 
-The server binds to `127.0.0.1` by default. Set `--api-key` to require:
+[llama-swap](https://github.com/mostlygeek/llama-swap) can launch Gufo on
+demand. Use the model readiness endpoint for its startup check:
 
-```text
-Authorization: Bearer <local-token>
+```yaml
+models:
+  gufo-model:
+    cmd: >
+      /path/to/gufo serve --host 127.0.0.1 --port ${PORT} llm
+      --model /path/to/model.gguf --served-model-name gufo-model
+    checkEndpoint: /ready
 ```
 
-Authentication covers every route, including health, metrics, audio, and video.
-CORS preflight (`OPTIONS`) does not require credentials. Select the listen
-address with `--host`; it must be a numeric IPv4 or IPv6 address, not a host
-name. `--host ::` is dual-stack: it accepts IPv6 clients and IPv4 clients, and
-an IPv4 client keeps its IPv4 address as its client ID. `--host ::1` accepts
-only IPv6 loopback clients. TLS termination belongs in a reverse proxy.
+Replace the executable and model paths. llama-swap assigns `${PORT}` and
+waits for `/ready` to return HTTP 200 before forwarding the triggering
+request. Gufo returns 503 while the model loads. The served model name
+matches the llama-swap model ID, so clients can request `gufo-model`
+through the proxy. Gufo requires no credentials on any route, so llama-swap's
+default `/health` probe works too. For long cold starts, increase llama-swap's
+`healthCheckTimeout` to cover model and disk-cache loading.
 
-Request bodies, prompts, generated text and credentials are not logged.
+Gufo answers the names passed to `--served-model-name` plus its built-in
+identifiers: TTS also accepts `qwen3-tts`, ASR also accepts `qwen3-asr` and
+`qwen3-asr-1.7b`, and video always accepts the canonical `minimax-h3` and
+its preset names; requests naming another model return 404 (`400
+invalid_model` for audio and video). Repeat the option for each llama-swap
+`aliases:` entry — every `gufo serve` modality accepts the repeated option —
+or set `useModelName` so llama-swap rewrites the request's `model` field
+instead:
+
+```yaml
+models:
+  gufo-model:
+    aliases: [gufo-fast]
+    cmd: >
+      /path/to/gufo serve --host 127.0.0.1 --port ${PORT} llm
+      --model /path/to/model.gguf --served-model-name gufo-model
+      --served-model-name gufo-fast
+    checkEndpoint: /ready
+```
+
+To load the model without generating a response, request its readiness
+endpoint through llama-swap (assuming the router listens on port 8080):
+
+```sh
+curl --fail-with-body http://127.0.0.1:8080/upstream/gufo-model/ready
+```
+
+The browser Load action and startup preloading (`hooks.onStartup.preload`)
+request the upstream root `/`. Gufo answers `GET /` with the `/health` body,
+503 while the model loads and 200 once ready, so both actions report success
+(#957). `checkEndpoint` controls readiness polling, not the triggering
+request.
+
+## Exposure
+
+The server binds to `127.0.0.1` by default and answers every route without
+credentials: it has no authentication layer (`--api-key` was removed for
+#957). Any process that can reach the listener can run inference and read
+metrics, so keep the bind local or place a reverse proxy in front. Select
+the listen address with `--host`; it must be a numeric IPv4 or IPv6 address,
+not a host name. `--host ::` is dual-stack: it accepts IPv6 clients and IPv4
+clients, and an IPv4 client keeps its IPv4 address as its client ID.
+`--host ::1` accepts only IPv6 loopback clients. TLS termination and any
+access control belong in a reverse proxy.
+
+A stale `Authorization` header from an old client is accepted and ignored.
+
+Request bodies, prompts and generated text are not logged.
 
 Tool definitions and generated tool calls are treated as data. `gufo`
 never executes tools, shell commands, URLs, or generated code.
 
-The HTTP transport currently uses a wildcard CORS origin and the same listener
-and API key for inference and metrics.
+The HTTP transport currently uses a wildcard CORS origin and the same
+listener for inference and metrics.
 
-`gufo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`
-as the bearer credential when it is set.
+`gufo eval` sends `OPENAI_API_KEY` as a bearer credential to remote
+endpoints that require one; the Gufo server itself ignores credentials.
 
 ## Lifecycle and limits
 
@@ -1452,8 +1538,8 @@ with `GET /health` or `GET /ready`.
 
 The `debug` tier adds:
 
-- the resolved server options as `event=options` before the model opens, with
-  `api_key=set` rather than the key. This line and the `event=listening` banner
+- the resolved server options as `event=options` before the model opens.
+  This line and the `event=listening` banner
   are separate on purpose: the banner only appears once the model has loaded and
   the listener is accepting, so a load that fails or hangs leaves
   `event=options` as the sole record of what was asked for;
@@ -1478,7 +1564,7 @@ threshold rather than writing to stderr directly, so its informational startup
 lines (the ROCm model-cache and managed-KV lines, DSpark attachment, the shared
 batch workspace) are suppressed by `--log-level=warn`/`error` too.
 
-Prompt text, message bodies and API keys stay unlogged at every level, and debug
+Prompt text and message bodies stay unlogged at every level, and debug
 lines use the same escaping and redaction as the rest of the log. Only the
 opt-in [content trace](#content-trace), a separate file, records content. Client
 identity is the exception: scheduler admission lines name a client by the peer
@@ -1523,7 +1609,7 @@ Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
 
 A request that fails before generation, for example with invalid JSON, has
 no `generation` record. Requests refused before routing (malformed HTTP or an
-oversized body), unauthenticated requests and other routes are not traced.
+oversized body) and other routes are not traced.
 Malformed UTF-8 is replaced with U+FFFD. A record that cannot be written in
 full, for example on a full disk, is cut from the file and the first failure is
 logged as `event=trace_write_failed`; a file that cannot be cut back, such as a
@@ -1576,7 +1662,7 @@ lazily in the worker. Control characters are escaped in log lines.
 ## Focused checks
 
 - `json_test`: number precision, Unicode escapes, malformed input and depth limits.
-- `http_server_test`: transport framing, authentication, compatibility validation,
+- `http_server_test`: transport framing, compatibility validation,
   sampling forwarding, request logs at the default and debug tiers, and streaming
   failures without loading a model.
 - `serve_cli_test`: executable help, argument wiring and rejected configurations,

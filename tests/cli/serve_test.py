@@ -25,8 +25,10 @@ def main():
                               capture_output=True, timeout=10)
 
     for modality in ("llm", "tts", "asr", "video", "image", "embedding"):
-        check(["serve", "--port", "0", modality, "--help"], 0, "--api-key")
-        check(["serve", modality, "--port=0", "--help"], 0, "--api-key")
+        check(["serve", "--port", "0", modality, "--help"], 0,
+              "--max-connections")
+        check(["serve", modality, "--port=0", "--help"], 0,
+              "--max-connections")
         check(["serve", modality, "--help"], 0, "--log-level")
         if modality in ("tts", "asr", "image", "embedding"):
             help_text = check(["serve", modality, "--help"], 0,
@@ -40,6 +42,14 @@ def main():
         check(["serve", modality, "unexpected"], 2, "Unexpected argument")
         check(["serve", modality, "--port", "65536"], 2, "--port must")
         check(["serve", modality, "--host", "bad.address"], 2, "--host must")
+    # Repeated --served-model-name is accepted by every naming modality, with
+    # duplicates refused at parse time (#957).
+    for modality in ("llm", "tts", "asr", "image", "embedding", "decision",
+                     "video"):
+        check(["serve", modality, "--help"], 0, "repeatable")
+        check(["serve", modality, "--served-model-name", "dup",
+               "--served-model-name", "dup", "--model", "missing.gguf"], 2,
+              "duplicate --served-model-name")
     check(["serve", "image"], 2, "--model <DIR> is required")
     check(["serve", "embedding"], 2, "--model <DIR> is required")
     text = check(["serve", "embedding", "--help"], 0, "--served-model-name")
@@ -67,9 +77,12 @@ def main():
     for args in (["--model", "audio"], ["llm", "--model", "audio"],
                  ["--served-model-name", "-v", "--model", "audio"],
                  ["--port", "0", "llm", "--served-model-name", "-v", "--model", "audio"],
-                 ["--api-key", "test-key", "llm", "--model", "audio"],
                  ["llm", "--served-model-name", "--verbose", "--model", "audio"]):
         check(["serve", *args], 1, "Error loading model 'audio'")
+    # Repeated names parse and only fail at the missing model (#957).
+    for modality in ("tts", "asr"):
+        check(["serve", modality, "--served-model-name", "a",
+               "--served-model-name", "b", "--model", "audio"], 1, "Error")
     check(["serve", "help", "unknown"], 2, "unknown serve command")
     help_text = check(["serve", "llm", "--help"], 0, "model native context")
     assert "-1 = until EOS or context full" in help_text
@@ -86,7 +99,8 @@ def main():
     for value in ("OFF", "-1", "16G"):
         check(["serve", "llm", "--cache-ram-bytes", value], 2,
               "--cache-ram-bytes must be off or a byte count")
-    assert "it applies to every request" in help_text
+    assert ("each session stays native until it holds more than 262144 tokens"
+            in help_text)
     # The flag is a plain switch: it must not swallow the next argument.
     check(["serve", "llm", "--enable-yarn", "--model", "missing.gguf"], 1,
           "Error loading model 'missing.gguf'")
@@ -131,10 +145,9 @@ def main():
     for both in (["--log-level", "info", "-v"], ["-v", "--log-level", "warn"],
                  ["--verbose", "--log-level=debug"]):
         check(load + both, 2, "cannot combine with --log-level")
-    # Debug lines must not leak the API key they report as set.
-    keyed = run(load + ["-v", "--api-key", "super-secret-value"])
-    assert "api_key=set" in keyed.stderr
-    assert "super-secret-value" not in keyed.stderr
+    # The removed --api-key option no longer parses (#957).
+    check(["serve", "--api-key", "k", "llm", "--model", "audio"], 2,
+          "Unknown option")
     # Structured output is prepared automatically, without a separate option.
     assert "--prepare-structured-output" not in help_text
     check(["serve", "llm", "--model", "missing.gguf",

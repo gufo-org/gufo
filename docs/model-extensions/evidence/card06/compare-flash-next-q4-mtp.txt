@@ -1,0 +1,1 @@
+failed: {'passed': 0, 'failed': 0, 'inconclusive': 0}; /home/mixer/gufo/docs/model-extensions/evidence/card06/compare-flash-next-q4-mtp.json

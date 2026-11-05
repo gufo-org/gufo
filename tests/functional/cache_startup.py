@@ -34,7 +34,7 @@ def main():
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if len(command) < 3 or command[1] != "serve" or "llm" not in command:
         parser.error("pass a production gufo serve llm command after --")
-    for flag in ("--host", "--port", "--api-key", "--cache-disk",
+    for flag in ("--host", "--port", "--cache-disk",
                  "--cache-disk-bytes", "--cache-disk-staging-bytes"):
         if option(command, flag) is not None:
             parser.error(f"the runner owns {flag}; omit it")

@@ -83,18 +83,41 @@ All-copy batches retain full width; sampled proposal streams are unchanged.
 Timings report
 `lookup_n` / `lookup_n_accepted`.
 
+A request decoding alone can verify a copy wider than the MTP chain: greedy
+requests, and sampled ones without a seed whose rows verify compactly. Copy-only
+cycles start at the ordinary eight rows; two whole copies in a row at the
+current width double it, up to 64 rows, and any rejected copy returns it to
+eight. The wide pass (`Executor::ForwardWide`) runs the projections, routed
+experts and head once over every row with the batched decode route's
+row-independent arithmetic, and the recurrent state, attention and PLE as
+consecutive segments of at most eight rows, so each row's logits equal those of
+consecutive ordinary verifications (`wide_verification_test` checks the logits
+and the continuation after cutting back to any kept prefix). Later segments
+keep their starting state and snapshot rows in executor-owned buffers, about
+270 MiB per segment past the first (1.9 GiB at 64 rows), allocated on first use
+and reserved with the other lazy scratch. When the configured sessions leave
+less device memory, the load narrows the widest pass to what fits instead of
+refusing the session count. When more than eight rows are kept,
+the draft block catches up on all but the last of them at once (K/V only, as
+for prompt rows), so snapshots and batched cycles still hold at most eight
+hidden rows. Seeded sampled requests and batched cycles keep the ordinary
+width, so their proposals and random draws do not depend on scheduling.
+
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)
 for explicit effort/thinking overrides. Native context is 262144. A larger
-context needs static YaRN and `--enable-yarn`: `gufo serve llm` refuses to
+context needs YaRN and `--enable-yarn`: `gufo serve llm` refuses to
 start with `--context` above 262144 without it, and `gufo bench` refuses a
 workload whose depth plus prompt or generation tokens exceeds 262144. With
-the flag, the factor is context / 262144 (`--context 409600` gives 1.5625).
-The flag is an error at or below 262144, where it would have no effect.
-Static YaRN applies to every request on that server, including short ones,
-and changes the output distribution more as the factor grows; in the first
-measurements, multiple-choice accuracy moved within noise at factors 1.5625
-to 3.875. See the
+the flag, the largest factor is context / 262144 (`--context 409600` gives
+1.5625). The flag is an error at or below 262144, where it would have no
+effect. A session keeps the native rotation while it holds at most 262144
+tokens, so short requests are unchanged by the flag; past that it takes the
+smallest whole factor covering its positions (2, 3, ...), capped at the
+largest, and its cached attention and indexer keys are re-rotated when the
+factor changes. The factor changes the output distribution more as it
+grows; in the first measurements of a fixed factor, multiple-choice accuracy
+moved within noise at factors 1.5625 to 3.875. See the
 [measurements](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323981940),
 the
 [opt-in proposal](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323982386)

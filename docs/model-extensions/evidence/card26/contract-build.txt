@@ -1,0 +1,182 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+[0/2] Re-checking globbed directories...
+-- GLOB mismatch!
+The following files were added:
+  +/home/mixer/gufo/cmake/../include/gufo/ext/changes/0.1/decision-metadata-capability.md
+[1/2] Re-running CMake...
+-- gufo: compiling C and CXX through /nix/store/j0yrxqvaka4xky3xca88jbnwzbp42lil-ccache-4.14.1/bin/ccache
+-- gufo: unshipped discovered extension lfm3
+-- gufo: extension mode=discovery; included=[deepseek_v4_flash;embedding_gemma2;lfm3;minimax_h3;qwen;qwen38_flash_next;qwen3_asr;qwen3_tts;qwen_image_21]; excluded=[]
+-- gufo: HIP target gfx1151
+-- gufo: ROCr runtime /nix/store/88jjsz00km321bcl9851aiwwdig79b4l-rocm-runtime-10.1/lib/libhsa-runtime64.so
+-- Configuring done (0.7s)
+-- Generating done (0.4s)
+-- Build files have been written to: /home/mixer/gufo/build/gpu-test
+[0/4] Re-checking globbed directories...
+[1/23] Building CXX object CMakeFiles/gufo_test_support.dir/tests/support/test_support.cpp.o
+[2/23] Building CXX object src/ext/CMakeFiles/gufo_ext_runtime.dir/runtime.cpp.o
+[3/23] Linking CXX static library src/ext/libgufo_ext_runtime.a
+[4/23] Linking HIP static library libgufo_test_support.a
+[5/23] Building CXX object CMakeFiles/qwen3_asr_audio_api_test.dir/src/models/qwen3_asr/tests/audio_api_test.cpp.o
+../../src/models/qwen3_asr/tests/audio_api_test.cpp: In function ‘gufo::server::AsrService {anonymous}::MakeService(FakeRunner*)’:
+../../src/models/qwen3_asr/tests/audio_api_test.cpp:77:3: warning: missing initializer for member ‘gufo::server::AsrServiceOptions::projector_path’ [-Wmissing-field-initializers]
+   77 |   });
+      |   ^
+../../src/models/qwen3_asr/tests/audio_api_test.cpp:77:3: warning: missing initializer for member ‘gufo::server::AsrServiceOptions::live’ [-Wmissing-field-initializers]
+../../src/models/qwen3_asr/tests/audio_api_test.cpp:77:3: warning: missing initializer for member ‘gufo::server::AsrServiceOptions::voice’ [-Wmissing-field-initializers]
+[6/23] Building CXX object CMakeFiles/qwen_image_21_test.dir/tests/models/qwen_image_21/model_test.cpp.o
+[7/23] Building CXX object CMakeFiles/video_api_test.dir/tests/cli/video_api_test.cpp.o
+[8/23] Building CXX object CMakeFiles/video_api_test.dir/src/cli/serve/video_api.cpp.o
+../../src/cli/serve/video_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Error(int, std::string, std::string, std::string)’:
+../../src/cli/serve/video_api.cpp:76:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+   76 |   };
+      |   ^
+../../src/cli/serve/video_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::VideoContent(std::string_view, const gufo::server::HttpRequest&, gufo::server::VideoJobService&)’:
+../../src/cli/serve/video_api.cpp:752:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+  752 |   };
+      |   ^
+../../src/cli/serve/video_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::DeleteVideo(std::string_view, gufo::server::VideoJobService&)’:
+../../src/cli/serve/video_api.cpp:777:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+  777 |   };
+      |   ^
+[9/23] Building CXX object CMakeFiles/video_api_test.dir/src/cli/serve/video_jobs.cpp.o
+[10/23] Building CXX object CMakeFiles/text_model_runner_test.dir/tests/cli/text_model_runner_test.cpp.o
+../../tests/cli/text_model_runner_test.cpp: In member function ‘virtual gufo::ext::TextDecodeSelection {anonymous}::FakeRunner::SelectNext(gufo::ext::TextRunnerState&, gufo::sampling::SamplerState&) const’:
+../../tests/cli/text_model_runner_test.cpp:256:7: warning: missing initializer for member ‘gufo::ext::TextDecodeSelection::logprobs’ [-Wmissing-field-initializers]
+  256 |       };
+      |       ^
+../../tests/cli/text_model_runner_test.cpp:263:5: warning: missing initializer for member ‘gufo::ext::TextDecodeSelection::logprobs’ [-Wmissing-field-initializers]
+  263 |     };
+      |     ^
+../../tests/cli/text_model_runner_test.cpp: In function ‘void {anonymous}::TestGeneratedFrontierForksBeforeMutation()’:
+../../tests/cli/text_model_runner_test.cpp:918:17: warning: ignoring return value of ‘gufo::ext::TextPrefillStep gufo::server::TextRunnerPool::Request::Prefill(std::size_t)’, declared with attribute ‘nodiscard’ [-Wunused-result]
+  918 |     root.Prefill(4);
+      |     ~~~~~~~~~~~~^~~
+In file included from ../../tests/cli/text_model_runner_test.cpp:1:
+../../src/cli/serve/text_model_runner.hpp:122:35: note: declared here
+  122 |     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+      |                                   ^~~~~~~
+../../tests/cli/text_model_runner_test.cpp: In function ‘void {anonymous}::TestGeneratedFrontierPersistsForForks()’:
+../../tests/cli/text_model_runner_test.cpp:958:17: warning: ignoring return value of ‘gufo::ext::TextPrefillStep gufo::server::TextRunnerPool::Request::Prefill(std::size_t)’, declared with attribute ‘nodiscard’ [-Wunused-result]
+  958 |     root.Prefill(3);
+      |     ~~~~~~~~~~~~^~~
+../../src/cli/serve/text_model_runner.hpp:122:35: note: declared here
+  122 |     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+      |                                   ^~~~~~~
+../../tests/cli/text_model_runner_test.cpp:983:17: warning: ignoring return value of ‘gufo::ext::TextPrefillStep gufo::server::TextRunnerPool::Request::Prefill(std::size_t)’, declared with attribute ‘nodiscard’ [-Wunused-result]
+  983 |     root.Prefill(3);
+      |     ~~~~~~~~~~~~^~~
+../../src/cli/serve/text_model_runner.hpp:122:35: note: declared here
+  122 |     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+      |                                   ^~~~~~~
+../../tests/cli/text_model_runner_test.cpp: In function ‘void {anonymous}::TestCancellationRetainsOnlyCompletedWork()’:
+../../tests/cli/text_model_runner_test.cpp:1069:20: warning: ignoring return value of ‘gufo::ext::TextPrefillStep gufo::server::TextRunnerPool::Request::Prefill(std::size_t)’, declared with attribute ‘nodiscard’ [-Wunused-result]
+ 1069 |     request.Prefill(2);
+      |     ~~~~~~~~~~~~~~~^~~
+../../src/cli/serve/text_model_runner.hpp:122:35: note: declared here
+  122 |     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+      |                                   ^~~~~~~
+../../tests/cli/text_model_runner_test.cpp:1093:18: warning: ignoring return value of ‘gufo::ext::TextPrefillStep gufo::server::TextRunnerPool::Request::Prefill(std::size_t)’, declared with attribute ‘nodiscard’ [-Wunused-result]
+ 1093 |   request.Prefill(2);
+      |   ~~~~~~~~~~~~~~~^~~
+../../src/cli/serve/text_model_runner.hpp:122:35: note: declared here
+  122 |     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+      |                                   ^~~~~~~
+../../tests/cli/text_model_runner_test.cpp: In function ‘void {anonymous}::TestPromptReuseCanBeDisabledPerRequest()’:
+../../tests/cli/text_model_runner_test.cpp:1225:20: warning: ignoring return value of ‘gufo::ext::TextPrefillStep gufo::server::TextRunnerPool::Request::Prefill(std::size_t)’, declared with attribute ‘nodiscard’ [-Wunused-result]
+ 1225 |     initial.Prefill(2);
+      |     ~~~~~~~~~~~~~~~^~~
+../../src/cli/serve/text_model_runner.hpp:122:35: note: declared here
+  122 |     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+      |                                   ^~~~~~~
+../../tests/cli/text_model_runner_test.cpp: In function ‘void {anonymous}::TestStableChatPrefixSurvivesInterruptedFraming()’:
+../../tests/cli/text_model_runner_test.cpp:1279:14: warning: ignoring return value of ‘gufo::ext::TextPrefillStep gufo::server::TextRunnerPool::Request::Prefill(std::size_t)’, declared with attribute ‘nodiscard’ [-Wunused-result]
+ 1279 |   old.Prefill(64);
+      |   ~~~~~~~~~~~^~~~
+../../src/cli/serve/text_model_runner.hpp:122:35: note: declared here
+  122 |     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+      |                                   ^~~~~~~
+../../tests/cli/text_model_runner_test.cpp: In function ‘void {anonymous}::TestServerInstructionsAreFraming()’:
+../../tests/cli/text_model_runner_test.cpp:2470:71: warning: missing initializer for member ‘gufo::ext::ChatTool::description’ [-Wmissing-field-initializers]
+ 2470 |         request.tools = {{.name = "record", .parameters_json = schema}};
+      |                                                                       ^
+../../tests/cli/text_model_runner_test.cpp:2470:71: warning: missing initializer for member ‘gufo::ext::ChatTool::definition_json’ [-Wmissing-field-initializers]
+../../tests/cli/text_model_runner_test.cpp:2575:124: warning: missing initializer for member ‘gufo::ext::ChatTool::description’ [-Wmissing-field-initializers]
+ 2575 |            R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
+      |                                                                                                                            ^
+../../tests/cli/text_model_runner_test.cpp:2575:124: warning: missing initializer for member ‘gufo::ext::ChatTool::definition_json’ [-Wmissing-field-initializers]
+../../tests/cli/text_model_runner_test.cpp:2612:44: warning: missing initializer for member ‘gufo::ext::ChatTool::description’ [-Wmissing-field-initializers]
+ 2612 |              .definition_json = definition}};
+      |                                            ^
+../../tests/cli/text_model_runner_test.cpp:2612:44: warning: missing initializer for member ‘gufo::ext::ChatTool::definition_json’ [-Wmissing-field-initializers]
+../../tests/cli/text_model_runner_test.cpp:2612:44: warning: missing initializer for member ‘gufo::ext::ChatTool::description’ [-Wmissing-field-initializers]
+[11/23] Linking HIP executable qwen3_asr_audio_api_test
+[12/23] Linking HIP executable qwen_image_21_test
+[13/23] Linking HIP executable text_model_runner_test
+[14/23] Linking HIP executable video_api_test
+[15/23] Building CXX object CMakeFiles/qwen3_tts_audio_api_test.dir/tests/models/qwen3_tts/audio_api_test.cpp.o
+../../tests/models/qwen3_tts/audio_api_test.cpp: In function ‘gufo::server::TtsService {anonymous}::MakeService(FakeRunner*)’:
+../../tests/models/qwen3_tts/audio_api_test.cpp:77:3: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::projector_path’ [-Wmissing-field-initializers]
+   77 |   });
+      |   ^
+../../tests/models/qwen3_tts/audio_api_test.cpp:77:3: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::voice_presets’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp: In function ‘gufo::server::TtsService {anonymous}::MakeVoiceDesignService(FakeRunner*)’:
+../../tests/models/qwen3_tts/audio_api_test.cpp:93:3: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::projector_path’ [-Wmissing-field-initializers]
+   93 |   });
+      |   ^
+../../tests/models/qwen3_tts/audio_api_test.cpp:93:3: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::voice_presets’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp: In function ‘gufo::server::TtsService {anonymous}::MakeBaseService(FakeRunner*)’:
+../../tests/models/qwen3_tts/audio_api_test.cpp:109:3: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::projector_path’ [-Wmissing-field-initializers]
+  109 |   });
+      |   ^
+../../tests/models/qwen3_tts/audio_api_test.cpp:109:3: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::voice_presets’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp: In function ‘void {anonymous}::TestQueuedCancellation()’:
+../../tests/models/qwen3_tts/audio_api_test.cpp:301:26: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::model_root’ [-Wmissing-field-initializers]
+  301 |                         }});
+      |                          ^
+../../tests/models/qwen3_tts/audio_api_test.cpp:301:26: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::projector_path’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp:301:26: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::model_id’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp:301:26: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::voices’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp:301:26: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::voice_presets’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp: In function ‘void {anonymous}::TestInvalidWaveform()’:
+../../tests/models/qwen3_tts/audio_api_test.cpp:444:5: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::model_root’ [-Wmissing-field-initializers]
+  444 |     });
+      |     ^
+../../tests/models/qwen3_tts/audio_api_test.cpp:444:5: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::projector_path’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp:444:5: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::model_id’ [-Wmissing-field-initializers]
+../../tests/models/qwen3_tts/audio_api_test.cpp:444:5: warning: missing initializer for member ‘gufo::server::TtsServiceOptions::voice_presets’ [-Wmissing-field-initializers]
+[16/23] Linking HIP executable qwen3_tts_audio_api_test
+[17/23] Building CXX object CMakeFiles/text_generation_scheduler_test.dir/tests/cli/text_generation_scheduler_test.cpp.o
+../../tests/cli/text_generation_scheduler_test.cpp: In member function ‘virtual gufo::ext::TextRunnerResourceClaim {anonymous}::FakeRunner::ResourceClaim() const’:
+../../tests/cli/text_generation_scheduler_test.cpp:298:5: warning: missing initializer for member ‘gufo::ext::TextRunnerResourceClaim::retained_snapshot_ceiling_bytes’ [-Wmissing-field-initializers]
+  298 |     };
+      |     ^
+../../tests/cli/text_generation_scheduler_test.cpp: In member function ‘virtual gufo::ext::TextDecodeSelection {anonymous}::FakeRunner::SelectNext(gufo::ext::TextRunnerState&, gufo::sampling::SamplerState&) const’:
+../../tests/cli/text_generation_scheduler_test.cpp:421:54: warning: missing initializer for member ‘gufo::ext::TextDecodeSelection::piece’ [-Wmissing-field-initializers]
+  421 |       return {.stop = true, .logprobs = probabilities};
+      |                                                      ^
+../../tests/cli/text_generation_scheduler_test.cpp:424:27: warning: missing initializer for member ‘gufo::ext::TextDecodeSelection::piece’ [-Wmissing-field-initializers]
+  424 |       return {.stop = true};
+      |                           ^
+../../tests/cli/text_generation_scheduler_test.cpp:424:27: warning: missing initializer for member ‘gufo::ext::TextDecodeSelection::logprobs’ [-Wmissing-field-initializers]
+../../tests/cli/text_generation_scheduler_test.cpp:429:29: warning: missing initializer for member ‘gufo::ext::TextDecodeSelection::piece’ [-Wmissing-field-initializers]
+  429 |         return {.stop = true};
+      |                             ^
+../../tests/cli/text_generation_scheduler_test.cpp:429:29: warning: missing initializer for member ‘gufo::ext::TextDecodeSelection::logprobs’ [-Wmissing-field-initializers]
+../../tests/cli/text_generation_scheduler_test.cpp: In function ‘gufo::server::TextRequestMetadata {anonymous}::ClientMetadata(std::string)’:
+../../tests/cli/text_generation_scheduler_test.cpp:639:3: warning: missing initializer for member ‘gufo::server::TextGenerationScheduler::RequestMetadata::prompt_context’ [-Wmissing-field-initializers]
+  639 |   };
+      |   ^
+../../tests/cli/text_generation_scheduler_test.cpp:639:3: warning: missing initializer for member ‘gufo::server::TextGenerationScheduler::RequestMetadata::stop_sequences’ [-Wmissing-field-initializers]
+../../tests/cli/text_generation_scheduler_test.cpp: In function ‘void {anonymous}::TestExpiredQueuedRequestNeverConsumesState()’:
+../../tests/cli/text_generation_scheduler_test.cpp:1522:7: warning: missing initializer for member ‘gufo::server::TextGenerationScheduler::RequestMetadata::prompt_context’ [-Wmissing-field-initializers]
+ 1522 |       });
+      |       ^
+../../tests/cli/text_generation_scheduler_test.cpp:1522:7: warning: missing initializer for member ‘gufo::server::TextGenerationScheduler::RequestMetadata::stop_sequences’ [-Wmissing-field-initializers]
+[18/23] Linking HIP executable text_generation_scheduler_test
+[19/23] Building CXX object tests/models/embedding_gemma2/CMakeFiles/embedding_gemma2_embeddings_api_test.dir/embeddings_api_test.cpp.o
+[20/23] Linking HIP executable tests/models/embedding_gemma2/embedding_gemma2_embeddings_api_test

@@ -1,0 +1,11 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+error (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/62f3224ae05c1b8d86216461a5959be6c8abc816d9e76e9f3f9cbb58f85e6ae3.sqlite' is busy
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+...................
+----------------------------------------------------------------------
+Ran 19 tests in 130.085s
+
+OK

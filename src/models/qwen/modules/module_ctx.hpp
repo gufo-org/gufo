@@ -2,8 +2,8 @@
 #define GUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
 
 #include <cstdint>
+#include <gufo/ext/model_config.hpp>
 
-#include "src/core/model_config.hpp"
 #include "src/models/qwen/state.hpp"
 
 namespace gufo::models::qwen {

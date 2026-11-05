@@ -47,7 +47,7 @@ class PlanTest(unittest.TestCase):
 
     def test_shared_llm_uses_only_flash_next(self):
         for path in ('src/core/sampling.cpp', 'src/cache/cache.cpp',
-                     'src/models/qwen/tokenizer.cpp', 'src/models/qwen/vision/encoder.hip',
+                     'src/families/qwen/text/tokenizer.cpp', 'src/families/qwen/vision/encoder.hip',
                      'src/cli/serve/text_model_runner.cpp'):
             with self.subTest(path=path):
                 self.assertEqual(self.models(path), {'flash-next-q4'})
@@ -75,7 +75,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'src/cli/serve/openai_chat.cpp'),
                          {'flash-next-q4'})
         self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'), {'qwen3-asr', 'qwen3-tts-base'})
-        self.assertEqual(self.models('tests/cli/continuation_cache_test.cpp'), self.models('CMakeLists.txt'))
+        self.assertEqual(self.models('tests/cli/unlisted_test.cpp'), self.models('CMakeLists.txt'))
 
     def test_category_and_fixture_ownership(self):
         for path, expected in [

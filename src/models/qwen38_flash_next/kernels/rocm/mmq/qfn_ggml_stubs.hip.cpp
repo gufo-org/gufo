@@ -1,5 +1,5 @@
 #include "qfn_mmq_prelude.h"
-#include "src/core/hip/managed_alloc.hpp"
+#include <gufo/ext/experimental/managed_alloc.hpp>
 namespace qfn_mmq {
 // SPDX-License-Identifier: MIT
 // Implementations of the ggml-API stubs declared in qfn_ggml_stubs.h plus

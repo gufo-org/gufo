@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "src/cache/prefetch_cursor.hpp"
 #include "src/cache/slot.hpp"
 
 namespace gufo::cache {
@@ -118,7 +119,7 @@ public:
   void Reading(std::size_t index) {
     {
       const std::lock_guard lock(mutex_);
-      reader_ = index;
+      cursor_.Reading(index);
     }
     wake_.notify_all();
   }
@@ -130,12 +131,10 @@ private:
       std::size_t i;
       {
         std::unique_lock lock(mutex_);
-        if (!wake_.wait(lock, stop, [&] {
-              return next_ < items_.size() &&
-                     offsets_[next_] - offsets_[reader_] < kWindowBytes;
-            }))
+        if (!wake_.wait(lock, stop,
+                        [&] { return cursor_.Ready(offsets_, kWindowBytes); }))
           return;
-        i = next_++;
+        i = cursor_.Take();
       }
       try {
         disk_.PrefetchPayload(snapshot_, items_[i].private_file,
@@ -151,7 +150,7 @@ private:
   std::vector<std::uint64_t> offsets_;
   std::mutex mutex_;
   std::condition_variable_any wake_;
-  std::size_t next_{}, reader_{};
+  detail::PrefetchCursor cursor_;
   std::array<std::jthread, 4> threads_;
 };
 bool SameJob(const DiskManifest& a, const DiskManifest& b) {

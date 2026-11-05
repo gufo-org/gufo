@@ -18,8 +18,8 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/arch.hpp"
-#include "src/core/platform/mapped_file.hpp"
+#include <gufo/ext/platform/mapped_file.hpp>
+#include <gufo/ext/experimental/arch.hpp>
 #include "src/models/minimax_h3/attention.hip.hpp"
 #include "src/models/minimax_h3/dense.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"

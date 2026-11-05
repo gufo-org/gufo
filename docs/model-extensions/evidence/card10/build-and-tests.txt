@@ -1,0 +1,149 @@
+Card 10 Build and Tests Evidence Log
+Date: 2026-10-31
+Working Copy: xppvypvw 47a03291
+Parent: klwmvoxr a761679a
+
+================================================================================
+1. Host RAM Pre-Check
+================================================================================
+Command: free -g
+Result:
+               total        used        free      shared  buff/cache   available
+Mem:             125          12          38           0          76         112
+Swap:              0           0           0
+Headroom: 112 GiB available (>= 15 GiB required).
+
+================================================================================
+2. Extension API Surface & Version Gate Checks
+================================================================================
+Command: python3 tools/ci/check-extension-api.py --write
+Result: PASS: extension API surface (97 paths)
+Exit Code: 0
+
+Command: python3 tools/ci/check-extension-api.py
+Result: PASS: extension API surface (97 paths)
+Exit Code: 0
+
+Command: python3 tools/ci/check-extension-api.py --base a761679a --labels '["ext-api"]'
+Result:
+Extension API changed paths: cmake/GufoExtension.cmake, include/gufo/ext/adapter.hpp, include/gufo/ext/cache.hpp, include/gufo/ext/cancellable_gate.hpp, include/gufo/ext/continuation.hpp, include/gufo/ext/crypto.hpp, include/gufo/ext/device_probe.hpp, include/gufo/ext/draft_backend.hpp, include/gufo/ext/experimental/dispatch_telemetry.hpp, include/gufo/ext/experimental/gemv_dispatcher.hpp, include/gufo/ext/experimental/ggml_dequant.hpp, include/gufo/ext/experimental/ggml_gemm.hpp, include/gufo/ext/experimental/heap_placement.hpp, include/gufo/ext/experimental/hip_graph_decode_executor.hpp, include/gufo/ext/experimental/hip_utils.hpp, include/gufo/ext/experimental/hipblaslt_plan_database.hpp, include/gufo/ext/experimental/host_allocations.hpp, include/gufo/ext/experimental/managed_alloc.hpp, include/gufo/ext/experimental/snapshot_copy.hpp, include/gufo/ext/experimental/snapshot_transfer.hpp, include/gufo/ext/experimental/transfer_pool.hpp, include/gufo/ext/experimental/weight_upload.hpp, include/gufo/ext/gguf_reader.hpp, include/gufo/ext/host_budget.hpp, include/gufo/ext/image.hpp, include/gufo/ext/json.hpp, include/gufo/ext/ledger.hpp, include/gufo/ext/mapped_prefetch.hpp, include/gufo/ext/model_config.hpp, include/gufo/ext/platform/fs.hpp, include/gufo/ext/platform/library.hpp, include/gufo/ext/platform/mapped_file.hpp, include/gufo/ext/platform/os_info.hpp, include/gufo/ext/platform/pages.hpp, include/gufo/ext/platform/prefault.hpp, include/gufo/ext/platform/publish.hpp, include/gufo/ext/prompt_lookup.hpp, include/gufo/ext/reasoning.hpp, include/gufo/ext/sampling.hpp, include/gufo/ext/session_mode.hpp, include/gufo/ext/sha256.hpp, include/gufo/ext/speculative_verifier.hpp, include/gufo/ext/text_contracts.hpp, include/gufo/ext/types.hpp, include/gufo/ext/utf8.hpp, include/gufo/ext/version.hpp
+PASS: extension API surface (97 paths)
+Exit Code: 0
+
+Command (Missing label check): python3 tools/ci/check-extension-api.py --base a761679a --labels '[]'
+Result: Expected rejection with: "extension API changes require the ext-api PR label"
+Exit Code: 1 (Expected)
+
+================================================================================
+3. Unit Policy Tests
+================================================================================
+Command: python3 tests/tools/check_extension_api_test.py
+Result:
+Ran 7 tests in 0.002s
+OK
+Exit Code: 0
+
+================================================================================
+4. Isolation and Boundary Gates
+================================================================================
+Command: python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-serving-boundary --fail-on-family-graph --fail-on-target-ownership
+Result:
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+Exit Code: 0
+
+================================================================================
+5. Build and Execution of Extension Tests (CPU Configuration)
+================================================================================
+Command: nix develop -c cmake --build build/cpu-test --target ext_runtime_neutral_contracts_test extension_runtime_test extension_role_test
+Result: Build completed successfully.
+Exit Code: 0
+
+Command: nix develop -c ctest --test-dir build/cpu-test -R '^(ext_runtime_neutral_contracts_test|extension_runtime_test|extension_role_test|extension_api_policy_test|extension_api_surface|extension_metadata_test|extension_discovery_test)$' --output-on-failure
+Result:
+    Start 115: extension_runtime_test
+1/7 Test #115: extension_runtime_test ...............   Passed    0.00 sec
+    Start 116: extension_role_test
+2/7 Test #116: extension_role_test ..................   Passed    0.00 sec
+    Start 117: ext_runtime_neutral_contracts_test
+3/7 Test #117: ext_runtime_neutral_contracts_test ...   Passed    0.00 sec
+    Start 119: extension_discovery_test
+4/7 Test #119: extension_discovery_test .............   Passed   44.76 sec
+    Start 120: extension_api_policy_test
+5/7 Test #120: extension_api_policy_test ............   Passed    0.04 sec
+    Start 121: extension_api_surface
+6/7 Test #121: extension_api_surface ................   Passed    0.04 sec
+    Start 122: extension_metadata_test
+7/7 Test #122: extension_metadata_test ..............   Passed   10.06 sec
+
+100% tests passed out of 7
+Exit Code: 0
+
+================================================================================
+6. Build and Execution of Extension Tests (GPU Configuration)
+================================================================================
+Command: nix develop -c cmake --build build/gpu-test --target ext_runtime_neutral_contracts_test extension_runtime_test extension_role_test
+Result: Build completed successfully, including libalpha_hip.a with experimental HIP headers.
+Exit Code: 0
+
+Command: nix develop -c ctest --test-dir build/gpu-test -R '^(ext_runtime_neutral_contracts_test|extension_runtime_test|extension_role_test|extension_api_policy_test|extension_api_surface|extension_metadata_test|extension_discovery_test)$' --output-on-failure
+Result:
+    Start 150: extension_runtime_test
+1/7 Test #150: extension_runtime_test ...............   Passed    0.00 sec
+    Start 151: extension_role_test
+2/7 Test #151: extension_role_test ..................   Passed    0.00 sec
+    Start 152: ext_runtime_neutral_contracts_test
+3/7 Test #152: ext_runtime_neutral_contracts_test ...   Passed    0.00 sec
+    Start 154: extension_discovery_test
+4/7 Test #154: extension_discovery_test .............   Passed   44.77 sec
+    Start 155: extension_api_policy_test
+5/7 Test #155: extension_api_policy_test ............   Passed    0.04 sec
+    Start 156: extension_api_surface
+6/7 Test #156: extension_api_surface ................   Passed    0.04 sec
+    Start 157: extension_metadata_test
+7/7 Test #157: extension_metadata_test ..............   Passed   10.15 sec
+
+100% tests passed out of 7
+Exit Code: 0
+
+================================================================================
+7. Identity Golden Tests (CPU & GPU)
+================================================================================
+Command: nix develop -c ctest --test-dir build/cpu-test -R '^(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test$' --output-on-failure
+Result:
+    Start 139: qwen27b_continuation_identity_test
+1/3 Test #139: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 153: deepseek_v4_flash_continuation_identity_test
+2/3 Test #153: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 159: qwen38_flash_next_continuation_identity_test
+3/3 Test #159: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+100% tests passed out of 3
+Exit Code: 0
+
+Command: nix develop -c ctest --test-dir build/gpu-test -R '^(qwen27b|qwen38_flash_next|deepseek_v4_flash)_continuation_identity_test$' --output-on-failure
+Result:
+    Start 194: qwen27b_continuation_identity_test
+1/3 Test #194: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 225: deepseek_v4_flash_continuation_identity_test
+2/3 Test #225: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 242: qwen38_flash_next_continuation_identity_test
+3/3 Test #242: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+100% tests passed out of 3
+Exit Code: 0
+
+Command: sha256sum -c docs/model-extensions/evidence/card02/SHA256SUMS
+Result: 42/42 fixture entries matched OK.
+Exit Code: 0
+
+================================================================================
+8. Format and Documentation Checks
+================================================================================
+Command: nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+Result: PASS: Checked 785 C++ files
+Exit Code: 0
+
+Command: python3 tests/tools/check_docs_test.py
+Result: Ran 11 tests in 0.004s, OK
+Exit Code: 0

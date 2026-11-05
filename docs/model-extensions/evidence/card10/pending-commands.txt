@@ -1,0 +1,31 @@
+# Card 10 Pending Commands (Deferred to Post-Card-14 Qualification Window)
+
+Per user decision (2026-10-31), functional harness runs, prompt lookup benchmarks, speed benchmarks,
+and matched-timing comparisons on main are deferred to the single consolidated qualification window
+after Card 14 completes. They must NOT be run during Card 10.
+
+Status: PENDING
+Scheduled by: Orchestrator post-Card-14
+
+## Deferred Functional Harness Commands
+
+1. Qwen 27B functional test suite:
+   python3 tests/functional/run.py --model qwen27b --suite standard
+
+2. Qwen 27B long-context continuation:
+   python3 tests/functional/run.py --model qwen27b --suite long-context
+
+3. Qwen 38B Flash-Next functional test suite:
+   python3 tests/functional/run.py --model qwen38_flash_next --suite standard
+
+4. Speculative prompt lookup verification:
+   python3 tests/functional/prompt_lookup.py --model qwen38_flash_next
+
+5. DeepSeek functional verification (when weights scheduled):
+   python3 tests/functional/run.py --model deepseek_v4_flash --suite standard
+
+6. Standard HTTP speed benchmark:
+   python3 tools/bench/speed_bench.py --url http://127.0.0.1:8080/v1 --model qwen27b
+
+7. Matched main-control timings (per request and phase at 5% and 10 ms):
+   python3 tests/functional/run.py --model qwen27b --suite standard --compare-git-rev main

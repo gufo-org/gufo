@@ -1,0 +1,25 @@
+Cards 19–22: Pending and Deferred Commands
+
+The following commands are deferred per project instructions, card scope discipline, and the standing user decision to qualify models during a single post-Card-14 qualification window:
+
+1. Full functional test harness runs across migrated text models (Qwen 27B, Qwen3.8 Flash-Next, DeepSeek V4 Flash):
+   - Commands:
+     * python3 tests/functional/run.py --model qwen2.5-coder-7b ...
+     * python3 tests/functional/run.py --model qwen3.8-flash-next ...
+     * python3 tests/functional/run.py --model deepseek-v4-flash ...
+   - Status: PENDING / DEFERRED
+   - Reason: Functional test harness rows require remote GPU weights, full context caches, and execution harness sweeps. Per standing user decision, model qualification runs are deferred to the dedicated qualification window after all model extension cards are complete.
+
+2. Benchmark throughput measurements and TG/PP sweeps:
+   - Commands:
+     * ./result/bin/gufo bench -m <path-to-qwen.gguf> ...
+     * ./result/bin/gufo bench -m <path-to-flash-next.gguf> ...
+     * ./result/bin/gufo bench -m <path-to-deepseek.gguf> ...
+   - Status: PENDING / DEFERRED
+   - Reason: Standard speed benchmarks require hardware ceilings and real GGUF weights on the remote GPU. No kernel changes were introduced in Cards 19-22; structural extension migration preserves identical execution policies.
+
+3. Pi agent workflow replays:
+   - Commands:
+     * python3 tests/functional/pi_agent.py ...
+   - Status: PENDING / DEFERRED
+   - Reason: Interactive agent loop verification is deferred to the post-Card-14 qualification window.
