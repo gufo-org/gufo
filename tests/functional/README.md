@@ -295,16 +295,19 @@ Selections from separate paths are combined:
 | --- | --- |
 | Shared LLM behavior, cache, sampling or Qwen framing/vision | Flash-Next Q4/MTP |
 | Private Qwen27 implementation | Qwen27 Q4/DFlash2 |
-| Private DeepSeek implementation | DeepSeek V4/DSpark (disabled, see below) |
-| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek (disabled, see below) |
+| Private DeepSeek implementation | DeepSeek V4/DSpark |
+| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek |
 | Embedding, ASR or TTS code | That category's representative |
 | Shared infrastructure or unmapped paths | One representative per supported category |
 | Documentation, image generation or H3-only paths | No GPU job in this workflow |
 
-Models listed under `disabled` in `devlab.json`, with a reason, are left out of
-the plan and named in the report. DeepSeek V4 is disabled for now: its 81 GiB
-of weights and its suite set make the run too long to finish within a PR.
-Remove its entry to restore it.
+Models listed under `disabled` in `devlab.core.json`, with a reason, are left
+out of the plan and named in the report. Remove the entry to restore the model.
+
+A model's `suites` list in its `functional/devlab.json` limits Devlab to those
+suites at every tier; the report counts the others as out of scope. DeepSeek V4
+uses it to run the PR-tier set that passes on the runner. Its other full-tier
+suites still assume Flash-Next checkpoint sizes and Qwen token counts.
 
 The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
 uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
