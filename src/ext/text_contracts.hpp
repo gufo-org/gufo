@@ -19,7 +19,8 @@ struct ReasoningTags {
 /// parsers and the usage accounting read them. Budget enforcement works on
 /// tokens and keeps `ReasoningTags`: its start must be one control token, while
 /// `open` is the complete literal prefix the model emits, which may span tokens
-/// and include whitespace (for example `<|think|>\n`). Reasoning that the
+/// and end in whitespace (for example `<|think|>\n`). It must not begin with
+/// whitespace, because parsers skip whitespace before it. Reasoning that the
 /// prompt already opened (`InitialOutputState::kThought`) may still repeat
 /// `open`; the parsers drop it. `open` may be empty when the provider has no
 /// opener. `close` must be non-empty.

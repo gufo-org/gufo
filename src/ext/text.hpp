@@ -345,13 +345,18 @@ public:
   /// and streamed alike. By default they follow the budget tags: `start` opens
   /// and the first of `ends` closes (Qwen and DeepSeek: `<think>`, `</think>`);
   /// runners that declare no budget tags keep `<think>`, `</think>`.
-  /// Override when the literal framing differs from the budget control tokens.
+  /// Override when the literal framing differs from the budget control tokens,
+  /// keeping them about the same block: `ReasoningBudgetTags().start` is the
+  /// control token that begins `open`, and its `ends` include the one for
+  /// `close`. `open` must not begin with whitespace, which parsers skip.
   using ReasoningMarkup = ext::ReasoningMarkup;
   [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const;
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,
-                       std::span<const TextRunnerToken> prompt) const;
+                       std::span<const TextRunnerToken> prompt,
+                       ext::InitialOutputState initial =
+                           ext::InitialOutputState::kThought) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
@@ -476,6 +481,7 @@ private:
   mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
       constraints_;
   mutable std::shared_ptr<const std::vector<bool>> partial_utf8_;
+  mutable std::shared_ptr<const std::vector<bool>> blank_tokens_;
 };
 
 using TextRunner = TextModelRunner;

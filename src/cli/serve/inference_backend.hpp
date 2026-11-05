@@ -35,16 +35,15 @@ using ext::TextDFlashDraftPolicyName;
 }
 }  // namespace speculative
 
-/// Generated reasoning tokens, excluding the delimiters. With an empty `open`
-/// the output starts inside reasoning, which ends at `close`; otherwise only a
-/// block the output itself opens with `open` counts, after a prefix that
-/// `blank` accepts (none when unset). An unclosed block counts to the end.
+/// Generated tokens with reasoning text, excluding the delimiters. Text output
+/// has none. Reasoning the prompt opened ends at `close`, after any repeated
+/// `open`; an automatic output counts only a block it opens itself, after blank
+/// text. An unclosed block counts to the end.
 [[nodiscard]] std::size_t CountReasoningTokens(
     std::span<const tokenization::TokenId> tokens,
-    std::span<const tokenization::TokenId> open,
-    std::span<const tokenization::TokenId> close,
-    const std::function<bool(std::span<const tokenization::TokenId>)>& blank =
-        {});
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning,
+    const std::function<std::string(tokenization::TokenId)>& decode);
 
 /// Thread-safe HTTP inference facade over shared immutable GPU model resources
 /// and a bounded pool of request-owned executor sessions.

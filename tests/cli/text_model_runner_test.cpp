@@ -573,6 +573,39 @@ void TestReasoningDelimitersFollowTheRunner() {
     rejected = true;
   }
   Expect(rejected, "an empty close delimiter is rejected at load");
+  rejected = false;
+  try {
+    TextRunnerPool pool(
+        std::make_shared<MarkupRunner>(std::nullopt, Markup{"\n<a>", "</a>"}),
+        1);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an open delimiter with leading whitespace is rejected");
+
+  // An automatic budget waits for the output's own opener, ignoring the
+  // opener of an earlier turn in the prompt.
+  class BudgetRunner final : public FakeRunner {
+  public:
+    BudgetRunner() : FakeRunner(std::make_shared<FakeStats>()) {}
+    gufo::ext::ReasoningTags ReasoningBudgetTags() const override {
+      return {"7", "8", {"8"}};
+    }
+    std::vector<TextRunnerToken> TokenizeControl(
+        std::string_view text) const override {
+      return {static_cast<TextRunnerToken>(text.front() - '0')};
+    }
+  };
+  const BudgetRunner budget_runner;
+  const std::vector<TextRunnerToken> prompt{1, 7, 2};
+  const auto automatic = budget_runner.BuildReasoningBudget(
+      4, prompt, gufo::ext::InitialOutputState::kAuto);
+  Expect(automatic && automatic->opener == 7 && automatic->prompt.empty(),
+         "an automatic budget starts at the output's opener");
+  const auto opened = budget_runner.BuildReasoningBudget(4, prompt);
+  Expect(opened && !opened->opener &&
+             opened->prompt == std::vector<TextRunnerToken>{2},
+         "a prompt-opened budget counts the prompt's open block");
 }
 
 void TestResourceClaimsAreValidatedBeforeAllocation() {

@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <semaphore>
 #include <span>
@@ -3174,32 +3175,39 @@ void TestBackendRejectsInvalidSamplingDefaults() {
 #endif
 
 void TestReasoningTokenCount() {
-  using Tokens = std::vector<gufo::tokenization::TokenId>;
-  const Tokens open{7, 8};
-  const Tokens close{9};
-  const auto count = [](const Tokens& tokens, const Tokens& open,
-                        const Tokens& close) {
-    return gufo::server::CountReasoningTokens(tokens, open, close);
+  using State = gufo::server::TextGenerationBackend::InitialOutputState;
+  using Pieces = std::vector<std::string>;
+  const gufo::ext::ReasoningMarkup markup{"<a>\n", "</a>"};
+  const auto count = [&markup](const Pieces& pieces, State initial) {
+    std::vector<gufo::tokenization::TokenId> tokens(pieces.size());
+    std::iota(tokens.begin(), tokens.end(), 0);
+    return gufo::server::CountReasoningTokens(
+        tokens, initial, markup,
+        [&pieces](gufo::tokenization::TokenId token) { return pieces[token]; });
   };
-  Expect(count({1, 2, 9, 3}, {}, close) == 2,
+  Expect(count({"x", "y", "</a>", "z"}, State::kThought) == 2,
          "output inside reasoning counts to the close");
-  Expect(count({1, 2, 3}, {}, close) == 3,
+  Expect(count({"x", "y", "z"}, State::kThought) == 3,
          "unclosed reasoning counts to the end");
-  Expect(count({7, 8, 1, 2, 9, 3}, open, close) == 2,
+  Expect(count({"<a>", "\n", "x", "</a>"}, State::kThought) == 1,
+         "a repeated opener is not reasoning");
+  Expect(count({"<a>", "\n", "x", "y", "</a>", "z"}, State::kAuto) == 2,
          "a model-opened block counts without its delimiters");
-  Expect(count({1, 7, 8, 2, 9}, open, close) == 0,
+  Expect(count({"<a>", "\n\n", "x", "</a>"}, State::kAuto) == 2,
+         "a delimiter token merged with its neighbour still opens the block");
+  Expect(count({"<a>\n", "x", "y</", "a>"}, State::kAuto) == 2,
+         "a token holding text before the close counts");
+  Expect(count({"x", "<a>\n", "y", "</a>"}, State::kAuto) == 0,
          "an automatic phase counts only a leading block");
-  const auto blank = [](std::span<const gufo::tokenization::TokenId> prefix) {
-    return std::ranges::all_of(prefix, [](auto token) { return token == 0; });
-  };
-  Expect(gufo::server::CountReasoningTokens(Tokens{0, 7, 8, 2, 9}, open, close,
-                                            blank) == 1,
-         "a blank prefix may precede the opener");
-  Expect(gufo::server::CountReasoningTokens(Tokens{1, 7, 8, 2, 9}, open, close,
-                                            blank) == 0,
-         "text before the opener is not blank");
-  Expect(count({7}, open, close) == 0, "a partial opener is not reasoning");
-  Expect(count({1, 2}, {}, {}) == 0, "no close delimiter counts nothing");
+  Expect(count({" \n", "<a>\n", "y", "</a>"}, State::kAuto) == 1,
+         "blank text may precede the opener");
+  Expect(count({"<a>"}, State::kAuto) == 0,
+         "a partial opener is not reasoning");
+  Expect(count({"<a>\n", "x"}, State::kAuto) == 1,
+         "an unclosed model-opened block counts to the end");
+  Expect(count({"<a>\n", "x", "</a>"}, State::kText) == 0,
+         "text output has no reasoning");
+  Expect(count({}, State::kThought) == 0, "no output counts nothing");
 }
 
 int main() {

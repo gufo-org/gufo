@@ -1077,7 +1077,8 @@ std::string_view AfterReasoningSeparator(std::string_view value,
                                          ToolMarkerSet markers) {
   // Qwen's llama.cpp PEG uses `reasoning << content`: `<<` consumes space().
   // Keep other dialects' existing line-break rule. Only the boundary after an
-  // explicit </think> is framing; answer and argument interiors are untouched.
+  // explicit reasoning close is framing; answer and argument interiors are
+  // untouched.
   const bool qwen = markers.size() == 1 &&
                     markers.front() == tokenization::QwenToolSyntax::kCallOpen;
   const auto first = value.find_first_not_of(qwen ? " \t\r\n\f\v" : "\r\n");
@@ -2363,9 +2364,9 @@ public:
     }
 
     if (state_ == State::kThinking) {
-      const std::string_view kThinkEnd = reasoning_.close;
+      const std::string_view close = reasoning_.close;
       const auto offset = pending_offset();
-      const auto think_found = raw_.find(kThinkEnd, offset);
+      const auto think_found = raw_.find(close, offset);
       const std::size_t end_pos = think_found == std::string::npos
                                       ? std::string::npos
                                       : think_found - offset;
@@ -2391,10 +2392,10 @@ public:
           return false;
         }
         std::string_view remaining = pending_;
-        remaining.remove_prefix(end_pos + kThinkEnd.size());
+        remaining.remove_prefix(end_pos + close.size());
         pending_ = std::string(remaining);
         state_ = State::kContent;
-        quotes_.Reset(raw_, offset + end_pos + kThinkEnd.size());
+        quotes_.Reset(raw_, offset + end_pos + close.size());
         trim_reasoning_separator_ = true;
       } else {
         std::size_t held = !recognize_tools_
@@ -2402,9 +2403,9 @@ public:
                                : HeldMarkerPrefix(raw_, raw_.size(),
                                                   thinking_markers, quotes_);
         held = std::min(held, pending_.size());
-        for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
+        for (std::size_t len = std::min(pending_.size(), close.size() - 1);
              len > 0; --len) {
-          if (kThinkEnd.starts_with(pending_.substr(pending_.size() - len))) {
+          if (close.starts_with(pending_.substr(pending_.size() - len))) {
             held = std::max(held, len);
             break;
           }
