@@ -81,6 +81,9 @@ public:
     bool cache_persist{true};
     std::size_t cache_prefix_tokens{0};
     bool stop_at_eos{true};
+    /// This request's runtime-projection opt-in (ChatRequest::projection);
+    /// applied to the leased state once, before any generation.
+    bool projection{false};
     std::vector<std::string> stop_sequences;
     bool return_progress{false};
   };

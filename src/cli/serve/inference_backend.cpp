@@ -257,16 +257,16 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
   }
 }
 
-bool InferenceBackend::load(const std::string& model_path, std::string* error,
-                            std::uint32_t max_context,
-                            std::size_t session_count,
-                            TextPrefillPolicy prefill_policy,
-                            TextSchedulerPolicy scheduler_policy,
-                            const TextSpeculativeConfig& speculative_config,
-                            const TextDiskCacheConfig& disk_cache_config,
-                            const std::string& vision_model_path,
-                            TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+bool InferenceBackend::load(
+    const std::string& model_path, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    const TextSpeculativeConfig& speculative_config,
+    const TextDiskCacheConfig& disk_cache_config,
+    const std::string& vision_model_path,
+    TextRunnerRamCacheOptions ram_cache_config, bool enable_yarn,
+    const std::string& projection_vector_path,
+    std::uint32_t projection_layer_lo, std::uint32_t projection_layer_hi) {
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
   if (reader_owner == nullptr) {
@@ -286,6 +286,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .session_count = session_count,
       .speculative = speculative_config,
       .vision_model_path = vision_model_path,
+      .projection_vector_path = projection_vector_path,
+      .projection_layer_lo = projection_layer_lo,
+      .projection_layer_hi = projection_layer_hi,
       .disk_cache = disk_cache_config,
       .ram_cache = ram_cache_config,
       .enable_yarn = enable_yarn,
@@ -310,7 +313,8 @@ bool InferenceBackend::load(const std::string&, std::string* error,
                             std::uint32_t, std::size_t, TextPrefillPolicy,
                             TextSchedulerPolicy, const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
-                            TextRunnerRamCacheOptions, bool) {
+                            TextRunnerRamCacheOptions, bool, const std::string&,
+                            std::uint32_t, std::uint32_t) {
   SetError(error, "HIP engine is disabled");
   return false;
 }
@@ -642,6 +646,14 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
       ConstrainChatRequest(request, state->scheduler->runner(),
                            &effective_sampling, &tool_format, &tool_dialect);
   const auto& effective_request = constrained ? *constrained : request;
+  if (effective_request.projection.value_or(false) &&
+      !state->scheduler->runner()
+           .Descriptor()
+           .capabilities.runtime_projection) {
+    throw std::invalid_argument(
+        "projection requested but this model has no projection vector "
+        "loaded (--projection-vector)");
+  }
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return TextGenerationBackend::start_chat(
@@ -668,6 +680,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .cache_prompt = request.cache_prompt,
           .cache_persist = request.cache_persist,
           .cache_prefix_tokens = prompt->cache_prefix_tokens,
+          .projection = effective_request.projection.value_or(false),
           .stop_sequences = request.stop_sequences,
           .return_progress = request.return_progress,
       });

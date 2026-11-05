@@ -175,6 +175,9 @@ public:
   void SetCancellationCheck(const CancellationCheck& check) override {
     session_->SetCancellationCheck(check);
   }
+  void SetProjectionEnabled(bool enabled) override {
+    session_->SetProjectionEnabled(enabled);
+  }
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
     return {.per_request_state_bytes = session_->AllocatedBytes(),
@@ -289,6 +292,7 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
+                .runtime_projection = model_->ProjectionLoaded(),
                 // Sparse prefill tiles group four queries from each pass
                 // start: one selection block (compress ratio).
                 .prefill_alignment =
@@ -829,6 +833,9 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
           .mtp_model_path =
               use_mtp ? options.speculative.draft_model_path : std::string{},
           .vision_model_path = options.vision_model_path,
+          .projection_vector_path = options.projection_vector_path,
+          .projection_layer_lo = options.projection_layer_lo,
+          .projection_layer_hi = options.projection_layer_hi,
           .decode_concurrency =
               DecodeConcurrencyForSessions(options.session_count),
           .rope_scaling = rope_scaling,

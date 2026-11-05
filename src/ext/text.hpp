@@ -115,6 +115,10 @@ struct TextRunnerCapabilities {
   bool in_pass_checkpoint{false};
   bool partial_prefill_retention{false};
   bool prefill_rollback{false};
+  /// The runner applies its optional runtime residual projection when a
+  /// request opts in (see ChatRequest::projection). True only while the
+  /// serving model carries a loaded projection vector.
+  bool runtime_projection{false};
   /// Prefill continues a prompt exactly only from positions divisible by
   /// this. Intermediate pass ends and published prompt checkpoints are
   /// rounded down to it, except the complete prompt, which only an
@@ -202,6 +206,11 @@ public:
   }
 
   virtual void SetCancellationCheck(const CancellationCheck&) {}
+
+  /// Applies this request's runtime-projection opt-in
+  /// (ChatRequest::projection). Called once per request before any
+  /// generation; runners without the feature ignore it.
+  virtual void SetProjectionEnabled(bool /*enabled*/) {}
 
   [[nodiscard]] virtual TextRunnerMeasuredResources MeasuredResources()
       const noexcept {
@@ -322,6 +331,12 @@ struct ChatRequest {
   bool cache_prompt{true};
   bool cache_persist{true};
   bool return_progress{false};
+  /// Per-request opt-in for the runner's optional runtime residual
+  /// projection (see TextRunnerCapabilities::runtime_projection): the
+  /// projection stays off unless a request sets this true, and no state
+  /// carries into later requests. Requests that enable it on a model
+  /// without a loaded vector are rejected by the backend.
+  std::optional<bool> projection;
   std::vector<std::string> stop_sequences;
   std::shared_ptr<const sampling::JsonConstraint> response_format;
   std::string response_format_description;
@@ -583,6 +598,12 @@ struct TextRunnerOptions {
   std::size_t session_count{1};
   TextSpeculativeConfig speculative{};
   std::string vision_model_path{};
+  /// Optional llama.cpp control-vector GGUF for a runtime residual-stream
+  /// projection (Qwen3.8-Flash-Next); empty leaves the feature off.
+  std::string projection_vector_path{};
+  /// Inclusive steered layer range; hi == 0 selects the file's full range.
+  std::uint32_t projection_layer_lo{1};
+  std::uint32_t projection_layer_hi{0};
   TextDiskCacheConfig disk_cache{};
   TextRunnerRamCacheOptions ram_cache{};
   bool enable_yarn{false};
