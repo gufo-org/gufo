@@ -106,6 +106,9 @@ int main(int argc, char** argv) {
   std::uint32_t batch = 512;
   std::uint32_t context = 4096;
   float yarn_factor = 1.0F;
+  std::string projection_vector;
+  std::string projection_layers;
+  bool projection_off = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto next = [&]() -> std::string {
@@ -206,6 +209,12 @@ int main(int argc, char** argv) {
       every_pass_rows = rows;
     } else if (arg == "--nll") {
       nll_path = next();
+    } else if (arg == "--projection-vector") {
+      projection_vector = next();
+    } else if (arg == "--projection-layers") {
+      projection_layers = next();
+    } else if (arg == "--projection-off") {
+      projection_off = true;
     } else {
       std::fprintf(stderr, "unknown argument %s\n", arg.c_str());
       return 2;
@@ -274,6 +283,38 @@ int main(int argc, char** argv) {
     weights->config.rope_scaling = scaling;
   }
   const auto& c = weights->config;
+  // Optional runtime projection: loaded vectors steer unless --projection-off.
+  q::ProjectionVector projection;
+  bool projection_loaded = false;
+  if (!projection_vector.empty()) {
+    std::string warning;
+    if (!q::LoadControlVector(projection_vector, c.num_layers, c.hidden_size,
+                              "qwen4exp", &projection, &error, &warning)) {
+      std::fprintf(stderr, "projection vector failed: %s\n", error.c_str());
+      return 1;
+    }
+    if (!warning.empty()) {
+      std::fprintf(stderr, "warning: %s\n", warning.c_str());
+    }
+    std::uint32_t lo = 1;
+    std::uint32_t hi = 0;
+    if (!projection_layers.empty() &&
+        std::sscanf(projection_layers.c_str(), "%u-%u", &lo, &hi) != 2) {
+      std::fprintf(stderr, "--projection-layers must be LO-HI\n");
+      return 2;
+    }
+    projection.first_layer = std::max<std::uint32_t>(1, lo);
+    projection.last_layer =
+        hi == 0 ? projection.last_layer : std::min(hi, projection.last_layer);
+    if (projection.first_layer > projection.last_layer) {
+      std::fprintf(stderr, "projection layer range is empty\n");
+      return 2;
+    }
+    projection_loaded = true;
+    std::printf("projection %s layers %u..%u (%s)\n", projection_vector.c_str(),
+                projection.first_layer, projection.last_layer,
+                projection_off ? "loaded, disabled" : "enabled");
+  }
   if (cost_depth &&
       (c.context_length < 96 || *cost_depth > c.context_length - 96)) {
     std::fprintf(stderr, "--depth leaves no room for the cost-audit suffix\n");
@@ -331,6 +372,7 @@ int main(int argc, char** argv) {
                 batch, every_pass_rows != 0 ? every_pass_rows : 64);
   if (mtp_audit || cost_audit)
     options.max_speculative = 8;
+  options.projection = projection_loaded ? &projection : nullptr;
 
   if (cost_audit) {
     options.max_batch = 2048;
@@ -371,6 +413,9 @@ int main(int argc, char** argv) {
   if (!session) {
     std::fprintf(stderr, "session failed: %s\n", error.c_str());
     return 1;
+  }
+  if (projection_loaded && !projection_off) {
+    session->SetProjectionEnabled(true);
   }
 
   std::vector<std::int32_t> tokens;
@@ -415,8 +460,7 @@ int main(int argc, char** argv) {
     if (!executor->Forward(
             *session, std::span<const std::int32_t>(tokens.data() + off, n),
             rows, out.data(), q::rocm::Executor::ForwardMode::kPrefill, &error,
-            nullptr,
-            std::span<const std::int32_t>(tokens.data() + off + n, next))) {
+            {}, std::span<const std::int32_t>(tokens.data() + off + n, next))) {
       std::fprintf(stderr, "prefill failed: %s\n", error.c_str());
       return 1;
     }
@@ -542,6 +586,10 @@ int main(int argc, char** argv) {
   if (reference) {
     q::ReferenceModel ref(*weights, ngram.get(),
                           static_cast<std::uint32_t>(tokens.size()));
+    if (projection_loaded) {
+      ref.SetProjection(projection);
+      ref.SetProjectionEnabled(!projection_off);
+    }
     std::vector<float> ref_logits(c.vocab_size);
     const std::size_t first = tokens.size() - logit_rows;
     for (std::size_t i = 0; i < tokens.size(); ++i) {
