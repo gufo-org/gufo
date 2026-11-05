@@ -33,8 +33,9 @@ struct ReasoningMarkup {
 };
 
 // Interim, by design: the request-level chat and tool contract is still the
-// serve-owned `ChatRequest`, and the tool dialect is still
-// `sampling::JsonConstraint::ToolFormat`. RFC step 10 moves the runner header;
-// step 7 publishes both under `include/gufo/ext/`.
+// serve-owned `ChatRequest`, and the built-in tool formats are still
+// `sampling::JsonConstraint::ToolFormat` (provider dialects register a
+// `ToolDialect` by identity). RFC step 10 moves the runner header; step 7
+// publishes both under `include/gufo/ext/`.
 
 }  // namespace gufo::ext

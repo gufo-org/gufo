@@ -2262,6 +2262,359 @@ void TestLlamaCppToolGrammarGoldens() {
   assert(rows == 688 && differences < rows / 5);
 }
 
+// An invented native syntax, absent from ToolFormat, with non-JSON value
+// framing: `<<invoke:NAME>>{key:«text»,n:1}<</invoke>>`, guillemet strings,
+// bare keys, no whitespace and sorted members.
+JsonConstraint::ToolSyntax LedgerSyntax() {
+  return {
+      .open = "<<invoke:",
+      .name_prefix = "",
+      .name_suffix = ">>",
+      .close = "<</invoke>>",
+      .name_delimiters = ">",
+      .values = {.string_open = "«",
+                 .string_close = "»",
+                 .bare_keys = true,
+                 .whitespace = false,
+                 .sorted_keys = true},
+      .reasoning_header = true,
+  };
+}
+
+void TestProviderToolSyntax() {
+  const auto syntax = LedgerSyntax();
+  const auto schema = parse(R"({"type":"object","properties":{
+    "units":{"type":"string","enum":["metric","imperial"]},
+    "city":{"type":"string","minLength":1},
+    "days":{"type":"integer","minimum":1,"maximum":7},
+    "a:b":{"type":"boolean"},
+    "options":{"type":"object","properties":{"zone":{"type":"string"},
+      "alerts":{"type":"array","items":{"type":"integer"}}},
+      "required":["zone"],"additionalProperties":false}},
+    "required":["city","days"],"additionalProperties":false})");
+  const auto parameters = JsonConstraint::ToolParameters(schema, false, syntax);
+  assert(parameters == JsonConstraint::ToolParameters(schema, false, syntax));
+  // Sorted members, bare keys, guillemet strings and compact JSON scalars.
+  assert(Accepts(*parameters, "{city:«Paris»,days:3}"));
+  assert(Accepts(*parameters,
+                 "{«a:b»:true,city:«Paris»,days:3,"
+                 "options:{alerts:[1,2],zone:«CET»},units:«metric»}"));
+  // Undelimited keys need quoting, string text may contain JSON quotes and
+  // other dialects' markers, and the predicates still apply.
+  assert(Accepts(*parameters, "{city:«\"<tool_call>\"»,days:7}"));
+  assert(!Accepts(*parameters, "{city:«»,days:3}"));
+  assert(!Accepts(*parameters, "{city:«Paris»,days:8}"));
+  assert(!Accepts(*parameters, "{city:«Paris»,days:«3»}"));
+  assert(!Accepts(*parameters, "{city:«Paris»,days:3,units:«kelvin»}"));
+  assert(!Accepts(*parameters, "{days:3}"));
+  assert(!Accepts(*parameters, "{city:«Paris»,days:}"));
+  assert(!Accepts(*parameters, "{city:«Pa»ris»,days:3}"));
+  assert(!Accepts(*parameters, "{days:3,city:«Paris»}"));
+  assert(!Accepts(*parameters, "{city:«Paris»,days:3,extra:1}"));
+  assert(!Accepts(*parameters, "{a:b:true,city:«Paris»,days:3}"));
+  assert(!Accepts(*parameters, "{city: «Paris»,days:3}"));
+  assert(!Accepts(*parameters, R"({"city":"Paris","days":3})"));
+  assert(!Accepts(*parameters, "{city:«Paris»,days:3,options:{}}"));
+
+  // Strict schemas keep their contract; unsupported ones are errors.
+  const auto strict = parse(R"({"type":"object","properties":{
+    "path":{"type":"string"},"lines":{"type":["integer","null"]}},
+    "required":["path","lines"],"additionalProperties":false})");
+  const auto exact = JsonConstraint::ToolParameters(strict, true, syntax);
+  assert(Accepts(*exact, "{lines:null,path:«/tmp/a»}"));
+  assert(Accepts(*exact, "{lines:4,path:«/tmp/a»}"));
+  assert(!Accepts(*exact, "{path:«/tmp/a»}"));
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::ToolParameters(
+        parse(R"({"type":"object","properties":{"x":{"not":{}}},
+          "required":["x"],"additionalProperties":false})"),
+        true, syntax);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+  // A string the delimiters cannot carry is no exact grammar either.
+  rejected = false;
+  try {
+    (void)JsonConstraint::ToolParameters(
+        parse(R"({"type":"object","properties":{"x":{"const":"a»b"}},
+          "required":["x"],"additionalProperties":false})"),
+        true, syntax);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  // Best effort: an untyped or unsupported schema keeps the envelope with any
+  // object in the provider's value syntax.
+  // An open schema keeps the envelope with any object in the value syntax.
+  const auto open = JsonConstraint::ToolParameters(
+      parse(R"({"type":"object","additionalProperties":true})"), false, syntax);
+  assert(open == JsonConstraint::OpenToolParameters(syntax));
+  assert(Accepts(*open, "{}"));
+  assert(Accepts(*open, "{x:1,y:«s»,z:[true,null,{w:«v»}]}"));
+  assert(!Accepts(*open, R"({x:"s"})"));
+  assert(!Accepts(*open, "{x:1 }"));
+  assert(!Accepts(*open, "{«x:1}"));
+  // An empty schema declares no arguments, as on the built-in routes.
+  const auto none = JsonConstraint::ToolParameters(parse("{}"), false, syntax);
+  assert(Accepts(*none, "{}"));
+  assert(!Accepts(*none, "{x:1}"));
+  // Where the JSON route falls back to any object, so does the native one.
+  const auto guided = JsonConstraint::ToolParameters(
+      parse(R"({"type":"object","properties":{"x":{"not":{}}}})"), false,
+      syntax);
+  assert(guided == open);
+  assert(JsonConstraint::OpenToolParameters(syntax) ==
+         JsonConstraint::OpenToolParameters(syntax));
+
+  const std::string call = "<<invoke:weather>>{city:«Paris»,days:3}<</invoke>>";
+  const std::string other = "<<invoke:clock>>{}<</invoke>>";
+  const auto empty =
+      JsonConstraint::ToolParameters(parse(R"({"type":"object","properties":{},
+        "additionalProperties":false})"),
+                                     false, syntax);
+  const std::vector<JsonConstraint::Tool> tools{{"weather", parameters},
+                                                {"clock", empty}};
+  // tool_choice=required: only whitespace may precede the native marker.
+  const auto required =
+      JsonConstraint::WithTools(nullptr, tools, true, false, syntax);
+  assert(required ==
+         JsonConstraint::WithTools(nullptr, tools, true, false, syntax));
+  assert(Accepts(*required, call));
+  assert(Accepts(*required, "\n" + other));
+  assert(!Accepts(*required, "I will call it. " + call));
+  assert(!Accepts(*required, "plain answer"));
+  assert(!Accepts(*required, call + other));
+  assert(!Accepts(*required,
+                  "<<invoke:unknown>>{city:«Paris»,days:3}<</invoke>>"));
+  assert(!Accepts(*required, "<<invoke:weather>>{city:«Paris»}<</invoke>>"));
+  assert(
+      !Accepts(*required,
+               R"(<tool_call>{"name":"weather","arguments":{}}</tool_call>)"));
+  const auto parallel =
+      JsonConstraint::WithTools(nullptr, tools, true, true, syntax);
+  assert(Accepts(*parallel, call + other));
+  assert(Accepts(*parallel, call + "\n" + other));
+  // tool_choice=auto: prose, including another dialect's markers, is text.
+  const auto automatic =
+      JsonConstraint::WithTools(nullptr, tools, false, true, syntax);
+  assert(Accepts(*automatic, "plain answer"));
+  assert(Accepts(*automatic,
+                 R"(<tool_call>{"name":"weather"}</tool_call> <|tool_call>)"));
+  assert(Accepts(*automatic, "Checking. " + call + " Then " + other));
+  assert(!Accepts(*automatic, "Checking. <<invoke:weather>>{days:3}"));
+  // A response format closes the output after the calls.
+  const auto answer = JsonConstraint::Object();
+  const auto formatted =
+      JsonConstraint::WithTools(answer, tools, false, false, syntax);
+  assert(Accepts(*formatted, R"({"final":true})"));
+  assert(Accepts(*formatted, call));
+  assert(!Accepts(*formatted, call + " trailing"));
+  // The reasoning phase ends at the native call header.
+  const auto thinking = JsonConstraint::WithReasoning(required);
+  assert(Accepts(*thinking, "Need the weather." + call));
+  assert(Accepts(*thinking, "Need the weather.</think>" + call));
+  assert(
+      Accepts(*thinking, "Quoted `<<invoke:` stays thought.</think>" + call));
+  assert(!Accepts(*thinking, "Need the weather.</think>no call"));
+  // Tool names the parser could not delimit cannot be constrained.
+  rejected = false;
+  try {
+    (void)JsonConstraint::WithTools(nullptr, {{"a>b", empty}}, true, false,
+                                    syntax);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+}
+
+// Reasoning framed by provider delimiters: a multi-token opener with a newline,
+// a close whose prefix overlaps itself, and both the prompt-opened phase and
+// the phase the model opens itself.
+void TestProviderReasoningMarkup() {
+  constexpr std::string_view open = "[[ponder>>\n", close = "<<ponder]]";
+  // The default markup is the classic grammar, for every answer shape.
+  const auto object = JsonConstraint::Object();
+  const auto qwen_tools = JsonConstraint::WithTools(
+      nullptr,
+      {{"a",
+        JsonConstraint::OpenToolParameters(JsonConstraint::ToolFormat::kQwen)}},
+      false, true, JsonConstraint::ToolFormat::kQwen);
+  const auto dsml_tools = JsonConstraint::WithTools(
+      object,
+      {{"a", JsonConstraint::OpenToolParameters(
+                 JsonConstraint::ToolFormat::kDeepSeek)}},
+      true, false, JsonConstraint::ToolFormat::kDeepSeek);
+  for (const auto& answer : {object, qwen_tools, dsml_tools}) {
+    assert(JsonConstraint::WithReasoning(answer) ==
+           JsonConstraint::WithReasoning(answer, "</think>"));
+    assert(JsonConstraint::WithReasoning(answer) ==
+           JsonConstraint::WithReasoning(answer, "</think>", ""));
+    assert(JsonConstraint::WithReasoning(answer, close) !=
+           JsonConstraint::WithReasoning(answer));
+  }
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::WithReasoning(object, "");
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  const auto syntax = LedgerSyntax();
+  const auto schema = parse(R"({"type":"object","properties":{
+    "city":{"type":"string"}},"required":["city"],
+    "additionalProperties":false})");
+  const std::vector<JsonConstraint::Tool> tools{
+      {"weather", JsonConstraint::ToolParameters(schema, true, syntax)}};
+  const std::string call = "<<invoke:weather>>{city:«Paris»}<</invoke>>";
+  const auto required =
+      JsonConstraint::WithTools(nullptr, tools, true, false, syntax);
+  // Prompt-opened reasoning, then a call.
+  const auto opened = JsonConstraint::WithReasoning(required, close);
+  assert(Accepts(*opened, "Need the weather.<<ponder]]" + call));
+  assert(Accepts(*opened, "Need the weather.<<ponder]]\n" + call));
+  assert(Accepts(*opened, "Need the weather." + call));
+  assert(Accepts(*opened, "Overlap <<<ponder]]" + call));
+  assert(Accepts(*opened, "Quoted `<<invoke:` stays.<<ponder]]" + call));
+  assert(!Accepts(*opened, "Need the weather.<<ponder]]no call"));
+  assert(!Accepts(*opened, "Need the weather.</think>no call"));
+  // Reasoning the model opens itself.
+  const auto automatic = JsonConstraint::WithReasoning(required, close, open);
+  assert(Accepts(*automatic, "[[ponder>>\nNeed the weather.<<ponder]]" + call));
+  assert(Accepts(*automatic, "[[ponder>>\nNeed the weather." + call));
+  assert(Accepts(*automatic, call));
+  assert(!Accepts(*automatic, "<think>\nNeed the weather.</think>" + call));
+  assert(!Accepts(*automatic, "[[ponder>>Need the weather.<<ponder]]" + call));
+  assert(!Accepts(*automatic, "Need the weather.<<ponder]]" + call));
+  // Automatic tool choice keeps reasoning-only and plain answers.
+  const auto optional = JsonConstraint::WithReasoning(
+      JsonConstraint::WithTools(nullptr, tools, false, false, syntax), close,
+      open);
+  assert(Accepts(*optional, "[[ponder>>\nThinking only"));
+  assert(Accepts(*optional, "[[ponder>>\nPlan.<<ponder]]Plain answer."));
+  assert(Accepts(*optional, "Plain answer."));
+  // A response format without tools: the provider's close alone ends the
+  // phase, including after an overlapping prefix.
+  const auto formatted = JsonConstraint::WithReasoning(object, close);
+  assert(Accepts(*formatted, "Plan.<<ponder]]{\"x\":1}"));
+  assert(Accepts(*formatted, "Plan <<<ponder]]{\"x\":1}"));
+  assert(Accepts(*formatted, "Plan.</think> is text.<<ponder]]{}"));
+  assert(!Accepts(*formatted, "Plan.</think>{\"x\":1}"));
+  const auto framed = JsonConstraint::WithReasoning(object, close, open);
+  assert(Accepts(*framed, "[[ponder>>\nPlan.<<ponder]]{}"));
+  assert(Accepts(*framed, "{}"));
+  assert(!Accepts(*framed, "<think>\nPlan.</think>{}"));
+  assert(!Accepts(*framed, "[[ponder>>\nPlan.</think>{}"));
+}
+
+// V4 DSML tag text in the V4.1 spelling: a space after ｜DSML｜ and the call
+// block named `calls`.
+std::string DsmlVariant(std::string text) {
+  static constexpr std::pair<std::string_view, std::string_view> kTags[] = {
+      {"｜DSML｜tool_calls", "｜DSML｜ calls"},
+      {"｜DSML｜invoke", "｜DSML｜ invoke"},
+      {"｜DSML｜parameter", "｜DSML｜ parameter"},
+  };
+  for (const auto& [from, to] : kTags)
+    for (auto at = text.find(from); at != std::string::npos;
+         at = text.find(from, at + to.size()))
+      text.replace(at, from.size(), to);
+  return text;
+}
+
+// A tagged dialect variant needs only provider data: the built-in DeepSeek
+// descriptor with other tag text accepts exactly the translated outputs.
+void TestProviderTaggedSyntax() {
+  using Format = JsonConstraint::ToolFormat;
+  auto variant = JsonConstraint::Syntax(Format::kDeepSeek);
+  for (auto* text : {&variant.open, &variant.name_prefix, &variant.close,
+                     &variant.block_close, &variant.tagged->parameter_open,
+                     &variant.tagged->value_close})
+    *text = DsmlVariant(*text);
+  assert(variant.open == "<｜DSML｜ calls>");
+  assert(variant.tagged->parameter_open == "<｜DSML｜ parameter name=\"");
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::Syntax(Format::kJson);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+  std::ifstream in(GUFO_LLAMA_TOOL_GRAMMAR_GOLDENS);
+  const auto fixture =
+      parse(std::string(std::istreambuf_iterator<char>(in), {}));
+  std::size_t rows = 0;
+  for (const auto& row : fixture.find("rows")->items()) {
+    if (row.member_str("format") != "deepseek")
+      continue;
+    const auto& parameters = *row.find("parameters");
+    for (const bool parallel : {false, true}) {
+      const auto v4 = JsonConstraint::WithTools(
+          nullptr,
+          {{"record", JsonConstraint::ToolParameters(parameters, false,
+                                                     Format::kDeepSeek)}},
+          true, parallel, Format::kDeepSeek);
+      const auto v41 = JsonConstraint::WithTools(
+          nullptr,
+          {{"record",
+            JsonConstraint::ToolParameters(parameters, false, variant)}},
+          true, parallel, variant);
+      const auto output = row.member_str("output");
+      assert(Accepts(*v4, output) == Accepts(*v41, DsmlVariant(output)));
+      assert(!Accepts(*v41, output) || DsmlVariant(output) == output);
+    }
+    ++rows;
+  }
+  assert(rows > 300);
+  // Untyped key/value tags in another layout, where only the schema types
+  // values: strings raw, other values JSON.
+  const JsonConstraint::ToolSyntax pairs{
+      .open = "<tool_call>",
+      .name_prefix = "",
+      .name_suffix = "\n",
+      .close = "</tool_call>",
+      .name_delimiters = "\n<",
+      .tagged =
+          JsonConstraint::TaggedArguments{
+              .parameter_open = "<arg_key>",
+              .raw_value_open = "</arg_key>\n<arg_value>",
+              .typed_value_open = "</arg_key>\n<arg_value>",
+              .value_close = "</arg_value>",
+              .parameter_separator = "\n",
+          },
+  };
+  const auto weather = parse(R"({"type":"object","properties":{
+    "city":{"type":"string"},"days":{"type":"integer"}},
+    "required":["city"],"additionalProperties":false})");
+  const auto paired = JsonConstraint::WithTools(
+      nullptr, {{"get", JsonConstraint::ToolParameters(weather, false, pairs)}},
+      true, true, pairs);
+  const std::string city =
+      "<arg_key>city</arg_key>\n<arg_value>Paris 75</arg_value>\n";
+  assert(Accepts(*paired, "<tool_call>get\n" + city + "</tool_call>"));
+  assert(Accepts(*paired,
+                 "<tool_call>get\n<arg_key>days</arg_key>\n<arg_value>3"
+                 "</arg_value>\n" +
+                     city + "</tool_call>\n<tool_call>get\n" + city +
+                     "</tool_call>"));
+  assert(!Accepts(*paired,
+                  "<tool_call>get\n<arg_key>days</arg_key>\n"
+                  "<arg_value>x</arg_value>\n" +
+                      city + "</tool_call>"));
+  assert(!Accepts(*paired, "<tool_call>get\n</tool_call>"));
+  assert(!Accepts(*paired, "<tool_call>get\n" + city + "</tool_call> more"));
+  // The built-in formats are these descriptors.
+  const auto schema = parse(R"({"type":"object","properties":{
+    "text":{"type":"string"}},"required":["text"],"additionalProperties":false})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+    assert(JsonConstraint::ToolParameters(schema, false, format) ==
+           JsonConstraint::ToolParameters(schema, false,
+                                          JsonConstraint::Syntax(format)));
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -2318,6 +2671,9 @@ int main(int argc, char** argv) {
   TestToolSchemaSafety();
   TestNativeToolSchemaMatrix();
   TestLlamaCppToolGrammarGoldens();
+  TestProviderToolSyntax();
+  TestProviderReasoningMarkup();
+  TestProviderTaggedSyntax();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }

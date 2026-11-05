@@ -1076,10 +1076,228 @@ void TestServerInstructionsAreFraming() {
 
 }  // namespace
 
+// A dialect absent from ToolFormat: identity, grammar and parser come from
+// its registration alone.
+void ScanNothing(std::string_view, std::span<const std::string_view>,
+                 std::vector<gufo::ext::ScannedToolCall>*,
+                 std::vector<std::pair<std::size_t, std::size_t>>*, bool) {}
+
+void TestProviderToolDialectSelection() {
+  using Constraint = gufo::sampling::JsonConstraint;
+  const Constraint::ToolSyntax syntax{
+      .open = "<<invoke:",
+      .name_suffix = ">>",
+      .close = "<</invoke>>",
+      .name_delimiters = ">",
+      .values = {.string_open = "«",
+                 .string_close = "»",
+                 .bare_keys = true,
+                 .whitespace = false,
+                 .sorted_keys = true},
+  };
+  gufo::ext::RegisterToolDialect({
+      .markers = {"<<invoke:"},
+      .scan_tool_calls = &ScanNothing,
+      .id = "ledger-runner",
+      .syntax = syntax,
+  });
+  const auto rejects = [](gufo::ext::ToolDialect dialect) {
+    try {
+      gufo::ext::RegisterToolDialect(std::move(dialect));
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  Expect(rejects({.markers = {"<tool_call>"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "qwen",
+                  .syntax = syntax}),
+         "host-parsed identities cannot be registered");
+  Expect(rejects({.markers = {"[[call"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "bracket",
+                  .syntax = syntax}),
+         "markers must contain '<'");
+  Expect(rejects({.markers = {"<<call:"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "mismatch",
+                  .syntax = syntax}),
+         "the grammar's opener must be a parser marker");
+  Expect(rejects({.markers = {"<<invoke:"}, .id = "noscan", .syntax = syntax}),
+         "a dialect needs a parser");
+  Expect(rejects({.markers = {"<<invoke:"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "nogrammar"}),
+         "a dialect needs a grammar");
+  Expect(gufo::ext::FindToolDialect("ledger-runner") != nullptr &&
+             gufo::ext::FindToolDialect("ledger-runner")->syntax == syntax,
+         "registered dialects are found by identity");
+
+  class DialectRunner final : public FakeRunner {
+  public:
+    explicit DialectRunner(
+        std::string id, std::optional<gufo::ext::ReasoningMarkup> markup = {},
+        gufo::ext::InitialOutputState initial =
+            gufo::ext::InitialOutputState::kAuto)
+        : FakeRunner(std::make_shared<FakeStats>()),
+          id_(std::move(id)),
+          markup_(std::move(markup)),
+          initial_(initial) {}
+    std::string ToolDialectId() const override { return id_; }
+    gufo::ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return markup_ ? *markup_ : FakeRunner::ReasoningDelimiters();
+    }
+    gufo::ext::InitialOutputState InitialOutputState(
+        const ChatRequest&) const override {
+      return initial_;
+    }
+    std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+    BuildConstraintVocabulary() const override {
+      return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+          256, [](std::uint32_t id) {
+            return gufo::sampling::ConstraintVocabulary::Piece{
+                std::string(1, static_cast<char>(id)), false};
+          });
+    }
+
+  private:
+    std::string id_;
+    std::optional<gufo::ext::ReasoningMarkup> markup_;
+    gufo::ext::InitialOutputState initial_;
+  };
+  const auto accepts = [](const Constraint& grammar, std::string_view text) {
+    auto state = grammar.Start();
+    for (const unsigned char byte : text) {
+      state = grammar.Advance(state, byte);
+      if (state.empty())
+        return false;
+    }
+    return grammar.Complete(state);
+  };
+  const DialectRunner runner("ledger-runner");
+  Expect(FakeRunner(std::make_shared<FakeStats>()).ToolDialectId() == "json",
+         "existing runners keep the identity of their format");
+  const std::string call = "<<invoke:record>>{text:«hi»}<</invoke>>";
+  for (const auto choice :
+       {ChatRequest::ToolChoice::kRequired, ChatRequest::ToolChoice::kAuto,
+        ChatRequest::ToolChoice::kNone}) {
+    ChatRequest request;
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kUser, "go");
+    request.tool_choice = choice;
+    request.tools = {
+        {.name = "record",
+         .parameters_json =
+             R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
+    gufo::sampling::SamplingConfig sampling;
+    std::optional<Constraint::ToolFormat> format{Constraint::ToolFormat::kQwen};
+    std::string dialect;
+    const auto constrained = gufo::server::ConstrainChatRequest(
+        request, runner, &sampling, &format, &dialect);
+    Expect(dialect == "ledger-runner" && !format,
+           "the runner's identity selects the provider dialect");
+    if (choice == ChatRequest::ToolChoice::kNone) {
+      Expect(!constrained && !sampling.constraint,
+             "tool_choice none leaves the output unconstrained");
+      continue;
+    }
+    Expect(constrained && sampling.constraint &&
+               constrained->messages.size() == 1 &&
+               constrained->messages.front().framing_suffix.empty(),
+           "a native dialect constrains without a JSON instruction");
+    const auto& grammar = *sampling.constraint->grammar;
+    Expect(accepts(grammar, call),
+           "the provider grammar constrains the request");
+    Expect(
+        accepts(
+            grammar,
+            R"(<tool_call>{"name":"record","arguments":{"text":"hi"}}</tool_call>)") ==
+            (choice == ChatRequest::ToolChoice::kAuto),
+        "the JSON envelope is no call of this dialect, only prose");
+    Expect(accepts(grammar, "Plain answer.") ==
+               (choice == ChatRequest::ToolChoice::kAuto),
+           "only automatic tool choice admits a plain answer");
+  }
+  // The reasoning phase of the grammar uses the runner's delimiters.
+  const auto constrain = [](const DialectRunner& reasoner, bool tools,
+                            std::optional<bool> enabled = {}) {
+    ChatRequest request;
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kUser, "go");
+    request.reasoning.enabled = enabled;
+    if (tools) {
+      request.tool_choice = ChatRequest::ToolChoice::kRequired;
+      request.tools = {
+          {.name = "record",
+           .parameters_json =
+               R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
+    } else {
+      request.response_format = Constraint::Object();
+    }
+    gufo::sampling::SamplingConfig sampling;
+    (void)gufo::server::ConstrainChatRequest(request, reasoner, &sampling);
+    return sampling.constraint->grammar;
+  };
+  const gufo::ext::ReasoningMarkup ponder{"[[ponder>>\n", "<<ponder]]"};
+  using Initial = gufo::ext::InitialOutputState;
+  for (const bool tools : {true, false}) {
+    const std::string answer = tools ? call : R"({"x":1})";
+    const auto opened = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kReasoning), tools);
+    Expect(accepts(*opened, "Plan.<<ponder]]" + answer),
+           "prompt-opened reasoning ends at the provider's close");
+    Expect(!accepts(*opened, "Plan.</think>" + answer + "</think>"),
+           "the classic close does not end provider reasoning");
+    const auto automatic = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kAuto), tools);
+    Expect(accepts(*automatic, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+               accepts(*automatic, answer),
+           "the model may open reasoning with the provider's opener");
+    Expect(!accepts(*automatic, "<think>\nPlan.</think>" + answer) &&
+               !accepts(*automatic, "[[ponder>>Plan.<<ponder]]" + answer),
+           "other reasoning framing is no reasoning of this provider");
+    const auto disabled = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kAuto), tools, false);
+    Expect(!accepts(*disabled, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+               accepts(*disabled, answer),
+           "disabled reasoning admits no reasoning phase");
+    const auto content = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kContent), tools);
+    Expect(!accepts(*content, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+               accepts(*content, answer),
+           "content output admits no reasoning phase");
+  }
+  // The default markup builds the same reasoning grammar as before.
+  {
+    const DialectRunner classic("json", std::nullopt, Initial::kReasoning);
+    const auto grammar = constrain(classic, false);
+    Expect(grammar == Constraint::WithReasoning(Constraint::Object()),
+           "default reasoning markup keeps the classic grammar");
+  }
+  bool rejected = false;
+  try {
+    gufo::sampling::SamplingConfig sampling;
+    (void)gufo::server::ConstrainChatRequest(
+        ChatRequest{}, DialectRunner("unregistered"), &sampling);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an unknown identity is a request error");
+  rejected = false;
+  try {
+    TextRunnerPool pool(std::make_shared<DialectRunner>("unregistered"), 1);
+  } catch (const std::invalid_argument& error) {
+    rejected = std::string_view(error.what()).find("unregistered") !=
+               std::string_view::npos;
+  }
+  Expect(rejected, "an unknown identity is rejected at load");
+  TextRunnerPool pool(std::make_shared<DialectRunner>("ledger-runner"), 1);
+}
+
 int main() {
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
   TestReasoningDelimitersFollowTheRunner();
+  TestProviderToolDialectSelection();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();
   TestBoundedPrefillDecodeAndPrefixReuse();
   TestAbandonedRequestRollsBackState();

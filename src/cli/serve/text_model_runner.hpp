@@ -190,10 +190,16 @@ private:
 
 /// Build output constraints and attach server-authored instructions as framing,
 /// preserving client message content and the model's native prompt layout.
+/// `tool_format` receives the built-in format the request was constrained
+/// with (none for a provider syntax) and `tool_dialect` the runner's dialect
+/// identity, which the response parsers select by. Throws
+/// std::invalid_argument for an identity that is neither built in nor
+/// registered.
 [[nodiscard]] std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
-    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr,
+    std::string* tool_dialect = nullptr);
 
 }  // namespace gufo::server
 

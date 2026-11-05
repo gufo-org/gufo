@@ -50,7 +50,8 @@ public:
   static std::shared_ptr<const JsonSchemaLexeme> Whitespace();
   enum class ReasoningEnd { kExplicit, kTool, kUnfinished };
   static std::shared_ptr<const JsonSchemaLexeme> Reasoning(
-      std::string tool_prefix, ReasoningEnd end);
+      std::string tool_prefix, ReasoningEnd end,
+      std::string close = "</think>");
   static json::Value IntersectMultipleOf(const json::Value& a,
                                          const json::Value& b);
   static json::Value Format(std::string_view format);

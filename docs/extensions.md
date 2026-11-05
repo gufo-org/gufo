@@ -212,6 +212,37 @@ start at a leading `open`. The budget counts from `start`, so the rest of `open`
 counts toward it. Line breaks after `close` are framing and dropped, and Qwen's
 tool dialect also drops other whitespace there.
 
+### Native tool calls
+
+A text model whose call syntax is not a built-in format registers a
+`ToolDialect` from its extension registration and returns its `id` from
+`TextModelRunner::ToolDialectId()`; no core enum entry or host branch is
+needed. That one identity selects both the constrained grammar and the
+buffered and streamed parsers of the Chat Completions, Responses and Messages
+endpoints, and only its markers start calls. The registration supplies:
+
+- `syntax`, a `JsonConstraint::ToolSyntax`: the call literals (`open`,
+  `name_prefix`, `name_suffix`, `close`) and either `tagged` key/value
+  parameters (the form of the built-in Qwen and DeepSeek grammars, which
+  `JsonConstraint::Syntax()` returns for copying) or JSON-shaped arguments
+  spelled by `values` (string delimiters, bare keys, whitespace, member order).
+  Core compiles each tool's JSON schema into it for `required` and `auto` tool
+  choice, strict and best-effort tools.
+- `markers`, `reasoning_markers` and `closers` for the host's text handling,
+  and `scan_tool_calls`, which reads calls back, including the unfinished call
+  of a streamed partial parse. Values that are not JSON are converted to JSON
+  text, which the host checks against the declared schema.
+
+The constrained reasoning phase before an answer or call uses the runner's
+`ReasoningDelimiters()`, as the response parsers do: it ends at `close` or at a
+complete call header, and for `InitialOutputState::kAuto` the model may open it
+with the complete `open` literal.
+
+The contract, ownership and error rules are documented on `ToolDialect` in
+[`text.hpp`](../include/gufo/ext/text.hpp). Existing runners need no change:
+the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,
+`deepseek`) of `ToolFormat()`.
+
 Provider options use canonical names and manifest types. CMake checks conflicting
 declarations. The Nix serving helper derives provider arguments and validation
 from metadata, including optional `serving` declarations. New runtime controls
