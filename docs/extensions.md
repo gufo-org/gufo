@@ -45,8 +45,23 @@ Extension code still has arbitrary native-code privileges during build and run.
 
 Every text runner provides continuation through the component cache. It
 implements `cache::Adapter` and links `gufo_ext_cache`, the public target for the
-component cache and its HIP backing. That target exists only in HIP builds, so
-list it under a target that requires `hip`.
+component cache and, in HIP builds, its HIP backing.
+
+### Link targets
+
+`gufo_ext_runtime` declares the whole public surface but implements only its
+neutral contracts. The `gufo` executable supplies everything else at its final
+link, so a registration library needs nothing more. A test, probe or tool that
+is its own executable must link the implementation of each service it uses:
+
+| Target | Provides | Builds |
+| --- | --- | --- |
+| `gufo_ext_core` | GGUF reading and identity, sampling, JSON constraints, dequantization, SHA-256, image decoding, the hipBLASLt plan database, and `WeightUpload` in HIP builds. Also carries OpenSSL, which `sha256.hpp` exposes | all |
+| `gufo_ext_cache` | Component cache; in HIP builds also `transfer_pool`, `host_allocations` and `component_cache_resources` | all |
+| `gufo_ext_hip` | `ENGINE_ENABLE_HIP`, which the public HIP headers need, `hip::host` and the hipCUB and rocPRIM include paths | HIP only; list it under a target that requires `hip` |
+
+These targets add no Gufo include path, so the source API stays the audited
+surface. Linking `gufo_core` or `gufo_cache` directly is still rejected.
 
 ## Provide continuation
 

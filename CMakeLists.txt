@@ -250,10 +250,6 @@ if (ENGINE_ENABLE_HIP)
   if (BUILD_TESTING)
     target_compile_options(gufo_cache_hip PRIVATE -UNDEBUG)
   endif()
-  # The link contract for extension adapters. It carries no include path: the
-  # headers come from the audited public surface of gufo_ext_runtime.
-  add_library(gufo_ext_cache INTERFACE)
-  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache_hip>)
   if (GUFO_BUILD_TOOLS)
     add_executable(cache_idle_spill_bench tests/cache/idle_spill_bench.cpp)
     target_link_libraries(cache_idle_spill_bench PRIVATE gufo_cache_hip)
@@ -344,6 +340,25 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR})
   target_link_libraries(gufo_core PUBLIC gufo_hip_host hip::host roc::hipblas
     roc::hipblaslt roc::rocblas)
+endif()
+
+# The link contracts for extensions. They add no Gufo include path: the headers
+# come from the audited public surface of gufo_ext_runtime.
+add_library(gufo_ext_core INTERFACE)
+target_link_libraries(gufo_ext_core INTERFACE $<LINK_ONLY:gufo_core>
+  OpenSSL::Crypto)
+add_library(gufo_ext_cache INTERFACE)
+if (ENGINE_ENABLE_HIP)
+  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache_hip>)
+  add_library(gufo_ext_hip INTERFACE)
+  target_compile_definitions(gufo_ext_hip INTERFACE ENGINE_ENABLE_HIP=1)
+  target_include_directories(gufo_ext_hip SYSTEM INTERFACE
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR})
+  target_link_libraries(gufo_ext_hip INTERFACE $<LINK_ONLY:gufo_hip_host>
+    hip::host)
+else()
+  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
 endif()
 
 # Card 08 (RFC step 5): the model, comparison and eval tiers that used to be
