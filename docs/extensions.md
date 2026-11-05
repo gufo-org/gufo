@@ -97,8 +97,8 @@ in `TextRunnerDescriptor::scheduling` and split its passes by layers instead:
 - `pass_tokens` is the width the host uses for a prompt beside decoders,
   normally the model's own prefill pass. A lone prompt is not bounded.
 - Before such a pass, the host calls `SetPrefillYield(groups, yield)` on the
-  prompt's state, with `groups` chosen from the measured pass time and capped
-  at `max_layer_groups`. Split the pass into about that many groups of similar
+  prompt's state, with `groups` chosen from the measured time of that pass's
+  tokens and capped at `max_layer_groups`; a short remainder runs unsplit. Split the pass into about that many groups of similar
   duration, not layer count, and add a boundary right after any point where the
   pass waits, such as an input read: decoders wait for the longest group.
   Between groups, the runner calls `state.YieldPrefill()`, which decodes up to

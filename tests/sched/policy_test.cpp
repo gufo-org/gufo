@@ -176,6 +176,36 @@ void ProfiledPassesSplitByLayers() {
   tiny.Observe(4096, 100);
   assert(Prefill(policy.Next(queues, tiny)).layer_groups == 1);
 
+  // A shorter remainder is a shorter pass, with fewer groups: 1,000 tokens
+  // at 2.1 s per 4,096 take about 513 ms, three groups.
+  const std::vector<PrefillingRequest> tail{{.remaining_tokens = 1000}};
+  const WorkQueues tail_queues{.prefilling = tail, .decoding = decoding};
+  work = Prefill(policy.Next(tail_queues, rate));
+  assert(work.max_tokens == 4096u && work.layer_groups == 3);
+  // A cached continuation's few tokens run unsplit.
+  const std::vector<PrefillingRequest> continuation{{.remaining_tokens = 300}};
+  assert(Prefill(policy.Next({.prefilling = continuation, .decoding = decoding},
+                             rate))
+             .layer_groups == 1);
+  // Up to the legacy 512-token budget, even a slow pass runs unsplit, as it
+  // would without a profile: 512 tokens at 2 ms each would be five groups.
+  PrefillRate slow;
+  slow.Observe(4096, 8192);
+  const std::vector<PrefillingRequest> budget{{.remaining_tokens = 512}};
+  assert(
+      Prefill(policy.Next({.prefilling = budget, .decoding = decoding}, slow))
+          .layer_groups == 1);
+  const std::vector<PrefillingRequest> past_budget{{.remaining_tokens = 513}};
+  assert(Prefill(policy.Next({.prefilling = past_budget, .decoding = decoding},
+                             slow))
+             .layer_groups == 5);
+  // Uncalibrated, the most groups scale with the remainder: ceil(8 * 1000 /
+  // 4096) = 2, and a continuation still runs unsplit.
+  assert(Prefill(policy.Next(tail_queues)).layer_groups == 2);
+  assert(
+      Prefill(policy.Next({.prefilling = continuation, .decoding = decoding}))
+          .layer_groups == 1);
+
   // Alone, or beside a waiting short peer, the profile does not apply.
   work = Prefill(policy.Next({.prefilling = prefilling}, fast));
   assert(!work.max_tokens && work.layer_groups == 1);
