@@ -45,6 +45,7 @@ include/gufo/ext/prompt_lookup.hpp
 include/gufo/ext/reasoning.hpp
 include/gufo/ext/registry.hpp
 include/gufo/ext/sampling.hpp
+include/gufo/ext/scheduling.hpp
 include/gufo/ext/session_mode.hpp
 include/gufo/ext/sha256.hpp
 include/gufo/ext/snapshot_copy.hpp
@@ -121,3 +122,4 @@ src/ext/text.hpp
 src/ext/text_contracts.hpp
 src/ext/tts.hpp
 src/ext/video.hpp
+src/sched/profile.hpp
