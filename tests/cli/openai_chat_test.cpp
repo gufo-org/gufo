@@ -3188,7 +3188,9 @@ void TestStructuredResponseFormat() {
   for (
       const char* format :
       {R"({"type":"json_object"})",
-       R"({"type":"json_schema","json_schema":{"name":"Reply","strict":true,"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}})"}) {
+       R"({"type":"json_schema","json_schema":{"name":"Reply","strict":true,"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}})",
+       // The Vercel AI SDK always declares the dialect (#1057).
+       R"({"type":"json_schema","json_schema":{"name":"Reply","strict":true,"schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"ok":{"type":"boolean","default":false}},"required":["ok"],"additionalProperties":false}}})"}) {
     body["response_format"] = gufo::json::parse(format);
     const auto response =
         gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
