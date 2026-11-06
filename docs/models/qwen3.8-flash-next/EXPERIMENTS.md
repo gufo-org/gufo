@@ -1,32 +1,5 @@
 # Qwen3.8 Flash-Next experiments
 
-## Decode shared-expert overlap (November 5–6, 2026)
-
-Retained in `09433cf5`: run the Q8_0 shared expert beside routed experts on
-narrow decode. The review follow-up limits the extension to 1–8 total token
-rows, preserving the original wide/prefill eligibility and serial 9–32-row
-route. `MoeBatch` still runs serial shared experts above eight total rows;
-user concurrency alone does not identify this path. Capture and stream scopes
-now unwind on exceptions. Forking before routing remains an unmeasured
-follow-up, not another retained optimization.
-
-Historical CLI controls report AR tg128 about +1.2% at d0/d4096, with a
-single d32768 pair at +1.3%; MTP d0 overlaps noise and d4096 reports +1.4%.
-The [retained observations](artifacts/decode-shared-expert-overlap-20261105.json)
-preserve every available run, including the prefill dip. They were recovered
-from the notes in `09433cf5`, subsequently deleted by `663d281a`, and a local
-MR summary; exact build hashes and raw logs were not supplied.
-
-Rerun on November 6 with matched Nix `.#release` builds, three alternating
-runs per cell: the pre-overlap tree is 29.63/28.95 AR tg128 at d0/d4096
-against upstream's 30.03/29.27 (+1.35%/+1.12%), so the AR gain reproduces.
-MTP is 62.41 → 62.26 at d0 (noise) and 50.86 → 51.05 at d4096 (+0.4%, below
-the earlier report). The review candidate is 30.00/29.35 AR and 62.54/51.06
-MTP, within noise of upstream; greedy output is byte-identical. These remain
-CLI controls, not HTTP or per-request qualification. See
-[the tables](BENCHMARKS.md#decode-overlap-verification-november-6-2026) and
-[quality limits](QUALITY.md#decode-overlap-review-november-6-2026).
-
 ## Raw completion fallback (November 4, 2026)
 
 Retained: capture the aligned prompt tail in-pass before retaining the exact
