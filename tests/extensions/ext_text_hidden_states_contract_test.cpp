@@ -66,8 +66,17 @@ public:
       std::span<const TextRunnerToken>) const override {
     return {};
   }
-  [[nodiscard]] std::unique_ptr<gufo::ext::TextRunnerState> CreateState()
-      const override {
+  [[nodiscard]] std::unique_ptr<gufo::ext::ComponentCacheResources>
+  CreateComponentCacheResources(gufo::cache::ResourceLedger&,
+                                std::size_t) const override {
+    throw std::logic_error("not used");
+  }
+  [[nodiscard]] std::unique_ptr<gufo::ext::TextRunnerState> BindComponentState(
+      gufo::cache::Adapter&, gufo::cache::Slot&) const override {
+    throw std::logic_error("not used");
+  }
+  void ReconcileComponentState(gufo::ext::TextRunnerState&,
+                               std::size_t) const override {
     throw std::logic_error("not used");
   }
   [[nodiscard]] gufo::ext::TextPrefillStep Prefill(
