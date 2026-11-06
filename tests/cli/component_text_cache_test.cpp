@@ -210,6 +210,40 @@ void BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim() {
     assert(request.SelectNext().token != 0);
   }
 }
+// Slots that leave the host at its reserve start with the RAM cache off
+// instead of failing startup with bad_alloc (#1058).
+void HostReserveAfterSlotsTurnsRamCacheOff() {
+  class ReserveRunner final : public Runner {
+  public:
+    std::size_t ceiling{};
+    mutable bool committed{};
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      claim.retained_snapshot_capacity_bytes = adapter ? ceiling / 2 : 2 << 20;
+      claim.retained_snapshot_ceiling_bytes = adapter ? ceiling : 4 << 20;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->commit_backing = [this](std::size_t) { committed = true; };
+      return resources;
+    }
+  };
+  // No host RAM left, and less than the 40 KiB the fake backing holds.
+  for (const std::size_t ceiling : {std::size_t{0}, std::size_t{16} << 10})
+    for (const auto requested : {0ULL, 3ULL << 20}) {
+      auto runner = std::make_shared<ReserveRunner>();
+      runner->ceiling = ceiling;
+      TextRunnerPool pool(runner, 2, {}, {.capacity_bytes = requested});
+      assert(!runner->committed);
+      std::vector<TextRunnerToken> prompt{10, 11, 12, 13};
+      auto request = pool.Acquire(prompt);
+      while (!request.prefill_complete())
+        (void)request.Prefill(8);
+      assert(request.SelectNext().token != 0);
+    }
+}
 void Prefill(TextRunnerPool::Request& request) {
   while (!request.prefill_complete())
     (void)request.Prefill(8);
@@ -2849,6 +2883,7 @@ int main() {
   PartialFrontierDoesNotServeAnEqualPrompt();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
+  HostReserveAfterSlotsTurnsRamCacheOff();
   InPassCapturePreservesBoundaryAndLiveTail();
   AlignedPrefillKeepsAlignedBoundaries();
   UnalignedPromptEndPublishesBeforeDroppingTheFrontier();

@@ -280,6 +280,51 @@ struct ComponentTextCache::Impl {
       entries.push_back(std::move(entry));
     }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
+    if (ram_enabled && resources->commit_backing) {
+      const auto claim = this->runner->ResourceClaim();
+      // The claim measures the host after the slots allocated, so bytes they
+      // pinned are missing from it. Add them back: in full to the ceiling,
+      // and half to the automatic budget, which is half the available RAM.
+      // The ledger charges them on top of the cache's own budget.
+      const auto pinned =
+          resources->pinned_bytes ? resources->pinned_bytes() : 0;
+      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
+      const auto automatic = measured + pinned / 2;
+      const auto ceiling =
+          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
+      automatic_bytes =
+          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
+      // Staging is pinned host memory too, so the host keeps its reserve
+      // only if both fit under the ceiling.
+      const auto staging = ledger.Limits().staging_bytes;
+      const auto requested = ram;
+      max_bytes = ceiling > staging ? ceiling - staging : 0;
+      ram = std::min(ram, max_bytes);
+      if (automatic_ram)
+        ram = std::min(ram, automatic);
+      // Within the host ceiling and the limit the slots allocated under. Other
+      // charges above the budget are refused here, as without pins.
+      const auto limit =
+          std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
+      ram = std::min(ram, limit > pinned ? limit - pinned : 0);
+      // Sessions that fit can leave the host at its reserve, with no RAM for
+      // the cache beside the charges already admitted. Serve as with the RAM
+      // cache off rather than refuse them (#1058). A requested budget below
+      // those charges still fails.
+      if (ram < requested && (!ram || limit < ledger.Snapshot().ram_bytes)) {
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=ram_cache_unavailable "
+                     "reason=host_reserve requested_bytes=" +
+                         std::to_string(requested) + " max_bytes=" +
+                         std::to_string(max_bytes) + " host_reserve_bytes=" +
+                         std::to_string(kHostSnapshotHeadroomBytes));
+        ram_enabled = false;
+      } else {
+        ledger.ConstrainLimits({limit + staging, limit, staging, limit});
+        resources->commit_backing(ram);
+        slot_pinned_bytes = pinned;
+      }
+    }
     if (!ram_enabled) {
       // Only disk captures copy through backing, so without a disk cache no
       // pool exists. The ledger admits what the slots already charged, that
@@ -306,36 +351,7 @@ struct ComponentTextCache::Impl {
           };
         }
       }
-    } else if (resources->commit_backing) {
-      const auto claim = this->runner->ResourceClaim();
-      // The claim measures the host after the slots allocated, so bytes they
-      // pinned are missing from it. Add them back: in full to the ceiling,
-      // and half to the automatic budget, which is half the available RAM.
-      // The ledger charges them on top of the cache's own budget.
-      const auto pinned =
-          resources->pinned_bytes ? resources->pinned_bytes() : 0;
-      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
-      const auto automatic = measured + pinned / 2;
-      const auto ceiling =
-          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
-      automatic_bytes =
-          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
-      // Staging is pinned host memory too, so the host keeps its reserve
-      // only if both fit under the ceiling.
-      const auto staging = ledger.Limits().staging_bytes;
-      max_bytes = ceiling > staging ? ceiling - staging : 0;
-      ram = std::min(ram, max_bytes);
-      if (automatic_ram)
-        ram = std::min(ram, automatic);
-      // Within the host ceiling and the limit the slots allocated under. Other
-      // charges above the budget are refused here, as without pins.
-      const auto limit =
-          std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
-      ledger.ConstrainLimits({limit + staging, limit, staging, limit});
-      ram = std::min(ram, limit > pinned ? limit - pinned : 0);
-      resources->commit_backing(ram);
-      slot_pinned_bytes = pinned;
-    } else {
+    } else if (!resources->commit_backing) {
       // Slots allocated under the host ceiling; return to the budget. This
       // ignores pinned_bytes: a runner that pins must commit backing.
       const auto staging = ledger.Limits().staging_bytes;
