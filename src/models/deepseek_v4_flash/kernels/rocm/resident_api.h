@@ -35,6 +35,17 @@ int ds4_gpu_attention_prefill_static_mixed_heads_tensor(ds4_gpu_tensor *heads, c
 int ds4_gpu_begin_commands(void);
 int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, const char *label);
 int ds4_gpu_release_model_staging(void);
+/* A Q8_0 weight that the hipBLAS prefill routes read as an F16 copy.
+ * `transposed` selects the out_dim-major layout of attention output B. */
+struct ds4_gpu_q8_f16_weight {
+  uint64_t offset;
+  uint64_t in_dim;
+  uint64_t out_dim;
+  uint32_t transposed;
+};
+/* Registers a model's F16 weight copies. The next lookup builds every
+ * registered copy in one pass, so they exist for all layers or for none. */
+int ds4_gpu_register_q8_f16_weights(const void *model_map, uint64_t model_size, const struct ds4_gpu_q8_f16_weight *weights, uint32_t count);
 int ds4_gpu_reserve_support_map(const void *support_map, uint64_t support_size, uint64_t arena_bytes);
 int ds4_gpu_cache_support_range(const void *support_map, uint64_t support_size, uint64_t offset, uint64_t bytes, const char *label);
 void ds4_gpu_release_support_map(void);
