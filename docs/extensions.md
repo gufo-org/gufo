@@ -261,9 +261,30 @@ the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,
 Provider options use canonical names and manifest types. Extensions may declare
 the same option when the type agrees, as providers sharing `--mtp-model` do; CMake
 rejects conflicting types. The Nix serving helper derives provider arguments and validation
-from metadata, including optional `serving` declarations. New runtime controls
-also need actual command parsing/execution support; metadata alone cannot
-implement them. See [Nix serving](model-extensions/serving.md).
+from metadata, including optional `serving` declarations. See
+[Nix serving](model-extensions/serving.md).
+
+Text providers receive their options. `serve`, `prompt`, `chat` and `bench`
+accept every option an available provider declares for that command, list the
+ones core does not own under "Provider options" in `--help`, and parse values
+with the manifest types. Once the model's provider is selected, the explicit
+values of its declared options reach `TextRunnerOptions`, `TextPromptOptions`
+or `TextBenchOptions` as `provider_options`; read them with
+`ext::FindOption<T>`:
+
+```cpp
+std::uint32_t image_tokens = kDefaultImageTokens;
+if (const auto* value = ext::FindOption<std::int64_t>(
+        options.provider_options, "--image-tokens")) {
+  image_tokens = ValidateImageTokens(*value);  // provider-owned validation
+}
+```
+
+An option that was not given is absent, so defaults stay with the provider; an
+explicit `false` or `0` is present. An option the selected provider does not
+declare for the command fails before any weights load, as do type errors and a
+repeated option. Spellings core parses itself, such as `--mtp-model`, keep
+their core handling and fields and are not part of `provider_options`.
 
 ## Build and exercise the extension
 

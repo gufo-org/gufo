@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "gufo/ext/registry.hpp"
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
@@ -206,11 +208,18 @@ void PrintBenchHelp(std::string_view program_name) {
       "Benchmark prompt processing (pp) and token generation (tg) throughput.");
   RegisterBenchOptions(parser, dummy_opt, explicit_p, explicit_n,
                        speculative_explicit);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, "bench");
+  provider.Register(parser);
   parser.PrintHelp();
 }
 
+namespace {
+
 std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
-                                              std::string* error_msg) {
+                                              std::string* error_msg,
+                                              ProviderOptions& provider) {
   BenchOptions opt;
   bool explicit_p = false;
   bool explicit_n = false;
@@ -220,6 +229,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       "Benchmark prompt processing (pp) and token generation (tg) throughput.");
   RegisterBenchOptions(parser, opt, explicit_p, explicit_n,
                        speculative_explicit);
+  provider.Register(parser);
 
   if (!parser.Parse(args, error_msg)) {
     return std::nullopt;
@@ -251,6 +261,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   }
 
   try {
+    provider.Parse();
     opt.sampling.Validate();
     if (opt.sampling.seed < 0) {
       throw std::invalid_argument("benchmark seed must be non-negative");
@@ -283,9 +294,22 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   return opt;
 }
 
+}  // namespace
+
+std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
+                                              std::string* error_msg) {
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, "bench");
+  return ParseBenchOptions(args, error_msg, provider);
+}
+
 int RunBench(std::span<const char* const> args) {
   std::string parse_err;
-  const auto opt_res = ParseBenchOptions(args, &parse_err);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "bench");
+  auto opt_res = ParseBenchOptions(args, &parse_err, provider_options);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -296,7 +320,7 @@ int RunBench(std::span<const char* const> args) {
     return 0;
   }
 
-  const auto& opt = *opt_res;
+  auto& opt = *opt_res;
   if (opt.model_path.empty()) {
     std::cerr << "Error: --model <PATH> is required\n";
     return 2;
@@ -314,13 +338,18 @@ int RunBench(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
   if (provider == nullptr || provider->bench_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for benchmark\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
+  }
+  try {
+    opt.provider_options = provider_options.Select(provider->id);
+  } catch (const std::invalid_argument& exception) {
+    std::cerr << "Error: " << exception.what() << "\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 2;
   }
   return provider->bench_driver(opt, reader, model_load_start);
 }
