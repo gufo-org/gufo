@@ -458,6 +458,10 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject) {
            "instantiate");
   for (int replay = 0; replay < 3; ++replay) {
     reset(&out, static_cast<unsigned char>(0x3C + replay));
+    // The poison memsets run on the legacy NULL stream, which does not
+    // order with launches on this non-blocking stream; drain them before
+    // replaying, the idiom the eager paths above already use.
+    CheckHip(hipDeviceSynchronize(), "poison drain");
     CheckHip(hipGraphLaunch(exec, stream), "replay");
     CheckHip(hipStreamSynchronize(stream), "replay sync");
     compare("graph replay");
