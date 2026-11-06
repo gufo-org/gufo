@@ -1,5 +1,47 @@
 # Qwen3.8 Flash-Next quality
 
+## Decode overlap review, November 6, 2026
+
+`09433cf5` extended the shared-expert side stream to decode. Its surviving
+notes report one byte-identical 96-token greedy completion and no capture
+membership assertion failures. They do not contain full-logit replay evidence,
+HTTP/concurrent qualification, raw logs or binary hashes. The
+[recovered observations](artifacts/decode-shared-expert-overlap-20261105.json)
+are historical, not a quality pass for the review follow-up.
+
+The follow-up preserves serial dispatch for non-prefill 9–32-row calls and
+adds scope cleanup for exceptions during shared-expert launches and graph
+capture. The new `qwen38_flash_next.decode_graph` regression reuses the
+synthetic model fixture: production projection geometry and formats, four
+trunk layers including PLE, a reduced vocabulary and a 64-token sparse budget.
+It is designed to compare finite, byte-identical full logits for widths 1–8,
+with changing histories, on eager execution and two graph replays per shape,
+in dense and sparse attention. Poisoned shared-output scratch prevents stale
+eager results from masking missing graph nodes. It also checks the overlap
+boundary at 8/9/32 rows, capture exception cleanup and cancellation followed
+by executor reuse. This is execution-path parity, not an independent
+language-quality oracle or a full production-model qualification.
+
+Pending commands, when the GPU is available:
+
+```sh
+cmake --build --preset gpu-test --target qwen38_flash_next_wide_verification_test
+ctest --preset gpu-full -R '^qwen38_flash_next\.decode_graph$' --output-on-failure
+```
+
+**Benchmarks run, tests not run.** The candidate and upstream `663d281a` were
+built as matched Nix `.#release` artifacts and alternated three times per
+cell: AR tg128 30.00/29.35 against 30.00/29.34, MTP 62.54/51.06 against
+62.34/51.28 tok/s at d0/d4096, all within run-to-run spread. A greedy
+48-token prompt is byte-identical in AR and MTP. The pre-overlap tree
+reproduces the AR gain (+1.35%/+1.12%) but only +0.4% at MTP d4096. These are
+CLI controls; see [the tables](BENCHMARKS.md#decode-overlap-verification-november-6-2026).
+
+The new GPU regression was not built or run: reproducing the `gpu-test`
+preset needs dev-shell packages the pinned build image lacks. Added test wall
+time is unmeasured. HTTP C1, affected concurrent cohorts and per-request
+timing remain pending. No quality pass and no HTTP timing pass is claimed.
+
 ## Raw-completion follow-up, November 4, 2026
 
 GitHub exposed a case missing from the first qualification: a raw completion

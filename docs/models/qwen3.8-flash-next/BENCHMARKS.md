@@ -6,6 +6,53 @@ Gufo `fec4759d` (October 18, 2026); llama.cpp `b11069` AR and `6fcaa16f` MTP
 (September 22–23). Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
 
+## Decode-overlap verification, November 6, 2026
+
+Review fixes for `09433cf5` measured against upstream `663d281a` and against
+the pre-overlap tree `6cc8a42c`. Both new arms are `nix build path:<tree>#release`
+from the same pinned flake (ROCm 10.1, lock-mode extensions), built and run in
+one container on the same Strix Halo. Command: `gufo bench -p 2048 -n 128
+-d 0,4096 -r 2`, three alternating runs per cell, GPU 43–58 °C. Candidate is
+upstream plus the bounded-gate/cleanup patch (`b8cf516c`). Values are the
+reported tok/s means of three runs; pp varies about ±2% between runs.
+
+| Mode | Depth | Upstream tg | Candidate tg | Delta | Upstream pp | Candidate pp |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 30.00 | 30.00 | 0.0% | 1,908 | 1,936 |
+| AR | 4,096 | 29.34 | 29.35 | +0.03% | 1,927 | 1,935 |
+| MTP | 0 | 62.34 | 62.54 | +0.3% | 1,879 | 1,841 |
+| MTP | 4,096 | 51.28 | 51.06 | −0.4% | 1,865 | 1,864 |
+
+The candidate changes only the 9–32-row dispatch and exception cleanup, so
+single-session decode is expected to match. The MTP d4096 upstream mean
+includes one 51.62 run; across all six upstream runs it is 51.17, against
+51.06 for the candidate (−0.2%), inside the run-to-run spread. A greedy
+48-token prompt (`gufo prompt -t 0 --think off`) is byte-identical between the
+two arms in AR and MTP.
+
+Pre-overlap control, same method, to check the retained claim:
+
+| Mode | Depth | Pre-overlap tg | Upstream tg | Delta |
+| --- | ---: | ---: | ---: | ---: |
+| AR | 0 | 29.63 | 30.03 | **+1.35%** |
+| AR | 4,096 | 28.95 | 29.27 | **+1.12%** |
+| MTP | 0 | 62.41 | 62.26 | −0.2% |
+| MTP | 4,096 | 50.86 | 51.05 | +0.4% |
+
+The AR gain reproduces the retained +1.2–1.3%; MTP d0 stays within noise and
+MTP d4096 is smaller than the earlier +1.44% report. The pre-overlap arm is
+the older CMake `release` build (all discovered extensions, `development`
+version string), so its build differs from the two lock-mode Nix arms beyond
+the overlap commit; treat that pair as advisory.
+
+Provenance: upstream `.gufo-wrapped` `56a9da3b…`, candidate `8ae137ee…`,
+pre-overlap `6ff61219…`. These are CLI controls, not HTTP or per-request
+timing qualification. The `qwen38_flash_next.decode_graph` GPU regression is
+still unbuilt and unrun.
+
+[Historical observations and provenance gaps](artifacts/decode-shared-expert-overlap-20261105.json).
+Historical reference comparisons below are unchanged.
+
 ## PR #877 controls, November 4, 2026
 
 Pinned main `1c75887b` versus runtime candidate `e6b2a4c1`, Nix production
