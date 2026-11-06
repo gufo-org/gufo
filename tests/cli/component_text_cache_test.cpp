@@ -2661,6 +2661,22 @@ void HostBelowReserveServesWithRamCacheOff() {
     }
   };
   const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  for (const bool enabled : {true, false}) {
+    // Through the pool, as serving builds it. A host with nothing above its
+    // reserve reports a ceiling of 0, also before the slots allocate; the
+    // cache's own metadata must still fit, with the RAM cache on or off.
+    const TemporaryDirectory pool_temp("gufo-component-host-zero-test");
+    auto runner = std::make_shared<ShortHostRunner>();
+    TextRunnerPool pool(
+        runner, 1,
+        TextRunnerDiskCacheOptions{.directory = pool_temp.path().string(),
+                                   .capacity_bytes = 1 << 20,
+                                   .min_checkpoint_step_tokens = 1},
+        {.capacity_bytes = 1ULL << 30, .enabled = enabled});
+    auto request = pool.Acquire(prompt);
+    Prefill(request);
+    assert(Generate(request) != 0);
+  }
   std::uint64_t hash;
   {
     auto runner = std::make_shared<ShortHostRunner>();

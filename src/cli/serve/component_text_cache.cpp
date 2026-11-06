@@ -202,9 +202,6 @@ struct ComponentTextCache::Impl {
   // equals the small explicit budget used before off existed, and it retains
   // nothing.
   static constexpr std::size_t kDiskOnlyBackingBytes = std::size_t{512} << 20;
-  // Ledger room for index and request metadata when the RAM cache is off. It
-  // caps accounting only; the memory is not reserved.
-  static constexpr std::size_t kOffMetadataBytes = std::size_t{64} << 20;
   // Queue ownership plus transient submissions before superseded callbacks
   // release their serving handles. No callback runs under the serving mutex.
   std::array<std::shared_ptr<const cache::Checkpoint>, 2 * kPersistenceDepth>
