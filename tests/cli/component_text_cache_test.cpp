@@ -2620,6 +2620,76 @@ void RamCacheOffWithDiskCommitsOnlyStagingBacking() {
   auto& state = dynamic_cast<State&>(lease->state());
   assert(runner->adapter->RecurrentHash(state.slot) == hash);
 }
+// A host that keeps less than its reserve after loading measures a ceiling
+// below what the slots already pinned. The load does not fail with
+// ResourceExhausted ("bad allocation"); it serves as with the RAM cache off,
+// and the disk cache still persists and restores.
+void HostBelowReserveServesWithRamCacheOff() {
+  constexpr std::size_t kPin = 512 << 10;
+  const TemporaryDirectory temp("gufo-component-host-short-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .min_checkpoint_step_tokens = 1};
+  class ShortHostRunner final : public Runner {
+  public:
+    mutable std::size_t committed{};
+    mutable std::vector<cache::ResourceCharge> pins;
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      // After the slots pinned their buffers, the host has nothing left
+      // above its reserve.
+      claim.retained_snapshot_capacity_bytes = 0;
+      claim.retained_snapshot_ceiling_bytes = 0;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->stream = [this, &ledger,
+                           stream = std::move(resources->stream)] {
+        if (!committed)
+          pins.push_back(
+              ledger.Reserve(cache::ResourceCategory::kMetadata, kPin)
+                  .Convert());
+        return stream();
+      };
+      resources->pinned_bytes = [this] { return pins.size() * kPin; };
+      resources->commit_backing = [this](std::size_t bytes) {
+        committed = bytes;
+      };
+      return resources;
+    }
+  };
+  const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  std::uint64_t hash;
+  {
+    auto runner = std::make_shared<ShortHostRunner>();
+    // An explicit RAM budget, as in --cache-ram-bytes 1073741824.
+    ComponentTextCache cache(runner, 1, 1 << 24, disk, false, 0, true);
+    assert(!runner->pins.empty());
+    // Only the disk-only backing of the off mode, no RAM cache budget.
+    assert(runner->committed != 0 && runner->committed <= 512ULL << 20);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    auto snapshot = lease->Capture();
+    assert(snapshot);
+    assert(lease->PublishSnapshot(prompt, std::move(snapshot), false) == 0);
+    assert(lease->Metrics().disk_queued_bytes > 0);
+    (void)lease->Commit(prompt, {}, prompt);
+  }
+  auto runner = std::make_shared<ShortHostRunner>();
+  ComponentTextCache cache(runner, 1, 1 << 24, disk, false, 0, true);
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(lease->restored_from_disk() &&
+         lease->cached_tokens() == prompt.size());
+  auto& state = dynamic_cast<State&>(lease->state());
+  assert(runner->adapter->RecurrentHash(state.slot) == hash);
+}
 // With the RAM cache off, a capture within the disk step of a published
 // checkpoint has nowhere to go. The cache refuses it at reservation, so no
 // caller logs a failed capture. With the RAM cache on it goes to RAM.
@@ -2896,5 +2966,6 @@ int main() {
   OverRamCaptureStagesPrivateStateUnderPressure(true);
   RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers();
   RamCacheOffWithDiskCommitsOnlyStagingBacking();
+  HostBelowReserveServesWithRamCacheOff();
   RamCacheOffRefusesCapturesWithinTheDiskStep();
 }
