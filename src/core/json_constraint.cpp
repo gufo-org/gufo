@@ -2167,6 +2167,9 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
       return found->second;
   }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
+  grammar->reasoning_rules_ = static_cast<std::uint32_t>(answer->rules_.size());
+  grammar->reasoning_lexemes_ =
+      static_cast<std::uint32_t>(answer->lexemes_.size());
   if (!answer->reasoning_tool_prefix_.empty()) {
     using End = JsonSchemaLexeme::ReasoningEnd;
     const auto lexeme = [&](End end) {
@@ -2585,6 +2588,18 @@ JsonConstraint::State JsonConstraint::Advance(const State& state,
 bool JsonConstraint::Complete(const State& state) const {
   return std::ranges::any_of(
       state, [](const auto& stack) { return stack.symbols.empty(); });
+}
+
+bool JsonConstraint::InReasoning(const State& state) const {
+  // Until the close or a call header completes, some stack still holds a
+  // reasoning rule or lexeme, even where another reads the close's last byte.
+  return std::ranges::any_of(state, [&](const auto& stack) {
+    return std::ranges::any_of(stack.symbols, [&](std::uint32_t symbol) {
+      if (symbol & kLexeme)
+        return (symbol & ~kLexeme) >= reasoning_lexemes_;
+      return !(symbol & (kTerminal | kArguments)) && symbol >= reasoning_rules_;
+    });
+  });
 }
 
 JsonConstraint::State JsonConstraint::CanonicalMaskState(

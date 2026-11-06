@@ -753,18 +753,22 @@ void SamplerState::AdvanceReasoning(TokenId token) {
 }
 
 void SamplerState::Accept(std::span<const TokenId> tokens) {
-  if (reasoning_phase_ != ReasoningPhase::kOff)
-    for (const auto token : tokens)
-      AdvanceReasoning(token);
-  if (config_.constraint) {
-    auto next = constraint_state_;
-    for (const auto token : tokens)
+  auto next = constraint_state_;
+  for (const auto token : tokens) {
+    if (config_.constraint)
       next = config_.constraint->vocabulary->Accept(
           *config_.constraint->grammar, next, token);
-    if (next != constraint_state_) {
-      constraint_state_ = std::move(next);
-      constraint_mask_.reset();
-    }
+    if (reasoning_phase_ == ReasoningPhase::kOff)
+      continue;
+    AdvanceReasoning(token);
+    // A grammar also ends reasoning on a close spelled as text or a call
+    // header; the budget must not force its end into the answer after that.
+    if (config_.constraint && !config_.constraint->grammar->InReasoning(next))
+      reasoning_phase_ = ReasoningPhase::kOff;
+  }
+  if (next != constraint_state_) {
+    constraint_state_ = std::move(next);
+    constraint_mask_.reset();
   }
   if (config_.frequency_penalty != 0 || config_.presence_penalty != 0) {
     for (const auto token : tokens) {
