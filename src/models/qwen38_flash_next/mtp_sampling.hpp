@@ -4,10 +4,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <gufo/ext/sampling.hpp>
 #include <span>
 #include <stdexcept>
-
-#include "src/core/sampling.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 

@@ -164,14 +164,6 @@ bool LooksLikeAudio(std::string_view base64) {
          starts(0, "OggS");
 }
 
-bool IsKnownField(std::string_view name, bool native) {
-  return name == "input" || name == "model" || name == "encoding_format" ||
-         name == "dimensions" || name == "user" || name == "truncate" ||
-         name == "prompt_name" || name == "video_options" ||
-         name == "mm_processor_kwargs" ||
-         (native && (name == "content" || name == "embd_normalize"));
-}
-
 /// The member's value, or nullptr when it is absent or null.
 const json::Value* Optional(const json::Value& root, const std::string& name) {
   const json::Value* value = root.find(name);
@@ -191,32 +183,27 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
     return BadRequest("request body must be a JSON object",
                       "invalid_request_body");
   }
-  for (const auto& [name, unused] : root.members()) {
-    (void)unused;
-    if (!IsKnownField(name, native)) {
-      return BadRequest("unsupported embeddings parameter: " + name,
-                        "unsupported_field");
-    }
-  }
+  // As in llama.cpp, TEI, vLLM and Ollama, unknown members are ignored.
 
   if (const json::Value* model = Optional(root, "model"); model != nullptr) {
     if (!model->is_string()) {
       return BadRequest("'model' must be a string", "invalid_parameter_type");
     }
-    if (model->str() != service.model_id()) {
+    if (!service.serves_model(model->str())) {
       return Error(404, "requested embedding model is not loaded",
                    "model_not_found");
     }
   }
 
   const json::Value* input = Optional(root, "input");
-  // As in llama.cpp, `input` takes precedence over the legacy `content`.
-  if (input == nullptr && native)
-    input = Optional(root, "content");
+  // As in llama.cpp, `input` takes precedence over the legacy `content`, and
+  // `content` selects the native form on either route.
   if (input == nullptr) {
-    return BadRequest(
-        native ? "'input' or 'content' is required" : "'input' is required",
-        "missing_input");
+    input = Optional(root, "content");
+    native = native || input != nullptr;
+  }
+  if (input == nullptr) {
+    return BadRequest("'input' or 'content' is required", "missing_input");
   }
   std::vector<EmbeddingInput> inputs;
   std::size_t image_count = 0;
@@ -510,6 +497,17 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
               "video overflow_strategy must be uniform or truncate",
               "invalid_video_options");
         options.video.truncate_overflow = value.str() == "truncate";
+      } else if (key == "max_soft_tokens") {
+        const auto budget = value.as_size(0);
+        if (!value.is_number() ||
+            value.as_double() != static_cast<double>(budget) ||
+            !(budget == 70 || budget == 140 || budget == 280 || budget == 560 ||
+              budget == 1120))
+          return BadRequest(
+              "video max_soft_tokens must be one of 70, 140, 280, 560, or "
+              "1120",
+              "invalid_video_options");
+        options.video.max_soft_tokens = static_cast<std::uint32_t>(budget);
       } else
         return BadRequest("unsupported video option: " + key,
                           "invalid_video_options");
@@ -539,9 +537,9 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
                           "invalid_mm_processor_kwargs");
       }
       const auto budget = value.as_size(0);
-      if (budget > models::embedding_gemma2::kMaxImageSoftTokens ||
-          !models::embedding_gemma2::SupportedImageSoftTokens(
-              static_cast<std::uint32_t>(budget))) {
+      if (budget > kMaxImageSoftTokens ||
+          !(budget == 70 || budget == 140 || budget == 280 || budget == 560 ||
+            budget == 1120)) {
         return BadRequest(
             "'max_soft_tokens' must be one of 70, 140, 280, 560, or 1120",
             "invalid_mm_processor_kwargs");

@@ -14,8 +14,8 @@
 #include <optional>
 #include <utility>
 
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/models/minimax_h3/json.hpp"
-#include "src/models/qwen/control_tokens.hpp"
 
 namespace gufo::minimax_h3 {
 namespace {

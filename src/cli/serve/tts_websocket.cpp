@@ -3,9 +3,9 @@
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/text_stream.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
-#include "src/models/qwen3_tts/text_stream.hpp"
 
 namespace gufo::server {
 
@@ -52,7 +52,7 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
       start["sentence_index"] = static_cast<std::int64_t>(sentence);
       start["sentence_text"] = std::move(text);
       start["format"] = body.member_str("response_format");
-      start["sample_rate"] = 24000;
+      start["sample_rate"] = static_cast<std::int64_t>(service.sample_rate());
       if (!socket.SendText(start.dump()))
         return false;
       auto response = HandleAudioTtsApiRequest(speech, service);
@@ -138,13 +138,20 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
               next["voice_clone_mode"] =
                   value.as_bool() ? "speaker_embedding_only" : "icl";
             } else if (name == "task_type") {
-              const auto variant = service.variant();
-              const std::string expected =
-                  variant == models::qwen3_tts::ModelVariant::kBase ? "Base"
-                  : variant == models::qwen3_tts::ModelVariant::kVoiceDesign
-                      ? "VoiceDesign"
-                      : "CustomVoice";
-              if (!value.is_string() || value.str() != expected)
+              if (!value.is_string())
+                throw std::invalid_argument(
+                    "task_type does not match the loaded checkpoint");
+              const auto& cond = service.conditioning();
+              const bool ok =
+                  (value.str() == "Base" &&
+                   (cond.reference_audio !=
+                        ext::TtsConditioningMode::kUnsupported ||
+                    cond.reference_presets)) ||
+                  (value.str() == "VoiceDesign" &&
+                   cond.instructions == ext::TtsConditioningMode::kRequired) ||
+                  (value.str() == "CustomVoice" && cond.unconditioned &&
+                   cond.instructions != ext::TtsConditioningMode::kRequired);
+              if (!ok)
                 throw std::invalid_argument(
                     "task_type does not match the loaded checkpoint");
             } else {
@@ -181,8 +188,7 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
           input_bytes += text->str().size();
           in_utterance = true;
           pending.append(text->str());
-          for (auto& part : models::qwen3_tts::TakeSpeechSegments(
-                   &pending, granularity, false))
+          for (auto& part : TakeSpeechSegments(&pending, granularity, false))
             if (!synthesize(std::move(part))) {
               socket.Close(1011);
               return;
@@ -190,8 +196,7 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
         } else if (type == "input.done") {
           if (!configured)
             throw std::invalid_argument("send session.config first");
-          for (auto& part : models::qwen3_tts::TakeSpeechSegments(
-                   &pending, granularity, true))
+          for (auto& part : TakeSpeechSegments(&pending, granularity, true))
             if (!synthesize(std::move(part))) {
               socket.Close(1011);
               return;

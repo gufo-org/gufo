@@ -28,6 +28,10 @@ struct BorrowedLocation {
 enum class ComponentKind : std::uint8_t {
   kAppendRows,
   kPrivateState,
+  // Append rows of which a continuation reads only the last window_rows
+  // (sliding-window attention). A checkpoint at n keeps the chunks from the
+  // one containing row n - window_rows, so earlier chunks can be released.
+  kWindowRows,
 };
 
 struct ComponentDescriptor {
@@ -37,7 +41,27 @@ struct ComponentDescriptor {
   std::size_t row_bytes{0};
   Rows rows_per_chunk{0};
   std::size_t state_bytes{0};
+  // kWindowRows only: trailing rows a continuation reads; zero otherwise.
+  Rows window_rows{0};
 };
+
+[[nodiscard]] constexpr bool HasRows(ComponentKind kind) noexcept {
+  return kind == ComponentKind::kAppendRows ||
+         kind == ComponentKind::kWindowRows;
+}
+// First row a continuation from `rows` valid rows still reads.
+[[nodiscard]] constexpr Rows WindowFirstRow(const ComponentDescriptor& d,
+                                            Rows rows) noexcept {
+  return d.kind == ComponentKind::kWindowRows && rows > d.window_rows
+             ? rows - d.window_rows
+             : 0;
+}
+// First row of the first chunk a checkpoint at `rows` retains.
+[[nodiscard]] constexpr Rows FirstChunkRow(const ComponentDescriptor& d,
+                                           Rows rows) noexcept {
+  const Rows first = WindowFirstRow(d, rows);
+  return d.rows_per_chunk ? first - first % d.rows_per_chunk : 0;
+}
 
 struct ComponentPosition {
   ComponentId id;

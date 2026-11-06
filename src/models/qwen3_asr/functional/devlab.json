@@ -1,0 +1,46 @@
+{
+  "assets": {
+    "asr": {
+      "repo": "Qwen/Qwen3-ASR-1.7B",
+      "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.model",
+        "*.txt",
+        "*.jinja",
+        "*.tiktoken"
+      ],
+      "required": [
+        "config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors"
+      ]
+    }
+  },
+  "models": {
+    "qwen3-asr": {
+      "title": "Qwen3-ASR",
+      "category": "asr",
+      "asset": "asr",
+      "service": "asr"
+    }
+  },
+  "rules": [
+    {
+      "id": "asr",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen3_asr/**",
+        "src/cli/serve/asr*",
+        "src/cli/serve/audio_asr*",
+        "src/cli/transcribe*",
+        "tests/functional/asr_service.py"
+      ],
+      "owners": [
+        "asr"
+      ]
+    }
+  ]
+}

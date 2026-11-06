@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <gufo/ext/model_config.hpp>
 #include <memory>
 #include <optional>
 #include <span>
@@ -14,25 +15,25 @@
 #include <type_traits>
 #include <vector>
 
-#include "src/core/model_config.hpp"
-#include "src/models/qwen/continuation_hooks.hpp"
+#include "src/families/qwen/hip_common/continuation_hooks.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
-#include "src/core/hip/detail/hip_graph_decode_executor.hpp"
-#include "src/models/qwen/hip/execution_policy.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
-#include "src/models/qwen/hip/ops/ssm.hpp"
-#include "src/models/qwen/hip/ops/token.hpp"
+#include <gufo/ext/experimental/hip_graph_decode_executor.hpp>
+
+#include "src/families/qwen/hip_common/execution_policy.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/ssm.hpp"
+#include "src/families/qwen/kernels/ops/token.hpp"
+#include "src/families/qwen/vision/device_input.hpp"
 #include "src/models/qwen/hip/prompt_hidden_buffer.hpp"
-#include "src/models/qwen/vision/device_input.hpp"
 
 namespace gufo::hip {
 
@@ -293,6 +294,11 @@ public:
                                             std::uint32_t position) const;
   [[nodiscard]] const float* GetReplayBeta(std::uint32_t layer,
                                            std::uint32_t position) const;
+  /// Grows the replay ring to hold `rows` rows of one pass (a power of two
+  /// slots). Call before the pass captures; returns true when buffers moved.
+  [[nodiscard]] bool EnsureSsmReplayCapacity(std::size_t rows);
+  [[nodiscard]] static std::size_t SsmReplayLogBytes(
+      const core::ModelConfig& config, std::size_t capacity);
 
   float* d_hidden{nullptr};
   float* d_normed{nullptr};
@@ -399,6 +405,7 @@ private:
   float* d_ssm_replay_alpha_{nullptr};
   float* d_ssm_replay_beta_{nullptr};
   std::uint32_t* d_ssm_replay_enabled_{nullptr};
+  std::size_t replay_capacity_{kSsmReplayCapacity};
   std::uint32_t saved_context_{0};
   std::uint32_t replay_last_position_{0};
   std::size_t replay_captured_positions_{0};
@@ -481,6 +488,12 @@ public:
   [[nodiscard]] tokenization::TokenId ForwardPromptBatch(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos = 0, bool compute_logits = true);
+
+  /// Rows one session may verify in a single pass. A chain longer than eight
+  /// rows (a prompt-lookup copy) shares every projection across its rows and
+  /// runs attention in eight-row segments, so each row has the arithmetic of
+  /// consecutive ordinary verifications; the replay ring grows to hold it.
+  static constexpr std::size_t kMaxWideVerificationRows = 64;
 
   /// Verifies a chunk of speculative draft candidate tokens in a single
   /// parallel prefill forward pass on the GPU.

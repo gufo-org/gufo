@@ -1,12 +1,13 @@
 // Times the wide-batch routed expert GEMMs of one Flash-Next layer: the
-// paired Q4_K gate/up projection (128-token tiles, SwiGLU, F16 out) and the
-// Q5_1 down projection (64-token tiles), with the executor's tile maps over
-// a skewed top-10 routing of 512 experts, or the per-expert counts of each
-// line of a counts file (one layer per line; tokens = sum / 10). Prints the
-// median time, the streamed weight bandwidth of the active experts and
-// FNV-1a hashes of both outputs, then the totals over all layers.
+// paired gate/up projection (SwiGLU, F16 out) and the down projection over
+// the executor's 128-token tile map for a skewed
+// top-10 routing of 512 experts, or the per-expert counts of each line of a
+// counts file (one layer per line; tokens = sum / 10). Prints the median
+// time, the useful TFLOPS, the streamed weight bandwidth of the active
+// experts and FNV-1a hashes of both outputs, then the totals over all layers.
 //
-// routed_gemm_bench [reps] [tokens | counts-file]
+// routed_gemm_bench [reps] [tokens | counts-file] [gate type] [down type]
+//   gate type: q4_k (default) | q5_k; down type: q5_1 (default) | q8_0
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -33,8 +34,31 @@ constexpr std::uint32_t kExperts = 512;
 constexpr std::uint32_t kUsed = 10;
 constexpr std::uint32_t kHidden = 2560;
 constexpr std::uint32_t kFf = 640;
-constexpr std::size_t kQ4KBytes = 144;  // per 256 elements
-constexpr std::size_t kQ51Bytes = 24;   // per 32 elements
+q::WeightType gate_type = q::WeightType::kQ4_K;
+q::WeightType down_type = q::WeightType::kQ5_1;
+
+/// Bytes per quantized block and elements per block.
+std::size_t BlockBytes(q::WeightType type) {
+  return type == q::WeightType::kQ4_K   ? 144
+         : type == q::WeightType::kQ5_K ? 176
+         : type == q::WeightType::kQ5_1 ? 24
+                                        : 34;
+}
+std::size_t BlockElems(q::WeightType type) {
+  return type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ? 256
+                                                                      : 32;
+}
+q::WeightType ParseType(const std::string& name) {
+  if (name == "q4_k")
+    return q::WeightType::kQ4_K;
+  if (name == "q5_k")
+    return q::WeightType::kQ5_K;
+  if (name == "q5_1")
+    return q::WeightType::kQ5_1;
+  if (name == "q8_0")
+    return q::WeightType::kQ8_0;
+  throw std::runtime_error("unknown weight type " + name);
+}
 
 void CheckHip(hipError_t error, const char* operation) {
   if (error != hipSuccess)
@@ -85,19 +109,29 @@ std::uint16_t HalfBits(float v) {
   return bits;
 }
 
-/// Random quantized blocks whose F16 scale fields hold small finite values.
-std::vector<std::uint8_t> MakeBlocks(std::size_t blocks, std::size_t bytes,
+/// Random quantized blocks whose F16 scale fields hold model-like values
+/// (weights near 0.02), so neither output overflows F16.
+std::vector<std::uint8_t> MakeBlocks(q::WeightType type, std::size_t elems,
                                      std::uint32_t seed) {
+  const std::size_t bytes = BlockBytes(type);
+  const std::size_t blocks = elems / BlockElems(type);
+  const bool k_quant = BlockElems(type) == 256;
   std::vector<std::uint8_t> w(blocks * bytes);
   for (std::size_t i = 0; i < w.size(); i += 4) {
     const std::uint32_t r = Next(&seed);
     std::memcpy(&w[i], &r, std::min<std::size_t>(4, w.size() - i));
   }
   for (std::size_t b = 0; b < blocks; ++b) {
-    const std::uint16_t d = HalfBits(0.01F + 0.02F * (Next(&seed) % 97) / 97);
-    const std::uint16_t m = HalfBits(0.005F + 0.01F * (Next(&seed) % 89) / 89);
-    std::memcpy(&w[b * bytes], &d, 2);
-    std::memcpy(&w[b * bytes + 2], &m, 2);
+    const float d = (k_quant ? 4e-4F : 1.5e-3F) *
+                    (1.0F + 0.5F * static_cast<float>(Next(&seed) % 97) / 97);
+    const std::uint16_t dh = HalfBits(d);
+    std::memcpy(&w[b * bytes], &dh, 2);
+    if (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ||
+        type == q::WeightType::kQ5_1) {
+      const std::uint16_t mh =
+          HalfBits(type == q::WeightType::kQ5_1 ? -16.0F * d : 0.5F * d);
+      std::memcpy(&w[b * bytes + 2], &mh, 2);
+    }
   }
   return w;
 }
@@ -157,6 +191,8 @@ struct Result {
   float down_ms;
   double pair_gb;
   double down_gb;
+  double pair_tflop;
+  double down_tflop;
 };
 
 Result RunLayer(const std::vector<std::uint32_t>& counts, int reps,
@@ -176,9 +212,9 @@ Result RunLayer(const std::vector<std::uint32_t>& counts, int reps,
       ids[std::size_t{t} * kUsed + filled[t]++] = static_cast<std::int32_t>(e);
     }
   }
-  // The executor's maps: 64-token down tiles, then 128-token pair tiles;
-  // below 1,024 tokens one 16- or 48-token map serves separate gate, up and
-  // down projections.
+  // The executor's maps: one of 128-token tiles for the paired gate/up and
+  // the down projections; below 1,024 tokens one 16- or 48-token map serves
+  // separate gate, up and down projections.
   const bool wide = tokens >= 1024;
   const std::uint32_t narrow_rows = slots >= 16 * kExperts ? 48 : 16;
   std::vector<std::int32_t> tiles;
@@ -187,13 +223,10 @@ Result RunLayer(const std::vector<std::uint32_t>& counts, int reps,
       for (std::uint32_t j = 0; j < (counts[e] + rows - 1) / rows; ++j)
         tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
   };
-  append(wide ? 64 : narrow_rows);
-  const auto down_tiles = static_cast<std::uint32_t>(tiles.size());
-  if (wide)
-    append(128);
-  const auto pair_tiles = static_cast<std::uint32_t>(tiles.size()) - down_tiles;
-  std::printf("tokens %u  active %3u  down tiles %3u  pair tiles %3u  ", tokens,
-              active, down_tiles, pair_tiles);
+  const std::uint32_t tile_rows = wide ? 128 : narrow_rows;
+  append(tile_rows);
+  const auto n_tiles = static_cast<std::uint32_t>(tiles.size());
+  std::printf("tokens %u  active %3u  tiles %4u  ", tokens, active, n_tiles);
 
   const std::size_t compact = q::RoutedCompactRows(slots, kExperts);
   auto* d_ids = Upload(ids);
@@ -220,49 +253,49 @@ Result RunLayer(const std::vector<std::uint32_t>& counts, int reps,
 
   const auto pair = [&] {
     if (!wide) {
-      if (!q::RoutedF16Gemm(d_gate, q::WeightType::kQ4_K, d_x, d_tiles,
-                            down_tiles, narrow_rows, d_bounds, d_rows_token,
-                            d_rows_slot, nullptr, d_gate_out, nullptr, kFf,
-                            kHidden, nullptr) ||
-          !q::RoutedF16Gemm(d_up, q::WeightType::kQ4_K, d_x, d_tiles,
-                            down_tiles, narrow_rows, d_bounds, d_rows_token,
-                            d_rows_slot, d_gate_out, nullptr, d_mid, kFf,
-                            kHidden, nullptr))
+      if (!q::RoutedF16Gemm(d_gate, gate_type, d_x, d_tiles, n_tiles, tile_rows,
+                            d_bounds, d_rows_token, d_rows_slot, nullptr,
+                            d_gate_out, nullptr, kFf, kHidden, nullptr) ||
+          !q::RoutedF16Gemm(d_up, gate_type, d_x, d_tiles, n_tiles, tile_rows,
+                            d_bounds, d_rows_token, d_rows_slot, d_gate_out,
+                            nullptr, d_mid, kFf, kHidden, nullptr))
         throw std::runtime_error("gate/up GEMM rejected");
       return;
     }
-    if (!q::RoutedGatedF16Gemm(d_gate, d_up, q::WeightType::kQ4_K, d_x,
-                               d_tiles + down_tiles, pair_tiles, d_bounds,
-                               d_rows_token, d_rows_slot, d_mid, kFf, kHidden,
-                               nullptr))
+    if (!q::RoutedGatedF16Gemm(d_gate, d_up, gate_type, d_x, d_tiles, n_tiles,
+                               d_bounds, d_rows_token, d_rows_slot, d_mid, kFf,
+                               kHidden, nullptr))
       throw std::runtime_error("gated GEMM rejected");
   };
   const auto down = [&] {
-    if (!q::RoutedF16Gemm(d_down, q::WeightType::kQ5_1, d_mid, d_tiles,
-                          down_tiles, wide ? 64 : narrow_rows, d_bounds,
-                          d_rows_slot, d_rows_slot, nullptr, nullptr, d_out,
-                          kHidden, kFf, nullptr))
+    if (!q::RoutedF16Gemm(d_down, down_type, d_mid, d_tiles, n_tiles, tile_rows,
+                          d_bounds, d_rows_slot, d_rows_slot, nullptr, nullptr,
+                          d_out, kHidden, kFf, nullptr))
       throw std::runtime_error("down GEMM rejected");
   };
   pair();
   down();
   const float pair_ms = Median(reps, pair);
   const float down_ms = Median(reps, down);
-  const double pair_gb = 2.0 * active * kFf * kHidden / 256 * kQ4KBytes / 1e9;
-  const double down_gb = 1.0 * active * kHidden * kFf / 32 * kQ51Bytes / 1e9;
+  const double pair_gb = 2.0 * active * kFf * kHidden / BlockElems(gate_type) *
+                         BlockBytes(gate_type) / 1e9;
+  const double down_gb = 1.0 * active * kHidden * kFf / BlockElems(down_type) *
+                         BlockBytes(down_type) / 1e9;
+  const double pair_tflop = 4.0 * slots * kFf * kHidden / 1e12;
+  const double down_tflop = 2.0 * slots * kHidden * kFf / 1e12;
   std::printf(
-      "gate/up %6.3f ms %5.1f GB/s %016llx  down %6.3f ms %5.1f GB/s "
-      "%016llx\n",
-      pair_ms, pair_gb / pair_ms * 1e3,
+      "gate/up %6.3f ms %4.1f TFLOPS %5.1f GB/s %016llx  down %6.3f ms %4.1f "
+      "TFLOPS %5.1f GB/s %016llx\n",
+      pair_ms, pair_tflop / pair_ms * 1e3, pair_gb / pair_ms * 1e3,
       static_cast<unsigned long long>(Hash(d_mid, std::size_t{slots} * kFf)),
-      down_ms, down_gb / down_ms * 1e3,
+      down_ms, down_tflop / down_ms * 1e3, down_gb / down_ms * 1e3,
       static_cast<unsigned long long>(
           Hash(d_out, std::size_t{slots} * kHidden)));
   for (void* p : std::initializer_list<void*>{
            d_ids, d_counts, d_tiles, d_bounds, d_cursors, d_rows_token,
            d_rows_slot, d_x, d_mid, d_gate_out, d_out})
     CheckHip(hipFree(p), "hipFree");
-  return {pair_ms, down_ms, pair_gb, down_gb};
+  return {pair_ms, down_ms, pair_gb, down_gb, pair_tflop, down_tflop};
 }
 
 }  // namespace
@@ -291,11 +324,14 @@ int main(int argc, char** argv) try {
     if (layers.empty())
       throw std::runtime_error("no 512-expert count lines in " + source);
   }
-  const std::size_t gate_blocks = std::size_t{kExperts} * kFf * kHidden / 256;
-  auto* d_gate = Upload(MakeBlocks(gate_blocks, kQ4KBytes, 1U));
-  auto* d_up = Upload(MakeBlocks(gate_blocks, kQ4KBytes, 2U));
-  const std::size_t down_blocks = std::size_t{kExperts} * kHidden * kFf / 32;
-  auto* d_down = Upload(MakeBlocks(down_blocks, kQ51Bytes, 3U));
+  if (argc > 3)
+    gate_type = ParseType(argv[3]);
+  if (argc > 4)
+    down_type = ParseType(argv[4]);
+  const std::size_t elems = std::size_t{kExperts} * kFf * kHidden;
+  auto* d_gate = Upload(MakeBlocks(gate_type, elems, 1U));
+  auto* d_up = Upload(MakeBlocks(gate_type, elems, 2U));
+  auto* d_down = Upload(MakeBlocks(down_type, elems, 3U));
   Result total{};
   for (const auto& counts : layers) {
     const Result r = RunLayer(counts, reps, d_gate, d_up, d_down);
@@ -303,12 +339,16 @@ int main(int argc, char** argv) try {
     total.down_ms += r.down_ms;
     total.pair_gb += r.pair_gb;
     total.down_gb += r.down_gb;
+    total.pair_tflop += r.pair_tflop;
+    total.down_tflop += r.down_tflop;
   }
   std::printf(
-      "total %zu layers: gate/up %.2f ms (%.1f GB/s)  down %.2f ms "
-      "(%.1f GB/s)\n",
-      layers.size(), total.pair_ms, total.pair_gb / total.pair_ms * 1e3,
-      total.down_ms, total.down_gb / total.down_ms * 1e3);
+      "total %zu layers: gate/up %.2f ms (%.1f TFLOPS, %.1f GB/s)  down %.2f "
+      "ms (%.1f TFLOPS, %.1f GB/s)\n",
+      layers.size(), total.pair_ms, total.pair_tflop / total.pair_ms * 1e3,
+      total.pair_gb / total.pair_ms * 1e3, total.down_ms,
+      total.down_tflop / total.down_ms * 1e3,
+      total.down_gb / total.down_ms * 1e3);
   return 0;
 } catch (const std::exception& error) {
   std::fprintf(stderr, "%s\n", error.what());

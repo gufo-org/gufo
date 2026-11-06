@@ -1,0 +1,2 @@
+960217f1d82db18ef2d15f2889e00fb5f90481cf62f14f9821e4084d601af94d  build/card06-release/gufo
+d5b14ded311048a2fa5205ddf6b6db7fa150fad8040c6e3e2bd4eb59e636940e  build/card06-main-release/gufo

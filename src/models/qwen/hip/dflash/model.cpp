@@ -4,16 +4,16 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
+#include <gufo/ext/experimental/hip_utils.hpp>
+#include <gufo/ext/mapped_prefetch.hpp>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/hip_utils.hpp"
-#include "src/core/mapped_prefetch.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
+#include "src/families/qwen/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
-#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
 namespace gufo::hip {
@@ -299,7 +299,35 @@ QwenDFlashGpuModel::QwenDFlashGpuModel(
       target_model_(std::move(target_model)),
       weights_(std::move(weights)),
       allocations_(std::move(allocations)),
-      packed_weight_bytes_(packed_weight_bytes) {}
+      packed_weight_bytes_(packed_weight_bytes) {
+  // The draft table copies head rows, so the head must be row-addressable.
+  // A vocabulary with more special tokens than table rows drafts over the
+  // full head.
+  const auto& config = weights_.config;
+  const auto& head = weights_.output;
+  const std::size_t row_bytes =
+      quant::EncodedSizeBytes(head.type, config.hidden_size);
+  if (head.data == nullptr ||
+      config.vocab_size <= speculative::kDraftVocabPrefix || row_bytes == 0 ||
+      row_bytes % sizeof(std::uint32_t) != 0 ||
+      quant::EncodedSizeBytes(head.type, head.num_elements) !=
+          row_bytes * config.vocab_size)
+    return;
+  std::vector<std::int32_t> specials;
+  for (std::uint32_t id = speculative::kDraftVocabPrefix;
+       id < config.vocab_size; ++id)
+    if (GetTokenizer().IsSpecialToken(id))
+      specials.push_back(static_cast<std::int32_t>(id));
+  if (specials.size() >= speculative::kDraftVocabExtraRows)
+    return;
+  draft_prefix_rows_ = speculative::kDraftVocabPrefix;
+  draft_specials_ = std::move(specials);
+  draft_row_bytes_ = row_bytes;
+}
+
+bool QwenDFlashGpuModel::InDraftSubset(tokenization::TokenId token) const {
+  return token < draft_prefix_rows_ || GetTokenizer().IsSpecialToken(token);
+}
 
 QwenDFlashGpuModel::~QwenDFlashGpuModel() {
   for (void* pointer : allocations_) {

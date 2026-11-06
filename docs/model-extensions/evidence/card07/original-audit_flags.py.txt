@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Card 07: per-source compile-flag parity for every moved Qwen source."""
+import json, shlex, sys, collections
+
+OLD = "build/card06-release/compile_commands.json"
+NEW = "build/card07-release/compile_commands.json"
+
+def load(path):
+    out = {}
+    for entry in json.load(open(path)):
+        out[entry["file"].replace("/home/mixer/gufo/", "")] = entry
+    return out
+
+def mapping():
+    pairs = {}
+    for line in open("/tmp/card07-work/move-applied.txt"):
+        parts = line.split()
+        if parts and parts[0] in ("MOVE", "APPLIED", "NEW") and "->" in line:
+            pairs[parts[1]] = parts[-1]
+    return pairs
+
+DROP_VALUES = {"-o", "-c", "-MF", "-MT", "-MQ"}
+
+def normalize(entry):
+    args = shlex.split(entry["command"])
+    flags, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in DROP_VALUES:
+            skip = True
+            continue
+        # The invocation path itself and depfile targets carry the file path.
+        if arg.endswith((".cpp", ".hip", ".cpp.o", ".hip.o")) or arg.startswith("/tmp") or arg.startswith("/home/mixer/gufo/"):
+            continue
+        flags.append(arg)
+    return flags
+
+old, new = load(OLD), load(NEW)
+pairs = mapping()
+rows = []
+missing_old = []
+for src_old, src_new in sorted(pairs.items()):
+    if not src_old.endswith((".cpp", ".hip")):
+        continue
+    if src_old not in old:
+        missing_old.append(src_old)
+        continue
+    if src_new not in new:
+        rows.append((src_old, src_new, "MISSING-IN-NEW", ""))
+        continue
+    fo, fn = normalize(old[src_old]), normalize(new[src_new])
+    if fo == fn:
+        rows.append((src_old, src_new, "IDENTICAL", ""))
+    else:
+        extra = [f for f in fn if f not in fo]
+        gone = [f for f in fo if f not in fn]
+        rows.append((src_old, src_new, "DIFF", f"-{gone} +{extra}"))
+
+counts = collections.Counter(r[2] for r in rows)
+print(f"mapped sources (compiled units): {len(rows)}  counts={dict(counts)}")
+print(f"old-tree sources with no compile entry (headers moved only): {len(missing_old)}")
+for row in rows:
+    if row[2] != "IDENTICAL":
+        print(" ", row[2], row[0], "->", row[1], row[3])
+
+# Confirm the special per-source options survived.
+special = {
+    "small_batch_wave64.hip": "-mwavefrontsize64",
+    "prefill_quant_wave64.hip": "-fno-slp-vectorize",
+    "attention_decode_verify_wave64.hip": "-mwavefrontsize64",
+    "small_batch_quant16_wave64.hip": "-mllvm=-amdgpu-sched-strategy=iterative-ilp",
+    "prefill_quant_gemm.hip": "-fno-slp-vectorize",
+}
+print("\nper-source option survival (new production compile line):")
+for name, option in special.items():
+    hits = [s for s in new if s.endswith("/" + name)]
+    for hit in hits:
+        flags = normalize(new[hit])
+        print(f"  {hit}: {option}={'yes' if option in flags else 'NO'} "
+              f"wave64={'yes' if '-mwavefrontsize64' in flags else 'no'}")

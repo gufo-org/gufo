@@ -1,0 +1,68 @@
+{
+  "profiles": {
+    "qwen27-q4/off": {
+      "model": "qwen27-q4",
+      "mode": "off",
+      "vision": true
+    },
+    "qwen27-q4/dflash2": {
+      "model": "qwen27-q4",
+      "mode": "dflash2",
+      "vision": true
+    },
+    "qwen27-q8/off": {
+      "model": "qwen27-q8",
+      "mode": "off",
+      "vision": true
+    },
+    "qwen27-q8/dflash2": {
+      "model": "qwen27-q8",
+      "mode": "dflash2",
+      "vision": true
+    }
+  },
+  "rules": [
+    {
+      "id": "qwen27-runtime",
+      "paths": [
+        "src/models/qwen/**",
+        "src/families/qwen/**"
+      ],
+      "priority": 10,
+      "profiles": [
+        "qwen27-q4/off",
+        "qwen27-q4/dflash2",
+        "qwen27-q8/off",
+        "qwen27-q8/dflash2"
+      ],
+      "affects": [
+        "*"
+      ],
+      "obligations": [],
+      "ignored": false
+    },
+    {
+      "id": "dflash2",
+      "paths": [
+        "src/models/qwen/hip/dflash/**",
+        "src/models/qwen/hip/dflash.hpp",
+        "src/models/qwen/dflash_*",
+        "src/families/qwen/kernels/dflash_kernels.*"
+      ],
+      "priority": 20,
+      "profiles": [
+        "qwen27-q4/off",
+        "qwen27-q4/dflash2",
+        "qwen27-q8/off",
+        "qwen27-q8/dflash2"
+      ],
+      "affects": [
+        "*"
+      ],
+      "obligations": [
+        "DFlash2 execution and AR override controls."
+      ],
+      "ignored": false
+    }
+  ]
+}

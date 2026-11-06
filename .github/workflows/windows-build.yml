@@ -11,6 +11,16 @@ on:
         required: false
         default: ''
         type: string
+      extension-repo:
+        description: External extension repository to build (owner/repo)
+        required: false
+        default: ''
+        type: string
+      extension-ref:
+        description: External extension git ref/commit to check out
+        required: false
+        default: 'main'
+        type: string
     outputs:
       bundle-id:
         description: Windows bundle artifact for model validation
@@ -217,13 +227,34 @@ jobs:
           New-Item -ItemType Directory -Force build/windows-release | Out-Null
           Copy-Item $runtime build/windows-release
 
+      - name: Check out external extension
+        if: ${{ inputs.extension-repo != '' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.extension-repo }}
+          ref: ${{ inputs.extension-ref }}
+          path: external-extension
+          persist-credentials: false
+
       - name: Configure Windows build
         id: configure
+        env:
+          EXTERNAL_EXTENSION_REPO: ${{ inputs.extension-repo }}
         run: |
-          $identity = @()
+          $identity = @("-DGUFO_EXTENSIONS_FROM_LOCK=OFF")
           if ($env:GUFO_RELEASE_VERSION) {
-            $identity = @("-DGUFO_RELEASE_VERSION=$env:GUFO_RELEASE_VERSION", "-DGUFO_REVISION=$env:GUFO_REVISION")
+            $identity = @("-DGUFO_RELEASE_VERSION=$env:GUFO_RELEASE_VERSION", "-DGUFO_REVISION=$env:GUFO_REVISION", "-DGUFO_EXTENSIONS_FROM_LOCK=ON")
           }
+          if ($env:EXTERNAL_EXTENSION_REPO) {
+            $identity += "-DGUFO_EXTENSION_DIRS=$PWD/external-extension"
+          }
+          $packageArgs = @('--root', "$PWD")
+          if ($env:GUFO_RELEASE_VERSION) { $packageArgs += '--from-lock' }
+          if ($env:EXTERNAL_EXTENSION_REPO) {
+            $packageArgs += @('--extension-dir', "$PWD/external-extension")
+          }
+          python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_extension_packages.py" @packageArgs
+          if ($LASTEXITCODE -ne 0) { throw 'extension dependencies are missing from the vcpkg manifest' }
           # ccache cannot cache objects that write a shared /Zi PDB: embed
           # the debug info in each object instead (/Z7).
           cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
@@ -250,8 +281,15 @@ jobs:
           # here; the Devlab job runs the full diagnosis on the device.
           & $gufo diagnose --section platform
           if ($LASTEXITCODE -ne 0) { throw 'gufo diagnose --section platform failed' }
+          ccache --zero-stats
           cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target check-pr
-          if ($LASTEXITCODE -ne 0) { throw 'check-pr failed' }
+          $checkExit = $LASTEXITCODE
+          ccache --show-stats
+          if (Test-Path build/windows-release/Testing/Temporary/LastTest.log) {
+            Get-Content build/windows-release/Testing/Temporary/LastTest.log |
+              Select-String 'discovery timing:'
+          }
+          if ($checkExit -ne 0) { throw 'check-pr failed' }
           ctest --test-dir build/windows-release --output-on-failure --no-tests=error --timeout 60 -R '^(qwen38_flash_next\.ngram|gpu_queues_test|bandwidth_test|allocation_benchmark_test)$'
           if ($LASTEXITCODE -ne 0) { throw 'diagnostics and ngram tests failed' }
 
@@ -265,6 +303,11 @@ jobs:
           $dist = "$env:RUNNER_TEMP\windows-gufo"
           $build = 'build\windows-release'
           New-Item -ItemType Directory -Force -Path $dist, "$dist\tests\fixtures", "$dist\tests\functional\fixtures" | Out-Null
+          $install = "$env:RUNNER_TEMP/gufo-installed"
+          cmake --install $build --prefix $install
+          if ($LASTEXITCODE -ne 0) { throw 'install failed' }
+          Copy-Item "$install/bin/*" $dist -Recurse -Force
+          if (Test-Path "$install/share") { Copy-Item "$install/share" $dist -Recurse }
           Copy-Item "$build\gufo.exe", "$build\*.dll", "$env:SDK_ROOT\bin\hipInfo.exe" $dist
           foreach ($dir in 'rocblas', 'hipblaslt') {
             if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
@@ -351,6 +394,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item "$bundle\gufo.exe", "$bundle\*.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $dist
           Copy-Item "$bundle/llvm-openmp-LICENSE.txt", "$bundle/llvm-openmp-version.txt" $dist
+          if (Test-Path "$bundle/share") { Copy-Item "$bundle/share" $dist -Recurse }
           if (Test-Path "$bundle/gufo-video-libraries.txt") {
             Copy-Item "$bundle/gufo-video-libraries.txt" $dist
           }
@@ -384,7 +428,10 @@ jobs:
           try {
             $expected = "gufo version $env:GUFO_RELEASE_VERSION ($env:GUFO_REVISION)"
             $actual = & ./gufo.exe --version
-            if ($LASTEXITCODE -ne 0 -or ($actual -join "`n") -cne $expected) {
+            # Historical tags predate extension selection; repackaging them
+            # still checks their immutable version/revision first line.
+            $hasExtensionLock = Test-Path "$env:GITHUB_WORKSPACE/extensions.lock"
+            if ($LASTEXITCODE -ne 0 -or @($actual)[0] -cne $expected -or ($hasExtensionLock -and -not ($actual -contains "Extension selection: lock"))) {
               throw "release reports '$actual', expected '$expected'"
             }
             $help = & ./gufo.exe --help

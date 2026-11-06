@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "draft_vocab",
+  "target": "gufo_qwen_draft_vocab",
+  "kind": "interface",
+  "purpose": "Header-only draft-head vocabulary rules (prefix plus per-request table) shared by the Flash-Next MTP and 27B DFlash2 drafts.",
+  "depends": []
+}

@@ -11,8 +11,8 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/model_config.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/ops.hpp"
 
 namespace {
 

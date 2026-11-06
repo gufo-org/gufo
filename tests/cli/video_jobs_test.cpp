@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/registry.hpp>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -20,12 +21,26 @@
 
 namespace {
 
-namespace h3 = gufo::minimax_h3;
+using gufo::ext::CancellationCheck;
+using gufo::ext::VideoProgress;
+using gufo::ext::VideoRequest;
+using gufo::ext::VideoTelemetry;
 using gufo::server::VideoJobRequest;
 using gufo::server::VideoJobResult;
 using gufo::server::VideoJobService;
 using gufo::server::VideoJobServiceOptions;
 using gufo::server::VideoJobStatus;
+
+gufo::ext::VideoParameters ResolveGenerationPreset(std::string_view preset) {
+  const auto* provider = gufo::ext::FindVideoProvider("minimax-h3");
+  if (provider && provider->resolve_preset) {
+    auto res = provider->resolve_preset(preset, nullptr);
+    if (res) {
+      return std::move(*res);
+    }
+  }
+  return {};
+}
 
 [[noreturn]] void Fail(const std::string& message) {
   std::cerr << "FAIL video_jobs_test: " << message << '\n';
@@ -43,12 +58,11 @@ struct FakeRunner {
   std::condition_variable condition;
   int calls{0};
   bool release{false};
-  std::vector<h3::GenerationRequest> requests;
+  std::vector<VideoRequest> requests;
 
-  bool Run(const h3::GenerationRequest& request,
-           const h3::CancellationToken* cancellation,
-           h3::GenerationProgress progress, void* progress_opaque,
-           h3::GenerationTelemetry* telemetry, std::string* error) {
+  bool Run(const VideoRequest& request, const CancellationCheck& cancellation,
+           VideoProgress progress, void* progress_opaque,
+           VideoTelemetry* telemetry, std::string* error) {
     {
       const std::lock_guard<std::mutex> lock(mutex);
       ++calls;
@@ -61,12 +75,11 @@ struct FakeRunner {
     progress("video_vae", 1, 1, progress_opaque);
     {
       std::unique_lock<std::mutex> lock(mutex);
-      while (!release &&
-             (cancellation == nullptr || !cancellation->IsCancelled())) {
+      while (!release && (!cancellation || !cancellation())) {
         condition.wait_for(lock, std::chrono::milliseconds(5));
       }
     }
-    if (cancellation != nullptr && cancellation->IsCancelled()) {
+    if (cancellation && cancellation()) {
       if (error != nullptr) {
         *error = "cancelled";
       }
@@ -97,7 +110,8 @@ struct FakeRunner {
     }
     if (telemetry != nullptr) {
       telemetry->prompt_tokens = 6;
-      telemetry->denoiser.forward_ms = {1.0, 2.0};
+      telemetry->extra_json =
+          R"({"schema":"gufo.minimax-h3-generation-telemetry.v1","denoiser":{"forward_ms":[1.0, 2.0]}})";
     }
     return true;
   }
@@ -129,15 +143,14 @@ std::string NextId() {
 }
 
 VideoJobRequest Mp4Request(std::string prompt = "A red fox") {
-  auto parameters = h3::ResolveGenerationPreset("fast", nullptr);
-  Check(parameters.has_value(), "fast preset resolves");
+  auto parameters = ResolveGenerationPreset("fast");
   return {
       .model = "minimax-h3",
       .prompt = std::move(prompt),
       .size = "512x512",
       .seconds = "1",
       .output_format = "mp4",
-      .parameters = std::move(*parameters),
+      .parameters = std::move(parameters),
       .seed = 42,
   };
 }
@@ -188,10 +201,10 @@ void TestQueueLifecycleAndRecovery(const std::filesystem::path& root) {
       .id_factory = NextId,
       .now = [&] { return now; },
       .runner =
-          [&](const h3::GenerationRequest& request,
-              const h3::CancellationToken* cancellation,
-              h3::GenerationProgress progress, void* progress_opaque,
-              h3::GenerationTelemetry* telemetry, std::string* error) {
+          [&](const VideoRequest& request,
+              const CancellationCheck& cancellation, VideoProgress progress,
+              void* progress_opaque, VideoTelemetry* telemetry,
+              std::string* error) {
             return runner.Run(request, cancellation, progress, progress_opaque,
                               telemetry, error);
           },
@@ -318,24 +331,23 @@ void TestPpmAndExpiry(const std::filesystem::path& root) {
       .id_factory = NextId,
       .now = [&] { return now; },
       .runner =
-          [&](const h3::GenerationRequest& request,
-              const h3::CancellationToken* cancellation,
-              h3::GenerationProgress progress, void* progress_opaque,
-              h3::GenerationTelemetry* telemetry, std::string* error) {
+          [&](const VideoRequest& request,
+              const CancellationCheck& cancellation, VideoProgress progress,
+              void* progress_opaque, VideoTelemetry* telemetry,
+              std::string* error) {
             return runner.Run(request, cancellation, progress, progress_opaque,
                               telemetry, error);
           },
   });
-  auto parameters = h3::ResolveGenerationPreset("dev", nullptr);
-  Check(parameters.has_value(), "development preset resolves");
-  parameters->selected_frames = {11};
+  auto parameters = ResolveGenerationPreset("dev");
+  parameters.selected_frames = {11};
   const auto created = service.Create({
       .model = "minimax-h3",
       .prompt = "diagnostic",
       .size = "256x256",
       .seconds = "1",
       .output_format = "ppm",
-      .parameters = *parameters,
+      .parameters = parameters,
       .seed = 7,
   });
   Check(created.job.has_value(), "single-frame PPM job admitted");
@@ -380,9 +392,8 @@ void TestValidation(const std::filesystem::path& root) {
       .validate_model_inventory = false,
       .id_factory = NextId,
       .now = {},
-      .runner = [](const h3::GenerationRequest&, const h3::CancellationToken*,
-                   h3::GenerationProgress, void*, h3::GenerationTelemetry*,
-                   std::string*) { return false; },
+      .runner = [](const VideoRequest&, const CancellationCheck&, VideoProgress,
+                   void*, VideoTelemetry*, std::string*) { return false; },
   });
   Check(service.Create(Mp4Request("")).result == VideoJobResult::kInvalid,
         "empty prompt is rejected");
@@ -406,16 +417,15 @@ void TestValidation(const std::filesystem::path& root) {
   Check(service.Create(invalid).result == VideoJobResult::kInvalid,
         "model alias cannot disagree with the frozen preset");
 
-  auto development = h3::ResolveGenerationPreset("dev", nullptr);
-  Check(development.has_value(), "development preset resolves");
-  development->selected_frames = {11};
+  auto development = ResolveGenerationPreset("dev");
+  development.selected_frames = {11};
   const VideoJobRequest wrong_ppm_size{
       .model = "minimax-h3-dev",
       .prompt = "diagnostic",
       .size = "512x512",
       .seconds = "1",
       .output_format = "ppm",
-      .parameters = *development,
+      .parameters = development,
       .seed = 42,
   };
   Check(service.Create(wrong_ppm_size).result == VideoJobResult::kInvalid,
@@ -431,9 +441,8 @@ void TestValidation(const std::filesystem::path& root) {
       .validate_model_inventory = false,
       .id_factory = [collision_id] { return collision_id; },
       .now = {},
-      .runner = [](const h3::GenerationRequest&, const h3::CancellationToken*,
-                   h3::GenerationProgress, void*, h3::GenerationTelemetry*,
-                   std::string*) { return false; },
+      .runner = [](const VideoRequest&, const CancellationCheck&, VideoProgress,
+                   void*, VideoTelemetry*, std::string*) { return false; },
   });
   Check(collision_service.ready(), collision_service.initialization_error());
   std::filesystem::create_directories(collision_root / collision_id);
@@ -480,9 +489,8 @@ void TestRecoveryHardening(const std::filesystem::path& root) {
       .validate_model_inventory = false,
       .id_factory = NextId,
       .now = [] { return 3100; },
-      .runner = [](const h3::GenerationRequest&, const h3::CancellationToken*,
-                   h3::GenerationProgress, void*, h3::GenerationTelemetry*,
-                   std::string*) { return false; },
+      .runner = [](const VideoRequest&, const CancellationCheck&, VideoProgress,
+                   void*, VideoTelemetry*, std::string*) { return false; },
   });
   Check(service.ready(), service.initialization_error());
   Check(service.Get(claimed_id).result == VideoJobResult::kNotFound,
@@ -509,9 +517,8 @@ void TestRunnerExceptionRecovery(const std::filesystem::path& root) {
       .id_factory = NextId,
       .now = [] { return 5000; },
       .runner =
-          [&](const h3::GenerationRequest& request,
-              const h3::CancellationToken*, h3::GenerationProgress, void*,
-              h3::GenerationTelemetry*, std::string*) {
+          [&](const VideoRequest& request, const CancellationCheck&,
+              VideoProgress, void*, VideoTelemetry*, std::string*) {
             ++calls;
             if (calls == 1) {
               throw std::runtime_error("injected backend exception");
@@ -561,9 +568,8 @@ void TestRunnerOutputBoundary(const std::filesystem::path& root) {
       .id_factory = NextId,
       .now = [] { return 6000; },
       .runner =
-          [&](const h3::GenerationRequest& request,
-              const h3::CancellationToken*, h3::GenerationProgress, void*,
-              h3::GenerationTelemetry*, std::string*) {
+          [&](const VideoRequest& request, const CancellationCheck&,
+              VideoProgress, void*, VideoTelemetry*, std::string*) {
             std::filesystem::create_directories(
                 request.output_path.parent_path());
             std::error_code link_error;
@@ -590,7 +596,11 @@ void TestRunnerOutputBoundary(const std::filesystem::path& root) {
 
 }  // namespace
 
+void minimax_h3_register(gufo::ext::Registry&);
+
 int main() {
+  gufo::ext::Registry registry;
+  minimax_h3_register(registry);
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() /
       ("gufo-video-jobs-test-" + std::to_string(gufo::platform::ProcessId()));

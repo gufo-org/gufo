@@ -1,7 +1,5 @@
 // POST /v1/embeddings contract against a fake encoder: no model files, no
 // device, and no socket. The test calls the HTTP handler directly.
-#include "src/cli/serve/embeddings_api.hpp"
-
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -24,8 +22,8 @@
 #include <utility>
 #include <vector>
 
-#include "src/cli/serve/embedding_service.hpp"
 #include "src/core/json.hpp"
+#include "tests/support/model_api_test_support.hpp"
 
 namespace {
 
@@ -429,8 +427,6 @@ void TestInputValidation() {
               "invalid_parameter_type", "boolean item");
   ExpectError(Send(*service, R"({"input":"x","user":3})"), 400,
               "invalid_parameter_type", "non-string user");
-  ExpectError(Send(*service, R"({"input":"x","normalize":true})"), 400,
-              "unsupported_field", "unknown member");
 
   std::string many = R"({"input":[)";
   for (int i = 0; i < 2049; ++i) {
@@ -448,6 +444,8 @@ void TestInputValidation() {
             Parse(accepted).find("data")->items().size() == 2048U,
         "2048 inputs are accepted");
   Check(runner.calls == 1, "rejected requests never reach the encoder");
+  Check(Send(*service, R"({"input":"x","normalize":true})").status == 200,
+        "unknown members are ignored, as in llama.cpp, TEI and vLLM");
 }
 
 void TestModelAndJson() {
@@ -614,7 +612,7 @@ void TestTypedInput() {
   Check(
       Send(
           service,
-          R"({"input":[{"content":[{"type":"text","text":"before"},{"type":"input_video","input_video":{"data":"AAAA","url":"ignored"}},{"type":"text","text":"after"}]}],"video_options":{"fps":0.5,"max_frames":3,"add_timestamps":true,"overflow_strategy":"truncate"}})")
+          R"({"input":[{"content":[{"type":"text","text":"before"},{"type":"input_video","input_video":{"data":"AAAA","url":"ignored"}},{"type":"text","text":"after"}]}],"video_options":{"fps":0.5,"max_frames":3,"add_timestamps":true,"overflow_strategy":"truncate","max_soft_tokens":560}})")
               .status == 200,
       "video content and controls accepted");
   Check(captured[0].content.size() == 3 &&
@@ -626,7 +624,9 @@ void TestTypedInput() {
   Check(captured_options.video.fps == 0.5 &&
             captured_options.video.max_frames == 3 &&
             captured_options.video.timestamps &&
-            captured_options.video.truncate_overflow,
+            captured_options.video.truncate_overflow &&
+            captured_options.video.max_soft_tokens == 560 &&
+            captured_options.image_soft_tokens == 280,
         "video controls reach runtime");
   for (
       const auto* body :
@@ -639,7 +639,9 @@ void TestTypedInput() {
        {R"({"fps":0})", R"({"fps":121})", R"({"max_frames":0})",
         R"({"max_frames":33})", R"({"max_frames":1.5})",
         R"({"add_timestamps":1})", R"({"overflow_strategy":"other"})",
-        R"({"unknown":true})"})
+        R"({"max_soft_tokens":100})", R"({"max_soft_tokens":0})",
+        R"({"max_soft_tokens":280.5})", R"({"max_soft_tokens":"280"})",
+        R"({"max_soft_tokens":2240})", R"({"unknown":true})"})
     ExpectError(
         Send(service, std::string(R"({"input":"hello","video_options":)") +
                           settings + "}"),
@@ -820,16 +822,15 @@ void TestNativeEmbeddings() {
   ExpectError(SendTo(service, "/embeddings",
                      R"({"content":"y","encoding_format":"int8"})"),
               400, "invalid_encoding_format", "encoding_format is validated");
-  ExpectError(
-      SendTo(service, "/embeddings", R"({"content":"y","pooling":"none"})"),
-      400, "unsupported_field", "unknown native fields are rejected");
   Check(calls == before, "rejected native requests never reach the runner");
-  // The OpenAI route keeps its own field set.
-  ExpectError(Send(service, R"({"content":"y"})"), 400, "unsupported_field",
-              "/v1/embeddings does not take content");
-  ExpectError(Send(service, R"({"input":"y","embd_normalize":2})"), 400,
-              "unsupported_field",
-              "/v1/embeddings does not take embd_normalize");
+  // As in llama.cpp, both routes take `content` and `embd_normalize`, and
+  // `content` without `input` selects the native response.
+  ExpectError(Send(service, R"({"input":"y","embd_normalize":0})"), 400,
+              "unsupported_embd_normalize",
+              "/v1/embeddings validates embd_normalize");
+  const HttpResponse content = Send(service, R"({"content":"y"})");
+  Check(content.status == 200 && Parse(content).is_array(),
+        "/v1/embeddings content returns the native form");
   ExpectError(Send(service, R"({"input":[{"prompt_string":"y"}]})"), 400,
               "invalid_parameter_type",
               "/v1/embeddings does not take prompt objects");
@@ -984,6 +985,12 @@ void TestImageSoftTokens() {
       "image and video processor options coexist");
   Check(runner.last_image_soft_tokens == 70,
         "video options do not override the image budget");
+  Check(Send(*service,
+             R"({"input":"a","video_options":{"max_soft_tokens":1120}})")
+                .status == 200,
+        "a video budget alone is accepted");
+  Check(runner.last_image_soft_tokens == 280,
+        "a video budget does not change the image default");
 }
 
 // The native path's cut for inputs with images: 2 = <bos>, 1 = <eos>,

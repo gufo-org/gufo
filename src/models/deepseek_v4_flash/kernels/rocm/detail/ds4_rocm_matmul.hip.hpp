@@ -791,7 +791,7 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
       x->bytes < x_bytes || out->bytes < out_bytes)
     return 0;
   const __half* w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes,
-                                       in_dim, out_dim, label);
+                                       in_dim, out_dim, false);
   if (!w_f16)
     return 0;
   const uint64_t xh_count = n_tok * in_dim;
@@ -839,85 +839,33 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
                                      HIPBLAS_GEMM_DEFAULT);
     if (st == HIPBLAS_STATUS_SUCCESS) return 1;
     fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " q8 f16 matmul failed: status %d\n", (int)st);
-    hip_q8_f16_cache_disable_after_failure(DS4_GPU_BLAS_NAME " f16 matmul failure",
-                                            in_dim * out_dim * sizeof(__half));
     return 0;
 }
 
-static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
-        ds4_gpu_tensor *out_h,
-        const void *model_map,
-        uint64_t model_size,
-        uint64_t weight_offset,
-        uint64_t in_dim,
-        uint64_t out_dim,
-        const ds4_gpu_tensor *x,
-        uint64_t n_tok,
-        const char *label) {
-  if (!g_hipblas_ready || !out_h || !x || !model_map || in_dim == 0u ||
-      out_dim == 0u || n_tok == 0u || in_dim > UINT32_MAX ||
-      out_dim > UINT32_MAX || n_tok > UINT32_MAX)
-    return 0;
-  const uint64_t blocks = (in_dim + 31u) / 32u;
-  uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
-  if (weight_offset > model_size ||
-      !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
-      !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
-      weight_bytes > model_size - weight_offset ||
-      !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
-      !hip_u64_mul3_checked(n_tok, out_dim, sizeof(__half), &out_bytes) ||
-      x->bytes < x_bytes || out_h->bytes < out_bytes)
-    return 0;
-  const __half* w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes,
-                                       in_dim, out_dim, label);
-  if (!w_f16)
-    return 0;
-  const uint64_t xh_count = n_tok * in_dim;
-  __half* xh = hip_f16_input_lookup((const float*)x->ptr, xh_count);
-  if (!xh) {
-    xh = (__half*)hip_tmp_alloc(xh_count * sizeof(__half),
-                                "q8 f16-out gemm activations");
-    if (!xh)
-      return 0;
-    hip_launch_f32_to_f16(xh, (const float*)x->ptr, xh_count);
-    if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch"))
-      return 0;
-  }
-#ifdef __HIP_PLATFORM_AMD__
-  if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-      hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F16) &&
-      hipblaslt_gemm_f16(out_h->ptr, w_f16, xh, (uint32_t)out_dim,
-                         (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
-                         HIP_R_16F, label ? label : "q8 f16-out projection")) {
-    return 1;
-  }
-#endif
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    hipblasStatus_t st = hipblasGemmEx(g_hipblas,
-                                     HIPBLAS_OP_T,
-                                     HIPBLAS_OP_N,
-                                     (int)out_dim,
-                                     (int)n_tok,
-                                     (int)in_dim,
-                                     &alpha,
-                                     w_f16,
-                                     HIPBLAS_R_16F,
-                                     (int)in_dim,
-                                     xh,
-                                     HIPBLAS_R_16F,
-                                     (int)in_dim,
-                                     &beta,
-                                     out_h->ptr,
-                                     HIPBLAS_R_16F,
-                                     (int)out_dim,
-                                     HIPBLAS_COMPUTE_32F,
-                                     HIPBLAS_GEMM_DEFAULT);
-    if (st == HIPBLAS_STATUS_SUCCESS) return 1;
-    fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " q8 f16-out matmul failed: status %d\n", (int)st);
-    hip_q8_f16_cache_disable_after_failure(DS4_GPU_BLAS_NAME " f16-out matmul failure",
-                                            in_dim * out_dim * sizeof(__half));
-    return 0;
+static int hip_quantize_q8_0_prequant(const ds4_gpu_tensor *x, uint64_t in_dim, uint64_t blocks,
+                                      uint64_t n_tok, int8_t **xq, float **xscale) {
+    const uint64_t scale_offset = hip_q8_0_act_scale_offset(n_tok, blocks);
+    const uint64_t tmp_bytes = scale_offset + n_tok * blocks * sizeof(float);
+    void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 prequant");
+    if (!tmp) return 0;
+    *xq = (int8_t *)tmp;
+    *xscale = (float *)((char *)tmp + scale_offset);
+    dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
+    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(*xq, *xscale, (const float *)x->ptr, in_dim, blocks);
+    return hip_ok(hipGetLastError(), "matmul_q8_0 quantize launch");
+}
+
+static int hip_launch_q8_0_decode_rows(ds4_gpu_tensor *out, const char *wptr, const int8_t *xq,
+                                       const float *xscale, uint64_t in_dim, uint64_t out_dim,
+                                       uint64_t blocks) {
+    const uint32_t rows_per_block = 1u;
+    const int use_dp4a = 1;
+    matmul_q8_0_preq_rows_w32_kernel<<<
+        ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
+        rows_per_block * 32u>>>(
+        (float*)out->ptr, reinterpret_cast<const unsigned char*>(wptr), xq,
+        xscale, in_dim, out_dim, blocks, rows_per_block, use_dp4a);
+    return hip_ok(hipGetLastError(), "matmul_q8_0 rows launch");
 }
 
 static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok, const char *label) {
@@ -1074,67 +1022,11 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
                 blocks);
         return hip_ok(hipGetLastError(), "matmul_q8_0 f32 batch warp launch");
     }
-    if (g_hipblas_ready && n_tok > 1) {
-        const __half *w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes, in_dim, out_dim, label);
-        if (w_f16) {
-            const uint64_t xh_count = n_tok * in_dim;
-            __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
-            if (!xh) {
-                xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
-                if (!xh) return 0;
-                hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-                if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
-            }
-            const float alpha = 1.0f;
-            const float beta = 0.0f;
-            hipblasStatus_t st = hipblasGemmEx(g_hipblas,
-                                             HIPBLAS_OP_T,
-                                             HIPBLAS_OP_N,
-                                             (int)out_dim,
-                                             (int)n_tok,
-                                             (int)in_dim,
-                                             &alpha,
-                                             w_f16,
-                                             HIPBLAS_R_16F,
-                                             (int)in_dim,
-                                             xh,
-                                             HIPBLAS_R_16F,
-                                             (int)in_dim,
-                                             &beta,
-                                             out->ptr,
-                                             HIPBLAS_R_32F,
-                                             (int)out_dim,
-                                             HIPBLAS_COMPUTE_32F,
-                                             HIPBLAS_GEMM_DEFAULT);
-            if (st == HIPBLAS_STATUS_SUCCESS) return 1;
-            fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " q8 f16 matmul failed: status %d\n", (int)st);
-            hip_q8_f16_cache_disable_after_failure(DS4_GPU_BLAS_NAME " f16 matmul failure",
-                                                    in_dim * out_dim * sizeof(__half));
-            /* The F16 expansion cache is only an optimization.  If hipBLAS
-             * rejects the cached path under memory pressure, retry the same
-             * operation through the native Q8 kernels below. */
-        }
-    }
-    const uint64_t xq_bytes = n_tok * blocks * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes = scale_offset + n_tok * blocks * sizeof(float);
-    void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 prequant");
-    if (!tmp) return 0;
-    int8_t *xq = (int8_t *)tmp;
-    float* xscale = (float*)((char*)tmp + scale_offset);
+    int8_t *xq = NULL;
+    float *xscale = NULL;
+    if (!hip_quantize_q8_0_prequant(x, in_dim, blocks, n_tok, &xq, &xscale)) return 0;
     const int use_dp4a = 1;
-    dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
-    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(xq, xscale, (const float *)x->ptr, in_dim, blocks);
-    if (!hip_ok(hipGetLastError(), "matmul_q8_0 quantize launch")) return 0;
-    if (n_tok == 1) {
-      const uint32_t rows_per_block = 1u;
-      matmul_q8_0_preq_rows_w32_kernel<<<
-          ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
-          rows_per_block * 32u>>>(
-          (float*)out->ptr, reinterpret_cast<const unsigned char*>(wptr), xq,
-          xscale, in_dim, out_dim, blocks, rows_per_block, use_dp4a);
-      return hip_ok(hipGetLastError(), "matmul_q8_0 rows launch");
-    }
+    if (n_tok == 1) return hip_launch_q8_0_decode_rows(out, wptr, xq, xscale, in_dim, out_dim, blocks);
     if (blocks <= 32u) {
         dim3 bgrid(((unsigned)out_dim + 7u) / 8u, (unsigned)n_tok, 1);
         matmul_q8_0_preq_batch_warp8_kernel<<<bgrid, 256>>>(
@@ -1162,6 +1054,34 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
 extern "C" int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok) {
     return hip_matmul_q8_0_tensor_labeled(out, model_map, model_size, weight_offset,
                                            in_dim, out_dim, x, n_tok, "q8_0");
+}
+
+extern "C" int ds4_gpu_matmul_q8_0_preq_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size,
+                                              uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim,
+                                              const ds4_gpu_tensor *xq8) {
+    if (!out || !model_map || in_dim == 0u || in_dim > UINT32_MAX || out_dim == 0u ||
+        out_dim > UINT32_MAX || out->bytes < out_dim * sizeof(float) || weight_offset > model_size) {
+        return 0;
+    }
+    const uint64_t blocks = (in_dim + 31u) / 32u;
+    uint64_t weight_bytes = 0;
+    if (!hip_u64_mul3_checked(out_dim, blocks, 34u, &weight_bytes) ||
+        weight_bytes > model_size - weight_offset) {
+        return 0;
+    }
+    const char *wptr = hip_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0");
+    int8_t *xq = NULL;
+    float *xscale = NULL;
+    return wptr && hip_q8_0_act(xq8, 1u, blocks, &xq, &xscale) &&
+           hip_launch_q8_0_decode_rows(out, wptr, xq, xscale, in_dim, out_dim, blocks);
+}
+
+extern "C" int ds4_gpu_matmul_q8_0_shared_input_tensor(ds4_gpu_tensor *out0, uint64_t weight0_offset, uint64_t out0_dim,
+                                                      ds4_gpu_tensor *out1, uint64_t weight1_offset, uint64_t out1_dim,
+                                                      const void *model_map, uint64_t model_size, uint64_t in_dim,
+                                                      const ds4_gpu_tensor *xq8) {
+    return ds4_gpu_matmul_q8_0_preq_tensor(out0, model_map, model_size, weight0_offset, in_dim, out0_dim, xq8) &&
+           ds4_gpu_matmul_q8_0_preq_tensor(out1, model_map, model_size, weight1_offset, in_dim, out1_dim, xq8);
 }
 
 extern "C" int ds4_gpu_matmul_q8_0_group_pairs_tensor(
@@ -1237,6 +1157,7 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
         uint64_t out0_dim,
         uint64_t out1_dim,
         const ds4_gpu_tensor *x,
+        const ds4_gpu_tensor *xq8,
         uint64_t n_tok) {
   if (!out0 || !out1 || !x || !model_map || in_dim == 0 || out0_dim == 0 ||
       out1_dim == 0 || n_tok == 0 || in_dim > UINT32_MAX ||
@@ -1271,19 +1192,13 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
     if (!w0 || !w1)
       return 0;
 
-    const uint64_t xq_bytes = n_tok * blocks * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes = scale_offset + n_tok * blocks * sizeof(float);
-    void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 pair prequant");
-    if (!tmp) return 0;
-    int8_t *xq = (int8_t *)tmp;
-    float *xscale = (float *)((char *)tmp + scale_offset);
+    int8_t *xq = NULL;
+    float *xscale = NULL;
     const int use_dp4a = 1;
-    dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
-    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
-            xq, xscale, (const float *)x->ptr, in_dim, blocks);
-    if (!hip_ok(hipGetLastError(), "matmul_q8_0 pair quantize launch")) {
-        return 0;
+    if (xq8) {
+      if (n_tok != 1 || !hip_q8_0_act(xq8, 1u, blocks, &xq, &xscale)) return 0;
+    } else if (!hip_quantize_q8_0_prequant(x, in_dim, blocks, n_tok, &xq, &xscale)) {
+      return 0;
     }
     if (n_tok > 1) {
       for (uint32_t first = 0; first < n_tok; first += 4u) {
@@ -1326,6 +1241,7 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
         uint64_t                in_dim,
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
+        const ds4_gpu_tensor *x_q8,
         const ds4_gpu_tensor *block_add,
         const ds4_gpu_tensor *residual_hc,
         const ds4_gpu_tensor *split,
@@ -1354,17 +1270,12 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
     if (!wptr)
       return 0;
 
-    const uint64_t xq_bytes = blocks * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes = scale_offset + blocks * sizeof(float);
-    void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 hc expand prequant");
-    if (!tmp) return 0;
-    int8_t *xq = (int8_t *)tmp;
-    float* xscale = (float*)((char*)tmp + scale_offset);
+    int8_t *xq = NULL;
+    float *xscale = NULL;
     const int use_dp4a = 1;
-    quantize_q8_0_f32_kernel<<<(unsigned)blocks, 32>>>(
-            xq, xscale, (const float *)x->ptr, in_dim, blocks);
-    if (!hip_ok(hipGetLastError(), "matmul_q8_0_hc_expand quantize launch")) {
+    if (x_q8) {
+        if (!hip_q8_0_act(x_q8, 1u, blocks, &xq, &xscale)) return 0;
+    } else if (!hip_quantize_q8_0_prequant(x, in_dim, blocks, 1u, &xq, &xscale)) {
         return 0;
     }
     const uint32_t rows_per_block = 16u;
@@ -1537,17 +1448,16 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         return hipblas_ok(st, "f16 matmul");
     }
     /* The 4096x256 F16 router projection is latency-bound and the ordered
-     * 32-thread row kernel is at least as fast on gfx1151; keep shared-X for
-     * compressor/indexer F16 decode where reusing x across rows is the win. */
+     * 32-thread row kernel is at least as fast on gfx1151; use the warp-row
+     * kernel for compressor/indexer F16 decode. */
     if (n_tok == 1u && !f16_decode_router_shape) {
-        if (in_dim <= 8192u && in_dim * sizeof(float) <= 65536u) {
-            const uint32_t rows_per_block = 32u;
-            matmul_f16_f32_sharedx_warp_rows_w32_kernel<<<
+        if (in_dim <= 8192u) {
+            const uint32_t rows_per_block = F16_DECODE_ROWS_PER_BLOCK;
+            matmul_f16_f32_warp_rows_w32_kernel<<<
                     ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
-                    rows_per_block * 32u,
-                    (size_t)in_dim * sizeof(float)>>>(
+                    rows_per_block * 32u>>>(
                     (float *)out->ptr, w, (const float *)x->ptr, (uint32_t)in_dim, out_dim);
-            return hip_ok(hipGetLastError(), "matmul_f16 sharedx launch");
+            return hip_ok(hipGetLastError(), "matmul_f16 warp rows launch");
         }
     }
     dim3 grid((unsigned)out_dim, (unsigned)n_tok, 1);
@@ -1803,15 +1713,14 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
     const __half *w0 = (const __half *)hip_model_range_ptr(model_map, weight0_offset, weight_bytes, "f16_pair0");
     const __half *w1 = (const __half *)hip_model_range_ptr(model_map, weight1_offset, weight_bytes, "f16_pair1");
     if (!w0 || !w1) return 0;
-    if (in_dim <= 8192u && in_dim * sizeof(float) <= 65536u) {
-        const uint32_t rows_per_block = 32u;
-        matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel<<<
+    if (in_dim <= 8192u) {
+        const uint32_t rows_per_block = F16_DECODE_ROWS_PER_BLOCK;
+        matmul_f16_pair_f32_warp_rows_w32_kernel<<<
                 ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
-                rows_per_block * 32u,
-                (size_t)in_dim * sizeof(float)>>>(
+                rows_per_block * 32u>>>(
                 (float *)out0->ptr, (float *)out1->ptr, w0, w1,
                 (const float *)x->ptr, (uint32_t)in_dim, out_dim);
-        return hip_ok(hipGetLastError(), "matmul_f16_pair sharedx launch");
+        return hip_ok(hipGetLastError(), "matmul_f16_pair warp rows launch");
     }
     matmul_f16_pair_ordered_chunks_kernel<<<(unsigned)out_dim, 32>>>(
         (float *)out0->ptr,

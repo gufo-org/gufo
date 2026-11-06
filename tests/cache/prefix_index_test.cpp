@@ -569,8 +569,28 @@ void AdmissionAndValidation() {
   assert(index.Lookup(Query(original)).selected->entry == id);
 }
 }  // namespace
+// A window checkpoint transfers only the rows from its first retained chunk.
+void WindowTransferBytes() {
+  static constexpr std::array<ComponentDescriptor, 2> kWindowed{{
+      {{1}, 1, ComponentKind::kWindowRows, 8, 4, 0, 6},
+      {{3}, 1, ComponentKind::kPrivateState, 0, 0, 32},
+  }};
+  ResourceLedger ledger{kIndexLimits};
+  {
+    PrefixIndex index{ledger};
+    index.Register({1}, kWindowed);
+    const Tokens tokens(13, 7);  // Window [7, 13), first chunk row 4.
+    (void)index.Insert(IndexCheckpoint(ledger, tokens, {1}, {}, kWindowed),
+                       {{{1}, true, false}, {{3}, true, false}});
+    const auto result = index.Lookup(Query(tokens));
+    assert(result.selected && result.selected->boundary == 13);
+    assert(result.selected->transfer_bytes == (13 - 4) * 8 + 32);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 int main() {
   SelectionTable();
+  WindowTransferBytes();
   CheckpointPresence();
   ImagesAndLearning();
   CoherenceAndFallback();

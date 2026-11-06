@@ -31,6 +31,21 @@ have matching precision. Use the Q4_K_M DFlash2 draft with either target.
 | AR | No speculative option | Target-only generation. |
 | DFlash2 | `--speculative dflash2 --dflash-model PATH` | Adaptive default; `--draft-tokens` caps proposals, `--draft-policy fixed` is a comparison mode. |
 
+A request decoding alone can verify a prompt-lookup copy wider than the DFlash2
+block: greedy requests, and sampled ones without a seed. Copy-only steps start
+at the ordinary eight rows; two whole copies in a row at the current width
+double it, up to 64 rows, and any rejected copy returns it to eight. The wide
+pass shares every projection across its rows and runs attention in eight-row
+segments, so each row's logits and DFlash2 target features equal those of
+consecutive ordinary verifications (`qwen27b_wide_verification_test` also checks
+decoding after cutting back to any kept prefix). Rollback replays the captured
+recurrent inputs of every kept row, so the session's SSM replay ring grows from
+16 to 64 rows (about 91 MiB) on first use; the resource claim includes it, and
+the load narrows the widest pass when the configured sessions would not fit.
+When more than eight rows are kept, the draft injects all but the last at once,
+so snapshots and batched steps still hold at most eight pending rows. Seeded
+sampled requests and batched steps keep the ordinary width.
+
 Greedy speculation must match AR. Sampled modes preserve the target policy,
 but AR and speculation need not share the same-seed sequence. See the
 [quality contract](QUALITY.md). Thinking/template controls and HTTP

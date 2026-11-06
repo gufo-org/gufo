@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/tokenizer.hpp"
+#include "tokenizer.hpp"
 
 #include <algorithm>
 #include <string>

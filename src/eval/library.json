@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "name": "eval",
+  "target": "gufo_eval",
+  "kind": "static",
+  "purpose": "Evaluation dataset loading, answer extraction and regrading for `gufo eval`. The default dataset is the core fixture tests/fixtures/eval/antirez-ds4.json, so the command works in builds without DeepSeek.",
+  "consumers": [
+    "gufo"
+  ],
+  "checks": [
+    "eval_regrade_test"
+  ],
+  "compiled_elsewhere": [
+    {
+      "target": "gufo",
+      "source": "src/eval/http_client.cpp",
+      "reason": "gufo_eval stays the offline dataset/extract/regrade library; the OpenAI-compatible client for `gufo eval --serve` belongs to the executable so the library keeps no socket dependency."
+    },
+    {
+      "target": "eval_http_client_test",
+      "source": "src/eval/http_client.cpp",
+      "reason": "The test drives the raw-socket client against a local listener and links nothing else from the eval tier."
+    }
+  ]
+}

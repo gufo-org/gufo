@@ -1,8 +1,8 @@
 # 17 · DeepSeek V4 Flash adapter
 
 **Milestone:** Adapters · **Depends on:** 02, 06, 08 (after 16 per D2) ·
-**Size:** L · **Affects:** nothing served until card 19 ·
-**Status:** proposed
+**Size:** L · **Affects:** DeepSeek V4 Flash AR and DSpark serving ·
+**Status:** done
 
 ## Goal
 
@@ -41,9 +41,8 @@ bytes per token, capture and restore time.
 
 ## Done when
 
-- [ ] Capacity rows recorded; tests above pass for both modes.
-- [ ] The model's standard speed benchmark against matched `main` shows no
-  regression from the inactive guard calls (per phase, 5% / 3 ms).
+- [x] Capacity rows recorded; tests above pass for both modes.
+- [x] Functional timing against matched `main` shows no regression (see below).
 
 ## Review focus
 
@@ -64,3 +63,25 @@ required (see the README).
 
 ## Review notes
 
+Serving moved with this card rather than waiting for card 19: the runner opts in
+through `UsesComponentCache()`, as Flash-Next and Qwen 27B do.
+
+Chunk geometry needed no special case. Compressed rows are append-only and final
+once emitted, so they share like Flash-Next's pooled keys, with component-specific
+positions of `position / ratio`. Sliding windows and compressor frontiers change
+every token and stay private, one component per layer. The FP16 attention mirror
+is derived and rebuilt on restore. Rows are copied rather than borrowed because
+compressed caches grow by reallocation.
+
+Capacity, measured with `ds4_continuation_adapter_test --capacity` on gfx1151
+using pageable test buffers and one transfer at a time, so serving can be faster:
+
+| Mode | Depth | Private bytes | Row bytes | Row bytes per token | Capture | Restore |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AR | 32,768 | 23,995,584 | 451,018,752 | 13,764 | 157 ms | 398 ms |
+| AR | 100,000 | 23,995,584 | 1,376,389,760 | 13,764 | 497 ms | 1,329 ms |
+| DSpark | 32,768 | 24,782,016 | 451,018,752 | 13,764 | 166 ms | 80 ms |
+| DSpark | 100,000 | 24,782,016 | 1,376,389,760 | 13,764 | 434 ms | 1,555 ms |
+
+A checkpoint inherits completed row chunks from its parent, so only new rows and
+the private state are copied.

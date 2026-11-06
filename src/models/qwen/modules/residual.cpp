@@ -3,7 +3,7 @@
 #include <cstddef>
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/ops/norm_residual.hpp"
+#include "src/families/qwen/kernels/ops/norm_residual.hpp"
 #endif
 
 namespace gufo::models::qwen {

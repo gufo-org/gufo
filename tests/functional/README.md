@@ -50,9 +50,9 @@ VoiceDesign model (fixed English voice instructions). Neither requires a clone.
 
 | Suite | Required checks |
 | --- | --- |
-| Embedding | The default three-request smoke check covers text, image, video, mixed video/audio/image input, malformed-video rejection and recovery. `--embedding-suite full` retains the text, image, audio and video HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, invalid inputs, cancellation and recovery |
-| ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, rejected options, malformed WAV recovery, stream cancellation and subsequent valid inference |
-| TTS | Voice discovery, valid non-silent 24-kHz mono PCM16 audio, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, rejected inputs, stream cancellation and subsequent valid inference |
+| Embedding | The default three-request smoke check covers text, image, video, mixed video/audio/image input, malformed-video rejection and recovery. `--embedding-suite full` retains the text, image, audio and video HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, ignored unknown members, llama.cpp `content`/`embd_normalize`, invalid inputs, cancellation and recovery |
+| ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, ignored unknown fields, rejected options (including timestamps and logprobs), malformed WAV recovery, stream cancellation and subsequent valid inference |
+| TTS | Voice discovery, valid non-silent 24-kHz mono PCM16 audio, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, ignored unknown fields, rejected inputs, stream cancellation and subsequent valid inference |
 
 Audio cancellation must appear against the cancelled request's ID in the server
 log; a client closing a response alone does not satisfy the assertion. SSE must
@@ -138,6 +138,21 @@ Add `--deep-peers` before `--` and serve with `--sessions 4` to fill the other
 slots with duplicate deep conversations. This checks that a short request
 after cancellation can reuse a redundant slot while another live copy retains
 the generated frontier. It also rejects the roughly 280 ms restore stall.
+
+Flash-Next prompt restores have a focused alignment check. Four conversations
+place the end of the final user turn on each residue modulo four past the
+sparse budget. Each continuation restores that boundary from RAM, and from
+`--cache-disk` after a restart, and must equal the same request on a fresh
+server byte for byte, with every restore on a multiple of four:
+
+```sh
+nix develop -c python3 tests/functional/cache_alignment_qwen38.py \
+  --output /tmp/cache-alignment -- \
+  /path/to/production/gufo serve llm --model /path/to/flash-next.gguf
+```
+
+Add `--mtp-model /path/to/mtp.gguf` before `--` for the MTP mode. The test owns
+its servers, cache directory and loopback listener.
 
 Flash-Next MTP and Qwen27B DFlash2 prompt lookup have a focused runner. It
 requires actual accepted copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
@@ -464,16 +479,10 @@ must perform zero drafts. `state-edges` requires actual draft execution when
 enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
 draft limit for this suite. Audio and image/video generation have separate tests.
 
-Card 01's new cache workloads stay outside routine functional runs until the
-new cache lands in card 19. Both `run.py --suite all` and
-`openai_sdk.py --suite all` exclude `cache-compaction`, `cache-transforms`,
-`cache-pressure` and `cache-messages-loop`. The disk lifecycle runner is
-standalone and is never invoked by `all`. Existing functional suites and the
-passing CPU workload/gate checks remain active. Explicitly selecting a new
-workload still runs its strict assertions and may fail on the legacy cache;
-use that selection only to record a baseline or develop the new cache.
-Card 19 enables these workloads in routine qualification with their required
-RAM, disk and restart settings once their contracts pass.
+Both `run.py --suite all` and `openai_sdk.py --suite all` exclude
+`cache-compaction`, `cache-transforms`, `cache-pressure` and
+`cache-messages-loop`, which need their own RAM, disk and restart settings.
+The disk lifecycle runner is standalone and is never invoked by `all`.
 
 | Suite | Checks |
 | --- | --- |
@@ -521,7 +530,7 @@ RAM, disk and restart settings once their contracts pass.
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
 | `cache-depth` | Histories beyond 16K, concurrent branches from rewritten replies, a side conversation, resume, unchanged retries and exact uncached controls; use context 32768 and also check sessions 1 |
-| `cache-stalls` | Flash-Next AR/MTP: sequential coding/planning prompts with 6.4K/25.6K/55.6K/56K padding and three repeats each, thinking on and tg128. Checks prefix reuse and exact fully cached replay; retains each request's PP/TG and maximum-gap timing gate. Public equivalents of #632, whose prompts were not attached. Use sessions 2/context 262144 to match its capacity; minimum context 65536. Explicit selection only, outside `all` |
+| `cache-stalls` | Flash-Next AR/MTP: sequential coding/planning prompts with 6.4K/25.6K/55.6K/56K padding and three repeats each, thinking on and tg128. Checks prefix reuse and exact fully cached replay; retains each request's PP/TG and maximum-gap timing gate. Public equivalents of #632, whose prompts were not attached. Devlab runs sessions 2/context 131072: two 262144-token sessions exceed its 100 GiB device at load. Pass context 262144 locally to match #632's capacity; minimum context 65536. Explicit selection only, outside `all` |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 | `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
 | `cache-bridge` | A chat bridge sends each user message with metadata its history copy drops, under a full RAM budget with small unrelated requests between turns: from the third turn on, reuse reaches the user turn two back; compare answers with uncached controls. Not in `all` |
@@ -738,7 +747,7 @@ request. The seed is a genuine model reply; tool calls/results and the summary
 are deterministic client-authored fixtures. This covers compaction mechanics,
 not a real client's summary generation or retention under RAM/disk pressure.
 The [card 01 results](../../docs/cache-redesign/cards/01-functional-coverage.md#results)
-record all scenario families, including failures on the legacy cache.
+record all scenario families.
 
 Run `cache-transforms` with a roomy RAM budget in its own invocation. Its
 retried prompts end with a user turn after a tool result, and Qwen templates

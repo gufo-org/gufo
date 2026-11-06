@@ -1,4 +1,4 @@
-#include "src/models/embedding_gemma2/tensor.hpp"
+#include "tensor.hpp"
 
 #include <limits>
 #include <utility>

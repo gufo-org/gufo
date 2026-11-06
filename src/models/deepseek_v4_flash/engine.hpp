@@ -1,16 +1,17 @@
 #ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
 #define GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "src/core/session_mode.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/runtime/model.h"
 
@@ -24,6 +25,7 @@ struct ModelOptions {
 
 class Session;
 class SessionSnapshot;
+class ContinuationAdapter;
 
 struct SessionBatchItem {
   Session* session = nullptr;
@@ -91,7 +93,10 @@ private:
 
   ds4_engine* engine_ = nullptr;
   ModelOptions options_;
+  /// Vocabulary IDs indexed by ControlToken, resolved at load.
+  std::array<int, kControlTokenCount> control_tokens_{};
 
+  friend class ContinuationAdapter;
   friend class Session;
 };
 
@@ -149,6 +154,9 @@ public:
     bool operator==(const DsparkStats&) const = default;
   };
   [[nodiscard]] DsparkStats DsparkStatistics() const;
+  /// Valid until the next Evaluate, Sync, step, or restore on this session.
+  [[nodiscard]] std::span<const float> Logits(
+      std::string* error_msg = nullptr) const;
   [[nodiscard]] std::vector<float> CopyLogits(
       std::string* error_msg = nullptr) const;
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
@@ -172,6 +180,7 @@ private:
   ds4_session* session_ = nullptr;
   CancellationCheck is_cancelled_;
 
+  friend class ContinuationAdapter;
   friend class Model;
 };
 

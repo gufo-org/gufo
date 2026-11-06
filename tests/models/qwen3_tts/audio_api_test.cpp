@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -10,10 +11,9 @@
 #include <string>
 #include <utility>
 
-#include "src/cli/serve/audio_stream.hpp"
-#include "src/cli/serve/audio_tts_api.hpp"
-#include "src/cli/serve/tts_service.hpp"
-#include "src/models/qwen3_tts/text_stream.hpp"
+#include "src/cli/serve/text_stream.hpp"
+#include "src/models/qwen3_tts/synthesis.hpp"
+#include "tests/support/model_api_test_support.hpp"
 
 namespace {
 
@@ -82,7 +82,7 @@ TtsService MakeVoiceDesignService(FakeRunner* runner) {
   return TtsService(TtsServiceOptions{
       .model_root = {},
       .validate_model = false,
-      .variant = qwen3_tts::ModelVariant::kVoiceDesign,
+      .variant = gufo::ext::TtsVariant::kVoiceDesign,
       .model_id = {},
       .voices = {},
       .runner =
@@ -98,7 +98,7 @@ TtsService MakeBaseService(FakeRunner* runner) {
   return TtsService(TtsServiceOptions{
       .model_root = {},
       .validate_model = false,
-      .variant = qwen3_tts::ModelVariant::kBase,
+      .variant = gufo::ext::TtsVariant::kBase,
       .model_id = {},
       .voices = {},
       .runner =
@@ -277,12 +277,12 @@ void TestStreaming() {
   const std::string text = "Value 3.14 is fine. Next phrase! Then 中文。";
   std::string pending = text;
   const auto expected =
-      qwen3_tts::TakeSpeechSegments(&pending, "sentence", true);
+      gufo::server::TakeSpeechSegments(&pending, "sentence", true);
   for (std::size_t split = 0; split <= text.size(); ++split) {
     pending = text.substr(0, split);
-    auto actual = qwen3_tts::TakeSpeechSegments(&pending, "sentence", false);
+    auto actual = gufo::server::TakeSpeechSegments(&pending, "sentence", false);
     pending += text.substr(split);
-    auto tail = qwen3_tts::TakeSpeechSegments(&pending, "sentence", true);
+    auto tail = gufo::server::TakeSpeechSegments(&pending, "sentence", true);
     actual.insert(actual.end(), tail.begin(), tail.end());
     Check(actual == expected,
           "text splitting is independent of packet boundaries");
@@ -292,14 +292,15 @@ void TestStreaming() {
 void TestQueuedCancellation() {
   std::binary_semaphore entered{0}, release{0};
   std::atomic<int> calls{0};
-  TtsService service(
-      TtsServiceOptions{.validate_model = false,
-                        .runner = [&](const auto&, const auto&, auto*, auto*) {
-                          ++calls;
-                          entered.release();
-                          release.acquire();
-                          return true;
-                        }});
+  TtsService service(TtsServiceOptions{
+      .validate_model = false,
+      .runner = [&](const auto&, const auto&, auto* result, auto*) {
+        ++calls;
+        entered.release();
+        release.acquire();
+        result->sample_rate = 24000;
+        return true;
+      }});
   auto active = std::async(std::launch::async, [&] {
     qwen3_tts::SynthesisResult output;
     std::string error;
@@ -350,12 +351,13 @@ void TestValidationAndVoices() {
              R"({"model":"qwen3-tts","input":"x","voice":"vivian","seed":1.5})")
                 .status == 400,
         "fractional seed fails closed");
+  Check(runner.calls == 0, "invalid requests never invoke inference");
   Check(
       Send(service, "POST", "/v1/audio/speech",
            R"({"model":"qwen3-tts","input":"x","voice":"vivian","typo":true})")
-              .status == 400,
-      "unknown fields fail closed");
-  Check(runner.calls == 0, "invalid requests never invoke inference");
+                  .status == 200 &&
+          runner.calls == 1,
+      "unknown fields are ignored");
 }
 
 void TestVoiceDesignContract() {
@@ -472,6 +474,302 @@ void TestInvalidWaveform() {
   }
 }
 
+void TestSampleRateAndDuration() {
+  struct CustomRateRunner final : gufo::ext::TtsRunner {
+    explicit CustomRateRunner(std::uint32_t rate) : rate_(rate) {}
+    bool Synthesize(const gufo::ext::SynthesisRequest& request,
+                    const gufo::ext::CancellationCheck&,
+                    gufo::ext::SynthesisResult* result, std::string*) override {
+      result->sample_rate = rate_;
+      result->samples.assign(22050, 0.1F);
+      return !request.on_audio || request.on_audio(result->samples);
+    }
+    std::vector<std::string> Voices() const override { return {"default"}; }
+    std::uint32_t SampleRate() const override { return rate_; }
+    std::string ModelId() const override { return "custom-rate-tts"; }
+    std::uint32_t rate_;
+  };
+  static std::uint32_t provider_rate = 44100;
+  gufo::ext::RegisterTtsProvider({
+      .id = "test-custom-rate-provider",
+      .probe =
+          [](std::string_view root) {
+            return root == "/virtual/custom-rate-tts";
+          },
+      .resolve = [](std::string_view, std::string*) { return true; },
+      .create = [](const std::string&, std::size_t,
+                   std::string*) -> std::unique_ptr<gufo::ext::TtsRunner> {
+        return std::make_unique<CustomRateRunner>(provider_rate);
+      },
+  });
+  {
+    TtsService from_provider(TtsServiceOptions{
+        .model_root = "/virtual/custom-rate-tts",
+        .validate_model = true,
+    });
+    Check(from_provider.ready() && from_provider.sample_rate() == 44100 &&
+              from_provider.model_id() == "custom-rate-tts",
+          "provider TtsRunner::SampleRate() populates service sample_rate");
+  }
+  for (const std::uint32_t bad_rate : {0U, 192001U}) {
+    provider_rate = bad_rate;
+    TtsService invalid_provider(TtsServiceOptions{
+        .model_root = "/virtual/custom-rate-tts",
+        .validate_model = true,
+    });
+    Check(!invalid_provider.ready(),
+          "invalid TtsRunner::SampleRate() rejected at startup");
+  }
+
+  for (const std::uint32_t bad_rate : {0U, 192001U}) {
+    TtsService invalid(TtsServiceOptions{
+        .validate_model = false,
+        .sample_rate = bad_rate,
+        .voices = {"vivian"},
+        .runner = [](const auto&, const auto&, auto*, auto*) { return true; },
+    });
+    Check(!invalid.ready(), "invalid output sample rate rejected at startup");
+    qwen3_tts::SynthesisResult out;
+    std::string error;
+    Check(!invalid.Synthesize({}, {}, &out, &error) && !error.empty(),
+          "unready service rejects synthesis");
+  }
+
+  for (const auto& [rate, half_sec_samples] :
+       {std::pair{24000U, std::size_t{12000}},
+        std::pair{44100U, std::size_t{22050}}}) {
+    TtsService service(TtsServiceOptions{
+        .validate_model = false,
+        .sample_rate = rate,
+        .model_id = "test-tts",
+        .voices = {"default"},
+        .runner =
+            [rate, half_sec_samples](const auto& request, const auto&,
+                                     auto* result, auto*) {
+              result->sample_rate = rate;
+              result->code_groups = 10;
+              result->codes.resize(100);
+              result->samples.assign(half_sec_samples, 0.25F);
+              return !request.on_audio || request.on_audio(result->samples);
+            },
+    });
+    Check(service.ready() && service.sample_rate() == rate,
+          "custom sample rate service is ready");
+
+    const auto wav =
+        Send(service, "POST", "/v1/audio/speech",
+             R"({"model":"test-tts","input":"half second","voice":"default"})");
+    Check(wav.status == 200 &&
+              wav.log_details.find("audio_ms=500") != std::string::npos,
+          "buffered WAV duration uses exact sample rate");
+    std::uint32_t wav_rate = 0;
+    std::memcpy(&wav_rate, wav.body.data() + 24, sizeof(wav_rate));
+    Check(wav_rate == rate, "WAV header carries provider sample rate");
+
+    for (const auto format : {"audio", "sse"}) {
+      auto stream = Send(
+          service, "POST", "/v1/audio/speech",
+          std::string(
+              R"({"model":"test-tts","input":"half second","voice":"default","response_format":"pcm","stream_format":")") +
+              format + "\"}");
+      std::string payload;
+      stream.streaming_body([&](std::string_view bytes) {
+        payload.append(bytes);
+        return true;
+      });
+      Check(stream.stream_log->error_code.empty() &&
+                stream.stream_log->details.find("audio_ms=500") !=
+                    std::string::npos,
+            "streaming duration uses exact provider sample rate");
+    }
+  }
+
+  TtsService mismatched(TtsServiceOptions{
+      .validate_model = false,
+      .sample_rate = 44100,
+      .model_id = "test-tts",
+      .voices = {"default"},
+      .runner =
+          [](const auto& request, const auto&, auto* result, auto*) {
+            result->sample_rate = 24000;
+            result->samples = {0.0F, 0.25F};
+            return !request.on_audio || request.on_audio(result->samples);
+          },
+  });
+  const auto bad_wav =
+      Send(mismatched, "POST", "/v1/audio/speech",
+           R"({"model":"test-tts","input":"x","voice":"default"})");
+  Check(bad_wav.status == 500 &&
+            bad_wav.body.find("invalid_audio") != std::string::npos,
+        "mismatched result sample rate fails closed for buffered WAV");
+  for (const auto format : {"audio", "sse"}) {
+    auto stream = Send(
+        mismatched, "POST", "/v1/audio/speech",
+        std::string(
+            R"({"model":"test-tts","input":"x","voice":"default","response_format":"pcm","stream_format":")") +
+            format + "\"}");
+    std::string body;
+    stream.streaming_body([&](std::string_view bytes) {
+      body.append(bytes);
+      return true;
+    });
+    Check(stream.stream_log->error_code == "invalid_audio",
+          "mismatched result sample rate marks streaming log as invalid_audio");
+    if (format == std::string_view("sse")) {
+      Check(
+          body.find("event: error") != std::string::npos &&
+              body.find("speech.audio.done") == std::string::npos,
+          "SSE reports an error instead of speech.audio.done on rate mismatch");
+    }
+  }
+}
+
+void TestConditioningCapabilities() {
+  constexpr std::string_view kReferenceWav =
+      "UklGRiwAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YQgAAAAAAOgD"
+      "GPwAAA==";
+
+  for (const auto variant : {gufo::ext::TtsVariant::kCustomVoice,
+                             gufo::ext::TtsVariant::kVoiceDesign}) {
+    FakeRunner runner;
+    TtsService rejected(TtsServiceOptions{
+        .validate_model = false,
+        .variant = variant,
+        .voices = {"vivian"},
+        .voice_presets = {{"preset",
+                           {.reference_audio = {.sample_rate = 24000,
+                                                .channels = 1,
+                                                .samples = {0.1F}},
+                            .reference_text = "hi"}}},
+        .runner = [&](const auto&, const auto&, auto*, auto*) { return true; },
+    });
+    Check(!rejected.ready(),
+          "startup rejects voice presets when reference_presets is false");
+  }
+
+  for (const auto& bad_cond : {
+           gufo::ext::TtsConditioningCapabilities{
+               .unconditioned = false,
+               .require_voice = false,
+               .default_voice = {},
+               .reference_audio = gufo::ext::TtsConditioningMode::kUnsupported,
+               .reference_presets = false,
+               .instructions = gufo::ext::TtsConditioningMode::kOptional,
+           },
+           gufo::ext::TtsConditioningCapabilities{
+               .unconditioned = true,
+               .require_voice = false,
+               .default_voice = "default",
+               .reference_audio = gufo::ext::TtsConditioningMode::kRequired,
+               .reference_presets = false,
+               .instructions = gufo::ext::TtsConditioningMode::kOptional,
+           },
+       }) {
+    TtsService invalid(TtsServiceOptions{
+        .validate_model = false,
+        .conditioning = bad_cond,
+        .voices = {"default"},
+        .runner = [](const auto&, const auto&, auto*, auto*) { return true; },
+    });
+    Check(!invalid.ready(),
+          "contradictory conditioning capabilities rejected at startup");
+  }
+
+  FakeRunner runner;
+  TtsService hybrid(TtsServiceOptions{
+      .validate_model = false,
+      .variant = gufo::ext::TtsVariant::kBase,
+      .conditioning =
+          gufo::ext::TtsConditioningCapabilities{
+              .unconditioned = true,
+              .require_voice = false,
+              .default_voice = "default",
+              .reference_audio = gufo::ext::TtsConditioningMode::kOptional,
+              .reference_presets = true,
+              .instructions = gufo::ext::TtsConditioningMode::kUnsupported,
+          },
+      .model_id = "fish-drama-3",
+      .voices = {"default", "voice-clone"},
+      .voice_presets = {{"aaa_preset",
+                         {.reference_audio = {.sample_rate = 24000,
+                                              .channels = 1,
+                                              .samples = {0.25F, -0.25F}},
+                          .reference_text = "Preset transcript.",
+                          .speaker_embedding_only = false,
+                          .language = "italian"}}},
+      .runner =
+          [&runner](const qwen3_tts::SynthesisRequest& request,
+                    const qwen3_tts::CancellationCheck& cancelled,
+                    qwen3_tts::SynthesisResult* result, std::string* error) {
+            return runner.Run(request, cancelled, result, error);
+          },
+  });
+  Check(hybrid.ready(), "hybrid conditioning service with presets is ready");
+
+  const auto unconditioned =
+      Send(hybrid, "POST", "/v1/audio/speech",
+           R"({"model":"fish-drama-3","input":"Unconditioned hello."})");
+  Check(
+      unconditioned.status == 200 && runner.calls == 1 &&
+          runner.latest.speaker == "default" &&
+          runner.latest.reference_audio.samples.empty() &&
+          runner.latest.reference_text.empty(),
+      "hybrid runner synthesizes without reference audio using default_voice");
+
+  const auto cloned = Send(
+      hybrid, "POST", "/v1/audio/speech",
+      std::string(
+          R"({"model":"fish-drama-3","input":"Cloned hello.","voice":"voice-clone","reference_audio":")") +
+          std::string(kReferenceWav) +
+          R"(","reference_text":"Reference phrase."})");
+  Check(cloned.status == 200 && runner.calls == 2 &&
+            runner.latest.speaker == "voice-clone" &&
+            runner.latest.reference_audio.samples.size() == 4 &&
+            runner.latest.reference_text == "Reference phrase.",
+        "hybrid runner accepts explicit per-request reference cloning");
+
+  const auto preset = Send(
+      hybrid, "POST", "/v1/audio/speech",
+      R"({"model":"fish-drama-3","input":"Preset hello.","voice":"aaa_preset"})");
+  Check(
+      preset.status == 200 && runner.calls == 3 &&
+          runner.latest.speaker == "aaa_preset" &&
+          runner.latest.reference_audio.samples.size() == 2 &&
+          runner.latest.reference_text == "Preset transcript." &&
+          runner.latest.language == "italian",
+      "hybrid runner applies registered voice preset and its default language");
+
+  Check(
+      Send(
+          hybrid, "POST", "/v1/audio/speech",
+          std::string(
+              R"({"model":"fish-drama-3","input":"x","voice":"aaa_preset","reference_audio":")") +
+              std::string(kReferenceWav) + R"(","reference_text":"conflict"})")
+              .status == 400,
+      "preset rejects conflicting per-request reference audio");
+  Check(
+      Send(hybrid, "POST", "/v1/audio/speech",
+           R"({"model":"fish-drama-3","input":"x","reference_text":"orphan"})")
+              .status == 400,
+      "orphan reference_text without reference_audio fails closed");
+  Check(Send(hybrid, "POST", "/v1/audio/speech",
+             std::string(
+                 R"({"model":"fish-drama-3","input":"x","reference_audio":")") +
+                 std::string(kReferenceWav) + R"("})")
+                .status == 400,
+        "ICL reference_audio without reference_text fails closed");
+  Check(
+      Send(
+          hybrid, "POST", "/v1/audio/speech",
+          R"({"model":"fish-drama-3","input":"x","reference_audio":"not-wav","reference_text":"hi"})")
+              .status == 400,
+      "malformed reference_audio fails closed");
+  Check(Send(hybrid, "POST", "/v1/audio/speech",
+             R"({"model":"fish-drama-3","input":"x","instructions":"whisper"})")
+                .status == 400,
+        "unsupported instructions field fails closed");
+}
+
 }  // namespace
 
 int main() {
@@ -483,6 +781,8 @@ int main() {
   TestVoiceDesignContract();
   TestBaseContract();
   TestInvalidWaveform();
+  TestSampleRateAndDuration();
+  TestConditioningCapabilities();
   std::cout << "PASS qwen3_tts_audio_api_test\n";
   return 0;
 }

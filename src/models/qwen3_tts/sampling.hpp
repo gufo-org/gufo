@@ -6,20 +6,11 @@
 #include <random>
 #include <vector>
 
+#include "src/ext/tts.hpp"
+
 namespace gufo::models::qwen3_tts {
 
-struct SamplingOptions {
-  bool sample{true};
-  std::uint32_t seed{42};
-  std::size_t top_k{50};
-  float temperature{0.9F};
-  float top_p{1.0F};
-  bool predictor_sample{true};
-  std::size_t predictor_top_k{50};
-  float predictor_temperature{0.9F};
-  float predictor_top_p{1.0F};
-  float repetition_penalty{1.05F};
-};
+using SamplingOptions = ext::TtsSamplingOptions;
 
 struct TokenScore {
   std::uint32_t token;

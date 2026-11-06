@@ -615,6 +615,9 @@ void ds4_tokenize_text(ds4_engine *engine,
     ds4_vocab_tokenize(engine->vocab, text, tokens);
 }
 
+/* Raw prompts only. Chat prompts keep caller text out of this table through
+ * deepseek_v4_flash::SplitControlTokens, which holds the same spellings in the
+ * same order; Model::Load checks that both agree. */
 static bool special_token_at(const ds4_vocab *vocab, const char *p, int *token, size_t *len) {
     struct special {
         const char *text;

@@ -13,20 +13,16 @@
       "gpuDriver": "amdgpu",
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
-      "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "kernelRelease": "7.2.9-200.fc44.x86_64",
+      "memoryTotalBytes": 134297587712,
       "memoryType": "LPDDR5X (Unified)",
-      "rocmVersion": "7.2.3",
+      "rocmVersion": "10.1.0",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "6a00ba111e0ba4f715799d4fb9dd494ab94a336e71a45179b26e52c2d1b6a917",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-23",
-  "measurement_window_utc": [
-    "2026-09-23",
-    "2026-09-24"
-  ],
+  "measuredOn": "2026-10-30",
   "mode": null,
   "model": {
     "id": "DeepSeek-V4-Flash",
@@ -34,167 +30,159 @@
   },
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
-    "synthetic text: 1.143 tokens/word, template overhead 4 tokens"
+    "synthetic text: 1.138 tokens/word, template overhead 4 tokens"
   ],
   "referenceName": "antirez/ds4",
   "rows": {
     "0": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 0,
-          "completion_sha256": "5c68d0345d10a072cb0e25d37689205e84b07d4a5fe3d10927b327ac9ba0890a",
+          "completion_sha256": "181c2fb99d1eb6a966af504c061b27156eb0b24ec7ed384a7503ad43dceb7e39",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2035
         }
       ],
-      "pp": 484.62,
+      "pp": 469.49,
       "pp_sd": null,
       "samples": 1,
-      "tg": 16.28,
+      "tg": 17.65,
       "tg_sd": null,
       "workload": "prose"
     },
     "12288": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 12241,
-          "completion_sha256": "a12e2e45d43a23d3cdbddb964708269cf18955c393fdc47c208857b7d34487d3",
+          "completion_sha256": "8f8c8261b6ef191320c4b8c462bd61d0c11fb1c0135235ebc5dd59c4b8abdedd",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2042
         }
       ],
-      "pp": 393.95,
+      "pp": 389.89,
       "pp_sd": null,
       "samples": 1,
-      "tg": 15.64,
+      "tg": 17.34,
       "tg_sd": null,
       "workload": "prose"
     },
     "131072": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 131248,
-          "completion_sha256": "c1dda723760ecbb43d6c2b21c86a90e98a9b1d962b9669397eac48426b0b917c",
+          "completion_sha256": "417fa08bf3a34006d10334adcfa3bb7b0dab638a2bb8faa1866746bcd5fb2b3f",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2052
         }
       ],
-      "pp": 279.95,
+      "pp": 287.52,
       "pp_sd": null,
       "samples": 1,
-      "tg": 12.04,
+      "tg": 16.04,
       "tg_sd": null,
       "workload": "prose"
     },
     "16384": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 16364,
-          "completion_sha256": "d2afc8c2e9ebf87c60f581843802ef4d6c6aca53bab863c670430c2f661da1d1",
+          "completion_sha256": "3b54652ac4f9ef83fcbfdb71e346b51b36d9eb0727a112b720c6aa1b43e17a79",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2054
         }
       ],
-      "pp": 358.41,
+      "pp": 395.96,
       "pp_sd": null,
       "samples": 1,
-      "tg": 15.5,
+      "tg": 17.29,
       "tg_sd": null,
       "workload": "prose"
     },
     "32768": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 32798,
-          "completion_sha256": "8221920d34d610692373895963d9021228dcdffbbfdc6619315c5c928e311b30",
+          "completion_sha256": "d0b5bd85647749bb89a4f5db087973aea70272727aa3b2192ed8a300bf86c956",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2035
         }
       ],
-      "pp": 370.1,
+      "pp": 405.8,
       "pp_sd": null,
       "samples": 1,
-      "tg": 14.87,
+      "tg": 17.03,
       "tg_sd": null,
       "workload": "prose"
     },
     "4096": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 4116,
-          "completion_sha256": "ceb9a340750d2e09c7fb1b1b11533983378235dd1a9d9371a63b57c1cb9e6768",
+          "completion_sha256": "f02e053b76720f1649aa8295a71ef20f32cd2115b9d0b3bfc2e0bfe43fba6796",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2040
         }
       ],
-      "pp": 399.75,
+      "pp": 443.83,
       "pp_sd": null,
       "samples": 1,
-      "tg": 15.97,
+      "tg": 17.44,
       "tg_sd": null,
       "workload": "prose"
     },
     "65536": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 52501 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
-          "cache_n": 65293,
-          "completion_sha256": "f79f9bb227088507106ffc656c8d6b3c077950d0784e609e51a98d643151b72f",
+          "cache_n": 65569,
+          "completion_sha256": "00078df2614bd54ada190716914e191c46a48ccca6eeff9de766581ee893152d",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
-          "prompt_n": 2047
+          "prompt_n": 2056
         }
       ],
-      "pp": 321.28,
+      "pp": 354.84,
       "pp_sd": null,
       "samples": 1,
-      "tg": 13.95,
+      "tg": 16.81,
       "tg_sd": null,
       "workload": "story"
     },
     "8192": {
-      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
-      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 59163 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 8177,
-          "completion_sha256": "ef4ee36cd48f152bf267f3f5147d54732e7b98c9aa144d01f2b6d27975b5e283",
+          "completion_sha256": "410c9f0e90e48c0b20636691448e3418b0fd6ffea5378ff15b7fbd87416579e8",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2028
         }
       ],
-      "pp": 368.17,
+      "pp": 405.71,
       "pp_sd": null,
       "samples": 1,
-      "tg": 15.82,
+      "tg": 17.39,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -205,7 +193,7 @@
       "gufo",
       "serve",
       "--port",
-      "52501",
+      "59163",
       "--sessions",
       "1",
       "llm",
@@ -223,8 +211,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+    "dirty": false,
+    "revision": "07206ea40c4aadc5ea7da081073bf10a570cb1af"
   },
   "table": "single-ar",
   "target": "gufo"

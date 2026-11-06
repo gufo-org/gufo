@@ -93,8 +93,8 @@ bool ResolveRopeScaling(std::uint32_t requested, std::uint32_t native,
   const std::string native_text = std::to_string(native);
   if (requested > native && !enable_yarn) {
     return fail("context above the native " + native_text +
-                " tokens needs static YaRN, which applies to every "
-                "request; pass --enable-yarn (requested " +
+                " tokens needs YaRN, which scales each session that grows "
+                "past it; pass --enable-yarn (requested " +
                 std::to_string(requested) + ")");
   }
   if (requested <= native && enable_yarn) {

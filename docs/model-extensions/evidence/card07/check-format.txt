@@ -1,0 +1,6 @@
+G8 formatting: nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+  first run EXIT=1: 39 files needed clang-format (all of them files this card had
+  already modified; none outside the card diff)
+  --fix applied, re-run: PASS: Checked 730 C++ files, EXIT=0
+  Files newly touched by --fix beyond the pre-existing card diff: none.
+Final sweep after all evidence was written: PASS: Checked 730 C++ files, EXIT=0.

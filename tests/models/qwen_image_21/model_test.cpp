@@ -5,10 +5,10 @@
 #include <cmath>
 #include <iostream>
 
-#include "src/cli/serve/http_server.hpp"
-#include "src/cli/serve/image_api.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen_image_21/tokenizer.hpp"
+#include "src/models/qwen_image_21/weights.hpp"
+#include "tests/support/model_api_test_support.hpp"
 
 int main(int argc, char** argv) {
   using namespace gufo::models::qwen_image_21;
@@ -87,9 +87,65 @@ int main(int argc, char** argv) {
   assert(std::abs(schedule[39] - 0.02F) < 1e-6F);
   for (std::size_t i = 1; i < schedule.size(); ++i)
     assert(std::isfinite(schedule[i]) && schedule[i] < schedule[i - 1]);
-  ValidateRequest(Request{.prompt = "a red cube"});
-  for (const auto invalid :
-       {Request{.width = 31}, Request{.steps = 1}, Request{.height = 8192}}) {
+  // Independent checkpoint metadata, not a call to the native schedule builder.
+  const auto turbo_index = gufo::json::parse(R"({"sample_sigmas":
+    [1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568]})");
+  const auto turbo_scheduler = gufo::json::parse(R"({
+    "_class_name":"FlowMatchEulerDiscreteScheduler",
+    "base_image_seq_len":256,"max_image_seq_len":8192,
+    "base_shift":0.5,"max_shift":0.9,"num_train_timesteps":1000,
+    "time_shift_type":"exponential","shift":1.0,"shift_terminal":null,
+    "use_dynamic_shifting":false,"invert_sigmas":false,
+    "stochastic_sampling":false,"use_beta_sigmas":false,
+    "use_exponential_sigmas":false,"use_karras_sigmas":false})");
+  const auto turbo = ReadSamplingConfig(turbo_index, turbo_scheduler);
+  const std::vector<float> expected_turbo{1,         0.978453F, 0.95418F,
+                                          0.926626F, 0.89508F,  0.845148F,
+                                          0.704534F, 0.414568F, 0};
+  assert(turbo.IsTurbo() && turbo.DefaultSteps() == 8);
+  assert(turbo.ResolveSteps(0) == 8 && turbo.ResolveSteps(8) == 8);
+  assert(turbo.Sigmas(0, 256) == expected_turbo);
+  assert(turbo.Sigmas(8, 8160) == expected_turbo);
+  const SamplingConfig base;
+  assert(!base.IsTurbo() && base.ResolveSteps(0) == 40);
+  assert(base.Sigmas(0, 4096) == schedule);
+  auto base_scheduler = turbo_scheduler;
+  base_scheduler["use_dynamic_shifting"] = true;
+  base_scheduler["shift_terminal"] = 0.02;
+  assert(!ReadSamplingConfig(gufo::json::Value::object(), base_scheduler)
+              .IsTurbo());
+  const auto reject_config = [](const auto& index, const auto& scheduler) {
+    bool rejected = false;
+    try {
+      (void)ReadSamplingConfig(index, scheduler);
+    } catch (const std::runtime_error&) {
+      rejected = true;
+    }
+    assert(rejected);
+  };
+  reject_config(turbo_index, base_scheduler);
+  reject_config(gufo::json::Value::object(), turbo_scheduler);
+  for (const auto* sigmas :
+       {"[]", "[1,0.5]", "[1,1,0.9,0.8,0.7,0.6,0.5,0.4]",
+        "[1,0.9,0.8,0.7,0.6,0.5,0.4,0]", "[1,0.9,0.8,0.7,0.6,0.5,0.4,1e-100]",
+        "[1,0.9,0.8,0.7,0.6,0.5,0.4,\"x\"]"})
+    reject_config(
+        gufo::json::parse(std::string("{\"sample_sigmas\":") + sigmas + "}"),
+        turbo_scheduler);
+  for (const int steps : {2, 7, 9, 40, 100}) {
+    bool rejected = false;
+    try {
+      (void)turbo.ResolveSteps(steps);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+  ValidateRequest(Request{.prompt = "a red cube", .images = {}});
+  for (const auto& invalid :
+       {Request{.prompt = "", .images = {}, .width = 31},
+        Request{.prompt = "", .images = {}, .steps = 1},
+        Request{.prompt = "", .images = {}, .height = 8192}}) {
     bool rejected = false;
     try {
       ValidateRequest(invalid);
@@ -100,19 +156,22 @@ int main(int argc, char** argv) {
   }
   int calls = 0;
   gufo::server::ImageService service(
-      {}, "image-test", [&](const Request& request, const CancellationCheck&) {
+      {}, "image-test",
+      [&](const Request& request, const CancellationCheck&) {
         ++calls;
         assert(request.prompt == "a red cube");
         assert(request.width == 256 && request.height == 256);
         assert(request.seed == static_cast<std::uint64_t>(calls + 40));
-        return Result{.image = image};
-      });
+        return Result{.image = image, .metrics = {}};
+      },
+      {"image-alias"});
   gufo::server::HttpRequest http;
   http.method = "POST";
   http.path = "/v1/images/generations";
   http.headers = {{"Content-Type", "application/json"}};
   http.body =
-      R"({"model":"image-test","prompt":"a red cube","size":"256x256","n":2,"seed":41})";
+      R"({"model":"image-test","prompt":"a red cube","size":"256x256","n":2,"seed":41,"style":"vivid"})";
+  // Unknown members such as DALL-E 3's `style` are ignored.
   const auto response = gufo::server::HandleImageApiRequest(http, service);
   assert(response.status == 200 && calls == 2);
   const auto json = gufo::json::parse(response.body);
@@ -123,12 +182,19 @@ int main(int argc, char** argv) {
         R"({"prompt":"a red cube","n":0})",
         R"({"prompt":"a red cube","output_format":"webp"})",
         R"({"prompt":"a red cube","stream":true})",
-        R"({"prompt":"a red cube","size":"256x256junk"})",
-        R"({"prompt":"a red cube","unknown":true})"}) {
+        R"({"prompt":"a red cube","size":"256x256junk"})"}) {
     http.body = body;
     assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
   }
   http.body = R"({"prompt":"a red cube","model":"unknown"})";
+  assert(gufo::server::HandleImageApiRequest(http, service).status == 404);
+  // A repeated --served-model-name alias generates an image (#957).
+  http.body =
+      R"({"prompt":"a red cube","model":"image-alias","size":"256x256","seed":43})";
+  const auto aliased = gufo::server::HandleImageApiRequest(http, service);
+  assert(aliased.status == 200 && calls == 3);
+  assert(gufo::json::parse(aliased.body).find("data")->size() == 1);
+  http.body = R"({"prompt":"a red cube","model":"image-typo"})";
   assert(gufo::server::HandleImageApiRequest(http, service).status == 404);
   http.path = "/v1/images/edits";
   http.headers = {
@@ -142,13 +208,110 @@ int main(int argc, char** argv) {
   for (const auto& [name, value] : {std::pair{"model", "image-test"},
                                     {"prompt", "a red cube"},
                                     {"size", "256x256"},
-                                    {"seed", "43"}})
+                                    {"seed", "44"}})
     http.body += "\r\n--boundary\r\nContent-Disposition: form-data; name=\"" +
                  std::string(name) + "\"\r\n\r\n" + value;
   http.body += "\r\n--boundary--\r\n";
   assert(gufo::server::HandleImageApiRequest(http, service).status == 200 &&
-         calls == 3);
+         calls == 4);
   http.body.resize(http.body.size() - 8);
   assert(gufo::server::HandleImageApiRequest(http, service).status == 400);
+  int turbo_calls = 0;
+  std::vector<Request> turbo_requests;
+  gufo::server::ImageService turbo_service(
+      {}, "turbo-test", [&](const Request& request, const CancellationCheck&) {
+        // The runner owns checkpoint defaults and step validation.
+        auto resolved = request;
+        resolved.steps = turbo.ResolveSteps(request.steps);
+        assert(resolved.steps == 8);
+        turbo_requests.push_back(std::move(resolved));
+        ++turbo_calls;
+        return Result{image, {}};
+      });
+  http.path = "/v1/images/generations";
+  http.headers = {{"Content-Type", "application/json"}};
+  for (const auto* body : {R"({"prompt":"cube","size":"256x256"})",
+                           R"({"prompt":"cube","steps":8,"size":"256x256"})"}) {
+    http.body = body;
+    assert(gufo::server::HandleImageApiRequest(http, turbo_service).status ==
+           200);
+  }
+  assert(turbo_calls == 2);
+  for (const int steps : {0, 2, 7, 9, 40, 100}) {
+    http.body = "{\"prompt\":\"cube\",\"steps\":" + std::to_string(steps) + "}";
+    assert(gufo::server::HandleImageApiRequest(http, turbo_service).status ==
+           400);
+  }
+  http.path = "/v1/images/edits";
+  assert(gufo::server::HandleImageApiRequest(http, turbo_service).status ==
+         400);
+  assert(turbo_calls == 2);
+  // Editing shares the ordered-reference path, including RGBA, masks,
+  // background controls and independent outputs; only the schedule differs.
+  const auto edit_body = [&](const std::vector<Image>& inputs, int steps,
+                             const std::string& background, int count) {
+    std::string body;
+    for (const auto& input : inputs) {
+      const auto bytes = EncodePng(input);
+      body +=
+          "--boundary\r\nContent-Disposition: form-data; "
+          "name=\"image[]\"; filename=\"reference.png\"\r\n"
+          "Content-Type: image/png\r\n\r\n";
+      body.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+      body += "\r\n";
+    }
+    std::vector<std::pair<std::string, std::string>> fields{
+        {"model", "turbo-test"},
+        {"prompt", "edit image one using image two"},
+        {"size", "256x256"},
+        {"seed", "77"},
+        {"background", background},
+        {"n", std::to_string(count)}};
+    if (steps >= 0)
+      fields.emplace_back("steps", std::to_string(steps));
+    for (const auto& [name, value] : fields)
+      body += "--boundary\r\nContent-Disposition: form-data; name=\"" + name +
+              "\"\r\n\r\n" + value + "\r\n";
+    return body + "--boundary--\r\n";
+  };
+  http.headers = {{"Content-Type", "multipart/form-data; boundary=boundary"}};
+  Image mask{
+      2,
+      2,
+      {255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255}};
+  for (const int steps : {-1, 8}) {
+    http.body = edit_body({image, mask}, steps, "transparent", 2);
+    const auto edited =
+        gufo::server::HandleImageApiRequest(http, turbo_service);
+    assert(edited.status == 200);
+    assert(gufo::json::parse(edited.body).find("data")->size() == 2);
+    for (std::size_t i = turbo_requests.size() - 2; i < turbo_requests.size();
+         ++i) {
+      const auto& captured = turbo_requests[i];
+      assert(captured.steps == 8 && captured.images.size() == 2);
+      assert(captured.images[0].rgba == image.rgba);
+      assert(captured.images[1].rgba == mask.rgba);
+      assert(captured.seed == 77 + i % 2);
+      assert(captured.prompt.find("RGBA image with transparency") !=
+             std::string::npos);
+    }
+  }
+  http.body = edit_body(std::vector<Image>(10, image), 8, "opaque", 1);
+  assert(gufo::server::HandleImageApiRequest(http, turbo_service).status ==
+         200);
+  assert(turbo_requests.back().images.size() == 10);
+  const auto accepted = turbo_calls;
+  for (const int steps : {0, 7, 9, 40}) {
+    http.body = edit_body({image}, steps, "auto", 1);
+    assert(gufo::server::HandleImageApiRequest(http, turbo_service).status ==
+           400);
+  }
+  http.body = edit_body(std::vector<Image>(11, image), 8, "auto", 1);
+  assert(gufo::server::HandleImageApiRequest(http, turbo_service).status ==
+         400);
+  http.body = edit_body({}, 8, "auto", 1);
+  assert(gufo::server::HandleImageApiRequest(http, turbo_service).status ==
+         400);
+  assert(turbo_calls == accepted);
   std::cout << "Qwen-Image image and schedule contracts passed\n";
 }

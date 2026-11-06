@@ -17,6 +17,66 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  extension-contracts:
+    name: Check Windows extension contracts
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\vcpkg-archives
+          key: gufo-windows-extension-vcpkg-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-windows-extension-vcpkg-${{ hashFiles('vcpkg.json') }}-
+            gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-
+
+      # The fixture needs only OpenSSL, at the same baseline as the application.
+      # Do not install the full media stack or the HIP SDK for header checks.
+      - name: Prepare fixture dependencies
+        run: |
+          git clone --quiet https://github.com/microsoft/vcpkg.git C:\vcpkg-gufo
+          if ($LASTEXITCODE -ne 0) { throw 'cannot clone vcpkg' }
+          & C:\vcpkg-gufo\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'cannot bootstrap vcpkg' }
+          $manifest = Get-Content vcpkg.json -Raw | ConvertFrom-Json
+          $deps = "$env:RUNNER_TEMP\extension-deps"
+          New-Item -ItemType Directory -Force $deps | Out-Null
+          @{
+            name = 'gufo-extension-fixture'
+            'version-string' = '0'
+            'builtin-baseline' = $manifest.'builtin-baseline'
+            dependencies = @('openssl')
+          } | ConvertTo-Json | Set-Content "$deps\vcpkg.json"
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\vcpkg-archives" | Out-Null
+          "VCPKG_ROOT=C:\vcpkg-gufo" >> $env:GITHUB_ENV
+          "VCPKG_DEFAULT_BINARY_CACHE=$env:RUNNER_TEMP\vcpkg-archives" >> $env:GITHUB_ENV
+
+      - name: Configure standalone extension fixture
+        run: |
+          cmake -S tests/extensions/fixture -B build/windows-extensions -A x64 -T ClangCL `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg-gufo/scripts/buildsystems/vcpkg.cmake `
+            "-DVCPKG_MANIFEST_DIR=$env:RUNNER_TEMP/extension-deps" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-release -DGUFO_ENABLE_WARNINGS=OFF
+          if ($LASTEXITCODE -ne 0) { throw 'extension fixture configuration failed' }
+
+      - name: Build and run extension contracts
+        run: |
+          cmake --build build/windows-extensions --config RelWithDebInfo --parallel 4 `
+            --target extension_runtime_test extension_role_test ext_runtime_neutral_contracts_test
+          if ($LASTEXITCODE -ne 0) { throw 'extension fixture build failed' }
+          ctest --test-dir build/windows-extensions -C RelWithDebInfo --output-on-failure `
+            --no-tests=error --timeout 60 -R '^(extension_runtime_test|extension_role_test|ext_runtime_neutral_contracts_test)$'
+          if ($LASTEXITCODE -ne 0) { throw 'extension fixture tests failed' }
+
   build:
     name: Build
     uses: ./.github/workflows/windows-build.yml

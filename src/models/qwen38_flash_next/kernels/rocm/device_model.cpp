@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
+#include <gufo/ext/experimental/managed_alloc.hpp>
+#include <gufo/ext/experimental/weight_upload.hpp>
 #include <initializer_list>
 #include <utility>
+#include <vector>
 
-#include "src/core/hip/managed_alloc.hpp"
-#include "src/core/hip/weight_upload.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -114,10 +116,19 @@ struct Uploader {
   /// Uploads a narrow projection the quantized tier does not cover (the
   /// hyper-connection inject) as F32. A Q8_0 tensor is uploaded as is and
   /// expanded once the disk pipeline drains, so it runs the F32 kernels with
-  /// its dequantized values instead of quantizing their activations.
+  /// its dequantized values instead of quantizing their activations. A BF16
+  /// tensor is widened exactly on the host (see HcInjectUploadFor).
   DeviceTensor CopyF32(const TensorRef& t) {
-    if (t.empty() || !ok || t.type != core::GgmlType::kQ8_0) {
-      return Copy(t);
+    if (t.empty() || !ok) {
+      return {};
+    }
+    switch (HcInjectUploadFor(t.type)) {
+      case HcInjectUpload::kCopy:
+        return Copy(t);
+      case HcInjectUpload::kWidenBF16:
+        return UploadWidened(t);
+      case HcInjectUpload::kExpandQ8_0:
+        break;
     }
     DeviceTensor d = Copy(t);
     const std::size_t count = t.cols * t.rows * t.experts;
@@ -137,6 +148,36 @@ struct Uploader {
                          kTailMargin, nullptr);
     d.data = f32;
     d.type = core::GgmlType::kF32;
+    return d;
+  }
+
+  DeviceTensor UploadWidened(const TensorRef& t) {
+    DeviceTensor d;
+    const std::size_t count = t.cols * t.rows * t.experts;
+    void* f32 = nullptr;
+    if (Allocate(&f32, count * sizeof(float) + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + std::string(t.name));
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    allocations.push_back(f32);
+    bytes += count * sizeof(float) + kTailMargin;
+    std::vector<float> host(count);
+    WidenBF16(static_cast<const std::uint16_t*>(t.data), host.data(), count);
+    if (hipMemcpy(f32, host.data(), count * sizeof(float),
+                  hipMemcpyHostToDevice) != hipSuccess ||
+        hipMemset(static_cast<std::uint8_t*>(f32) + count * sizeof(float), 0,
+                  kTailMargin) != hipSuccess) {
+      Fail("upload failed for " + std::string(t.name));
+      return d;
+    }
+    d.data = f32;
+    d.type = core::GgmlType::kF32;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
     return d;
   }
 
@@ -400,6 +441,14 @@ bool DeviceModel::SetDraftVocab(std::uint32_t prefix_rows,
   draft_output_.rows = prefix_rows;
   draft_specials_ = std::move(specials);
   return true;
+}
+
+void WidenBF16(const std::uint16_t* src, float* dst,
+               std::size_t count) noexcept {
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(src[i]) << 16;
+    std::memcpy(dst + i, &bits, sizeof(float));
+  }
 }
 
 std::unique_ptr<DeviceModel> DeviceModel::Upload(

@@ -39,10 +39,13 @@ WORKLOADS = [
 
 def post(base_url, model, texts, api_key):
     body = json.dumps({"model": model, "input": texts}).encode()
-    request = urllib.request.Request(
-        base_url + "/embeddings", data=body,
-        headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer " + api_key})
+    headers = {"Content-Type": "application/json"}
+    # The Gufo server has no authentication layer, but --base-url can target
+    # another endpoint or a reverse proxy that requires a bearer credential.
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    request = urllib.request.Request(base_url + "/embeddings", data=body,
+                                     headers=headers)
     start = time.perf_counter()
     with urllib.request.urlopen(request) as response:
         payload = json.loads(response.read())
@@ -59,7 +62,8 @@ def run(base_url, model, api_key, concurrency, inputs, words, requests):
     start = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
         results = list(pool.map(
-            lambda _: post(base_url, model, texts, api_key), range(requests)))
+            lambda _: post(base_url, model, texts, api_key),
+            range(requests)))
     wall = time.perf_counter() - start
     times = sorted(r[0] for r in results)
     tokens = sum(r[1] for r in results)
@@ -79,7 +83,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
     parser.add_argument("--model", default="embeddinggemma-2")
-    parser.add_argument("--api-key", default="unused")
+    parser.add_argument("--api-key", default="",
+                        help="Optional bearer credential for authenticated "
+                             "endpoints; the Gufo server itself ignores it")
     parser.add_argument("--requests", type=int, default=60)
     args = parser.parse_args()
     for concurrency, inputs, words in WORKLOADS:

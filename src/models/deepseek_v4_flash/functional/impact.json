@@ -1,0 +1,32 @@
+{
+  "profiles": {
+    "deepseek4/off": {
+      "model": "deepseek4",
+      "mode": "off",
+      "vision": false
+    },
+    "deepseek4/dspark": {
+      "model": "deepseek4",
+      "mode": "dspark",
+      "vision": false
+    }
+  },
+  "rules": [
+    {
+      "id": "deepseek-runtime",
+      "paths": [
+        "src/models/deepseek_v4_flash/**"
+      ],
+      "priority": 10,
+      "profiles": [
+        "deepseek4/off",
+        "deepseek4/dspark"
+      ],
+      "affects": [
+        "*"
+      ],
+      "obligations": [],
+      "ignored": false
+    }
+  ]
+}

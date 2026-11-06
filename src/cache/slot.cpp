@@ -98,8 +98,7 @@ struct LeaseState final : MutationGuard {
           spill->reassignment_batch_size > 16)
         throw std::invalid_argument("invalid idle spill configuration");
       for (const auto& c : adapter.Components())
-        if (c.kind == ComponentKind::kAppendRows &&
-            c.row_bytes > spill->piece_bytes)
+        if (HasRows(c.kind) && c.row_bytes > spill->piece_bytes)
           throw std::invalid_argument("spill piece smaller than a row");
     }
     source->id = id;
@@ -246,6 +245,14 @@ struct LeaseState final : MutationGuard {
           "slot lease cancelled while waiting for readers");
   }
   void RunIdle(std::stop_token cancelled) {
+    // Another slot's prefill keeps the device busy for seconds. Polling every
+    // millisecond wakes a core 1000 times a second: on Strix Halo, a core of
+    // an otherwise sleeping CCD costs ~4 W of the package limit the GPU
+    // shares, ~5% of a long prefill. Back off while deferred; the delay only
+    // postpones optional idle work.
+    constexpr auto kDeferMin = std::chrono::milliseconds(1);
+    constexpr auto kDeferMax = std::chrono::milliseconds(32);
+    auto defer = kDeferMin;
     std::unique_lock lock(mutex);
     while (!cancelled.stop_requested()) {
       // No polling once retained ranges are complete. Only a released lease
@@ -277,6 +284,7 @@ struct LeaseState final : MutationGuard {
       }
       if (!candidate) {
         idle_pending = false;
+        defer = kDeferMin;
         continue;
       }
       spilling = true;
@@ -302,9 +310,12 @@ struct LeaseState final : MutationGuard {
       spilling = false;
       idle_failed = failed;
       changed.notify_all();
-      if (!admitted)
-        changed.wait_for(lock, cancelled, std::chrono::milliseconds(1),
-                         [] { return false; });
+      if (admitted) {
+        defer = kDeferMin;
+      } else {
+        changed.wait_for(lock, cancelled, defer, [] { return false; });
+        defer = std::min(defer * 2, kDeferMax);
+      }
     }
   }
   void Guard(ComponentId component, Rows first, Rows end, bool release) {
@@ -689,9 +700,8 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
       !info.reserved ||
       (info.category != ResourceCategory::kBackingAssigned &&
        info.category != ResourceCategory::kPrivateTail) ||
-      d == descriptors.end() || d->kind != ComponentKind::kAppendRows ||
-      p == positions.end() || first >= end || end > p->valid_rows ||
-      !d->row_bytes ||
+      d == descriptors.end() || !HasRows(d->kind) || p == positions.end() ||
+      first >= end || end > p->valid_rows || !d->row_bytes ||
       end - first > std::numeric_limits<std::size_t>::max() / d->row_bytes ||
       backing.size() != (end - first) * d->row_bytes ||
       backing.size() > info.bytes ||
@@ -730,9 +740,9 @@ std::shared_ptr<BorrowedRows> SlotLease::Observe(
   const auto d = std::ranges::find(descriptors, c, &ComponentDescriptor::id);
   const auto positions = state_->adapter.Positions(slot);
   const auto p = std::ranges::find(positions, c, &ComponentPosition::id);
-  if (!slot.IsValid() || d == descriptors.end() ||
-      d->kind != ComponentKind::kAppendRows || p == positions.end() ||
-      first >= end || end > p->valid_rows || !d->row_bytes ||
+  if (!slot.IsValid() || d == descriptors.end() || !HasRows(d->kind) ||
+      p == positions.end() || first >= end || end > p->valid_rows ||
+      !d->row_bytes ||
       end - first > std::numeric_limits<std::size_t>::max() / d->row_bytes ||
       source.size() != (end - first) * d->row_bytes)
     throw std::invalid_argument("invalid observed row description");

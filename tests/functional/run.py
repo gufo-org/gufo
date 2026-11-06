@@ -296,8 +296,6 @@ def main():
                      "--cache-disk-staging-bytes"):
         if option(command, reserved) is not None:
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
-    if option(command, "--api-key") is not None:
-        parser.error("omit --api-key for the isolated loopback test server")
     if set(args.suite) & {"image-inputs", "image-count", "tool-images", "image-detail"} and option(command, "--mmproj") is None:
         parser.error("image-inputs, image-count, tool-images, and image-detail require --mmproj in the server command")
     selected = args.suite
@@ -439,7 +437,7 @@ def main():
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
             configured = bool(set(selected) & {"cache-bridge", "cache-pressure"}) and re.search(
-                r"event=(?:snapshot_cache_configured|configured) .*?\bcapacity_bytes=(\d+)\b",
+                r"event=configured .*?\bcapacity_bytes=(\d+)\b",
                 (output / "server.log").read_text())
             for suite in selected:
                 if suite == "cache":

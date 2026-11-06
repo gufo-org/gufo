@@ -1,0 +1,194 @@
+================================================================================
+Card 12: Compilations and Test Execution Log
+================================================================================
+
+1. Build of Migrated Test Targets on CPU (cpu-test)
+--------------------------------------------------------------------------------
+$ nix develop -c cmake --build --preset cpu-test --target qwen3_asr_audio_api_test embedding_gemma2_embeddings_api_test qwen3_tts_audio_api_test qwen_image_21_test
+[117/125] Linking CXX static library libgufo_http.a
+[118/125] Linking CXX static library libgufo_test_support.a
+[119/125] Linking CXX executable qwen3_tts_audio_api_test
+[120/125] Linking CXX executable qwen3_asr_audio_api_test
+[121/125] Linking CXX executable tests/models/embedding_gemma2/embedding_gemma2_embeddings_api_test
+[122/125] Linking CXX executable qwen_image_21_test
+Exit code: 0
+
+2. Build of Migrated Test Targets on GPU (gpu-test)
+--------------------------------------------------------------------------------
+$ nix develop -c cmake --build --preset gpu-test --target qwen3_asr_audio_api_test embedding_gemma2_embeddings_api_test qwen3_tts_audio_api_test qwen_image_21_test
+[26/34] Linking HIP static library libgufo_http.a
+[27/34] Linking HIP static library libgufo_test_support.a
+[28/34] Linking HIP executable qwen3_asr_audio_api_test
+[29/34] Linking HIP executable tests/models/embedding_gemma2/embedding_gemma2_embeddings_api_test
+[30/34] Linking HIP executable qwen3_tts_audio_api_test
+[31/34] Linking HIP executable qwen_image_21_test
+Exit code: 0
+
+3. Gate 1: CTest Execution for Migrated Model API Tests (cpu-test)
+--------------------------------------------------------------------------------
+$ nix develop -c ctest --test-dir build/cpu-test -R '^(qwen3_asr_audio_api_test|qwen_image_21_test|qwen3_tts_audio_api_test|embedding_gemma2_embeddings_api_test)$' --output-on-failure
+Test project /home/mixer/gufo/build/cpu-test
+    Start   5: qwen3_asr_audio_api_test
+1/4 Test   #5: qwen3_asr_audio_api_test ...............   Passed    0.01 sec
+    Start   7: qwen_image_21_test
+2/4 Test   #7: qwen_image_21_test .....................   Passed    0.01 sec
+    Start  74: qwen3_tts_audio_api_test
+3/4 Test  #74: qwen3_tts_audio_api_test ...............   Passed    0.01 sec
+    Start 149: embedding_gemma2_embeddings_api_test
+4/4 Test #149: embedding_gemma2_embeddings_api_test ...   Passed    0.17 sec
+
+100% tests passed out of 4
+
+Label Time Summary:
+api                 =   0.18 sec*proc (3 tests)
+audio               =   0.01 sec*proc (2 tests)
+cpu                 =   0.18 sec*proc (4 tests)
+embedding-gemma2    =   0.17 sec*proc (1 test)
+models              =   0.18 sec*proc (4 tests)
+quality             =   0.18 sec*proc (3 tests)
+qwen-image          =   0.01 sec*proc (1 test)
+qwen3-asr           =   0.01 sec*proc (1 test)
+qwen3-tts           =   0.01 sec*proc (1 test)
+server              =   0.18 sec*proc (3 tests)
+
+Total Test time (real) =   0.19 sec
+Exit code: 0
+
+4. Gate 2: CTest Execution for Migrated Model API Tests (gpu-test)
+--------------------------------------------------------------------------------
+$ nix develop -c ctest --test-dir build/gpu-test -R '^(qwen3_asr_audio_api_test|qwen_image_21_test|qwen3_tts_audio_api_test|embedding_gemma2_embeddings_api_test)$' --output-on-failure
+Test project /home/mixer/gufo/build/gpu-test
+    Start   5: qwen3_asr_audio_api_test
+1/4 Test   #5: qwen3_asr_audio_api_test ...............   Passed    0.06 sec
+    Start  10: qwen_image_21_test
+2/4 Test  #10: qwen_image_21_test .....................   Passed    0.06 sec
+    Start  81: qwen3_tts_audio_api_test
+3/4 Test  #81: qwen3_tts_audio_api_test ...............   Passed    0.06 sec
+    Start 219: embedding_gemma2_embeddings_api_test
+4/4 Test #219: embedding_gemma2_embeddings_api_test ...   Passed    0.22 sec
+
+100% tests passed out of 4
+
+Label Time Summary:
+api                 =   0.34 sec*proc (3 tests)
+audio               =   0.12 sec*proc (2 tests)
+cpu                 =   0.41 sec*proc (4 tests)
+embedding-gemma2    =   0.22 sec*proc (1 test)
+models              =   0.41 sec*proc (4 tests)
+quality             =   0.34 sec*proc (3 tests)
+qwen-image          =   0.06 sec*proc (1 test)
+qwen3-asr           =   0.06 sec*proc (1 test)
+qwen3-tts           =   0.06 sec*proc (1 test)
+server              =   0.34 sec*proc (3 tests)
+
+Total Test time (real) =   0.41 sec
+Exit code: 0
+
+5. Gate 3: Extension API Surface Validation
+--------------------------------------------------------------------------------
+$ python3 tools/ci/check-extension-api.py
+PASS: extension API surface (97 paths)
+Exit code: 0
+
+6. Gate 4: Extension Isolation & Serving Boundary Audit
+--------------------------------------------------------------------------------
+$ python3 tools/ci/check-extension-isolation.py --fail-on-core-model-includes --fail-on-serving-boundary --fail-on-family-graph --fail-on-target-ownership --fail-on-model-core-includes
+[check-extension-isolation] REPORT ONLY (coupling does not fail this check)
+  files: 1321
+  includes: 8558
+  cross_owner_includes: 1296
+  namespace_references: 1388
+  name_references: 15371
+  configuration_mentions: 1875
+  qwen_headers: 61
+  family_libraries: 6
+  family_edges: 7
+  ...
+  models/qwen3_asr -> configuration: 11
+  models/qwen3_asr -> tests/support: 1
+  ...
+  tests/support -> src/cli: 9
+  ...
+[check-extension-isolation] PASS: core boundary (no src/core -> src/models|src/families includes)
+[check-extension-isolation] PASS: serving boundary (no src/cli include from models, families, cache, src/ext or the public extension API)
+[check-extension-isolation] PASS: model core boundary (no production src/models -> src/core|src/cache includes)
+[check-extension-isolation] PASS: target ownership (17 libraries, 179 dependency edges)
+[check-extension-isolation] PASS: family graph (6 libraries, 7 declared edges, acyclic)
+Exit code: 0
+
+7. Gate 5: Isolation Tool Unit Tests (Negative Proof for Serving Boundary)
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_extension_isolation_test.py
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 19.164s
+
+OK
+Exit code: 0
+
+8. Gates 6 & 7: Extension API and Docs Verification
+--------------------------------------------------------------------------------
+$ python3 tests/tools/check_extension_api_test.py
+Ran 7 tests in 0.002s
+OK
+Exit code: 0
+
+$ python3 tests/tools/check_docs_test.py
+Ran 11 tests in 0.004s
+OK
+Exit code: 0
+
+9. Gate 8: Continuation Identity Goldens (CPU & GPU)
+--------------------------------------------------------------------------------
+$ nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity_test' --output-on-failure
+Test project /home/mixer/gufo/build/cpu-test
+    Start 140: qwen27b_continuation_identity_test
+1/3 Test #140: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 154: deepseek_v4_flash_continuation_identity_test
+2/3 Test #154: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 160: qwen38_flash_next_continuation_identity_test
+3/3 Test #160: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 3
+Exit code: 0
+
+$ nix develop -c ctest --test-dir build/gpu-test -R 'continuation_identity_test' --output-on-failure
+Test project /home/mixer/gufo/build/gpu-test
+    Start 195: qwen27b_continuation_identity_test
+1/3 Test #195: qwen27b_continuation_identity_test .............   Passed    0.00 sec
+    Start 226: deepseek_v4_flash_continuation_identity_test
+2/3 Test #226: deepseek_v4_flash_continuation_identity_test ...   Passed    0.00 sec
+    Start 243: qwen38_flash_next_continuation_identity_test
+3/3 Test #243: qwen38_flash_next_continuation_identity_test ...   Passed    0.00 sec
+
+100% tests passed out of 3
+Exit code: 0
+
+10. Gate 9: Clang Format Verification
+--------------------------------------------------------------------------------
+$ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py
+PASS: Checked 787 C++ files
+Exit code: 0
+
+11. Gate 10: Production Exclusion Proof (BUILD_TESTING=OFF)
+--------------------------------------------------------------------------------
+$ nix develop -c cmake -B /tmp/card12-btoff -S . -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_HIP=OFF
+-- Configuring done (2.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/card12-btoff
+Exit code: 0
+
+$ grep -rn "gufo_test_support" /tmp/card12-btoff/
+CONFIRMED: ZERO MATCHES FOR gufo_test_support
+
+$ grep -i "test_support" /tmp/card12-btoff/cmake_install.cmake
+CONFIRMED: ZERO MATCHES IN INSTALL SCRIPT
+
+$ nix develop -c cmake --build /tmp/card12-btoff --target gufo --parallel 4
+[100%] Linking CXX executable gufo
+[100%] Built target gufo
+Exit code: 0
+
+$ nix develop -c bash -c "nm /tmp/card12-btoff/gufo | grep -i test_support || echo 'NO MATCHES'"
+NO MATCHES
+Exit code: 0

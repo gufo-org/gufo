@@ -317,6 +317,60 @@ void TestQuantizedRows() {
   std::filesystem::remove(path);
 }
 
+// A Q8_0 table (the source converter's format) decodes exactly through the
+// same cold, cached and mixed gathers.
+void TestQ8Rows() {
+  const auto path =
+      std::filesystem::temp_directory_path() / "qwen38_ngram_q8.bin";
+  constexpr std::uint32_t dim = 160;
+  constexpr std::uint32_t rows = 129;
+  constexpr std::uint64_t offset = 4096 + 90;
+  const auto quant = [](std::uint32_t row, std::uint32_t col) {
+    return static_cast<int>((row * 7 + col * 3) % 255) - 127;
+  };
+  {
+    std::ofstream file(path, std::ios::binary);
+    file.seekp(offset);
+    for (std::uint32_t row = 0; row < rows; ++row) {
+      for (std::uint32_t block = 0; block < dim / 32; ++block) {
+        // Exactly representable half scales: 0.5 and -2.
+        const std::uint16_t scale = row % 2 == 0 ? 0x3800 : 0xC000;
+        file.write(reinterpret_cast<const char*>(&scale), sizeof(scale));
+        for (std::uint32_t col = 0; col < 32; ++col)
+          file.put(static_cast<char>(
+              static_cast<std::int8_t>(quant(row, block * 32 + col))));
+      }
+    }
+    Check(file.good(), "Q8_0 fixture written");
+  }
+  std::string error;
+  auto table =
+      OpenTable(path, offset, rows, dim, gufo::core::GgmlType::kQ8_0, &error);
+  Check(table != nullptr, error.c_str());
+  if (table) {
+    const auto gather = [&](std::span<const std::uint32_t> ids) {
+      std::vector<float> out(ids.size() * dim + 16, -123.0F);
+      Check(table->Read(ids, std::span(out).first(ids.size() * dim)),
+            "Q8_0 gather completes");
+      for (std::size_t i = 0; i < ids.size(); ++i) {
+        const float scale = ids[i] % 2 == 0 ? 0.5F : -2.0F;
+        for (std::uint32_t col = 0; col < dim; ++col)
+          Check(out[i * dim + col] == scale * quant(ids[i], col),
+                "Q8_0 exact decoded value");
+      }
+      for (std::size_t i = ids.size() * dim; i < out.size(); ++i)
+        Check(out[i] == -123.0F, "Q8_0 output guard");
+    };
+    const std::array<std::uint32_t, 6> warm{0, 7, 128, 7, 0, 32};
+    gather(warm);
+    gather(warm);
+    const std::array<std::uint32_t, 7> mixed{128, 3, 7, 64, 3, 32, 1};
+    gather(mixed);
+  }
+  table.reset();
+  std::filesystem::remove(path);
+}
+
 // Widely spaced rows exercise cache eviction, including simultaneous readers
 // whose compressed rows map to the same bounded-cache slot.
 void TestDistantRows() {
@@ -486,6 +540,7 @@ int main() {
   TestHash();
   TestTable();
   TestQuantizedRows();
+  TestQ8Rows();
   TestDistantRows();
   TestCounters();
   if (failures != 0) {

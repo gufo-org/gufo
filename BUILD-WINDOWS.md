@@ -150,3 +150,10 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
   `hipblaslt\`).
 - After reinstalling or upgrading the SDK, rerun the patch in step 2 and
   rebuild into a fresh build directory so the runtime stages again.
+
+## External source extensions
+
+Use the [extension distribution recipe](docs/model-extensions/DISTRIBUTION.md#native-windows-and-zip-recipe)
+for vcpkg dependency preflight, external source selection, CMake installation,
+license/data staging and fresh-ZIP runtime checks. Declared metadata dependencies
+do not install additional vcpkg ports automatically.

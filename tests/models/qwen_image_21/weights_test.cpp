@@ -65,6 +65,7 @@ struct Fixture {
       "latents_mean":)" + latent_mean + "],\"latents_std\":" +
                                         latent_std + "]}");
     Write(root / "scheduler/scheduler_config.json", R"({
+      "_class_name":"FlowMatchEulerDiscreteScheduler",
       "base_image_seq_len":256,"max_image_seq_len":8192,"base_shift":0.5,
       "max_shift":0.9,"shift_terminal":0.02,"num_train_timesteps":1000,
       "time_shift_type":"exponential","use_dynamic_shifting":true,

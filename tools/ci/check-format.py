@@ -11,14 +11,16 @@ def main() -> int:
     parser.add_argument("--fix", action="store_true", help="format files in place")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
+    # BEGIN GENERATED VENDORED PATHS
     excluded = (
-        "src/models/deepseek_v4_flash/runtime/",
         "src/models/deepseek_v4_flash/kernels/rocm/",
+        "src/models/deepseek_v4_flash/runtime/",
         "src/models/qwen38_flash_next/kernels/rocm/mmq/",
     )
+    # END GENERATED VENDORED PATHS
     files = sorted(
         str(path.relative_to(root))
-        for directory in ("src", "tests")
+        for directory in ("include", "src", "tests")
         for path in (root / directory).rglob("*")
         if path.is_file()
         and path.suffix in {".cpp", ".h", ".hpp"}

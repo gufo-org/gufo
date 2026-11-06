@@ -1,13 +1,12 @@
-#include "src/models/embedding_gemma2/config.hpp"
+#include "config.hpp"
 
 #include <charconv>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <sstream>
 #include <string>
 #include <string_view>
-
-#include "src/core/json.hpp"
 
 namespace gufo::models::embedding_gemma2 {
 namespace {

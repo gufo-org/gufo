@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -12,14 +14,12 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/snapshot_transfer.hpp"
+#include "src/families/qwen/kernels/dflash_kernels.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
+#include "src/families/qwen/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
-#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
-#include "src/models/qwen/hip/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
-#include "src/models/qwen/hip/ops.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -78,6 +78,17 @@ void AllocateBuffer(T*& pointer, std::size_t elements) {
 
 /// Widest proposal block; BF16 context injection also uses sixteen rows.
 constexpr std::size_t kDFlashMaxSharedBatch = 8;
+
+constexpr std::uint32_t kDraftRows = speculative::kDraftVocabExtraRows;
+
+/// The session's draft table (draft_vocab.hpp): head rows, IDs and one block
+/// of scores. Zero when the model drafts over the full head.
+std::size_t DraftTableBytes(const QwenDFlashGpuModel& model) {
+  if (model.DraftPrefixRows() == 0)
+    return 0;
+  return kDraftRows * (model.DraftRowBytes() + sizeof(std::int32_t) +
+                       model.GetDFlashConfig().block_size * sizeof(float));
+}
 
 void NormalizeAndRotateQK(float* query, float* key, const float* query_weight,
                           const float* key_weight,
@@ -318,8 +329,59 @@ void QwenDFlashGpuExecutor::Allocate() {
   allocate_scratch(d_out_token_, block_size);
   if (block_size > kDFlashMaxSharedBatch)
     allocate_scratch(d_bf16_input_, block_size * intermediate_size);
+  if (model_->DraftPrefixRows() != 0) {
+    allocate_scratch(d_draft_rows_, kDraftRows * model_->DraftRowBytes());
+    allocate_scratch(d_draft_ids_, kDraftRows);
+    allocate_scratch(d_draft_logits_, block_size * kDraftRows);
+    // The table starts with the special tokens; every other slot is empty.
+    ClearDraftRows(0);
+    AppendDraftRows(0, model_->DraftSpecials());
+    HIP_CHECK(hipStreamSynchronize(stream_));
+  }
 
   PrewarmBlockGemms();
+}
+
+models::QwenTensorRef QwenDFlashGpuExecutor::DraftTable() const noexcept {
+  return {
+      .data = d_draft_rows_,
+      .type = model_->GetWeights().output.type,
+      .num_elements = std::size_t{kDraftRows} * model_->GetConfig().hidden_size,
+  };
+}
+
+void QwenDFlashGpuExecutor::ClearDraftRows(std::uint32_t first) {
+  if (d_draft_ids_ == nullptr || first > kDraftRows)
+    throw std::invalid_argument("invalid DFlash draft table clear");
+  // Stale rows stay; an ID of -1 masks the slot.
+  if (first != kDraftRows)
+    HIP_CHECK(hipMemsetAsync(d_draft_ids_ + first, 0xFF,
+                             (kDraftRows - first) * sizeof(std::int32_t),
+                             stream_));
+}
+
+void QwenDFlashGpuExecutor::AppendDraftRows(std::uint32_t first,
+                                            std::span<const std::int32_t> ids) {
+  if (ids.empty())
+    return;
+  const auto vocab = model_->GetConfig().vocab_size;
+  if (d_draft_ids_ == nullptr || first > kDraftRows ||
+      ids.size() > kDraftRows - first ||
+      std::ranges::any_of(ids, [&](std::int32_t id) {
+        return id < 0 || static_cast<std::size_t>(id) >= vocab;
+      }))
+    throw std::invalid_argument("invalid DFlash draft table append");
+  // The upload source lives until the next append; every draft synchronizes
+  // this stream before then.
+  draft_upload_.assign(ids.begin(), ids.end());
+  HIP_CHECK(hipMemcpyAsync(d_draft_ids_ + first, draft_upload_.data(),
+                           draft_upload_.size() * sizeof(std::int32_t),
+                           hipMemcpyHostToDevice, stream_));
+  kernels::LaunchDFlashGatherRows(
+      model_->GetWeights().output.data, model_->DraftRowBytes(),
+      d_draft_ids_ + first,
+      d_draft_rows_ + std::size_t{first} * model_->DraftRowBytes(),
+      static_cast<std::uint32_t>(ids.size()), stream_);
 }
 
 void QwenDFlashGpuExecutor::PrewarmBlockGemms() {
@@ -545,6 +607,12 @@ void QwenDFlashGpuExecutor::Free() noexcept {
     (void)hipFree(d_out_token_);
   if (d_bf16_input_ != nullptr)
     (void)hipFree(d_bf16_input_);
+  if (d_draft_rows_ != nullptr)
+    (void)hipFree(d_draft_rows_);
+  if (d_draft_ids_ != nullptr)
+    (void)hipFree(d_draft_ids_);
+  if (d_draft_logits_ != nullptr)
+    (void)hipFree(d_draft_logits_);
   if (d_batch_scratch_ != nullptr)
     (void)hipFree(d_batch_scratch_);
   hipblaslt_gemm_.reset();
@@ -605,6 +673,7 @@ QwenGpuMemoryUsage QwenDFlashGpuExecutor::EstimateMemoryUsage(
   if (block > kDFlashMaxSharedBatch)
     usage.temporary_scratch_bytes +=
         block * config.intermediate_size * sizeof(hip_bfloat16);
+  usage.temporary_scratch_bytes += DraftTableBytes(model);
   if (max_batch_width > 1 && config.head_dim <= 256)
     usage.temporary_scratch_bytes += BatchScratchBytes(
         model, max_batch_width * std::min<std::size_t>(block, max_context));
@@ -970,7 +1039,7 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     std::span<const float> sample_uniforms, std::vector<float>* out_confidences,
     std::vector<tokenization::TokenId>* out_candidate_ids,
     std::vector<float>* out_candidate_probabilities, const DFlashTrace& trace,
-    const sampling::SamplerState* sampler) {
+    const sampling::SamplerState* sampler, bool draft_subset) {
   CheckContinuation();
   const auto& weights = model_->GetWeights();
   const auto& cfg = model_->GetConfig();
@@ -990,7 +1059,8 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
   draft_count = std::min(draft_count,
                          df_cfg.block_size > 0 ? df_cfg.block_size - 1U : 0U);
   if (anchor_token >= vocab_size || df_cfg.mask_token_id >= vocab_size ||
-      current_pos != injected_context_len_ || current_pos >= max_context_) {
+      current_pos != injected_context_len_ || current_pos >= max_context_ ||
+      (draft_subset && d_draft_ids_ == nullptr)) {
     throw std::invalid_argument(
         "DFlash block token or committed position is invalid");
   }
@@ -1150,9 +1220,25 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
   TraceTensor(trace, "selector_hidden", d_selector_hidden_,
               draft_count * df_cfg.selector_rank, stream_);
 
-  RunBlockGemm(weights.output, d_block_normed_ + hidden_size, d_logits_,
-               draft_count, vocab_size, hidden_size);
-  TraceTensor(trace, "logits", d_logits_, draft_count * vocab_size, stream_);
+  // The draft vocabulary scores the head's leading rows in place, then the
+  // request's table (draft_vocab.hpp).
+  const std::uint32_t prefix = draft_subset ? model_->DraftPrefixRows() : 0;
+  if (draft_subset) {
+    RunBlockGemm(weights.output, d_block_normed_ + hidden_size, d_logits_,
+                 draft_count, prefix, hidden_size);
+    RunBlockGemm(DraftTable(), d_block_normed_ + hidden_size, d_draft_logits_,
+                 draft_count, kDraftRows, hidden_size);
+    kernels::LaunchDFlashDraftTableLogits(nullptr, 0, d_draft_ids_,
+                                          d_draft_logits_, draft_count,
+                                          kDraftRows, stream_);
+    TraceTensor(trace, "logits", d_logits_, draft_count * prefix, stream_);
+    TraceTensor(trace, "draft_table_logits", d_draft_logits_,
+                draft_count * kDraftRows, stream_);
+  } else {
+    RunBlockGemm(weights.output, d_block_normed_ + hidden_size, d_logits_,
+                 draft_count, vocab_size, hidden_size);
+    TraceTensor(trace, "logits", d_logits_, draft_count * vocab_size, stream_);
+  }
 
   if (temperature > 0.0F) {
     const auto uniform_copy = hipMemcpyAsync(
@@ -1173,7 +1259,10 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     }
   } sampling_upload{stream_, sampler != nullptr};
   const std::array sequences{kernels::DFlashSelectorSequence{
-      draft_count, temperature, PrepareDraftSampling(sampler, stream_)}};
+      draft_count, temperature, PrepareDraftSampling(sampler, stream_),
+      draft_subset ? kernels::DFlashSelectorVocab{prefix, d_draft_logits_,
+                                                  d_draft_ids_, kDraftRows}
+                   : kernels::DFlashSelectorVocab{}}};
   kernels::LaunchDFlashSelectorBatch(
       d_logits_, d_selector_hidden_, weights.selector_predecessor.data,
       weights.selector_successor.data, d_out_token_, d_confidences_,
@@ -1184,7 +1273,7 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
           ? d_selector_candidate_probabilities_
           : nullptr,
       sequences, vocab_size, df_cfg.selector_rank, df_cfg.selector_top_k,
-      stream_);
+      stream_, prefix);
 
   const auto token_copy =
       hipMemcpyAsync(tokens.data(), d_out_token_ + 1U,

@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-#include "src/models/embedding_gemma2/audio_processor.hpp"
+#include "audio_processor.hpp"
 
 namespace gufo::models::embedding_gemma2::hip {
 // Float32 audio tower with checkpoint BF16 weights widened once at load. Owned

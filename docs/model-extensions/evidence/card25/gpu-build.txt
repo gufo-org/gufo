@@ -1,0 +1,403 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+[0/2] Re-checking globbed directories...
+[1/2] Re-running CMake...
+-- gufo: compiling C and CXX through /nix/store/j0yrxqvaka4xky3xca88jbnwzbp42lil-ccache-4.14.1/bin/ccache
+-- gufo: unshipped discovered extension lfm3
+-- gufo: extension mode=discovery; included=[deepseek_v4_flash;embedding_gemma2;lfm3;minimax_h3;qwen;qwen38_flash_next;qwen3_asr;qwen3_tts;qwen_image_21]; excluded=[]
+-- gufo: HIP target gfx1151
+-- gufo: ROCr runtime /nix/store/88jjsz00km321bcl9851aiwwdig79b4l-rocm-runtime-10.1/lib/libhsa-runtime64.so
+-- Configuring done (0.6s)
+-- Generating done (0.3s)
+-- Build files have been written to: /home/mixer/gufo/build/gpu-test
+[0/4] Re-checking globbed directories...
+[1/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/config.cpp.o
+[2/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/weights.cpp.o
+[3/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/reference.cpp.o
+[4/120] Building CXX object src/ext/CMakeFiles/gufo_ext_runtime.dir/options.cpp.o
+[5/120] Building CXX object src/ext/CMakeFiles/gufo_ext_runtime.dir/runtime.cpp.o
+[6/120] Linking CXX static library src/ext/libgufo_ext_runtime.a
+[7/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/probe.cpp.o
+[8/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/vl/image.cpp.o
+[9/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/extension.cpp.o
+[10/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/vl/prompt.cpp.o
+[11/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/d1/packing.cpp.o
+[12/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/d1/boxes.cpp.o
+[13/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3.dir/__/__/__/__/__/lfm3-gufo-extension/d1/prompt.cpp.o
+[14/120] Linking CXX static library extensions/build/lfm3/build/libgufo_lfm3.a
+[15/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_hip.dir/__/__/__/__/__/lfm3-gufo-extension/engine.cpp.o
+[16/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/weights.cpp.o
+[17/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/audio.cpp.o
+[18/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/model.cpp.o
+../../lfm3-gufo-extension/audio/model.cpp: In member function ‘void gufo::models::lfm3_audio::{anonymous}::StackState::Clear(const gufo::models::lfm3_audio::Stack&, hipStream_t)’:
+../../lfm3-gufo-extension/audio/model.cpp:84:27: warning: unused parameter ‘s’ [-Wunused-parameter]
+   84 |   void Clear(const Stack& s, hipStream_t stream) {
+      |              ~~~~~~~~~~~~~^
+[19/120] Building HIP object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_hip.dir/__/__/__/__/__/lfm3-gufo-extension/hip/ops.hip.o
+[20/120] Linking HIP static library extensions/build/lfm3/build/libgufo_lfm3_hip.a
+[21/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/realtime.cpp.o
+../../lfm3-gufo-extension/audio/realtime.cpp: In member function ‘virtual bool gufo::models::lfm3_audio::{anonymous}::Conversation::Respond(const gufo::ext::VoiceConversation::Settings&, const gufo::ext::VoiceConversation::Callbacks&, gufo::ext::VoiceConversation::Reply*, std::string*)’:
+../../lfm3-gufo-extension/audio/realtime.cpp:236:10: warning: suggest explicit braces to avoid ambiguous ‘else’ [-Wdangling-else]
+  236 |       if (prefix != "<think>")
+      |          ^
+[22/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/provider.cpp.o
+[23/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/runner.cpp.o
+[24/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/generation.cpp.o
+[25/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/speak.cpp.o
+../../lfm3-gufo-extension/audio/speak.cpp: In function ‘int gufo::models::lfm3_audio::RunLfm3Speak(const gufo::ext::SpeakOptions&)’:
+../../lfm3-gufo-extension/audio/speak.cpp:110:6: warning: suggest explicit braces to avoid ambiguous ‘else’ [-Wdangling-else]
+  110 |   if (!tts && !o.reasoning)
+      |      ^
+[26/120] Building CXX object extensions/build/embedding_gemma2/build/CMakeFiles/gufo_embedding_gemma2.dir/__/__/__/__/__/src/models/embedding_gemma2/batch_scheduler.cpp.o
+../../src/models/embedding_gemma2/batch_scheduler.cpp: In member function ‘gufo::models::embedding_gemma2::BatchScheduler::Outcome gufo::models::embedding_gemma2::BatchScheduler::Run(const std::vector<gufo::models::embedding_gemma2::EncoderSequence>&, const std::function<bool()>&, std::vector<std::vector<float> >*, std::string*)’:
+../../src/models/embedding_gemma2/batch_scheduler.cpp:116:43: warning: missing initializer for member ‘gufo::models::embedding_gemma2::BatchScheduler::Caller::outcome’ [-Wmissing-field-initializers]
+  116 |                 .remaining_tokens = tokens};
+      |                                           ^
+../../src/models/embedding_gemma2/batch_scheduler.cpp:116:43: warning: missing initializer for member ‘gufo::models::embedding_gemma2::BatchScheduler::Caller::error’ [-Wmissing-field-initializers]
+[27/120] Building CXX object extensions/build/deepseek_v4_flash/build/CMakeFiles/gufo_deepseek_v4_flash.dir/__/__/__/__/__/src/models/deepseek_v4_flash/extension.cpp.o
+[28/120] Building HIP object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_audio.dir/__/__/__/__/__/lfm3-gufo-extension/audio/hip/ops.hip.o
+/home/mixer/gufo/lfm3-gufo-extension/audio/hip/ops.hip:283:39: warning: unused parameter 'codebooks' [-Wunused-parameter]
+  283 |                                   int codebooks, int size) {
+      |                                       ^
+1 warning generated when compiling for gfx1151.
+/home/mixer/gufo/lfm3-gufo-extension/audio/hip/ops.hip:283:39: warning: unused parameter 'codebooks' [-Wunused-parameter]
+  283 |                                   int codebooks, int size) {
+      |                                       ^
+1 warning generated when compiling for host.
+[29/120] Linking HIP static library extensions/build/lfm3/build/libgufo_lfm3_audio.a
+[30/120] Building CXX object extensions/build/embedding_gemma2/build/CMakeFiles/gufo_embedding_gemma2.dir/__/__/__/__/__/src/models/embedding_gemma2/video_processor.cpp.o
+[31/120] Building CXX object extensions/build/embedding_gemma2/build/CMakeFiles/gufo_embedding_gemma2.dir/__/__/__/__/__/src/models/embedding_gemma2/image_processor.cpp.o
+[32/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_vl.dir/__/__/__/__/__/lfm3-gufo-extension/vl/vision.cpp.o
+[33/120] Building CXX object extensions/build/embedding_gemma2/build/CMakeFiles/gufo_embedding_gemma2.dir/__/__/__/__/__/src/models/embedding_gemma2/extension.cpp.o
+[34/120] Building CXX object extensions/build/minimax_h3/build/CMakeFiles/gufo_minimax_h3.dir/__/__/__/__/__/src/models/minimax_h3/extension.cpp.o
+[35/120] Building CXX object extensions/build/qwen/build/CMakeFiles/gufo_qwen.dir/__/__/__/__/__/src/models/qwen/extension.cpp.o
+[36/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts.dir/__/__/__/__/__/src/models/qwen3_tts/audio.cpp.o
+../../src/models/qwen3_tts/audio.cpp: In function ‘gufo::models::qwen3_tts::AudioBuffer gufo::models::qwen3_tts::{anonymous}::DecodeWavBytes(std::span<const std::byte>)’:
+../../src/models/qwen3_tts/audio.cpp:124:3: warning: missing initializer for member ‘gufo::ext::TtsAudioBuffer::samples’ [-Wmissing-field-initializers]
+  124 |   };
+      |   ^
+[37/120] Building CXX object extensions/build/qwen38_flash_next/build/CMakeFiles/gufo_qwen38_flash_next.dir/__/__/__/__/__/src/models/qwen38_flash_next/extension.cpp.o
+[38/120] Building CXX object extensions/build/qwen3_asr/build/CMakeFiles/gufo_qwen3_asr.dir/__/__/__/__/__/src/models/qwen3_asr/extension.cpp.o
+[39/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts.dir/__/__/__/__/__/src/models/qwen3_tts/sampling.cpp.o
+[40/120] Building CXX object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21.dir/__/__/__/__/__/src/models/qwen_image_21/image.cpp.o
+[41/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts.dir/__/__/__/__/__/src/models/qwen3_tts/extension.cpp.o
+[42/120] Building CXX object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21.dir/__/__/__/__/__/src/models/qwen_image_21/tokenizer.cpp.o
+[43/120] Building CXX object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21.dir/__/__/__/__/__/src/models/qwen_image_21/extension.cpp.o
+[44/120] Building CXX object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21.dir/__/__/__/__/__/src/models/qwen_image_21/weights.cpp.o
+[45/120] Building CXX object CMakeFiles/gufo_llm_cli.dir/src/cli/bench/bench.cpp.o
+../../src/cli/bench/bench.cpp: In lambda function:
+../../src/cli/bench/bench.cpp:143:54: warning: unused parameter ‘flag’ [-Wunused-parameter]
+  143 |       [&opt, &speculative_explicit](std::string_view flag, std::string_view val,
+      |                                     ~~~~~~~~~~~~~~~~~^~~~
+[46/120] Building CXX object CMakeFiles/gufo_llm_cli.dir/src/cli/prompt/prompt.cpp.o
+[47/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/asr_service.cpp.o
+[48/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/image_api.cpp.o
+../../src/cli/serve/image_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Error(int, const std::string&, const std::string&)’:
+../../src/cli/serve/image_api.cpp:48:60: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+   48 |           .headers = {{"Content-Type", "application/json"}}};
+      |                                                            ^
+../../src/cli/serve/image_api.cpp:48:60: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/image_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::HandleImageApiRequest(const HttpRequest&, ImageService&)’:
+../../src/cli/serve/image_api.cpp:551:62: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+  551 |             .headers = {{"Content-Type", "application/json"}}};
+      |                                                              ^
+../../src/cli/serve/image_api.cpp:551:62: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+[49/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/audio_asr_api.cpp.o
+../../src/cli/serve/audio_asr_api.cpp: In lambda function:
+../../src/cli/serve/audio_asr_api.cpp:362:11: warning: missing initializer for member ‘gufo::ext::TranscriptionRequest::pcm16k’ [-Wmissing-field-initializers]
+  362 |           };
+      |           ^
+../../src/cli/serve/audio_asr_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Transcribe(const gufo::server::HttpRequest&, gufo::server::AsrService&)’:
+../../src/cli/serve/audio_asr_api.cpp:402:11: warning: missing initializer for member ‘gufo::ext::TranscriptionRequest::pcm16k’ [-Wmissing-field-initializers]
+  402 |           },
+      |           ^
+../../src/cli/serve/audio_asr_api.cpp:402:11: warning: missing initializer for member ‘gufo::ext::TranscriptionRequest::on_text’ [-Wmissing-field-initializers]
+[50/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/embedding_service.cpp.o
+[51/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/tts_service.cpp.o
+[52/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/embeddings_api.cpp.o
+[53/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/audio_tts_api.cpp.o
+../../src/cli/serve/audio_tts_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Error(int, std::string, std::string, std::string)’:
+../../src/cli/serve/audio_tts_api.cpp:87:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+   87 |   };
+      |   ^
+../../src/cli/serve/audio_tts_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Voices(gufo::server::TtsService&)’:
+../../src/cli/serve/audio_tts_api.cpp:173:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+  173 |   };
+      |   ^
+[54/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/video_api.cpp.o
+../../src/cli/serve/video_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Error(int, std::string, std::string, std::string)’:
+../../src/cli/serve/video_api.cpp:76:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+   76 |   };
+      |   ^
+../../src/cli/serve/video_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::VideoContent(std::string_view, const gufo::server::HttpRequest&, gufo::server::VideoJobService&)’:
+../../src/cli/serve/video_api.cpp:752:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+  752 |   };
+      |   ^
+../../src/cli/serve/video_api.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::DeleteVideo(std::string_view, gufo::server::VideoJobService&)’:
+../../src/cli/serve/video_api.cpp:777:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+  777 |   };
+      |   ^
+[55/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/websocket.cpp.o
+../../src/cli/serve/websocket.cpp: In function ‘gufo::server::HttpResponse gufo::server::UpgradeWebSocket(const HttpRequest&, std::function<void(WebSocket&)>)’:
+../../src/cli/serve/websocket.cpp:63:96: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+   63 |             R"({"error":{"message":"invalid WebSocket handshake","code":"invalid_websocket"}})"};
+      |                                                                                                ^
+../../src/cli/serve/websocket.cpp:63:96: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/websocket.cpp:63:96: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+[56/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/asr_websocket.cpp.o
+../../src/cli/serve/asr_websocket.cpp: In function ‘gufo::server::HttpResponse gufo::server::HandleAsrWebSocket(const HttpRequest&, AsrService&)’:
+../../src/cli/serve/asr_websocket.cpp:59:101: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+   59 |             R"({"error":{"message":"unsupported realtime model or intent","code":"invalid_model"}})"};
+      |                                                                                                     ^
+../../src/cli/serve/asr_websocket.cpp:59:101: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/asr_websocket.cpp:59:101: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+In file included from ../../src/cli/serve/asr_websocket.cpp:11:
+In constructor ‘gufo::server::VoiceActivity::VoiceActivity(gufo::server::VadSettings, uint32_t)’,
+    inlined from ‘constexpr void std::_Construct(_Tp*, _Args&& ...) [with _Tp = gufo::server::VoiceActivity; _Args = {const gufo::server::VadSettings&, int}]’ at /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/bits/stl_construct.h:133:7,
+    inlined from ‘constexpr void std::_Optional_payload_base<_Tp>::_M_construct(_Args&& ...) [with _Args = {const gufo::server::VadSettings&, int}; _Tp = gufo::server::VoiceActivity]’ at /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/optional:316:19,
+    inlined from ‘constexpr void std::_Optional_base<_Tp, <anonymous>, <anonymous> >::_M_construct(_Args&& ...) [with _Args = {const gufo::server::VadSettings&, int}; _Tp = gufo::server::VoiceActivity; bool <anonymous> = true; bool <anonymous> = true]’ at /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/optional:573:27,
+    inlined from ‘constexpr std::enable_if_t<((bool)is_constructible_v<_Tp, _Args ...>), _Tp&> std::optional<_Tp>::emplace(_Args&& ...) [with _Args = {const gufo::server::VadSettings&, int}; _Tp = gufo::server::VoiceActivity]’ at /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/optional:1158:22,
+    inlined from ‘gufo::server::HandleAsrWebSocket(const HttpRequest&, AsrService&)::<lambda(gufo::server::WebSocket&)>’ at ../../src/cli/serve/asr_websocket.cpp:425:24:
+../../src/cli/serve/voice_activity.hpp:51:9: warning: ‘*(const gufo::server::VadSettings*)((char*)&vad + offsetof(std::optional<gufo::server::VoiceActivity>,std::optional<gufo::server::VoiceActivity>::<unnamed>.std::_Optional_base<gufo::server::VoiceActivity, true, true>::_M_payload.std::_Optional_payload<gufo::server::VoiceActivity, true, true, true>::<unnamed>.std::_Optional_payload_base<gufo::server::VoiceActivity>::_M_payload))’ may be used uninitialized [-Wmaybe-uninitialized]
+   51 |       : settings_(settings),
+      |         ^~~~~~~~~~~~~~~~~~~
+../../src/cli/serve/asr_websocket.cpp: In lambda function:
+../../src/cli/serve/asr_websocket.cpp:77:34: note: ‘vad’ declared here
+   77 |     std::optional<VoiceActivity> vad;
+      |                                  ^~~
+[57/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/voice_page.cpp.o
+[58/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/decision_service.cpp.o
+[59/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/voice_websocket.cpp.o
+[60/120] Linking HIP static library extensions/build/deepseek_v4_flash/build/libgufo_deepseek_v4_flash.a
+[61/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/tts_websocket.cpp.o
+../../src/cli/serve/tts_websocket.cpp: In lambda function:
+../../src/cli/serve/tts_websocket.cpp:43:76: warning: missing initializer for member ‘gufo::server::HttpRequest::query’ [-Wmissing-field-initializers]
+   43 |                          .is_cancelled = [&] { return socket.cancelled(); }};
+      |                                                                            ^
+../../src/cli/serve/tts_websocket.cpp:43:76: warning: missing initializer for member ‘gufo::server::HttpRequest::headers’ [-Wmissing-field-initializers]
+../../src/cli/serve/tts_websocket.cpp: In lambda function:
+../../src/cli/serve/tts_websocket.cpp:164:70: warning: missing initializer for member ‘gufo::server::HttpRequest::query’ [-Wmissing-field-initializers]
+  164 |                                                   .body = next.dump()},
+      |                                                                      ^
+../../src/cli/serve/tts_websocket.cpp:164:70: warning: missing initializer for member ‘gufo::server::HttpRequest::headers’ [-Wmissing-field-initializers]
+../../src/cli/serve/tts_websocket.cpp:164:70: warning: missing initializer for member ‘gufo::server::HttpRequest::is_cancelled’ [-Wmissing-field-initializers]
+[62/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/http_server.cpp.o
+../../src/cli/serve/http_server.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Ok(const gufo::json::Value&)’:
+../../src/cli/serve/http_server.cpp:384:58: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+  384 |   return {.status = 200, .reason = "OK", .body = v.dump()};
+      |                                                          ^
+../../src/cli/serve/http_server.cpp:384:58: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp:384:58: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Err(int, const char*, const char*, const char*, const char*)’:
+../../src/cli/serve/http_server.cpp:433:63: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+  433 |   return {.status = status, .reason = reason, .body = e.dump()};
+      |                                                               ^
+../../src/cli/serve/http_server.cpp:433:63: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp:433:63: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::DeviceLost()’:
+../../src/cli/serve/http_server.cpp:446:78: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+  446 |   return {.status = 503, .reason = "Service Unavailable", .body = body.dump()};
+      |                                                                              ^
+../../src/cli/serve/http_server.cpp:446:78: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp:446:78: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::OpenAiCompletions(const gufo::server::HttpRequest&, gufo::server::TextGenerationBackend&)’:
+../../src/cli/serve/http_server.cpp:1112:5: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+ 1112 |     };
+      |     ^
+../../src/cli/serve/http_server.cpp: In function ‘std::optional<gufo::server::HttpResponse> gufo::server::{anonymous}::ReadOpenAiResponseChat(const gufo::json::Value&, gufo::server::TextGenerationBackend&, gufo::server::ChatRequest*, std::size_t*, gufo::sampling::SamplingConfig*)’:
+../../src/cli/serve/http_server.cpp:1152:44: warning: missing initializer for member ‘gufo::server::{anonymous}::CompatibilityAllowances::stop_field’ [-Wmissing-field-initializers]
+ 1152 |   if (auto error = ReadCompatibilityOptions(
+      |                    ~~~~~~~~~~~~~~~~~~~~~~~~^
+ 1153 |           body, b, "max_output_tokens", max_tokens, sampling_config,
+      |           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 1154 |           chat->reasoning.enabled,
+      |           ~~~~~~~~~~~~~~~~~~~~~~~~
+ 1155 |           {.stream = true, .response_controls = true})) {
+      |           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../../src/cli/serve/http_server.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::LlamaMetrics(const gufo::server::HttpRequest&, gufo::server::TextGenerationBackend&)’:
+../../src/cli/serve/http_server.cpp:1691:69: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+ 1691 |           .headers = {{"Content-Type", "text/plain; version=0.0.4"}}};
+      |                                                                     ^
+../../src/cli/serve/http_server.cpp:1691:69: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp: In member function ‘gufo::server::HttpResponse gufo::server::HttpServer::handle_request(const gufo::server::HttpRequest&)’:
+../../src/cli/serve/http_server.cpp:2205:72: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+ 2205 |         .status = 200, .reason = "OK", .body = std::string(VoicePage())};
+      |                                                                        ^
+../../src/cli/serve/http_server.cpp:2205:72: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp:2205:72: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp: In member function ‘void gufo::server::HttpServer::handle_connection(int, std::atomic<bool>&)’:
+../../src/cli/serve/http_server.cpp:2554:52: warning: missing initializer for member ‘gufo::server::HttpResponse::body’ [-Wmissing-field-initializers]
+ 2554 |       resp = {.status = 204, .reason = "No Content"};
+      |                                                    ^
+../../src/cli/serve/http_server.cpp:2554:52: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp:2554:52: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/http_server.cpp:2554:52: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+[63/120] Linking CXX static library extensions/build/embedding_gemma2/build/libgufo_embedding_gemma2.a
+[64/120] Building CXX object extensions/build/deepseek_v4_flash/build/CMakeFiles/gufo_deepseek_v4_flash_hip.dir/__/__/__/__/__/src/models/deepseek_v4_flash/provider.cpp.o
+[65/120] Linking HIP static library extensions/build/lfm3/build/libgufo_lfm3_vl.a
+[66/120] Building CXX object extensions/build/embedding_gemma2/build/CMakeFiles/gufo_embedding_gemma2_hip.dir/__/__/__/__/__/src/models/embedding_gemma2/provider.cpp.o
+[67/120] Building CXX object extensions/build/embedding_gemma2/build/CMakeFiles/gufo_embedding_gemma2_hip.dir/__/__/__/__/__/src/models/embedding_gemma2/hip/encoder_runtime.cpp.o
+../../src/models/embedding_gemma2/hip/encoder_runtime.cpp: In member function ‘void gufo::models::embedding_gemma2::hip::EncoderRuntime::Impl::Warmup()’:
+../../src/models/embedding_gemma2/hip/encoder_runtime.cpp:459:76: warning: missing initializer for member ‘gufo::models::embedding_gemma2::EncoderSequence::audio’ [-Wmissing-field-initializers]
+  459 |     const EncoderSequence filler{std::vector<std::uint32_t>(rows, 1000), {}};
+      |                                                                            ^
+../../src/models/embedding_gemma2/hip/encoder_runtime.cpp:459:76: warning: missing initializer for member ‘gufo::models::embedding_gemma2::EncoderSequence::is_cancelled’ [-Wmissing-field-initializers]
+../../src/models/embedding_gemma2/hip/encoder_runtime.cpp: In member function ‘bool gufo::models::embedding_gemma2::hip::EncoderRuntime::Embed(const std::vector<std::vector<unsigned int> >&, std::vector<std::vector<float> >*, std::string*, const std::function<bool()>&)’:
+../../src/models/embedding_gemma2/hip/encoder_runtime.cpp:740:21: warning: missing initializer for member ‘gufo::models::embedding_gemma2::EncoderSequence::audio’ [-Wmissing-field-initializers]
+  740 |     inputs.push_back({tokens, {}});
+      |     ~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~
+../../src/models/embedding_gemma2/hip/encoder_runtime.cpp:740:21: warning: missing initializer for member ‘gufo::models::embedding_gemma2::EncoderSequence::is_cancelled’ [-Wmissing-field-initializers]
+[68/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_text.dir/__/__/__/__/__/lfm3-gufo-extension/runner.cpp.o
+[69/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_text.dir/__/__/__/__/__/lfm3-gufo-extension/provider.cpp.o
+[70/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_text.dir/__/__/__/__/__/lfm3-gufo-extension/drivers.cpp.o
+[71/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_d1.dir/__/__/__/__/__/lfm3-gufo-extension/d1/runner.cpp.o
+[72/120] Linking HIP static library extensions/build/minimax_h3/build/libgufo_minimax_h3.a
+[73/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_d1.dir/__/__/__/__/__/lfm3-gufo-extension/d1/provider.cpp.o
+[74/120] Linking HIP static library extensions/build/qwen/build/libgufo_qwen.a
+[75/120] Building CXX object extensions/build/minimax_h3/build/CMakeFiles/gufo_minimax_h3_hip.dir/__/__/__/__/__/src/models/minimax_h3/provider.cpp.o
+[76/120] Building CXX object extensions/build/lfm3/build/CMakeFiles/gufo_lfm3_d1.dir/__/__/__/__/__/lfm3-gufo-extension/d1/model.cpp.o
+[77/120] Linking HIP static library extensions/build/qwen38_flash_next/build/libgufo_qwen38_flash_next.a
+[78/120] Linking HIP static library extensions/build/qwen3_asr/build/libgufo_qwen3_asr.a
+[79/120] Building CXX object extensions/build/qwen/build/CMakeFiles/gufo_qwen_hip.dir/__/__/__/__/__/src/models/qwen/provider.cpp.o
+[80/120] Building CXX object CMakeFiles/gufo_http.dir/src/cli/serve/openai_chat.cpp.o
+../../src/cli/serve/openai_chat.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::Error(int, const char*, std::string, const char*)’:
+../../src/cli/serve/openai_chat.cpp:240:70: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+  240 |   return {.status = status, .reason = reason, .body = response.dump()};
+      |                                                                      ^
+../../src/cli/serve/openai_chat.cpp:240:70: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/openai_chat.cpp:240:70: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/openai_chat.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::GenerationError(const gufo::server::TextGenerationError&)’:
+../../src/cli/serve/openai_chat.cpp:271:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+  271 |   };
+      |   ^
+../../src/cli/serve/openai_chat.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::NonStreamingResponse(const ParsedChatRequest&, gufo::server::TextGenerationBackend&, const std::shared_ptr<gufo::server::TextGenerationBackend::GenerationRequest>&, gufo::server::TextGenerationBackend::InitialOutputState)’:
+../../src/cli/serve/openai_chat.cpp:2993:62: warning: unused parameter ‘backend’ [-Wunused-parameter]
+ 2993 |     const ParsedChatRequest& request, TextGenerationBackend& backend,
+      |                                       ~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+../../src/cli/serve/openai_chat.cpp: In function ‘gufo::server::HttpResponse gufo::server::{anonymous}::StreamingResponse(const ParsedChatRequest&, gufo::server::TextGenerationBackend&, std::shared_ptr<gufo::server::TextGenerationBackend::GenerationRequest>, gufo::server::TextGenerationBackend::InitialOutputState)’:
+../../src/cli/serve/openai_chat.cpp:3266:3: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+ 3266 |   };
+      |   ^
+../../src/cli/serve/openai_chat.cpp:3067:62: warning: unused parameter ‘backend’ [-Wunused-parameter]
+ 3067 |     const ParsedChatRequest& request, TextGenerationBackend& backend,
+      |                                       ~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+../../src/cli/serve/openai_chat.cpp: In function ‘gufo::server::HttpResponse gufo::server::CountOpenAiInputTokens(const ChatRequest&, TextGenerationBackend&)’:
+../../src/cli/serve/openai_chat.cpp:4127:78: warning: missing initializer for member ‘gufo::server::HttpResponse::headers’ [-Wmissing-field-initializers]
+ 4127 |           .status = 501, .reason = "Not Implemented", .body = response.dump()};
+      |                                                                              ^
+../../src/cli/serve/openai_chat.cpp:4127:78: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+../../src/cli/serve/openai_chat.cpp:4127:78: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+../../src/cli/serve/openai_chat.cpp: In instantiation of ‘gufo::server::HttpResponse gufo::server::{anonymous}::CreateCompatibilityResponse(const gufo::server::HttpRequest&, gufo::server::TextGenerationBackend&, const gufo::server::ChatRequest&, std::size_t, const gufo::sampling::SamplingConfig&, bool, std::string_view) [with Output = ResponsesOutput; gufo::server::ChatRequest = gufo::ext::ChatRequest; std::size_t = long unsigned int; std::string_view = std::basic_string_view<char>]’:
+../../src/cli/serve/openai_chat.cpp:4071:54:   required from here
+ 4071 |   return CreateCompatibilityResponse<ResponsesOutput>(
+      |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+ 4072 |       request, backend, chat, max_tokens, sampling, stream, model);
+      |       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../../src/cli/serve/openai_chat.cpp:4053:58: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+ 4053 |             .defer_stream_headers = !chat.return_progress};
+      |                                                          ^
+../../src/cli/serve/openai_chat.cpp:4060:45: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+ 4060 |           .log_details = stream_log->details};
+      |                                             ^
+../../src/cli/serve/openai_chat.cpp: In instantiation of ‘gufo::server::HttpResponse gufo::server::{anonymous}::CreateCompatibilityResponse(const gufo::server::HttpRequest&, gufo::server::TextGenerationBackend&, const gufo::server::ChatRequest&, std::size_t, const gufo::sampling::SamplingConfig&, bool, std::string_view) [with Output = AnthropicOutput; gufo::server::ChatRequest = gufo::ext::ChatRequest; std::size_t = long unsigned int; std::string_view = std::basic_string_view<char>]’:
+../../src/cli/serve/openai_chat.cpp:4081:54:   required from here
+ 4081 |   return CreateCompatibilityResponse<AnthropicOutput>(
+      |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+ 4082 |       request, backend, chat, max_tokens, sampling, stream, model);
+      |       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../../src/cli/serve/openai_chat.cpp:4053:58: warning: missing initializer for member ‘gufo::server::HttpResponse::log_details’ [-Wmissing-field-initializers]
+ 4053 |             .defer_stream_headers = !chat.return_progress};
+      |                                                          ^
+../../src/cli/serve/openai_chat.cpp:4060:45: warning: missing initializer for member ‘gufo::server::HttpResponse::streaming_body’ [-Wmissing-field-initializers]
+ 4060 |           .log_details = stream_log->details};
+      |                                             ^
+[81/120] Building CXX object extensions/build/qwen38_flash_next/build/CMakeFiles/gufo_qwen38_flash_next_hip.dir/__/__/__/__/__/src/models/qwen38_flash_next/provider.cpp.o
+[82/120] Linking HIP static library extensions/build/qwen3_tts/build/libgufo_qwen3_tts.a
+[83/120] Building CXX object extensions/build/qwen3_asr/build/CMakeFiles/gufo_qwen3_asr_hip.dir/__/__/__/__/__/src/models/qwen3_asr/provider.cpp.o
+[84/120] Building CXX object extensions/build/qwen3_asr/build/CMakeFiles/gufo_qwen3_asr_hip.dir/__/__/__/__/__/src/models/qwen3_asr/hip/transcription_runtime.cpp.o
+[85/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts_hip.dir/__/__/__/__/__/src/models/qwen3_tts/hip/speaker_encoder_runtime.cpp.o
+../../src/models/qwen3_tts/hip/speaker_encoder_runtime.cpp: In member function ‘void gufo::models::qwen3_tts::hip::SpeakerEncoderHipRuntime::Impl::LoadWeights()’:
+../../src/models/qwen3_tts/hip/speaker_encoder_runtime.cpp:291:7: warning: missing initializer for member ‘gufo::models::qwen3_tts::hip::{anonymous}::Res2NetWeights::blocks’ [-Wmissing-field-initializers]
+  291 |       };
+      |       ^
+[86/120] Building HIP object extensions/build/qwen3_asr/build/CMakeFiles/gufo_qwen3_asr_hip.dir/__/__/__/__/__/src/models/qwen3_asr/hip/text_decoder_runtime.cpp.o
+[87/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts_hip.dir/__/__/__/__/__/src/models/qwen3_tts/hip/synthesis_runtime.cpp.o
+[88/120] Linking HIP static library extensions/build/qwen_image_21/build/libgufo_qwen_image_21.a
+[89/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts_hip.dir/__/__/__/__/__/src/models/qwen3_tts/hip/speech_encoder_runtime.cpp.o
+[90/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts_hip.dir/__/__/__/__/__/src/models/qwen3_tts/provider.cpp.o
+[91/120] Building CXX object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21_hip.dir/__/__/__/__/__/src/models/qwen_image_21/provider.cpp.o
+../../src/models/qwen_image_21/provider.cpp: In member function ‘virtual gufo::ext::ImageResult gufo::models::qwen_image_21::QwenImage21RunnerImpl::Generate(const gufo::ext::ImageRequest&, const gufo::ext::CancellationCheck&)’:
+../../src/models/qwen_image_21/provider.cpp:25:5: warning: missing initializer for member ‘gufo::ext::ImageRequest::images’ [-Wmissing-field-initializers]
+   25 |     };
+      |     ^
+[92/120] Building CXX object extensions/build/qwen3_tts/build/CMakeFiles/gufo_qwen3_tts_hip.dir/__/__/__/__/__/src/models/qwen3_tts/hip/talker_runtime.cpp.o
+../../src/models/qwen3_tts/hip/talker_runtime.cpp: In member function ‘bool gufo::models::qwen3_tts::hip::TalkerHipRuntime::BuildVoiceClonePrompt(const gufo::models::qwen3_tts::hip::VoiceClonePromptInput&, gufo::models::qwen3_tts::hip::TalkerPromptOutput*, std::string*)’:
+../../src/models/qwen3_tts/hip/talker_runtime.cpp:1384:7: warning: missing initializer for member ‘gufo::models::qwen3_tts::NonIclPromptInput::instruction’ [-Wmissing-field-initializers]
+ 1384 |       };
+      |       ^
+[93/120] Building HIP object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21_hip.dir/__/__/__/__/__/src/models/qwen_image_21/hip/attention.hip.o
+[94/120] Building HIP object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21_hip.dir/__/__/__/__/__/src/models/qwen_image_21/hip/kernels.hip.o
+/home/mixer/gufo/src/models/qwen_image_21/hip/kernels.hip:848:69: warning: missing field 'raw' initializer [-Wmissing-designated-field-initializers]
+  848 |   StagedWeight target{.m = New(rows, static_cast<int>(count / rows))};
+      |                                                                     ^
+1 warning generated when compiling for gfx1151.
+/home/mixer/gufo/src/models/qwen_image_21/hip/kernels.hip:848:69: warning: missing field 'raw' initializer [-Wmissing-designated-field-initializers]
+  848 |   StagedWeight target{.m = New(rows, static_cast<int>(count / rows))};
+      |                                                                     ^
+1 warning generated when compiling for host.
+[95/120] Linking HIP static library libgufo_llm_cli.a
+[96/120] Linking HIP static library libgufo_http.a
+[97/120] Building HIP object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21_hip.dir/__/__/__/__/__/src/models/qwen_image_21/hip/dense.hip.o
+[98/120] Building CXX object CMakeFiles/gufo.dir/src/cli/main.cpp.o
+[99/120] Building CXX object CMakeFiles/gufo.dir/src/cli/extension_diagnostics.cpp.o
+[100/120] Building HIP object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21_hip.dir/__/__/__/__/__/src/models/qwen_image_21/hip/pipeline.cpp.o
+[101/120] Building HIP object extensions/build/qwen_image_21/build/CMakeFiles/gufo_qwen_image_21_hip.dir/__/__/__/__/__/src/models/qwen_image_21/hip/convolution.hip.o
+[102/120] Building CXX object CMakeFiles/gufo.dir/src/cli/transcribe/transcribe.cpp.o
+../../src/cli/transcribe/transcribe.cpp: In function ‘int gufo::cli::RunTranscribe(std::span<const char* const>)’:
+../../src/cli/transcribe/transcribe.cpp:334:3: warning: missing initializer for member ‘gufo::ext::TranscriptionRequest::pcm16k’ [-Wmissing-field-initializers]
+  334 |   };
+      |   ^
+../../src/cli/transcribe/transcribe.cpp:334:3: warning: missing initializer for member ‘gufo::ext::TranscriptionRequest::on_text’ [-Wmissing-field-initializers]
+[103/120] Building CXX object CMakeFiles/gufo.dir/src/cli/speak/speak.cpp.o
+[104/120] Linking HIP static library extensions/build/deepseek_v4_flash/build/libgufo_deepseek_v4_flash_hip.a
+[105/120] Linking HIP static library extensions/build/embedding_gemma2/build/libgufo_embedding_gemma2_hip.a
+[106/120] Linking HIP static library extensions/build/lfm3/build/libgufo_lfm3_text.a
+[107/120] Linking HIP static library extensions/build/lfm3/build/libgufo_lfm3_d1.a
+[108/120] Linking HIP static library extensions/build/minimax_h3/build/libgufo_minimax_h3_hip.a
+[109/120] Linking HIP static library extensions/build/qwen/build/libgufo_qwen_hip.a
+[110/120] Building CXX object CMakeFiles/gufo.dir/src/cli/decide/decide.cpp.o
+[111/120] Linking HIP static library extensions/build/qwen3_asr/build/libgufo_qwen3_asr_hip.a
+[112/120] Building CXX object CMakeFiles/gufo.dir/extensions/gufo/extension_registry.cpp.o
+[113/120] Linking HIP static library extensions/build/qwen38_flash_next/build/libgufo_qwen38_flash_next_hip.a
+[114/120] Linking HIP static library extensions/build/qwen_image_21/build/libgufo_qwen_image_21_hip.a
+[115/120] Linking HIP static library extensions/build/qwen3_tts/build/libgufo_qwen3_tts_hip.a
+[116/120] Building CXX object CMakeFiles/gufo.dir/src/cli/serve/serve.cpp.o
+../../src/cli/serve/serve.cpp: In function ‘void gufo::cli::PrintServeHelp(std::string_view, std::string_view)’:
+../../src/cli/serve/serve.cpp:613:57: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::model’ [-Wmissing-field-initializers]
+  613 |     SpeechOptions options{.context = tts ? 4096U : 1024U};
+      |                                                         ^
+../../src/cli/serve/serve.cpp:613:57: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::mmproj’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:613:57: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::served_model_name’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:613:57: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::voice_specs’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:613:57: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::voice_text_specs’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:613:57: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::voice_lang_specs’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp: In function ‘int gufo::cli::RunServe(std::span<const char* const>)’:
+../../src/cli/serve/serve.cpp:1196:60: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::model’ [-Wmissing-field-initializers]
+ 1196 |     SpeechOptions options{.context = is_tts ? 4096U : 1024U};
+      |                                                            ^
+../../src/cli/serve/serve.cpp:1196:60: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::mmproj’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:1196:60: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::served_model_name’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:1196:60: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::voice_specs’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:1196:60: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::voice_text_specs’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:1196:60: warning: missing initializer for member ‘gufo::cli::{anonymous}::SpeechOptions::voice_lang_specs’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:1263:9: warning: missing initializer for member ‘gufo::server::AsrServiceOptions::live’ [-Wmissing-field-initializers]
+ 1263 |         });
+      |         ^
+../../src/cli/serve/serve.cpp:1263:9: warning: missing initializer for member ‘gufo::server::AsrServiceOptions::voice’ [-Wmissing-field-initializers]
+../../src/cli/serve/serve.cpp:1610:9: warning: missing initializer for member ‘gufo::ext::TextDiskCacheConfig::draft_model_artifact_fingerprint’ [-Wmissing-field-initializers]
+ 1610 |         },
+      |         ^
+[117/120] Linking HIP executable gufo

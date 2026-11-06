@@ -8,13 +8,15 @@ compiler flags, dependencies and installation; Nix supplies the pinned toolchain
 Linux source-build prerequisites are in [README.md](README.md#build-from-source).
 
 ```sh
-nix build                              # production package, no tests/tools
+nix build                              # development package, all discovered extensions
+nix build .#release                    # shipped lock-mode package, no tests/tools
 ./result/bin/gufo diagnose
-nix build .#checks.x86_64-linux.pr      # bounded hosted CPU/repository checks
+nix flake check                       # hosted CPU/repository checks
 nix develop                            # GPU development and reference tools
 
 # Same production build without Nix, with the documented dependencies installed
-cmake --preset release
+cmake --preset release                # discovery build
+# Add -DGUFO_EXTENSIONS_FROM_LOCK=ON for the shipped extension selection.
 cmake --build --preset release --parallel 4
 ```
 
@@ -32,6 +34,12 @@ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.p
 # Add --fix to apply formatting, then rerun the check.
 ```
 
+Tests selected by `nix flake check` should stay fast and cache-friendly where
+possible. Reuse expensive setup and compiler caches when valid, use the smallest
+deterministic fixtures that preserve the assertions, and avoid redundant builds,
+fixed sleeps and repeated whole-tree work. Measure added wall time; keep expensive
+stress/model qualification explicitly selectable without weakening correctness.
+
 Run the smallest check covering the change. `gpu-test` is RelWithDebInfo with
 assertions enabled. Build only the affected target during iteration:
 
@@ -42,7 +50,8 @@ nix develop -c ctest --preset gpu-full -R '^<test-name>$' --output-on-failure
 ```
 
 The same CMake/CTest commands work outside Nix. `cmake --build --preset pr`
-runs the hosted contract suite after configuring `cpu-test`. Full CPU checks,
+runs the focused contract subset after configuring `cpu-test`; `nix flake check`
+runs the canonical CPU/repository gate. Full CPU checks,
 sanitisers, GPU/operator/model checks and H3 quality tools remain available
 locally; see [docs/TESTING.md](docs/TESTING.md). Do not run full model sweeps,
 video generation or duplicate suites for routine edits. A missing-model skip
@@ -83,7 +92,7 @@ quality; successful optimizations become the default, without extra switches.
 
 - Keep model code, tests, tools and numerical contracts with their model.
 - Use the shared Qwen control-token constants for framing; see
-  [src/models/qwen/AGENTS.md](src/models/qwen/AGENTS.md). Inspect their definitions
+  [src/families/qwen/AGENTS.md](src/families/qwen/AGENTS.md). Inspect their definitions
   when reviewing or changing behavior, and keep reference fixtures independent.
 - Put Windows-specific code in `src/core/platform/`: one leaf per OS facility
   (files, pages, sockets), whose sources may branch on `_WIN32` or split into
@@ -99,4 +108,22 @@ quality; successful optimizations become the default, without extra switches.
   that title on `main`. Mark breaking changes with `!` in the title, and leave
   version and changelog updates to the release workflow.
 - Prefer `jj` when available (`jj version`); otherwise use Git.
+- The source extension API is versioned independently from Gufo. Public headers
+  under `include/gufo/ext/`, their transitive `SURFACE` closure (including
+  forwarded core/cache headers), the metadata schema and public CMake contracts
+  require an `ext-api` PR label and one new, uniquely named Markdown record under
+  `include/gufo/ext/changes/<major>.<minor>/` when declarations/contracts change.
+  Records are permanent and immutable. CMake derives the API revision from the
+  active series in `include/gufo/ext/api-series.json` plus its revision-record
+  count. The `baseline.md` record documents the initial contracts without advancing
+  it. Do not manually bump versions for additive changes.
+  Run `python3 tools/ci/check-extension-api.py --write` after header/include
+  changes; the PR diff gate also checks forwarded declarations. Before 1.0, a minor bump
+  may break extensions; revision bumps are additive. Fix in-tree users together.
+  The guarantee is source compatibility after rebuilding, never binary ABI.
+  Breaking changes explicitly advance the compatibility series in api-series.json
+  and add a record in the new series, retaining all historical records. Extension
+  API and the future experimental flake `extensions` argument are excluded from Gufo's
+  release compatibility surface; CLI/HTTP/public existing flake breaks still
+  require `!`. See [the release policy](docs/RELEASING.md).
 - Follow the user's remote workflow and preserve unrelated work.

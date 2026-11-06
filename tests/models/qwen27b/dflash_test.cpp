@@ -22,9 +22,10 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
-#include "src/models/qwen/chat_template.hpp"
+#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
 
 namespace {
 
@@ -345,85 +346,110 @@ void TestConcurrentBlocks(
              "shared context reuses existing scalar scratch");
     }
   }
-  for (const bool full_block : {false, true}) {
-    std::array<DraftProposal, 8> expected;
-    std::array<std::map<std::string, std::vector<float>>, 8> traces;
-    std::array<std::uint32_t, 8> counts{};
+  // Give each table rare rows beside its special tokens (draft_vocab.hpp).
+  if (draft_model->DraftPrefixRows() != 0) {
+    const auto specials =
+        static_cast<std::uint32_t>(draft_model->DraftSpecials().size());
     for (std::size_t index = 0; index < executors.size(); ++index) {
-      counts[index] =
-          full_block ? 7U : 1U + static_cast<std::uint32_t>(index % 7U);
-      auto& proposal = expected[index];
-      proposal.start_pos = positions[index];
-      proposal.candidates_per_token =
-          temperatures[index] > 0.0F ? config.selector_top_k : 0;
-      const DFlashTrace trace = [&](std::string_view name,
-                                    std::span<const float> values) {
-        traces[index].emplace(std::string(name),
-                              std::vector<float>(values.begin(), values.end()));
-      };
-      proposal.tokens = executors[index]->ForwardBlock(
-          prompt[positions[index]], positions[index], counts[index],
-          temperatures[index], uniforms[index], nullptr,
-          temperatures[index] > 0.0F ? &proposal.candidate_ids : nullptr,
-          temperatures[index] > 0.0F ? &proposal.candidate_probabilities
-                                     : nullptr,
-          trace);
-    }
-    for (const std::size_t width : {2U, 3U, 4U, 5U, 6U, 7U, 8U}) {
-      std::vector<QwenDFlashBlockRequest> requests;
-      std::vector<std::size_t> order;
-      std::array<std::set<std::string>, 8> visited;
-      for (std::size_t row = 0; row < width; ++row) {
-        const auto index = (row + width / 2U) % executors.size();
-        order.push_back(index);
-        requests.push_back(
-            {executors[index].get(), prompt[positions[index]], positions[index],
-             counts[index], temperatures[index], uniforms[index],
-             [&, index](std::string_view name, std::span<const float> values) {
-               const auto found = traces[index].find(std::string(name));
-               Expect(
-                   found != traces[index].end(),
-                   "concurrent draft trace stage exists in scalar reference");
-               Expect(exact(values, found->second),
-                      "concurrent draft differs at " + std::string(name) +
-                          " request " + std::to_string(index) + " width " +
-                          std::to_string(width));
-               visited[index].insert(std::string(name));
-             }});
-      }
-      const auto actual = QwenDFlashGpuExecutor::ForwardBlockBatch(requests);
-      Expect(actual.size() == width, "concurrent draft result count");
-      const auto memory = requests.front().executor->GetMemoryUsage();
-      Expect(
-          memory.request_state_bytes == serial_memory.request_state_bytes &&
-              memory.temporary_scratch_bytes >
-                  serial_memory.temporary_scratch_bytes &&
-              memory.temporary_scratch_bytes <=
-                  batch_memory.temporary_scratch_bytes,
-          "concurrent draft workspace is counted within its admission bound");
-      if (full_block && width == 8)
-        Expect(memory.TotalBytes() == batch_memory.TotalBytes(),
-               "full concurrent draft memory matches its admission estimate");
-      for (std::size_t row = 0; row < width; ++row) {
-        const auto index = order[row];
-        Expect(visited[index].size() == traces[index].size(),
-               "every scalar draft stage was checked in the batch");
-        const auto& reference = expected[index];
-        Expect(actual[row].start_pos == reference.start_pos &&
-                   actual[row].tokens == reference.tokens &&
-                   actual[row].candidate_ids == reference.candidate_ids &&
-                   actual[row].candidates_per_token ==
-                       reference.candidates_per_token &&
-                   exact(actual[row].candidate_probabilities,
-                         reference.candidate_probabilities),
-               "concurrent draft tokens and actual selector distributions");
-        Expect(executors[index]->GetInjectedContextLength() == positions[index],
-               "drafting cannot commit another request's context");
-      }
+      std::vector<std::int32_t> rare;
+      for (std::uint32_t slot = 0; slot < 24; ++slot)
+        rare.push_back(static_cast<std::int32_t>(
+            draft_model->DraftPrefixRows() + 4096U * slot + 97U * index));
+      executors[index]->AppendDraftRows(specials, rare);
     }
   }
+  // Heads: 0 full, 1 every request's draft vocabulary, 2 mixed.
+  for (const int head : {0, 1, 2})
+    for (const bool full_block : {false, true}) {
+      if (head != 0 && draft_model->DraftPrefixRows() == 0)
+        continue;
+      const auto subset = [head](std::size_t index) {
+        return head == 1 || (head == 2 && index % 2 == 0);
+      };
+      std::array<DraftProposal, 8> expected;
+      std::array<std::map<std::string, std::vector<float>>, 8> traces;
+      std::array<std::uint32_t, 8> counts{};
+      for (std::size_t index = 0; index < executors.size(); ++index) {
+        counts[index] =
+            full_block ? 7U : 1U + static_cast<std::uint32_t>(index % 7U);
+        auto& proposal = expected[index];
+        proposal.start_pos = positions[index];
+        proposal.candidates_per_token =
+            temperatures[index] > 0.0F ? config.selector_top_k : 0;
+        const DFlashTrace trace = [&](std::string_view name,
+                                      std::span<const float> values) {
+          traces[index].emplace(
+              std::string(name),
+              std::vector<float>(values.begin(), values.end()));
+        };
+        proposal.tokens = executors[index]->ForwardBlock(
+            prompt[positions[index]], positions[index], counts[index],
+            temperatures[index], uniforms[index], nullptr,
+            temperatures[index] > 0.0F ? &proposal.candidate_ids : nullptr,
+            temperatures[index] > 0.0F ? &proposal.candidate_probabilities
+                                       : nullptr,
+            trace, nullptr, subset(index));
+      }
+      for (const std::size_t width : {2U, 3U, 4U, 5U, 6U, 7U, 8U}) {
+        std::vector<QwenDFlashBlockRequest> requests;
+        std::vector<std::size_t> order;
+        std::array<std::set<std::string>, 8> visited;
+        for (std::size_t row = 0; row < width; ++row) {
+          const auto index = (row + width / 2U) % executors.size();
+          order.push_back(index);
+          requests.push_back(
+              {executors[index].get(), prompt[positions[index]],
+               positions[index], counts[index], temperatures[index],
+               uniforms[index],
+               [&, index](std::string_view name,
+                          std::span<const float> values) {
+                 const auto found = traces[index].find(std::string(name));
+                 Expect(
+                     found != traces[index].end(),
+                     "concurrent draft trace stage exists in scalar reference");
+                 Expect(exact(values, found->second),
+                        "concurrent draft differs at " + std::string(name) +
+                            " request " + std::to_string(index) + " width " +
+                            std::to_string(width));
+                 visited[index].insert(std::string(name));
+               },
+               nullptr, subset(index)});
+        }
+        const auto actual = QwenDFlashGpuExecutor::ForwardBlockBatch(requests);
+        Expect(actual.size() == width, "concurrent draft result count");
+        const auto memory = requests.front().executor->GetMemoryUsage();
+        Expect(
+            memory.request_state_bytes == serial_memory.request_state_bytes &&
+                memory.temporary_scratch_bytes >
+                    serial_memory.temporary_scratch_bytes &&
+                memory.temporary_scratch_bytes <=
+                    batch_memory.temporary_scratch_bytes,
+            "concurrent draft workspace is counted within its admission bound");
+        if (full_block && width == 8)
+          Expect(memory.TotalBytes() == batch_memory.TotalBytes(),
+                 "full concurrent draft memory matches its admission estimate");
+        for (std::size_t row = 0; row < width; ++row) {
+          const auto index = order[row];
+          Expect(visited[index].size() == traces[index].size(),
+                 "every scalar draft stage was checked in the batch");
+          const auto& reference = expected[index];
+          Expect(actual[row].start_pos == reference.start_pos &&
+                     actual[row].tokens == reference.tokens &&
+                     actual[row].candidate_ids == reference.candidate_ids &&
+                     actual[row].candidates_per_token ==
+                         reference.candidates_per_token &&
+                     exact(actual[row].candidate_probabilities,
+                           reference.candidate_probabilities),
+                 "concurrent draft tokens and actual selector distributions");
+          Expect(
+              executors[index]->GetInjectedContextLength() == positions[index],
+              "drafting cannot commit another request's context");
+        }
+      }
+    }
   std::cout << "DFlash2 C2-C8: exact layers, logits, selector probabilities; "
-               "ragged/full blocks, distinct positions/temperatures/draws\n";
+               "ragged/full blocks, distinct positions/temperatures/draws; "
+               "full, draft-vocabulary and mixed heads\n";
   for (auto& executor : executors)
     executor.reset();
   std::array<std::unique_ptr<QwenDFlashGpuDraftBackend>, 8> backends;
@@ -582,9 +608,15 @@ void TestConcurrentBlocks(
       positions[index] += static_cast<std::uint32_t>(accepted[index] + 1U);
     }
   }
+  std::uint64_t subset_blocks = 0;
+  for (const auto& backend : backends)
+    subset_blocks += backend->DraftSubsetBlocks();
+  Expect(draft_model->DraftPrefixRows() == 0 || subset_blocks > 0,
+         "batched backends drafted through the draft vocabulary");
   std::cout
       << "DFlash2 batched backends: exact RNG, private fixed/adaptive policy, "
-         "pending feature injection and persistent state\n";
+         "pending feature injection and persistent state; "
+      << subset_blocks << " draft-vocabulary blocks\n";
 }
 
 void CaptureReferenceTrace(
@@ -707,12 +739,13 @@ void CaptureAcceptanceTrace(
       draft_model, {.max_context = capacity, .max_draft_tokens = 7}, &error);
   Expect(backend != nullptr, error);
   auto* inspect = backend.get();
-  gufo::speculative::SpeculativeVerifier verifier(
+  auto verifier_owner = gufo::hip::CreateQwenGpuSpeculativeVerifier(
       *executor, std::move(backend),
       {.max_draft_tokens = 7,
        .initial_draft_tokens = 7,
        .enable_adaptive_draft_length = false,
        .use_batched_verification = true});
+  auto& verifier = *verifier_owner;
   Token current = verifier.Prime(prompt);
   const Token first = current;
   const auto target_prefix = executor->SaveSnapshot(prompt.size());
@@ -774,12 +807,13 @@ void CaptureAcceptanceTrace(
   // single expensive target prefill for every arm.
   for (const int arm : {0, 1, 2}) {
     executor->RestoreSnapshot(*target_prefix);
-    gufo::speculative::SpeculativeVerifier rebuilt_verifier(
+    auto rebuilt_verifier_owner = gufo::hip::CreateQwenGpuSpeculativeVerifier(
         *executor, *rebuilt,
         {.max_draft_tokens = 7,
          .initial_draft_tokens = 7,
          .enable_adaptive_draft_length = false,
          .use_batched_verification = true});
+    auto& rebuilt_verifier = *rebuilt_verifier_owner;
     if (arm == 0)
       verifier.RestoreSnapshot(*draft_prefix);
     else if (arm == 1)

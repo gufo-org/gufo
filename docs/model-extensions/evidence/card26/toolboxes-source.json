@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/gufo-org/toolboxes",
+  "source_revision": "62d93f839ac3341e5228dbe64e14c4a6ddd27cca",
+  "engine_revision": "2e6aa96ce20a0e244561cb86915dd79260042eac",
+  "build_run": "https://github.com/gufo-org/toolboxes/actions/runs/41301781526",
+  "source_files": {
+    "flake.nix": "dbf4f38916b1fea8995a96b6107e5207bb8a88fce26f0626536bd781cfe8f1d2",
+    "flake.lock": "a313d93a5883f42e5b19486258cf0ad8c040b302bcfba4dea5ad10722bcbd6ea",
+    "nix/gufo-dev.nix": "1773fa8896bf63f4961504c72974b23aed31f0459695f12d71a9e04ddb64fe57",
+    "nix/gufo-runtime.nix": "262b8c05946ac2273082c763c85ea941bfb7ab22ad306b563e55ab71083fc3ca"
+  },
+  "edge_uses_default_package": true,
+  "explicit_lock_override_in_image_recipe": false,
+  "runtime_executed": false,
+  "external_extension_builder_validated": false
+}

@@ -15,7 +15,7 @@ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.p
 nix build .#checks.x86_64-linux.docs
 
 # Hosted CPU/repository checks
-nix build .#checks.x86_64-linux.pr
+nix flake check
 
 # Focused test (replace the target and expression)
 nix develop -c cmake --preset gpu-test
@@ -41,32 +41,52 @@ not a quality pass.
 
 ## Hosted versus local checks
 
-GitHub runs formatting, documentation, dependency-inventory and server-command
-checks plus `cmake/Checks.cmake`: parsing, GGUF safety, sampling, templates,
-server/cache/scheduler behavior, model configuration and small audio/video API
-contracts. It builds only those test executables and the CPU CLI. It does not
-build ROCm, download weights, run full H3 oracles or compile whole-tree clang-tidy.
-The workflow cancels superseded runs and has a 25-minute limit.
+GitHub runs `nix flake check`: formatting, documentation, dependency inventory,
+server-command checks and one CPU build/test derivation. The CPU suite selects
+168 tests, runs with up to four CTest slots, and validates a separate lock-mode
+CLI build. It does not build ROCm, download weights, run H3 qualification or run
+whole-tree clang-tidy. Missing-model skips remain visible and are not quality
+passes. The workflow cancels superseded runs and has a 25-minute limit.
 
 ```sh
-# Same hosted C++/CLI selection locally
+# Focused CMake contract subset for local iteration (also used on Windows)
 cmake --preset cpu-test
 cmake --build --preset pr --parallel 4
 
-# Full CPU suite, or explicit non-hosted tools
+# Individual CPU check, or explicit qualification tools
 nix build .#checks.x86_64-linux.tests
-nix build .#checks.x86_64-linux.static-analysis
-nix build .#checks.x86_64-linux.h3-manifest
-nix build .#checks.x86_64-linux.h3-quality
-nix build .#checks.x86_64-linux.h3-ml-quality
+nix build .#static-analysis
+nix build .#h3-manifest
+nix build .#h3-quality
+nix build .#h3-ml-quality
 ```
+
+Static analysis and the three H3 qualification packages above are explicit-only: `nix flake check`
+excludes them and the six CTest suites labelled `h3-qualification`. Their tests
+remain available through those packages or an explicit local CTest selection.
+
+The default Nix CPU suite also excludes `serving_bench_test`. Run its mocked
+benchmark-client/reporting regressions explicitly when changing those tools:
+
+```sh
+nix develop .#checks.x86_64-linux.tests -c python3 tests/tools/serving_bench_test.py
+```
+
+The default `.clang-tidy` runs the static analyzer and selected correctness
+checks. Run it explicitly against an affected source file:
+
+```sh
+nix develop -c clang-tidy -p build/cpu-test src/core/json.cpp
+```
+
+The compilation database must already be configured (the `cpu-test` preset
+exports it).
 
 Full CPU builds need Python NumPy for the offline tool tests. GPU model oracles
 need the documented local weights; use focused targets and CTest labels before
 running the complete tree. H3 development normally needs an analytic primitive,
 one transformer block or one denoiser forward. Full video generation and LPIPS
-are release/quality qualification, not routine PR work. `nix flake check` runs
-all declared checks and is deliberately not the hosted CI command.
+are release/quality qualification, not routine PR work. `nix flake check` is the canonical hosted CI command.
 
 For Qwen image-prefix changes, build `qwen_vision_serving_test` with `gpu-test`
 and run it with `MODEL DRAFT_OR_DASH IMAGE_DIRECTORY --append-only`.
@@ -76,6 +96,51 @@ snapshot restoration and sampled Flash-Next MTP replay.
 Qwen27B also checks exact restoration after cancellation between layers.
 Use the [HTTP continuation check](SERVER.md#hip-execution)
 for cancellation, thinking controls and disk restart.
+
+## Boundary and link-graph gates
+
+Three repository gates describe who may reach the serving tier; all three are
+`cpu;repository` CTest tests and run in the hosted selection.
+
+```sh
+# No src/cli include from a model, family, cache, src/ext or public API source
+python3 tools/ci/check-extension-isolation.py --fail-on-serving-boundary
+# The same scan with every location listed
+python3 tools/ci/check-extension-isolation.py --fail-on-serving-boundary --details
+# No link edge from below gufo_ext_runtime to gufo_serving or gufo_http
+python3 tools/ci/check-target-graph.py --report build/<dir>/gufo-link-graph.json
+```
+
+`gufo-link-graph.json` is written by the configure step
+(`cmake/TargetGraph.cmake`) and holds the transitive link closure of every
+model and support library declared in a `library.json`, plus `gufo_core`,
+`gufo_cache`, `gufo_cache_hip` and `gufo_ext_runtime`. Only explicitly allow-listed HIP libraries may be listed under `absent`,
+and only when the report records `hip: false`; missing protected names fail.
+Unsupported interface expressions fail configuration. The checker itself has unit coverage in `tests/tools/`.
+
+`ext_runtime_neutral_contracts_test` builds inside the isolated extension
+fixture project and links only `gufo_ext_runtime` among Gufo libraries (plus
+OpenSSL for public crypto-header coverage): the neutral continuation
+bases, host memory budgets, reasoning tags and device-probe default have to
+work with no serving or HTTP target even defined. The capture and backing-plan
+contract is cache-owned and is covered by `cache_adapter_test`.
+
+For Windows extension-header and runtime changes, the **Check Windows extension
+contracts** job runs this fixture independently of the package build. It uses
+the hosted ClangCL toolset and only OpenSSL from the application's vcpkg baseline;
+it does not require the HIP SDK or media dependencies. Rerun that individual job
+while iterating. The full package job still validates the production toolchain.
+On a Windows development host with OpenSSL installed, the same focused check is:
+
+```powershell
+cmake -S tests/extensions/fixture -B build/windows-extensions -A x64 -T ClangCL -DOPENSSL_ROOT_DIR=C:/path/to/openssl
+cmake --build build/windows-extensions --config RelWithDebInfo --parallel 4 --target extension_runtime_test extension_role_test ext_runtime_neutral_contracts_test
+ctest --test-dir build/windows-extensions -C RelWithDebInfo --output-on-failure --no-tests=error --timeout 60 -R '^(extension_runtime_test|extension_role_test|ext_runtime_neutral_contracts_test)$'
+```
+
+The qualification window must use a `BUILD_TESTING=OFF` artifact. Test-preset
+binaries now assert inside serving sources where the previous executable did not;
+assertion state differs from production.
 
 ## Text API functional tests
 
