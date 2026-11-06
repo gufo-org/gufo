@@ -14,7 +14,7 @@ struct GpuLocalBudget {
 };
 
 /// Budget and current usage of the local memory segment group of the GPU
-/// adapter whose LUID is `luid`, on engine node `node`, for the calling
+/// adapter whose LUID is `luid`, on adapter node `node`, for the calling
 /// process. Windows asks DXGI once per call and keeps no adapter between
 /// calls. The budget is a ceiling for this process: it does not see other
 /// processes or pressure on host memory. Returns nullopt when the adapter or

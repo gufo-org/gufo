@@ -24,11 +24,9 @@ int main() {
   using gufo::platform::GpuLocalBudget;
   constexpr std::uint64_t kGiB = 1ull << 30;
   constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
-  // The admission margin: 5.5 GiB of host RAM. It exceeds the snapshot
-  // guard's, so a session admitted at the limit can commit a checkpoint.
+  // The admission margin: 5.5 GiB of host RAM.
   constexpr std::uint64_t kMargin = gufo::hip::kAdmissionHostMarginBytes;
   static_assert(kMargin == 5 * kGiB + kGiB / 2);
-  static_assert(kMargin > gufo::hip::kSnapshotHostMarginBytes);
   // 23 GiB of budget left, as measured when a 262144-token Flash-Next
   // session was refused on a Strix Halo.
   constexpr GpuLocalBudget kRoomy{.budget_bytes = 104 * kGiB,

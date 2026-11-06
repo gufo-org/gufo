@@ -11,7 +11,7 @@
 
 namespace gufo::hip {
 
-/// The DXGI engine node of the adapter behind a HIP device, from the device's
+/// The DXGI node index of the adapter behind a HIP device, from the device's
 /// luidDeviceNodeMask. One set bit names the node. TheRock 10.0.0 leaves the
 /// mask zero on Strix Halo, a single-node APU, so a zero mask means node 0
 /// there and on no other architecture. The architecture is the part of
@@ -54,19 +54,12 @@ namespace gufo::hip {
   return std::max(hip_free, std::min(budget_left, host_left));
 }
 
-/// Host RAM an integrated GPU's snapshot storage leaves the OS when the OS
-/// video-memory budget sets its headroom: as much as an explicit host cache
-/// limit leaves (kHostSnapshotHeadroomBytes in src/cli/serve).
-inline constexpr std::uint64_t kSnapshotHostMarginBytes = std::uint64_t{4}
-                                                          << 30;
-
-/// Host RAM kept out of the state capacity on such a GPU: the snapshot margin
-/// plus 1.5 GiB, so that a session admitted at the limit can still commit its
-/// first checkpoint. The snapshot guard also keeps the lazy scratch and
-/// 512 MiB of slack free, and a Flash-Next session on a Strix Halo under
-/// Windows used up to 0.6 GiB more than its state and lazy scratch.
+/// Host RAM kept out of the state capacity on such a GPU. On a Strix Halo under
+/// Windows, a Flash-Next session costs about its state and lazy scratch, so one
+/// admitted at the limit leaves the OS about this much, more than the 4 GiB an
+/// explicit host cache limit leaves (kHostSnapshotHeadroomBytes).
 inline constexpr std::uint64_t kAdmissionHostMarginBytes =
-    kSnapshotHostMarginBytes + (std::uint64_t{3} << 30) / 2;
+    (std::uint64_t{11} << 30) / 2;
 
 }  // namespace gufo::hip
 
