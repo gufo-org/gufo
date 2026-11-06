@@ -48,9 +48,7 @@ public:
     };
   }
 
-  ext::ImageCapabilities Capabilities() const override {
-    return kCapabilities;
-  }
+  ext::ImageCapabilities Capabilities() const override { return kCapabilities; }
 
 private:
   std::unique_ptr<Model> model_;

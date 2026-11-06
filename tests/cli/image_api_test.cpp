@@ -1,5 +1,7 @@
 // Image provider startup options and request capability validation (#974).
 // Host-only: providers are fakes registered in this process, no weights load.
+#include "src/cli/serve/image_api.hpp"
+
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -14,7 +16,6 @@
 
 #include "gufo/ext/registry.hpp"
 #include "src/cli/serve/http_server.hpp"
-#include "src/cli/serve/image_api.hpp"
 #include "src/core/json.hpp"
 
 namespace {
@@ -99,10 +100,14 @@ void RegisterProviders(ext::Registry& registry) {
       .keys = {},
       .model_ids = {},
       .speculative = {},
-      .options = {{"--text-encoder", ext::OptionType::kPath, {"serve image"},
+      .options = {{"--text-encoder",
+                   ext::OptionType::kPath,
+                   {"serve image"},
                    "Text encoder GGUF"},
-                  {"--encoder-threads", ext::OptionType::kInteger,
-                   {"serve image"}, ""}},
+                  {"--encoder-threads",
+                   ext::OptionType::kInteger,
+                   {"serve image"},
+                   ""}},
       .available = true,
       .unavailable_reason = {},
       .extension = {},
@@ -175,17 +180,17 @@ void TestStartupOptions(const std::filesystem::path& encoder) {
   const auto& restricted =
       server::SelectImageProvider(registry, "restricted", options);
   Require(restricted.id == "restricted-image", "probe selects provider");
-  const auto runner = server::CreateImageRunner(restricted, "restricted",
-                                                options);
+  const auto runner =
+      server::CreateImageRunner(restricted, "restricted", options);
   Require(runner != nullptr && g_created == 1, "factory called once");
   Require(g_received.model_root == "restricted", "model root forwarded");
   Require(g_received.options.size() == 2, "only supplied options forwarded");
   Require(std::get<std::string>(g_received.options.at("--text-encoder")) ==
               encoder.string(),
           "path option forwarded");
-  Require(std::get<std::int64_t>(g_received.options.at("--encoder-threads")) ==
-              4,
-          "integer option forwarded");
+  Require(
+      std::get<std::int64_t>(g_received.options.at("--encoder-threads")) == 4,
+      "integer option forwarded");
   // No options: the provider keeps its defaults (for example a sidecar beside
   // the model) and receives an empty map.
   (void)server::CreateImageRunner(
@@ -194,16 +199,14 @@ void TestStartupOptions(const std::filesystem::path& encoder) {
   Require(g_received.options.empty() && g_created == 2, "defaults untouched");
 
   // Type errors and unknown spellings fail in the shared parser.
-  Reject([&] { Parse(registry, {"--encoder-threads=four"}); },
-         "invalid value");
+  Reject([&] { Parse(registry, {"--encoder-threads=four"}); }, "invalid value");
   Reject([&] { Parse(registry, {"--text-encoder"}); }, "missing value");
   Reject([&] { Parse(registry, {"--llm-draft=x"}); }, "unknown option");
   Reject([&] { Parse(registry, {"--made-up=1"}); }, "unknown option");
 
   // Options of another provider are rejected once the model selects one.
-  Reject(
-      [&] { server::SelectImageProvider(registry, "legacy", options); },
-      "provider legacy-image does not support --");
+  Reject([&] { server::SelectImageProvider(registry, "legacy", options); },
+         "provider legacy-image does not support --");
   const auto flag = Parse(registry, {"--legacy-flag"});
   Require(std::get<bool>(flag.at("--legacy-flag")), "bare serve applies");
   Reject([&] { server::SelectImageProvider(registry, "restricted", flag); },
@@ -212,11 +215,10 @@ void TestStartupOptions(const std::filesystem::path& encoder) {
   // Missing sidecars fail before the factory runs.
   const auto created = g_created;
   const auto missing = Parse(
-      registry, {"--text-encoder=" + (encoder.parent_path() / "absent.gguf")
-                                         .string()});
-  Reject(
-      [&] { server::SelectImageProvider(registry, "restricted", missing); },
-      "--text-encoder does not exist");
+      registry,
+      {"--text-encoder=" + (encoder.parent_path() / "absent.gguf").string()});
+  Reject([&] { server::SelectImageProvider(registry, "restricted", missing); },
+         "--text-encoder does not exist");
   Require(g_created == created, "no runner for a missing sidecar");
 
   // A provider that declares options must accept them in its factory.
@@ -238,16 +240,16 @@ void TestStartupOptions(const std::filesystem::path& encoder) {
   // `serve` and modality-specific declarations overlap for conflict checks.
   ext::Registry conflicting;
   conflicting.BeginExtension({"conflict", "1.0.0", "test"});
-  conflicting.AddProvider({.id = "a",
-                           .capability = ext::Capability::kImageGeneration,
-                           .keys = {},
-                           .model_ids = {},
-                           .speculative = {},
-                           .options = {{"--shared", ext::OptionType::kPath,
-                                        {"serve image"}, ""}},
-                           .available = true,
-                           .unavailable_reason = {},
-                           .extension = {}});
+  conflicting.AddProvider(
+      {.id = "a",
+       .capability = ext::Capability::kImageGeneration,
+       .keys = {},
+       .model_ids = {},
+       .speculative = {},
+       .options = {{"--shared", ext::OptionType::kPath, {"serve image"}, ""}},
+       .available = true,
+       .unavailable_reason = {},
+       .extension = {}});
   Reject(
       [&] {
         conflicting.AddProvider(
@@ -256,8 +258,8 @@ void TestStartupOptions(const std::filesystem::path& encoder) {
              .keys = {},
              .model_ids = {},
              .speculative = {},
-             .options = {{"--shared", ext::OptionType::kInteger, {"serve"},
-                          ""}},
+             .options =
+                 {{"--shared", ext::OptionType::kInteger, {"serve"}, ""}},
              .available = true,
              .unavailable_reason = {},
              .extension = {}});
@@ -311,10 +313,7 @@ server::HttpRequest Edit(std::string_view background) {
 }
 
 std::string Message(const server::HttpResponse& response) {
-  return json::parse(response.body)
-      .find("error")
-      ->find("message")
-      ->str();
+  return json::parse(response.body).find("error")->find("message")->str();
 }
 
 void TestRequestValidation() {
@@ -326,10 +325,9 @@ void TestRequestValidation() {
   };
 
   // A runner that advertises nothing: text-to-image with auto/opaque only.
-  server::ImageService narrow(
-      std::make_shared<server::CallbackImageRunner>(record,
-                                                    ext::ImageCapabilities{}),
-      "narrow");
+  server::ImageService narrow(std::make_shared<server::CallbackImageRunner>(
+                                  record, ext::ImageCapabilities{}),
+                              "narrow");
   for (const auto& [background, expected] :
        {std::pair<std::string_view, ext::ImageBackground>{
             "", ext::ImageBackground::kAuto},
@@ -403,8 +401,8 @@ void TestRequestValidation() {
 
 int main() {
   try {
-    const auto directory = std::filesystem::temp_directory_path() /
-                           "gufo-image-api-test";
+    const auto directory =
+        std::filesystem::temp_directory_path() / "gufo-image-api-test";
     std::filesystem::create_directories(directory);
     const auto encoder = directory / "encoder.gguf";
     std::ofstream(encoder) << "GGUF";

@@ -1229,8 +1229,8 @@ int RunServe(std::span<const char* const> args) {
     }
     ext::ParsedOptions provider_options;
     try {
-      provider_options = ext::ParseOptions(registry, ext::kImageServeCommand,
-                                           provider_args);
+      provider_options =
+          ext::ParseOptions(registry, ext::kImageServeCommand, provider_args);
     } catch (const std::invalid_argument& error) {
       std::cerr << "Error: " << error.what() << '\n';
       return 2;
