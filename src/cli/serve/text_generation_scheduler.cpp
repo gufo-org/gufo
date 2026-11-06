@@ -1315,15 +1315,19 @@ struct TextGenerationScheduler::Impl {
       }
       const auto start = Clock::now();
       const std::size_t rounds_before = yield_rounds;
+      const double yield_ms_before = yield_ms;
       const auto step =
           request->runner_request.Prefill(budget, work.layer_groups, yield);
       request->result.prefill_yield_rounds += yield_rounds - rounds_before;
       if (yield_rounds != rounds_before)
         request->result.max_prefill_layer_groups = std::max(
             request->result.max_prefill_layer_groups, work.layer_groups);
+      // Decode rounds between layer groups count as the decoders' time, not
+      // this prompt's.
       const double step_ms =
           std::chrono::duration<double, std::milli>(Clock::now() - start)
-              .count();
+              .count() -
+          (yield_ms - yield_ms_before);
       request->result.prefill_ms += step_ms;
       request->result.prefill_tokens += step.consumed_tokens;
       if (!decoder_runnable && !peer_waiting)
@@ -1962,6 +1966,16 @@ struct TextGenerationScheduler::Impl {
         return;
       progress.fetch_add(1, std::memory_order_relaxed);
       ++yield_rounds;
+      const auto start = Clock::now();
+      struct AddTime {
+        Clock::time_point start;
+        double& total;
+        ~AddTime() {
+          total +=
+              std::chrono::duration<double, std::milli>(Clock::now() - start)
+                  .count();
+        }
+      } add_time{start, yield_ms};
       RunDecodeUnit(*round, decoding, capturing);
     } catch (...) {
       // Decode failures complete their own requests; nothing reaches the
@@ -2141,6 +2155,8 @@ struct TextGenerationScheduler::Impl {
   std::vector<sched::DecodingRequest> decoding_view;
   // Decode rounds run between layer groups since startup.
   std::size_t yield_rounds{0};
+  // Time those rounds took, which their prompt's pass excludes.
+  double yield_ms{0};
   detail::PublicationWaitEstimate publication_prefill;
   std::shared_ptr<OutputBudget> output_budget;
   std::shared_ptr<SessionTable> sessions;
