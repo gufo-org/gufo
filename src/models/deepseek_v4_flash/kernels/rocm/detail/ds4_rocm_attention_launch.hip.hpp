@@ -1214,7 +1214,8 @@ static int attention_output_q8_batch_launch(
                       return 1;
                     }
                     if (hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_ATTN_B) &&
-                        hipblaslt_gemm_f16(out->ptr, out_b_f16_t, low_h,
+                        hipblaslt_gemm_f16(out->ptr, out_b_f16_t,
+                                           (uint32_t)out_dim, low_h,
                                            (uint32_t)out_dim, n_tokens,
                                            (uint32_t)low_dim, HIPBLAS_OP_N,
                                            HIP_R_32F,

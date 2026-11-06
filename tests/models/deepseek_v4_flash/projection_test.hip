@@ -429,9 +429,9 @@ void f16_ordered(unsigned dim, unsigned rows, std::mt19937& random) {
   check(hipMemcpy(x.data, input.data(), input.size() * sizeof(float),
                   hipMemcpyHostToDevice));
   matmul_f16_ordered_chunks_kernel<<<dim3(rows, Tokens), 32>>>(
-      reference.data, w.data, x.data, dim, rows, Tokens);
+      reference.data, w.data, dim, x.data, dim, rows, Tokens);
   matmul_f16_ordered_batch_reuse_kernel<Tokens>
-      <<<rows, 32>>>(output.data, w.data, x.data, dim, rows);
+      <<<rows, 32>>>(output.data, w.data, dim, x.data, dim, rows);
   check(hipGetLastError());
   check(hipMemcpy(expected.data(), reference.data,
                   expected.size() * sizeof(float), hipMemcpyDeviceToHost));
@@ -439,6 +439,31 @@ void f16_ordered(unsigned dim, unsigned rows, std::mt19937& random) {
                   hipMemcpyDeviceToHost));
   equal("ordered F16 projection", expected.data(), actual.data(),
         actual.size());
+  constexpr unsigned kRowPadHalves = 256;
+  const unsigned stride = dim + kRowPadHalves;
+  __half_raw padding_nan{};
+  padding_nan.x = 0x7e00;
+  std::vector<__half> padded(size_t(rows) * stride, __half(padding_nan));
+  for (unsigned row = 0; row < rows; ++row)
+    std::copy_n(weights.begin() + size_t(row) * dim, dim,
+                padded.begin() + size_t(row) * stride);
+  Device<__half> wp(padded.size());
+  check(hipMemcpy(wp.data, padded.data(), padded.size() * sizeof(__half),
+                  hipMemcpyHostToDevice));
+  for (const bool reuse : {false, true}) {
+    check(hipMemset(output.data, 0xff, actual.size() * sizeof(float)));
+    if (reuse)
+      matmul_f16_ordered_batch_reuse_kernel<Tokens>
+          <<<rows, 32>>>(output.data, wp.data, stride, x.data, dim, rows);
+    else
+      matmul_f16_ordered_chunks_kernel<<<dim3(rows, Tokens), 32>>>(
+          output.data, wp.data, stride, x.data, dim, rows, Tokens);
+    check(hipGetLastError());
+    check(hipMemcpy(actual.data(), output.data, actual.size() * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("padded-row F16 projection", expected.data(), actual.data(),
+          actual.size());
+  }
   for (unsigned token = 0; token < Tokens; ++token) {
     double sum = 0;
     for (unsigned i = 0; i < dim; ++i)
@@ -448,8 +473,10 @@ void f16_ordered(unsigned dim, unsigned rows, std::mt19937& random) {
       std::exit(4);
     }
   }
-  std::printf("F16 dim=%u tokens=%u: exact scalar/batch projection\n", dim,
-              Tokens);
+  std::printf(
+      "F16 dim=%u tokens=%u: exact scalar/batch projection, packed and "
+      "padded rows\n",
+      dim, Tokens);
 }
 
 void plain_norm(unsigned rows, std::mt19937& random) {
@@ -534,8 +561,8 @@ void hc_prefill_fp32(unsigned tokens) {
                   hipMemcpyHostToDevice));
   hc4_norm_mix_split_weighted_sum_kernel<4, 256, 16>
       <<<(tokens + 3) / 4, 1024>>>(output.data, mix.data, split.data, x.data,
-                                   w.data, s.data, b.data, embedding, tokens,
-                                   20, 1e-6F, 1e-6F);
+                                   w.data, width, s.data, b.data, embedding,
+                                   tokens, 20, 1e-6F, 1e-6F);
   check(hipGetLastError());
   std::vector<float> actual(tokens * mixes);
   check(hipMemcpy(actual.data(), mix.data, actual.size() * sizeof(float),
@@ -597,8 +624,8 @@ void hc_complete_formula(unsigned tokens, float epsilon, std::mt19937& random) {
                   hipMemcpyHostToDevice));
   hc4_norm_mix_split_weighted_sum_kernel<4, 256, 16>
       <<<(tokens + 3) / 4, 1024>>>(output.data, mix.data, split.data, x.data,
-                                   w.data, s.data, b.data, embedding, tokens,
-                                   20, epsilon, 1e-6F);
+                                   w.data, width, s.data, b.data, embedding,
+                                   tokens, 20, epsilon, 1e-6F);
   hc_expand4_vec4_kernel<<<(block.size() / 4 + 255) / 256, 256>>>(
       expanded.data, y.data, x.data, split.data, embedding, tokens);
   check(hipGetLastError());
