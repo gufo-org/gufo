@@ -223,6 +223,9 @@ struct FakeControl {
   std::optional<gufo::ext::TextSchedulingProfile> scheduling;
   // Runs on the scheduler thread before each yield of a layered pass.
   std::function<void()> before_yield;
+  // Each decode advance inside a yield takes this long.
+  std::chrono::milliseconds yield_advance_delay{0};
+  std::atomic<bool> yielding{false};
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
@@ -467,7 +470,9 @@ public:
                      .count = group});
       if (control_->before_yield)
         control_->before_yield();
+      control_->yielding = true;
       fake.YieldPrefill();
+      control_->yielding = false;
       control_->Log({.kind = EventKind::kResume,
                      .label = fake.label,
                      .index = fake.position,
@@ -535,6 +540,8 @@ public:
     if (!fake.frontier.has_value() || token != *fake.frontier) {
       throw std::logic_error("scheduler fake frontier mismatch");
     }
+    if (control_->yielding)
+      std::this_thread::sleep_for(control_->yield_advance_delay);
 
     {
       std::unique_lock<std::mutex> lock(control_->mutex);
@@ -1558,6 +1565,27 @@ void TestLayeredPrefillDecodesBetweenGroups() {
   Expect(result_a.max_prefill_layer_groups == 1 &&
              result_a.prefill_yield_rounds == 0,
          "a lone prompt runs unsplit");
+}
+
+void TestLayeredPrefillTimeExcludesYieldRounds() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->yield_advance_delay = std::chrono::milliseconds(25);
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+
+  auto request_a = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto request_b = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  (void)request_a.Wait();
+  const auto result_b = request_b.Wait();
+  // Four rounds of at least 25 ms ran inside the prompt's passes; the fake
+  // passes themselves take microseconds.
+  Expect(result_b.prefill_yield_rounds == 4 && result_b.prefill_ms < 50.0,
+         "a prompt's prefill time excludes the decode rounds between groups");
 }
 
 void TestLayeredPrefillAloneRunsUnsplit() {
@@ -3547,6 +3575,7 @@ int main() {
   }
   TestNonIncrementalRunnerFallsBackSafely();
   TestLayeredPrefillDecodesBetweenGroups();
+  TestLayeredPrefillTimeExcludesYieldRounds();
   TestLayeredPrefillAloneRunsUnsplit();
   TestDecoderFinishesInsideYield();
   TestLayeredPrefillBatchesDecodersPerRound(1);
