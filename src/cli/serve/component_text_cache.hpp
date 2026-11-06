@@ -98,6 +98,8 @@ public:
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  // RAM the cache may retain after host limits; zero with the RAM cache off.
+  [[nodiscard]] std::size_t ram_budget() const noexcept;
 
 private:
   std::unique_ptr<Impl> impl_;

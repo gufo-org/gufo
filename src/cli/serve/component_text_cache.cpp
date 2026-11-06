@@ -7,6 +7,7 @@
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -158,8 +159,23 @@ public:
     }
   }
 };
-}  // namespace
 
+std::string HostReserveMessage(std::size_t sessions, std::size_t requested,
+                               std::size_t available) {
+  constexpr std::size_t kMiB = std::size_t{1} << 20;
+  return std::to_string(sessions) +
+         (sessions == 1 ? " session leaves " : " sessions leave ") +
+         std::to_string(available / kMiB) +
+         " MiB for the RAM cache above the " +
+         std::to_string(kHostSnapshotHeadroomBytes / kMiB) +
+         " MiB host reserve" +
+         (requested
+              ? " (" + std::to_string(requested / kMiB) + " MiB requested)"
+              : std::string()) +
+         ". Use fewer --sessions, a smaller --context, or --cache-ram-bytes "
+         "off to serve without RAM checkpoints";
+}
+}  // namespace
 struct ComponentTextCache::Impl {
   struct Entry {
     // Guard fallbacks outlive their slots. Idle pieces and capture/load work
@@ -278,7 +294,7 @@ struct ComponentTextCache::Impl {
     }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
     // RAM cache limit for a runner that pins its slots; computed before the
-    // branch below so a host short of its reserve can fall back to off.
+    // branch below so a short host refuses the load before anything commits.
     std::size_t pinned{}, limit{};
     if (ram_enabled && resources->commit_backing) {
       const auto claim = this->runner->ResourceClaim();
@@ -296,6 +312,7 @@ struct ComponentTextCache::Impl {
       // Staging is pinned host memory too, so the host keeps its reserve
       // only if both fit under the ceiling.
       const auto staging = ledger.Limits().staging_bytes;
+      const auto requested = ram;
       max_bytes = ceiling > staging ? ceiling - staging : 0;
       ram = std::min(ram, max_bytes);
       if (automatic_ram)
@@ -303,25 +320,22 @@ struct ComponentTextCache::Impl {
       // Within the host ceiling and the limit the slots allocated under. Other
       // charges above the budget are refused here, as without pins.
       limit = std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
-      // The ceiling is measured after the weights loaded. On a host that
-      // keeps less than its reserve it falls below what the slots already
-      // pinned and charged, and constraining the ledger to it would fail the
-      // whole load with ResourceExhausted ("bad allocation"). The slots exist
-      // either way, so serve as with --cache-ram-bytes off: the disk cache
-      // still works, and its backing grows only above the host reserve. An
-      // explicit budget below the other charges is still refused below: that
-      // is the operator's setting, not the host's state.
-      if (const auto charged = ledger.Snapshot().ram_bytes;
-          max_bytes < charged) {
-        Logger::Warn("cache",
-                     "schema=component-cache-v1 event=ram_cache_disabled "
-                     "reason=host_reserve charged_bytes=" +
-                         std::to_string(charged) +
-                         " limit_bytes=" + std::to_string(limit) +
-                         " max_bytes=" + std::to_string(max_bytes) +
-                         " slot_pinned_bytes=" + std::to_string(pinned));
-        ram_enabled = false;
-      }
+      const auto charged = ledger.Snapshot().ram_bytes;
+      const auto granted = std::min(ram, limit > pinned ? limit - pinned : 0);
+      // The ceiling is measured after the slots allocated. When they leave
+      // no RAM for the cache above the host reserve, refuse the load with
+      // the remedies instead of serving without the cache the user expects
+      // (#1053). An explicit budget below the other charges is the
+      // operator's setting, not the host's state.
+      const bool host_bound = automatic_ram || ram < requested;
+      if (max_bytes < charged || !granted || (limit < charged && host_bound))
+        throw std::runtime_error(HostReserveMessage(
+            count, requested, max_bytes > pinned ? max_bytes - pinned : 0));
+      if (limit < charged)
+        throw std::runtime_error(
+            "--cache-ram-bytes " + std::to_string(requested) +
+            " is below the " + std::to_string(charged) +
+            " bytes the cache already holds for its sessions and metadata");
     }
     if (!ram_enabled) {
       // Only disk captures copy through backing, so without a disk cache no
@@ -1004,6 +1018,9 @@ ComponentTextCache::ComponentTextCache(
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();
+}
+std::size_t ComponentTextCache::ram_budget() const noexcept {
+  return impl_->budget;
 }
 
 std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(

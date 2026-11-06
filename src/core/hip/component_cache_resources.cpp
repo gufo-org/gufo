@@ -49,7 +49,10 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                                 result->adapter.get()](std::size_t budget) {
     const auto plan = adapter->BackingPlan(budget);
     if (plan.size() != 1)
-      throw std::invalid_argument("insufficient component backing budget");
+      throw std::invalid_argument(
+          "a RAM cache budget of " + std::to_string(budget) +
+          " bytes is too small for its backing; use a larger "
+          "--cache-ram-bytes, or --cache-ram-bytes off");
     const auto& allocation = plan.front();
     // Pages commit as captures need them. A payload cannot span segments,
     // so segments of about 128 MiB bound registration pauses and stranded
