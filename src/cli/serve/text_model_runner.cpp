@@ -287,10 +287,14 @@ struct TextRunnerPool::Impl {
       // slots allocate and the cache observes remaining host capacity. Slots
       // allocate under the ceiling; what they pin is charged on top of this.
       // The state claim includes lazy image/rollback storage, not startup
-      // usage.
+      // usage. The ceiling is what the host keeps above its reserve after
+      // loading; on a host short of that reserve it is 0. The cache's own
+      // metadata still needs a little room, or the load fails before the
+      // cache can serve with the RAM cache off.
       component_cache = std::make_unique<ComponentTextCache>(
           validated.runner, state_count, std::min(requested, ceiling),
-          disk_cache_options, !ram_cache_options.capacity_bytes, ceiling,
+          disk_cache_options, !ram_cache_options.capacity_bytes,
+          std::max(ceiling, ComponentTextCache::kOffMetadataBytes),
           ram_cache_options.enabled);
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
