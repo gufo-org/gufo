@@ -50,6 +50,26 @@ block arithmetic. For complete trajectories, use 40 steps and `--trajectory`
 on the probe, then omit `--teacher-force`. `--skip-decode` gives a faster latent
 comparison while investigating. Raw tensors/images stay outside Git.
 
+## Qwen-Image-2.1-Turbo
+
+Reference: Diffusers `aaf57d03a3edfbd9de457d2872417a92f149a91d`, which reads the
+checkpoint's `sample_sigmas`, with shared initial noise at 256×256 and 8 steps.
+
+| Check | Result |
+| --- | --- |
+| Schedule and tokenizer | Exact |
+| Matched-input blocks | Generation: 297, worst relative L2 0.0073; editing: 346, worst 0.0048 (limit 0.01) |
+| Generation trajectory | Final-latent cosine 0.99995; PNG 45.5 dB |
+| Single-reference edit trajectory | Final-latent cosine 0.99991; PNG 50.2 dB |
+| Original-plus-mask edit trajectory | Final-latent cosine 0.999829; PNG 40.6 dB |
+| Server | Default and explicit 8 steps, seed/edit/mask replay, independent `n=2`/concurrent seeds, size changes, transparency, disconnect recovery and invalid-step rejection pass |
+
+Use the commands above with 8 steps, `--model-revision`/`--diffusers-revision`
+for the record, and `check_server.py --steps 8`. The pinned Diffusers revision
+needs `huggingface_hub>=1.32`. Fixtures:
+[original](artifacts/turbo-editing-input.png) and [mask](artifacts/turbo-editing-mask.png).
+These checks compare against the Turbo reference, not the base model's quality.
+
 ## ROCm 10.1 migration
 
 Focused cross-compiler checks, matched controls and remaining limits are in

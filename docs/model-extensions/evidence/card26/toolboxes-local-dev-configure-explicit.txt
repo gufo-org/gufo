@@ -1,0 +1,23 @@
+-- The C compiler identification is Clang 24.0.0
+-- The CXX compiler identification is Clang 24.0.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /nix/store/al4qwi7jfyrdkyb25xsri8b00b1agj1r-clr-10.1/llvm/bin/clang - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /nix/store/al4qwi7jfyrdkyb25xsri8b00b1agj1r-clr-10.1/llvm/bin/clang++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- gufo: ccache not found, compiling without a launcher
+CMake Error at /share/cmake-4.3/Modules/FindPackageHandleStandardArgs.cmake:290 (message):
+  Failed to find all ICU components (missing: ICU_INCLUDE_DIR ICU_LIBRARY uc
+  i18n)
+Call Stack (most recent call first):
+  /share/cmake-4.3/Modules/FindPackageHandleStandardArgs.cmake:654 (_FPHSA_FAILURE_MESSAGE)
+  /share/cmake-4.3/Modules/FindICU.cmake:393 (find_package_handle_standard_args)
+  CMakeLists.txt:76 (find_package)
+
+
+-- Configuring incomplete, errors occurred!

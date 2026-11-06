@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "qwen3_tts",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.2.0",
   "entry": "qwen3_tts_register",
   "registration_target": "gufo_qwen3_tts",
   "depends": [],
@@ -21,13 +21,21 @@
       "model_ids": [
         "qwen3-tts"
       ],
-      "target": "gufo_qwen3_tts",
-      "entry": "qwen3_tts_provider_register"
+      "target": "gufo_qwen3_tts_hip",
+      "entry": "qwen3_tts_provider_register",
+      "serving": {
+        "voices": true
+      }
     }
   ],
   "targets": {
     "gufo_qwen3_tts": {
       "requires": []
+    },
+    "gufo_qwen3_tts_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "production_paths": {

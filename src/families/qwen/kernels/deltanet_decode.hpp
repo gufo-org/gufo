@@ -129,10 +129,11 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
         replay_capture.beta != nullptr && replay_capture.position != nullptr &&
         replay_capture.enabled != nullptr && replay_capture.enabled[0] != 0U) {
       const std::size_t slot =
-          static_cast<std::size_t>(replay_capture.position[row]) %
-          kSsmReplayCapacity;
+          static_cast<std::size_t>(replay_capture.position[row]) &
+          (replay_capture.capacity - 1U);
       const std::size_t offset =
-          ((static_cast<std::size_t>(layer_idx) * kSsmReplayCapacity + slot) *
+          ((static_cast<std::size_t>(layer_idx) * replay_capture.capacity +
+            slot) *
            num_heads) +
           h;
       replay_capture.alpha[offset] = alpha_in;

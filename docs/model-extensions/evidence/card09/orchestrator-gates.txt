@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Card 09 — orchestrator closure gates (all run by the orchestrator, after the last
 integration edit, on `@ prusoklk` over parent `uytorytn c03aaa23`).
 These runs supersede the worker and integration histories for the commands below.
@@ -172,9 +176,9 @@ RFC.md is not among the changed paths). Nothing under docs/ exceeds 1 MB
 (`find docs/model-extensions/evidence/card09 -size +1M` -> empty).
 
 Hosted bounded checks (AGENTS.md)
-$ nix build .#checks.x86_64-linux.pr --no-link
+$ legacy hosted PR check
   exit 0; the built source snapshot contains cmake/TargetGraph.cmake, so the
   hosted check-pr-tests / check-format / check-docs derivations covered this
   working set rather than the parent.
-$ (after the closing commit) nix build .#checks.x86_64-linux.pr --no-link
+$ (after the closing commit) legacy hosted PR check
   exit 0; check-docs and check-pr rebuilt against the committed tree.

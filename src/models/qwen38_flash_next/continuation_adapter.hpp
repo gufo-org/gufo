@@ -2,7 +2,7 @@
 #define GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_ADAPTER_HPP_
 
 #include <gufo/ext/adapter.hpp>
-#include <gufo/ext/experimental/transfer_pool.hpp>
+#include <gufo/ext/transfer_pool.hpp>
 
 #include "src/models/qwen38_flash_next/continuation_layout.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
@@ -21,8 +21,11 @@ public:
   [[nodiscard]] Session& GetSession(cache::Slot&);
   // Capture synchronously while the coherent boundary is exposed; settle
   // all transfers before the callback returns and the shared arena is reused.
+  // The callback receives the index of each ascending boundary in turn.
   void PrefillThrough(cache::Slot&, std::span<const std::int32_t>,
-                      std::uint32_t boundary, const std::function<void()>&);
+                      std::span<const std::uint32_t> boundaries,
+                      const std::function<void(std::size_t)>&,
+                      std::span<const std::int32_t> next = {});
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
       std::size_t ram_bytes) const override {
     return layout_.BackingPlan(ram_bytes, model_->DecodeConcurrency());
@@ -82,6 +85,9 @@ private:
   [[nodiscard]] Region PrivateRegion(State&, const ContinuationComponent&,
                                      bool loading) const;
   [[nodiscard]] void* RowData(State&, const ContinuationComponent&) const;
+  void CopyNativeKeys(const rocm::Session&, const ContinuationComponent&,
+                      cache::Rows first, cache::Rows end, std::span<std::byte>,
+                      gufo::hip::TransferStream&) const;
   [[nodiscard]] cache::Completion Transfer(
       State&, bool load, cache::Stream&,
       const std::function<void(gufo::hip::TransferStream&)>&);

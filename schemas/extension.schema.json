@@ -154,7 +154,8 @@
               "speech_recognition",
               "speech_synthesis",
               "image_generation",
-              "video_generation"
+              "video_generation",
+              "decision"
             ]
           },
           "keys": {
@@ -291,6 +292,22 @@
                 "xor_eq"
               ]
             }
+          },
+          "serving": {
+            "type": "object",
+            "properties": {
+              "draft_options": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^--[a-z][a-z0-9-]*$"
+                }
+              },
+              "voices": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "required": [

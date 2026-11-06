@@ -3,9 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace gufo::ext {
+
+/// Scheme tag for full-content GGUF identities.
+inline constexpr std::string_view kGgufIdentityScheme = "gguf-sha256-v1";
 
 /// Token identifier shared by runners and the continuation cache.
 using ContinuationToken = std::uint32_t;
@@ -44,26 +48,6 @@ public:
 
   /// Discards any partially or fully computed continuation.
   virtual void Invalidate() noexcept = 0;
-};
-
-/// Immutable model-private continuation payload.
-class ContinuationSnapshot {
-public:
-  ContinuationSnapshot() = default;
-  virtual ~ContinuationSnapshot() = default;
-
-  ContinuationSnapshot(const ContinuationSnapshot&) = delete;
-  ContinuationSnapshot& operator=(const ContinuationSnapshot&) = delete;
-  ContinuationSnapshot(ContinuationSnapshot&&) = delete;
-  ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
-
-  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
-  /// Prefer an available state that still holds this snapshot's borrowed rows.
-  /// This is an allocation hint; every state must remain able to restore it.
-  [[nodiscard]] virtual bool PrefersState(
-      const ContinuationState&) const noexcept {
-    return false;
-  }
 };
 
 }  // namespace gufo::ext

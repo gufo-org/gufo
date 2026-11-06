@@ -20,18 +20,12 @@ __global__ static void fp8_kv_quantize_kernel(
     __shared__ float scratch[64];
     float v = 0.0f;
     if (tid < 64u && off + tid < head_dim) v = xr[off + tid];
-    scratch[tid] = (tid < 64u && off + tid < n_nope) ? fabsf(v) : 0.0f;
-    __syncthreads();
-    for (uint32_t stride = 32; stride > 0; stride >>= 1) {
-        if (tid < stride) scratch[tid] = fmaxf(scratch[tid], scratch[tid + stride]);
-        __syncthreads();
-    }
-    const float scale = exp2f(ceilf(log2f(fmaxf(scratch[0], 1.0e-4f) / 448.0f)));
+    const float scale = dsv4_fp8_kv_group_scale(
+            scratch, tid, (tid < 64u && off + tid < n_nope) ? fabsf(v) : 0.0f);
     if (tid < 64u && off + tid < head_dim) {
         const uint32_t d = off + tid;
         if (d < n_nope) {
-            v = dsv4_e4m3fn_dequant_dev(
-                    fminf(448.0f, fmaxf(-448.0f, v / scale))) * scale;
+            v = dsv4_fp8_kv_round(v, scale);
             xr[d] = v;
         }
         if (mirror_f16) {

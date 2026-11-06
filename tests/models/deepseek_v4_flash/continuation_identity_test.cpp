@@ -1,4 +1,4 @@
-#include "src/cli/serve/continuation_identity.hpp"
+#include "src/models/deepseek_v4_flash/continuation_identity.hpp"
 
 #include <sstream>
 

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Orchestrator input brief — instructions and planned commands only; nothing here is a result.
 
 # Card 08 — integration brief (third agent: resolve findings, re-run affected gates once, draft the execution record)
@@ -85,7 +89,7 @@ entry must correspond to a derived edge for that library) and add one negative f
 tree → Nix snapshot from tracked parent paths)" including the
 `warning: Git tree '/home/mixer/gufo' is dirty` line, and make P7 in
 `pending-commands.md` the authoritative post-commit re-run with the source-snapshot proof
-(`nix build .#checks.x86_64-linux.pr --no-link --print-out-paths`,
+(`legacy hosted PR check`,
 `nix eval --raw .#packages.x86_64-linux.release.src`, then list
 `$src/src/models/minimax_h3/CMakeLists.txt`, `$src/tests/fixtures/eval/antirez-ds4.json`
 and `find $src/tests -type f`). The orchestrator runs those after the closing commit; do

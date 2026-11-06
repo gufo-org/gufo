@@ -142,8 +142,8 @@ void ScanDeepSeekToolCalls(
           const auto name = Attribute(tag, "name");
           if (name && !name->empty() &&
               Attribute(tag, "string").value_or("true") == "true")
-            call.unfinished = ChatMessage::ToolArgument{
-                .name = *name,
+            call.unfinished = ScannedToolArgument{
+                .name = std::string(*name),
                 .value = std::string(BeforePartialDelimiter(
                     text.substr(parameter_tag_end + 1),
                     DeepSeekToolSyntax::kParameterCloses[syntax])),
@@ -178,8 +178,8 @@ void ScanDeepSeekToolCalls(
         }
         const auto raw = text.substr(parameter_tag_end + 1,
                                      parameter_end - parameter_tag_end - 1);
-        ChatMessage::ToolArgument argument{
-            .name = *parameter_name,
+        ScannedToolArgument argument{
+            .name = std::string(*parameter_name),
             .value = std::string(is_string ? raw : TrimAscii(raw)),
             .is_string = is_string,
         };

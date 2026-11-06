@@ -1,0 +1,40 @@
+warning: Git tree '/home/mixer/gufo' is dirty
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+error (ignored): SQLite database '/home/mixer/.cache/nix/eval-cache-v6/a651eb72baa724762a7ab68a3d3337df252b92396491a93b6afe7ad749b6edaa.sqlite' is busy
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+-- Install configuration: "RelWithDebInfo"
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/extensions/template_model/LICENSE
+-- Installing: /tmp/gufo-card26-install/bin/gufo
+-- Installing: /tmp/gufo-card26-install/share/gufo/eval/antirez-ds4.json
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/LICENSE
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/NOTICE
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/THIRD_PARTY_NOTICES.md
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/DS4-GB10.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/ccv.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/composable_kernel.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/curl.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/ffmpeg-GPL-3.0.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/ffmpeg-LGPL-3.0.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/ffmpeg.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/h3.c.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/hip.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/hipblas.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/hipblaslt.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/hipcub.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/icu.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/libjpeg-turbo-IJG.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/libjpeg-turbo.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/libpng.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/libsndfile.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/libsoxr.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/llama.cpp.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/llvm-openmp.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/openssl.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/qwen.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/rocblas.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/rocprim.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/rocwmma.txt
+-- Installing: /tmp/gufo-card26-install/share/licenses/gufo/third-party/strix-halo-llamacpp.txt

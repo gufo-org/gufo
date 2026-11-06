@@ -28,6 +28,7 @@ using ext::kMaxImageSoftTokens;
 using ext::kMaxInputTokens;
 using ext::kMaxVideoFrames;
 using ext::kMaxVideos;
+using ext::kMaxVideoSoftTokens;
 
 struct EmbeddingServiceOptions {
   using Runner =
@@ -38,6 +39,9 @@ struct EmbeddingServiceOptions {
   std::filesystem::path model_root;
   bool validate_model{true};
   std::string model_id;
+  /// Additional IDs accepted from requests; `model_id` stays primary in
+  /// listings and responses (#957).
+  std::vector<std::string> model_aliases;
   /// Named input prefixes, as in a checkpoint's
   /// config_sentence_transformers.json `prompts`.
   std::map<std::string, std::string> prompts;
@@ -72,6 +76,7 @@ public:
   static constexpr std::size_t kMaxAudio = ext::kMaxAudio;
   static constexpr std::size_t kMaxVideos = ext::kMaxVideos;
   static constexpr std::size_t kMaxVideoFrames = ext::kMaxVideoFrames;
+  static constexpr std::size_t kMaxVideoSoftTokens = ext::kMaxVideoSoftTokens;
 
   explicit EmbeddingService(EmbeddingServiceOptions options);
   ~EmbeddingService();
@@ -86,6 +91,9 @@ public:
   [[nodiscard]] bool device_lost() const noexcept;
   [[nodiscard]] std::string initialization_error() const;
   [[nodiscard]] std::string model_id() const;
+  /// True for the primary ID or a configured alias.
+  [[nodiscard]] bool serves_model(std::string_view name) const;
+  [[nodiscard]] const std::vector<std::string>& model_aliases() const;
   [[nodiscard]] std::string backend_name() const;
   /// The prefix registered under `name`, or nullptr.
   [[nodiscard]] const std::string* prompt(const std::string& name) const;

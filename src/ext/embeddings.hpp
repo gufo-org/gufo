@@ -45,12 +45,16 @@ enum class EmbeddingStatus {
   kDeviceLost,
 };
 
+inline constexpr std::uint32_t kDefaultVideoSoftTokens = 140;
+
 /// Video decoding and sampling options for embedding inputs.
 struct EmbeddingVideoOptions {
   double fps{1};
   std::size_t max_frames{32};
   bool timestamps{false};
   bool truncate_overflow{false};
+  /// Per-frame vision budget; frames accept the image budgets.
+  std::uint32_t max_soft_tokens{kDefaultVideoSoftTokens};
 };
 
 inline constexpr std::uint32_t kDefaultImageSoftTokens = 280;
@@ -60,6 +64,10 @@ inline constexpr std::size_t kMaxImages = 32;
 inline constexpr std::size_t kMaxAudio = 32;
 inline constexpr std::size_t kMaxVideos = 32;
 inline constexpr std::size_t kMaxVideoFrames = 64;
+/// Video soft tokens per request: 64 frames at the default budget, so a
+/// larger budget accepts proportionally fewer frames.
+inline constexpr std::size_t kMaxVideoSoftTokens =
+    kMaxVideoFrames * kDefaultVideoSoftTokens;
 
 /// Per-request choices that change how inputs are encoded.
 struct EmbeddingRequestOptions {

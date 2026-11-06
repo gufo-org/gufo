@@ -705,10 +705,16 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     tensors_.push_back(std::move(info));
   }
 
-  // Align data payload base to alignment boundary
+  // Align data payload base to alignment boundary. A tensorless file, such as
+  // a metadata-only first split shard, may end unpadded after its header.
   const auto padding = (alignment_ - offset % alignment_) % alignment_;
-  if (offset > size_ || padding > size_ - offset)
+  if (tensors_.empty())
+    return true;
+  if (offset > size_ || padding > size_ - offset) {
+    if (error_msg)
+      *error_msg = "GGUF data section is truncated before its alignment";
     return false;
+  }
   const std::size_t data_base = offset + padding;
   for (auto& tensor : tensors_) {
     if (tensor.offset % alignment_ != 0 || tensor.offset > size_ - data_base ||

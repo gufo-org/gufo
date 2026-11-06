@@ -97,6 +97,8 @@ void check_indexer_scores(bool benchmark) {
         // The verifier crosses compression boundaries within its block.
         const uint32_t pos0 = (rows - 2) * ratio - 1;
         const uint32_t last_visible = (pos0 + tokens) / ratio;
+        const uint32_t tiles =
+            (rows + indexer_score_direct_keys - 1) / indexer_score_direct_keys;
         std::vector<float> q(tokens * heads * dim), k(rows * dim),
             weights(tokens * heads), ref(tokens * rows), out(ref.size());
         for (auto& v : q)
@@ -130,7 +132,7 @@ void check_indexer_scores(bool benchmark) {
                         hipMemcpyDeviceToHost));
         for (int repeat = 0; repeat < 2; ++repeat) {
           check(hipMemset(dout, 0xff, out.size() * sizeof(float)));
-          indexer_score_one_direct_kernel<<<dim3(rows, tokens), 128>>>(
+          indexer_score_one_direct_kernel<<<dim3(tiles, tokens), 128>>>(
               dout, dq, dw, dk, rows, pos0, ratio, scale, causal);
           check(hipGetLastError());
           check(hipMemcpy(out.data(), dout, out.size() * sizeof(float),
@@ -196,7 +198,7 @@ void check_indexer_scores(bool benchmark) {
               const bool candidate = (order + pass) % 2;
               auto launch = [&] {
                 if (candidate)
-                  indexer_score_one_direct_kernel<<<dim3(rows, tokens), 128>>>(
+                  indexer_score_one_direct_kernel<<<dim3(tiles, tokens), 128>>>(
                       dout, dq, dw, dk, rows, pos0, ratio, scale, causal);
                 else
                   reference_indexer_scores<<<dim3(rows, tokens), 128>>>(
@@ -419,6 +421,89 @@ __global__ static void reference_attention(float* heads, const float* sinks,
   }
 }
 
+// The decode reference reductions, kept here so the fixture does not depend
+// on the production helpers.
+__device__ static float reference_warp_sum(float v) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+    v += __shfl_down(v, offset, 32);
+#else
+    v += __shfl_down_sync(FULL_WARP_MASK, v, offset, 32);
+#endif
+  }
+  return v;
+}
+
+__device__ static float reference_warp_max(float v) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+    v = fmaxf(v, __shfl_down(v, offset, 32));
+#else
+    v = fmaxf(v, __shfl_down_sync(FULL_WARP_MASK, v, offset, 32));
+#endif
+  }
+  return v;
+}
+
+__device__ static float reference_block_sum(float v) {
+  __shared__ float sh[32];
+  const uint32_t tid = threadIdx.x;
+  const uint32_t lane = tid & 31u;
+  const uint32_t wid = tid >> 5u;
+  const uint32_t nwarp = (blockDim.x + 31u) >> 5u;
+  v = reference_warp_sum(v);
+  if (lane == 0u)
+    sh[wid] = v;
+  __syncthreads();
+  v = (tid < nwarp) ? sh[lane] : 0.0f;
+  if (wid == 0u)
+    v = reference_warp_sum(v);
+  if (tid == 0u)
+    sh[0] = v;
+  __syncthreads();
+  return sh[0];
+}
+
+__device__ static float reference_block_max(float v) {
+  __shared__ float sh[32];
+  const uint32_t tid = threadIdx.x;
+  const uint32_t lane = tid & 31u;
+  const uint32_t wid = tid >> 5u;
+  const uint32_t nwarp = (blockDim.x + 31u) >> 5u;
+  v = reference_warp_max(v);
+  if (lane == 0u)
+    sh[wid] = v;
+  __syncthreads();
+  v = (tid < nwarp) ? sh[lane] : -3.4e38f;
+  if (wid == 0u)
+    v = reference_warp_max(v);
+  if (tid == 0u)
+    sh[0] = v;
+  __syncthreads();
+  return sh[0];
+}
+
+__device__ __forceinline__ static float reference_dot_f32_vec4(const float* a,
+                                                               const float* b,
+                                                               uint32_t n) {
+  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+  const uint32_t n4 = n >> 2u;
+  const float4* a4 = (const float4*)a;
+  const float4* b4 = (const float4*)b;
+  for (uint32_t i = 0; i < n4; i++) {
+    const float4 av = a4[i];
+    const float4 bv = b4[i];
+    s0 += av.x * bv.x;
+    s1 += av.y * bv.y;
+    s2 += av.z * bv.z;
+    s3 += av.w * bv.w;
+  }
+  float s = (s0 + s1) + (s2 + s3);
+  for (uint32_t i = n4 << 2u; i < n; i++)
+    s += a[i] * b[i];
+  return s;
+}
+
 __global__ static void reference_target_attention(
     float* heads, const float* q, const float* raw_kv, const float* comp_kv,
     const float* comp_mask, const float* sinks, uint32_t n_raw,
@@ -437,7 +522,7 @@ __global__ static void reference_target_attention(
   for (uint32_t r = tid; r < n_raw; r += blockDim.x) {
     const uint32_t row = raw_cap ? ((raw_start + r) % raw_cap) : r;
     const float* kv = raw_kv + (uint64_t)row * head_dim;
-    float s = use_vec4 ? attention_dot_f32_vec4_oldhip(qh, kv, head_dim) : 0.0f;
+    float s = use_vec4 ? reference_dot_f32_vec4(qh, kv, head_dim) : 0.0f;
     if (!use_vec4) {
       for (uint32_t i = 0; i < head_dim; i++)
         s += qh[i] * kv[i];
@@ -450,8 +535,7 @@ __global__ static void reference_target_attention(
     float s = -3.4e38f;
     if (!(use_mask && comp_mask && comp_mask[c] <= -5.0e29f)) {
       const float* kv = comp_kv + (uint64_t)c * head_dim;
-      float dot =
-          use_vec4 ? attention_dot_f32_vec4_oldhip(qh, kv, head_dim) : 0.0f;
+      float dot = use_vec4 ? reference_dot_f32_vec4(qh, kv, head_dim) : 0.0f;
       if (!use_vec4) {
         for (uint32_t i = 0; i < head_dim; i++)
           dot += qh[i] * kv[i];
@@ -463,7 +547,7 @@ __global__ static void reference_target_attention(
     scores[n_raw + c] = s;
     local_max = fmaxf(local_max, s);
   }
-  const float max_score = attention_block_max_oldhip_w32(local_max);
+  const float max_score = reference_block_max(local_max);
 
   float local_sum = 0.0f;
   for (uint32_t r = tid; r < n_rows; r += blockDim.x) {
@@ -473,7 +557,7 @@ __global__ static void reference_target_attention(
   }
   if (tid == 0u)
     local_sum += expf(sinks[h] - max_score);
-  const float denom = attention_block_sum_oldhip_w32(local_sum);
+  const float denom = reference_block_sum(local_sum);
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
@@ -531,7 +615,7 @@ __global__ static void reference_indexed_attention(
   for (uint32_t r = tid; r < n_raw; r += blockDim.x) {
     const uint32_t row = raw_cap ? ((raw_start + r) % raw_cap) : r;
     const float* kv = raw_kv + (uint64_t)row * head_dim;
-    float s = use_vec4 ? attention_dot_f32_vec4_oldhip(qh, kv, head_dim) : 0.0f;
+    float s = use_vec4 ? reference_dot_f32_vec4(qh, kv, head_dim) : 0.0f;
     if (!use_vec4) {
       for (uint32_t i = 0; i < head_dim; i++)
         s += qh[i] * kv[i];
@@ -543,8 +627,7 @@ __global__ static void reference_indexed_attention(
   for (uint32_t c = tid; c < comp_count; c += blockDim.x) {
     const uint32_t row = comp_rows[c];
     const float* kv = comp_kv + (uint64_t)row * head_dim;
-    float dot =
-        use_vec4 ? attention_dot_f32_vec4_oldhip(qh, kv, head_dim) : 0.0f;
+    float dot = use_vec4 ? reference_dot_f32_vec4(qh, kv, head_dim) : 0.0f;
     if (!use_vec4) {
       for (uint32_t i = 0; i < head_dim; i++)
         dot += qh[i] * kv[i];
@@ -553,7 +636,7 @@ __global__ static void reference_indexed_attention(
     scores[n_raw + c] = s;
     local_max = fmaxf(local_max, s);
   }
-  const float max_score = attention_block_max_oldhip_w32(local_max);
+  const float max_score = reference_block_max(local_max);
 
   float local_sum = 0.0f;
   for (uint32_t r = tid; r < n_rows; r += blockDim.x) {
@@ -563,7 +646,7 @@ __global__ static void reference_indexed_attention(
   }
   if (tid == 0u)
     local_sum += expf(sinks[h] - max_score);
-  const float denom = attention_block_sum_oldhip_w32(local_sum);
+  const float denom = reference_block_sum(local_sum);
   const float inv_denom = 1.0f / denom;
 
   for (uint32_t d = tid; d < head_dim; d += blockDim.x) {
@@ -628,21 +711,22 @@ void check_target_attention() {
       check(hipMemcpy(di, indices.data(), indices.size() * 4,
                       hipMemcpyHostToDevice));
       const size_t shared = (raw + std::min(comp, top_k)) * sizeof(float);
+      float* dscores;
+      check(hipMalloc(&dscores, heads * (raw + comp + 4) * sizeof(float)));
       if (indexed) {
         reference_indexed_attention<<<heads, 256, shared>>>(
             dref, dq, dk, dc, di, ds, raw, cap, start, comp, top_k, position,
             ratio, heads, dim, 1);
-        attention_decode_indexed_mixed_one_fast_oldhip_kernel<<<heads, 256,
-                                                                shared>>>(
-            dout, dq, dk, dc, di, ds, raw, cap, start, comp, top_k, position,
-            ratio, heads, dim, 1);
+        attention_decode_indexed_mixed_one_launch(
+            dout, dscores, dq, dk, dc, di, ds, raw, cap, start, comp, top_k,
+            position, ratio, heads, dim);
       } else {
         reference_target_attention<<<heads, 256, shared>>>(
             dref, dq, dk, dc, dm, ds, raw, cap, start, comp, comp != 0, heads,
             dim, 1);
-        attention_decode_mixed_one_fast_oldhip_kernel<<<heads, 256, shared>>>(
-            dout, dq, dk, dc, dm, ds, raw, cap, start, comp, comp != 0, heads,
-            dim, 1);
+        attention_decode_mixed_one_launch(dout, dscores, dq, dk, dc, dm, ds,
+                                          raw, cap, start, comp, comp != 0,
+                                          heads, dim);
       }
       check(hipGetLastError());
       check(hipMemcpy(expected.data(), dref, q.size() * 4,
@@ -704,7 +788,7 @@ void check_target_attention() {
           }
         }
       }
-      for (auto ptr : {dq, dk, dc, ds, dm, dref, dout})
+      for (auto ptr : {dq, dk, dc, ds, dm, dref, dout, dscores})
         check(hipFree(ptr));
       check(hipFree(di));
     }

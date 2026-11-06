@@ -41,6 +41,7 @@ __device__ static float warp_sum_f32(float v);
 __global__ static void matmul_f16_kernel(
         float *out,
         const __half *w,
+        uint64_t w_stride,
         const float *x,
         uint64_t in_dim,
         uint64_t out_dim,
@@ -50,7 +51,7 @@ __global__ static void matmul_f16_kernel(
     if (row >= out_dim || tok >= n_tok) return;
 
     float sum = 0.0f;
-    const __half *wr = w + row * in_dim;
+    const __half *wr = w + row * w_stride;
     const float *xr = x + tok * in_dim;
     for (uint64_t i = threadIdx.x; i < in_dim; i += blockDim.x) {
         sum += __half2float(wr[i]) * xr[i];
@@ -78,6 +79,7 @@ __global__ static void matmul_f16_kernel(
 __global__ static void matmul_f16_ordered_equal_group_pairs_exact_kernel(
         float *out,
         const __half *w,
+        uint64_t w_stride,
         const float *x,
         uint64_t in_dim,
         uint64_t out_dim,
@@ -100,7 +102,7 @@ __global__ static void matmul_f16_ordered_equal_group_pairs_exact_kernel(
     const uint64_t k0 = (uint64_t)tid * chunk;
     uint64_t k1 = k0 + chunk;
     if (k1 > in_dim) k1 = in_dim;
-    const __half *wr = w + row * in_dim;
+    const __half *wr = w + row * w_stride;
     const float *x0 = x + (uint64_t)row0 * in_dim;
     const float *x1 = x + (uint64_t)row1 * in_dim;
     for (uint64_t i = k0; i < k1; ++i) {
@@ -126,6 +128,7 @@ __global__ static void matmul_f16_ordered_equal_group_pairs_exact_kernel(
 __global__ static void matmul_f16_ordered_ragged_group_pair_exact_kernel(
         float *out,
         const __half *w,
+        uint64_t w_stride,
         const float *x,
         uint64_t in_dim,
         uint64_t out_dim,
@@ -148,7 +151,7 @@ __global__ static void matmul_f16_ordered_ragged_group_pair_exact_kernel(
     const uint64_t k0 = (uint64_t)tid * chunk;
     uint64_t k1 = k0 + chunk;
     if (k1 > in_dim) k1 = in_dim;
-    const __half *wr = w + row * in_dim;
+    const __half *wr = w + row * w_stride;
     const float *x0 =
         x + ((uint64_t)row0 + (active0 ? token : 0u)) * in_dim;
     const float *x1 =
@@ -183,6 +186,7 @@ __global__ static void matmul_f16_pair_batch_reuse_warp_rows_w32_kernel(
         float *out1,
         const __half *w0,
         const __half *w1,
+        uint32_t w_stride,
         const float *x,
         uint32_t in_dim,
         uint64_t out_dim,
@@ -192,8 +196,8 @@ __global__ static void matmul_f16_pair_batch_reuse_warp_rows_w32_kernel(
         (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
     if (row >= out_dim) return;
 
-    const __half *wr0 = w0 + row * (uint64_t)in_dim;
-    const __half *wr1 = w1 + row * (uint64_t)in_dim;
+    const __half *wr0 = w0 + row * (uint64_t)w_stride;
+    const __half *wr1 = w1 + row * (uint64_t)w_stride;
     float acc0[BATCH];
     float acc1[BATCH];
 #pragma unroll
@@ -269,37 +273,43 @@ __global__ static void matmul_f16_pair_batch_reuse_warp_rows_w32_kernel(
     }
 }
 
-__global__ static void matmul_f16_f32_sharedx_warp_rows_w32_kernel(
+/*
+ * One wave computes one output row, so the block size only sets how many rows
+ * launch together. Sixteen rows per block measured fastest on gfx1151 for the
+ * 256-512 row compressor projections. x is read directly: per-block LDS
+ * staging costs more the fewer rows share it.
+ */
+constexpr uint32_t F16_DECODE_ROWS_PER_BLOCK = 16u;
+
+__global__ static void matmul_f16_f32_warp_rows_w32_kernel(
         float *out,
         const __half *w,
+        uint32_t w_stride,
         const float *x,
         uint32_t in_dim,
         uint64_t out_dim) {
-    extern __shared__ float shx[];
     const uint32_t tid = threadIdx.x;
     const uint32_t lane = tid & 31u;
     const uint32_t wave = tid >> 5u;
     const uint32_t rows_per_block = blockDim.x >> 5u;
-    for (uint32_t i = tid; i < in_dim; i += blockDim.x) shx[i] = x[i];
-    __syncthreads();
 
     const uint64_t row = (uint64_t)blockIdx.x * rows_per_block + wave;
     if (row >= out_dim) return;
-    const __half *wr = w + row * (uint64_t)in_dim;
+    const __half *wr = w + row * (uint64_t)w_stride;
     float acc = 0.0f;
     uint32_t i = lane;
     for (; i + 224u < in_dim; i += 256u) {
-        acc += __half2float(wr[i]) * shx[i];
-        acc += __half2float(wr[i + 32u]) * shx[i + 32u];
-        acc += __half2float(wr[i + 64u]) * shx[i + 64u];
-        acc += __half2float(wr[i + 96u]) * shx[i + 96u];
-        acc += __half2float(wr[i + 128u]) * shx[i + 128u];
-        acc += __half2float(wr[i + 160u]) * shx[i + 160u];
-        acc += __half2float(wr[i + 192u]) * shx[i + 192u];
-        acc += __half2float(wr[i + 224u]) * shx[i + 224u];
+        acc += __half2float(wr[i]) * x[i];
+        acc += __half2float(wr[i + 32u]) * x[i + 32u];
+        acc += __half2float(wr[i + 64u]) * x[i + 64u];
+        acc += __half2float(wr[i + 96u]) * x[i + 96u];
+        acc += __half2float(wr[i + 128u]) * x[i + 128u];
+        acc += __half2float(wr[i + 160u]) * x[i + 160u];
+        acc += __half2float(wr[i + 192u]) * x[i + 192u];
+        acc += __half2float(wr[i + 224u]) * x[i + 224u];
     }
     for (; i < in_dim; i += 32u) {
-        acc += __half2float(wr[i]) * shx[i];
+        acc += __half2float(wr[i]) * x[i];
     }
     acc = warp_sum_f32(acc);
     if (lane == 0u) out[row] = acc;
@@ -309,6 +319,7 @@ __global__ static void
 matmul_f16_f32_equal_group_pairs_sharedx_warp_rows_w32_kernel(
         float *out,
         const __half *w,
+        uint32_t w_stride,
         const float *x,
         uint32_t in_dim,
         uint64_t out_dim,
@@ -336,7 +347,7 @@ matmul_f16_f32_equal_group_pairs_sharedx_warp_rows_w32_kernel(
     const uint64_t row =
         (uint64_t)blockIdx.x * rows_per_block + wave;
     if (row >= out_dim) return;
-    const __half *wr = w + row * (uint64_t)in_dim;
+    const __half *wr = w + row * (uint64_t)w_stride;
     float acc0 = 0.0f;
     float acc1 = 0.0f;
     uint32_t i = lane;
@@ -383,6 +394,7 @@ __global__ static void
 matmul_f16_f32_ragged_group_pair_sharedx_warp_rows_w32_kernel(
         float *out,
         const __half *w,
+        uint32_t w_stride,
         const float *x,
         uint32_t in_dim,
         uint64_t out_dim,
@@ -413,7 +425,7 @@ matmul_f16_f32_ragged_group_pair_sharedx_warp_rows_w32_kernel(
     const uint64_t row =
         (uint64_t)blockIdx.x * rows_per_block + wave;
     if (row >= out_dim) return;
-    const __half *wr = w + row * (uint64_t)in_dim;
+    const __half *wr = w + row * (uint64_t)w_stride;
     float acc0 = 0.0f;
     float acc1 = 0.0f;
     uint32_t i = lane;
@@ -460,57 +472,55 @@ matmul_f16_f32_ragged_group_pair_sharedx_warp_rows_w32_kernel(
     }
 }
 
-__global__ static void matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel(
+__global__ static void matmul_f16_pair_f32_warp_rows_w32_kernel(
         float *out0,
         float *out1,
         const __half *w0,
         const __half *w1,
+        uint32_t w_stride,
         const float *x,
         uint32_t in_dim,
         uint64_t out_dim) {
-    extern __shared__ float shx[];
     const uint32_t tid = threadIdx.x;
     const uint32_t lane = tid & 31u;
     const uint32_t wave = tid >> 5u;
     const uint32_t rows_per_block = blockDim.x >> 5u;
-    for (uint32_t i = tid; i < in_dim; i += blockDim.x) shx[i] = x[i];
-    __syncthreads();
 
     const uint64_t row = (uint64_t)blockIdx.x * rows_per_block + wave;
     if (row >= out_dim) return;
-    const __half *wr0 = w0 + row * (uint64_t)in_dim;
-    const __half *wr1 = w1 + row * (uint64_t)in_dim;
+    const __half *wr0 = w0 + row * (uint64_t)w_stride;
+    const __half *wr1 = w1 + row * (uint64_t)w_stride;
     float acc0 = 0.0f;
     float acc1 = 0.0f;
     uint32_t i = lane;
     for (; i + 224u < in_dim; i += 256u) {
-        float xv = shx[i];
+        float xv = x[i];
         acc0 += __half2float(wr0[i]) * xv;
         acc1 += __half2float(wr1[i]) * xv;
-        xv = shx[i + 32u];
+        xv = x[i + 32u];
         acc0 += __half2float(wr0[i + 32u]) * xv;
         acc1 += __half2float(wr1[i + 32u]) * xv;
-        xv = shx[i + 64u];
+        xv = x[i + 64u];
         acc0 += __half2float(wr0[i + 64u]) * xv;
         acc1 += __half2float(wr1[i + 64u]) * xv;
-        xv = shx[i + 96u];
+        xv = x[i + 96u];
         acc0 += __half2float(wr0[i + 96u]) * xv;
         acc1 += __half2float(wr1[i + 96u]) * xv;
-        xv = shx[i + 128u];
+        xv = x[i + 128u];
         acc0 += __half2float(wr0[i + 128u]) * xv;
         acc1 += __half2float(wr1[i + 128u]) * xv;
-        xv = shx[i + 160u];
+        xv = x[i + 160u];
         acc0 += __half2float(wr0[i + 160u]) * xv;
         acc1 += __half2float(wr1[i + 160u]) * xv;
-        xv = shx[i + 192u];
+        xv = x[i + 192u];
         acc0 += __half2float(wr0[i + 192u]) * xv;
         acc1 += __half2float(wr1[i + 192u]) * xv;
-        xv = shx[i + 224u];
+        xv = x[i + 224u];
         acc0 += __half2float(wr0[i + 224u]) * xv;
         acc1 += __half2float(wr1[i + 224u]) * xv;
     }
     for (; i < in_dim; i += 32u) {
-        const float xv = shx[i];
+        const float xv = x[i];
         acc0 += __half2float(wr0[i]) * xv;
         acc1 += __half2float(wr1[i]) * xv;
     }
@@ -527,6 +537,7 @@ __global__ static void matmul_f16_pair_ordered_chunks_kernel(
         float *out1,
         const __half *w0,
         const __half *w1,
+        uint64_t w_stride,
         const float *x,
         uint64_t in_dim,
         uint64_t out0_dim,
@@ -543,8 +554,8 @@ __global__ static void matmul_f16_pair_ordered_chunks_kernel(
     const uint64_t k0 = (uint64_t)tid * chunk;
     uint64_t k1 = k0 + chunk;
     if (k1 > in_dim) k1 = in_dim;
-    const __half *wr0 = row < out0_dim ? w0 + row * in_dim : w0;
-    const __half *wr1 = row < out1_dim ? w1 + row * in_dim : w1;
+    const __half *wr0 = row < out0_dim ? w0 + row * w_stride : w0;
+    const __half *wr1 = row < out1_dim ? w1 + row * w_stride : w1;
     for (uint64_t i = k0; i < k1; i++) {
         const float xv = x[i];
         if (row < out0_dim) sum0 += __half2float(wr0[i]) * xv;

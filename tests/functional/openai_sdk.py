@@ -33,7 +33,7 @@ from image_inputs import check_image_count, check_image_detail, check_image_inpu
 from tool_images import check_tool_images
 from tool_choice import check_tool_choice_cache
 from tool_parameter_order import check_tool_parameter_order
-from tool_native import check_finite_argument_types, check_native_tool_schemas
+from tool_native import check_finite_argument_types, check_native_tool_schemas, check_tool_type_unions
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
                         check_tool_schema_edges)
@@ -1206,6 +1206,26 @@ def check_structured_outputs(client, model, checks, vision=False):
     result = chat_result(client, unbounded, True)
     assert result["finish"] == "stop" and json.loads(result["text"]) == {"numbers": [1, 2]}, result
     record("schema_unbounded_array", result)
+
+    # The Vercel AI SDK always declares the dialect and keeps annotations
+    # (#1057); they describe the schema without constraining the reply.
+    annotated = {
+        **common,
+        "messages": [{"role": "user", "content": "Greet me and label the sentiment neutral."}],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "Greeting", "strict": True, "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$comment": "generated", "type": "object", "properties": {
+                    "greeting": {"type": "string", "default": "hi", "examples": ["hello"]},
+                    "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"],
+                                  "deprecated": False}},
+                "required": ["greeting", "sentiment"], "additionalProperties": False}}},
+    }
+    result = chat_result(client, annotated, True)
+    reply = json.loads(result["text"])
+    assert result["finish"] == "stop" and set(reply) == {"greeting", "sentiment"}, result
+    assert isinstance(reply["greeting"], str) and reply["sentiment"] == "neutral", result
+    record("schema_annotations", result)
 
     def constant(text):
         return {"type": "json_schema", "json_schema": {"name": "constant", "strict": True,
@@ -2759,7 +2779,7 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
 
 SDK_SUITES = ("discovery", "openai-count-tokens", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
               "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-type-unions", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection")
 
@@ -2901,6 +2921,8 @@ def main():
             "tool-choice-cache": lambda: check_tool_choice_cache(
                 client, args.model, checks, chat_result, args.server_log),
             "tool-parameter-order": lambda: check_tool_parameter_order(
+                client, args.model, checks, chat_result),
+            "tool-type-unions": lambda: check_tool_type_unions(
                 client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content, args.server_log),

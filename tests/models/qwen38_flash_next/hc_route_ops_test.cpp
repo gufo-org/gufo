@@ -12,10 +12,19 @@
 // Every row of every intermediate the next operator reads must match bit
 // for bit. The reference outputs' hashes are printed so a change of the
 // wide route's arithmetic is visible across builds.
+//
+// The chain runs once more with BF16 inject rows as Upload stores them:
+// widened to F32, so they take the same fused inject kernels. A separate
+// BF16 inject projection took the library GEMM, whose sums depend on the
+// pass width, and on the wide route it shared the half staging buffer with
+// the mixed row. Its inject logits are also checked against a double
+// reference over the BF16 values and the pass's F16 norm rows.
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -25,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
@@ -177,15 +187,43 @@ struct Inputs {
   std::vector<float> weights, shared, gate;
 };
 
-/// Layer constants (device).
+/// Inject rows as Upload stores them: F32 as is, BF16 (rounded from the
+/// same values) widened through the upload's conversion.
+std::vector<float> InjectRows(std::uint32_t seed, bool bf16) {
+  std::vector<float> rows = MakeValues(kStreams * kDim, seed, 0.02F);
+  if (!bf16)
+    return rows;
+  if (q::HcInjectUploadFor(gufo::core::GgmlType::kBF16) !=
+      q::HcInjectUpload::kWidenBF16)
+    throw std::runtime_error("BF16 inject rows are not widened to F32");
+  std::vector<std::uint16_t> encoded(rows.size());
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &rows[i], sizeof(bits));
+    encoded[i] = static_cast<std::uint16_t>(
+        (bits + 0x7FFFU + ((bits >> 16) & 1U)) >> 16);
+  }
+  q::WidenBF16(encoded.data(), rows.data(), rows.size());
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &rows[i], sizeof(bits));
+    if (bits != std::uint32_t{encoded[i]} << 16)
+      throw std::runtime_error("BF16 inject widening is not exact");
+  }
+  return rows;
+}
+
+/// Layer constants (device), with the inject rows also kept on the host.
 struct Weights {
-  Weights()
+  explicit Weights(bool bf16_inject)
       : down(kRank * kDim / 32 * 34),
         up(kDim * kRank / 32 * 34),
         gamma_ffn(kDim),
         gamma_attn(kDim),
         inject_ffn(kStreams * kDim),
-        inject_attn(kStreams * kDim) {
+        inject_attn(kStreams * kDim),
+        inject_ffn_rows(InjectRows(0x3E1C0005U, bf16_inject)),
+        inject_attn_rows(InjectRows(0x3E1C0006U, bf16_inject)) {
     const auto d = MakeQ8_0(kRank, kDim, 0x3E1C0001U);
     const auto u = MakeQ8_0(kDim, kRank, 0x3E1C0002U);
     UploadRows(&down, d, 0, d.size());
@@ -193,13 +231,12 @@ struct Weights {
     UploadRows(&gamma_ffn, MakeValues(kDim, 0x3E1C0003U, 0.25F, 1.0F), 0, kDim);
     UploadRows(&gamma_attn, MakeValues(kDim, 0x3E1C0004U, 0.25F, 1.0F), 0,
                kDim);
-    UploadRows(&inject_ffn, MakeValues(kStreams * kDim, 0x3E1C0005U, 0.02F), 0,
-               kStreams * kDim);
-    UploadRows(&inject_attn, MakeValues(kStreams * kDim, 0x3E1C0006U, 0.02F), 0,
-               kStreams * kDim);
+    UploadRows(&inject_ffn, inject_ffn_rows, 0, kStreams * kDim);
+    UploadRows(&inject_attn, inject_attn_rows, 0, kStreams * kDim);
   }
   HipBuffer<std::uint8_t> down, up;
   HipBuffer<float> gamma_ffn, gamma_attn, inject_ffn, inject_attn;
+  std::vector<float> inject_ffn_rows, inject_attn_rows;
 };
 
 /// Every intermediate of one pass, downloaded.
@@ -402,15 +439,59 @@ void PrintHashes(const Pass& reference) {
   }
 }
 
+/// Inject logits (the partials summed) that differ from a double reference
+/// over the host inject rows and the pass's F16 norm rows by more than the
+/// norm's F16 rounding allows.
+std::size_t CheckInjectLogits(const Pass& p, const std::vector<float>& rows,
+                              const std::vector<std::uint8_t>& xn_bytes,
+                              const std::vector<std::uint8_t>& inject_bytes,
+                              const char* name) {
+  const std::size_t parts = q::HcInjectPartsVec4(kHidden);
+  std::vector<__half> xn(xn_bytes.size() / sizeof(__half));
+  std::vector<float> inject(inject_bytes.size() / sizeof(float));
+  std::memcpy(xn.data(), xn_bytes.data(), xn_bytes.size());
+  std::memcpy(inject.data(), inject_bytes.data(), inject_bytes.size());
+  std::size_t bad = 0;
+  double worst = 0.0;
+  for (std::uint32_t t = 0; t < p.n; ++t) {
+    for (std::uint32_t s = 0; s < kStreams; ++s) {
+      double expected = 0.0;
+      double magnitude = 0.0;
+      for (std::size_t k = 0; k < kDim; ++k) {
+        const double term = static_cast<double>(rows[s * kDim + k]) *
+                            __half2float(xn[std::size_t{t} * kDim + k]);
+        expected += term;
+        magnitude += std::fabs(term);
+      }
+      double got = 0.0;
+      for (std::size_t j = 0; j < parts; ++j)
+        got += inject[(std::size_t{t} * kStreams + s) * parts + j];
+      const double error = std::fabs(got - expected);
+      worst = std::max(worst, error / (magnitude + 1e-30));
+      bad += error > magnitude * 0x1p-10 + 1e-6;
+    }
+  }
+  std::cout << (bad == 0 ? "  " : "  MISMATCH ") << name
+            << " inject logits vs double reference: worst error "
+            << std::setprecision(3) << worst << " of sum |w x|, " << bad
+            << " of " << p.n * kStreams << " beyond bound\n";
+  return bad;
+}
+
 /// The wide pass over `n` rows, and short and wide passes over its head,
 /// middle and tail rows.
-std::size_t CheckLayerRoutes(std::uint32_t n) {
+std::size_t CheckLayerRoutes(std::uint32_t n, bool bf16_inject) {
   const Inputs in(n);
-  Weights w;
+  Weights w(bf16_inject);
   const Pass reference = RunPass(in, &w, 0, n);
-  std::cout << "HC layer routes, reference pass of " << n << " rows\n";
+  std::cout << "HC layer routes, " << (bf16_inject ? "BF16" : "F32")
+            << " inject rows, reference pass of " << n << " rows\n";
   PrintHashes(reference);
-  std::size_t failures = 0;
+  std::size_t failures =
+      CheckInjectLogits(reference, w.inject_ffn_rows, reference.ffn_xn,
+                        reference.ffn_inject, "FFN") +
+      CheckInjectLogits(reference, w.inject_attn_rows, reference.attn_xn,
+                        reference.attn_inject, "attention");
   for (const std::uint32_t rows : {1U, 7U, 9U, 95U, 96U}) {
     for (const std::uint32_t first : {0U, (n - rows) / 2, n - rows}) {
       const Pass candidate = RunPass(in, &w, first, rows);
@@ -431,7 +512,8 @@ int main() {
     // 1619 rows end in a partial 128-row tile; 1549 rows also leave a tail
     // of 13 that the W8A8 projections hand to their tail kernel.
     for (const std::uint32_t n : {1619U, 1549U})
-      failures += CheckLayerRoutes(n);
+      failures += CheckLayerRoutes(n, false);
+    failures += CheckLayerRoutes(1619, true);
     if (failures != 0) {
       std::cerr << "HC prefill rows depend on the pass route (" << failures
                 << " row mismatches)\n";

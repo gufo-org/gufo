@@ -64,6 +64,9 @@ void TestHipGraphDecodeStep() {
                       hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_weight, h_w.data(), hidden_size * sizeof(float),
                       hipMemcpyHostToDevice));
+  // The graph under test executes on a nonblocking stream, which does not
+  // order with these default-stream uploads; drain before capture.
+  HIP_CHECK(hipDeviceSynchronize());
 
   gufo::hip::detail::HipGraphDecodeExecutor executor;
   constexpr gufo::hip::detail::HipGraphCaptureKey graph_key{

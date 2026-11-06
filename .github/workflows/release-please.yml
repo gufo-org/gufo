@@ -1,9 +1,7 @@
 name: Release automation
 
 on:
-  schedule:
-    # Daily at a non-round minute to reduce scheduler congestion.
-    - cron: "17 5 * * *"
+  # Releases are cut on demand from the Actions tab ("Run workflow").
   workflow_dispatch:
 
 permissions:
@@ -80,7 +78,7 @@ jobs:
           fi
 
           required_checks=(
-            "Validate PR title"
+            "Validate PR title and extension API"
             "Run CPU and repository checks"
             # The full functional suite on Strix Halo; only releases require it.
             "devlab/functional"

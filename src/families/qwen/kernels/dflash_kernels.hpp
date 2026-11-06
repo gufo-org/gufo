@@ -83,16 +83,31 @@ struct DFlashSampling {
   std::uint32_t history_count{0};
 };
 
+/// A sequence that scores the draft vocabulary (draft_vocab.hpp) instead of
+/// the whole head. Its logits rows hold vocabulary IDs 0..prefix-1 in their
+/// first `prefix` columns; `logits` holds `rows` more scores per proposal for
+/// the request's table, whose IDs are `ids` (-1 for an empty slot, whose
+/// score must be -inf). The selector returns full vocabulary IDs, so the
+/// transition codebooks, penalties and sampled candidates are unchanged.
+struct DFlashSelectorVocab {
+  std::uint32_t prefix{0};  ///< 0: the sequence scores the whole vocabulary
+  const float* logits{nullptr};
+  const std::int32_t* ids{nullptr};
+  std::uint32_t rows{0};
+};
+
 struct DFlashSelectorSequence {
   std::uint32_t count;
   float temperature;
   DFlashSampling sampling;
+  DFlashSelectorVocab vocab{};
 };
 
 // Proposal rows are contiguous by sequence. Each token sequence includes its
 // anchor before the proposal slots; all other buffers contain proposals only.
-// Partial buffers need DFlashSelectorScratchElements(vocab_size) per proposal.
-// Requested candidates include one-hot probabilities for greedy sequences.
+// Logits rows are `logits_stride` apart (0: vocab_size). Partial buffers need
+// DFlashSelectorScratchElements(vocab_size) per proposal. Requested
+// candidates include one-hot probabilities for greedy sequences.
 void LaunchDFlashSelectorBatch(
     const float* logits, const float* projected_hidden,
     const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,
@@ -101,7 +116,23 @@ void LaunchDFlashSelectorBatch(
     std::uint32_t* candidate_ids, float* candidate_probabilities,
     std::span<const DFlashSelectorSequence> sequences, std::uint32_t vocab_size,
     std::uint32_t selector_rank, std::uint32_t selector_top_k,
-    hipStream_t stream);
+    hipStream_t stream, std::uint32_t logits_stride = 0);
+
+/// Writes `rows` x `table_rows` draft-table scores: `source[row * stride +
+/// ids[slot]]` when `source` is set (a full-vocabulary row), otherwise the
+/// table's own projection already in `table_logits`. Empty slots (ID -1)
+/// become -inf either way.
+/// Copies the `count` rows `ids` names (device IDs, all valid) of a
+/// row-major `source` into consecutive rows of `destination`. `row_bytes`
+/// must be a multiple of four.
+void LaunchDFlashGatherRows(const void* source, std::size_t row_bytes,
+                            const std::int32_t* ids, void* destination,
+                            std::uint32_t count, hipStream_t stream);
+
+void LaunchDFlashDraftTableLogits(const float* source, std::uint32_t stride,
+                                  const std::int32_t* ids, float* table_logits,
+                                  std::uint32_t rows, std::uint32_t table_rows,
+                                  hipStream_t stream);
 
 }  // namespace gufo::hip::kernels
 #endif  // defined(ENGINE_ENABLE_HIP)

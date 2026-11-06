@@ -1,5 +1,6 @@
 #include <array>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -154,11 +155,58 @@ void TestHost() {
   Require(output.str().find("escaped\\x0aline") != std::string::npos,
           "shared log escaping");
 }
+class FixedDecision final : public DecisionRunner {
+public:
+  gufo::json::Value Decide(const gufo::json::Value& request) override {
+    if (!request.contains("questions"))
+      throw std::invalid_argument("questions required");
+    return gufo::json::parse(R"({"answers":{}})");
+  }
+  bool Multimodal() const override { return true; }
+  std::string ModelId() const override { return "fixed-decision"; }
+};
+void TestDecisionProviders() {
+  Registry registry;
+  registry.AddDecisionProvider({
+      .id = "fixed",
+      .probe = [](std::string_view root) { return root == "fixed.gguf"; },
+      .resolve = nullptr,
+      .create = [](const DecisionRunnerOptions& options,
+                   std::string* error) -> std::unique_ptr<DecisionRunner> {
+        if (options.maximum_context_tokens == 0) {
+          *error = "context required";
+          return nullptr;
+        }
+        return std::make_unique<FixedDecision>();
+      },
+  });
+  Require(FindDecisionProvider("fixed") != nullptr, "decision lookup");
+  Require(ProbeDecisionProvider("other.gguf") == nullptr, "decision probe");
+  const auto* provider = ProbeDecisionProvider("fixed.gguf");
+  Require(provider != nullptr && provider->id == "fixed", "decision claim");
+  std::string error;
+  Require(!provider->create({.model_root = "fixed.gguf",
+                             .projector_path = {},
+                             .maximum_context_tokens = 0},
+                            &error) &&
+              error == "context required",
+          "decision factory error");
+  auto runner = provider->create({.model_root = "fixed.gguf",
+                                  .projector_path = {},
+                                  .maximum_context_tokens = 8192},
+                                 &error);
+  Require(
+      runner && runner->Multimodal() && runner->ModelId() == "fixed-decision",
+      "decision runner");
+  Reject([&] { (void)runner->Decide(gufo::json::Value::object()); },
+         "questions required");
+}
 }  // namespace
 int main() {
   try {
     TestRegistryAndParser();
     TestHost();
+    TestDecisionProviders();
     std::cout << "extension runtime contracts passed\n";
     return 0;
   } catch (const std::exception& error) {

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 > Instructions given to the implementation agent, written before it ran. This is a
 > brief, not a result. Results go in the other files of this directory.
 
@@ -290,7 +294,7 @@ If it changes, that is a finding: revert and report.
 - `pending-commands.md` — every deferred functional/performance/Windows/lock-runtime
   requirement with its verbatim command (all four text profiles with
   `long-context`/`cache`, DeepSeek local time, matched timings, speed benchmark,
-  Windows build, `nix build .#checks.x86_64-linux.pr`, `nix build .#release`).
+  Windows build, `legacy hosted PR check`, `nix build .#release`).
 - Scratch log inventory (`/tmp/card09-*` paths) in `RESUME-NOTES.md` for cleanup.
 
 ## Handoff (last thing you write, in `RESUME-NOTES.md`)

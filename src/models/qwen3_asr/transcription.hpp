@@ -1,53 +1,14 @@
 #ifndef GUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_
 #define GUFO_MODELS_QWEN3_ASR_TRANSCRIPTION_HPP_
 
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
+#include "src/ext/asr.hpp"
 
 namespace gufo::models::qwen3_asr {
 
-struct TranscriptionRequest {
-  std::span<const std::byte> wav;
-  std::string context;
-  std::optional<std::string> language;
-  std::size_t max_new_tokens{256};
-  /// Alternative to WAV for live sessions: normalized mono audio at 16 kHz.
-  /// Exactly one audio source must be supplied.
-  std::span<const float> pcm16k;
-  /// Cumulative UTF-8 transcript, called during generation. Returning false
-  /// cancels the operation; the view is valid only during the callback.
-  std::function<bool(std::string_view)> on_text;
-};
-
-struct TranscriptionTimings {
-  double decode_audio_ms{0.0};
-  double feature_extraction_ms{0.0};
-  double audio_encoder_ms{0.0};
-  double text_decoder_ms{0.0};
-  double total_ms{0.0};
-};
-
-struct TranscriptionResult {
-  std::string language;
-  std::string text;
-  std::string decoded;
-  std::vector<std::uint32_t> generated_ids;
-  std::uint32_t sample_rate{16000};
-  std::size_t audio_samples{0};
-  std::size_t mel_frames{0};
-  std::size_t audio_tokens{0};
-  std::size_t prompt_tokens{0};
-  std::size_t chunks{0};
-  TranscriptionTimings timings;
-};
-
-using CancellationCheck = std::function<bool()>;
+using TranscriptionRequest = ext::TranscriptionRequest;
+using TranscriptionTimings = ext::TranscriptionTimings;
+using TranscriptionResult = ext::TranscriptionResult;
+using CancellationCheck = ext::CancellationCheck;
 
 }  // namespace gufo::models::qwen3_asr
 

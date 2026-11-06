@@ -4,10 +4,7 @@
   "target": "gufo_qwen3_tts",
   "kind": "static",
   "purpose": "Qwen3-TTS CustomVoice speech model: text and speech encoders, talker and vocoder.",
-  "consumers": [
-    "gufo",
-    "gufo_http"
-  ],
+  "consumers": [],
   "checks": [
     "qwen3_tts_audio_api_test",
     "qwen3_tts_audio_test",

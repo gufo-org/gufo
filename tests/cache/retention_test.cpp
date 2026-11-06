@@ -350,6 +350,57 @@ void CheapCheckpointsGiveWayFirst() {
   assert(f.Reclaim() == first && f.Reclaim() == second);
   assert(f.Reclaim() == idle);
 }
+// A window is a fixed cost per checkpoint, like private state: conversations
+// whose window outweighs eight times their rows give way first. Rows of 64
+// bytes and a 32-row window of 1,024-byte rows: cheap below 64 tokens.
+void ShortWindowCheckpointsAreCheap() {
+  static constexpr std::array<ComponentDescriptor, 3> kWindowed{{
+      {{1}, 1, ComponentKind::kAppendRows, 64, 4, 0},
+      {{2}, 1, ComponentKind::kWindowRows, 1024, 4, 0, 32},
+      {{3}, 1, ComponentKind::kPrivateState, 0, 0, 4},
+  }};
+  ResourceLedger ledger({1ULL << 30, 1ULL << 30, 0, 1ULL << 30});
+  {
+    PrefixIndex index{ledger};
+    index.Register({1}, kWindowed);
+    Log log;
+    RetentionPolicy policy(ledger, index, &log);
+    const auto add = [&](const std::vector<Token>& tokens) {
+      const Rows n = tokens.size();
+      auto history = ExecutionHistory::Cold(ledger, kWindowed, {1});
+      assert(
+          policy.Admit({tokens, {1}, {}, RetentionPurpose::kContinuation}, [&] {
+            return history.Capture(
+                {tokens,
+                 InputIdentity(n),
+                 {{{1}, n}, {{2}, n}, {{3}, n}},
+                 CheckpointPurpose::kPrompt,
+                 1},
+                [&](const PayloadRequest& request) {
+                  auto pool = ledger
+                                  .Reserve(ResourceCategory::kBackingFree,
+                                           request.bytes)
+                                  .Convert();
+                  auto charge = pool.ReserveBacking(request.category).Convert();
+                  return Payload::Committed(std::move(charge),
+                                            std::make_shared<int>(0));
+                });
+          }));
+      return log.events.back().checkpoint;
+    };
+    const auto reclaim = [&] {
+      const std::vector<Token> incoming(9, 99);
+      assert(policy.Reclaim({incoming, {1}, {}}));
+      return log.events.back().checkpoint;
+    };
+    const auto idle = add(Conversation(1, 80));
+    const auto first = add(Conversation(2, 16));
+    const auto second = add(Conversation(3, 16));
+    assert(reclaim() == first && reclaim() == second);
+    assert(reclaim() == idle);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 void ReusedCheapCheckpointKeepsRecency() {
   // A short checkpoint restored one request ago is not cheap any more: its
   // next turn would be a full miss (state-edges). It competes by recency.
@@ -1074,6 +1125,80 @@ void RealCapacityAndUniqueAdmission() {
   }
 }
 }  // namespace
+// Window chunks shared at different vector positions count once, both when
+// the retained total is computed and when admission and removal update it.
+std::size_t DistinctPayloadBytes(
+    std::initializer_list<const Checkpoint*> checkpoints) {
+  std::vector<const CheckpointChunk*> seen;
+  std::size_t bytes = 0;
+  for (const auto* checkpoint : checkpoints)
+    for (const auto& c : checkpoint->Components()) {
+      for (const auto& chunk : c.chunks)
+        if (std::ranges::none_of(seen, [&](const auto* other) {
+              return chunk.SameChunk(*other);
+            })) {
+          seen.push_back(&chunk);
+          bytes += chunk.Storage().Bytes();
+        }
+      if (c.tail)
+        bytes += c.tail->Bytes();
+      if (c.private_state)
+        bytes += c.private_state->Bytes();
+    }
+  return bytes;
+}
+void WindowPeersAlignByRow() {
+  static constexpr std::array<ComponentDescriptor, 3> kWindowed{{
+      {{1}, 1, ComponentKind::kAppendRows, 4, 4, 0},
+      {{2}, 1, ComponentKind::kWindowRows, 8, 4, 0, 6},
+      {{3}, 1, ComponentKind::kPrivateState, 0, 0, 32},
+  }};
+  ResourceLedger ledger{kIndexLimits};
+  {
+    PrefixIndex index{ledger};
+    index.Register({2}, kWindowed);
+    Log log;
+    RetentionPolicy policy(ledger, index, &log);
+    auto history = ExecutionHistory::Cold(ledger, kWindowed, {2});
+    const std::vector<Token> tokens(14, 1);
+    std::shared_ptr<const Checkpoint> early, late;
+    const auto capture = [&](Rows n) {
+      return history.Capture(
+          {std::span(tokens).first(n),
+           InputIdentity(n),
+           {{{1}, n}, {{2}, n}, {{3}, n}},
+           CheckpointPurpose::kPrompt,
+           1},
+          [&](const PayloadRequest& request) {
+            auto pool =
+                ledger.Reserve(ResourceCategory::kBackingFree, request.bytes)
+                    .Convert();
+            auto charge = pool.ReserveBacking(request.category).Convert();
+            return Payload::Committed(std::move(charge),
+                                      std::make_shared<int>(0));
+          });
+    };
+    // Window chunks [4, 8) and [8, 12), then only [8, 12): one shared chunk
+    // at index 1 of the first checkpoint and index 0 of the second.
+    assert(policy.Admit(
+        {std::span(tokens).first(13), {2}, {}, RetentionPurpose::kHistory},
+        [&] { return early = capture(13); }));
+    assert(policy.RetainedPayloadBytes() == DistinctPayloadBytes({&*early}));
+    assert(policy.Admit(
+        {std::span(tokens).first(14), {2}, {}, RetentionPurpose::kHistory},
+        [&] { return late = capture(14); }));
+    assert(policy.Size() == 2);
+    assert(early->Components()[1].chunks[1].SameChunk(
+        late->Components()[1].chunks[0]));
+    assert(policy.RetainedPayloadBytes() ==
+           DistinctPayloadBytes({&*early, &*late}));
+    policy.Remove(early->Id());
+    assert(policy.RetainedPayloadBytes() == DistinctPayloadBytes({&*late}));
+    policy.Remove(late->Id());
+    assert(policy.RetainedPayloadBytes() == 0);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
 int main() {
   Planning();
   Branches();
@@ -1100,4 +1225,6 @@ int main() {
   RealCapacityAndUniqueAdmission();
   SharedChunkAccounting();
   InvalidInventoriesPreserveReplacement();
+  WindowPeersAlignByRow();
+  ShortWindowCheckpointsAreCheap();
 }

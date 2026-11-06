@@ -716,6 +716,22 @@
       "vision_required": false,
       "tier": "release"
     },
+    "tool-type-unions": {
+      "covers": [
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
     "tool-schema-edges": {
       "covers": [
         "limits",
@@ -1631,7 +1647,7 @@
   },
   "configurations": {
     "cache-stalls": {
-      "context": 262144,
+      "context": 131072,
       "sessions": 2
     },
     "standard": {

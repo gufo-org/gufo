@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 > Instructions given to the implementation agent, written before it ran. This is a
 > brief, not a result. Results go in the other files of this directory.
 
@@ -131,7 +135,7 @@ Run the required gates and record evidence:
 6. Bounded hosted CPU contract and check-pr targets:
    `nix develop -c cmake --preset cpu-test`
    `nix develop -c cmake --build --preset cpu-test --target check-pr`
-   `nix build .#checks.x86_64-linux.pr`
+   `legacy hosted PR check`
 7. Derivation independence proof:
    Compare `nix eval --raw .#packages.x86_64-linux.default.drvPath` before and after an edit to a model test file; verify it is unchanged.
 8. Continuation identity goldens (GPU preset, weight-free):

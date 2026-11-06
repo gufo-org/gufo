@@ -63,5 +63,12 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
+/// Hash the sidecar and upload its weights while the model loads, before the
+/// runner claims state capacity and the RAM cache is sized. Otherwise the first
+/// image request hashes the whole sidecar in its queue time and uploads the
+/// weights in its prefill, after admission and the cache were sized without
+/// them. Logs `event=vision_prepared`; a null encoder is a no-op.
+void PrepareForServing(const std::shared_ptr<Encoder>& encoder);
+
 }  // namespace gufo::models::qwen::vision
 #endif

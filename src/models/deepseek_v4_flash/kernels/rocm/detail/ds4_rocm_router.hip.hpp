@@ -24,6 +24,15 @@ __device__ __forceinline__ static bool router_score_better(float av, uint32_t ai
     return av > bv || (av == bv && ai < bi);
 }
 
+// With kThreadPerExpert one thread per expert computes the FP64 probabilities
+// of up to DS4_ROCM_ROUTER_ROWS rows, then one wave per row selects, so a
+// decode row spreads its FP64 work over eight waves. On gfx1151 that is faster
+// for up to DS4_ROCM_ROUTER_EXPERT_THREAD_MAX_ROWS rows and slower from five.
+constexpr uint32_t DS4_ROCM_ROUTER_ROWS = DS4_ROCM_N_EXPERT / 32u;
+constexpr uint32_t DS4_ROCM_ROUTER_EXPERT_THREAD_MAX_ROWS = 4u;
+constexpr uint32_t DS4_ROCM_ROUTER_WAVE_ROWS = 4u;
+
+template <bool kThreadPerExpert>
 __global__ static void router_select_warp_topk_kernel(
         int32_t *selected,
         float *weights,
@@ -43,30 +52,58 @@ __global__ static void router_select_warp_topk_kernel(
     const uint32_t lane = threadIdx.x;
     const uint32_t row_in_block = threadIdx.y;
     const uint32_t t = blockIdx.x * blockDim.y + row_in_block;
-    if (t >= n_tokens || lane >= 32u) return;
-
-    const float *log = logits + (uint64_t)t * DS4_ROCM_N_EXPERT;
-    float *prob = probs + (uint64_t)t * DS4_ROCM_N_EXPERT;
-    int32_t *sel = selected + (uint64_t)t * DS4_ROCM_N_EXPERT_USED;
-    float *w = weights + (uint64_t)t * DS4_ROCM_N_EXPERT_USED;
-    __shared__ float sprob[4][DS4_ROCM_N_EXPERT];
+    constexpr uint32_t rows = kThreadPerExpert ? DS4_ROCM_ROUTER_ROWS : DS4_ROCM_ROUTER_WAVE_ROWS;
+    __shared__ float sprob[rows][DS4_ROCM_N_EXPERT];
     float local_prob[DS4_ROCM_N_EXPERT / 32u];
     float local_score[DS4_ROCM_N_EXPERT / 32u];
 
-    #pragma unroll
-    for (uint32_t j = 0; j < DS4_ROCM_N_EXPERT / 32u; j++) {
-        const uint32_t e = lane + j * 32u;
+    if constexpr (kThreadPerExpert) {
+        const uint32_t row0 = blockIdx.x * rows;
+        const uint32_t expert = row_in_block * 32u + lane;
+        __shared__ float sscore[rows][DS4_ROCM_N_EXPERT];
+        const float expert_bias = has_bias ? bias[expert] : 0.0f;
+        #pragma unroll
+        for (uint32_t r = 0; r < rows; r++) {
+            if (row0 + r >= n_tokens) break;
+            const uint64_t i = (uint64_t)(row0 + r) * DS4_ROCM_N_EXPERT + expert;
 #if __clang_major__ >= 24
-        const float p = router_probability(log[e]);
+            const float p = router_probability(logits[i]);
 #else
-        const float p = ds4_precise_sqrtf(softplus_dev(log[e]));
+            const float p = ds4_precise_sqrtf(softplus_dev(logits[i]));
 #endif
-        local_prob[j] = p;
-        local_score[j] = p + (has_bias ? bias[e] : 0.0f);
-        sprob[row_in_block][e] = p;
-        prob[e] = p;
+            sprob[r][expert] = p;
+            sscore[r][expert] = p + expert_bias;
+            probs[i] = p;
+        }
+        __syncthreads();
+        if (t >= n_tokens) return;
+        #pragma unroll
+        for (uint32_t j = 0; j < DS4_ROCM_N_EXPERT / 32u; j++) {
+            local_prob[j] = sprob[row_in_block][lane + j * 32u];
+            local_score[j] = sscore[row_in_block][lane + j * 32u];
+        }
+    } else {
+        if (t >= n_tokens || lane >= 32u) return;
+        const float *log = logits + (uint64_t)t * DS4_ROCM_N_EXPERT;
+        float *prob = probs + (uint64_t)t * DS4_ROCM_N_EXPERT;
+        #pragma unroll
+        for (uint32_t j = 0; j < DS4_ROCM_N_EXPERT / 32u; j++) {
+            const uint32_t e = lane + j * 32u;
+#if __clang_major__ >= 24
+            const float p = router_probability(log[e]);
+#else
+            const float p = ds4_precise_sqrtf(softplus_dev(log[e]));
+#endif
+            local_prob[j] = p;
+            local_score[j] = p + (has_bias ? bias[e] : 0.0f);
+            sprob[row_in_block][e] = p;
+            prob[e] = p;
+        }
+        __syncwarp();
     }
-    __syncwarp();
+
+    int32_t *sel = selected + (uint64_t)t * DS4_ROCM_N_EXPERT_USED;
+    float *w = weights + (uint64_t)t * DS4_ROCM_N_EXPERT_USED;
 
     if (hash_mode) {
         if (lane == 0) {
@@ -170,10 +207,10 @@ extern "C" int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_te
         }
     }
     if (ok) {
-        dim3 block(32, 4, 1);
-        router_select_warp_topk_kernel<<<1, block>>>((int32_t *)selected->ptr, (float *)weights->ptr, (float *)probs->ptr,
-                                                     bias, hash, (const float *)logits->ptr, NULL, tok, hash_rows, 1,
-                                                     has_bias && !hash_mode, hash_mode);
+        dim3 block(32, DS4_ROCM_ROUTER_ROWS, 1);
+        router_select_warp_topk_kernel<true><<<1, block>>>((int32_t *)selected->ptr, (float *)weights->ptr, (float *)probs->ptr,
+                                                           bias, hash, (const float *)logits->ptr, NULL, tok, hash_rows, 1,
+                                                           has_bias && !hash_mode, hash_mode);
         ok = hip_ok(hipGetLastError(), "router_select launch");
     }
     return ok;
@@ -205,18 +242,23 @@ extern "C" int ds4_gpu_router_select_batch_tensor(ds4_gpu_tensor *selected, ds4_
         hash = (const int32_t *)hip_model_range_ptr(model_map, hash_offset, hash_bytes, "router_hash");
         if (!hash) return 0;
     }
-    dim3 block(32, 4, 1);
-    router_select_warp_topk_kernel<<<(n_tokens + 3u) / 4u, block>>>((int32_t *)selected->ptr,
-                                                                    (float *)weights->ptr,
-                                                                    (float *)probs->ptr,
-                                                                    bias,
-                                                                    hash,
-                                                                    (const float *)logits->ptr,
-                                                                    (const int32_t *)tokens->ptr,
-                                                                    0,
-                                                                    hash_rows,
-                                                                    n_tokens,
-                                                                    has_bias && !hash_mode,
-                                                                    hash_mode);
+    const bool thread_per_expert = n_tokens <= DS4_ROCM_ROUTER_EXPERT_THREAD_MAX_ROWS;
+    const uint32_t rows = thread_per_expert ? DS4_ROCM_ROUTER_ROWS : DS4_ROCM_ROUTER_WAVE_ROWS;
+    const dim3 block(32, rows, 1);
+    const uint32_t grid = (n_tokens + rows - 1u) / rows;
+    auto kernel = thread_per_expert ? router_select_warp_topk_kernel<true>
+                                    : router_select_warp_topk_kernel<false>;
+    kernel<<<grid, block>>>((int32_t *)selected->ptr,
+                            (float *)weights->ptr,
+                            (float *)probs->ptr,
+                            bias,
+                            hash,
+                            (const float *)logits->ptr,
+                            (const int32_t *)tokens->ptr,
+                            0,
+                            hash_rows,
+                            n_tokens,
+                            has_bias && !hash_mode,
+                            hash_mode);
     return hip_ok(hipGetLastError(), "router_select launch");
 }

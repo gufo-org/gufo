@@ -3,6 +3,8 @@
 import argparse
 import copy
 import json
+import os
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +16,11 @@ FIXTURES = ROOT / "tests/extensions/fixture"
 BASE = [json.loads((FIXTURES / f"{name}.json").read_text()) for name in ("alpha", "beta", "base")]
 MODULE = ROOT / "cmake/GufoExtension.cmake"
 DIAGNOSTICS = []
+spec = importlib.util.spec_from_file_location("extension_api", ROOT / "tools/ci/check-extension-api.py")
+api = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(api)
+API_VERSION = api.version_for_root(ROOT)
+
 
 
 class ConfigureTests(unittest.TestCase):
@@ -28,7 +35,7 @@ class ConfigureTests(unittest.TestCase):
                 cmake.append(f'gufo_extension(MANIFEST "{path.as_posix()}")')
             cmake.extend(["gufo_extensions_validate()", extra])
             (source / "CMakeLists.txt").write_text("\n".join(cmake))
-            result = subprocess.run(["cmake", "-S", str(source), "-B", str(source / "build")],
+            result = subprocess.run(["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             DIAGNOSTICS.append({"test": self.id(), "expected": expected,
                                 "extra": extra, "returncode": result.returncode, "output": result.stdout})
@@ -53,6 +60,37 @@ class ConfigureTests(unittest.TestCase):
         for field in ("name", "type", "commands"):
             with self.subTest(option_field=field):
                 self.invalid(lambda m: m[0]["options"][0].pop(field), field)
+
+    def test_decision_capability(self):
+        manifests = copy.deepcopy(BASE)
+        manifests[0]["providers"][0]["capability"] = "decision"
+        self.configure(manifests)
+
+    def test_serving_metadata(self):
+        manifests = copy.deepcopy(BASE)
+        provider = manifests[0]["providers"][0]
+        provider["serving"] = {"draft_options": {"draft": "--alpha-path"}}
+        manifests[0]["options"][1]["commands"].append("serve")
+        self.configure(manifests)
+        invalid = copy.deepcopy(manifests)
+        invalid[0]["providers"][0]["serving"]["draft_options"] = {"unknown": "--alpha-path"}
+        self.configure(invalid, "serving draft mode is not advertised")
+        for change in ("missing", "wrong-type", "wrong-owner", "wrong-command"):
+            invalid = copy.deepcopy(manifests)
+            option = invalid[0]["options"][1]
+            if change == "missing":
+                option["name"] = "--other-path"
+            elif change == "wrong-type":
+                option["type"] = "string"
+            elif change == "wrong-owner":
+                option["providers"] = ["alpha-hip"]
+            else:
+                option["commands"] = ["prompt"]
+            with self.subTest(change=change):
+                self.configure(invalid, "serving draft option must declare a provider-owned serve path")
+        invalid = copy.deepcopy(BASE)
+        invalid[0]["providers"][0]["serving"] = {"voices": True}
+        self.configure(invalid, "serving voices requires speech_synthesis")
 
     def test_names_and_collisions(self):
         cases = [
@@ -132,6 +170,7 @@ class ConfigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gufo-extension-edges-") as temp:
             source = Path(temp)
             cmake = ["cmake_minimum_required(VERSION 3.21)", "project(extension_edges LANGUAGES CXX)",
+                     f'include("{ROOT.as_posix()}/cmake/CompilerCache.cmake")',
                      "set(CMAKE_CXX_STANDARD 20)", "set(CMAKE_CXX_STANDARD_REQUIRED ON)",
                      f'set(PROJECT_SOURCE_DIR "{ROOT.as_posix()}")', "find_package(Threads REQUIRED)",
                      f'add_subdirectory("{ROOT.as_posix()}/src/core/platform" platform)',
@@ -173,24 +212,31 @@ class ConfigureTests(unittest.TestCase):
                 'if (p.id.ends_with("-extra")) { if (!p.options.empty()) return 3; continue; }'
                 'if (p.options.size() != 1 || p.options[0].help != "x\\\\u0000y") return 2; } return 0; }\n')
             # Ninja keeps the build's compiler (CXX); a Visual Studio generator
-            # would select MSVC instead.
+            # would select MSVC instead. Like discovery fixtures, these temporary
+            # builds can reuse objects without retaining debug directory paths.
             for command in (["cmake", "-S", str(source), "-B", str(source / "build"), "-GNinja"],
-                            ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "4"],
+                            ["cmake", "--build", str(source / "build"), "--config", "Release", "--parallel", "2"],
                             ["ctest", "--test-dir", str(source / "build"), "-C", "Release", "--output-on-failure"]):
-                result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                result = subprocess.run(command, env=dict(os.environ, CCACHE_BASEDIR=str(source), CCACHE_NOHASHDIR="true"),
+                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 DIAGNOSTICS.append({"test": self.id(), "command": command,
                                     "returncode": result.returncode, "output": result.stdout})
                 self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_dependencies_and_version(self):
         self.configure(BASE)
-        current = copy.deepcopy(BASE)
-        current[0]["api_version"] = ">= 0.1.5"
-        self.configure(current)
+        major, minor, revision = map(int, API_VERSION.split("."))
+        # Existing extension floors must remain accepted after the migration.
+        for floor in range(revision + 1):
+            current = copy.deepcopy(BASE)
+            current[0]["api_version"] = f">= {major}.{minor}.{floor}"
+            with self.subTest(accepted_api=current[0]["api_version"]):
+                self.configure(current)
         self.invalid(lambda m: m[0].update(depends=["absent"]), "missing dependency absent")
         self.invalid(lambda m: m[2].update(depends=["alpha"]), "cyclic dependency")
         self.invalid(lambda m: m[2].update(platforms=["linux"]), "unsatisfiable dependency platforms")
-        for api in (">= 0.2.0", ">= 0.1.6", ">= 1.0.0", "0.1", ">= 0.01.0"):
+        for api in (f">= {major}.{minor + 1}.0", f">= {major}.{minor}.{revision + 1}",
+                    f">= {major + 1}.0.0", "0.1", ">= 0.01.0"):
             with self.subTest(api=api):
                 self.invalid(lambda m: m[0].update(api_version=api), "API" if api.startswith(">= ") else "api_version")
 
@@ -240,7 +286,7 @@ class ConfigureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gufo-extension-registry-") as temp:
             directories = [Path(temp) / name for name in ("first", "second", "available")]
             for directory in directories:
-                result = subprocess.run(["cmake", "-S", str(FIXTURES), "-B", str(directory),
+                result = subprocess.run(["cmake", "-S", str(FIXTURES), "-B", str(directory), "-GNinja",
                                          f"-DENGINE_ENABLE_HIP={'ON' if directory.name == 'available' else 'OFF'}",
                                          "-DCMAKE_DISABLE_FIND_PACKAGE_Python3=TRUE"],
                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -260,6 +306,13 @@ class ConfigureTests(unittest.TestCase):
 
 
 class SchemaTests(unittest.TestCase):
+    def test_decision_capability(self):
+        import jsonschema
+        decision = copy.deepcopy(BASE[0])
+        decision["providers"][0]["capability"] = "decision"
+        schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
+        jsonschema.Draft202012Validator(schema).validate(decision)
+
     def test_full_schema(self):
         import jsonschema
         schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Integration environment: python3 supplied from existing /nix/store/60m4rxhg2fldqaak400c0lry96ijrzqn-python3-3.13.13/bin via PATH. Nix daemon access restricted.
 $ nix develop -c ctest --test-dir build/card06-gpu -R '^(qwen27b_continuation_identity_test|qwen38_flash_next_continuation_identity_test|deepseek_v4_flash_continuation_identity_test)$' --output-on-failure
 warning: Git tree '/home/mixer/gufo' is dirty
@@ -250,7 +254,7 @@ exit=0
 4) check-extension-api.py -> exit 0 PASS (6 paths); --write -> exit 0, SURFACE diff 0 files; check-extension-isolation.py --fail-on-core-model-includes -> exit 0 PASS core boundary
 5) sha256sum RFC.md -> 2ce2becbc0bf0f844702b624de6827c2bae6eba921ab8a1ea883659fa2f96448 (unchanged)
 6) check-docs.py whole-repo -> 164 errors, ALL in unrelated untracked hrx-system/, 0 outside (recorded baseline; the --root docs/model-extensions invocation used for one attempt was a tool misuse: --root redefines the repo root and fails by design)
-Still pending: hosted nix build .#checks.x86_64-linux.pr (orchestrator, after final review edits), functional matrix + prompt_lookup + timings + benchmarks (post-Card-14 window), qwen_mtp_gpu_test (asset), DeepSeek GPU trio/runtime (user-skipped), lock-mode HIP runtime gates.
+Still pending: hosted legacy hosted PR check (orchestrator, after final review edits), functional matrix + prompt_lookup + timings + benchmarks (post-Card-14 window), qwen_mtp_gpu_test (asset), DeepSeek GPU trio/runtime (user-skipped), lock-mode HIP runtime gates.
 
 === FINAL USER-MANDATED CODEX REVIEW, 2026-10-31 ===
 cmd: codex exec review --dangerously-bypass-approvals-and-sandbox 'review the diff of current jj revision, you can use jj diff to see changes'

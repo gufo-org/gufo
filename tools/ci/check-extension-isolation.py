@@ -11,10 +11,11 @@ Enforcement ratchet (one boundary per migrated layer): with
 under src/models/** or src/families/**. Card 06 (RFC step 4) retired the last
 such include, so a new violation fails the check. --fail-on-serving-boundary
 audits the Card 09 (RFC step 6) split: no src/cli/** include from production
-sources under src/models/**, src/families/**, src/cache/**, src/ext/** or
-include/gufo/ext/**; sources under a tests/ tree stay exempt until step 7b.
+sources under src/models/**, src/families/**, src/cache/**, src/sched/**,
+src/ext/** or include/gufo/ext/**; sources under a tests/ tree stay exempt until step 7b.
 --fail-on-model-core-includes audits the Card 11 (RFC step 7) migration:
-no production file under src/models/** may include src/core/** or src/cache/**.
+no production file under src/models/** may include src/core/**, src/cache/**
+or src/sched/**.
 --fail-on-family-graph audits the Card 07 family manifests. --fail-on-target-ownership audits the Card 08
 (RFC step 5) target graph: every model directory needs a manifest, and every
 target that links, compiles or includes a library must be claimed by it, so
@@ -660,8 +661,8 @@ def core_boundary_violations(report):
 
 
 # Layers that reach execution only through neutral contracts (RFC step 6).
-BOUNDARY_LAYERS = ("src/models/", "src/families/", "src/cache/", "src/ext/",
-                   "include/gufo/ext/")
+BOUNDARY_LAYERS = ("src/models/", "src/families/", "src/cache/", "src/sched/",
+                   "src/ext/", "include/gufo/ext/")
 
 
 def in_test_tree(path):
@@ -692,11 +693,11 @@ def serving_boundary_violations(report):
 
 
 def model_core_boundary_violations(report):
-    """Return production src/models/** includes of src/core/** or src/cache/** headers.
+    """Return production src/models/** includes of src/core/**, src/cache/** or src/sched/** headers.
 
     Card 11 (RFC step 7) migrated all eight model implementations to public
     extension headers under <gufo/ext/...>. Production sources under
-    src/models/** must not include src/core/** or src/cache/**.
+    src/models/** must not include src/core/**, src/cache/** or src/sched/**.
     """
     violations = []
     for edge in report["includes"]:
@@ -706,19 +707,31 @@ def model_core_boundary_violations(report):
         inc = edge["include"]
         target = edge["resolved"] or posixpath.normpath(
             posixpath.join(posixpath.dirname(path), inc))
-        if (target.startswith("src/core/") or target.startswith("src/cache/")
-                or inc.startswith(("src/core/", "src/cache/"))):
+        if (target.startswith(("src/core/", "src/cache/", "src/sched/"))
+                or inc.startswith(("src/core/", "src/cache/", "src/sched/"))):
             violations.append(f"{path}:{edge['line']}: {inc}")
     return sorted(violations)
+
+
+MIGRATED_EXTENSIONS = (
+    "src/models/deepseek_v4_flash/",
+    "src/models/embedding_gemma2/",
+    "src/models/minimax_h3/",
+    "src/models/qwen/",
+    "src/models/qwen3_asr/",
+    "src/models/qwen3_tts/",
+    "src/models/qwen38_flash_next/",
+    "src/models/qwen_image_21/",
+)
 
 
 def extension_boundary_violations(report):
     """Return src/cli/** includes of migrated model extensions.
 
-    Card 13 migrated EmbeddingGemma 2 to the neutral extension runtime.
-    The CLI and serving layer must not include headers from migrated extensions
-    (currently src/models/embedding_gemma2/**), interacting only via ext::Registry
-    and neutral extension interfaces.
+    Cards 13 and 15–18 migrated EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS,
+    Qwen-Image-2.1, and MiniMax H3 to the neutral extension runtime.
+    The CLI and serving layer must not include headers from migrated extensions,
+    interacting only via ext::Registry and neutral extension interfaces.
     """
     violations = []
     for edge in report["includes"]:
@@ -728,8 +741,8 @@ def extension_boundary_violations(report):
         inc = edge["include"]
         target = edge["resolved"] or posixpath.normpath(
             posixpath.join(posixpath.dirname(path), inc))
-        if (target.startswith("src/models/embedding_gemma2/")
-                or inc.startswith("src/models/embedding_gemma2/")):
+        if (target.startswith(MIGRATED_EXTENSIONS)
+                or inc.startswith(MIGRATED_EXTENSIONS)):
             violations.append(f"{path}:{edge['line']}: {inc}")
     return sorted(violations)
 
@@ -774,9 +787,9 @@ def classify_edge(owner, dep, root=None):
     # 1. STRICT BOUNDARY VIOLATIONS
     if owner == "src/core" and (dep.startswith("models/") or dep.startswith("families/")):
         return ("FAIL", "❌", "core boundary violation (core includes model/family)")
-    if (owner.startswith(("models/", "families/", "src/cache", "src/ext")) or owner.startswith("include/gufo/ext")) and dep == "src/cli":
+    if (owner.startswith(("models/", "families/", "src/cache", "src/sched", "src/ext")) or owner.startswith("include/gufo/ext")) and dep == "src/cli":
         return ("FAIL", "❌", "serving boundary violation (engine/extension includes CLI)")
-    if owner.startswith("models/") and dep in {"src/core", "src/cache"}:
+    if owner.startswith("models/") and dep in {"src/core", "src/cache", "src/sched"}:
         return ("FAIL", "❌", "model core boundary violation (production model includes core/cache)")
     if owner == "src/cli" and m_dep in migrated:
         return ("FAIL", "❌", f"extension boundary violation (CLI includes migrated extension {m_dep})")
@@ -808,11 +821,11 @@ def classify_edge(owner, dep, root=None):
         return ("OK", "✅", "test -> test support")
     if owner.startswith("tests/") and "golden_helpers" in dep:
         return ("OK", "✅", "test -> shared golden helper")
-    if owner == "src/cli" and dep in {"src/core", "src/cache", "src/ext", "src/eval", "src/testing", "configuration", "families/qwen"}:
+    if owner == "src/cli" and dep in {"src/core", "src/cache", "src/sched", "src/ext", "src/eval", "src/testing", "configuration", "families/qwen"}:
         return ("OK", "✅", "serving -> engine/infra")
     if owner in {"src/cache", "src/ext", "src/eval"} and dep in {"src/core", "configuration"}:
         return ("OK", "✅", "engine layer -> core")
-    if owner.startswith("tests/") and dep in {"src/core", "src/cache", "src/cli", "src/ext", "src/eval", "src/testing", "families/qwen"}:
+    if owner.startswith("tests/") and dep in {"src/core", "src/cache", "src/sched", "src/cli", "src/ext", "src/eval", "src/testing", "families/qwen"}:
         return ("OK", "✅", "test -> engine component")
     if owner == "configuration" or dep == "configuration":
         return ("OK", "✅", "build/manifest reference")
@@ -859,6 +872,8 @@ def main():
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--mode", choices=["report"], default="report")
     parser.add_argument("--json-report", type=Path, help="Write complete deterministic inventory")
+    parser.add_argument("--inventory", type=Path,
+                        help="Read a snapshot produced by --json-report in this test run")
     parser.add_argument("--details", action="store_true", help="Print the full JSON inventory")
     parser.add_argument("--legacy-counts", action="store_true",
                         help="Print legacy unclassified flat cross-owner counts")
@@ -874,14 +889,15 @@ def main():
                         help="Fail if any production model file includes a core or cache header")
     parser.add_argument("--fail-on-extension-boundary", "--fail-on-cli-model-includes",
                         dest="fail_on_extension_boundary", action="store_true",
-                        help="Fail if any src/cli file includes a migrated extension (src/models/embedding_gemma2)")
+                        help="Fail if any src/cli file includes a migrated extension (src/models/{embedding_gemma2,minimax_h3,qwen3_asr,qwen3_tts,qwen_image_21})")
     parser.add_argument("--fail-on-target-ownership", action="store_true",
                         help="Fail unless every model directory has a manifest and every "
                              "target that links, compiles or includes a library claims it")
     parser.add_argument("--target-ownership-report", action="store_true",
                         help="Print the library/target ownership graph")
     args = parser.parse_args()
-    report = inventory(args.root.resolve())
+    report = (json.loads(args.inventory.read_text(encoding="utf-8"))
+              if args.inventory else inventory(args.root.resolve()))
     if args.json_report:
         args.json_report.parent.mkdir(parents=True, exist_ok=True)
         args.json_report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -926,12 +942,12 @@ def main():
         violations = model_core_boundary_violations(report)
         if violations:
             print("[check-extension-isolation] MODEL CORE BOUNDARY VIOLATED "
-                  "(production models must not include src/core or src/cache headers):")
+                  "(production models must not include src/core, src/cache or src/sched headers):")
             for violation in violations:
                 print(f"  {violation}")
             return 1
         print("[check-extension-isolation] PASS: model core boundary "
-              "(no production src/models -> src/core|src/cache includes)")
+              "(no production src/models -> src/core|src/cache|src/sched includes)")
     if args.fail_on_extension_boundary:
         violations = extension_boundary_violations(report)
         if violations:
@@ -941,7 +957,7 @@ def main():
                 print(f"  {violation}")
             return 1
         print("[check-extension-isolation] PASS: extension boundary "
-              "(no src/cli -> src/models/embedding_gemma2 includes)")
+              "(no src/cli -> migrated extension includes)")
     if args.fail_on_target_ownership or args.target_ownership_report:
         libraries, edges, violations = target_ownership(args.root.resolve())
         if args.target_ownership_report:

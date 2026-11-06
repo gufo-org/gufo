@@ -2,8 +2,11 @@
 
 #include <array>
 #include <cstdlib>
+#include <gufo/ext/registry.hpp>
 #include <iostream>
 #include <string>
+
+#include "src/ext/video.hpp"
 
 namespace {
 
@@ -28,7 +31,10 @@ void TestPresets() {
          "fast denoiser evaluations");
   Expect(options->request.parameters.active_blocks == 45, "fast blocks");
   Expect(options->request.parameters.reuse_interval == 2, "fast reuse");
-  const std::string parameters = gufo::minimax_h3::GenerationParametersJson(
+  const auto* provider = gufo::ext::FindVideoProvider("minimax-h3");
+  Expect(provider != nullptr && provider->parameters_json != nullptr,
+         "minimax-h3 provider available");
+  const std::string parameters = provider->parameters_json(
       options->request.parameters, 42,
       "df0ff96bcdb3a350f115cc39daaf0d7523814258890aa90c06fa784e3ad06169");
   Expect(parameters.find("gufo.minimax-h3-text-generation.v1") !=
@@ -161,7 +167,11 @@ void TestSharedOptionParsing() {
 
 }  // namespace
 
+void minimax_h3_register(gufo::ext::Registry&);
+
 int main() {
+  gufo::ext::Registry registry;
+  minimax_h3_register(registry);
   TestPresets();
   TestDevelopmentAndOverrides();
   TestSelectedFramesAndFailures();

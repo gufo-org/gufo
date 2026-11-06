@@ -1,5 +1,148 @@
 # Qwen3.8 Flash-Next quality
 
+## Raw-completion follow-up, November 4, 2026
+
+GitHub exposed a case missing from the first qualification: a raw completion
+has no separate stable chat boundary, so retaining only its unaligned exact
+prompt loses reuse on a longer request. Runtime `96481a82` retains an aligned
+near-end fallback as well as the exact retry, captured in the same prefill pass.
+The fake-runner regression fails before the fix and passes afterward, including
+slot reuse for an unrelated request. Real AR/MTP checks above the sparse budget
+reuse all 3,094 tokens for an exact retry, restore at 3,092 for an extension,
+and match a cold continuation byte for byte in both modes.
+
+A further admission guard checks whether the cache can retain the raw fallback
+before asking the runner to prepare an in-pass checkpoint. Disabled RAM cache
+without disk storage consumes the unaligned raw prompt in one pass and never
+prepares checkpoint scratch; the focused regression fails without this guard.
+Refused disk-only captures also avoid an unhelpful raw-tail split.
+
+The original Devlab follow-up now reuses 1,548 tokens (main: 1,549), with
+TTFT 309 versus 307 ms, instead of the broken branch's 1.25 s. Its one-token
+replay is intentional. The timing fixture now uses a 1,548-token seed so both
+arms do identical work; two alternating controls retain exact output hashes
+and have no slower request phase under the unchanged 5%/10 ms rule. The full
+Nix CPU gate passes, as do 20 scheduler-test repeats after synchronizing the
+two active decoders in the test setup; its fairness assertions are unchanged.
+
+This raw case activates 136 MiB of already-reserved in-pass device checkpoint
+scratch that main does not touch in that history. Startup allocation and cache
+limits are unchanged, but measured peak GTT is higher by that amount; it is
+not a zero-memory-cost result. Paired aligned-history RSS peaks differ by
+5–16 MiB; the original unaligned history uses about 86 MiB more RSS for its
+additional retained fallback. These bounded costs are distinct from the earlier
+chat/concurrency measurements below. Follow-up evidence is retained in
+`/home/fbozzo/projects/validation/pr877-20261104/ci-followup/`.
+
+## PR #877 qualification, November 4, 2026
+
+Pinned main `1c75887b` versus runtime candidate `e6b2a4c1`, Nix builds on
+Strix Halo gfx1151 with ROCm 10.1 and the cached Unsloth UD-Q4_K_XL target
+and shared Q8_0 MTP sidecar:
+
+- The final alignment harness passes in AR and MTP: all four prompt residues,
+  RAM and restarted-disk restore at token 2,944, and all 16 continuations
+  byte-identical to cold runs. It verifies useful stable checkpoints, actual
+  loaded mode and draft execution, and retains raw requests and checkpoint IDs.
+- Four F32-reference fixtures cover 2,479 scored positions. Paired current-main
+  KL and NLL deltas are zero, and all four logit dumps are byte-identical.
+  Independent reference mean KL remains 0.03409, top-1 agreement 0.951
+  and NLL 1.2049.
+- Ten focused cache/runner tests pass in 7.25 seconds. The real snapshot and
+  continuation-adapter checks also pass in AR/MTP, including eleven-row tails,
+  twelve-row rejection, seeded replay and host/device exhaustion fallback.
+- Current-base `cache` and `long-context` functional assertions pass for
+  Flash-Next AR/MTP and Qwen3.8-27B Q4/Q8 AR/DFlash2 (50 requests per build
+  and mode). Flash uses the same number of prefill passes as main. Earlier
+  aligned checkpoints intentionally replay extra tokens; an unaligned full
+  checkpoint can fall back farther than three tokens. Corrected sparse prefill
+  changes one reasoning trajectory from 64 to 55 tokens, with the same final
+  answer and exact same-build replay. The strict comparator retains these
+  intended output/work differences as flags.
+- With unchanged 5% and 10 ms per-request/per-phase margins, repeated Flash
+  controls have no confirmed timing failures: AR 674 passed/3 inconclusive,
+  MTP 667 passed/10 inconclusive. Q4 AR and Q8 DFlash2 pass the strict
+  comparison. Q4 DFlash2 and Q8 AR retain inconclusive disk timings; these
+  observations are unqualified, not a complete timing pass.
+- Image-count, image cancellation and restarted disk continuation pass in
+  AR/MTP with unchanged outputs. AR has 340/340 timing measurements within
+  margin; MTP has 339 passed and one inconclusive server-restart measurement.
+- Loaded device allocation is identical to main: AR 88,093 MiB, MTP
+  90,931 MiB with two sessions, context 32,768 and a 4 GiB RAM cache.
+  Sampled host RSS peaks are comparable (AR 4,290 → 4,258 MiB;
+  MTP 4,323 → 4,318 MiB). The readahead fix retains four workers and the
+  existing 32 MiB window.
+
+Raw evidence is retained under
+`/home/fbozzo/projects/validation/pr877-20261104/`. Earlier exploratory
+observations affected by unrelated crash-reporter disk activity are retained
+separately; final comparisons use quiet, sequential controls. DeepSeek's
+legacy cache does not execute the changed component readahead and was not
+model-qualified in this run.
+
+## Four-token prefill alignment, October 28, 2026
+
+Sparse prefill (`WmmaCausalAttention` with a mask) packs four consecutive
+queries from each pass start into a tile and gathers the union of their
+selections, so a prompt split past the 2,048-token budget matches one pass
+only when every later pass starts on a multiple of four (noted in #714). The
+server could split there: a turn's stable boundary, shared and in-pass
+checkpoints and budget-limited passes beside decoders can end anywhere. The
+model now reports `TextRunnerCapabilities::prefill_alignment` (the compress
+ratio, 4): budget-limited passes end on a multiple of four (a budget below
+four runs to the next one), as do passes the runner's 4,096-row capacity
+(4,224 for a final or in-pass checkpoint pass) ends before the prompt, also
+from a reused decoded frontier off that multiple (#1015), and the stable
+final-user-turn boundary, grid
+and shared checkpoints are rounded down to it, moving each boundary back
+by at most three tokens. The complete-prompt checkpoint keeps its exact
+end: an unchanged retry continues it without prefill. `ComponentTextCache`
+never restores an unaligned checkpoint for a longer prompt; that request
+falls back to an earlier aligned checkpoint, which can replay more than
+three additional tokens compared with the old unaligned prompt end. An in-pass
+checkpoint may leave up to eleven rows after its boundary (eight plus the
+three alignment can take), so the five-to-seven-token assistant framing after
+a rounded-down stable boundary still fits in the final pass instead of
+needing a pass of its own. `Session::Feed` aligns its own passes the same
+way. An unaligned prefill frontier is not kept as a live continuation;
+decoded frontiers are. `TextRunnerPool::Request::Prefill` asserts that every
+step after a request's first starts aligned. The snapshot payload version
+is 19.
+
+- `component_text_cache_test` checks the planning with a fake runner of
+  alignment 4: pass ends 8/16/24/32/41 for a 41-token prompt at budget 10,
+  restores at 32 for edits and for a longer prompt, an unchanged retry from
+  all 41 tokens without prefill, and a budget of 3 running to the next
+  multiple of four.
+- `qwen38_flash_next_snapshot_test` captures in-pass checkpoints with an
+  eleven-row tail (boundary 2,048 of a 2,059-token pass, and boundary 4,100
+  of a pass starting at 4,095) in AR and MTP: logits, payload and sampled
+  continuation equal a split at the boundary; a twelve-row tail is refused.
+- `run.py --tier pr --suite cache --suite long-context` (MTP) on a downstream
+  branch (v0.28 base, `--sessions 2 --context 32768`), 50 requests, main
+  and this change alternated twice: every request takes the same number of
+  prefill passes as on main, and all 677 timing measurements pass. With
+  the eight-row tail, 13 of them took an extra pass for the stable boundary
+  (a 13-token warm turn 94 → 168 ms TTFT, a 289-token one 324 → 399 ms, a
+  2,454-token cold prompt 1,483 → 1,559 ms). Unchanged retries reuse the
+  complete 12,359- and 12,481-token prompts without prefill.
+- `tests/functional/cache_alignment_qwen38.py` (`--sessions 2 --context
+  40960`, 4 GiB RAM cache): four conversations whose final user turn ends at
+  2,944–2,947 tokens (all four residues). A seeds the cache, B continues it;
+  B restored from RAM and from `--cache-disk` after a restart must equal B
+  on a fresh server byte for byte, and every restore must start on a
+  multiple of four. On a downstream branch (v0.23 base, 8-bit K/V) it passes
+  in AR and MTP, every restore at 2,944; without the change the restores
+  start at 2,944/2,945/2,946/2,947 and the 2,946 case changes its output from
+  RAM and from disk.
+- End to end on the same branch, two long prompts prefilled as one pass
+  against two passes ending 3, 4, 5 and 6 tokens before the prompt end: the
+  aligned split is identical, the others change the prompt logits (one
+  changes its 40th generated token). Four long 28-question-slice answers
+  (5,754–22,368-token prompts) that the server had split off the alignment
+  now equal a single-pass prefill through the engine API over their whole
+  reasoning, where they had diverged after 173–647 characters.
+
 ## Decode rows at the sparse budget, October 28, 2026
 
 A verification chain that crosses the 2,048-token sparse-attention budget
@@ -1033,8 +1176,22 @@ runs on the per-token attention kernel at about 350–375 tokens/s; a
 585,454-token prompt averaged 493 tokens/s overall, with decode at 36
 tokens/s.
 
-Gaps: short-text quality with YaRN on is not measured (Qwen's model card
-warns static YaRN can hurt short texts); there is no Transformers reference
+**Dynamic YaRN (October 30, 2026).** A session keeps the native rotation
+while it holds at most 262,144 tokens and takes the smallest whole factor
+covering its positions past that, so short requests with `--enable-yarn` are
+unchanged. Unsloth UD-Q4_K_XL target, shared Q8_0 MTP.
+
+| Check | Result |
+| --- | --- |
+| Short requests, `--context 409600` | Five greedy 384-token answers byte-identical to YaRN off; the fixed factor 1.5625 changed four of five |
+| Re-rotation of cached keys | Within one F16 ulp of each rotary pair against keys written directly at the new factor, positions 0 to 299,999, factors 1 to 2, 2 to 4 and 2 to 1 (`attention_ops_test`) |
+| Needle retrieval | Two codes planted before 262,144 tokens of a 309,326-token prompt both recalled after the session moved to factor 1.5625 (1,137 prompt tokens/s overall) |
+| Sessions at different factors | With the native length lowered to 8,192 in a local build, a 21,203-token session at factor 3 and a short native session decoding concurrently each produced their solo greedy output byte for byte |
+| Cached prefix restore | Cached keys always hold the native rotation, and a restore re-rotates them to the factor the session needs. With the native length lowered to 8,192, a 22,414-token restored prompt matched the cold greedy text over 160 tokens, with mean absolute logprob difference 0.00002 (0.00043 when scaled keys were cached as written) |
+
+Gaps: short-text quality under a fixed factor was measured only by the
+first multiple-choice check (dynamic YaRN keeps short sessions native);
+there is no Transformers reference
 beyond the native context, so agreement above uses llama.cpp and the CPU
 oracle; and the fused WMMA kernel is not used for chunks whose visible
 context exceeds 262,144 tokens.

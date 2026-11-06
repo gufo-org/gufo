@@ -13,6 +13,8 @@ shapes. The SDK requests base64 by default, so the agreement check covers that
 encoding. With `"truncate": true` an over-length input must embed exactly like
 its longest prefix that fits the 8192-token limit unchanged. A
 `prompt_name` must embed like the same prompt written by the client.
+Unknown request members are ignored, as in llama.cpp, vLLM and TEI, and
+`/v1/embeddings` takes llama.cpp's `content` and `embd_normalize` too.
 """
 
 import argparse
@@ -109,6 +111,34 @@ def check_truncate(openai, client, model):
                  "invalid_parameter_type", "string truncate")
 
 
+def check_request_members(openai, client, model, texts, single):
+    """#724: unknown members are ignored, as in llama.cpp, vLLM, TEI and
+    Ollama; llama.cpp's `content` and `embd_normalize` work on this route."""
+    check("unknown request members are ignored")
+    extra = client.embeddings.create(
+        model=model, input=texts[0], encoding_format="float",
+        extra_body={"normalize": True, "client_tag": "functional"})
+    assert cosine(extra.data[0].embedding,
+                  single.data[0].embedding) > 0.99999
+
+    check("embd_normalize 2 is accepted and other values are refused")
+    euclidean = client.embeddings.create(
+        model=model, input=texts[0], encoding_format="float",
+        extra_body={"embd_normalize": 2})
+    assert cosine(euclidean.data[0].embedding,
+                  single.data[0].embedding) > 0.99999
+    expect_error(openai, lambda: client.embeddings.create(
+        model=model, input=texts[0], extra_body={"embd_normalize": 0}),
+        400, "unsupported_embd_normalize", "embd_normalize 0")
+
+    check("content without input returns llama.cpp's native form")
+    native = client.post("/embeddings", cast_to=object,
+                         body={"model": model, "content": texts[0]})
+    assert [item["index"] for item in native] == [0], native
+    assert cosine(native[0]["embedding"][0],
+                  single.data[0].embedding) > 0.99999
+
+
 def check_prompt_names(openai, client, model):
     """#723: `prompt_name` adds a prompt from the checkpoint's
     config_sentence_transformers.json, which embeds exactly like the same
@@ -145,7 +175,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
     parser.add_argument("--model", default="embeddinggemma-2")
-    parser.add_argument("--api-key", default="unused")
     parser.add_argument("--output", type=Path, help="Retain every response and request timing")
     args = parser.parse_args()
 
@@ -171,7 +200,7 @@ def main():
             if args.output:
                 args.output.write_text(json.dumps({"requests": requests}, indent=2) + "\n")
 
-    client = openai.OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0,
+    client = openai.OpenAI(base_url=args.base_url, api_key="unused", max_retries=0,
                           http_client=httpx.Client(timeout=120, trust_env=False,
                               event_hooks={"request": [started], "response": [completed]}))
     cases = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
@@ -248,6 +277,7 @@ def main():
         expect_error(openai, lambda: client.embeddings.create(**kwargs),
                      status, code, name)
 
+    check_request_members(openai, client, args.model, texts, single)
     check_truncate(openai, client, args.model)
     check_prompt_names(openai, client, args.model)
 

@@ -29,6 +29,18 @@ extern "C" int ds4_gpu_store_raw_kv_batch_tensor(ds4_gpu_tensor *raw_cache, cons
       head_dim);
   return hip_ok(hipGetLastError(), "store_raw_kv_batch launch");
 }
+// Score scratch for the single-token decode attention launches. Rounding to
+// whole MiB keeps the shared buffer from regrowing as the context lengthens.
+static float *attention_decode_scores_alloc(uint32_t n_head, uint32_t n_raw,
+                                            uint32_t max_comp) {
+  const uint64_t bytes = (uint64_t)n_head *
+                         attention_decode_score_stride(n_raw, max_comp) *
+                         sizeof(float);
+  const uint64_t mib = 1ull << 20;
+  return (float *)hip_tmp_alloc((bytes + mib - 1u) / mib * mib,
+                                "attention decode scores");
+}
+
 extern "C" int ds4_gpu_attention_decode_heads_tensor(
         ds4_gpu_tensor       *heads,
         const void             *model_map,
@@ -62,16 +74,17 @@ extern "C" int ds4_gpu_attention_decode_heads_tensor(
     const float *sinks = (const float *)hip_model_range_ptr(
             model_map, sinks_offset, (uint64_t)n_head * sizeof(float), "attn_sinks");
     if (!sinks) return 0;
-    const uint32_t rows = n_raw + n_comp;
-    const size_t shmem = (size_t)rows * sizeof(float);
-    attention_decode_mixed_one_fast_oldhip_kernel<<<(unsigned)n_head, 256,
-                                                    shmem>>>(
-        (float*)heads->ptr, (const float*)q->ptr, (const float*)raw_kv->ptr,
-        n_comp ? (const float*)comp_kv->ptr : NULL,
-        use_mask ? (const float*)comp_mask->ptr : NULL, sinks, n_raw, raw_cap,
-        raw_start, n_comp, use_mask, n_head, head_dim,
-        (uint32_t)((head_dim & 3u) == 0u));
-    return hip_ok(hipGetLastError(), "attention decode oldhip fast launch");
+    float *scores = attention_decode_scores_alloc(n_head, n_raw, n_comp);
+    if (!scores ||
+        !attention_decode_mixed_one_launch(
+            (float*)heads->ptr, scores, (const float*)q->ptr,
+            (const float*)raw_kv->ptr,
+            n_comp ? (const float*)comp_kv->ptr : NULL,
+            use_mask ? (const float*)comp_mask->ptr : NULL, sinks, n_raw,
+            raw_cap, raw_start, n_comp, use_mask, n_head, head_dim)) {
+      return 0;
+    }
+    return hip_ok(hipGetLastError(), "attention decode launch");
 }
 extern "C" int ds4_gpu_attention_prefill_raw_heads_tensor(ds4_gpu_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_gpu_tensor *q, const ds4_gpu_tensor *raw_kv, uint32_t n_tokens, uint32_t window, uint32_t n_head, uint32_t head_dim) {
   if (!heads || !q || !raw_kv || !model_map || sinks_offset > model_size ||
@@ -417,31 +430,32 @@ extern "C" int ds4_gpu_attention_indexed_mixed_batch_heads_tensor(
         const uint32_t row_raw = end - first;
         const uint32_t row_start =
             (raw_start + first - first_raw_pos) % raw_cap;
-        const size_t shmem =
-            (size_t)(row_raw + std::min(top_k, n_comp)) * sizeof(float);
-        attention_decode_indexed_mixed_one_fast_oldhip_kernel<<<n_head, 256,
-                                                                shmem>>>(
-            (float*)heads->ptr + t * row_elements,
-            (float*)q->ptr + t * row_elements, (float*)raw_kv->ptr,
-            (float*)comp_kv->ptr, topk_ptr + (uint64_t)t * top_k, sinks,
-            row_raw, raw_cap, row_start, n_comp, top_k, pos0 + t, ratio, n_head,
-            head_dim, (head_dim & 3u) == 0u);
-        if (!hip_ok(hipGetLastError(), "indexed verifier scalar row"))
+        float *scores = attention_decode_scores_alloc(
+            n_head, row_raw, std::min(top_k, n_comp));
+        if (!scores ||
+            !attention_decode_indexed_mixed_one_launch(
+                (float*)heads->ptr + t * row_elements, scores,
+                (float*)q->ptr + t * row_elements, (float*)raw_kv->ptr,
+                (float*)comp_kv->ptr, topk_ptr + (uint64_t)t * top_k, sinks,
+                row_raw, raw_cap, row_start, n_comp, top_k, pos0 + t, ratio,
+                n_head, head_dim) ||
+            !hip_ok(hipGetLastError(), "indexed verifier scalar row"))
           return 0;
       }
       return 1;
     }
     if (n_tokens == 1u) {
-      const uint32_t rows = n_raw + (top_k < n_comp ? top_k : n_comp);
-      const size_t shmem = (size_t)(rows ? rows : 1u) * sizeof(float);
-      attention_decode_indexed_mixed_one_fast_oldhip_kernel<<<(unsigned)n_head,
-                                                              256, shmem>>>(
-          (float*)heads->ptr, (const float*)q->ptr, (const float*)raw_kv->ptr,
-          (const float*)comp_kv->ptr, topk_ptr, sinks, n_raw, raw_cap,
-          raw_start, n_comp, top_k, pos0, ratio, n_head, head_dim,
-          (uint32_t)((head_dim & 3u) == 0u));
-      return hip_ok(hipGetLastError(),
-                    "attention indexed decode oldhip fast launch");
+      float *scores = attention_decode_scores_alloc(
+          n_head, n_raw, std::min(top_k, n_comp));
+      if (!scores ||
+          !attention_decode_indexed_mixed_one_launch(
+              (float*)heads->ptr, scores, (const float*)q->ptr,
+              (const float*)raw_kv->ptr, (const float*)comp_kv->ptr, topk_ptr,
+              sinks, n_raw, raw_cap, raw_start, n_comp, top_k, pos0, ratio,
+              n_head, head_dim)) {
+        return 0;
+      }
+      return hip_ok(hipGetLastError(), "attention indexed decode launch");
     }
     /* The single-pass rocWMMA kernel visits each KV row block once, so the score
      * cache that let the old second pass skip its QK matrix multiply has no
@@ -1082,19 +1096,15 @@ static int attention_output_q8_batch_launch(
     const __half *out_a_f16 = NULL;
     if (g_hipblas_ready && n_tokens >= 2u) {
       out_a_f16 = hip_q8_f16_ptr(model_map, out_a_offset, out_a_bytes,
-                                 group_dim, low_dim, "attn_output_a");
+                                 group_dim, low_dim, false);
     }
     if (out_a_f16) {
       {
         const int interleaved_b = 1;
         const __half* out_b_f16_t =
-            hip_q8_f16_transpose_ptr(model_map, out_b_offset, out_b_bytes,
-                                     low_dim, out_dim, "attn_output_b");
-        const __half* out_b_f16 =
-            out_b_f16_t ? NULL
-                        : hip_q8_f16_ptr(model_map, out_b_offset, out_b_bytes,
-                                         low_dim, out_dim, "attn_output_b");
-        if (out_b_f16 || out_b_f16_t) {
+            hip_q8_f16_ptr(model_map, out_b_offset, out_b_bytes, low_dim,
+                           out_dim, true);
+        if (out_b_f16_t) {
           const uint64_t heads_h_count =
               (uint64_t)n_groups * n_tokens * group_dim;
           const uint64_t low_h_count = (uint64_t)n_groups * n_tokens * rank;
@@ -1108,7 +1118,7 @@ static int attention_output_q8_batch_launch(
            * pinned trajectory's own twenty-token prefill on the library
            * this envelope was measured against. */
           uint64_t b_pad_n = ds4_gemm_f16_wmma_pad_n(n_tokens);
-          if (out_b_f16_t == NULL || n_tokens < DS4_ROCM_ATTENTION_WIDE_ROWS ||
+          if (n_tokens < DS4_ROCM_ATTENTION_WIDE_ROWS ||
               !ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n, low_dim) ||
               out->bytes < b_pad_n * out_dim * sizeof(float)) {
             b_pad_n = n_tokens;
@@ -1151,7 +1161,6 @@ static int attention_output_q8_batch_launch(
             return 0;
           const float alpha = 1.0f;
           const float beta0 = 0.0f;
-          const float beta1 = 1.0f;
           int a_wmma_ok = 0;
 #ifdef __HIP_PLATFORM_AMD__
                 /* rocBLAS reaches 2.7 TFLOP/s on this strided-batched shape;
@@ -1191,16 +1200,12 @@ static int attention_output_q8_batch_launch(
                                                                HIPBLAS_COMPUTE_32F,
                                                                HIPBLAS_GEMM_DEFAULT);
                 if (st == HIPBLAS_STATUS_SUCCESS && interleaved_b) {
-                    const __half *b_ptr = out_b_f16_t ? out_b_f16_t : out_b_f16;
-                    const auto b_op = out_b_f16_t ? HIPBLAS_OP_N : HIPBLAS_OP_T;
-                    const int b_lda = out_b_f16_t ? (int)out_dim : (int)low_dim;
 #ifdef __HIP_PLATFORM_AMD__
                     /* The rocWMMA tile moves 3.22 GB against Tensile's 5.7 GB on
                      * this shape; see the kernel comment. Needs the transposed
                      * weight cache, so opA is N. `b_pad_n` is n_tokens unless a
                      * tile is available for a rounded-up width. */
-                    if (out_b_f16_t &&
-                        ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n,
+                    if (ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n,
                                                           low_dim) &&
                         ds4_gemm_f16_wmma_padded_launch<false, float>(
                             (float*)out->ptr, out_b_f16_t, low_h, out_dim,
@@ -1209,23 +1214,25 @@ static int attention_output_q8_batch_launch(
                       return 1;
                     }
                     if (hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_ATTN_B) &&
-                        hipblaslt_gemm_f16(out->ptr, b_ptr, low_h,
+                        hipblaslt_gemm_f16(out->ptr, out_b_f16_t,
+                                           (uint32_t)out_dim, low_h,
                                            (uint32_t)out_dim, n_tokens,
-                                           (uint32_t)low_dim, b_op, HIP_R_32F,
+                                           (uint32_t)low_dim, HIPBLAS_OP_N,
+                                           HIP_R_32F,
                                            "attention output b")) {
                       return 1;
                     }
 #endif
                     st = hipblasGemmEx(g_hipblas,
-                                      b_op,
+                                      HIPBLAS_OP_N,
                                       HIPBLAS_OP_N,
                                       (int)out_dim,
                                       (int)n_tokens,
                                       (int)low_dim,
                                       &alpha,
-                                      b_ptr,
+                                      out_b_f16_t,
                                       HIPBLAS_R_16F,
-                                      b_lda,
+                                      (int)out_dim,
                                       low_h,
                                       HIPBLAS_R_16F,
                                       (int)low_dim,
@@ -1237,36 +1244,6 @@ static int attention_output_q8_batch_launch(
                                       HIPBLAS_GEMM_DEFAULT);
                     if (st == HIPBLAS_STATUS_SUCCESS) return 1;
                     fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " attention output interleaved B failed: status %d; falling back\n", (int)st);
-                } else if (st == HIPBLAS_STATUS_SUCCESS) {
-                    int ok_packed_b = 1;
-                    for (uint32_t g = 0; g < n_groups; g++) {
-                        const float *beta = (g == 0u) ? &beta0 : &beta1;
-                        st = hipblasGemmEx(g_hipblas,
-                                           HIPBLAS_OP_T,
-                                           HIPBLAS_OP_N,
-                                           (int)out_dim,
-                                           (int)n_tokens,
-                                           (int)rank,
-                                           &alpha,
-                                           out_b_f16 + (uint64_t)g * rank,
-                                           HIPBLAS_R_16F,
-                                           (int)low_dim,
-                                           low_h + (uint64_t)g * rank * n_tokens,
-                                           HIPBLAS_R_16F,
-                                           (int)rank,
-                                           beta,
-                                           out->ptr,
-                                           HIPBLAS_R_32F,
-                                           (int)out_dim,
-                                           HIPBLAS_COMPUTE_32F,
-                                           HIPBLAS_GEMM_DEFAULT);
-                        if (st != HIPBLAS_STATUS_SUCCESS) {
-                            ok_packed_b = 0;
-                            break;
-                        }
-                    }
-                    if (ok_packed_b) return 1;
-                    fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " attention output packed B failed: status %d; falling back\n", (int)st);
                 } else {
                     fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " attention output packed A failed: status %d; falling back\n", (int)st);
                 }
@@ -1342,32 +1319,21 @@ static int attention_output_q8_batch_launch(
                                                 blocks_a);
         if (!hip_ok(hipGetLastError(), "attention_output_q8_a prequant launch")) return 0;
         dim3 grid_a(((unsigned)low_dim + 7u) / 8u, (unsigned)n_tokens, 1);
-        grouped_q8_0_a_preq_warp8_kernel<<<grid_a, 256>>>((float *)low->ptr,
-                                                          out_a,
-                                                          xq,
-                                                          xscale,
-                                                          group_dim,
-                                                          rank,
-                                                          n_groups,
-                                                          n_tokens,
-                                                          blocks_a,
-                                                          use_dp4a);
+        grouped_q8_0_a_preq_warp8_kernel<false><<<grid_a, 256>>>((float *)low->ptr,
+                                                                 out_a,
+                                                                 xq,
+                                                                 xscale,
+                                                                 group_dim,
+                                                                 rank,
+                                                                 n_groups,
+                                                                 n_tokens,
+                                                                 blocks_a,
+                                                                 use_dp4a,
+                                                                 nullptr,
+                                                                 nullptr);
         if (!hip_ok(hipGetLastError(), "attention_output_q8_a preq launch")) return 0;
     }
 
-    if (attn_output_hipblas) {
-        if (hip_matmul_q8_0_tensor_f16_gemm(out,
-                                             model_map,
-                                             model_size,
-                                             out_b_offset,
-                                             low_dim,
-                                             out_dim,
-                                             low,
-                                             n_tokens,
-                                             "attn_output_b")) {
-            return 1;
-        }
-    }
     return hip_matmul_q8_0_tensor_labeled(out,
                                            model_map,
                                            model_size,
@@ -1596,7 +1562,9 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
         uint64_t                group_dim,
         uint64_t                rank,
         uint32_t                n_groups,
-        const ds4_gpu_tensor *heads) {
+        const ds4_gpu_tensor *heads,
+        const ds4_gpu_tensor *heads_q8,
+        ds4_gpu_tensor       *low_q8) {
     if (!low || !heads || !model_map || group_dim == 0 || rank == 0 || n_groups == 0) {
         return 0;
     }
@@ -1618,25 +1586,12 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
      * also cache-friendly. */
 
     const uint64_t x_rows = (uint64_t)n_groups;
-    const uint64_t xq_bytes = x_rows * blocks_a * 32u;
-    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes =
-        scale_offset + x_rows * blocks_a * sizeof(float);
-    void *tmp = hip_tmp_alloc(tmp_bytes,
-                               "attention output low q8 prequant");
-    if (!tmp) return 0;
-    int8_t *xq = (int8_t *)tmp;
-    float* xscale = (float*)((char*)tmp + scale_offset);
+    int8_t *xq = NULL;
+    float *xscale = NULL;
     const int use_dp4a = 1;
-    dim3 qgrid((unsigned)blocks_a, (unsigned)x_rows, 1);
-    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
-            xq,
-            xscale,
-            (const float *)heads->ptr,
-            group_dim,
-            blocks_a);
-    if (!hip_ok(hipGetLastError(),
-                 "attention_output_low_q8 prequant launch")) {
+    if (heads_q8) {
+        if (group_dim % 32u != 0u || !hip_q8_0_act(heads_q8, x_rows, blocks_a, &xq, &xscale)) return 0;
+    } else if (!hip_quantize_q8_0_prequant(heads, group_dim, blocks_a, x_rows, &xq, &xscale)) {
         return 0;
     }
     const uint32_t rows_per_block = 32u;
@@ -1644,8 +1599,17 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
             ((unsigned)low_dim + rows_per_block - 1u) / rows_per_block,
             1,
             1);
-    grouped_q8_0_a_preq_warp8_kernel<<<grid_a,
-                                       rows_per_block * 32u>>>(
+    if (low_q8) {
+        int8_t *lq = NULL;
+        float *ls = NULL;
+        if (low_dim % rows_per_block != 0u || !hip_q8_0_act(low_q8, 1u, low_dim / 32u, &lq, &ls)) return 0;
+        grouped_q8_0_a_preq_warp8_kernel<true><<<grid_a, rows_per_block * 32u>>>(
+                (float *)low->ptr, out_a, xq, xscale, group_dim, rank, n_groups, 1,
+                blocks_a, use_dp4a, lq, ls);
+        return hip_ok(hipGetLastError(), "attention_output_low_q8 launch");
+    }
+    grouped_q8_0_a_preq_warp8_kernel<false><<<grid_a,
+                                              rows_per_block * 32u>>>(
             (float *)low->ptr,
             out_a,
             xq,
@@ -1655,7 +1619,9 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
             n_groups,
             1,
             blocks_a,
-            use_dp4a);
+            use_dp4a,
+            nullptr,
+            nullptr);
     return hip_ok(hipGetLastError(),
                    "attention_output_low_q8 launch");
 }

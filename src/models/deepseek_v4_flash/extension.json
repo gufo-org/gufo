@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "deepseek_v4_flash",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.2.0",
   "entry": "deepseek_v4_flash_register",
   "registration_target": "gufo_deepseek_v4_flash",
   "depends": [],
@@ -23,8 +23,13 @@
       "speculative": [
         "dspark"
       ],
-      "target": "gufo_deepseek_v4_flash",
-      "entry": "deepseek_v4_flash_provider_register"
+      "target": "gufo_deepseek_v4_flash_hip",
+      "entry": "deepseek_v4_flash_provider_register",
+      "serving": {
+        "draft_options": {
+          "dspark": "--dspark-model"
+        }
+      }
     }
   ],
   "options": [
@@ -45,6 +50,11 @@
   "targets": {
     "gufo_deepseek_v4_flash": {
       "requires": []
+    },
+    "gufo_deepseek_v4_flash_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "licenses": [

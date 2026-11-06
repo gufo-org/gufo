@@ -75,11 +75,19 @@ def run(evidence, url, audio_root, model):
             assert speech.result()['text'] == references[0]
             assert not silence.result()['text'].strip()
 
+    with evidence.case('unknown-fields-ignored'):
+        # #724: as in llama.cpp and vLLM, fields the server does not use are
+        # ignored rather than refused.
+        assert request(item, 'unknown-fields', chunking_strategy='auto',
+                       client_tag='functional')['text'] == references[0]
+
     with evidence.case('rejections-and-recovery'):
         for options, code in [({'model': 'unknown'}, 'invalid_model'),
                               ({'temperature': '1'}, 'invalid_temperature'),
                               ({'response_format': 'srt'}, 'invalid_response_format'),
-                              ({'max_tokens': '0'}, 'invalid_max_tokens')]:
+                              ({'max_tokens': '0'}, 'invalid_max_tokens'),
+                              ({'timestamp_granularities[]': 'word'}, 'unsupported_option'),
+                              ({'include[]': 'logprobs'}, 'unsupported_option')]:
             evidence.reject(endpoint, code, label=code, data=fields(item, **options),
                 files={'file': ('speech.wav', item['path'].read_bytes(), 'audio/wav')})
         status, body, _ = evidence.call(endpoint, label='malformed-audio', data={'model': model},

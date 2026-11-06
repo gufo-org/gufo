@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "minimax_h3",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.2.0",
   "entry": "minimax_h3_register",
   "registration_target": "gufo_minimax_h3",
   "depends": [],
@@ -21,13 +21,18 @@
       "model_ids": [
         "minimax-h3"
       ],
-      "target": "gufo_minimax_h3",
+      "target": "gufo_minimax_h3_hip",
       "entry": "minimax_h3_provider_register"
     }
   ],
   "targets": {
     "gufo_minimax_h3": {
       "requires": []
+    },
+    "gufo_minimax_h3_hip": {
+      "requires": [
+        "hip"
+      ]
     }
   },
   "packages": [
@@ -44,7 +49,7 @@
     {
       "pkg_config": "libavutil",
       "nix": "ffmpeg-headless",
-      "windows": "ffmpeg[avutil]"
+      "windows": "ffmpeg"
     },
     {
       "pkg_config": "libswscale",

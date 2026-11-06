@@ -98,8 +98,7 @@ struct LeaseState final : MutationGuard {
           spill->reassignment_batch_size > 16)
         throw std::invalid_argument("invalid idle spill configuration");
       for (const auto& c : adapter.Components())
-        if (c.kind == ComponentKind::kAppendRows &&
-            c.row_bytes > spill->piece_bytes)
+        if (HasRows(c.kind) && c.row_bytes > spill->piece_bytes)
           throw std::invalid_argument("spill piece smaller than a row");
     }
     source->id = id;
@@ -701,9 +700,8 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
       !info.reserved ||
       (info.category != ResourceCategory::kBackingAssigned &&
        info.category != ResourceCategory::kPrivateTail) ||
-      d == descriptors.end() || d->kind != ComponentKind::kAppendRows ||
-      p == positions.end() || first >= end || end > p->valid_rows ||
-      !d->row_bytes ||
+      d == descriptors.end() || !HasRows(d->kind) || p == positions.end() ||
+      first >= end || end > p->valid_rows || !d->row_bytes ||
       end - first > std::numeric_limits<std::size_t>::max() / d->row_bytes ||
       backing.size() != (end - first) * d->row_bytes ||
       backing.size() > info.bytes ||
@@ -742,9 +740,9 @@ std::shared_ptr<BorrowedRows> SlotLease::Observe(
   const auto d = std::ranges::find(descriptors, c, &ComponentDescriptor::id);
   const auto positions = state_->adapter.Positions(slot);
   const auto p = std::ranges::find(positions, c, &ComponentPosition::id);
-  if (!slot.IsValid() || d == descriptors.end() ||
-      d->kind != ComponentKind::kAppendRows || p == positions.end() ||
-      first >= end || end > p->valid_rows || !d->row_bytes ||
+  if (!slot.IsValid() || d == descriptors.end() || !HasRows(d->kind) ||
+      p == positions.end() || first >= end || end > p->valid_rows ||
+      !d->row_bytes ||
       end - first > std::numeric_limits<std::size_t>::max() / d->row_bytes ||
       source.size() != (end - first) * d->row_bytes)
     throw std::invalid_argument("invalid observed row description");

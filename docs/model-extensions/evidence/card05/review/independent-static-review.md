@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 ## Review
 
 Type: independent read-only review (phase 2 of 3), Card 05 — Discovery, lock selection and provenance.
@@ -33,11 +37,11 @@ cmake --build ../lock-build --target gufo …
 ../lock-build/gufo --version | grep -Fx 'Extension selection: lock'
 ```
 
-and `cmake/Checks.cmake:62` newly registers `extension_discovery_test` in the hosted `gufo_pr_tests` list. `docs/model-extensions/evidence/card05/README.md` records only `nix develop`-local runs (focused CTest regex, hand-configured `build/card05-lock`). No `nix build .#checks.x86_64-linux.pr` output exists anywhere in `evidence/card05/`.
+and `cmake/Checks.cmake:62` newly registers `extension_discovery_test` in the hosted `gufo_pr_tests` list. `docs/model-extensions/evidence/card05/README.md` records only `nix develop`-local runs (focused CTest regex, hand-configured `build/card05-lock`). No `legacy hosted PR check` output exists anywhere in `evidence/card05/`.
 
 Impact: the branch-protection gate that runs for every future PR is itself unverified. `extension_discovery_test` shells out to `cmake`/`ninja` and performs ~10 nested configure+build cycles inside a Nix build sandbox; the flake provides both (`pkgsSys.cmake`, `pkgsSys.ninja`) and `testSource` admits `cmake/`, `schemas/`, `src/`, `tests/`, `tools/`, so it *should* work — but that is an argument, not evidence. This is exactly the "a planned command is not a result" rule in cards/README.md.
 
-Smallest fix: run `nix build .#checks.x86_64-linux.pr`, retain the log as `evidence/card05/hosted-pr-check.txt`, and record that the pre-existing `check_docs_test` failures (164 broken links under the unrelated `hrx-system/` tree, per HANDOFF) are separate if they still block. If the full check cannot be run, at minimum execute the four lock-build lines above verbatim on the filtered source and retain that output.
+Smallest fix: run `legacy hosted PR check`, retain the log as `evidence/card05/hosted-pr-check.txt`, and record that the pre-existing `check_docs_test` failures (164 broken links under the unrelated `hrx-system/` tree, per HANDOFF) are separate if they still block. If the full check cannot be run, at minimum execute the four lock-build lines above verbatim on the filtered source and retain that output.
 
 ### - Finding: P2, documented empty-selector behavior has no executable coverage
 
@@ -148,7 +152,7 @@ for f in include/gufo/ext/registry.hpp schemas/extension.schema.json extensions.
          tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json tests/extensions/discovery_test.py; do
   printf '%s: ' "$f"; test -e "$p/$f" && echo present || echo absent; done   # record "$p" itself
 
-nix build .#checks.x86_64-linux.pr     # P1: the new lock-build block + discovery_test in the pr suite
+legacy hosted PR check     # P1: the new lock-build block + discovery_test in the pr suite
 git show 3d2ce45a:schemas/extension.schema.json | diff - schemas/extension.schema.json  # the 1 changed line
 nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py          # no --fix
 ```
@@ -158,7 +162,7 @@ nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.p
 - **No execution at all.** Every numeric claim in the evidence README is unverified by me beyond internal consistency. Section C is mandatory, not optional.
 - **The `@-` diff was not read as a diff.** I inspected the resulting worktree files, and I took the changed-path/changed-line inventory from `jj diff --stat` output supplied in the task framing plus `evidence/card05/api-diff-gate.txt`. I therefore could not verify that, e.g., `tests/extensions/metadata_test.py` (+4/−?) and `tests/extensions/runtime_test.cpp` (+10/−?) contain no weakened assertions, or identify the single changed schema line. A reviewer with a shell should run `jj diff -r @- -- tests/extensions schemas` and confirm no assertion was relaxed except the documented excluded-order expectation.
 - **Delta claims about deleted/modified public declarations** rest on reading the current headers plus the "additive" test result; the diff gate itself is the authoritative check and must be run (section C).
-- **Hosted CI remains the largest risk** (P1). `check-pr` also contains the pre-existing `check_docs_test`, which HANDOFF says reports 164 broken links under the unrelated `hrx-system/` tree; if `nix build .#checks.x86_64-linux.pr` fails, that failure must be reported as pre-existing and *not* folded into a Card 05 pass.
+- **Hosted CI remains the largest risk** (P1). `check-pr` also contains the pre-existing `check_docs_test`, which HANDOFF says reports 164 broken links under the unrelated `hrx-system/` tree; if `legacy hosted PR check` fails, that failure must be reported as pre-existing and *not* folded into a Card 05 pass.
 - **Windows** is untouched by design: `windows-build.yml` now selects `FROM_LOCK=OFF` for development and `ON` for releases and tolerates historical tags, but nothing here is Windows execution evidence, and the card does not claim otherwise.
 - **Not examined in depth:** `tools/ci/check-format.py` behaviour on the new CMake/Python files (unaffected by the formatter's C++ file list), `src/cli/extension_diagnostics.hpp`, `include/gufo/ext/{host,options}.hpp` beyond the include closure, and any external (devlab/homelab) consumer of `manifest.json["version"]` — the last is the one I would most want checked before closing the P2 about the moved artifact field.
 
