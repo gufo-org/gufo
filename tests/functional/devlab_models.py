@@ -7,6 +7,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import time
+import traceback
 
 HERE = Path(__file__).resolve().parent
 REGISTRY = HERE / 'devlab.json'
@@ -47,9 +48,11 @@ def allow_large_http_downloads():
     from huggingface_hub import constants
     # The runner's Hugging Face mirror and Xet settings are not visible in the job log.
     xet = importlib.util.find_spec('hf_xet') is not None and not constants.HF_HUB_DISABLE_XET
-    print(f'Hub endpoint {constants.ENDPOINT}; Xet {"enabled" if xet else "disabled"}', flush=True)
+    route = f'Hub endpoint {constants.ENDPOINT}; Xet {"enabled" if xet else "disabled"}'
+    print(route, flush=True)
     # Without Xet headers or hf_xet, files over 50 GB (DeepSeek V4 Flash is 86.7 GB) come over HTTP.
     constants.MAX_HTTP_DOWNLOAD_SIZE = 1 << 40
+    return route
 
 
 def download(plan, cache, data):
@@ -111,8 +114,13 @@ def main():
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    allow_large_http_downloads()
-    paths = download(json.loads(args.plan.read_text()), args.cache.resolve(), registry())
+    route = allow_large_http_downloads()
+    try:
+        paths = download(json.loads(args.plan.read_text()), args.cache.resolve(), registry())
+    except Exception:
+        # The workflow shows only the log's tail; repeat the route after the traceback.
+        traceback.print_exc()
+        raise SystemExit('Download failed; ' + route)
     args.output.write_text(json.dumps(paths, indent=2) + '\n')
 
 

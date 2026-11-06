@@ -371,7 +371,8 @@ jobs:
               python3 -m venv "$RUNNER_TEMP/gufo-hf-cli"
               "$RUNNER_TEMP/gufo-hf-cli/bin/python" -m pip install 'huggingface_hub[hf_xet]==1.26.0'
               # Inherit the runner's Hugging Face mirror, transfer settings and persistent cache.
-              export HF_HUB_DOWNLOAD_TIMEOUT=120
+              # A mirror may fetch a file it lacks before it answers.
+              export HF_HUB_DOWNLOAD_TIMEOUT=1800
               export HF_HUB_ETAG_TIMEOUT=60
               "$RUNNER_TEMP/gufo-hf-cli/bin/python" controller/tests/functional/devlab_models.py \
                 --plan functional-plan.json --cache "$GUFO_CACHE_ROOT/models" \
