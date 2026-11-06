@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "src/cache/ledger.hpp"
 #include "src/cli/serve/component_text_cache.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
@@ -287,11 +288,35 @@ struct TextRunnerPool::Impl {
       // slots allocate and the cache observes remaining host capacity. Slots
       // allocate under the ceiling; what they pin is charged on top of this.
       // The state claim includes lazy image/rollback storage, not startup
-      // usage.
-      component_cache = std::make_unique<ComponentTextCache>(
-          validated.runner, state_count, std::min(requested, ceiling),
-          disk_cache_options, !ram_cache_options.capacity_bytes, ceiling,
-          ram_cache_options.enabled);
+      // usage. The ceiling is what the host keeps above its reserve after
+      // loading; on a host short of that reserve it is 0. The cache's own
+      // metadata still needs a little room, or the load fails before the
+      // cache can serve with the RAM cache off.
+      // ResourceExhausted is a bad_alloc without a message of its own; name
+      // the budget it refers to instead of a bare "std::bad_alloc".
+      try {
+        component_cache = std::make_unique<ComponentTextCache>(
+            validated.runner, state_count, std::min(requested, ceiling),
+            disk_cache_options, !ram_cache_options.capacity_bytes,
+            std::max(ceiling, ComponentTextCache::kOffMetadataBytes),
+            ram_cache_options.enabled);
+      } catch (const cache::ResourceExhausted&) {
+        throw std::runtime_error(
+            "the RAM cache budget was exhausted while preparing " +
+            std::to_string(state_count) +
+            " sessions; use fewer --sessions, a smaller --context, or "
+            "--cache-ram-bytes off");
+      }
+      // An explicit budget the host cannot hold is trimmed. Say so: the user
+      // asked for that much retention and gets less.
+      if (const auto granted = component_cache->ram_budget();
+          ram_cache_options.enabled && ram_cache_options.capacity_bytes &&
+          granted < ram_cache_options.capacity_bytes)
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=ram_cache_trimmed "
+                     "requested_bytes=" +
+                         std::to_string(ram_cache_options.capacity_bytes) +
+                         " capacity_bytes=" + std::to_string(granted));
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
         shared_prefix_max_boundaries =
