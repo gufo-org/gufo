@@ -16,6 +16,7 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/provider_options.hpp"
 #include "src/cli/sampling_options.hpp"
+#include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
 
@@ -219,7 +220,9 @@ namespace {
 
 std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
                                               std::string* error_msg,
-                                              ProviderOptions& provider) {
+                                              const ext::Registry& registry,
+                                              ProviderOptions& provider,
+                                              SpeculativeFlags& speculative) {
   BenchOptions opt;
   bool explicit_p = false;
   bool explicit_n = false;
@@ -252,10 +255,9 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     return std::nullopt;
   }
 
-  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
-      opt.min_draft_tokens > opt.draft_tokens) {
+  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0) {
     if (error_msg != nullptr) {
-      *error_msg = "min-draft-tokens cannot exceed draft-tokens";
+      *error_msg = "draft-tokens and min-draft-tokens must be positive";
     }
     return std::nullopt;
   }
@@ -276,11 +278,14 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     opt.speculative_backend = "dspark";
   }
 
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
+  // Unset draft settings take the selected provider's defaults later.
+  speculative = SpeculativeFlags::Given(parser, opt.draft_tokens,
+                                        opt.min_draft_tokens, opt.draft_policy);
+  try {
+    CheckSpeculativeFlags(registry, opt.speculative_backend, speculative);
+  } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+      *error_msg = exception.what();
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
@@ -301,7 +306,8 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider(registry, "bench");
-  return ParseBenchOptions(args, error_msg, provider);
+  SpeculativeFlags speculative;
+  return ParseBenchOptions(args, error_msg, registry, provider, speculative);
 }
 
 int RunBench(std::span<const char* const> args) {
@@ -309,7 +315,9 @@ int RunBench(std::span<const char* const> args) {
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider_options(registry, "bench");
-  auto opt_res = ParseBenchOptions(args, &parse_err, provider_options);
+  SpeculativeFlags speculative;
+  auto opt_res = ParseBenchOptions(args, &parse_err, registry, provider_options,
+                                   speculative);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -353,6 +361,11 @@ int RunBench(std::span<const char* const> args) {
   }
   try {
     opt.provider_options = provider_options.Select(provider->id);
+    const auto settings = ResolveSpeculativeSettings(
+        *provider, opt.speculative_backend, speculative);
+    opt.draft_tokens = settings.max_draft_tokens;
+    opt.min_draft_tokens = settings.min_draft_tokens;
+    opt.draft_policy = settings.draft_policy;
   } catch (const std::invalid_argument& exception) {
     std::cerr << "Error: " << exception.what() << "\n";
     PrintModelLoadTime(model_load_start, false);

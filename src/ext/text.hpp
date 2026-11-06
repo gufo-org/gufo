@@ -654,6 +654,9 @@ struct TextSpeculativeConfig {
   std::uint32_t max_draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
   TextDFlashDraftPolicy dflash_policy{TextDFlashDraftPolicy::kAdaptive};
+  /// The resolved `--draft-policy` (see `TextSpeculativeDefaults`); empty when
+  /// the backend has no policy.
+  std::string draft_policy{};
 };
 
 struct TextDiskCacheConfig {
@@ -849,6 +852,23 @@ using TextChatDriver =
     int (*)(const TextPromptOptions& options, const core::GgufReader& reader,
             std::chrono::steady_clock::time_point load_start);
 
+/// A provider's draft settings for one speculative backend. The commands
+/// resolve each setting as the explicit flag, else this default, else the
+/// host's (7 draft tokens, minimum 1, no policy; DFlash2 accepts `fixed` and
+/// `adaptive`) when the provider declares nothing for the backend.
+struct TextSpeculativeDefaults {
+  /// The `--speculative` value: `mtp`, `dflash2` or `dspark`.
+  std::string backend;
+  /// `--draft-tokens` when it is not given.
+  std::uint32_t max_draft_tokens{7};
+  /// `--min-draft-tokens` when it is not given.
+  std::uint32_t min_draft_tokens{1};
+  /// `--draft-policy` when it is not given; may be empty.
+  std::string draft_policy;
+  /// The `--draft-policy` values this backend accepts; empty accepts none.
+  std::vector<std::string> draft_policies;
+};
+
 struct TextProvider {
   std::string id;
   TextProbe probe = nullptr;
@@ -864,6 +884,8 @@ struct TextProvider {
   /// their `data` and reserved `size_bytes`; the others never probe such a
   /// file.
   bool accepts_unsized_tensors = false;
+  /// Draft settings per speculative backend the provider supports.
+  std::vector<TextSpeculativeDefaults> speculative_defaults{};
 };
 
 void RegisterTextProvider(TextProvider provider);
