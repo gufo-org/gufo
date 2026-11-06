@@ -13,7 +13,7 @@ LoadBuffer(BufferResource, unsigned, unsigned,
 
 namespace {
 
-using Fragment = __attribute__((ext_vector_type(16))) unsigned short;
+using Fragment = __attribute__((ext_vector_type(16))) short;
 using Accumulator = __attribute__((ext_vector_type(8))) float;
 
 __device__ BufferResource MakeBuffer(const std::uint16_t* pointer,
