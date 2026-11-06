@@ -1207,6 +1207,26 @@ def check_structured_outputs(client, model, checks, vision=False):
     assert result["finish"] == "stop" and json.loads(result["text"]) == {"numbers": [1, 2]}, result
     record("schema_unbounded_array", result)
 
+    # The Vercel AI SDK always declares the dialect and keeps annotations
+    # (#1057); they describe the schema without constraining the reply.
+    annotated = {
+        **common,
+        "messages": [{"role": "user", "content": "Greet me and label the sentiment neutral."}],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "Greeting", "strict": True, "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$comment": "generated", "type": "object", "properties": {
+                    "greeting": {"type": "string", "default": "hi", "examples": ["hello"]},
+                    "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"],
+                                  "deprecated": False}},
+                "required": ["greeting", "sentiment"], "additionalProperties": False}}},
+    }
+    result = chat_result(client, annotated, True)
+    reply = json.loads(result["text"])
+    assert result["finish"] == "stop" and set(reply) == {"greeting", "sentiment"}, result
+    assert isinstance(reply["greeting"], str) and reply["sentiment"] == "neutral", result
+    record("schema_annotations", result)
+
     def constant(text):
         return {"type": "json_schema", "json_schema": {"name": "constant", "strict": True,
                 "schema": {"type": "object", "properties": {

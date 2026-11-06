@@ -331,6 +331,57 @@ void TestRejectedSchemas() {
   }
 }
 
+// Annotations describe a schema without constraining values, so even strict
+// schemas accept them and compile to the same language as without them
+// (#1057: the Vercel AI SDK always sends "$schema").
+void TestSchemaAnnotations() {
+  const auto annotated = parse(R"({
+    "$schema":"https://json-schema.org/draft/2020-12/schema",
+    "$comment":"generated","type":"object","title":"Out",
+    "properties":{
+      "greeting":{"type":"string","default":"hi","examples":["hello"]},
+      "sentiment":{"$ref":"#/$defs/S","deprecated":false,"readOnly":true},
+      "score":{"anyOf":[{"type":"integer"},{"type":"null"}],"writeOnly":false,
+               "$comment":"nullable"}},
+    "required":["greeting","sentiment","score"],"additionalProperties":false,
+    "$defs":{"S":{"type":"string","enum":["positive","negative","neutral"],
+                  "description":"label"}}})");
+  const auto plain = parse(R"({
+    "type":"object",
+    "properties":{
+      "greeting":{"type":"string"},
+      "sentiment":{"$ref":"#/$defs/S"},
+      "score":{"anyOf":[{"type":"integer"},{"type":"null"}]}},
+    "required":["greeting","sentiment","score"],"additionalProperties":false,
+    "$defs":{"S":{"type":"string","enum":["positive","negative","neutral"]}}})");
+  for (const bool open : {false, true}) {
+    const auto expected = JsonConstraint::Compile(plain, true, open);
+    const auto actual = JsonConstraint::Compile(annotated, true, open);
+    for (const char* text :
+         {R"({"greeting":"hi","sentiment":"neutral","score":null})",
+          R"({"greeting":"hi","sentiment":"positive","score":3})",
+          R"({"greeting":"hi","sentiment":"happy","score":3})",
+          R"({"greeting":"hi","sentiment":"neutral"})",
+          R"({"greeting":"hi","sentiment":"neutral","score":"x"})",
+          R"({"greeting":"hi","sentiment":"neutral","score":1,"x":0})"})
+      assert(Accepts(*actual, text) == Accepts(*expected, text));
+    assert(Accepts(*actual,
+                   R"({"greeting":"hi","sentiment":"neutral","score":null})"));
+  }
+  for (
+      const char* invalid :
+      {R"({"$schema":1,"type":"object","properties":{},"additionalProperties":false})",
+       R"({"$comment":[],"type":"object","properties":{},"additionalProperties":false})"}) {
+    bool rejected = false;
+    try {
+      (void)JsonConstraint::Compile(parse(invalid), true);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
+
 void TestSchemaIntersections() {
   const auto grammar = JsonConstraint::Compile(parse(R"({
     "type":"object","properties":{
@@ -2726,6 +2777,7 @@ int main(int argc, char** argv) {
   TestMixedEnumValues();
   TestTypeUnions();
   TestRejectedSchemas();
+  TestSchemaAnnotations();
   TestOpenResponseObjects();
   TestIntegerBoundsAndRecursion();
   TestPrimitiveConstraints();
