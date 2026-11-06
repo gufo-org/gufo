@@ -32,8 +32,7 @@ class Client {
 public:
   Client(int port, std::string_view path, std::string first = {},
          std::string_view key = "dGhlIHNhbXBsZSBub25jZQ==",
-         std::string_view authorization = "Bearer test",
-         std::string_view extra = {}) {
+         std::string_view authorization = "", std::string_view extra = {}) {
     fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
     assert(net::SetSocketTimeouts(fd, 3'000));
@@ -134,6 +133,30 @@ private:
     }
   }
 };
+
+// The raw response to a JSON POST.
+std::string HttpPost(int port, std::string_view path, std::string_view body) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  assert(fd >= 0 && net::SetSocketTimeouts(fd, 3'000));
+  sockaddr_in address{.sin_family = AF_INET, .sin_port = htons(port)};
+  assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+  assert(::connect(fd, reinterpret_cast<sockaddr*>(&address),
+                   sizeof(address)) == 0);
+  const std::string request =
+      "POST " + std::string(path) +
+      " HTTP/1.1\r\nHost: localhost\r\n"
+      "Content-Type: application/json\r\nContent-Length: " +
+      std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" +
+      std::string(body);
+  assert(net::SendNoSignal(fd, request.data(), request.size()) ==
+         static_cast<long>(request.size()));
+  std::string response;
+  char buffer[4096];
+  for (ssize_t n; (n = ::recv(fd, buffer, sizeof(buffer), 0)) > 0;)
+    response.append(buffer, std::size_t(n));
+  net::CloseSocket(fd);
+  return response;
+}
 
 // The raw response to a plain GET.
 std::string HttpGet(int port, std::string_view path) {
@@ -351,8 +374,7 @@ void RealtimeStreams() {
             assert(rate == 24000);
             return std::unique_ptr<VoiceConversation>(new FakeVoice);
           }});
-  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, asr,
-                    {.api_key = "test"});
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, asr, {});
   std::string error;
   assert(server.start(&error));
   std::jthread worker([&] { server.run(); });
@@ -510,10 +532,13 @@ void RealtimeStreams() {
     client.Event("conversation.item.created");
     client.Text(R"({"type":"response.create"})");
     client.Event("response.created");
-    speak(Pcm(0.6, true) + Pcm(0.4, false));
+    speak(Pcm(0.6, true));
     client.Event("input_audio_buffer.speech_started");
     assert(client.Event("response.done")["response"].member_str("status") ==
            "cancelled");
+    // Wait for cancellation before sending silence: the response worker and
+    // incoming audio run independently, so their events can otherwise race.
+    speak(Pcm(0.4, false));
     client.Event("input_audio_buffer.speech_stopped");
     client.Event("input_audio_buffer.committed");
     client.Event("conversation.item.created");
@@ -546,7 +571,8 @@ void RealtimeStreams() {
     assert(type == "conversation.item.input_audio_transcription.completed");
   }
   {
-    // Browsers pass the key as a subprotocol; the page needs no key.
+    // Browsers may keep offering the legacy key subprotocol; the handshake
+    // selects "realtime" and ignores the rest.
     Client browser(server.port(), "/v1/realtime", {},
                    "dGhlIHNhbXBsZSBub25jZQ==", "",
                    "Sec-WebSocket-Protocol: realtime, "
@@ -555,11 +581,6 @@ void RealtimeStreams() {
     assert(browser.headers.find("Sec-WebSocket-Protocol: realtime") !=
            std::string::npos);
     browser.Event("session.created");
-    Client wrong(server.port(), "/v1/realtime", {},
-                 "dGhlIHNhbXBsZSBub25jZQ==", "",
-                 "Sec-WebSocket-Protocol: realtime, "
-                 "openai-insecure-api-key.nope\r\n");
-    assert(wrong.headers.starts_with("HTTP/1.1 401"));
     const auto page = HttpGet(server.port(), "/voice");
     assert(page.starts_with("HTTP/1.1 200") &&
            page.find("text/html") != std::string::npos &&
@@ -577,6 +598,7 @@ int main() {
   std::atomic<bool> entered{false}, cancelled{false};
   auto tts = std::make_shared<TtsService>(TtsServiceOptions{
       .validate_model = false,
+      .model_aliases = {"tts-alias"},
       .voices = {"vivian"},
       .runner = [&](const auto& request, const auto& check, auto* result,
                     auto*) {
@@ -600,6 +622,7 @@ int main() {
       }});
   auto asr = std::make_shared<AsrService>(AsrServiceOptions{
       .validate_model = false,
+      .model_aliases = {"asr-alias"},
       .runner = [&](const auto& request, const auto&, auto* result, auto*) {
         ++asr_calls;
         assert(request.pcm16k.size() == 1600);
@@ -609,15 +632,11 @@ int main() {
         return !request.on_text ||
                (request.on_text("Hello") && request.on_text(result->text));
       }});
-  HttpServer server("127.0.0.1", 0, nullptr, nullptr, tts, asr,
-                    {.api_key = "test"});
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, tts, asr, {});
   std::string error;
   assert(server.start(&error));
   std::jthread worker([&] { server.run(); });
   {
-    Client denied(server.port(), "/v1/realtime", {},
-                  "dGhlIHNhbXBsZSBub25jZQ==", "");
-    assert(denied.headers.starts_with("HTTP/1.1 401"));
     Client invalid(server.port(), "/v1/realtime", {}, "bad");
     assert(invalid.headers.starts_with("HTTP/1.1 400"));
   }
@@ -668,8 +687,9 @@ int main() {
     client.Send(Client::Frame("ping", 9));
     assert(client.Receive() == std::make_pair(10U, std::string("ping")));
     client.Send(Client::Frame(std::string_view(message).substr(split), 0));
-    assert(client.Event("audio.start").member_str("sentence_text") ==
-           "Hello é.");
+    auto first_start = client.Event("audio.start");
+    assert(first_start.member_str("sentence_text") == "Hello é.");
+    assert(first_start.find("sample_rate")->as_double() == 24000);
     const auto expected = EncodePcm16(std::vector<float>{-.5F, 0, .5F});
     assert(client.Receive() == std::make_pair(2U, expected));
     assert(client.Receive() == std::make_pair(2U, expected));
@@ -716,7 +736,161 @@ int main() {
     const auto reply = client.Receive();
     assert(reply.first == 8 && reply.second == std::string("\x03\xE8", 2));
   }
+  {
+    // Request-level aliases (#957): a configured alias synthesizes, an
+    // unserved name is refused, both aliases are listed, and the realtime
+    // handshake accepts the ASR alias.
+    const auto aliased =
+        HttpPost(server.port(), "/v1/audio/speech",
+                 R"({"model":"tts-alias","input":"Hi","voice":"vivian"})");
+    assert(aliased.starts_with("HTTP/1.1 200"));
+    assert(HttpPost(server.port(), "/v1/audio/speech",
+                    R"({"model":"tts-typo","input":"Hi","voice":"vivian"})")
+               .starts_with("HTTP/1.1 400"));
+    const auto models = HttpGet(server.port(), "/v1/models");
+    assert(models.find("\"id\":\"tts-alias\"") != std::string::npos);
+    assert(models.find("\"id\":\"asr-alias\"") != std::string::npos);
+    const auto asr_alias =
+        HttpGet(server.port(), "/v1/realtime?model=asr-alias");
+    // Without the upgrade headers the handshake cannot complete, but the
+    // model check must not reject the configured alias up front.
+    assert(asr_alias.find("invalid_model") == std::string::npos);
+    assert(HttpGet(server.port(), "/v1/realtime?model=asr-typo")
+               .find("invalid_model") != std::string::npos);
+  }
   server.stop();
   worker.join();
+  {
+    bool mismatch_rate = false;
+    auto tts_44k = std::make_shared<TtsService>(TtsServiceOptions{
+        .validate_model = false,
+        .sample_rate = 44100,
+        .model_id = "fish-drama-3",
+        .voices = {"default"},
+        .runner = [&](const auto& request, const auto&, auto* result, auto*) {
+          result->sample_rate = mismatch_rate ? 24000 : 44100;
+          result->code_groups = 10;
+          result->samples = {-.25F, 0.0F, .25F};
+          return !request.on_audio || request.on_audio(result->samples);
+        }});
+    HttpServer server_44k("127.0.0.1", 0, nullptr, nullptr, tts_44k, nullptr,
+                          {});
+    assert(server_44k.start(&error));
+    std::jthread worker_44k([&] { server_44k.run(); });
+    {
+      Client client(server_44k.port(), "/v1/audio/speech/stream");
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","voice":"default","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Forty-four one."})");
+      client.Text(R"({"type":"input.done"})");
+      auto start = client.Event("audio.start");
+      assert(start.find("sample_rate")->as_double() == 44100);
+      const auto expected = EncodePcm16(std::vector<float>{-.25F, 0.0F, .25F});
+      assert(client.Receive() == std::make_pair(2U, expected));
+      client.Event("audio.done");
+      client.Event("session.done");
+
+      mismatch_rate = true;
+      client.Text(R"({"type":"input.text","text":"Mismatch."})");
+      client.Text(R"({"type":"input.done"})");
+      assert(client.Event("audio.start").find("sample_rate")->as_double() ==
+             44100);
+      assert(client.Receive() == std::make_pair(2U, expected));
+      assert(client.Event("error").member_str("message") == "invalid_audio");
+    }
+    server_44k.stop();
+    worker_44k.join();
+  }
+  {
+    constexpr std::string_view kReferenceWav =
+        "UklGRiwAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YQgAAAAAAOgD"
+        "GPwAAA==";
+    gufo::ext::SynthesisRequest last_request;
+    auto hybrid_tts = std::make_shared<TtsService>(TtsServiceOptions{
+        .validate_model = false,
+        .variant = gufo::ext::TtsVariant::kBase,
+        .conditioning =
+            gufo::ext::TtsConditioningCapabilities{
+                .unconditioned = true,
+                .require_voice = false,
+                .default_voice = "default",
+                .reference_audio = gufo::ext::TtsConditioningMode::kOptional,
+                .reference_presets = true,
+                .instructions = gufo::ext::TtsConditioningMode::kOptional,
+            },
+        .model_id = "fish-drama-3",
+        .voices = {"default", "voice-clone"},
+        .voice_presets = {{"narrator",
+                           {.reference_audio = {.sample_rate = 24000,
+                                                .channels = 1,
+                                                .samples = {0.2F, -0.2F}},
+                            .reference_text = "Narrator ref."}}},
+        .runner = [&](const auto& request, const auto&, auto* result, auto*) {
+          last_request = request;
+          last_request.on_audio = {};
+          result->sample_rate = 24000;
+          result->code_groups = 10;
+          result->samples = {-.25F, 0.0F, .25F};
+          return !request.on_audio || request.on_audio(result->samples);
+        }});
+    HttpServer hybrid_server("127.0.0.1", 0, nullptr, nullptr, hybrid_tts,
+                             nullptr, {});
+    assert(hybrid_server.start(&error));
+    std::jthread hybrid_worker([&] { hybrid_server.run(); });
+    {
+      Client client(hybrid_server.port(), "/v1/audio/speech/stream");
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","task_type":"CustomVoice","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Default voice."})");
+      client.Text(R"({"type":"input.done"})");
+      client.Event("audio.start");
+      client.Receive();
+      client.Event("audio.done");
+      client.Event("session.done");
+      assert(last_request.speaker == "default" &&
+             last_request.reference_audio.samples.empty());
+
+      client.Text(
+          std::string(
+              R"({"type":"session.config","model":"fish-drama-3","task_type":"Base","voice":"voice-clone","ref_audio":")") +
+          std::string(kReferenceWav) +
+          R"(","ref_text":"Clone ref.","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Cloned voice."})");
+      client.Text(R"({"type":"input.done"})");
+      client.Event("audio.start");
+      client.Receive();
+      client.Event("audio.done");
+      client.Event("session.done");
+      assert(last_request.speaker == "voice-clone" &&
+             last_request.reference_audio.samples.size() == 4 &&
+             last_request.reference_text == "Clone ref.");
+
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","voice":"narrator","response_format":"pcm","stream_audio":true})");
+      client.Text(R"({"type":"input.text","text":"Preset voice."})");
+      client.Text(R"({"type":"input.done"})");
+      client.Event("audio.start");
+      client.Receive();
+      client.Event("audio.done");
+      client.Event("session.done");
+      assert(last_request.speaker == "narrator" &&
+             last_request.reference_audio.samples.size() == 2 &&
+             last_request.reference_text == "Narrator ref.");
+
+      client.Text(
+          std::string(
+              R"({"type":"session.config","model":"fish-drama-3","voice":"narrator","ref_audio":")") +
+          std::string(kReferenceWav) + R"(","ref_text":"conflict"})");
+      assert(client.Event("error").member_str("message").find(
+                 "unsupported_field") != std::string::npos);
+
+      client.Text(
+          R"({"type":"session.config","model":"fish-drama-3","task_type":"VoiceDesign","instructions":"warm"})");
+      assert(client.Event("error").member_str("message").find("task_type") !=
+             std::string::npos);
+    }
+    hybrid_server.stop();
+    hybrid_worker.join();
+  }
   RealtimeStreams();
 }

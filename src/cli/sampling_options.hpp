@@ -62,29 +62,44 @@ inline void RegisterSamplingOptions(ArgParser& parser,
       group, &config->top_p);
   parser.AddOption(
       "", "--min-p", "P",
-      "Keep tokens with probability at least P times the best token "
-      "(default: 0.0 = disabled)",
+      model_defaults
+          ? "Keep tokens with probability at least P times the best token "
+            "(default: model preset, otherwise 0.0 = disabled)"
+          : "Keep tokens with probability at least P times the best token "
+            "(default: 0.0 = disabled)",
       group, &config->min_p);
   parser.AddOption("", "--min-keep", "N",
-                   "Minimum candidates retained by enabled sampling filters "
-                   "(default: 0)",
+                   model_defaults
+                       ? "Minimum candidates retained by enabled sampling "
+                         "filters (default: model preset, otherwise 0)"
+                       : "Minimum candidates retained by enabled sampling "
+                         "filters (default: 0)",
                    group, &config->min_keep);
   parser.AddOption(
       register_short_aliases ? "-s" : "", "--seed", "N",
       "RNG seed for reproducible generation (default: -1 = random)", group,
       &config->seed);
   parser.AddOption("", "--repeat-penalty", "N",
-                   "Multiplicative penalty for recently used tokens "
-                   "(default: 1.0 = disabled)",
+                   model_defaults
+                       ? "Multiplicative penalty for recently used tokens "
+                         "(default: model preset, otherwise 1.0 = disabled)"
+                       : "Multiplicative penalty for recently used tokens "
+                         "(default: 1.0 = disabled)",
                    group, &config->repeat_penalty);
   parser.AddOption("", "--repeat-last-n", "N",
-                   "Trailing token window used by repetition penalties "
-                   "(default: 64; 0 = disabled)",
+                   model_defaults
+                       ? "Trailing token window used by repetition penalties "
+                         "(default: model preset, otherwise 64; 0 = disabled)"
+                       : "Trailing token window used by repetition penalties "
+                         "(default: 64; 0 = disabled)",
                    group, &config->repeat_last_n);
   parser.AddOption(
       "", "--frequency-penalty", "N",
-      "Penalty multiplied by each token's generated occurrence count "
-      "(default: 0.0 = disabled)",
+      model_defaults
+          ? "Penalty multiplied by each token's generated occurrence count "
+            "(default: model preset, otherwise 0.0 = disabled)"
+          : "Penalty multiplied by each token's generated occurrence count "
+            "(default: 0.0 = disabled)",
       group, &config->frequency_penalty);
   parser.AddOption(
       "", "--presence-penalty", "N",

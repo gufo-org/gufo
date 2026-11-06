@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Cards 19–22 Resume Notes: Shared Text Contract, Qwen 27B, Flash-Next, and DeepSeek Extensions
 
 ## 1. Summary of Accomplished Work
@@ -67,7 +71,7 @@ All 11 verification gates were executed and passed with exit code 0:
 | **7** | Static Extension Boundaries | `python3 tools/ci/check-extension-isolation.py --fail-on-extension-boundary --fail-on-serving-boundary --fail-on-model-core-includes` | 0 | PASS (0 violations) |
 | **8** | Continuation Identity Unit Tests | `nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure` | 0 | PASS (3/3) |
 | **9** | Hosted PR Test Suite (`check-pr`) | `nix develop -c cmake --build --preset cpu-test --target check-pr` | 0 | PASS (96/96, 100%) |
-| **10** | Hermetic Hosted CPU & Repo Checks | `nix build .#checks.x86_64-linux.pr --no-link` | 0 | PASS (4 derivations) |
+| **10** | Hermetic Hosted CPU & Repo Checks | `legacy hosted PR check` | 0 | PASS (4 derivations) |
 | **11** | Production Build & Diagnostics | `nix build && ./result/bin/gufo diagnose` | 0 | PASS (Overall Status: PASS) |
 
 Detailed output logs are documented in `docs/model-extensions/evidence/card19-22/build-and-tests.txt` and `docs/model-extensions/evidence/card19-22/integration-reruns.txt`.

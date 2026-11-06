@@ -418,30 +418,6 @@ request_with(overridden_benchmark,
              extra_body={"temperature": .7, "presence_penalty": .5, "top_k": 7})
 
 
-for api_key in ("", "benchmark-test-secret"):
-    with patch.dict(os.environ, {"OPENAI_API_KEY": api_key}):
-        expected = f"Bearer {api_key}" if api_key else None
-
-        def authenticated_completion(request, timeout):
-            check(request.get_header("Authorization") == expected,
-                  "generation uses the configured bearer credential")
-            return fake_urlopen(request, timeout)
-
-        observation = request_with(authenticated_completion)
-        if api_key:
-            check(api_key not in json.dumps(observation.public()),
-                  "credentials are not included in benchmark observations")
-
-        def authenticated_discovery(request, timeout):
-            check(request.get_header("Authorization") == expected,
-                  "model discovery uses the configured bearer credential")
-            return io.BytesIO(b'{"data":[{"id":"test-model"}]}')
-
-        with patch.object(serving_bench.urllib.request, "urlopen",
-                          authenticated_discovery):
-            check(serving_bench.discover_model("https://private.example", 5)
-                  == "test-model", "authenticated model discovery succeeds")
-
 
 plain = request_with(
     fake_urlopen_openai, endpoint_profile="openai", cache_prompt=False
@@ -538,6 +514,34 @@ check(
     "openai profile, cache flag, notes, and reference are recorded",
 )
 check(openai_report["warnings"] == [], "no spurious warnings without metrics")
+
+
+# The benchmark client keeps bearer support for authenticated endpoints even
+# though the Gufo server no longer has one.
+for api_key in ("", "benchmark-test-secret"):
+    with patch.dict(os.environ, {"OPENAI_API_KEY": api_key}):
+        expected = f"Bearer {api_key}" if api_key else None
+
+        def authenticated_completion(request, timeout):
+            check(request.get_header("Authorization") == expected,
+                  "generation uses the configured bearer credential")
+            return fake_urlopen(request, timeout)
+
+        observation = request_with(authenticated_completion)
+        if api_key:
+            check(api_key not in json.dumps(observation.public()),
+                  "credentials are not included in benchmark observations")
+
+        def authenticated_discovery(request, timeout):
+            check(request.get_header("Authorization") == expected,
+                  "model discovery uses the configured bearer credential")
+            return io.BytesIO(b'{"data":[{"id":"test-model"}]}')
+
+        with patch.object(serving_bench.urllib.request, "urlopen",
+                          authenticated_discovery):
+            check(serving_bench.discover_model("https://private.example", 5)
+                  == "test-model", "authenticated model discovery succeeds")
+
 with patch.object(serving_bench.urllib.request, "urlopen", fake_urlopen):
     try:
         serving_bench.run_corpus_benchmark(

@@ -25,6 +25,7 @@ struct ModelOptions {
 
 class Session;
 class SessionSnapshot;
+class ContinuationAdapter;
 
 struct SessionBatchItem {
   Session* session = nullptr;
@@ -95,6 +96,7 @@ private:
   /// Vocabulary IDs indexed by ControlToken, resolved at load.
   std::array<int, kControlTokenCount> control_tokens_{};
 
+  friend class ContinuationAdapter;
   friend class Session;
 };
 
@@ -178,6 +180,7 @@ private:
   ds4_session* session_ = nullptr;
   CancellationCheck is_cancelled_;
 
+  friend class ContinuationAdapter;
   friend class Model;
 };
 

@@ -18,6 +18,73 @@ enum class TtsVariant : std::uint8_t {
   kUnsupported,
 };
 
+enum class TtsConditioningMode : std::uint8_t {
+  kUnsupported,
+  kOptional,
+  kRequired,
+};
+
+/// Conditioning modes and voice selection semantics supported by a TTS runner.
+struct TtsConditioningCapabilities {
+  /// Synthesis without reference audio or a reference preset.
+  bool unconditioned{true};
+  /// Whether requests must explicitly supply `voice`; requests without it are
+  /// rejected regardless of the other modes.
+  bool require_voice{true};
+  /// Default `voice` used when `voice` is omitted and `!require_voice`; empty
+  /// falls back to the first registered voice.
+  std::string default_voice;
+  /// Per-request `reference_audio` / `reference_text` / `voice_clone_mode`.
+  TtsConditioningMode reference_audio{TtsConditioningMode::kUnsupported};
+  /// Operator-registered `--voice` reference presets.
+  bool reference_presets{false};
+  /// `instructions` field (optional style hint vs required VoiceDesign prompt).
+  TtsConditioningMode instructions{TtsConditioningMode::kOptional};
+};
+
+inline TtsConditioningCapabilities DefaultTtsConditioningCapabilities(
+    TtsVariant variant) {
+  switch (variant) {
+    case TtsVariant::kBase:
+      return {
+          .unconditioned = false,
+          .require_voice = false,
+          .default_voice = "voice-clone",
+          .reference_audio = TtsConditioningMode::kRequired,
+          .reference_presets = true,
+          .instructions = TtsConditioningMode::kOptional,
+      };
+    case TtsVariant::kVoiceDesign:
+      return {
+          .unconditioned = true,
+          .require_voice = false,
+          .default_voice = "voice-design",
+          .reference_audio = TtsConditioningMode::kUnsupported,
+          .reference_presets = false,
+          .instructions = TtsConditioningMode::kRequired,
+      };
+    case TtsVariant::kCustomVoice:
+      return {
+          .unconditioned = true,
+          .require_voice = true,
+          .default_voice = {},
+          .reference_audio = TtsConditioningMode::kUnsupported,
+          .reference_presets = false,
+          .instructions = TtsConditioningMode::kOptional,
+      };
+    case TtsVariant::kUnsupported:
+      break;
+  }
+  return {
+      .unconditioned = false,
+      .require_voice = false,
+      .default_voice = {},
+      .reference_audio = TtsConditioningMode::kUnsupported,
+      .reference_presets = false,
+      .instructions = TtsConditioningMode::kUnsupported,
+  };
+}
+
 struct TtsSamplingOptions {
   bool sample{true};
   std::uint32_t seed{42};
@@ -47,12 +114,14 @@ struct SynthesisRequest {
   bool speaker_embedding_only{false};
   std::size_t max_new_tokens{3000};
   TtsSamplingOptions sampling;
-  /// Called with newly generated mono audio at 24 kHz. Returning false cancels
-  /// generation. Streaming results retain codes but do not buffer the waveform.
+  /// Called with newly generated mono audio at the runner's fixed
+  /// `SampleRate()`. Returning false cancels generation. Streaming results
+  /// retain codes but do not buffer the waveform.
   std::function<bool(std::span<const float>)> on_audio{};
 };
 
 struct SynthesisResult {
+  /// Output waveform sample rate in Hz; must match `TtsRunner::SampleRate()`.
   std::uint32_t sample_rate{0};
   std::uint32_t code_groups{0};
   std::vector<float> samples;
@@ -76,6 +145,15 @@ public:
   [[nodiscard]] virtual std::vector<std::string> Voices() const { return {}; }
   [[nodiscard]] virtual TtsVariant Variant() const {
     return TtsVariant::kCustomVoice;
+  }
+  /// Fixed output waveform sample rate in Hz for buffered and streaming
+  /// synthesis. Must be in [1, 192000]. Defaults to 24000 for 24 kHz
+  /// compatibility.
+  [[nodiscard]] virtual std::uint32_t SampleRate() const { return 24000; }
+  /// Conditioning modes supported by this runner. Defaults to the legacy
+  /// behavior implied by `Variant()`.
+  [[nodiscard]] virtual TtsConditioningCapabilities Conditioning() const {
+    return DefaultTtsConditioningCapabilities(Variant());
   }
   /// Public model ID when the service names none; empty keeps the core
   /// default.
@@ -110,7 +188,7 @@ struct SpeakOptions {
   bool reasoning{false};
   std::string language{"en"};
   std::string voice;
-  /// 24 kHz WAV output (tts and chat modes).
+  /// WAV output path at the provider's sample rate (tts and chat modes).
   std::string output_path;
   /// "text" or "json" report.
   std::string format{"text"};

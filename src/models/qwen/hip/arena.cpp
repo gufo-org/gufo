@@ -444,6 +444,12 @@ QwenGpuMemoryUsage QwenGpuArena::GetMemoryUsage() const {
   if (d_ssm_conv_buffers_[1] && d_ssm_deltanet_buffers_[1])
     CheckedAdd(RecurrentStateBytes(config_, policy_),
                &usage.request_state_bytes);
+  // Rollback scratch, not snapshot state: only the slots a wide verification
+  // added to the ring (the runner claims them).
+  if (d_ssm_replay_qkv_ != nullptr && replay_capacity_ > kSsmReplayCapacity)
+    CheckedAdd(SsmReplayLogBytes(config_, replay_capacity_) -
+                   SsmReplayLogBytes(config_, kSsmReplayCapacity),
+               &usage.temporary_scratch_bytes);
   return usage;
 }
 
@@ -957,6 +963,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   d_ssm_replay_alpha_ = other.d_ssm_replay_alpha_;
   d_ssm_replay_beta_ = other.d_ssm_replay_beta_;
   d_ssm_replay_enabled_ = other.d_ssm_replay_enabled_;
+  replay_capacity_ = other.replay_capacity_;
   saved_context_ = other.saved_context_;
   replay_last_position_ = other.replay_last_position_;
   replay_captured_positions_ = other.replay_captured_positions_;
@@ -1003,6 +1010,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.d_ssm_replay_alpha_ = nullptr;
   other.d_ssm_replay_beta_ = nullptr;
   other.d_ssm_replay_enabled_ = nullptr;
+  other.replay_capacity_ = kSsmReplayCapacity;
   other.saved_context_ = 0;
   other.replay_last_position_ = 0;
   other.replay_captured_positions_ = 0;
@@ -1059,6 +1067,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     d_ssm_replay_alpha_ = other.d_ssm_replay_alpha_;
     d_ssm_replay_beta_ = other.d_ssm_replay_beta_;
     d_ssm_replay_enabled_ = other.d_ssm_replay_enabled_;
+    replay_capacity_ = other.replay_capacity_;
     saved_context_ = other.saved_context_;
     replay_last_position_ = other.replay_last_position_;
     replay_captured_positions_ = other.replay_captured_positions_;
@@ -1105,6 +1114,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.d_ssm_replay_alpha_ = nullptr;
     other.d_ssm_replay_beta_ = nullptr;
     other.d_ssm_replay_enabled_ = nullptr;
+    other.replay_capacity_ = kSsmReplayCapacity;
     other.saved_context_ = 0;
     other.replay_last_position_ = 0;
     other.replay_captured_positions_ = 0;

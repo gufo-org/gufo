@@ -1,5 +1,66 @@
 # Qwen3.8 Flash-Next experiments
 
+## Raw completion fallback (November 4, 2026)
+
+Retained: capture the aligned prompt tail in-pass before retaining the exact
+raw prompt. Keeping only the exact unaligned prompt made the Devlab follow-up
+lose its entire cached prefix (1.23 s prefill versus about 0.30 s). The fix
+restores at 1,548 tokens and keeps zero-prefill exact retries. AR/MTP raw
+continuations above the sparse budget match cold output. This path activates
+136 MiB of existing reserved device checkpoint scratch and retains another
+fallback within the same cache budget; the measured memory cost is recorded
+in QUALITY.md. The timing fixture uses an aligned prefix for matched work;
+unaligned extensions retain a separate regression test and raw evidence.
+
+## Cache readahead progress (November 4, 2026)
+
+Retained: skip files already consumed by the reader before computing the
+unsigned prefetch-window distance. Otherwise a reader that overtakes the
+helpers can stop all further hints. Four helpers and the 32 MiB window are
+unchanged; no larger allocation or new option is needed.
+
+On Strix Halo, ROCm 10.1, Flash-Next UD-Q4_K_XL with shared Q8_0 MTP,
+`--sessions 2 --context 32768`, old and fixed production builds alternated
+against reflinked copies of the same persisted records. The 200,142,032-byte
+restore measured 92.06/92.23 ms before and 74.03/84.34 ms after; the
+305,368,752-byte restore measured 135.29/127.41 ms before and
+118.25/122.94 ms after. These are retained observations, not a global speed
+claim. Both restore outputs remain exact. The deterministic cursor regression
+fails with the original scheduling and passes with the fix; the full
+`cache_streaming_test` takes 0.55 seconds.
+
+Those exploratory timings preceded discovery of an unrelated desktop crash
+reporter repeatedly writing cores. They remain advisory. Final qualification
+uses quiet, sequential controls against main `1c75887b`; variable disk
+restore timings remain explicitly inconclusive rather than a speed claim.
+
+## Wide prompt-lookup verification (November 1, 2026)
+
+Measured downstream, on a fork that runs Swift 1.5 IQ4_XS with its Q8_0 MTP
+head (formats main does not load): Strix Halo gfx1151, ROCm 7.2.4, 120 W
+package limit, `--sessions 8`, HTTP streaming, thinking off, one fresh server
+per build, both builds in one block. Rewrites re-emit a file from the prompt.
+Client decode tok/s:
+
+| Workload | Before | After | Verifications |
+| --- | ---: | ---: | ---: |
+| 220-line Python file, rename (2,222 tokens), greedy | 124.1 | 187.9 | 280 → 53 |
+| same file, add docstrings, greedy | 122.4 | 186.9 | 286 → 54 |
+| same file, add return hints, greedy | 123.5 | 194.4 | 279 → 41 |
+| 150-line C++ header, rename (1,675 tokens), greedy | 124.1 | 186.5 | 212 → 41 |
+| SEARCH/REPLACE blocks (1,122 tokens), greedy | 106.4 | 119.9 | 159 → 104 |
+| lines 60–160 of a line-numbered listing, greedy | 88.9 | 89.0 | 185 → 185 |
+| prose / code / Czech, 512 tokens, greedy | 66.5 / 83.6 / 57.6 | 66.3 / 83.4 / 57.6 | unchanged |
+| Python rename, temperature 1, unseeded | 123.9 | 182.9 | 280 → 58 |
+| Python rename, eight requests (aggregate) | 206.0 | 205.7 | unchanged |
+
+Every greedy output, alone, staggered and eight-way, is byte-identical.
+
+| Variant | Outcome |
+| --- | --- |
+| 32-row limit | Rejected: the four rewrites ran at 157–174 tok/s against 186–195 at 64 in the same block. |
+| Double the width after one whole copy | Rejected: copies of the line-numbered listing break at every line number, so doubled copies wasted rows (87.9 → 85.1 tok/s). Two whole copies in a row: 89.0–89.2. |
+
 ## Routed prefill experts (October 23, 2026)
 
 | Experiment | Outcome |

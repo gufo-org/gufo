@@ -214,6 +214,17 @@ std::string EmbeddingService::model_id() const {
   return impl_->options.model_id;
 }
 
+bool EmbeddingService::serves_model(std::string_view name) const {
+  return name == model_id() ||
+         std::find(impl_->options.model_aliases.begin(),
+                   impl_->options.model_aliases.end(),
+                   std::string(name)) != impl_->options.model_aliases.end();
+}
+
+const std::vector<std::string>& EmbeddingService::model_aliases() const {
+  return impl_->options.model_aliases;
+}
+
 std::string EmbeddingService::backend_name() const {
 #if defined(ENGINE_ENABLE_HIP)
   return impl_->options.runner ? "custom" : "hip";

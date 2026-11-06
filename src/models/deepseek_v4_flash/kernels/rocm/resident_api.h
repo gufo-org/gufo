@@ -35,6 +35,17 @@ int ds4_gpu_attention_prefill_static_mixed_heads_tensor(ds4_gpu_tensor *heads, c
 int ds4_gpu_begin_commands(void);
 int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, const char *label);
 int ds4_gpu_release_model_staging(void);
+/* A Q8_0 weight that the hipBLAS prefill routes read as an F16 copy.
+ * `transposed` selects the out_dim-major layout of attention output B. */
+struct ds4_gpu_q8_f16_weight {
+  uint64_t offset;
+  uint64_t in_dim;
+  uint64_t out_dim;
+  uint32_t transposed;
+};
+/* Registers a model's F16 weight copies. The next lookup builds every
+ * registered copy in one pass, so they exist for all layers or for none. */
+int ds4_gpu_register_q8_f16_weights(const void *model_map, uint64_t model_size, const struct ds4_gpu_q8_f16_weight *weights, uint32_t count);
 int ds4_gpu_reserve_support_map(const void *support_map, uint64_t support_size, uint64_t arena_bytes);
 int ds4_gpu_cache_support_range(const void *support_map, uint64_t support_size, uint64_t offset, uint64_t bytes, const char *label);
 void ds4_gpu_release_support_map(void);
@@ -229,6 +240,8 @@ int ds4_gpu_synchronize(void);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes);
 uint64_t ds4_gpu_tensor_bytes(const ds4_gpu_tensor *tensor);
+/// Device address for transfers on an independent stream; changes if the owner reallocates.
+void* ds4_gpu_tensor_device_pointer(const ds4_gpu_tensor* tensor);
 int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset, const ds4_gpu_tensor *src, uint64_t src_offset, uint64_t bytes);
 int ds4_gpu_tensor_convert_f32_to_f16(ds4_gpu_tensor *dst, const ds4_gpu_tensor *src, uint64_t count);
 int ds4_gpu_tensor_fill_f32(ds4_gpu_tensor *tensor, float value, uint64_t count);

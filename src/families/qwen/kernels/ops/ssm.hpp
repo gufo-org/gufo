@@ -13,6 +13,8 @@
 
 namespace gufo::hip {
 
+/// Replay slots an ordinary verification needs. A ring may hold more (a power
+/// of two): a wide single-session verification captures every one of its rows.
 inline constexpr std::size_t kSsmReplayCapacity = 16;
 
 struct SsmReplayCapture {
@@ -21,6 +23,8 @@ struct SsmReplayCapture {
   float* beta{nullptr};
   const std::uint32_t* position{nullptr};
   const std::uint32_t* enabled{nullptr};
+  /// Slots per layer, a power of two; position p uses slot p % capacity.
+  std::uint32_t capacity{kSsmReplayCapacity};
 };
 
 /// Source and destination of one recurrent-state pass. The pass that follows a

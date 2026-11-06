@@ -30,6 +30,15 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     COMMAND "${fixture_build}/extensions/ext_runtime_neutral_contracts_test${CMAKE_EXECUTABLE_SUFFIX}")
   set_tests_properties(extension_runtime_test extension_role_test
     ext_runtime_neutral_contracts_test PROPERTIES LABELS "cpu;extensions")
+  # The fixture project has no gufo_core, so the implementation behind the public
+  # services links here. Like an external target, this one drops the directory's
+  # repository include path.
+  add_executable(ext_public_link_test ext_public_link_test.cpp)
+  set_property(TARGET ext_public_link_test PROPERTY INCLUDE_DIRECTORIES "")
+  target_link_libraries(ext_public_link_test PRIVATE gufo_ext_runtime gufo_ext_core
+    gufo_ext_cache $<$<TARGET_EXISTS:gufo_ext_hip>:gufo_ext_hip>)
+  add_test(NAME ext_public_link_test COMMAND ext_public_link_test)
+  set_tests_properties(ext_public_link_test PROPERTIES LABELS "cpu;extensions")
   if(Python3_EXECUTABLE)
     add_test(NAME extension_cli_provenance_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/cli_provenance_test.py $<TARGET_FILE:gufo>)
@@ -38,7 +47,7 @@ if(NOT GUFO_EXTENSION_FIXTURE)
       ${CMAKE_CURRENT_LIST_DIR}/discovery_test.py)
     # Nested projects configure and build repeatedly; Windows needs the headroom.
     # They use the build's own compiler instead of whichever one CMake finds.
-    set_tests_properties(extension_discovery_test PROPERTIES LABELS "cpu;extensions" TIMEOUT 900
+    set_tests_properties(extension_discovery_test PROPERTIES LABELS "cpu;extensions" PROCESSORS 2 COST 90 TIMEOUT 900
       ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}")
     add_test(NAME extension_api_policy_test COMMAND ${Python3_EXECUTABLE}
       ${PROJECT_SOURCE_DIR}/tests/tools/check_extension_api_test.py)
@@ -47,7 +56,7 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     set_tests_properties(extension_api_policy_test extension_api_surface PROPERTIES LABELS "cpu;extensions")
     add_test(NAME extension_metadata_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/metadata_test.py)
-    set_tests_properties(extension_metadata_test PROPERTIES LABELS "cpu;extensions" TIMEOUT 300
+    set_tests_properties(extension_metadata_test PROPERTIES LABELS "cpu;extensions" PROCESSORS 2 COST 80 TIMEOUT 300
       ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}")
     if(NOT WIN32)
       add_test(NAME extension_schema_test COMMAND ${Python3_EXECUTABLE}

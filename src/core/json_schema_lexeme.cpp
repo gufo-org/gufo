@@ -824,23 +824,18 @@ private:
   std::vector<bool> can_close_;
 };
 
-// Native calls can start before </think>. Keep literal marker mentions and
-// Markdown code quoted; a complete native function header starts constrained
-// tool decoding. Only a small scan state belongs to each speculative branch.
+// Native calls can start before the reasoning close delimiter. Keep literal
+// marker mentions and Markdown code quoted; a complete native function header
+// starts constrained tool decoding. Only a small scan state belongs to each
+// speculative branch.
 class ReasoningLexeme final : public JsonSchemaLexeme {
 public:
-  ReasoningLexeme(std::string tool_prefix, ReasoningEnd end)
+  ReasoningLexeme(std::string tool_prefix, ReasoningEnd end, std::string close)
       : tool_prefix_(std::move(tool_prefix)),
+        close_(std::move(close)),
         end_(end),
-        tool_failure_(tool_prefix_.size()) {
-    for (std::size_t i = 1, matched = 0; i < tool_prefix_.size(); ++i) {
-      while (matched && tool_prefix_[i] != tool_prefix_[matched])
-        matched = tool_failure_[matched - 1];
-      if (tool_prefix_[i] == tool_prefix_[matched])
-        ++matched;
-      tool_failure_[i] = matched;
-    }
-  }
+        tool_failure_(Failure(tool_prefix_)),
+        close_failure_(Failure(close_)) {}
   bool CacheTransitions() const override { return true; }
   bool PlainReasoning(std::string_view encoded) const override {
     Scan state{};
@@ -907,15 +902,13 @@ public:
         return prefix + 1;
       return std::uint32_t{0};
     };
-    constexpr std::string_view explicit_end = "</think>";
-    constexpr std::array<std::uint32_t, 8> explicit_failure{};
     state.explicit_prefix =
-        advance(state.explicit_prefix, explicit_end, explicit_failure);
+        advance(state.explicit_prefix, close_, close_failure_);
     state.tool_prefix =
         state.inline_quote || state.fence
             ? 0
             : advance(state.tool_prefix, tool_prefix_, tool_failure_);
-    if (state.explicit_prefix == explicit_end.size())
+    if (state.explicit_prefix == close_.size())
       return {false, end_ == ReasoningEnd::kExplicit};
     if (state.tool_prefix == tool_prefix_.size())
       return {false, end_ == ReasoningEnd::kTool};
@@ -933,9 +926,23 @@ private:
     std::uint32_t run{}, run_char{}, run_at_start{}, fence_char{};
     std::uint32_t nonblank{}, closing_fence{};
   };
+  // Knuth-Morris-Pratt failure links, so overlapping marker prefixes survive.
+  static std::vector<std::uint32_t> Failure(std::string_view marker) {
+    std::vector<std::uint32_t> failure(marker.size());
+    for (std::size_t i = 1, matched = 0; i < marker.size(); ++i) {
+      while (matched && marker[i] != marker[matched])
+        matched = failure[matched - 1];
+      if (marker[i] == marker[matched])
+        ++matched;
+      failure[i] = static_cast<std::uint32_t>(matched);
+    }
+    return failure;
+  }
   std::string tool_prefix_;
+  std::string close_;
   ReasoningEnd end_;
   std::vector<std::uint32_t> tool_failure_;
+  std::vector<std::uint32_t> close_failure_;
 };
 
 }  // namespace
@@ -953,8 +960,9 @@ std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Whitespace() {
   return whitespace;
 }
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Reasoning(
-    std::string tool_prefix, ReasoningEnd end) {
-  return std::make_shared<ReasoningLexeme>(std::move(tool_prefix), end);
+    std::string tool_prefix, ReasoningEnd end, std::string close) {
+  return std::make_shared<ReasoningLexeme>(std::move(tool_prefix), end,
+                                           std::move(close));
 }
 
 json::Value JsonSchemaLexeme::IntersectMultipleOf(const json::Value& a,

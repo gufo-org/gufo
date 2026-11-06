@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 Card 14 Verification Evidence: Build and Tests
 Executed on: Linux x86_64 Strix Halo gfx1151
 Workspace: /home/mixer/gufo
@@ -179,7 +183,7 @@ Disposition: PASS
 Gate 13: Hosted Nix PR Check Derivations
 ================================================================================
 Command:
-nix build .#checks.x86_64-linux.pr
+legacy hosted PR check
 
 Output:
 these 4 derivations will be built:

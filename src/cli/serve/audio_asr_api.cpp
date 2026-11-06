@@ -207,15 +207,6 @@ bool ParsePositiveSize(std::string_view value, std::size_t maximum,
   return true;
 }
 
-bool IsKnownField(std::string_view name) {
-  static constexpr std::string_view kKnown[] = {
-      "file",       "model",           "language",
-      "prompt",     "response_format", "temperature",
-      "max_tokens", "stream",          "timestamp_granularities[]",
-  };
-  return std::ranges::find(kKnown, name) != std::end(kKnown);
-}
-
 std::string ServerTiming(const ext::TranscriptionTimings& timings) {
   std::ostringstream value;
   value << "decode_audio;dur=" << timings.decode_audio_ms
@@ -238,14 +229,8 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
     return Error(400, "Bad Request", std::move(parse_error),
                  "invalid_multipart");
   }
-  for (const auto& [name, unused] : parts) {
-    (void)unused;
-    if (!IsKnownField(name)) {
-      return Error(400, "Bad Request",
-                   "unsupported transcription field: " + name,
-                   "unsupported_field");
-    }
-  }
+  // As in vLLM and the other OpenAI-compatible servers, unknown fields are
+  // ignored.
 
   const MultipartPart* file = Find(parts, "file");
   if (file == nullptr || file->body.empty()) {
@@ -253,8 +238,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
                  "missing_file");
   }
   const MultipartPart* model = Find(parts, "model");
-  if (model != nullptr && model->body != service.model_id() &&
-      model->body != "qwen3-asr" && model->body != "qwen3-asr-1.7b") {
+  if (model != nullptr && !service.serves_model(model->body)) {
     return Error(400, "Bad Request", "unsupported transcription model",
                  "invalid_model");
   }
@@ -291,6 +275,11 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
   if (Find(parts, "timestamp_granularities[]") != nullptr) {
     return Error(400, "Bad Request",
                  "timestamp granularities are not supported",
+                 "unsupported_option");
+  }
+  // `include[]` only requests logprobs, which this server cannot return.
+  if (Find(parts, "include[]") != nullptr) {
+    return Error(400, "Bad Request", "transcription logprobs are not supported",
                  "unsupported_option");
   }
   bool stream = false;

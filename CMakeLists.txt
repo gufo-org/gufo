@@ -31,23 +31,7 @@ include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include)
 # Reuse the compiler cache whenever it is installed, as the CPU check
 # derivations do. HIP kernels stay uncached: hipcc drive files and bitcode
 # paths need their own hit-rate measurement before they join the cache.
-find_program(GUFO_CCACHE_PROGRAM NAMES ccache)
-if (GUFO_CCACHE_PROGRAM)
-  set(CMAKE_C_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
-  set(CMAKE_CXX_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
-  # Newer CMake gives clang-cl gcc-style depfiles (-clang:-MD), which ccache
-  # rejects as unsupported; /showIncludes is cacheable.
-  if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    set(GUFO_CCACHE_CLANG_CL ON)
-    foreach(lang C CXX)
-      set(CMAKE_DEPFILE_FLAGS_${lang} "/showIncludes")
-      set(CMAKE_${lang}_DEPFILE_FORMAT msvc)
-    endforeach()
-  endif()
-  message(STATUS "gufo: compiling C and CXX through ${GUFO_CCACHE_PROGRAM}")
-else()
-  message(STATUS "gufo: ccache not found, compiling without a launcher")
-endif()
+include(cmake/CompilerCache.cmake)
 
 # Windows host checks build only the OS leaves, the CPU cache library and
 # their portable tests. The rest of the tree targets Linux only.
@@ -55,7 +39,11 @@ option(GUFO_PLATFORM_ONLY
   "Build only the platform leaves, the CPU cache and their portable tests" OFF)
 if (GUFO_PLATFORM_ONLY)
   find_package(Threads REQUIRED)
-  add_compile_options(-Wall -Wextra -Wpedantic -UNDEBUG)
+  if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    add_compile_options(/W4 /UNDEBUG)
+  else()
+    add_compile_options(-Wall -Wextra -Wpedantic -UNDEBUG)
+  endif()
   add_subdirectory(src/core/platform)
   add_subdirectory(src/cache)
   include(CTest)
@@ -183,7 +171,11 @@ option(GUFO_ENABLE_WARNINGS "Enable compiler warnings" ON)
 option(GUFO_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
 if (GUFO_ENABLE_WARNINGS)
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  # clang-cl interprets -Wall as /Wall, enabling compatibility warnings and
+  # diagnostics in SDK headers. Use the frontend's normal warning level.
+  if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    add_compile_options(/W4)
+  elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
   endif()
 endif()
@@ -225,6 +217,7 @@ if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 add_subdirectory(src/cache)
+add_subdirectory(src/sched)
 
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
@@ -251,6 +244,7 @@ if (ENGINE_ENABLE_HIP)
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
     src/core/hip/component_cache_resources.cpp
+    src/core/hip/snapshot_copy.hip
     src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
@@ -338,7 +332,6 @@ endif()
 
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_core PRIVATE
-    src/core/hip/snapshot_copy.hip
     src/core/hip/weight_upload.cpp
     src/core/speculative/speculative_verifier.cpp
   )
@@ -348,6 +341,25 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR})
   target_link_libraries(gufo_core PUBLIC gufo_hip_host hip::host roc::hipblas
     roc::hipblaslt roc::rocblas)
+endif()
+
+# The link contracts for extensions. They add no Gufo include path: the headers
+# come from the audited public surface of gufo_ext_runtime.
+add_library(gufo_ext_core INTERFACE)
+target_link_libraries(gufo_ext_core INTERFACE $<LINK_ONLY:gufo_core>
+  OpenSSL::Crypto)
+add_library(gufo_ext_cache INTERFACE)
+if (ENGINE_ENABLE_HIP)
+  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache_hip>)
+  add_library(gufo_ext_hip INTERFACE)
+  target_compile_definitions(gufo_ext_hip INTERFACE ENGINE_ENABLE_HIP=1)
+  target_include_directories(gufo_ext_hip SYSTEM INTERFACE
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR})
+  target_link_libraries(gufo_ext_hip INTERFACE $<LINK_ONLY:gufo_hip_host>
+    hip::host)
+else()
+  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
 endif()
 
 # Card 08 (RFC step 5): the model, comparison and eval tiers that used to be
@@ -369,14 +381,12 @@ add_subdirectory(src/ext)
 # live here; queueing, retention/admission and API policy stay on this core
 # side of the boundary, while models reach execution through gufo_ext_runtime.
 add_library(gufo_serving STATIC
-  src/cli/serve/continuation_cache.cpp
-  src/cli/serve/continuation_disk_store.cpp
   src/cli/serve/component_text_cache.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp)
 target_link_libraries(gufo_serving PUBLIC gufo_ext_runtime gufo_logging
-  gufo_core gufo_cache)
+  gufo_core gufo_cache gufo_sched)
 # The executable's own objects carried production NDEBUG, the test binaries that
 # re-compiled these sources forced assertions on. One library can only pick
 # one: test builds keep assertions, so a test-preset `gufo` now asserts where it
@@ -526,6 +536,7 @@ if (BUILD_TESTING)
   target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
 
   add_subdirectory(tests/cache)
+  add_subdirectory(tests/sched)
   add_subdirectory(tests/extensions)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or
@@ -825,28 +836,41 @@ endfunction()
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_extension_isolation_test.py)
   add_test(NAME extension_isolation_report
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py --mode report)
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py --mode report
+      --json-report "${CMAKE_CURRENT_BINARY_DIR}/extension-isolation.json")
   add_test(NAME extension_core_model_includes_gate
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --inventory "${CMAKE_CURRENT_BINARY_DIR}/extension-isolation.json"
       --fail-on-core-model-includes)
   add_test(NAME extension_serving_boundary_gate
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --inventory "${CMAKE_CURRENT_BINARY_DIR}/extension-isolation.json"
       --fail-on-serving-boundary)
   add_test(NAME extension_model_core_includes_gate
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --inventory "${CMAKE_CURRENT_BINARY_DIR}/extension-isolation.json"
       --fail-on-model-core-includes)
   add_test(NAME extension_family_graph_gate
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --inventory "${CMAKE_CURRENT_BINARY_DIR}/extension-isolation.json"
       --fail-on-family-graph)
   add_test(NAME extension_target_ownership_gate
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/ci/check-extension-isolation.py
+      --inventory "${CMAKE_CURRENT_BINARY_DIR}/extension-isolation.json"
       --fail-on-target-ownership)
-  # The checker's own tests scan the tree many times: about 25 s on Linux.
+  # CTest refreshes the snapshot once per invocation, including when a single
+  # gate is selected with -R. Gates keep separate names and failure output.
+  set_tests_properties(extension_isolation_report PROPERTIES
+    FIXTURES_SETUP gufo_extension_inventory)
+  set_tests_properties(extension_core_model_includes_gate
+    extension_serving_boundary_gate extension_model_core_includes_gate
+    extension_family_graph_gate extension_target_ownership_gate PROPERTIES
+    FIXTURES_REQUIRED gufo_extension_inventory)
   set_tests_properties(check_extension_isolation_test PROPERTIES
     LABELS "cpu;repository" TIMEOUT 180)
   set_tests_properties(extension_isolation_report
@@ -909,21 +933,18 @@ endfunction()
       SKIP_RETURN_CODE 77)
   endif()
 
-  add_executable(continuation_cache_test tests/cli/continuation_cache_test.cpp)
-  target_link_libraries(continuation_cache_test PRIVATE gufo_serving)
-  add_test(NAME continuation_cache_test COMMAND continuation_cache_test)
-  set_tests_properties(continuation_cache_test PROPERTIES
-    LABELS "cpu;server;cache;state;lifecycle")
-
   add_executable(component_text_cache_test
     tests/cli/component_text_cache_test.cpp)
   target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake
     gufo_serving)
   add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
-  set_tests_properties(component_text_cache_test PROPERTIES LABELS "cpu;server;cache;state;lifecycle")
+  # Start the long persistence suite early while other contracts fill the
+  # remaining CTest slots. Costs order tests; they do not change timeouts.
+  set_tests_properties(component_text_cache_test PROPERTIES
+    LABELS "cpu;server;cache;state;lifecycle" COST 70)
 
   add_executable(text_model_runner_test tests/cli/text_model_runner_test.cpp)
-  target_link_libraries(text_model_runner_test PRIVATE gufo_serving
+  target_link_libraries(text_model_runner_test PRIVATE gufo_cache_fake gufo_serving
     ${GUFO_QWEN_LIBRARIES})
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
@@ -931,13 +952,6 @@ endfunction()
 
   # the disk-store suite exercises permission faults with chmod and lstat
   if (NOT WIN32)
-  add_executable(continuation_disk_store_test
-    tests/cli/continuation_disk_store_test.cpp)
-  target_link_libraries(continuation_disk_store_test PRIVATE gufo_serving)
-  add_test(NAME continuation_disk_store_test
-    COMMAND continuation_disk_store_test)
-  set_tests_properties(continuation_disk_store_test PROPERTIES
-    LABELS "cpu;server;cache;disk;state;lifecycle")
   endif()
 
   add_executable(logit_sampler_test tests/cli/logit_sampler_test.cpp)
@@ -948,7 +962,8 @@ endfunction()
 
   add_executable(text_generation_scheduler_test
     tests/cli/text_generation_scheduler_test.cpp)
-  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_serving)
+  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_cache_fake
+    gufo_serving)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES
@@ -1023,37 +1038,37 @@ endfunction()
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_profile_test.py)
   set_tests_properties(h3_profile_test PROPERTIES
-    LABELS "cpu;profiling;video;minimax-h3;quality")
+    LABELS "cpu;profiling;video;minimax-h3;quality;h3-qualification")
 
   add_test(NAME h3_preset_quality_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_preset_quality_test.py)
   set_tests_properties(h3_preset_quality_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;quality;video;audio")
+    LABELS "cpu;tools;models;minimax-h3;quality;video;audio;h3-qualification")
 
   add_test(NAME h3_rng_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_rng_test.py)
   set_tests_properties(h3_rng_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;quality")
+    LABELS "cpu;tools;models;minimax-h3;quality;h3-qualification")
 
   add_test(NAME h3_latent_quality_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_latent_quality_test.py)
   set_tests_properties(h3_latent_quality_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;quality")
+    LABELS "cpu;tools;models;minimax-h3;quality;h3-qualification")
 
   add_test(NAME h3_cache_control_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_cache_control_test.py)
   set_tests_properties(h3_cache_control_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;profiling")
+    LABELS "cpu;tools;models;minimax-h3;profiling;h3-qualification")
 
   add_test(NAME h3_profile_report_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_profile_report_test.py)
   set_tests_properties(h3_profile_report_test PROPERTIES
-    LABELS "cpu;tools;models;minimax-h3;profiling")
+    LABELS "cpu;tools;models;minimax-h3;profiling;h3-qualification")
 
   add_test(NAME serving_bench_test
     COMMAND ${Python3_EXECUTABLE}

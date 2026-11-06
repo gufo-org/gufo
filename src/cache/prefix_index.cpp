@@ -22,7 +22,8 @@ std::size_t Bytes(Rows rows, std::size_t bytes) {
 bool Same(const ComponentDescriptor& a, const ComponentDescriptor& b) {
   return a.id == b.id && a.kind == b.kind &&
          a.layout_version == b.layout_version && a.row_bytes == b.row_bytes &&
-         a.rows_per_chunk == b.rows_per_chunk && a.state_bytes == b.state_bytes;
+         a.rows_per_chunk == b.rows_per_chunk &&
+         a.state_bytes == b.state_bytes && a.window_rows == b.window_rows;
 }
 void ValidateAvailability(std::span<const ComponentAvailability> list,
                           std::span<const ComponentDescriptor> descriptors) {
@@ -446,10 +447,12 @@ struct PrefixIndex::Impl {
                                        return c.descriptor.id == descriptor.id;
                                      })
                     ->position.valid_rows;
-      result.transfer_bytes = Add(
-          result.transfer_bytes, descriptor.kind == ComponentKind::kPrivateState
-                                     ? descriptor.state_bytes
-                                     : Bytes(rows, descriptor.row_bytes));
+      result.transfer_bytes =
+          Add(result.transfer_bytes,
+              descriptor.kind == ComponentKind::kPrivateState
+                  ? descriptor.state_bytes
+                  : Bytes(rows - FirstChunkRow(descriptor, rows),
+                          descriptor.row_bytes));
     }
     return result;
   }
@@ -484,12 +487,13 @@ void PrefixIndex::Register(Identity identity,
     throw std::invalid_argument("prefix index has no required components");
   for (std::size_t i = 0; i < descriptors.size(); ++i) {
     const auto& d = descriptors[i];
-    if ((d.kind == ComponentKind::kAppendRows &&
-         (!d.row_bytes || !d.rows_per_chunk || d.state_bytes)) ||
+    if ((HasRows(d.kind) &&
+         (!d.row_bytes || !d.rows_per_chunk || d.state_bytes ||
+          (d.kind == ComponentKind::kWindowRows) != (d.window_rows != 0))) ||
         (d.kind == ComponentKind::kPrivateState &&
-         (!d.state_bytes || d.row_bytes || d.rows_per_chunk)) ||
-        (d.kind != ComponentKind::kAppendRows &&
-         d.kind != ComponentKind::kPrivateState))
+         (!d.state_bytes || d.row_bytes || d.rows_per_chunk ||
+          d.window_rows)) ||
+        (!HasRows(d.kind) && d.kind != ComponentKind::kPrivateState))
       throw std::invalid_argument("invalid prefix index component geometry");
     for (std::size_t j = 0; j < i; ++j)
       if (d.id == descriptors[j].id)

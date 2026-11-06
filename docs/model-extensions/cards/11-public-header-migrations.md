@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 11: Migrate models to public extension headers
 
 Status: **integrated, ready for orchestrator closure**. RFC step and dependencies: **7; 10**.
@@ -121,7 +125,7 @@ The integration rerun ledger is retained in [`integration-reruns.txt`](../eviden
 6. `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py`: **PASS** (785 C++ files clean, exit 0).
 7. Bounded CPU CTest (`extension_model_core_includes_gate` + 3 identity goldens): **4/4 passed** (100%, exit 0).
 8. Bounded GPU CTest (`extension_model_core_includes_gate` + 3 identity goldens): **4/4 passed** (100%, exit 0).
-9. `nix build .#checks.x86_64-linux.pr`: **PASS** (exit 0).
+9. `legacy hosted PR check`: **PASS** (exit 0).
 10. `codex exec review`: **RESOLVED** (1 P2 finding on `tools/bench/build.sh` resolved and verified).
 
 #### Definition of Done Audit

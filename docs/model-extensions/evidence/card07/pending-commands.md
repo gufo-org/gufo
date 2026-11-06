@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Pending commands — Card 07 (NOT execution evidence)
 
 Everything below is un-run. The 2026-10-31 user decision excludes functional-harness
@@ -147,5 +151,5 @@ or fix the spills. Do not silently widen the allowance inside this card.
 ## 9. Hosted checks (orchestrator runs these at closure, not the implementation agent)
 
 ```sh
-nix build .#checks.x86_64-linux.pr
+legacy hosted PR check
 ```

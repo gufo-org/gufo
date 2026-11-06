@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 14 Evidence Index and Provenance
 
 This directory contains the durable evidence artifacts for **Card 14: Generate infrastructure from model metadata** (RFC Step 8 infrastructure generator and manifest completeness).
@@ -35,5 +39,5 @@ All 8 affected verification gates passed cleanly across worker, reviewer, and in
 4. **Gate 4 (Documentation Integrity Check)**: `python3 tools/ci/check-docs.py` passed (315 markdown files, 1591 links verified with zero broken links or invalid JSON blocks).
 5. **Gate 5 (Clang-Format Code Formatting Check)**: `nix shell --inputs-from . nixpkgs#clang-tools -c python3 tools/ci/check-format.py` passed (792 C++ files clean).
 6. **Gate 6 (CPU-Test Check-PR Suite)**: `nix develop -c cmake --build --preset cpu-test --target check-pr` passed (96/96 tests passed, 100%, 139.82s).
-7. **Gate 7 (Hosted PR Checks Suite - Nix Sandbox)**: `nix build .#checks.x86_64-linux.pr` passed (all 4 derivations `check-dependency-inventory`, `check-docs`, `check-format`, `check-pr-tests` built and passed).
+7. **Gate 7 (Hosted PR Checks Suite - Nix Sandbox)**: `legacy hosted PR check` passed (all 4 derivations `check-dependency-inventory`, `check-docs`, `check-format`, `check-pr-tests` built and passed).
 8. **Gate 8 (Nix Derivation Hash Invariance)**: Formally proved that modifying model tests, fixtures, or functional fragments does not alter `nix eval --raw .#packages.x86_64-linux.default.drvPath` (`/nix/store/qnga21mdw4f1363jpnsb2139992ngvvn-gufo-0-unstable-642af9d-dirty.drv`).

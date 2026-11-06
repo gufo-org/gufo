@@ -25,12 +25,15 @@ PROTECTED = (
     "gufo_cache_hip",
     "gufo_core",
     "gufo_ext_runtime",
+    "gufo_ext_core",
+    "gufo_ext_cache",
+    "gufo_ext_hip",
 )
 
 
 FORBIDDEN = {"gufo_serving", "gufo_http"}
-HIP_ONLY = {"gufo_hip_host", "gufo_cache_hip", "gufo_deepseek_v4_flash",
-            "gufo_qwen_kernels"}
+HIP_ONLY = {"gufo_hip_host", "gufo_cache_hip", "gufo_ext_hip",
+            "gufo_deepseek_v4_flash", "gufo_qwen_kernels"}
 
 
 def manifest_targets(root):

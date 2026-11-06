@@ -268,7 +268,11 @@ void TestLifecycleAndRange(const std::filesystem::path& root) {
 
 void TestValidation(const std::filesystem::path& root) {
   FakeRunner runner;
-  VideoJobService service(Options(root, &runner));
+  auto options = Options(root, &runner);
+  // One configured alias exercises the repeated --served-model-name path
+  // (#957); every other name check below stays unserved.
+  options.model_aliases = {"swap-alias"};
+  VideoJobService service(std::move(options));
   const HttpResponse fullres = Send(
       service, "POST", "/v1/videos",
       R"({"model":"minimax-h3","prompt":"A goalkeeper saves a shot","size":"1344x768","seconds":5})");
@@ -282,6 +286,23 @@ void TestValidation(const std::filesystem::path& root) {
             fullres_generation.parameters.evaluations == 49,
         "API maps 1344x768 five-second request to the exact preset");
   WaitCompleted(service, CreatedId(fullres));
+
+  // A configured alias creates a job on the root model and reports the
+  // canonical ID; an unserved name stays rejected (#957).
+  const HttpResponse aliased = Send(
+      service, "POST", "/v1/videos",
+      R"({"model":"swap-alias","prompt":"x","size":"1344x768","seconds":5})");
+  Check(aliased.status == 202 &&
+            aliased.body.find("\"model\":\"minimax-h3\"") != std::string::npos,
+        "configured aliases create root-model jobs");
+  runner.WaitForCalls(2);
+  Check(runner.latest().parameters.preset == "exact-1344x768",
+        "the alias request resolves like the root model");
+  WaitCompleted(service, CreatedId(aliased));
+  Check(Send(service, "POST", "/v1/videos",
+             R"({"model":"swap-typo","prompt":"x","seconds":"1"})")
+                .status == 400,
+        "names the video process does not serve stay rejected");
 
   const HttpResponse reference = Send(
       service, "POST", "/v1/videos",
@@ -315,10 +336,10 @@ void TestValidation(const std::filesystem::path& root) {
 
   const HttpResponse unknown = Send(
       service, "POST", "/v1/videos",
-      R"({"model":"minimax-h3","prompt":"x","seconds":"1","silent_typo":true})");
+      R"({"model":"minimax-h3","prompt":"x","size":512,"seconds":"1","silent_typo":true})");
   Check(unknown.status == 400 &&
-            unknown.body.find("unsupported_field") != std::string::npos,
-        "unknown top-level fields fail closed");
+            unknown.body.find("invalid_parameter_type") != std::string::npos,
+        "unknown top-level fields are ignored, as in other OpenAI servers");
 
   const HttpResponse duplicate_json = Send(
       service, "POST", "/v1/videos",
@@ -365,7 +386,7 @@ void TestValidation(const std::filesystem::path& root) {
            {}, "multipart/form-data; boundary=\"gufo-openai-video-boundary\"");
   Check(multipart.status == 202,
         "OpenAI-style multipart text-to-video request is admitted");
-  runner.WaitForCalls(2);
+  runner.WaitForCalls(3);
   Check(runner.latest().parameters.preset == "fast-384",
         "multipart request preserves the selected H3 mode");
 

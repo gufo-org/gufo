@@ -611,3 +611,55 @@ def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
                                                           dict, type(None))}[name]
         assert set(arguments["auto"]) == {"value"} and isinstance(
             arguments["auto"]["value"], allowed), (name, arguments)
+
+
+def check_tool_type_unions(client, model, checks, chat_result):
+    """Grist's strict SQL argument union works without relaxing native calls."""
+    from copy import deepcopy
+
+    schema = {"type": "object", "properties": {
+        "query": {"type": "string"},
+        "args": {"type": ["array", "null"], "items": {
+            "type": ["string", "number", "boolean", "null"]}}},
+        "required": ["query", "args"], "additionalProperties": False}
+    expected = {"query": "SELECT ?", "args": ["a", 2, 1.5, True, False, None]}
+    for strict in (False, True):
+        for responses, stream in ((False, False), (True, True)):
+            function = {"name": "query_document", "strict": strict, "parameters": schema}
+            prompt = ("Call query_document exactly once with these exact JSON arguments: "
+                      + json.dumps(expected) + ". Preserve every JSON type.")
+            label = f"type_union_{strict}_{'responses' if responses else 'chat'}"
+            if responses:
+                result = response_result(client, dict(
+                    model=model, input=prompt, tools=[{"type": "function", **function}],
+                    tool_choice="required", temperature=0, reasoning={"effort": "none"},
+                    max_output_tokens=192, store=False), stream)
+            else:
+                result = chat_result(client, dict(
+                    model=model, messages=[{"role": "user", "content": prompt}],
+                    tools=[{"type": "function", "function": function}],
+                    tool_choice="required", temperature=0, reasoning_effort="none",
+                    max_completion_tokens=192), stream)
+            checks[label] = result
+            assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+            actual = result["tools"][0]["function"]
+            assert actual["name"] == "query_document", result
+            assert json.dumps(json.loads(actual["arguments"]), sort_keys=True) == json.dumps(
+                expected, sort_keys=True), result
+            assert_native(result, label)
+            print(f"CHECK {label}", file=sys.stderr, flush=True)
+    # Strict malformed unions must still fail during request validation.
+    for types in ([], ["string", 1], ["string", "bogus"], ["string", "string"]):
+        invalid = deepcopy(schema)
+        invalid["properties"]["args"]["items"]["type"] = types
+        try:
+            client.chat.completions.create(
+                model=model, messages=[{"role": "user", "content": "hello"}],
+                tools=[{"type": "function", "function": {
+                    "name": "query_document", "strict": True, "parameters": invalid}}],
+                max_completion_tokens=1)
+        except Exception as error:
+            assert getattr(error, "status_code", None) == 400, error
+            assert error.body["code"] == "invalid_tools", error
+        else:
+            raise AssertionError(f"malformed type union accepted: {types}")

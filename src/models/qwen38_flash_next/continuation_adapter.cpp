@@ -4,7 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
-#include <gufo/ext/experimental/snapshot_copy.hpp>
+#include <gufo/ext/snapshot_copy.hpp>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -28,6 +28,12 @@ bool Draft(ContinuationPart part) {
          part == ContinuationPart::kDraftPooledKeys ||
          part == ContinuationPart::kDraftRawKeys ||
          part == ContinuationPart::kDraftResidual;
+}
+bool RotatedKeys(ContinuationPart part) {
+  return part == ContinuationPart::kKey ||
+         part == ContinuationPart::kPooledKeys ||
+         part == ContinuationPart::kDraftKey ||
+         part == ContinuationPart::kDraftPooledKeys;
 }
 bool Pool(ContinuationPart part) {
   return part == ContinuationPart::kPooledKeys ||
@@ -251,16 +257,18 @@ Session& ContinuationAdapter::GetSession(cache::Slot& slot) {
   state.BeforeExecution();
   return *state.session;
 }
-void ContinuationAdapter::PrefillThrough(cache::Slot& slot,
-                                         std::span<const std::int32_t> prompt,
-                                         std::uint32_t boundary,
-                                         const std::function<void()>& capture) {
+void ContinuationAdapter::PrefillThrough(
+    cache::Slot& slot, std::span<const std::int32_t> prompt,
+    std::span<const std::uint32_t> boundaries,
+    const std::function<void(std::size_t)>& capture,
+    std::span<const std::int32_t> next) {
   auto& state = As(slot);
   state.BeforeExecution();
   if (!capture)
     throw std::invalid_argument("missing component checkpoint consumer");
   std::string error;
-  const auto consume = [&](const rocm::PrefillCheckpoint* checkpoint) {
+  const auto consume = [&](std::size_t index,
+                           const rocm::PrefillCheckpoint* checkpoint) {
     struct BoundaryScope {
       State& state;
       bool guarding;
@@ -282,11 +290,12 @@ void ContinuationAdapter::PrefillThrough(cache::Slot& slot,
         state.guarding = guarding;
       }
     } scope(state, checkpoint);
-    capture();
+    capture(index);
     if (state.pending)
       throw std::logic_error("in-pass capture returned with pending transfers");
   };
-  if (!state.session->SyncThroughComponents(prompt, boundary, consume, &error))
+  if (!state.session->SyncThroughComponents(prompt, boundaries, consume, &error,
+                                            next))
     throw std::runtime_error("component in-pass prefill failed: " + error);
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
@@ -564,12 +573,13 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     metadata.draft = native.mtp_.position;
     metadata.blocks = native.blocks_;
     metadata.draft_blocks = native.mtp_.blocks;
-    // A boundary capture stores the base a restore rebuilds from its kept
-    // rows (none without MTP), whether it reads the arena or the live session.
+    // The base a restore rebuilds from the rows a frontier keeps (none
+    // without MTP), whichever pass produced it: a split pass, an in-pass
+    // checkpoint, a live boundary capture and a native restore record the
+    // same base.
     metadata.hidden_base =
-        state.checkpoint    ? native.position_ - state.checkpoint->hidden_rows
-        : state.at_boundary ? native.position_ - session.KeptHiddenRows()
-                            : session.hidden_base_;
+        native.position_ - (state.checkpoint ? state.checkpoint->hidden_rows
+                                             : session.KeptHiddenRows());
     metadata.residual_valid = native.mtp_.residual_valid;
     metadata.ngram = native.ngram_;
     metadata.policy = session.draft_length_.State();
@@ -708,10 +718,53 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
       state, false, stream, [&](gufo::hip::TransferStream& transfer) {
         if (component.part == ContinuationPart::kTokens && !bytes.empty())
           std::memcpy(bytes.data(), source, bytes.size());
+        else if (!bytes.empty() && RotatedKeys(component.part) &&
+                 native.yarn_factor_ != 1.0F)
+          CopyNativeKeys(native, component, first, end, bytes, transfer);
         else if (!bytes.empty())
           Check(hip::CopySnapshotToHost(bytes.data(), source, bytes.size(),
                                         transfer.Native()));
       });
+}
+void ContinuationAdapter::CopyNativeKeys(
+    const rocm::Session& native, const ContinuationComponent& component,
+    Rows first, Rows end, std::span<std::byte> bytes,
+    gufo::hip::TransferStream& transfer) const {
+  const auto stream = transfer.Native();
+  const bool draft = Draft(component.part);
+  const auto* rows = reinterpret_cast<const __half*>(
+      component.part == ContinuationPart::kKey
+          ? native.attention_[component.layer].k_cache
+      : component.part == ContinuationPart::kPooledKeys
+          ? native.attention_[component.layer].block_k
+      : component.part == ContinuationPart::kDraftKey ? native.mtp_.k_cache
+                                                      : native.mtp_.block_k);
+  const auto* rope = draft ? native.vision_input_.rope()
+                           : native.attention_[component.layer].rope;
+  const auto copy = [&](__half* destination) {
+    model_->executor_->CopyNativeKeys(
+        native, rows, static_cast<std::uint32_t>(first),
+        static_cast<std::uint32_t>(end - first), Pool(component.part), rope,
+        destination, stream);
+  };
+  void* mapped{};
+  if (hipHostGetDevicePointer(&mapped, bytes.data(), 0) == hipSuccess &&
+      mapped) {
+    copy(static_cast<__half*>(mapped));
+    Check(hipGetLastError());
+    return;
+  }
+  // Ordinary host buffers are not visible to the kernel.
+  (void)hipGetLastError();
+  void* staging{};
+  Check(hipMalloc(&staging, bytes.size()));
+  copy(static_cast<__half*>(staging));
+  const auto copied = hipMemcpyAsync(bytes.data(), staging, bytes.size(),
+                                     hipMemcpyDeviceToHost, stream);
+  const auto settled = hipStreamSynchronize(stream);
+  (void)hipFree(staging);
+  Check(copied);
+  Check(settled);
 }
 std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
     const cache::Slot& slot, cache::ComponentId id, Rows first,
@@ -731,6 +784,9 @@ std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
   const auto row = component.descriptor.row_bytes;
   if (position == positions.end() || first >= end || end > position->valid_rows)
     throw std::invalid_argument("invalid Flash-Next borrowed range");
+  // Cached keys hold the native rotation (CopyRowsOut converts them).
+  if (RotatedKeys(component.part) && state.CaptureState().yarn_factor_ != 1.0F)
+    return {};
   return {static_cast<const std::byte*>(
               RowData(const_cast<State&>(state), component)) +
               first * row,
@@ -837,6 +893,10 @@ bool ContinuationAdapter::Validate(
   native.spec_base_ = metadata.target;
   native.spec_tokens_ = 0;
   native.snapshot_lineage_.reset();
+  // Cached keys hold the native rotation whatever factor wrote them, so one
+  // history can serve sessions at any factor. The next Feed or decode moves
+  // this session to the factor its positions need.
+  model_->executor_->AdoptYarnFactor(native, 1.0F);
   session.hidden_base_ = metadata.hidden_base;
   session.draft_length_ = policy;
   session.lookup_.Restore(metadata.lookup);

@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 14 Orchestrator Verification Gates
 
 Date: 2026-11-01
@@ -47,7 +51,7 @@ Parent commit: qupqlxsk 642af9d6 model-extensions-3* | feat(extensions): migrate
    Verdict: PASS
 
 9. Gate 9: Bounded Hosted PR Nix Checks
-   Command: nix build .#checks.x86_64-linux.pr --no-link
+   Command: legacy hosted PR check
    Result: Exit 0 (All 4 derivations built and passed: check-format, check-docs, check-pr-tests, check-pr)
    Verdict: PASS
 
@@ -61,4 +65,4 @@ Finding:
   When fewer than four manifests declare model guides, unconditional separators produced empty tuple elements, resulting in invalid Python syntax.
 Disposition:
 - RESOLVED by orchestrator: Chunked model directory strings into populated slices of up to 3 elements, joined with valid line breaks, added trailing comma for single-element tuples, and added `compile(docs_py, "check-docs.py", "exec")` to `tests/tools/generate_infrastructure_test.py`.
-- Re-ran all gates: `generate-infrastructure.py --check` (exit 0), `generate_infrastructure_test.py` (9/9 pass, exit 0), `check-format.py` (exit 0), `check-docs.py` (exit 0), `nix build .#checks.x86_64-linux.pr` (exit 0).
+- Re-ran all gates: `generate-infrastructure.py --check` (exit 0), `generate_infrastructure_test.py` (9/9 pass, exit 0), `check-format.py` (exit 0), `check-docs.py` (exit 0), `legacy hosted PR check` (exit 0).

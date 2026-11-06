@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 # Card 14 Independent Review Findings: Generate Infrastructure from Model Metadata
 
 Reviewer: Independent Read-Only Review Agent  
@@ -97,7 +101,7 @@ The following audited areas were thoroughly inspected and found fully compliant:
    - Conformance test suite `tests/tools/generate_infrastructure_test.py` passes 9/9 tests covering missing/duplicate metadata, drift detection, and conditional metadata omissions.
 7. **Hosted & Local Verification Suites**:
    - `nix develop -c cmake --build --preset cpu-test --target check-pr`: 96/96 (100%) tests passed in 140.96s.
-   - `nix build .#checks.x86_64-linux.pr`: All 4 hosted derivations (`check-dependency-inventory`, `check-docs`, `check-pr-tests`, `check-pr`) built and passed cleanly.
+   - `legacy hosted PR check`: All 4 hosted derivations (`check-dependency-inventory`, `check-docs`, `check-pr-tests`, `check-pr`) built and passed cleanly.
    - Continuation identity tests passed 3/3 (`qwen27b`, `deepseek_v4_flash`, `qwen38_flash_next`).
    - Clang-format CI check: 792 C++ files passed cleanly.
    - Documentation check: 313 markdown files and 1591 links verified with zero broken links.
@@ -115,7 +119,7 @@ The following audited areas were thoroughly inspected and found fully compliant:
 | DoD Item | Status | Verification Evidence / Details |
 |---|---|---|
 | **1. Every current model has accurate metadata before its code migration; generated consumers no longer need parallel model lists.** | **Proven** (with minor F2 note) | All 8 models have valid manifests in `src/models/*/extension.json`. Manifests validate 100% against schema. Central files (`Checks.cmake`, `check-format.py`, `check-docs.py`, `docs/models/README.md`, `devlab.json`, `impact.json`) are generated from manifests without manual parallel lists. |
-| **2. Windows ZIP uses generated registry data; hosted tests/labels and Nix output names remain compatible.** | **Proven** | Registry files (`devlab.json`, `impact.json`) generated deterministically. Hosted PR test targets in `cmake/Checks.cmake` match ctest overrides and run 96/96 tests. Public Nix check and output names are preserved in `flake.nix` and pass all 4 checks in `nix build .#checks.x86_64-linux.pr`. |
+| **2. Windows ZIP uses generated registry data; hosted tests/labels and Nix output names remain compatible.** | **Proven** | Registry files (`devlab.json`, `impact.json`) generated deterministically. Hosted PR test targets in `cmake/Checks.cmake` match ctest overrides and run 96/96 tests. Public Nix check and output names are preserved in `flake.nix` and pass all 4 checks in `legacy hosted PR check`. |
 | **3. Editing model test/functional/tool sources leaves production derivations unchanged while metadata/production edits are admitted; generated-output drift fails checks.** | **Proven** | Nix derivation path `/nix/store/4nqkz6iivwjxjdx6kgw9jd1mw0y3bjf9-gufo-0-unstable-642af9d-dirty.drv` is identical before and after touching test sources. Filter expression verified in Nix. Drift detection verified in `generate_infrastructure_test.py` and live repo check exits 0. |
 | **4. Pilot-selected devlab evidence and bounded hosted checks are retained, with discovery/release distinctions intact.** | **Proven / Deferred per policy** | Bounded hosted checks pass (`check-pr` 96/96, `checks.pr` 4/4). Discovery mode distinguishes metadata-only models from migrated pilot (`embedding_gemma2`). Functional harness runs deferred per project policy (2026-10-31) and documented in `pending-commands.txt`. |
 
@@ -139,7 +143,7 @@ The following audited areas were thoroughly inspected and found fully compliant:
 | 12 | `nix develop -c ctest --test-dir build/cpu-test -R 'continuation_identity' --output-on-failure` | 0 | PASS: 3/3 tests passed (qwen27b, ds4, qwen38) |
 | 13 | `nix eval --raw .#packages.x86_64-linux.default.drvPath` | 0 | Hash verified: `/nix/store/4nqkz6iivwjxjdx6kgw9jd1mw0y3bjf9-gufo-0-unstable-642af9d-dirty.drv` |
 | 14 | `nix eval --impure --expr '<filter-expression>'` | 0 | Proved test/fixture/functional paths evaluate to `false` and production/manifest to `true` |
-| 15 | `nix build .#checks.x86_64-linux.pr --no-link` | 0 | PASS: All 4 hosted check derivations built and passed |
+| 15 | `legacy hosted PR check` | 0 | PASS: All 4 hosted check derivations built and passed |
 | 16 | `nix develop -c cmake --build --preset cpu-test --target check-pr` | 0 | PASS: 96/96 (100%) tests passed in 140.96s |
 | 17 | `free -g` | 0 | System memory healthy: 111 GiB available |
 | 18 | `find docs -type f -size +1M` | 0 | Verified zero documentation files > 1 MB |

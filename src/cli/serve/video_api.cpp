@@ -444,15 +444,12 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
     return Error(400, "Bad Request", "request body must be a JSON object",
                  "invalid_body");
   }
+  // Unknown members are ignored, as in the other OpenAI-compatible servers;
+  // known conditioning fields are refused rather than silently dropped.
   if (IsUnsupportedConditioning(body)) {
     return Error(400, "Bad Request",
                  "image and ordered-reference conditioning are not supported",
                  "unsupported_input_reference");
-  }
-  if (!HasOnlyMembers(body, {"model", "prompt", "size", "seconds", "gufo"})) {
-    return Error(400, "Bad Request",
-                 "request contains an unsupported video field",
-                 "unsupported_field");
   }
 
   const json::Value* model_value = body.find("model");
@@ -465,7 +462,9 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
                  "'model', 'prompt', and optional 'size' must be strings",
                  "invalid_parameter_type");
   }
-  const std::string model = model_value->str();
+  // Alias names behave as the root model; preset-selecting variant names
+  // stay canonical (#957).
+  const std::string model = service.normalize_model(model_value->str());
   const std::string prompt = prompt_value->str();
   const std::string size = body.member_str("size", "512x512");
   const json::Value* seconds_value = body.find("seconds");

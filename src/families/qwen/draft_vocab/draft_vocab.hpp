@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_VOCAB_HPP_
-#define GUFO_MODELS_QWEN38_FLASH_NEXT_DRAFT_VOCAB_HPP_
+#ifndef GUFO_FAMILIES_QWEN_DRAFT_VOCAB_DRAFT_VOCAB_HPP_
+#define GUFO_FAMILIES_QWEN_DRAFT_VOCAB_DRAFT_VOCAB_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,32 +7,33 @@
 #include <span>
 #include <vector>
 
-namespace gufo::models::qwen38_flash_next {
+namespace gufo::speculative {
 
-/// Output rows the MTP draft head scores. Each draft token projects through
-/// the output head; over all 248,320 rows that is a 675 MB read, about 3 ms
-/// on gfx1151 and 12-18% of decode time. Byte-level BPE numbers tokens in
-/// merge order, and in this vocabulary the early merges are the frequent
-/// tokens: the first 98,304 cover ~99.8% of the tokens in English code and
-/// prose (measured, not guaranteed; other text falls back to the full head).
-/// The draft scores those rows in place, plus a small per-request table: the
-/// special tokens (chat, thinking and tool-call markers at the end of the
-/// vocabulary) and every other token the request has already used.
+/// Output rows a Qwen3.8 speculative draft head scores: the Flash-Next MTP
+/// head and the 27B DFlash2 block head. Over all 248,320 rows each draft row
+/// reads the whole output head (675 MB on Flash-Next, about 3 ms on gfx1151
+/// and 12-18% of decode time; 0.97 GiB per 27B DFlash2 block). Byte-level BPE
+/// numbers tokens in merge order, and in this vocabulary the early merges are
+/// the frequent tokens: the first 98,304 cover ~99.8% of the tokens in English
+/// code and prose (measured, not guaranteed; other text falls back to the full
+/// head). The draft scores those rows in place, plus a small per-request
+/// table: the special tokens (chat, thinking and tool-call markers at the end
+/// of the vocabulary) and every other token the request has already used.
 ///
 /// Only proposals change. The target verifies every drafted token over the
 /// full vocabulary, so greedy output is unchanged. Sampled proposals are
 /// corrected against the distribution they were drawn from.
-inline constexpr std::uint32_t kMtpDraftVocab = 98304;
+inline constexpr std::uint32_t kDraftVocabPrefix = 98304;
 
 /// Rows of the per-request table: the special tokens, then the request's own
-/// tokens above kMtpDraftVocab in first-use order.
-inline constexpr std::uint32_t kMtpDraftExtraRows = 1024;
+/// tokens above kDraftVocabPrefix in first-use order.
+inline constexpr std::uint32_t kDraftVocabExtraRows = 1024;
 
 /// Committed tokens the head choice looks back over.
-inline constexpr std::size_t kMtpDraftVocabWindow = 32;
+inline constexpr std::size_t kDraftVocabWindow = 32;
 
 /// Whether a request's cycle may draft through the small head; the table then
-/// decides per cycle (MtpDraftVocab::Fits). Penalties and constraints never
+/// decides per cycle (DraftVocab::Fits). Penalties and constraints never
 /// matter: drafts ignore both, and verification applies them over the full
 /// target vocabulary. Sampled requests may at any session count: verification
 /// corrects their proposals against the full target distribution, and the
@@ -41,26 +42,27 @@ inline constexpr std::size_t kMtpDraftVocabWindow = 32;
 /// session, when they decode alone (`occupancy`, the requests in this decode
 /// step, is 1, so no peer shares the step), or in a jointly planned batch;
 /// greedy requests in an unplanned multi-session batch keep the full head.
-[[nodiscard]] constexpr bool MtpDraftSubsetAllowed(
-    bool sampled, std::uint32_t sessions, std::uint32_t occupancy,
-    bool planned_batch) noexcept {
+[[nodiscard]] constexpr bool DraftSubsetAllowed(bool sampled,
+                                                std::uint32_t sessions,
+                                                std::uint32_t occupancy,
+                                                bool planned_batch) noexcept {
   return sampled || sessions == 1 || occupancy == 1 || planned_batch;
 }
 
 /// The request's draft vocabulary and when to use it. A token is a miss when
 /// it is outside the prefix, not special and not yet in the request's table
 /// (or the table is full). A draft cycle uses the small head when its anchor
-/// is not a miss and at most one of the last kMtpDraftVocabWindow committed
+/// is not a miss and at most one of the last kDraftVocabWindow committed
 /// tokens was, so text that keeps bringing new tokens (a short reply in
 /// another script) drafts over the full vocabulary as before, a lone new
 /// word does not leave the small head, and a request that repeats its own
 /// vocabulary (code and comments in the user's language) gets the small
 /// head. Everything is a function of the request's own token history, so
 /// batched, isolated and restored sessions draft the same way.
-class MtpDraftVocab {
+class DraftVocab {
 public:
   /// `rare_rows`: table rows left after the special tokens.
-  explicit MtpDraftVocab(std::uint32_t rare_rows = 0) : capacity_(rare_rows) {}
+  explicit DraftVocab(std::uint32_t rare_rows = 0) : capacity_(rare_rows) {}
 
   void Reset() {
     rare_.clear();
@@ -101,7 +103,7 @@ public:
 
   /// Whether the window allows the small head; Fits also needs the anchor.
   [[nodiscard]] bool Quiet() const noexcept {
-    return !prior_miss_ || *prior_miss_ + kMtpDraftVocabWindow < scanned_;
+    return !prior_miss_ || *prior_miss_ + kDraftVocabWindow < scanned_;
   }
 
   [[nodiscard]] std::size_t scanned() const noexcept { return scanned_; }
@@ -124,6 +126,6 @@ private:
   std::optional<std::size_t> prior_miss_;  ///< the miss before last_miss_
 };
 
-}  // namespace gufo::models::qwen38_flash_next
+}  // namespace gufo::speculative
 
 #endif

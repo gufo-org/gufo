@@ -3,7 +3,10 @@
 #include <array>
 #include <cassert>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 
 void TestDefaultOptions() {
@@ -201,7 +204,98 @@ void TestSamplingAndReasoningFlags() {
   assert(opt->prompt_text == "Explicit prompt text");
 }
 
+// Expected values are written out, independent of PresetDefaults.
+void TestPresetFixtures() {
+  using gufo::sampling::ResolveTextSampling;
+  using gufo::sampling::TextModelPreset;
+  const gufo::sampling::SamplingConfig configured;
+  const gufo::sampling::SamplingOverrides none;
+  struct Row {
+    TextModelPreset preset;
+    std::optional<bool> thinking;
+    float temperature;
+    float top_p;
+    int top_k;
+    float presence;
+  };
+  const Row rows[] = {
+      {TextModelPreset::kQwen38, true, 1.0F, 0.95F, 20, 0.0F},
+      {TextModelPreset::kQwen38, std::nullopt, 1.0F, 0.95F, 20, 0.0F},
+      {TextModelPreset::kQwen38, false, 0.7F, 0.8F, 20, 1.5F},
+      {TextModelPreset::kDeepSeekV4Flash, true, 1.0F, 0.95F, 0, 0.0F},
+      {TextModelPreset::kDeepSeekV4Flash, std::nullopt, 1.0F, 0.95F, 0, 0.0F},
+      {TextModelPreset::kDeepSeekV4Flash, false, 1.0F, 0.95F, 0, 0.0F},
+  };
+  for (const auto& row : rows) {
+    const auto r =
+        ResolveTextSampling(row.preset, row.thinking, configured, none);
+    assert(r.temperature == row.temperature && r.top_p == row.top_p &&
+           r.top_k == row.top_k && r.presence_penalty == row.presence &&
+           r.min_p == 0.0F && r.min_keep == 0 && r.seed == -1 &&
+           r.repeat_penalty == 1.0F && r.repeat_last_n == 64 &&
+           r.frequency_penalty == 0.0F);
+  }
+  const auto unspecified = ResolveTextSampling(TextModelPreset::kUnspecified,
+                                               true, configured, none);
+  assert(unspecified.temperature == 0.0F && unspecified.top_p == 1.0F);
+}
+
+void TestDefaultsValidation() {
+  gufo::sampling::TextSamplingDefaults defaults;
+  defaults.thinking_enabled.temperature = 0.0F;
+  gufo::sampling::ValidateTextSamplingDefaults(defaults);
+  for (auto* values :
+       {&defaults.thinking_unspecified, &defaults.thinking_enabled,
+        &defaults.thinking_disabled}) {
+    const auto valid = *values;
+    values->temperature = -1.0F;
+    bool rejected = false;
+    try {
+      gufo::sampling::ValidateTextSamplingDefaults(defaults);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+    *values = valid;
+  }
+}
+
+void TestProviderDefaults() {
+  using gufo::sampling::ResolveTextSampling;
+  gufo::sampling::TextSamplingDefaults provider;
+  provider.thinking_enabled = {
+      .temperature = 0.6F, .top_k = 64, .top_p = 0.9F, .min_p = 0.05F};
+  provider.thinking_disabled = {.temperature = 0.0F, .repeat_penalty = 1.2F};
+  const char* args[] = {"--top-k=0", "--top-p=1", "Hello"};
+  const auto cli = gufo::cli::ParsePromptOptions(args);
+  assert(cli);
+  const auto on = ResolveTextSampling(provider, true, cli->sampling,
+                                      cli->sampling_supplied);
+  assert(on.temperature == 0.6F && on.top_k == 0 && on.top_p == 1.0F &&
+         on.min_p == 0.05F);
+  const auto off = ResolveTextSampling(provider, false, cli->sampling,
+                                       cli->sampling_supplied);
+  assert(off.temperature == 0.0F && off.repeat_penalty == 1.2F &&
+         off.top_k == 0 && off.top_p == 1.0F && off.min_p == 0.0F);
+  const auto unset = ResolveTextSampling(provider, std::nullopt, cli->sampling,
+                                         cli->sampling_supplied);
+  assert(unset.temperature == 0.0F && unset.top_k == 0);
+  // No provider defaults: the command line is used unchanged.
+  const auto plain = ResolveTextSampling(std::nullopt, true, cli->sampling,
+                                         cli->sampling_supplied);
+  assert(plain.temperature == cli->sampling.temperature);
+  // The caller's constraint survives resolution.
+  auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
+  auto configured = cli->sampling;
+  configured.constraint = constraint;
+  assert(ResolveTextSampling(provider, true, configured, {}).constraint ==
+         constraint);
+}
+
 int main() {
+  TestPresetFixtures();
+  TestProviderDefaults();
+  TestDefaultsValidation();
   TestDefaultOptions();
   TestExplicitFlags();
   TestSamplingAndReasoningFlags();

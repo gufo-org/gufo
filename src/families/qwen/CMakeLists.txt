@@ -9,6 +9,7 @@
 #
 # Layer order (each layer may use the ones above it, never a model):
 #   control_tokens   header-only shared token spellings
+#   draft_vocab      header-only speculative draft-head vocabulary rules
 #   hip_common       header-only execution/attention policy, RoPE layout,
 #                    recurrent state, GEMM routing, quant helpers, hooks
 #   config           CPU-only GGUF configuration extraction
@@ -16,6 +17,7 @@
 #   kernels          shared HIP operators (ENGINE_ENABLE_HIP only)
 #   vision           vision encoder, image prompt, image cache
 add_subdirectory(control_tokens)
+add_subdirectory(draft_vocab)
 add_subdirectory(hip_common)
 add_subdirectory(config)
 add_subdirectory(text)

@@ -191,7 +191,7 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
     CheckHip(hipDeviceSynchronize(), "SSM inputs");
     if (!q::DenseF16SsmGemm(w, x, conv_w, conv_state, fused, scratch, batch, m,
                             k, channels, 4, replay == 2 ? main_stream : nullptr,
-                            0, replay == 2 ? z_stream : nullptr, z_start)) {
+                            {}, replay == 2 ? z_stream : nullptr, z_start)) {
       throw std::runtime_error("SSM projection rejected the shape");
     }
     CheckHip(hipDeviceSynchronize(), "SSM projection");

@@ -36,6 +36,8 @@ void deepseek_v4_flash_provider_register(gufo::ext::Registry& registry) {
       .bench_driver = &gufo::models::deepseek_v4_flash::RunDeepSeekBenchmark,
       .prompt_driver = &gufo::models::deepseek_v4_flash::RunDeepSeekPrompt,
       .chat_driver = &gufo::models::deepseek_v4_flash::RunDeepSeekChat,
+      .sampling_defaults =
+          &gufo::models::deepseek_v4_flash::DeepSeekSamplingDefaults,
   });
 #endif
 }

@@ -89,6 +89,51 @@ void TestReasoningBudgetForcesTheEnd() {
   Expect(!copy.ForcedToken(), "a restart resets the reasoning budget");
 }
 
+void TestReasoningBudgetWaitsForOpener() {
+  auto budget = std::make_shared<ReasoningBudget>(*Budget(2));
+  budget->opener = 9;
+  budget->blank = std::make_shared<std::vector<bool>>(
+      std::vector<bool>{false, true, false});
+  SamplingConfig config;
+  config.reasoning_budget = budget;
+  SamplerState opened(config);
+  opened.Accept(1);
+  opened.Accept(9);
+  Expect(!opened.ForcedToken(), "the opener itself spends no budget");
+  opened.Accept(2);
+  opened.Accept(2);
+  Expect(opened.ForcedToken() == TokenId{3},
+         "a self-opened block spends the budget");
+
+  SamplerState text(config);
+  text.Accept(2);
+  text.Accept(9);
+  text.Accept(2);
+  text.Accept(2);
+  Expect(!text.ForcedToken(), "an opener after text does not start a budget");
+
+  SamplerState closed(config);
+  closed.Accept(9);
+  closed.Accept(3);
+  closed.Accept(2);
+  closed.Accept(2);
+  Expect(!closed.ForcedToken(), "a closed block ends a self-opened budget");
+
+  auto zero = std::make_shared<ReasoningBudget>(*budget);
+  zero->tokens = 0;
+  config.reasoning_budget = zero;
+  SamplerState immediate(config);
+  Expect(!immediate.ForcedToken(), "no budget is spent before the opener");
+  immediate.Accept(9);
+  Expect(immediate.ForcedToken() == TokenId{3},
+         "a zero budget forces after the opener");
+
+  SamplerState copied(immediate);
+  Expect(copied.ForcedToken() == TokenId{3}, "a copy keeps the opened budget");
+  copied.ResetHistory({});
+  Expect(!copied.ForcedToken(), "a reset waits for the opener again");
+}
+
 void TestEarlyEndAndNoBudget() {
   SamplingConfig config;
   config.reasoning_budget = Budget(4);
@@ -402,6 +447,7 @@ void TestRawLogprobs() {
 int main() {
   TestRawLogprobs();
   TestReasoningBudgetForcesTheEnd();
+  TestReasoningBudgetWaitsForOpener();
   TestEarlyEndAndNoBudget();
   TestReasoningBudgetMatchesLlamaCpp();
   TestReasoningBudgetKeepsLiteralAnswer();

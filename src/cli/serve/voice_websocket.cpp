@@ -613,8 +613,13 @@ private:
     response["output_modalities"] = json::Value::array();
     response["output_modalities"].push_back(settings.audio_output ? "audio"
                                                                   : "text");
-    if (!Event("response.created", "response", response))
+    // Active before it is announced: a client may cancel on response.created.
+    cancel_ = false;
+    responding_ = true;
+    if (!Event("response.created", "response", response)) {
+      responding_ = false;
       return false;
+    }
     // The message item opens with the first text or audio.
     std::string item;
     std::string transcript, reasoning;
@@ -684,8 +689,6 @@ private:
     };
     VoiceConversation::Reply reply;
     std::string failure;
-    cancel_ = false;
-    responding_ = true;
     const bool ok =
         conversation_->Respond(settings, callbacks, &reply, &failure);
     responding_ = false;

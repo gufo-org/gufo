@@ -12,7 +12,7 @@
   "assets": {
     "flash-next": {
       "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
-      "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+      "revision": "d96201194f103c906994f283f504209dc8d2a10c",
       "patterns": [
         "UD-Q4_K_XL/*.gguf",
         "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
@@ -426,7 +426,6 @@
         "tests/cli/arg_parser_test.cpp",
         "tests/cli/bench_test.cpp",
         "tests/cli/component_text_cache_test.cpp",
-        "tests/cli/continuation_disk_store_test.cpp",
         "tests/cli/http_server_signals_test.cpp",
         "tests/cli/http_server_test.cpp",
         "tests/cli/http_server_test_support.hpp",

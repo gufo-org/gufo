@@ -716,6 +716,22 @@
       "vision_required": false,
       "tier": "release"
     },
+    "tool-type-unions": {
+      "covers": [
+        "tool-schemas",
+        "tools"
+      ],
+      "uses": [
+        "tokenization",
+        "framing",
+        "sampling",
+        "structured",
+        "generation"
+      ],
+      "status": "active",
+      "configuration": "standard",
+      "vision_required": false
+    },
     "tool-schema-edges": {
       "covers": [
         "limits",

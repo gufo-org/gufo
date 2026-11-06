@@ -50,7 +50,7 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
                                 AsrService& service) {
   const auto model = request.query_param("model");
   const auto intent = request.query_param("intent");
-  if ((!model.empty() && model != service.model_id() && model != "qwen3-asr") ||
+  if ((!model.empty() && !service.serves_model(model)) ||
       (!intent.empty() && intent != "transcription"))
     return {
         .status = 400,
@@ -318,8 +318,7 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
                 for (const auto& [name, value] : transcription->members()) {
                   if (!value.is_string())
                     throw std::invalid_argument(name + " must be a string");
-                  if (name == "model" && value.str() != service.model_id() &&
-                      value.str() != "qwen3-asr")
+                  if (name == "model" && !service.serves_model(value.str()))
                     throw std::invalid_argument(
                         "unsupported transcription model");
                   if (name == "language")

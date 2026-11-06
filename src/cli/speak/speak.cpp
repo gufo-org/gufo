@@ -55,7 +55,7 @@ ArgParser MakeParser(ext::SpeakOptions* o,
                    "Voice name (default: the model's first voice)", "Voice",
                    &o->voice);
   parser.AddOption("-o", "--output", "WAV",
-                   "Output 24 kHz WAV path (tts and chat modes)", "Output",
+                   "Output WAV path (tts and chat modes)", "Output",
                    &o->output_path);
   parser.AddOption("", "--format", "NAME",
                    "Report format: text or json (default: text)", "Output",

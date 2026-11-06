@@ -8,6 +8,7 @@ import stat
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,12 +16,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
+        self.timings = {"configure": 0.0, "build": 0.0}
+        self.calls = {"configure": 0, "build": 0}
         self.temporary = tempfile.TemporaryDirectory(prefix="gufo-discovery-")
         self.addCleanup(self.temporary.cleanup)
         # Windows may spell TEMP with 8.3 short names, while the manifest glob
         # returns long ones; relative extension sources need one spelling.
         self.source = Path(self.temporary.name).resolve()
         self.build = self.source / "build"
+        # Each case has a fresh source tree. Normalize its temporary paths so
+        # unchanged runtime objects remain reusable across cases and CI runs.
+        # clang-cl also hashes the working directory without debug flags.
+        # These disposable fixtures need no directory-specific debug paths;
+        # keep header/content validation but share objects across temp roots.
+        self.env = dict(os.environ, CCACHE_BASEDIR=str(self.source), CCACHE_NOHASHDIR="true")
         (self.source / "extensions.lock").write_text('{"schema":1,"extensions":[]}')
         (self.source / "main.cpp").write_text('''#include <iostream>
 #include "gufo/ext/registry.hpp"
@@ -33,6 +42,7 @@ int main(int argc, char**) {
 ''')
         (self.source / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.21)
 project(discovery_fixture LANGUAGES CXX)
+include("{ROOT.as_posix()}/cmake/CompilerCache.cmake")
 set(CMAKE_CXX_STANDARD 20)
 set(ENGINE_ENABLE_HIP OFF)
 include("{ROOT.as_posix()}/cmake/GufoExtensionDiscovery.cmake")
@@ -53,10 +63,25 @@ gufo_target_extensions(fixture EXTENSIONS ${{selected}})
         self.add("alpha", depends=["base"])
         self.add("beta", hip=True)
 
+    def tearDown(self):
+        # CTest retains this in LastTest.log even for successful cases.
+        print(f"discovery timing: {self._testMethodName}: "
+              f"configure={self.timings['configure']:.2f}s/{self.calls['configure']} calls, "
+              f"build={self.timings['build']:.2f}s/{self.calls['build']} calls", flush=True)
+
+    def timed_run(self, phase, command):
+        start = time.monotonic()
+        try:
+            return subprocess.run(command, env=self.env, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        finally:
+            self.timings[phase] += time.monotonic() - start
+            self.calls[phase] += 1
+
     def add(self, name, depends=None, family=False, hip=False):
         directory = self.source / (f"src/families/test/{name}" if family else f"src/models/{name}")
         directory.mkdir(parents=True, exist_ok=True)
-        manifest = {"schema": 1, "name": name, "version": "1.2.3", "api_version": ">= 0.1.0",
+        manifest = {"schema": 1, "name": name, "version": "1.2.3", "api_version": ">= 0.2.0",
                     "depends": depends or [], "platforms": ["linux", "windows"],
                     "targets": {f"{name}_registration": {"requires": []}}}
         if family:
@@ -82,8 +107,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         return directory
 
     def configure(self, *flags, error=None):
-        result = subprocess.run(["cmake", "-S", str(self.source), "-B", str(self.build), "-GNinja", *flags],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = self.timed_run("configure", ["cmake", "-S", str(self.source), "-B", str(self.build), "-GNinja", *flags])
         if error:
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn(error, " ".join(result.stdout.split()))
@@ -92,8 +116,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         return result.stdout
 
     def run_fixture(self):
-        result = subprocess.run(["cmake", "--build", str(self.build), "--target", "fixture", "--parallel", "2"],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = self.timed_run("build", ["cmake", "--build", str(self.build), "--target", "fixture", "--parallel", "2"])
         self.assertEqual(result.returncode, 0, result.stdout)
         return json.loads(subprocess.check_output([str(self.build / "fixture")], text=True))
 
@@ -223,12 +246,22 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         path = self.source / "src/models/beta/extension.json"
         original = json.loads(path.read_text())
         self.lock(["alpha", "base"])
-        for field in ("keys", "model_ids", "options"):
+        for field in ("keys", "model_ids"):
             data = copy.deepcopy(original)
-            if field == "options": data["options"][0]["name"] = "--alpha-path"
-            else: data["providers"][0][field] = ["gguf:alpha" if field == "keys" else "alpha-model"]
+            data["providers"][0][field] = ["gguf:alpha" if field == "keys" else "alpha-model"]
             path.write_text(json.dumps(data))
             self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error=f"{field} collision")
+
+    def test_shipped_unshipped_options_share_one_type(self):
+        path = self.source / "src/models/beta/extension.json"
+        data = json.loads(path.read_text())
+        self.lock(["alpha", "base"])
+        data["options"][0]["name"] = "--alpha-path"
+        path.write_text(json.dumps(data))
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON")
+        data["options"][0]["type"] = "string"
+        path.write_text(json.dumps(data))
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="conflicting option types")
 
     def test_disabled_target_dependency(self):
         path = self.source / "src/models/alpha/extension.cmake"
@@ -264,7 +297,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
             "schema": 1,
             "name": "external_model",
             "version": "1.0.0",
-            "api_version": ">= 0.1.0",
+            "api_version": ">= 0.2.0",
             "entry": "external_model_register",
             "registration_target": "gufo_external_model",
             "depends": [],
@@ -305,7 +338,7 @@ void external_model_register(gufo::ext::Registry&) {}
             "schema": 1,
             "name": "bad_ext",
             "version": "1.0.0",
-            "api_version": ">= 0.1.0",
+            "api_version": ">= 0.2.0",
             "entry": "bad_ext_register",
             "registration_target": "gufo_bad_ext",
             "depends": [],
@@ -383,6 +416,40 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
             path.chmod(path.stat().st_mode | stat.S_IWUSR)
         return external
 
+    def test_external_public_link_targets(self):
+        external_dir = Path(self.temporary.name) / "linked_ext"
+        external_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema": 1, "name": "linked_ext", "version": "1.0.0", "api_version": ">= 0.2.0",
+            "entry": "linked_ext_register", "registration_target": "gufo_linked_ext",
+            "depends": [], "platforms": ["linux", "windows"], "options": [],
+            "providers": [{"id": "linked-provider", "capability": "embeddings",
+                           "keys": ["safetensors:linked"], "model_ids": ["linked-model"],
+                           "target": "gufo_linked_ext", "entry": "linked_ext_provider_register"}],
+            "targets": {"gufo_linked_ext": {"requires": []}},
+        }
+        (external_dir / "extension.json").write_text(json.dumps(manifest))
+        (external_dir / "linked.cpp").write_text("""extern "C" {
+void linked_ext_provider_register(void*) {}
+void linked_ext_register(void*) {}
+}
+""")
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_linked_ext
+  SOURCES linked.cpp
+  LINK_LIBRARIES gufo_ext_runtime gufo_ext_core gufo_ext_cache
+)
+""")
+        cmake = self.source / "CMakeLists.txt"
+        cmake.write_text(cmake.read_text().replace("gufo_build_discovered_extensions()", """add_library(gufo_core INTERFACE)
+add_library(gufo_cache INTERFACE)
+add_library(gufo_ext_core INTERFACE)
+target_link_libraries(gufo_ext_core INTERFACE $<LINK_ONLY:gufo_core>)
+add_library(gufo_ext_cache INTERFACE)
+target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
+gufo_build_discovered_extensions()"""))
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}")
+
     def test_external_template_installs_license(self):
         external = self.template()
         self.configure(f"-DGUFO_EXTENSION_DIRS={external}")
@@ -418,7 +485,7 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
         # A private header outside the API SURFACE must fail to compile.
         source.write_text('#include "src/core/logging/trace.hpp"\n' + source.read_text())
         result = subprocess.run(["cmake", "--build", str(self.build), "--target", "gufo_template_model"],
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("src/core/logging/trace.hpp", result.stdout)
 

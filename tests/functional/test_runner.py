@@ -409,7 +409,7 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_rotation_checks_host_headroom_and_requested_limits(self):
         gib = 1024**3
         def log(capacity, sessions=1, entries=128):
-            return (f"event=snapshot_cache_configured sessions={sessions} "
+            return (f"schema=component-cache-v1 event=configured sessions={sessions} "
                     f"snapshot_entries={entries} capacity_bytes={capacity}\n")
         self.assertEqual(host_available_bytes("MemTotal: 9 kB\nMemAvailable: 4096 kB\n"),
                          4096 * 1024)
@@ -533,6 +533,26 @@ class FunctionalRunnerTest(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 check_unchanged_retry("history", retry, 24, log, 0, log.stat().st_size,
                                       mutable_suffix_tokens=24)
+
+    def test_pressure_retry_allows_only_the_aligned_stable_boundary(self):
+        from cache_growth import check_unchanged_retry
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            # Flash-Next rounds the counted boundary 1305 down to 1304 (#1017).
+            log.write_text("schema=component-cache-v1 event=capture_refused "
+                           "reason=byte_capacity tokens=1329\n")
+            retry = {"usage": {"prompt_tokens": 1329}}
+            check_unchanged_retry("history", retry, 25, log, 0, log.stat().st_size,
+                                  mutable_suffix_tokens=24)
+            with self.assertRaises(AssertionError):
+                check_unchanged_retry("history", retry, 26, log, 0, log.stat().st_size,
+                                      mutable_suffix_tokens=24)
+            # An already aligned boundary 1304 leaves no extra token.
+            log.write_text("schema=component-cache-v1 event=capture_refused "
+                           "reason=byte_capacity tokens=1328\n")
+            with self.assertRaises(AssertionError):
+                check_unchanged_retry("history", {"usage": {"prompt_tokens": 1328}}, 25,
+                                      log, 0, log.stat().st_size, mutable_suffix_tokens=24)
 
     def test_disk_spacing_uses_capture_ids_for_delayed_publications(self):
         totals = (2400, 2680, 2960, 3240, 3520, 5960, 6240)
@@ -1856,7 +1876,7 @@ import json, sys
 from pathlib import Path
 output = Path(sys.argv[sys.argv.index("--output") + 1])
 (output.parent / "disk").mkdir(exist_ok=True)
-(output.parent / "disk" / "entry.kvc").write_bytes(b"x")
+(output.parent / "disk" / "entry").write_bytes(b"x")
 payload = ({continuation_report!r} if Path(__file__).name == "continuation.py"
            else {{"exact": {spacing_exact!r}}})
 output.write_text(json.dumps([payload]))

@@ -50,24 +50,4 @@ public:
   virtual void Invalidate() noexcept = 0;
 };
 
-/// Immutable model-private continuation payload.
-class ContinuationSnapshot {
-public:
-  ContinuationSnapshot() = default;
-  virtual ~ContinuationSnapshot() = default;
-
-  ContinuationSnapshot(const ContinuationSnapshot&) = delete;
-  ContinuationSnapshot& operator=(const ContinuationSnapshot&) = delete;
-  ContinuationSnapshot(ContinuationSnapshot&&) = delete;
-  ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
-
-  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
-  /// Prefer an available state that still holds this snapshot's borrowed rows.
-  /// This is an allocation hint; every state must remain able to restore it.
-  [[nodiscard]] virtual bool PrefersState(
-      const ContinuationState&) const noexcept {
-    return false;
-  }
-};
-
 }  // namespace gufo::ext

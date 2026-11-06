@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,6 +35,16 @@ using ext::TextDFlashDraftPolicyName;
 }
 }  // namespace speculative
 
+/// Generated tokens with reasoning text, excluding the delimiters. Text output
+/// has none. Reasoning the prompt opened ends at `close`, after any repeated
+/// `open`; an automatic output counts only a block it opens itself, after blank
+/// text. An unclosed block counts to the end.
+[[nodiscard]] std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning,
+    const std::function<std::string(tokenization::TokenId)>& decode);
+
 /// Thread-safe HTTP inference facade over shared immutable GPU model resources
 /// and a bounded pool of request-owned executor sessions.
 class InferenceBackend final : public TextGenerationBackend {
@@ -51,8 +62,9 @@ public:
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
-  /// `enable_yarn` opts Flash-Next into static YaRN, required for (and only
-  /// accepted with) a `max_context` above its native context.
+  /// `enable_yarn` opts Flash-Next into YaRN, required for (and only accepted
+  /// with) a `max_context` above its native context; each session scales only
+  /// past the native context.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},

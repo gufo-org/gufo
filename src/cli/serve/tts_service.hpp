@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +15,12 @@
 #include "src/cli/serve/audio_buffer.hpp"
 
 namespace gufo::server {
+
+/// Exact `error` text set by `TtsService::Synthesize()` when it rejects the
+/// runner's output (null result, or `sample_rate` disagreeing with the rate
+/// the service announced). HTTP handlers map this to `invalid_audio`.
+inline constexpr std::string_view kInvalidSynthesisResultError =
+    "TTS provider returned an invalid synthesis result";
 
 /// An operator-registered named voice: reference audio the server holds on
 /// behalf of clients, so a Base checkpoint can be driven by voice name alone
@@ -38,8 +45,13 @@ struct TtsServiceOptions {
   std::filesystem::path projector_path;
   std::size_t native_context_tokens{4096};
   bool validate_model{true};
+  std::uint32_t sample_rate{24000};
   ext::TtsVariant variant{ext::TtsVariant::kCustomVoice};
+  std::optional<ext::TtsConditioningCapabilities> conditioning;
   std::string model_id;
+  /// Additional IDs accepted from requests; `model_id` stays primary in
+  /// listings and responses (#957).
+  std::vector<std::string> model_aliases;
   std::vector<std::string> voices;
   std::map<std::string, TtsVoicePreset> voice_presets;
   Runner runner;
@@ -62,12 +74,18 @@ public:
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::string initialization_error() const;
   [[nodiscard]] std::string model_id() const;
+  /// True for the primary ID, a built-in alias, or a configured alias.
+  [[nodiscard]] bool serves_model(std::string_view name) const;
+  [[nodiscard]] const std::vector<std::string>& model_aliases() const;
   [[nodiscard]] std::string backend_name() const;
   [[nodiscard]] std::vector<std::string> voices() const;
   /// Registered preset for `name`, or nullptr when `name` is not a preset.
   [[nodiscard]] const TtsVoicePreset* voice_preset(
       const std::string& name) const;
+  [[nodiscard]] std::uint32_t sample_rate() const noexcept;
   [[nodiscard]] ext::TtsVariant variant() const noexcept;
+  [[nodiscard]] const ext::TtsConditioningCapabilities& conditioning()
+      const noexcept;
 
   [[nodiscard]] bool Synthesize(const ext::SynthesisRequest& request,
                                 const ext::CancellationCheck& is_cancelled,

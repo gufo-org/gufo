@@ -75,6 +75,13 @@ public:
   }
   [[nodiscard]] virtual Capabilities GetCapabilities() const = 0;
   // Descriptors are stable for the adapter lifetime; each ID is unique.
+  //
+  // A kWindowRows component may keep its rows in a ring. Row numbers stay
+  // absolute: positions and transfers count every row since the start, never a
+  // ring offset. The ring holds at least window_rows + rows_per_chunk - 1 rows,
+  // the most a checkpoint retains. Call MutationGuard::BeforeOverwrite before
+  // evicting a row, as for any overwrite, because checkpoints may borrow it.
+  // BorrowRowsView returns empty for a range that wraps the ring.
   [[nodiscard]] virtual std::span<const ComponentDescriptor> Components()
       const = 0;
   [[nodiscard]] virtual Identity CompatibilityIdentity() const = 0;

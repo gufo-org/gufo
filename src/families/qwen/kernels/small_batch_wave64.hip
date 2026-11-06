@@ -16,8 +16,11 @@ void LaunchWideFfn(const void* w, const float* x, float* y, std::size_t batch,
     constexpr unsigned kLanes = Type == core::GgmlType::kIQ4_NL ? 16 : 32;
     constexpr unsigned kRows = Type == core::GgmlType::kIQ4_NL ? 4 : 6;
     constexpr unsigned kRowsPerBlock = 8 * kRows * (32 / kLanes);
+    // One IQ4_NL token step spills ~300-400 VGPRs on ROCm 10.1; stepping
+    // every token at once does not. Each token keeps its own dot products.
+    constexpr std::size_t kStep = Type == core::GgmlType::kIQ4_NL ? Batch : 1;
     SmallBatchKQuantExactFp32GEMMKernel<8, Batch, kRows, Type, 1, 4, Groups,
-                                        true, 1, 64, kLanes>
+                                        true, kStep, 64, kLanes>
         <<<((17408 + kRowsPerBlock - 1) / kRowsPerBlock) * Groups, 256, 0,
            stream>>>(w, x, y, 17408, 5120);
   };
@@ -98,13 +101,16 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
         return;
       }
     }
+    // Sixteen-lane IQ4_XS groups step two tokens at a time: one-token steps
+    // spill 110-400 VGPRs on ROCm 10.1. Each token keeps its own dots and
+    // accumulation order, so the step changes only the schedule.
     if constexpr (Type == core::GgmlType::kIQ4_XS && Batch == 16) {
       if (down) {
-        launch.template operator()<8, 4, 1, 4, Groups == 1 ? 2 : 1, true, 16>();
+        launch.template operator()<8, 4, 1, 4, 2, true, 16>();
         return;
       }
       if (k == 5120 && (m == 17408 || m == 34816)) {
-        launch.template operator()<8, 4, 1, 4, 1, true, 16>();
+        launch.template operator()<8, 4, 1, 4, 2, true, 16>();
         return;
       }
     }
@@ -112,7 +118,7 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
                   (Batch == 12 || Batch == 14)) {
       if ((m == 34816 && k == 5120) || (Batch == 14 && Groups > 1 && down)) {
         constexpr std::size_t kRows = Batch == 12 ? 3 : 4;
-        launch.template operator()<8, kRows, 1, 4, 1, true, 16>();
+        launch.template operator()<8, kRows, 1, 4, 2, true, 16>();
         return;
       }
     }
@@ -623,8 +629,11 @@ bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType type, const void* gate_up,
         constexpr unsigned kLanes = Type == core::GgmlType::kIQ4_XS ? 16 : 32;
         constexpr std::size_t kRows = Type == core::GgmlType::kIQ4_XS ? 4 : 6;
         constexpr std::size_t kRowsPerBlock = 8 * kRows * (32 / kLanes);
+        // See Launch: one-token IQ4_XS steps spill on ROCm 10.1.
+        constexpr std::size_t kStep = Type == core::GgmlType::kIQ4_XS ? 2 : 1;
         SmallBatchKQuantExactFp32GEMMKernel<8, Batch, kRows, Type, 1, 4, Groups,
-                                            true, 1, 64, kLanes, true, true>
+                                            true, kStep, 64, kLanes, true,
+                                            true>
             <<<((34816 + kRowsPerBlock - 1) / kRowsPerBlock) * Groups, 256, 0,
                stream>>>(gate_up, input, output, 34816, 5120);
       };

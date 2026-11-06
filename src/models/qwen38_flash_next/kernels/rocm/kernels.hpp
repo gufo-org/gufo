@@ -248,7 +248,7 @@ bool HcDownF16Gemm(const void* w, const void* x_tiled, __half* out,
 /// Fixed geometry: 24 query heads, two KV heads, 256 dimensions, 64 rotary.
 /// Requires at least 1024 tokens; cache capacity must include position +
 /// tokens.
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 bool AttentionF16Gemm(const void* weights, const __half* input,
                       const float* q_gamma, const float* k_gamma, float* query,
                       float* gate, __half* keys, __half* values,
@@ -281,6 +281,16 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
+/// Most checkpoints one prefill pass captures in place.
+inline constexpr std::uint32_t kMaxPassCheckpoints = 4;
+
+/// Prefixes of a prefill pass, in rows from its start and ascending, whose
+/// state an in-pass checkpoint captures while the pass continues.
+struct PassCheckpoints {
+  std::uint32_t tokens[kMaxPassCheckpoints] = {};
+  std::uint32_t count = 0;
+};
+
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
 /// every Z row plus the QKV rows required for tile boundaries and rolling
@@ -296,7 +306,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0,
+                     hipStream_t stream, PassCheckpoints checkpoints = {},
                      hipStream_t z_stream = nullptr,
                      hipEvent_t z_start = nullptr);
 
@@ -377,10 +387,14 @@ void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
                    std::uint32_t channels, std::uint32_t history_rows,
                    hipStream_t stream);
 
+/// The recurrent state and rolling convolution history at each prefix of
+/// `tokens` (ascending rows from the pass start). Null entries skip that
+/// part of a checkpoint.
 struct GdnCheckpoint {
-  float* state = nullptr;
-  float* history = nullptr;
-  std::uint32_t tokens = 0;
+  float* state[kMaxPassCheckpoints] = {};
+  float* history[kMaxPassCheckpoints] = {};
+  std::uint32_t tokens[kMaxPassCheckpoints] = {};
+  std::uint32_t count = 0;
 };
 
 /// Gated DeltaNet over a chunk of tokens for one layer. Runs the causal
@@ -461,7 +475,7 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
 /// With zero query heads, packed contains only K/V and q/gate may be null.
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const float* q_gamma, const float* k_gamma, float* q,
                       float* gate, __half* k_cache, __half* v_cache,
@@ -476,7 +490,7 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
 /// Positions are read from device memory (`start_pos` points at the
 /// session's control block) so a captured decode graph replays at any
 /// position.
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t d, std::uint32_t rotary_dim,
           const std::uint32_t* start_pos, float theta, hipStream_t stream,
@@ -499,7 +513,7 @@ void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
 /// block start position, then round once to F16 for scoring.
 /// `grid_blocks` bounds how many blocks one launch
 /// can pool (a device-side bound is not available at launch time).
-/// With yarn enabled, applies static YaRN (see rope_scaling.hpp).
+/// With yarn enabled, applies YaRN with its constants (see rope_scaling.hpp).
 void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        __half* blocks, const std::uint32_t* first_block,
                        const std::uint32_t* start_pos, std::uint32_t n_tokens,
@@ -508,6 +522,17 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        float eps, std::uint32_t capacity, hipStream_t stream,
                        const qwen::vision::DeviceRope* rope = nullptr,
                        const YarnRope& yarn = {});
+
+/// Dynamic YaRN: re-rotates `n_rows` cached post-RoPE key rows of `heads`
+/// heads (`head_dim` apart, first `rotary` dimensions rotated split-half)
+/// from the scaling `from` to `to`. Row r of `source` is at rope position
+/// (first_row + r) * pos_stride. `destination` may alias `source`.
+void RerotateKeys(const __half* source, __half* destination,
+                  std::uint32_t first_row, std::uint32_t n_rows,
+                  std::uint32_t heads, std::uint32_t head_dim,
+                  std::uint32_t rotary, std::uint32_t pos_stride, float theta,
+                  const qwen::vision::DeviceRope* rope, const YarnRope& from,
+                  const YarnRope& to, hipStream_t stream);
 
 /// Per query t (position *start_pos + first_token + t): scores every
 /// complete block below its own tail, keeps the `budget` highest, and
@@ -563,6 +588,13 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
 /// Returns false when the visible extent exceeds
 /// WmmaCausalAttentionContextLimit or the mask stride; the caller falls back
 /// to Attention.
+/// With a mask, each tile packs four consecutive queries from the first row
+/// and gathers the union of their selections, so a row's rounding depends on
+/// which queries share its tile. A prompt split therefore matches one pass
+/// only when every pass after the first starts on a multiple of four.
+/// Session::Feed keeps its own passes there, and the serving runner rounds
+/// pass ends and checkpoints to TextRunnerCapabilities::prefill_alignment
+/// (asserted in TextRunnerPool::Request::Prefill).
 bool WmmaCausalAttention(const float* q, const float* gate,
                          const __half* k_cache, const __half* v_cache,
                          const std::uint32_t* mask, std::uint32_t mask_words,

@@ -165,7 +165,14 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
   constexpr std::uint32_t kWavesPerBlock = 4;
   constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
 
-  if (M >= 2 && (M % 2 == 0)) {
+  // The K-quants take one row per warp: the two-row kernel runs its rows one
+  // after the other, so it only halves the warps in flight. Q4_K ssm_out
+  // (2048 x 4096) goes from 40.4 to 29.0 us, with the same per-row
+  // arithmetic.
+  const bool one_row_per_warp = type == core::GgmlType::kQ4_K ||
+                                type == core::GgmlType::kQ5_K ||
+                                type == core::GgmlType::kQ6_K;
+  if (!one_row_per_warp && M >= 2 && (M % 2 == 0)) {
     const std::size_t num_pairs = M / 2;
     const std::size_t grid = (num_pairs + kWavesPerBlock - 1U) / kWavesPerBlock;
     const auto launch = [&]<core::GgmlType StaticType>() {
@@ -173,12 +180,6 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
           <<<grid, kBlockThreads, 0, stream>>>(A, type, x, y, M, K);
     };
     switch (type) {
-      case core::GgmlType::kQ4_K:
-        launch.template operator()<core::GgmlType::kQ4_K>();
-        break;
-      case core::GgmlType::kQ5_K:
-        launch.template operator()<core::GgmlType::kQ5_K>();
-        break;
       case core::GgmlType::kIQ4_XS:
         launch.template operator()<core::GgmlType::kIQ4_XS>();
         break;

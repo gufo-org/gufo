@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "gufo/ext/adapter.hpp"
@@ -44,6 +45,23 @@ struct TextPromptContext {
       std::size_t token_count) const {
     return PrefixInputIdentity(cache_identity, cache_prefixes, token_count);
   }
+  /// Moves a candidate prefill stop, a token count, to a position where
+  /// prefill may end: the nearest legal one at or before `position`, or at or
+  /// after it when `up`. A model whose input rows must be evaluated in one
+  /// forward, such as image rows attending each other, returns the first row
+  /// of the span containing `position` (down) or the position after its last
+  /// token (up). Positions at span edges and outside spans are legal and must
+  /// be returned unchanged, and the result must be a fixed point of this
+  /// function. The pool applies it to cache checkpoints, snapshot and shared
+  /// prefix boundaries, and never restores a checkpoint inside a span. A step
+  /// that starts at a span consumes the whole span even beyond its token
+  /// budget, so the runner's scratch must fit its largest span, and a runner
+  /// consuming less than a step must not stop inside one. The default declares
+  /// no spans.
+  [[nodiscard]] virtual std::size_t PrefillStop(std::size_t position,
+                                                bool /*up*/) const {
+    return position;
+  }
 };
 
 struct TextPreparedPrompt {
@@ -55,7 +73,6 @@ struct TextPreparedPrompt {
 
 struct TextRunnerRamCacheOptions {
   static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
-  static constexpr std::size_t kMaxEntries = 128;
   std::size_t capacity_bytes{0};
   bool enabled{true};
 };
@@ -89,8 +106,6 @@ struct TextExecutionPlan {
 struct TextRunnerCapabilities {
   bool supports_vision{false};
   bool incremental_prefill{false};
-  bool snapshot{false};
-  bool fork{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
@@ -100,13 +115,13 @@ struct TextRunnerCapabilities {
   bool in_pass_checkpoint{false};
   bool partial_prefill_retention{false};
   bool prefill_rollback{false};
-};
-
-struct TextRunnerPersistenceDescriptor {
-  std::vector<std::uint8_t> compatibility_identity;
-  std::uint32_t payload_version{0};
-
-  bool operator==(const TextRunnerPersistenceDescriptor&) const = default;
+  /// Prefill continues a prompt exactly only from positions divisible by
+  /// this. Intermediate pass ends and published prompt checkpoints are
+  /// rounded down to it, except the complete prompt, which only an
+  /// unchanged retry restores; one keeps every position.
+  std::size_t prefill_alignment{1};
+  /// Boundaries one PrefillThrough call may capture in place.
+  std::size_t max_in_pass_checkpoints{1};
 };
 
 struct TextRunnerDescriptor {
@@ -114,7 +129,10 @@ struct TextRunnerDescriptor {
   std::string state_abi;
   std::uint32_t max_context{0};
   TextRunnerCapabilities capabilities;
-  std::optional<TextRunnerPersistenceDescriptor> persistence;
+  /// Provider-defined sampling defaults. They take precedence over
+  /// `sampling_preset`; neither set leaves controls to the caller.
+  std::optional<sampling::TextSamplingDefaults> sampling_defaults;
+  /// Core preset kept for existing extensions.
   sampling::TextModelPreset sampling_preset{
       sampling::TextModelPreset::kUnspecified};
 };
@@ -193,17 +211,6 @@ public:
 private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
-};
-
-class TextRunnerSnapshot : public ContinuationSnapshot {
-public:
-  TextRunnerSnapshot() = default;
-  ~TextRunnerSnapshot() override = default;
-
-  TextRunnerSnapshot(const TextRunnerSnapshot&) = delete;
-  TextRunnerSnapshot& operator=(const TextRunnerSnapshot&) = delete;
-  TextRunnerSnapshot(TextRunnerSnapshot&&) = delete;
-  TextRunnerSnapshot& operator=(TextRunnerSnapshot&&) = delete;
 };
 
 struct TextRunnerAdvance {
@@ -343,6 +350,13 @@ public:
       const {
     return sampling::JsonConstraint::ToolFormat::kJson;
   }
+  /// Identity of the tool dialect that constrains and parses this runner's
+  /// calls: a built-in identity (BuiltinToolDialectId) or the `id` of a
+  /// registered ToolDialect. The default is the built-in identity of
+  /// ToolFormat(), so existing runners keep their format; a runner that
+  /// overrides this need not override ToolFormat(). The host rejects a runner
+  /// whose identity is neither built in nor registered at load.
+  [[nodiscard]] virtual std::string ToolDialectId() const;
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
   std::size_t PrepareConstraintVocabulary() const;
@@ -351,10 +365,22 @@ public:
   [[nodiscard]] virtual ReasoningTags ReasoningBudgetTags() const {
     return {"<think>", "</think>", {"</think>"}};
   }
+  /// Delimiters the OpenAI-compatible endpoints split reasoning by, buffered
+  /// and streamed alike. By default they follow the budget tags: `start` opens
+  /// and the first of `ends` closes (Qwen and DeepSeek: `<think>`, `</think>`);
+  /// runners that declare no budget tags keep `<think>`, `</think>`.
+  /// Override when the literal framing differs from the budget control tokens,
+  /// keeping them about the same block: `ReasoningBudgetTags().start` is the
+  /// control token that begins `open`, and its `ends` include the one for
+  /// `close`. `open` must not begin with whitespace, which parsers skip.
+  using ReasoningMarkup = ext::ReasoningMarkup;
+  [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const;
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,
-                       std::span<const TextRunnerToken> prompt) const;
+                       std::span<const TextRunnerToken> prompt,
+                       ext::InitialOutputState initial =
+                           ext::InitialOutputState::kThought) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
@@ -401,15 +427,14 @@ public:
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
 
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
-      const = 0;
-
-  [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
+  /// Continuation contract. The cache owns every execution slot: it creates
+  /// the resources once, binds a state to each slot, and reconciles a state
+  /// after restoring rows into its slot at the given position.
   [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
-  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
+  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const = 0;
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
-      cache::Adapter&, cache::Slot&) const;
-  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
+      cache::Adapter&, cache::Slot&) const = 0;
+  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const = 0;
   [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
     return true;
   }
@@ -434,15 +459,25 @@ public:
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
+  /// Returns a claim only when this chunk covers the boundary, ending
+  /// beyond it, and can capture it in place. Admission happens before
+  /// allocating checkpoint state.
   [[nodiscard]] virtual std::optional<std::size_t> PrefillCheckpointBytes(
       const TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
       std::size_t, std::size_t) const {
     return std::nullopt;
   }
+  /// Prefills one chunk like Prefill, capturing each of the ascending
+  /// `boundaries` the chunk covers (at most max_in_pass_checkpoints, each
+  /// with a PrefillCheckpointBytes claim) without ending a pass there. Each
+  /// capture must equal the state a pass ending at its boundary leaves. The
+  /// runner invokes `consume` with each boundary's index, synchronously while
+  /// that boundary is readable as the lease's component state; it must drain
+  /// its captures before returning.
+  using InPassConsumer = std::function<void(std::size_t)>;
   [[nodiscard]] virtual TextPrefillStep PrefillThrough(
       TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
-      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
+      std::size_t, std::span<const std::size_t>, const InPassConsumer&) const {
     throw std::logic_error("runner does not support in-pass checkpoints");
   }
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
@@ -463,30 +498,6 @@ public:
   }
   [[nodiscard]] virtual bool DeviceUsable() const { return true; }
 
-  [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
-      const TextRunnerState& state) const;
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
-      const TextRunnerState& state) const;
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot>
-  SnapshotForPersistence(const TextRunnerState& state) const;
-
-  virtual void RestoreOrFork(TextRunnerState& state,
-                             const TextRunnerSnapshot& snapshot) const;
-
-  [[nodiscard]] virtual std::size_t PersistentSnapshotPayloadBytes(
-      const TextRunnerSnapshot& snapshot) const;
-
-  [[nodiscard]] virtual std::size_t SerializePersistentSnapshot(
-      const TextRunnerSnapshot& snapshot,
-      std::span<std::uint8_t> destination) const;
-
-  using SnapshotSink = std::function<void(std::span<const std::uint8_t>)>;
-  virtual void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
-                                        const SnapshotSink& sink) const;
-
-  virtual void RestorePersistentSnapshot(
-      TextRunnerState& state, std::span<const std::uint8_t> payload) const;
-
 private:
   mutable std::mutex constraint_mutex_;
   mutable std::shared_ptr<const sampling::ConstraintVocabulary>
@@ -494,6 +505,7 @@ private:
   mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
       constraints_;
   mutable std::shared_ptr<const std::vector<bool>> partial_utf8_;
+  mutable std::shared_ptr<const std::vector<bool>> blank_tokens_;
 };
 
 using TextRunner = TextModelRunner;
@@ -625,6 +637,15 @@ struct TextPromptOptions {
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+
+  /// Thinking mode these options select; a reasoning effort implies enabled.
+  [[nodiscard]] std::optional<bool> thinking_mode() const {
+    if (reasoning_mode == "on" || reasoning_effort != "auto")
+      return true;
+    if (reasoning_mode == "off")
+      return false;
+    return std::nullopt;
+  }
 };
 
 struct ScannedToolArgument {
@@ -641,6 +662,51 @@ struct ScannedToolCall {
   bool complete{false};
 };
 
+/// A provider's native tool-call dialect: the identity runners select it by,
+/// the grammar that constrains calls and the parser that reads them back.
+///
+/// Identity: `id` (or, when empty, BuiltinToolDialectId(format)). `json` and
+/// `qwen` are parsed by the host and cannot be registered; `deepseek` is the
+/// DeepSeek extension's registration. A TextModelRunner selects a dialect with
+/// ToolDialectId(), and that one identity drives both constrained generation
+/// and the buffered and streamed parsers of every OpenAI-compatible and
+/// Messages endpoint. Only the selected dialect's `markers` start calls; other
+/// dialects' markup is ordinary text.
+///
+/// Grammar: `syntax` describes the native call syntax (JsonConstraint::
+/// ToolSyntax), compiled from each tool's JSON schema for tool_choice
+/// required/auto, strict and best-effort tools; tool_choice none leaves the
+/// output unconstrained. Without `syntax`, the built-in grammar of `format`
+/// (kQwen or kDeepSeek) is used.
+///
+/// Parsing: `markers` open a call (each must contain '<' and `syntax->open`
+/// must be one of them); `reasoning_markers` are complete native call headers
+/// which end a constrained reasoning phase (normally `open + name_prefix`
+/// when `syntax->reasoning_header`); `closers` are closing tags the host
+/// removes when the model echoes them directly after an accepted call.
+/// `scan_tool_calls` receives the text from the first marker to the end,
+/// the markers, and must append each call it finds in order and, to
+/// `spans`, the [begin, end) byte range of each complete call or call block
+/// relative to `text`; text outside spans is content. The host accepts a
+/// call that is `complete` and `valid` (false: malformed arguments) and names
+/// a declared tool. Argument values are strings (`is_string`) or JSON text,
+/// which the host checks against the declared schema: a provider whose native
+/// values are not JSON converts them. With `partial`, the text may end inside
+/// a call: the scanner then also appends the one unfinished call that later
+/// text could still complete, with `complete` false, only the arguments
+/// already closed and, in `unfinished`, a string argument still open, and
+/// stops. The host streams these as argument deltas, so they must only grow;
+/// a call that is already malformed is not appended. The final, non-partial
+/// parse is authoritative.
+///
+/// Lifetime: register during extension registration, before any runner is
+/// created; registration is not thread-safe with lookups. The registry owns
+/// the dialect; pointers from FindToolDialect stay valid for the process,
+/// and registering the same identity again replaces it in place.
+/// RegisterToolDialect throws std::invalid_argument for a dialect it cannot
+/// use: a built-in host identity, no markers, a marker without '<', no
+/// scan_tool_calls, `syntax->open` not among the markers, or neither `syntax`
+/// nor a native `format`.
 struct ToolDialect {
   sampling::JsonConstraint::ToolFormat format{
       sampling::JsonConstraint::ToolFormat::kJson};
@@ -652,10 +718,21 @@ struct ToolDialect {
       std::vector<ScannedToolCall>* calls,
       std::vector<std::pair<std::size_t, std::size_t>>* spans, bool partial);
   ScanToolCallsFn scan_tool_calls{nullptr};
+  std::string id;
+  std::optional<sampling::JsonConstraint::ToolSyntax> syntax;
 };
+
+/// `json`, `qwen` or `deepseek`: the identity of a built-in format.
+[[nodiscard]] std::string_view BuiltinToolDialectId(
+    sampling::JsonConstraint::ToolFormat format);
 
 using TextProbe = bool (*)(std::string_view model_root);
 using TextProbeGguf = bool (*)(const core::GgufReader& reader);
+/// Sampling defaults of the model in `reader`, for prompt and chat; `nullopt`
+/// leaves controls to the command line.
+using TextSamplingDefaultsProbe =
+    std::optional<sampling::TextSamplingDefaults> (*)(
+        const core::GgufReader& reader);
 using TextRunnerFactory = std::shared_ptr<TextModelRunner> (*)(
     const TextRunnerOptions& options, std::string* error);
 using TextBenchDriver =
@@ -677,6 +754,7 @@ struct TextProvider {
   TextBenchDriver bench_driver = nullptr;
   TextPromptDriver prompt_driver = nullptr;
   TextChatDriver chat_driver = nullptr;
+  TextSamplingDefaultsProbe sampling_defaults = nullptr;
 };
 
 void RegisterTextProvider(TextProvider provider);
@@ -685,6 +763,9 @@ const TextProvider* ProbeTextProvider(std::string_view model_root);
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader);
 
 void RegisterToolDialect(ToolDialect dialect);
+/// The registered dialect with this identity, or null.
+const ToolDialect* FindToolDialect(std::string_view id);
+/// The registered dialect whose identity is BuiltinToolDialectId(format).
 const ToolDialect* FindToolDialect(sampling::JsonConstraint::ToolFormat format);
 std::vector<const ToolDialect*> AllToolDialects();
 

@@ -37,8 +37,10 @@ For Nix command generation and deployment validation, see
 - `context` — maximum context capacity; memory use depends on the model and
   the number of resident sessions.
 - `enableYarn` — Qwen3.8-Flash-Next only: allow a `context` above the native
-  262144 tokens through static YaRN, which applies to every request. Required
-  above 262144 and rejected at or below it.
+  262144 tokens through YaRN. A session keeps the native rotation while it
+  holds at most 262144 tokens, then takes the smallest whole factor covering
+  its positions, up to `context` / 262144. Required above 262144 and rejected
+  at or below it.
 - `prefillChunk` — prompt tokens processed between active decode steps in
   HTTP serving. Model runtimes choose their own internal prefill batch sizes.
 - `maxTokens` — maximum number of tokens a request may generate. In practice:
@@ -241,16 +243,14 @@ These apply to every modality, before or after the subcommand:
 - `maxRequestBytes` — maximum request body size. In practice: matters mostly
   for ASR, since requests carry whole audio files (the audio benchmark used
   32 MiB).
-- `apiKey` — if set, requests require `Authorization: Bearer <key>`, including
-  health checks. Browser CORS preflight (`OPTIONS`) remains unauthenticated.
 - `logLevel` (`--log-level <error|warn|info|debug>`, default `info`) — how much
   the server logs. In practice: `debug` is the level that explains a stalled
   client, because it also shows health polls, admission refusals with the limit
   that rejected them, and cache candidate decisions. `verbose` (`-v`) is
   shorthand for `--log-level=debug`; passing both is a usage error. The tier is
   a threshold all the way down, and the `event=listening` startup confirmation
-  is INFO-tier, so `warn` and `error` boot and stop silently. Prompt text,
-  message bodies and the API key are never logged at any level; only the
+  is INFO-tier, so `warn` and `error` boot and stop silently. Prompt text and
+  message bodies are never logged at any level; only the
   separate, opt-in `trace` file records content. Debug admission lines do name
   the client by the peer IP address of its connection. See
   [server logs](SERVER.md#troubleshooting-logs).

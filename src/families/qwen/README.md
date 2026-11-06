@@ -8,6 +8,7 @@ and family code never includes a model header.
 | Library | Target | Kind | Contents | Used by |
 | --- | --- | --- | --- | --- |
 | `control_tokens` | `gufo_qwen_control_tokens` | interface | Shared control-token spellings in `gufo::tokenization`. | Qwen 27B, Flash-Next, Qwen3-TTS, Qwen-Image-2.1, MiniMax H3 |
+| `draft_vocab` | `gufo_qwen_draft_vocab` | interface | Speculative draft-head vocabulary: the 98,304-row prefix plus per-request table and the rules for when a draft may use it. | Qwen 27B (DFlash2), Flash-Next (MTP) |
 | `hip_common` | `gufo_qwen_hip_common` | interface | Execution policy, attention policy, recurrent-state layout, GEMM routing, quantization helpers, the RoPE layout shared by attention and vision, and the continuation-hook interface. Below `kernels` and `vision`. | kernels, vision, Qwen 27B, Flash-Next |
 | `config` | `gufo_qwen_config` | static (CPU) | `ExtractQwenConfig`: Qwen GGUF configuration extraction and structural validation. Reaches no HIP. | Qwen 27B, text (chat-template shape check), `prompt` |
 | `text` | `gufo_qwen_text` | static (CPU) | Tokenizer and bounded deterministic ChatML template. | Qwen 27B, Flash-Next, Qwen-Image-2.1 |

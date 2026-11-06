@@ -71,6 +71,7 @@ gufo_extension_target(
     gufo_cache_hip
     gufo_qwen_kernels
     gufo_qwen_vision
+    gufo_qwen_draft_vocab
     gufo_compare
     hip::host
 )
@@ -103,6 +104,7 @@ set(GUFO_QWEN_LIBRARIES
   gufo_qwen27b
   gufo_qwen_config
   gufo_qwen_control_tokens
+  gufo_qwen_draft_vocab
   gufo_qwen_hip_common
   gufo_qwen_text
   gufo_qwen_vision

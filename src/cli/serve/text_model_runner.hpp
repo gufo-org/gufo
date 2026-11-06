@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "gufo/ext/text.hpp"
-#include "src/cli/serve/continuation_cache.hpp"
+#include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
 
@@ -31,6 +31,7 @@ using ext::InitialOutputState;
 using ext::kHostSnapshotHeadroomBytes;
 using ext::MeminfoAvailableBytes;
 using ext::ParseRamCacheOption;
+using ext::ReasoningMarkup;
 using ext::TextDecodeSelection;
 using ext::TextDecodeStep;
 using ext::TextExecutionPlan;
@@ -47,10 +48,8 @@ using ext::TextRunnerDescriptor;
 using ext::TextRunnerDiskCacheOptions;
 using ext::TextRunnerMeasuredResources;
 using ext::TextRunnerNgramRows;
-using ext::TextRunnerPersistenceDescriptor;
 using ext::TextRunnerRamCacheOptions;
 using ext::TextRunnerResourceClaim;
-using ext::TextRunnerSnapshot;
 using ext::TextRunnerState;
 using ext::TextRunnerToken;
 
@@ -68,10 +67,6 @@ public:
       std::size_t disk_queued_bytes{0};
       double disk_enqueue_ms{0.0};
       /// Shared-prefix snapshots queued for persistence during prefill.
-      std::size_t shared_prefix_snapshots{0};
-      std::size_t shared_prefix_bytes{0};
-      std::size_t shared_prefix_failures{0};
-      double shared_prefix_ms{0.0};
     };
 
     Request();
@@ -195,10 +190,16 @@ private:
 
 /// Build output constraints and attach server-authored instructions as framing,
 /// preserving client message content and the model's native prompt layout.
+/// `tool_format` receives the built-in format the request was constrained
+/// with (none for a provider syntax) and `tool_dialect` the runner's dialect
+/// identity, which the response parsers select by. Throws
+/// std::invalid_argument for an identity that is neither built in nor
+/// registered.
 [[nodiscard]] std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
-    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr,
+    std::string* tool_dialect = nullptr);
 
 }  // namespace gufo::server
 

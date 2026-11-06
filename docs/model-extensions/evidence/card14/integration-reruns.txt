@@ -1,3 +1,7 @@
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
 ================================================================================
 Card 14 Integration Phase Gate Reruns
 Date: 2026-11-01
@@ -73,7 +77,7 @@ Verdict: PASS
 --------------------------------------------------------------------------------
 
 Gate 7: Hosted PR Checks Suite (Nix Sandbox)
-Command: nix build .#checks.x86_64-linux.pr
+Command: legacy hosted PR check
 Exit code: 0
 Output:
 these 4 derivations will be built:

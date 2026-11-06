@@ -385,52 +385,14 @@ void Conflicts() {
     assert(store.Entries().empty());
   }
 }
-void Cleanup() {
-  Directory d, unrelated;
-  const std::array<std::uint8_t, 8> legacy{'G', 'U', 'F', 'O',
-                                           'K', 'V', 'C', '1'};
-  Write(d.path / "old.kvc", legacy);
-  fs::resize_file(d.path / "old.kvc", 1000000);
-  Write(d.path / ".tmp-owned", legacy);
-  Write(d.path / "unknown.kvc", std::array<std::uint8_t, 4>{1, 2, 3, 4});
-  Write(d.path / "unknown", legacy);
-  fs::create_directory(d.path / ".tmp-directory");
-  Write(d.path / ".tmp-directory/keep", legacy);
-  Write(unrelated.path / "old.kvc", legacy);
-  fs::create_directory_symlink(unrelated.path, d.path / "other");
-  fs::create_symlink(unrelated.path / "old.kvc", d.path / "link.kvc");
-  DiskStore store(ledger, d.path, 0);
-  assert(!fs::exists(d.path / "old.kvc") && !fs::exists(d.path / ".tmp-owned"));
-  assert(store.Stats().removed_legacy_bytes == 1000008);
-  assert(store.Stats().managed_bytes == 0);
-  for (const auto& p : {"unknown.kvc", "unknown", ".tmp-directory/keep",
-                        "other/old.kvc", "link.kvc"})
-    assert(fs::exists(d.path / p));
-}
-void InterruptedCleanup() {
-  Directory d;
-  const std::array<std::uint8_t, 4> legacy{'G', 'U', 'F', 'O'};
-  Write(d.path / "old.kvc", legacy);
-  fs::resize_file(d.path / "old.kvc", 1000000);
-  interrupt_next_read = true;
-  shorten_reads = true;
-  {
-    DiskStore store(ledger, d.path, 0);
-    assert(!fs::exists(d.path / "old.kvc"));
-    assert(store.Stats().removed_legacy_bytes == 1000000);
-    assert(store.Stats().legacy_probe_bytes_read == 4);
-  }
-  shorten_reads = false;
-}
 void RootSymlinks() {
   Directory d, target;
-  Write(target.path / "old.kvc",
-        std::array<std::uint8_t, 4>{'G', 'U', 'F', 'O'});
+  Write(target.path / "file", std::array<std::uint8_t, 4>{1, 2, 3, 4});
   auto link = d.path / "alias";
   fs::create_directory_symlink(target.path, link);
   for (const auto& suffix : {"", "/", "/.", "/./"}) {
     Reject([&] { DiskStore store(ledger, link.string() + suffix, 0); });
-    assert(fs::exists(target.path / "old.kvc"));
+    assert(fs::exists(target.path / "file"));
     assert(!fs::exists(target.path / "LOCK"));
   }
 }
@@ -438,14 +400,9 @@ void ParentPathResolution() {
   Directory base, target;
   fs::create_directory(target.path / "sub");
   fs::create_directory_symlink(target.path / "sub", base.path / "alias");
-  const std::array<std::uint8_t, 4> legacy{'G', 'U', 'F', 'O'};
-  Write(base.path / "old.kvc", legacy);
-  Write(target.path / "old.kvc", legacy);
   {
     DiskStore store(ledger, base.path / "alias/..", 0);
-    assert(!fs::exists(target.path / "old.kvc"));
     assert(fs::exists(target.path / "LOCK"));
-    assert(fs::exists(base.path / "old.kvc"));
     assert(!fs::exists(base.path / "LOCK"));
   }
 }
@@ -701,6 +658,72 @@ void VerifiedDependencies() {
   assert(retire() == settled);
 }
 }  // namespace
+// A window manifest lists the chunks from its window's first row, uses the
+// window format version and size, and shares chunk files with other
+// manifests at different list positions. Window 3 rows, chunks of 2.
+DiskManifest Windowed(Rows rows, std::vector<unsigned> chunks, unsigned tail,
+                      unsigned checkpoint) {
+  DiskManifest m;
+  m.checkpoint = {checkpoint};
+  m.lineage = {3};
+  m.compatibility.fill(0x42);
+  m.tokens.assign(rows, 17);
+  DiskComponent window{{{1}, 4, ComponentKind::kWindowRows, 4, 2, 0, 3},
+                       {{1}, rows},
+                       {},
+                       {},
+                       {}};
+  for (auto id : chunks)
+    window.chunks.push_back({Id(id), 8, 90 + id});
+  if (tail)
+    window.tail = DiskPayload{Id(tail), 4, 90 + tail};
+  m.components.push_back(window);
+  m.components.push_back({{{2}, 5, ComponentKind::kPrivateState, 0, 0, 16},
+                          {{2}, rows},
+                          {},
+                          {},
+                          DiskPayload{Id(100 + checkpoint), 16, 101}});
+  return m;
+}
+void WindowFormat() {
+  const auto eight = Windowed(8, {1, 2}, 0, 7);  // Chunks [4, 6) and [6, 8).
+  auto encoded = EncodeManifest(eight);
+  assert(encoded[8] == kDiskWindowFormatVersion);
+  auto decoded = DecodeManifest(encoded);
+  assert(decoded.components[0].descriptor.window_rows == 3);
+  assert(decoded.components[0].chunks == eight.components[0].chunks);
+  assert(EncodeManifest(decoded) == encoded);
+  for (std::size_t i = 0; i < encoded.size(); ++i)
+    Reject([&] { (void)DecodeManifest(std::span(encoded).first(i)); });
+  // Window components need the window format version.
+  auto old = encoded;
+  old[8] = kDiskFormatVersion;
+  const auto checksum = DiskChecksum(std::span(old).first(old.size() - 8));
+  for (unsigned i = 0; i < 8; ++i)
+    old[old.size() - 8 + i] = (checksum >> (8 * i)) & 255;
+  Reject([&] { (void)DecodeManifest(old); });
+  // Chunks start at the window's first chunk, never at row 0.
+  Reject([&] { (void)EncodeManifest(Windowed(8, {1}, 0, 7)); });
+  Reject([&] { (void)EncodeManifest(Windowed(8, {9, 1, 2}, 0, 7)); });
+  auto unsized = eight;
+  unsized.components[0].descriptor.window_rows = 0;
+  Reject([&] { (void)EncodeManifest(unsized); });
+  // Chunk [6, 8) is second in one manifest and first in the other.
+  Directory d;
+  {
+    DiskStore init(ledger, d.path, UINT64_MAX);
+  }
+  const auto nine = Windowed(9, {2}, 3, 8);  // Chunk [6, 8) and row 8.
+  for (const auto* m : {&eight, &nine})
+    Payloads(d.path, *m);
+  Put(d.path, eight, 7);
+  Put(d.path, nine, 8);
+  {
+    DiskStore store(ledger, d.path, UINT64_MAX);
+    assert(store.Entries().size() == 2);
+    assert(store.Stats().rejected_manifests == 0);
+  }
+}
 int main() {
   Format();
   ChecksumReference();
@@ -708,14 +731,13 @@ int main() {
   Ownership();
   Index();
   Conflicts();
-  Cleanup();
   BudgetAndDirectories();
   CapacityBeforePayloadReads();
   VerifiedDependencies();
-  InterruptedCleanup();
   RootSymlinks();
   ParentPathResolution();
   MetadataAdmission();
+  WindowFormat();
   assert(ledger.Snapshot().total_bytes == 0);
   std::cout << "disk format, ownership and metadata index passed\n";
 }

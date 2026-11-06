@@ -427,8 +427,6 @@ void TestInputValidation() {
               "invalid_parameter_type", "boolean item");
   ExpectError(Send(*service, R"({"input":"x","user":3})"), 400,
               "invalid_parameter_type", "non-string user");
-  ExpectError(Send(*service, R"({"input":"x","normalize":true})"), 400,
-              "unsupported_field", "unknown member");
 
   std::string many = R"({"input":[)";
   for (int i = 0; i < 2049; ++i) {
@@ -446,6 +444,8 @@ void TestInputValidation() {
             Parse(accepted).find("data")->items().size() == 2048U,
         "2048 inputs are accepted");
   Check(runner.calls == 1, "rejected requests never reach the encoder");
+  Check(Send(*service, R"({"input":"x","normalize":true})").status == 200,
+        "unknown members are ignored, as in llama.cpp, TEI and vLLM");
 }
 
 void TestModelAndJson() {
@@ -822,16 +822,15 @@ void TestNativeEmbeddings() {
   ExpectError(SendTo(service, "/embeddings",
                      R"({"content":"y","encoding_format":"int8"})"),
               400, "invalid_encoding_format", "encoding_format is validated");
-  ExpectError(
-      SendTo(service, "/embeddings", R"({"content":"y","pooling":"none"})"),
-      400, "unsupported_field", "unknown native fields are rejected");
   Check(calls == before, "rejected native requests never reach the runner");
-  // The OpenAI route keeps its own field set.
-  ExpectError(Send(service, R"({"content":"y"})"), 400, "unsupported_field",
-              "/v1/embeddings does not take content");
-  ExpectError(Send(service, R"({"input":"y","embd_normalize":2})"), 400,
-              "unsupported_field",
-              "/v1/embeddings does not take embd_normalize");
+  // As in llama.cpp, both routes take `content` and `embd_normalize`, and
+  // `content` without `input` selects the native response.
+  ExpectError(Send(service, R"({"input":"y","embd_normalize":0})"), 400,
+              "unsupported_embd_normalize",
+              "/v1/embeddings validates embd_normalize");
+  const HttpResponse content = Send(service, R"({"content":"y"})");
+  Check(content.status == 200 && Parse(content).is_array(),
+        "/v1/embeddings content returns the native form");
   ExpectError(Send(service, R"({"input":[{"prompt_string":"y"}]})"), 400,
               "invalid_parameter_type",
               "/v1/embeddings does not take prompt objects");

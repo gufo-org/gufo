@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "embedding_gemma2",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.2.0",
   "entry": "embedding_gemma2_register",
   "registration_target": "gufo_embedding_gemma2",
   "depends": [],

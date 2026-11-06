@@ -10,9 +10,6 @@
 
 namespace gufo::server {
 
-inline constexpr std::string_view kThinkStart = "<think>";
-inline constexpr std::string_view kThinkEnd = "</think>";
-
 /// Request-owned quoting state. Completed inline spans across nonblank lines
 /// and completed fences protect documentation. Markers in unfinished spans are
 /// held during streaming until a closing delimiter or the final parse decides.

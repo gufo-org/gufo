@@ -1,4 +1,8 @@
-# nix build .#checks.x86_64-linux.pr — hosted PR check, Card 05 integration
+> Historical record: references to the legacy hosted PR check describe the
+> original narrower gate. Use `nix flake check` for current validation; recorded
+> results below do not establish a pass of today's broader check.
+
+# legacy hosted PR check — hosted PR check, Card 05 integration
 
 Run on 2026-10-31 from /home/mixer/gufo with `--no-link --print-build-logs`.
 Full raw logs: /tmp/card05-int/30-hosted.log, 32-hosted.log and 33-hosted.log.
@@ -53,7 +57,7 @@ Exit status line retained verbatim: HOSTED_EXIT=0
 
 Run from /home/mixer/gufo after committing the Card 05 review-integration paths,
 so the Nix source snapshot contained every file the documentation refers to:
-`nix build .#checks.x86_64-linux.pr --no-link --print-build-logs`.
+`legacy hosted PR check`.
 
     check-docs> [check-docs] PASSED: 150 markdown files and 904 local links/anchors
                   verified with zero broken links or invalid JSON blocks.

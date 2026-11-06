@@ -13,6 +13,7 @@ agents and contributors are in [AGENTS.md](../AGENTS.md).
 | `src/cli` | Executable commands, terminal interfaces and HTTP adapters |
 | `src/core` | Shared runtime: GGUF loading, sampling, quantization, HIP helpers, diagnostics |
 | `src/cache` | Continuation cache: tiers, ledger and the neutral capture/backing contract |
+| `src/sched` | Text scheduling policy: work-unit decisions and prefill rate, without serving or model code |
 | `src/ext` | Extension runtime: registry, options, neutral continuation and host-service contracts |
 | `src/models/<model>` | One model package: config, weights, engine, kernels, CPU reference |
 | `src/eval` | HTTP capability evaluation |
@@ -45,7 +46,7 @@ Git first: flakes only see tracked files.
 ```sh
 nix build                              # production package, no tests or tools
 ./result/bin/gufo diagnose
-nix build .#checks.x86_64-linux.pr     # hosted CPU/repository checks
+nix flake check     # hosted CPU/repository checks
 nix develop                            # GPU development, profilers, reference tools
 ```
 
@@ -172,7 +173,7 @@ compiler and dependency versions fixed across compared runs. Follow
 
 ## Submitting changes
 
-Hosted CI runs `nix build .#checks.x86_64-linux.pr` on Ubuntu with a 25-minute
+Hosted CI runs `nix flake check` on Ubuntu with a 25-minute
 limit: formatting, documentation, dependency inventory, server-command checks
 and the CPU contract suite. It does not build ROCm, download weights or run
 model oracles, so run the GPU checks that cover the change locally; the exact

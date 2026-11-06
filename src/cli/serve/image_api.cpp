@@ -10,7 +10,6 @@
 #include <ctime>
 #include <map>
 #include <random>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -379,8 +378,11 @@ std::string String(const json::Value& fields, const char* name,
 }  // namespace
 
 ImageService::ImageService(const std::filesystem::path& root,
-                           std::string model_id, Runner runner)
-    : model_id_(std::move(model_id)), runner_(std::move(runner)) {
+                           std::string model_id, Runner runner,
+                           std::vector<std::string> model_aliases)
+    : model_id_(std::move(model_id)),
+      model_aliases_(std::move(model_aliases)),
+      runner_(std::move(runner)) {
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
   if (!runner_) {
@@ -439,19 +441,11 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     const auto& fields = parsed.fields;
     if (!fields.is_object())
       throw std::invalid_argument("request must be a JSON object");
-    const std::set<std::string> allowed{
-        "prompt",        "model",   "n",          "size", "response_format",
-        "output_format", "quality", "background", "user", "seed",
-        "steps",         "stream"};
-    for (const auto& [name, value] : fields.members()) {
-      (void)value;
-      if (!allowed.contains(name))
-        throw std::invalid_argument("unsupported image parameter: " + name);
-    }
+    // As in the other OpenAI-compatible servers, unknown members are ignored.
     if (!fields.contains("prompt"))
       throw std::invalid_argument("prompt is required");
     const auto model = String(fields, "model", service.model_id().c_str());
-    if (model != service.model_id())
+    if (!service.serves_model(model))
       return Error(404, "requested image model is not loaded",
                    "model_not_found");
     if (String(fields, "response_format", "b64_json") != "b64_json" ||

@@ -1,11 +1,11 @@
-#include "src/models/qwen38_flash_next/draft_vocab.hpp"
-
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
 
-namespace qfn = gufo::models::qwen38_flash_next;
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
+
+namespace qdv = gufo::speculative;
 
 void Require(bool condition, const char* message) {
   if (!condition)
@@ -23,20 +23,20 @@ bool Common(std::int32_t id) {
 
 // Text inside the prefix needs no table rows and keeps the small head.
 void CheckCommonText() {
-  qfn::MtpDraftVocab vocab(8);
-  std::vector<std::int32_t> tokens(qfn::kMtpDraftVocabWindow + 10, 1);
+  qdv::DraftVocab vocab(8);
+  std::vector<std::int32_t> tokens(qdv::kDraftVocabWindow + 10, 1);
   std::vector<std::int32_t> added;
   vocab.CatchUp(tokens, Common, &added);
   Require(added.empty() && vocab.rare().empty(), "common tokens were tabled");
   Require(vocab.Fits(2, Common), "common text left the small head");
-  Require(qfn::MtpDraftVocab(8).Fits(2, Common), "empty history");
+  Require(qdv::DraftVocab(8).Fits(2, Common), "empty history");
 }
 
 // A new rare token is tabled in first-use order. One miss in the window
 // keeps the small head; a second one leaves it until the earlier of the two
 // has left the window.
 void CheckMissWindow() {
-  qfn::MtpDraftVocab vocab(8);
+  qdv::DraftVocab vocab(8);
   std::vector<std::int32_t> tokens{1, 500, 1};
   std::vector<std::int32_t> added;
   vocab.CatchUp(tokens, Common, &added);
@@ -47,7 +47,7 @@ void CheckMissWindow() {
   Require(added == std::vector<std::int32_t>{500, 700}, "tabled order");
   Require(!vocab.Fits(1, Common), "small head right after a second miss");
   // The earlier miss (500, index 1) stays in the window until W more tokens.
-  tokens.resize(1 + qfn::kMtpDraftVocabWindow, 500);
+  tokens.resize(1 + qdv::kDraftVocabWindow, 500);
   added.clear();
   vocab.CatchUp(tokens, Common, &added);
   Require(added.empty(), "a known token was tabled again");
@@ -61,9 +61,9 @@ void CheckMissWindow() {
 
 // A full table turns every further rare token into a miss.
 void CheckCapacity() {
-  qfn::MtpDraftVocab vocab(2);
+  qdv::DraftVocab vocab(2);
   std::vector<std::int32_t> tokens{500, 600, 700};
-  tokens.resize(3 + qfn::kMtpDraftVocabWindow, 1);
+  tokens.resize(3 + qdv::kDraftVocabWindow, 1);
   std::vector<std::int32_t> added;
   vocab.CatchUp(tokens, Common, &added);
   Require(added == std::vector<std::int32_t>{500, 600}, "table overfilled");
@@ -76,7 +76,7 @@ void CheckCapacity() {
 
 // Reset forgets the table and the history.
 void CheckReset() {
-  qfn::MtpDraftVocab vocab(8);
+  qdv::DraftVocab vocab(8);
   std::vector<std::int32_t> tokens{500};
   vocab.CatchUp(tokens, Common, nullptr);
   vocab.Reset();
@@ -93,12 +93,11 @@ void CheckEligibility() {
   for (const std::uint32_t sessions : {1U, 2U, 8U}) {
     for (const std::uint32_t occupancy : {1U, 2U, 8U}) {
       for (const bool planned : {false, true}) {
-        Require(qfn::MtpDraftSubsetAllowed(true, sessions, occupancy, planned),
+        Require(qdv::DraftSubsetAllowed(true, sessions, occupancy, planned),
                 "a sampled request lost the small head");
-        Require(
-            qfn::MtpDraftSubsetAllowed(false, sessions, occupancy, planned) ==
-                (sessions == 1 || occupancy == 1 || planned),
-            "greedy eligibility changed");
+        Require(qdv::DraftSubsetAllowed(false, sessions, occupancy, planned) ==
+                    (sessions == 1 || occupancy == 1 || planned),
+                "greedy eligibility changed");
       }
     }
   }

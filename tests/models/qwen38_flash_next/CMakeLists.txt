@@ -24,6 +24,7 @@ function(add_qwen38_flash_next_test name library labels)
 endfunction()
 
 add_qwen38_flash_next_test(runner_options gufo_qwen38_flash_next "cpu")
+add_qwen38_flash_next_test(probe gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(continuation_layout gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
@@ -33,7 +34,6 @@ add_qwen38_flash_next_test(rope_scaling gufo_qwen38_flash_next "cpu")
 # (like ngram) this stays out of cmake/Checks.cmake's hosted check-pr set.
 add_qwen38_flash_next_test(rope_scaling_oracle
   gufo_qwen38_flash_next_reference "cpu")
-add_qwen38_flash_next_test(draft_vocab gufo_core "cpu")
 add_qwen38_flash_next_test(prompt_lookup gufo_core "cpu")
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
@@ -48,7 +48,7 @@ if (ENGINE_ENABLE_HIP)
   target_compile_definitions(qwen38_flash_next_test_hip INTERFACE ENGINE_ENABLE_HIP=1)
   foreach(name IN ITEMS mtp_ops blaslt_ops hc_mix_ops hc_route_ops gdn_ops
       attention_ops moe_epilogue_ops moe_ids_ops projection_ops routed_wmma_ops
-      select_ops snapshot_copy verification_sampling)
+      select_ops snapshot_copy verification_sampling wide_verification)
     add_qwen38_flash_next_test(${name} qwen38_flash_next_test_hip "hip;gpu;gfx1151")
   endforeach()
   # The rope phase and RMS checks compare against the scalar CPU oracle.
@@ -67,6 +67,17 @@ if (ENGINE_ENABLE_HIP)
     device_headroom_fault.cpp)
   target_link_libraries(qwen38_flash_next_continuation_adapter_test PRIVATE
     qwen38_flash_next_test_hip ${CMAKE_DL_LIBS})
+  # In-pass checkpoints through the component path against split passes, in
+  # AR and MTP modes. Build it with qwen38_flash_next_model_tests. It needs
+  # the model: QWEN38_FLASH_NEXT_MODEL names the first GGUF shard and
+  # QWEN38_FLASH_NEXT_MTP_MODEL the MTP head. Without them it is skipped.
+  add_test(NAME qwen38_flash_next.in_pass_checkpoints
+    COMMAND qwen38_flash_next_continuation_adapter_test --in-pass-only)
+  set_tests_properties(qwen38_flash_next.in_pass_checkpoints PROPERTIES
+    LABELS "qwen38_flash_next;hip;gpu;gfx1151;external-model"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE
+    TIMEOUT 1800)
   add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL
     continuation_probe.cpp)
   target_link_libraries(qwen38_flash_next_continuation_probe PRIVATE
