@@ -31,7 +31,7 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "openai-count-tokens", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
           "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
+          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-type-unions", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
           "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection", "cache")
 # Suites that already run another suite's checks; selecting both repeats the work.
 INCLUDED_IN = {"auto-tools": "tools", "tool-native-types": "tool-native-schemas"}

@@ -1162,7 +1162,8 @@ limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
 sequences and does not guarantee complete JSON. Token limits return `"length"`
 in Chat or `status: "incomplete"` with reason `max_output_tokens` in Responses.
 
-Supported: objects, arrays, nullable types, `enum`/`const`, `anyOf`, recursive local
+Supported: objects, arrays, type unions (including nullable types), `enum`/`const`,
+`anyOf`, recursive local
 `$ref`/`$defs`, numeric bounds/`multipleOf`, string patterns/lengths/formats and
 array length bounds. Formats include date/time, duration, email, hostname,
 IP addresses and UUID.

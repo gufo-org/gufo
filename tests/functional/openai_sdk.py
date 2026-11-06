@@ -33,7 +33,7 @@ from image_inputs import check_image_count, check_image_detail, check_image_inpu
 from tool_images import check_tool_images
 from tool_choice import check_tool_choice_cache
 from tool_parameter_order import check_tool_parameter_order
-from tool_native import check_finite_argument_types, check_native_tool_schemas
+from tool_native import check_finite_argument_types, check_native_tool_schemas, check_tool_type_unions
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
                         check_tool_schema_edges)
@@ -2759,7 +2759,7 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
 
 SDK_SUITES = ("discovery", "openai-count-tokens", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
               "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-type-unions", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
               "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection")
 
@@ -2901,6 +2901,8 @@ def main():
             "tool-choice-cache": lambda: check_tool_choice_cache(
                 client, args.model, checks, chat_result, args.server_log),
             "tool-parameter-order": lambda: check_tool_parameter_order(
+                client, args.model, checks, chat_result),
+            "tool-type-unions": lambda: check_tool_type_unions(
                 client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
