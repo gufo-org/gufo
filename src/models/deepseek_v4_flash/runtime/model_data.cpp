@@ -1110,8 +1110,7 @@ static void config_expect_u32(const char *name, uint32_t got, uint32_t expected)
 }
 
 static void config_expect_f32(const char *name, float got, float expected) {
-    const float scale = fabsf(expected) > 1.0f ? fabsf(expected) : 1.0f;
-    if (fabsf(got - expected) <= scale * 1.0e-6f) return;
+    if (ds4_config_f32_matches(got, expected)) return;
     fprintf(stderr, "ds4: expected %s=%.9g for %s, got %.9g\n",
             name, (double)expected, DS4_MODEL_SHAPE_NAME, (double)got);
     throw std::runtime_error("incompatible or invalid DeepSeek artifact");
