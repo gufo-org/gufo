@@ -1,0 +1,230 @@
+{
+  "sha256": "734e01dd6c610a7482446b325de0bb5e2f33c6e7f47e9af2b132c78e6874c1fa",
+  "entries": {
+    "upstream-batched-hc-q8-v1/configure-v3.json": {
+      "sha256": "49758b716c9c0ee99273bec2157dc322ebb710f828c32dab71fb54602fed315c",
+      "bytes": 1560
+    },
+    "upstream-batched-hc-q8-v1/configure.json": {
+      "sha256": "3e85e2235bda02387de627e642d16727718510e46d55f5114b5ae04490226a3b",
+      "bytes": 1393
+    },
+    "upstream-batched-hc-q8-v1/tp1-probe.cpp": {
+      "sha256": "46e15b39a3a1310095831f29ab4925f7a8db74d5b01801a6414154bc9ba45fef",
+      "bytes": 12294
+    },
+    "upstream-batched-hc-q8-v1/tp1-result.json": {
+      "sha256": "7e8cd05e3c6a3e55e96a01fe085065961dd347cbc5e43c4cae700431c172af4d",
+      "bytes": 143
+    },
+    "upstream-batched-hc-q8-v1/build-tp1.py": {
+      "sha256": "ec4dfdf8d4e1870401862172185db0dae0b5b389c5ce53a3725b6982eead6b1c",
+      "bytes": 3073
+    },
+    "upstream-batched-hc-q8-v1/build.log": {
+      "sha256": "50fc155eefff02d2410cb83a249ac78d8c17e8fa3502ba1bdeac9222f497753e",
+      "bytes": 130398
+    },
+    "upstream-batched-hc-q8-v1/tp1-build-commands.json": {
+      "sha256": "6cc60ae656f49af734141ca53188f403089f33bd6953b048000adc42597901fe",
+      "bytes": 7682
+    },
+    "upstream-batched-hc-q8-v1/tp1-design.json": {
+      "sha256": "db5cc4cc47e689219c0756a79e462ac5482600c2ee571f585953255cd760c7e4",
+      "bytes": 1028
+    },
+    "upstream-batched-hc-q8-v1/operator-test.log": {
+      "sha256": "9583e26bbcc1c98ac7af5619dacd1e8a9032b1e16c165379de466ce3426ae5bd",
+      "bytes": 510
+    },
+    "upstream-batched-hc-q8-v1/source.json": {
+      "sha256": "cf8ec7a8d21e1e2195b79ae602ef8312ea7d750a21ff52e889434382946c70cf",
+      "bytes": 349
+    },
+    "upstream-batched-hc-q8-v1/tp1-syntax-v2.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "upstream-batched-hc-q8-v1/tp1-build.log": {
+      "sha256": "946d1e60e7520acad3c8c3d4c1a46e9fb9b793a26519117a87017c6081faa861",
+      "bytes": 366
+    },
+    "upstream-batched-hc-q8-v1/tp1-diagnostic-batch.cpp": {
+      "sha256": "f0d8072d47d9d4f00fe41c3b619daeb9c22f1f45ce8a5550e2a0455c4820965e",
+      "bytes": 50213
+    },
+    "upstream-batched-hc-q8-v1/operator-test-result.json": {
+      "sha256": "74962b36bdc8163769635ce6af7ea27bcefe715dfe2b3feab91ee1f15d0f81d4",
+      "bytes": 202
+    },
+    "upstream-batched-hc-q8-v1/tp1-build-result.json": {
+      "sha256": "1534a08673f31ad1e9a49079827caf2001b813f0bb833bcf20cf2ebf8356c090",
+      "bytes": 413
+    },
+    "upstream-batched-hc-q8-v1/build-v3-result.json": {
+      "sha256": "5bc232b82de377a5655a39a2af9d7ae0fc868de5b9df957e18905cb914606c88",
+      "bytes": 12
+    },
+    "upstream-batched-hc-q8-v1/format.log": {
+      "sha256": "4042f9b201858e7f64ecff8d0af682cc1fea2746d802d0bef1678c45cc593af6",
+      "bytes": 28
+    },
+    "upstream-batched-hc-q8-v1/failed-config-cache.txt": {
+      "sha256": "9ec405a5f919c30c40ee9172e4058d9842406c4e6adce28a46cf90a52bba6b57",
+      "bytes": 42601
+    },
+    "upstream-batched-hc-q8-v1/tp1-syntax.log": {
+      "sha256": "f86dde56263c685bdc14ed6b23aeb9ec8809de9ad1f0f0ecee5fc9567514f9b5",
+      "bytes": 377
+    },
+    "upstream-batched-hc-q8-v1/build-result.json": {
+      "sha256": "8ef199e2ba32edcf45464649ce4dae0f2106f394db6f819c55faa6df8200c959",
+      "bytes": 12
+    },
+    "upstream-batched-hc-q8-v1/configure-v2.log": {
+      "sha256": "a2af761ecef5a3cd54deb76aabceab9e7aaf60c7be357e3c4b114e2baaf2fc87",
+      "bytes": 644
+    },
+    "upstream-batched-hc-q8-v1/tp1-ldd.txt": {
+      "sha256": "57dae83180f9ee33b33ee1db11e4b17e747f23944161dafd4845af0f2f6cb205",
+      "bytes": 6103
+    },
+    "upstream-batched-hc-q8-v1/tp1-protocol.json": {
+      "sha256": "64690c99e987a7b1fe6f5be0bdfc809706193ab07be170ae010f4eb860cff1d8",
+      "bytes": 2470
+    },
+    "upstream-batched-hc-q8-v1/configure.log": {
+      "sha256": "93259989ac213a874d8f1065878b90a59aac6950f2d6e5627f6e20e0c0c88820",
+      "bytes": 4849
+    },
+    "upstream-batched-hc-q8-v1/tp1.stderr": {
+      "sha256": "a7f44f25d6aef1ecfcc8d3b095abb827db61636aba3967d3515e18f6239670d7",
+      "bytes": 59
+    },
+    "upstream-batched-hc-q8-v1/README.md": {
+      "sha256": "d8e5397c5aa96fdf75d9ab909d7190debd16debe0b26549af01f8b62db31ef95",
+      "bytes": 2922
+    },
+    "upstream-batched-hc-q8-v1/build-v3.log": {
+      "sha256": "46571c2e5754f6c0e624aba0193570348b3a186639666c45967e821908842a45",
+      "bytes": 49914
+    },
+    "upstream-batched-hc-q8-v1/tp1.stdout": {
+      "sha256": "49479c0a439a00f3d4ec0089341a165edffcf7fcfc46b9e28532c5baaee2d7b1",
+      "bytes": 24
+    },
+    "upstream-batched-hc-q8-v1/run-tp1.py": {
+      "sha256": "a8540f6648520b691564896129ee61dad8c5e5390e32c7dd6420085aac1d78fd",
+      "bytes": 3361
+    },
+    "upstream-batched-hc-q8-v1/build-command.json": {
+      "sha256": "9c61caf07acb20817b842264ce08ad71ddca4f03beb1e743c3e2b09a7399cbe3",
+      "bytes": 180
+    },
+    "upstream-batched-hc-q8-v1/configure-v2.json": {
+      "sha256": "9a1f18ee78b5d66b9550e263194b1b58b3fb795b1e093fb81cbef00a62e0b50b",
+      "bytes": 1707
+    },
+    "upstream-batched-hc-q8-v1/configure-v3.log": {
+      "sha256": "7f1473e3c6441433a2d98f29872c00f2aa0686bd3797c2a5de47d6f98e193a7e",
+      "bytes": 3359
+    },
+    "upstream-batched-hc-q8-v1/focused.patch": {
+      "sha256": "05a338ea98a78b378fad44dd18a9769106fc075390e28d04210f907a1042bc42",
+      "bytes": 5062
+    },
+    "upstream-batched-hc-q8-v1/tp1-results.jsonl": {
+      "sha256": "88c7c2a95484b6823672ce58b11dbb0f833bdffc4989b701906ccfea38382212",
+      "bytes": 3308
+    },
+    "upstream-batched-hc-q8-v2/configure-v3.json": {
+      "sha256": "49758b716c9c0ee99273bec2157dc322ebb710f828c32dab71fb54602fed315c",
+      "bytes": 1560
+    },
+    "upstream-batched-hc-q8-v2/tp1-probe.cpp": {
+      "sha256": "2396fba3d97be10adf33428f015be98348af7d3efccaa23af0bdb01bb4aeb73b",
+      "bytes": 12420
+    },
+    "upstream-batched-hc-q8-v2/analysis.json": {
+      "sha256": "a0aef88d38b6d5ed2af51e74371ed5a29639294b8adadfcc7fd3cf9b05a79324",
+      "bytes": 685
+    },
+    "upstream-batched-hc-q8-v2/tp1-result.json": {
+      "sha256": "81179980455cfc59dda3b805ef4cce79b65f57460a86da62f50c09402c9850c9",
+      "bytes": 136
+    },
+    "upstream-batched-hc-q8-v2/build-tp1.py": {
+      "sha256": "3d83995aa94952d7cffacebe706cedea7c1bc6436746258e76200bd5fdd87762",
+      "bytes": 3851
+    },
+    "upstream-batched-hc-q8-v2/tp1-build-commands.json": {
+      "sha256": "2f0279d7d9bd2459f850c688851fba87b1d515ea6decd21c0b5282225712f10c",
+      "bytes": 9941
+    },
+    "upstream-batched-hc-q8-v2/tp1-design.json": {
+      "sha256": "5d1477921371c85f3ddc46be4ae2f2dc41ff9ffdcc3c8b1aa067905b2e113c6b",
+      "bytes": 1396
+    },
+    "upstream-batched-hc-q8-v2/tp1-build.log": {
+      "sha256": "14dbb6c47192fce89fb42e54bc2bfb83c013cfeee4e34dd1b82d1a6dfd68cb9d",
+      "bytes": 16963
+    },
+    "upstream-batched-hc-q8-v2/tp1-diagnostic-batch.cpp": {
+      "sha256": "f0d8072d47d9d4f00fe41c3b619daeb9c22f1f45ce8a5550e2a0455c4820965e",
+      "bytes": 50213
+    },
+    "upstream-batched-hc-q8-v2/tp1-build-result.json": {
+      "sha256": "39136d4fd7694c1a59fede9e8e99c4da744c5a2e17a15bccf494d51a29e5af05",
+      "bytes": 580
+    },
+    "upstream-batched-hc-q8-v2/analyze.py": {
+      "sha256": "6bd57f84cb3df2643f01b2de97221ae2b948de9af8f28719907cee7000c00c9e",
+      "bytes": 1916
+    },
+    "upstream-batched-hc-q8-v2/tp1-link-fix.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "upstream-batched-hc-q8-v2/tp1-link-fix-commands.json": {
+      "sha256": "9b06d68479d8504329e753a8dde84ac42eac0a02d7a0d35b5dd1adce65062abd",
+      "bytes": 3486
+    },
+    "upstream-batched-hc-q8-v2/tp1-ldd.txt": {
+      "sha256": "168e065c6a1f025f5b8110dbb442c3a00cfb75d8c3e68068b86d6e42dfaffef1",
+      "bytes": 6103
+    },
+    "upstream-batched-hc-q8-v2/tp1-protocol.json": {
+      "sha256": "ba10c0d3b33c8e4ac02aa6297effa2420b5a3897ed2843c1269e51b0822d74a9",
+      "bytes": 3011
+    },
+    "upstream-batched-hc-q8-v2/tp1.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "upstream-batched-hc-q8-v2/tp1.stdout": {
+      "sha256": "c872b22817947184c0d55487a4bf11ba9e3d85f2334e7c6007a3453f1a07cfeb",
+      "bytes": 5532
+    },
+    "upstream-batched-hc-q8-v2/run-tp1.py": {
+      "sha256": "94ad71604e81711fbe144e489fcf484f8efed57b8da1823bf1fd21232531360e",
+      "bytes": 3394
+    },
+    "upstream-batched-hc-q8-v2/tp1-diagnostic-engine.cpp": {
+      "sha256": "257f886e45e9774f8a056df87be22181a4838841141fe39841aa6eae27e04cf2",
+      "bytes": 67504
+    },
+    "upstream-batched-hc-q8-v2/tp1-results.jsonl": {
+      "sha256": "b79c0bf2c091553f4a36460a56d69a1d67ebd39bebb7d82200a442ee06323049",
+      "bytes": 26240
+    },
+    "canonical-build/LastTest.log": {
+      "sha256": "e2d9906307f2be8982ca95aff944dc57f40579fc89f3984308ad013e459640e9",
+      "bytes": 2427
+    },
+    "upstream-batched-hc-q8-v1/selected-compile-commands.json": {
+      "sha256": "6141936ec7a70dbf8313cd87586ad1a48b82ce39598ea396aed9733d3bad8c08",
+      "bytes": 6346
+    }
+  },
+  "scope": "Sources/commands/raw hashes/logs and all failed attempts. Excludes model weights, snapshots, objects and binaries. Numerical test, not teacher or throughput proof."
+}
