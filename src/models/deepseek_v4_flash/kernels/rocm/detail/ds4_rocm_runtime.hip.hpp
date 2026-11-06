@@ -102,6 +102,21 @@ struct hip_f16_padded_range {
 static std::vector<hip_f16_padded_range> g_f16_padded_ranges;
 static std::unordered_map<uint64_t, size_t> g_f16_padded_by_offset;
 
+/* Packed F16 tensors are uploaded into one staging buffer and padded together
+ * when it fills, so the uploader stays pipelined across tensors. */
+#define DS4_ROCM_F16_ROW_STAGING_BYTES (64ull * 1048576ull)
+
+struct hip_f16_staged_rows {
+    __half *device_ptr;
+    uint64_t staging_offset;
+    uint64_t in_dim;
+    uint64_t out_dim;
+};
+static char *g_f16_row_staging;
+static uint64_t g_f16_row_staging_bytes;
+static uint64_t g_f16_row_staging_used;
+static std::vector<hip_f16_staged_rows> g_f16_staged_rows;
+
 /*
  * Optional DSpark support-model mapping.
  *
@@ -627,6 +642,11 @@ static uint64_t hip_round_up(uint64_t v, uint64_t align) {
 
 static void hip_model_staging_release(void) {
     g_model_uploader.reset();
+    if (g_f16_row_staging) (void)hipFree(g_f16_row_staging);
+    g_f16_row_staging = NULL;
+    g_f16_row_staging_bytes = 0;
+    g_f16_row_staging_used = 0;
+    g_f16_staged_rows.clear();
 }
 
 /* On a unified-memory machine the driver's device heap is a fraction of system
@@ -1013,11 +1033,31 @@ extern "C" int ds4_gpu_set_model_fd(gufo::platform::PlatformFile fd) {
     return 1;
 }
 
-extern "C" int ds4_gpu_release_model_staging(void) {
+/* Waits for the queued uploads, then copies every staged tensor into its
+ * padded rows. */
+static int hip_f16_staged_rows_flush(void) {
     std::string error;
-    const bool ok = !g_model_uploader || g_model_uploader->Finish(&error);
+    bool ok = !g_model_uploader || g_model_uploader->Finish(&error);
     if (!ok)
         fprintf(stderr, DS4_GPU_LOG_PREFIX "model upload failed: %s\n", error.c_str());
+    if (g_f16_staged_rows.empty()) return ok;
+    for (const hip_f16_staged_rows &s : g_f16_staged_rows) {
+        const uint64_t row_bytes = s.in_dim * sizeof(__half);
+        const uint64_t stride = s.in_dim + DS4_ROCM_F16_ROW_PAD_HALVES;
+        ok = ok && hip_ok(hipMemcpy2DAsync(s.device_ptr, (size_t)(stride * sizeof(__half)),
+                                           g_f16_row_staging + s.staging_offset,
+                                           (size_t)row_bytes, (size_t)row_bytes,
+                                           (size_t)s.out_dim, hipMemcpyDeviceToDevice, 0),
+                          "f16 row padding copy");
+    }
+    ok = hip_ok(hipStreamSynchronize(0), "f16 row padding sync") && ok;
+    g_f16_staged_rows.clear();
+    g_f16_row_staging_used = 0;
+    return ok;
+}
+
+extern "C" int ds4_gpu_release_model_staging(void) {
+    const int ok = hip_f16_staged_rows_flush();
     hip_model_staging_release();
     return ok;
 }
@@ -1060,26 +1100,32 @@ extern "C" int ds4_gpu_cache_model_f16_rows(const void *model_map, uint64_t mode
     }
     char *dev = hip_model_range_alloc(padded_bytes, what);
     if (!dev) return 0;
-    void *packed = NULL;
-    if (!hip_ok(hipMalloc(&packed, (size_t)bytes), "f16 row staging alloc")) {
+    if (g_f16_row_staging_used + bytes > g_f16_row_staging_bytes &&
+        !hip_f16_staged_rows_flush()) {
         return 0;
     }
+    if (bytes > g_f16_row_staging_bytes) {
+        const uint64_t staging_bytes = std::max<uint64_t>(bytes, DS4_ROCM_F16_ROW_STAGING_BYTES);
+        if (g_f16_row_staging) (void)hipFree(g_f16_row_staging);
+        g_f16_row_staging = NULL;
+        g_f16_row_staging_bytes = 0;
+        if (!hip_ok(hipMalloc((void **)&g_f16_row_staging, (size_t)staging_bytes),
+                    "f16 row staging alloc")) {
+            return 0;
+        }
+        g_f16_row_staging_bytes = staging_bytes;
+    }
     std::string error;
-    bool ok = gufo::platform::FileValid(g_model_fd) &&
-              hip_model_uploader(model_map, &error) &&
-              g_model_uploader->Copy(0, offset, bytes, packed, &error);
-    if (g_model_uploader) ok = g_model_uploader->Finish(&error) && ok;
-    if (!ok) {
+    if (!gufo::platform::FileValid(g_model_fd) ||
+        !hip_model_uploader(model_map, &error) ||
+        !g_model_uploader->Copy(0, offset, bytes,
+                                g_f16_row_staging + g_f16_row_staging_used, &error)) {
         fprintf(stderr, DS4_GPU_LOG_PREFIX "model upload failed for %s: %s\n",
                 what, error.c_str());
+        return 0;
     }
-    const uint64_t row_bytes = in_dim * sizeof(__half);
-    ok = ok && hip_ok(hipMemcpy2D(dev, (size_t)(stride * sizeof(__half)), packed,
-                                  (size_t)row_bytes, (size_t)row_bytes,
-                                  (size_t)out_dim, hipMemcpyDeviceToDevice),
-                      "f16 row padding copy");
-    ok = hip_ok(hipFree(packed), "f16 row staging free") && ok;
-    if (!ok) return 0;
+    g_f16_staged_rows.push_back({(__half *)dev, g_f16_row_staging_used, in_dim, out_dim});
+    g_f16_row_staging_used += hip_round_up(bytes, 256);
     g_f16_padded_ranges.push_back({offset, bytes, in_dim, out_dim, (__half *)dev});
     g_f16_padded_by_offset[offset] = g_f16_padded_ranges.size() - 1u;
     g_model_range_bytes += bytes;
