@@ -1014,13 +1014,19 @@ private:
           return t.is_array() ? t.items() : json::Value::Array{t};
         };
         auto common = json::Value::array();
+        const auto add = [&](const json::Value& name) {
+          if (!std::ranges::any_of(common.items(), [&](const auto& existing) {
+                return EqualValue(existing, name);
+              }))
+            common.push_back(name);
+        };
         for (const auto& a : types(*previous))
           for (const auto& b : types(value))
             if (EqualValue(a, b))
-              common.push_back(a);
+              add(a);
             else if ((a.str() == "number" && b.str() == "integer") ||
                      (a.str() == "integer" && b.str() == "number"))
-              common.push_back("integer");
+              add("integer");
         if (common.empty())
           throw JsonSchemaEmpty(
               "JSON Schema: schema constraints have no common type");
@@ -1571,18 +1577,22 @@ private:
     std::vector<std::string> types;
     if (type && type->is_string())
       types.push_back(type->str());
-    else if (type && type->is_array() && type->size() > 0 &&
-             type->size() <= 2) {
+    else if (type && type->is_array() && !type->empty()) {
+      // Like llama.cpp, each listed type contributes an alternative. Validate
+      // names here so malformed arrays cannot grow the union beyond 7 types.
+      static constexpr std::array<std::string_view, 7> names{
+          "object", "array", "string", "integer", "number", "boolean", "null"};
       for (const auto& value : type->items()) {
         if (!value.is_string())
           Invalid("type members must be strings");
+        if (std::ranges::find(names, value.str()) == names.end())
+          Invalid("unsupported or missing type");
+        if (std::ranges::find(types, value.str()) != types.end())
+          Invalid("type members must be unique");
         types.push_back(value.str());
       }
-      if (types.size() == 2 &&
-          std::count(types.begin(), types.end(), "null") != 1)
-        Invalid("type unions must be nullable; use anyOf otherwise");
     } else
-      Invalid("type must be a string or nullable type array");
+      Invalid("type must be a string or nonempty type array");
     const bool object = std::ranges::find(types, "object") != types.end();
     const bool array = std::ranges::find(types, "array") != types.end();
     for (const auto& [key, value] : schema.members()) {
@@ -1650,26 +1660,30 @@ private:
     }
     Sequence alternatives;
     for (const auto& name : types) {
-      if (name == "object")
-        alternatives.push_back(Object(schema, depth));
-      else if (name == "array")
-        alternatives.push_back(Array(schema, depth));
-      else if ((name == "integer" && schema.contains("multipleOf")) ||
-               (name == "number" &&
-                (schema.contains("minimum") || schema.contains("maximum") ||
-                 schema.contains("exclusiveMinimum") ||
-                 schema.contains("exclusiveMaximum") ||
-                 schema.contains("multipleOf"))))
-        alternatives.push_back(
-            Lexeme(JsonSchemaLexeme::Number(schema, name == "integer")));
-      else if (name == "string" &&
-               (schema.contains("pattern") || schema.contains("format") ||
-                schema.contains("minLength") || schema.contains("maxLength")))
-        alternatives.push_back(StringValue(StringPredicate(schema)));
-      else if (name == "integer")
-        alternatives.push_back(Integer(schema));
-      else
-        alternatives.push_back(Primitive(name));
+      try {
+        if (name == "object")
+          alternatives.push_back(Object(schema, depth));
+        else if (name == "array")
+          alternatives.push_back(Array(schema, depth));
+        else if ((name == "integer" && schema.contains("multipleOf")) ||
+                 (name == "number" &&
+                  (schema.contains("minimum") || schema.contains("maximum") ||
+                   schema.contains("exclusiveMinimum") ||
+                   schema.contains("exclusiveMaximum") ||
+                   schema.contains("multipleOf"))))
+          alternatives.push_back(
+              Lexeme(JsonSchemaLexeme::Number(schema, name == "integer")));
+        else if (name == "string" &&
+                 (schema.contains("pattern") || schema.contains("format") ||
+                  schema.contains("minLength") || schema.contains("maxLength")))
+          alternatives.push_back(StringValue(StringPredicate(schema)));
+        else if (name == "integer")
+          alternatives.push_back(Integer(schema));
+        else
+          alternatives.push_back(Primitive(name));
+      } catch (const JsonSchemaEmpty&) {
+        // An impossible type branch must not discard the other alternatives.
+      }
     }
     return Alt(alternatives);
   }

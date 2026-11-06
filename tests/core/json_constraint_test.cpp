@@ -235,6 +235,78 @@ void TestSchemaLanguage() {
   assert(!Accepts(*referenced, "{\"x\":\"b\"}"));
 }
 
+// Grist's strict query_document schema (#1051), also used inside native tags.
+void TestTypeUnions() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto schema = parse(R"({"type":"object","properties":{
+    "query":{"type":"string"},
+    "args":{"type":["array","null"],"items":{
+      "type":["string","number","boolean","null"]}}},
+    "required":["query","args"],"additionalProperties":false})");
+  const auto response = JsonConstraint::Compile(schema, true);
+  assert(Accepts(*response,
+                 R"({"query":"SELECT ?","args":["a",1,2.5,true,false,null]})"));
+  for (const bool strict : {false, true}) {
+    for (const auto format :
+         {Format::kJson, Format::kQwen, Format::kDeepSeek}) {
+      const auto grammar =
+          JsonConstraint::ToolParameters(schema, strict, format);
+      const auto arguments = [&](std::string_view value) {
+        if (format == Format::kJson)
+          return std::string(R"({"query":"SELECT ?","args":)") +
+                 std::string(value) + "}";
+        if (format == Format::kQwen)
+          return std::string(
+                     "<parameter=query>\nSELECT ?\n</parameter>\n"
+                     "<parameter=args>\n") +
+                 std::string(value) + "\n</parameter>\n";
+        return std::string(
+                   "<｜DSML｜parameter name=\"query\" string=\"true\">"
+                   "SELECT ?</｜DSML｜parameter>\n"
+                   "<｜DSML｜parameter name=\"args\" string=\"false\">") +
+               std::string(value) + "</｜DSML｜parameter>\n";
+      };
+      for (const auto valid : {R"(["a",1,2.5,true,false,null])", "[]", "null"})
+        assert(Accepts(*grammar, arguments(valid)));
+      for (const auto invalid : {"[{}]", "[[]]", "1", R"("text")", "[1,]"})
+        assert(!Accepts(*grammar, arguments(invalid)));
+      assert(!Accepts(*grammar, "{}"));
+    }
+  }
+  const auto compile = [](std::string_view member) {
+    auto root = parse(R"({"type":"object","properties":{},"required":["x"],
+                          "additionalProperties":false})");
+    root["properties"]["x"] = parse(member);
+    return JsonConstraint::Compile(root, true);
+  };
+  // Constraints apply to their own type; adding alternatives must not drop
+  // them.
+  const auto bounded = compile(R"({"type":["string","integer","boolean","null"],
+    "minLength":2,"maxLength":3,"minimum":2,"maximum":4})");
+  for (const auto valid : {R"("ab")", "2", "4", "true", "null"})
+    assert(Accepts(*bounded, std::string("{\"x\":") + valid + "}"));
+  for (const auto invalid :
+       {R"("a")", R"("abcd")", "1", "5", "2.5", "[]", "{}"})
+    assert(!Accepts(*bounded, std::string("{\"x\":") + invalid + "}"));
+  const auto finite = compile(R"({"type":["string","number","boolean","null"],
+    "enum":["a",2,true,null]})");
+  for (const auto valid : {R"("a")", "2", "true", "null"})
+    assert(Accepts(*finite, std::string("{\"x\":") + valid + "}"));
+  for (const auto invalid : {R"("b")", "3", "false"})
+    assert(!Accepts(*finite, std::string("{\"x\":") + invalid + "}"));
+  for (const auto invalid :
+       {R"({"type":[]})", R"({"type":["string",1]})",
+        R"({"type":["string","bogus"]})", R"({"type":["string","string"]})"}) {
+    bool rejected = false;
+    try {
+      compile(invalid);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
+
 void TestRejectedSchemas() {
   for (
       const char* input :
@@ -2652,6 +2724,7 @@ int main(int argc, char** argv) {
   TestSchemaLanguage();
   TestSchemaIntersections();
   TestMixedEnumValues();
+  TestTypeUnions();
   TestRejectedSchemas();
   TestOpenResponseObjects();
   TestIntegerBoundsAndRecursion();
