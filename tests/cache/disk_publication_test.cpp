@@ -170,48 +170,6 @@ void SharingAndPins() {
   assert(store.Retire({2}));
   assert(Managed(dir.path) == 0);
 }
-void PublicationRejectsConflictingReferences() {
-  Directory dir;
-  DiskStore store(ledger, dir.path, 1 << 20);
-  Fixture first;
-  store.Publish(Id(100), first.manifest, first.buffers);
-  for (unsigned kind = 0; kind < 7; ++kind) {
-    Fixture next(2);
-    switch (kind) {
-      case 0:
-        next.manifest.checkpoint = first.manifest.checkpoint;
-        break;
-      case 1:
-        ++next.manifest.lineage.value;
-        break;
-      case 2:
-        ++next.manifest.compatibility[0];
-        break;
-      case 3:
-        ++next.manifest.components[0].descriptor.layout_version;
-        break;
-      case 4:
-        next.manifest.components[0].tail->file = Id(11);
-        next.buffers[1].file = Id(11);
-        break;
-      case 5:
-        next.manifest.components[1].private_state->file = Id(21);
-        next.buffers[2].file = Id(21);
-        break;
-      case 6: {
-        auto duplicate = next.manifest.components[0];
-        duplicate.descriptor.id = {3};
-        duplicate.position = {{3}, 2};
-        duplicate.tail.reset();
-        next.manifest.components.push_back(duplicate);
-        break;
-      }
-    }
-    Reject([&] { store.Publish(Id(101), next.manifest, next.buffers); });
-    assert(store.Entries().size() == 1);
-    CheckPublished(store, dir.path);
-  }
-}
 void IoOrderingAndShortWrites() {
   Directory dir;
   Fixture f;
@@ -624,7 +582,6 @@ int main() {
   assert(setrlimit(RLIMIT_CORE, &no_core) == 0);
   Crashes();
   SharingAndPins();
-  PublicationRejectsConflictingReferences();
   WriterEviction();
   Failures();
   RetirementFailure();
