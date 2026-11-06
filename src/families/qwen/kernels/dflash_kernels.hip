@@ -2,14 +2,15 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 
-#include "src/families/qwen/kernels/dflash_kernels.hpp"
 #include "src/families/qwen/hip_common/quant_ops.hpp"
+#include "src/families/qwen/kernels/dflash_kernels.hpp"
 
 namespace gufo::hip::kernels {
 
@@ -484,13 +485,33 @@ __device__ void MergeSelectorLists(float* scores, uint32_t* ids,
   __syncthreads();
 }
 
+/// Row ranges of the batch's draft-vocabulary sequences; rows of other
+/// sequences score the whole vocabulary.
+struct SelectorVocabRows {
+  DFlashSelectorVocab vocab[8];
+  uint32_t row_begin[8];
+  uint32_t row_end[8];
+  uint32_t count;
+};
+
 __global__ void dflash_selector_partial_topk_kernel(
     const float* __restrict__ logits, float* __restrict__ partial_scores,
     uint32_t* __restrict__ partial_ids, uint32_t vocab_size,
-    uint32_t selector_top_k) {
-  logits += uint64_t(blockIdx.y) * vocab_size;
+    uint32_t selector_top_k, uint64_t logits_stride = 0,
+    SelectorVocabRows vocab_rows = {}) {
+  logits += uint64_t(blockIdx.y) *
+            (logits_stride != 0 ? logits_stride : uint64_t(vocab_size));
   partial_scores += uint64_t(blockIdx.y) * gridDim.x * selector_top_k;
   partial_ids += uint64_t(blockIdx.y) * gridDim.x * selector_top_k;
+  DFlashSelectorVocab vocab{};
+  uint32_t vocab_row = 0;
+  for (uint32_t index = 0; index < vocab_rows.count; ++index) {
+    if (blockIdx.y >= vocab_rows.row_begin[index] &&
+        blockIdx.y < vocab_rows.row_end[index]) {
+      vocab = vocab_rows.vocab[index];
+      vocab_row = blockIdx.y - vocab_rows.row_begin[index];
+    }
+  }
   __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
   __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
 
@@ -504,10 +525,31 @@ __global__ void dflash_selector_partial_topk_kernel(
 
   const uint32_t begin = blockIdx.x * kSelectorTokensPerBlock;
   const uint32_t requested_end = begin + kSelectorTokensPerBlock;
-  const uint32_t end = requested_end < vocab_size ? requested_end : vocab_size;
-  for (uint32_t token = begin + threadIdx.x; token < end; token += blockDim.x) {
-    InsertSelectorCandidate(logits[token], token, local_scores, local_ids,
-                            selector_top_k);
+  if (vocab.prefix == 0) {
+    const uint32_t end =
+        requested_end < vocab_size ? requested_end : vocab_size;
+    for (uint32_t token = begin + threadIdx.x; token < end;
+         token += blockDim.x) {
+      InsertSelectorCandidate(logits[token], token, local_scores, local_ids,
+                              selector_top_k);
+    }
+  } else {
+    // Column c < prefix is ID c; the table follows, and its empty slots
+    // score -inf, so they never enter the list.
+    const uint32_t columns = vocab.prefix + vocab.rows;
+    const uint32_t end = requested_end < columns ? requested_end : columns;
+    const float* table = vocab.logits + uint64_t(vocab_row) * vocab.rows;
+    for (uint32_t column = begin + threadIdx.x; column < end;
+         column += blockDim.x) {
+      if (column < vocab.prefix) {
+        InsertSelectorCandidate(logits[column], column, local_scores, local_ids,
+                                selector_top_k);
+      } else {
+        const uint32_t slot = column - vocab.prefix;
+        InsertSelectorCandidate(table[slot], uint32_t(vocab.ids[slot]),
+                                local_scores, local_ids, selector_top_k);
+      }
+    }
   }
 
   const uint32_t shared_offset = threadIdx.x * kMaxSelectorTopK;
@@ -776,6 +818,32 @@ __global__ void dflash_selector_finalize_batch_kernel(
   }
 }
 
+__global__ void dflash_gather_rows_kernel(const uint32_t* __restrict__ source,
+                                          uint32_t row_words,
+                                          const int32_t* __restrict__ ids,
+                                          uint32_t* __restrict__ destination) {
+  const uint32_t* row =
+      source + uint64_t(uint32_t(ids[blockIdx.x])) * row_words;
+  uint32_t* out = destination + uint64_t(blockIdx.x) * row_words;
+  for (uint32_t word = threadIdx.x; word < row_words; word += blockDim.x)
+    out[word] = row[word];
+}
+
+__global__ void dflash_draft_table_logits_kernel(
+    const float* __restrict__ source, uint32_t stride,
+    const int32_t* __restrict__ ids, float* __restrict__ table_logits,
+    uint32_t table_rows) {
+  const uint32_t slot = blockIdx.x * blockDim.x + threadIdx.x;
+  if (slot >= table_rows)
+    return;
+  const int32_t id = ids[slot];
+  float* out = table_logits + uint64_t(blockIdx.y) * table_rows + slot;
+  if (id < 0)
+    *out = -INFINITY;
+  else if (source != nullptr)
+    *out = source[uint64_t(blockIdx.y) * stride + uint32_t(id)];
+}
+
 void LaunchDFlashGroupedDynamicConv(
     const float* input, const float* dynamic_coefficients,
     const float* base_kernel, float* output, std::uint32_t num_tokens,
@@ -931,7 +999,7 @@ void LaunchDFlashSelectorBatch(
     std::uint32_t* candidate_ids, float* candidate_probabilities,
     std::span<const DFlashSelectorSequence> sequences, std::uint32_t vocab_size,
     std::uint32_t selector_rank, std::uint32_t selector_top_k,
-    hipStream_t stream) {
+    hipStream_t stream, std::uint32_t logits_stride) {
   if (sequences.empty() || sequences.size() > 8 || logits == nullptr ||
       projected_hidden == nullptr || predecessor_codebook_bf16 == nullptr ||
       successor_codebook_bf16 == nullptr || tokens == nullptr ||
@@ -940,26 +1008,49 @@ void LaunchDFlashSelectorBatch(
       selector_top_k > kMaxSelectorTopK || selector_top_k > vocab_size)
     throw std::invalid_argument("invalid DFlash selector batch or scratch");
   SelectorBatch batch{};
+  SelectorVocabRows vocab_rows{};
   std::uint32_t rows = 0;
+  // The widest row decides the partial count; a draft-vocabulary row reads
+  // fewer columns, and its remaining partial lists stay empty.
+  std::uint32_t columns = 0;
   for (std::size_t index = 0; index < sequences.size(); ++index) {
     const auto sequence = sequences[index];
+    const auto& vocab = sequence.vocab;
     if (sequence.count == 0 ||
         sequence.count >
             std::numeric_limits<std::uint32_t>::max() - 8U - rows ||
         !std::isfinite(sequence.temperature) || sequence.temperature < 0.0F ||
-        (sequence.temperature > 0.0F && uniforms == nullptr))
+        (sequence.temperature > 0.0F && uniforms == nullptr) ||
+        (vocab.prefix != 0 &&
+         (vocab.prefix > vocab_size || vocab.logits == nullptr ||
+          vocab.ids == nullptr || vocab.rows == 0 ||
+          vocab.rows > vocab_size - vocab.prefix ||
+          vocab.prefix > (logits_stride != 0 ? logits_stride : vocab_size))))
       throw std::invalid_argument("invalid DFlash selector sequence");
     batch.sequences[index] = sequence;
     batch.row_offsets[index] = rows;
     batch.token_offsets[index] = rows + static_cast<std::uint32_t>(index);
+    if (vocab.prefix != 0) {
+      vocab_rows.vocab[vocab_rows.count] = vocab;
+      vocab_rows.row_begin[vocab_rows.count] = rows;
+      vocab_rows.row_end[vocab_rows.count] = rows + sequence.count;
+      ++vocab_rows.count;
+      columns = std::max(columns, vocab.prefix + vocab.rows);
+    } else {
+      columns = vocab_size;
+    }
     rows += sequence.count;
   }
+  if (logits_stride != 0 && vocab_rows.count != sequences.size() &&
+      logits_stride < vocab_size)
+    throw std::invalid_argument("invalid DFlash selector logits stride");
   const auto partial_count = static_cast<std::uint32_t>(
-      (static_cast<std::uint64_t>(vocab_size) + kSelectorTokensPerBlock - 1U) /
+      (static_cast<std::uint64_t>(columns) + kSelectorTokensPerBlock - 1U) /
       kSelectorTokensPerBlock);
   dflash_selector_partial_topk_kernel<<<dim3(partial_count, rows),
                                         kSelectorThreads, 0, stream>>>(
-      logits, partial_scores, partial_ids, vocab_size, selector_top_k);
+      logits, partial_scores, partial_ids, vocab_size, selector_top_k,
+      logits_stride, vocab_rows);
   dflash_selector_finalize_batch_kernel<<<sequences.size(), kSelectorThreads, 0,
                                           stream>>>(
       partial_scores, partial_ids, projected_hidden,
@@ -967,6 +1058,34 @@ void LaunchDFlashSelectorBatch(
       static_cast<const hip_bfloat16*>(successor_codebook_bf16), tokens,
       confidences, uniforms, candidate_ids, candidate_probabilities, batch,
       partial_count, selector_rank, selector_top_k);
+}
+
+void LaunchDFlashGatherRows(const void* source, std::size_t row_bytes,
+                            const std::int32_t* ids, void* destination,
+                            std::uint32_t count, hipStream_t stream) {
+  if (source == nullptr || ids == nullptr || destination == nullptr ||
+      row_bytes == 0 || row_bytes % sizeof(std::uint32_t) != 0 ||
+      row_bytes / sizeof(std::uint32_t) >
+          std::numeric_limits<std::uint32_t>::max())
+    throw std::invalid_argument("invalid DFlash row gather");
+  if (count == 0)
+    return;
+  dflash_gather_rows_kernel<<<count, 256, 0, stream>>>(
+      static_cast<const std::uint32_t*>(source),
+      static_cast<std::uint32_t>(row_bytes / sizeof(std::uint32_t)), ids,
+      static_cast<std::uint32_t*>(destination));
+}
+
+void LaunchDFlashDraftTableLogits(const float* source, std::uint32_t stride,
+                                  const std::int32_t* ids, float* table_logits,
+                                  std::uint32_t rows, std::uint32_t table_rows,
+                                  hipStream_t stream) {
+  if (ids == nullptr || table_logits == nullptr || rows == 0 || table_rows == 0)
+    throw std::invalid_argument("invalid DFlash draft table");
+  constexpr std::uint32_t kThreads = 256;
+  dflash_draft_table_logits_kernel<<<
+      dim3((table_rows + kThreads - 1U) / kThreads, rows), kThreads, 0,
+      stream>>>(source, stride, ids, table_logits, table_rows);
 }
 
 }  // namespace gufo::hip::kernels

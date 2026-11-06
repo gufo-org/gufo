@@ -90,9 +90,12 @@ conversation tokens. Reduce `--context` or `--sessions` if their state exceeds
 available memory.
 
 Text sampling follows each model's recommended defaults in `serve`, `prompt`
-and `chat`. Explicit request values override explicit server options, which
-otherwise inherit the effective thinking preset. Null request values inherit
-where supported; explicit zero values, including `top_p: 0`, are preserved.
+and `chat`, so these commands sample unless `--temperature 0` selects greedy
+decoding. Model providers supply the defaults for the effective thinking mode.
+Explicit server or command-line settings override them, and explicit request
+values override both. Null request values inherit where supported; explicit
+zero values, including `top_p: 0`, are preserved. Provider defaults never
+replace a request's output grammar.
 The startup sampling log reports server defaults; requests can override each
 setting independently, including when changing thinking mode.
 
@@ -173,9 +176,11 @@ correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
 Flash-Next's native context is 262144. `--context` above it requires
-`--enable-yarn`, which enables static YaRN with factor context / 262144; the
+`--enable-yarn`, which enables YaRN up to factor context / 262144; the
 server refuses to start without the flag, and the flag is an error at or below
-262144. The factor applies to every request, including short ones; see the
+262144. A session keeps the native rotation while it holds at most 262144
+tokens and takes the smallest whole factor covering its positions past that,
+re-rotating its cached keys when the factor changes; see the
 [measurements](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323981940),
 the
 [opt-in proposal](https://github.com/gufo-org/gufo/pull/350#issuecomment-6323982386),
@@ -212,9 +217,8 @@ movable pages, not GPU allocations. 27B also checks HIP free memory. A
 positive value sets a byte cap that may exceed the automatic budget, up to the
 available host RAM minus 4 GiB; the startup line reports both as
 `automatic_bytes` and `max_bytes`.
-On Qwen27B and Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
-`max_bytes` excludes it. Other models' disk staging and temporary disk-save
-buffers are separate from this RAM budget.
+The pinned disk staging buffer comes out of that ceiling, and `max_bytes`
+excludes it.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
 Qwen27B and Qwen3.8-Flash-Next pin pages for up to about 89% of its budget as captures
@@ -226,8 +230,7 @@ registered with HIP: `hipHostMalloc` asks for high-order pages, and compacting
 host memory for them stalled decode for seconds when most RAM belonged to the GPU.
 Growth stops early while the host would keep less than 4 GiB available. The pages hold checkpoint state and KV rows, partial
 tails and idle-session spill; there is no separate spill option.
-Other models allocate payloads only when captured. Under pressure, optional
-copies give way before another conversation's last useful checkpoint.
+Under pressure, optional copies give way before another conversation's last useful checkpoint.
 
 `--cache-ram-bytes off` keeps no RAM cache. The server retains and captures no
 checkpoint in RAM and pins no cache memory, except up to 512 MiB of backing that
@@ -292,20 +295,18 @@ encoding scratch is still allocated per image.
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
 
-On Qwen27B and Flash-Next, `--cache-disk-bytes` counts every file the cache manages,
+`--cache-disk-bytes` counts every file the cache manages,
 including temporary files of unfinished writes and files a crash left
 unreferenced. Restarting with a lower budget removes those first, then the
 oldest checkpoints by creation order, until the directory fits; use history does not
-survive a restart. One Qwen27B or Flash-Next server owns the directory: a second one fails
+survive a restart. One server owns the directory: a second one fails
 at startup, after loading its model but before committing its RAM budget, with
 an ownership error naming the directory. The lock does not wait: a restarted
 server fails if its predecessor is still draining disk writes when the new one
-finishes loading its model. Other models do not take this lock.
-The first start on a directory written by an earlier release removes its old
-checkpoint files (`*.kvc`), and the cache refills as conversations run. Do not
-share a directory with another model server; the component cache removes
+finishes loading its model.
+Do not share a directory with another model server; the component cache removes
 their checkpoint and temporary files too, including writes in progress.
-Qwen27B and Flash-Next ignore `--cache-disk-staging-bytes` and logs
+The server ignores `--cache-disk-staging-bytes` and logs
 `event=option_ignored`. Writes and restores stream each checkpoint through an
 internal 1 MiB pinned buffer, piece by piece; a larger buffer did not change
 restore or write speed and took pinned RAM and device heap from the cache and
@@ -582,15 +583,19 @@ transcript: synthesis runs to the `max_new_tokens` cap, so a short input can
 return several minutes of unusable audio. Preset names join
 `voice-clone` in `/v1/audio/voices`, and a request naming a preset must not
 also send `reference_audio`, `reference_text`, or `voice_clone_mode` --- the
-preset already supplies them. Presets require a Base checkpoint; CustomVoice
-selects a trained embedding and VoiceDesign is driven by `instructions`, so
-neither has anything to apply them to.
+preset already supplies them. Presets require a checkpoint that supports
+reference presets (such as Qwen3-TTS Base); CustomVoice selects a trained
+embedding and VoiceDesign is driven by `instructions`, so neither has anything
+to apply them to. A request that omits `voice` gets the model's declared
+default voice (such as `voice-clone`), falling back to the first name in
+`/v1/audio/voices`; a preset is never chosen implicitly.
 
 `POST /v1/audio/speech` accepts `model`, `input`, `voice`, `response_format`,
 `speed`, `language`, `instructions`, `seed`, `max_new_tokens`, `greedy`,
 `stream_format`, talker `temperature`/`top_k`/`top_p`/`repetition_penalty`, and
 predictor `subtalker_dosample`/`subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p`.
-Base additionally accepts `reference_audio`, `reference_text`, `voice_clone_mode`.
+Checkpoints that support reference conditioning additionally accept
+`reference_audio`, `reference_text`, `voice_clone_mode`.
 Unknown fields are ignored. `response_format` supports buffered `wav` and
 streaming `pcm`; `stream_format: "sse"` emits OpenAI audio events with base64
 PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
@@ -1157,10 +1162,13 @@ limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
 sequences and does not guarantee complete JSON. Token limits return `"length"`
 in Chat or `status: "incomplete"` with reason `max_output_tokens` in Responses.
 
-Supported: objects, arrays, nullable types, `enum`/`const`, `anyOf`, recursive local
+Supported: objects, arrays, type unions (including nullable types), `enum`/`const`,
+`anyOf`, recursive local
 `$ref`/`$defs`, numeric bounds/`multipleOf`, string patterns/lengths/formats and
 array length bounds. Formats include date/time, duration, email, hostname,
-IP addresses and UUID.
+IP addresses and UUID. Annotations that do not constrain values (`$schema`,
+`$comment`, `title`, `description`, `default`, `examples`, `deprecated`,
+`readOnly` and `writeOnly`) are accepted and ignored, including in strict schemas.
 
 The root must resolve to an object. As in llama.cpp, an object that declares
 `properties` admits no other keys unless `additionalProperties` is `true` or a

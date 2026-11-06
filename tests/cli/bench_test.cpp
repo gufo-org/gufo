@@ -198,8 +198,8 @@ void TestFlashNextYarnRule() {
          "a deep benchmark reserves past the native context");
   Expect(!ResolveFlashNextBenchYarn(*options, 262144, &scaling, &error) &&
              error ==
-                 "context above the native 262144 tokens needs static YaRN, "
-                 "which applies to every request; pass --enable-yarn "
+                 "context above the native 262144 tokens needs YaRN, which "
+                 "scales each session that grows past it; pass --enable-yarn "
                  "(requested 264097)",
          "a benchmark past the native context requires --enable-yarn");
   options->enable_yarn = true;

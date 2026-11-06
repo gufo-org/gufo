@@ -1,5 +1,39 @@
 # Qwen3.8 Flash-Next experiments
 
+## Raw completion fallback (November 4, 2026)
+
+Retained: capture the aligned prompt tail in-pass before retaining the exact
+raw prompt. Keeping only the exact unaligned prompt made the Devlab follow-up
+lose its entire cached prefix (1.23 s prefill versus about 0.30 s). The fix
+restores at 1,548 tokens and keeps zero-prefill exact retries. AR/MTP raw
+continuations above the sparse budget match cold output. This path activates
+136 MiB of existing reserved device checkpoint scratch and retains another
+fallback within the same cache budget; the measured memory cost is recorded
+in QUALITY.md. The timing fixture uses an aligned prefix for matched work;
+unaligned extensions retain a separate regression test and raw evidence.
+
+## Cache readahead progress (November 4, 2026)
+
+Retained: skip files already consumed by the reader before computing the
+unsigned prefetch-window distance. Otherwise a reader that overtakes the
+helpers can stop all further hints. Four helpers and the 32 MiB window are
+unchanged; no larger allocation or new option is needed.
+
+On Strix Halo, ROCm 10.1, Flash-Next UD-Q4_K_XL with shared Q8_0 MTP,
+`--sessions 2 --context 32768`, old and fixed production builds alternated
+against reflinked copies of the same persisted records. The 200,142,032-byte
+restore measured 92.06/92.23 ms before and 74.03/84.34 ms after; the
+305,368,752-byte restore measured 135.29/127.41 ms before and
+118.25/122.94 ms after. These are retained observations, not a global speed
+claim. Both restore outputs remain exact. The deterministic cursor regression
+fails with the original scheduling and passes with the fix; the full
+`cache_streaming_test` takes 0.55 seconds.
+
+Those exploratory timings preceded discovery of an unrelated desktop crash
+reporter repeatedly writing cores. They remain advisory. Final qualification
+uses quiet, sequential controls against main `1c75887b`; variable disk
+restore timings remain explicitly inconclusive rather than a speed claim.
+
 ## Wide prompt-lookup verification (November 1, 2026)
 
 Measured downstream, on a fork that runs Swift 1.5 IQ4_XS with its Q8_0 MTP

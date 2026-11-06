@@ -82,9 +82,11 @@ if (NOT WIN32)
     "$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,LINK_LIBRARIES>>\n$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,INTERFACE_LINK_LIBRARIES>>\n")
 
   add_test(NAME cache_boundary_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/boundary_test.py
+    COMMAND ${Python3_EXECUTABLE}
+      ${PROJECT_SOURCE_DIR}/tests/support/package_boundary_test.py
       ${PROJECT_SOURCE_DIR}/src/cache
-      ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt)
+      ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt
+      Threads::Threads gufo_platform)
   set_tests_properties(cache_boundary_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
   add_executable(cache_slot_test slot_test.cpp)

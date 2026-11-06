@@ -177,8 +177,9 @@ private:
     float* target_hidden{nullptr};  ///< last max_speculative trunk rows
     std::uint32_t position{0};
     bool residual_valid{false};
-    /// The request's draft table (draft_vocab.hpp): kMtpDraftExtraRows
-    /// output() rows and their token IDs, -1 for an empty slot.
+    /// The request's draft table (draft_vocab.hpp):
+    /// speculative::kDraftVocabExtraRows output() rows and their token IDs, -1
+    /// for an empty slot.
     std::uint8_t* draft_rows{nullptr};
     std::int32_t* draft_ids{nullptr};
   };
@@ -191,6 +192,10 @@ private:
   bool mtp_enabled_{false};
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
+  /// Dynamic YaRN: the factor this session's cached keys are rotated with,
+  /// and the rope constants its rope launches use for it.
+  float yarn_factor_{1.0F};
+  YarnRope yarn_rope_{};
   ContinuationHooks* continuation_hooks_{nullptr};
   std::vector<LinearState> linear_;
   std::vector<AttentionState> attention_;
@@ -239,6 +244,26 @@ struct PrefillCheckpoint {
 /// sized once for `max_batch` tokens; longer prompts are fed in chunks.
 class Executor {
 public:
+  /// Dynamic YaRN (with a configured YaRN factor): a session runs unscaled
+  /// while it fits the native context and takes the smallest whole factor
+  /// covering its positions past it, up to the configured one; its cached
+  /// keys are re-rotated when the factor changes.
+  [[nodiscard]] bool DynamicYarn() const noexcept { return dynamic_yarn_; }
+  [[nodiscard]] float YarnLevelFor(std::size_t end_position) const noexcept;
+  [[nodiscard]] float YarnFactor(const Session& s) const noexcept {
+    return s.yarn_factor_;
+  }
+  bool SetYarnFactor(Session& s, float factor, std::string* error_msg);
+  /// After a restore: the session's keys are rotated with `factor`.
+  void AdoptYarnFactor(Session& s, float factor);
+  /// Writes `count` key rows from `first` as the native rotation would have
+  /// written them, for a session whose factor is not 1. `pooled` selects the
+  /// indexer block layout; `destination` holds only the requested rows.
+  void CopyNativeKeys(const Session& s, const __half* rows, std::uint32_t first,
+                      std::uint32_t count, bool pooled,
+                      const qwen::vision::DeviceRope* rope, __half* destination,
+                      hipStream_t stream) const;
+
   struct Options {
     std::uint32_t max_batch{1};
     /// Rows of logits (and hidden states) a Forward call may return.
@@ -270,13 +295,24 @@ public:
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
-  /// Commits the in-pass checkpoint arena on first use. False when the device
-  /// lacks headroom for it; the caller then captures at a pass boundary.
+  /// Commits checkpoint slot 0 on first use. False when the device lacks
+  /// headroom for it; the caller then captures at a pass boundary.
   [[nodiscard]] bool ReservePrefillCheckpoint(const Session& session) const;
-  /// Requires ReservePrefillCheckpoint.
+  /// A view of `session` after `prefix` rows of the pass over `tokens`,
+  /// filled by the Forward that runs it. Each of a pass's checkpoints takes
+  /// its own `slot` (below kMaxPassCheckpoints) of executor storage, which
+  /// the next pass overwrites: consume the view before it. `previous` is the
+  /// prefix of the pass's preceding checkpoint (zero for the first), so the
+  /// view keeps the hidden rows a pass starting there would. Slot 0 requires
+  /// ReservePrefillCheckpoint and is counted in DeferredScratchBytes; the
+  /// others are allocated when a pass first needs them and fail (returning
+  /// null) without device headroom.
   [[nodiscard]] std::unique_ptr<PrefillCheckpoint> MakePrefillCheckpoint(
       Session& session, std::span<const std::int32_t> tokens,
-      std::uint32_t prefix, std::string* error_msg) const;
+      std::uint32_t prefix, std::string* error_msg, std::uint32_t slot = 0,
+      std::uint32_t previous = 0) const;
+  /// Returns the storage of checkpoint slots above 0 to the snapshot pool.
+  void ReleasePassCheckpointStorage() const noexcept;
 
   /// Appends `tokens` (at most max_batch) to the session and returns the
   /// logits of the last `n_logits` tokens in `logits` (n_logits * vocab
@@ -288,12 +324,12 @@ public:
   /// prompt: once its own n-gram rows have arrived it starts reading the
   /// next chunk's, so that read overlaps this chunk's layers. The rows are
   /// used only if the next batch has exactly those tokens.
-  [[nodiscard]] bool Forward(Session& session,
-                             std::span<const std::int32_t> tokens,
-                             std::uint32_t n_logits, float* logits,
-                             ForwardMode mode, std::string* error_msg,
-                             PrefillCheckpoint* checkpoint = nullptr,
-                             std::span<const std::int32_t> next = {}) const;
+  [[nodiscard]] bool Forward(
+      Session& session, std::span<const std::int32_t> tokens,
+      std::uint32_t n_logits, float* logits, ForwardMode mode,
+      std::string* error_msg,
+      std::span<PrefillCheckpoint* const> checkpoints = {},
+      std::span<const std::int32_t> next = {}) const;
 
   struct BatchItem {
     Session* session;
@@ -562,7 +598,7 @@ private:
   bool Ple(const DeviceLayer& l, Session& s, std::uint32_t n_tokens, float* res,
            bool speculative, std::string* error_msg,
            bool embeddings_ready = false,
-           PrefillCheckpoint* checkpoint = nullptr) const;
+           std::span<PrefillCheckpoint* const> checkpoints = {}) const;
   bool LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                        const float* x, float* out, std::uint32_t n_tokens,
                        bool speculative, std::string* error_msg,
@@ -578,7 +614,7 @@ private:
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
                  bool last_only = false, bool projections_ready = false,
                  bool project_output = true,
-                 std::uint32_t checkpoint_tokens = 0) const;
+                 PassCheckpoints checkpoints = {}) const;
   /// Orders the main stream after the work queued on side_stream_.
   bool JoinSide(std::string* error_msg) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,
@@ -597,7 +633,8 @@ private:
     return requested && !model_->draft_output().empty() &&
            session.mtp_.draft_rows != nullptr;
   }
-  /// The session's draft table as a weight of kMtpDraftExtraRows rows.
+  /// The session's draft table as a weight of speculative::kDraftVocabExtraRows
+  /// rows.
   DeviceTensor DraftTable(const Session& session) const noexcept;
   /// Small-head draft logits: prefix rows, then the table rows with empty
   /// slots at -infinity.
@@ -615,7 +652,7 @@ private:
                    std::uint32_t start_pos, std::uint32_t pool_grid,
                    std::uint32_t first_layer, std::uint32_t end_layer,
                    std::string* error_msg,
-                   PrefillCheckpoint* checkpoint = nullptr,
+                   std::span<PrefillCheckpoint* const> checkpoints = {},
                    bool embeddings_ready = false) const;
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
@@ -634,7 +671,10 @@ private:
   [[nodiscard]] std::shared_ptr<SnapshotAllocator> GetSnapshotAllocator() const;
   mutable std::once_flag snapshot_allocator_once_;
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;
-  mutable std::shared_ptr<void> checkpoint_storage_;
+  /// One region per in-pass checkpoint slot, allocated on first use.
+  mutable std::shared_ptr<void> checkpoint_storage_[kMaxPassCheckpoints];
+  /// The bytes of one checkpoint slot for `session`.
+  [[nodiscard]] std::size_t CheckpointSlotBytes(const Session& session) const;
   /// The stream kernels are queued on. Overlapped work swaps in side_stream_
   /// for its launches and joins back through side_done_ (JoinSide).
   mutable hipStream_t stream_{nullptr};
@@ -800,7 +840,16 @@ private:
   /// max(native context, Options::max_context).
   std::uint32_t context_capacity_{0};
   /// YaRN constants every rope launch receives (disabled: original path).
-  YarnRope yarn_{};
+  /// With dynamic YaRN they are the running session's (UseYarn).
+  mutable YarnRope yarn_{};
+  /// Dynamic YaRN: point the rope launches at `s`'s constants before a
+  /// per-session forward, so sessions at different factors never share them.
+  void UseYarn(const Session& s) const noexcept {
+    if (dynamic_yarn_)
+      yarn_ = s.yarn_rope_;
+  }
+  bool dynamic_yarn_{false};
+  RopeScaling yarn_max_{};  ///< configured static scaling (dynamic ceiling)
   /// Bounded score scratch, shared by sequential selector chunks.
   std::size_t select_score_floats_{0};
   std::vector<void*> allocations_;

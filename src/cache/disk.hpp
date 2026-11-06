@@ -15,6 +15,9 @@
 
 namespace gufo::cache {
 inline constexpr std::uint32_t kDiskFormatVersion = 2;
+// Written only by manifests with window components, which also encode the
+// window size; version 2 manifests remain readable.
+inline constexpr std::uint32_t kDiskWindowFormatVersion = 3;
 inline constexpr std::size_t kMaxManifestBytes = std::size_t{16} * 1024 * 1024;
 class DiskCapacityExhausted : public ResourceExhausted {};
 using DiskFileId = std::array<std::uint8_t, 16>;
@@ -87,9 +90,9 @@ private:
   std::uint64_t epoch_{};
 };
 struct DiskStartupStats {
-  std::uint64_t manifest_bytes_read{}, legacy_probe_bytes_read{};
+  std::uint64_t manifest_bytes_read{};
   std::uint64_t dependency_stats{}, rejected_manifests{};
-  std::uint64_t managed_bytes{}, removed_legacy_bytes{};
+  std::uint64_t managed_bytes{};
 };
 // Host-buffer publication only; caller retains and admits immutable buffers
 // until Publish returns. Full chunks already referenced by a checkpoint can be

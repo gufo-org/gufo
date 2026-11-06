@@ -13,6 +13,7 @@ agents and contributors are in [AGENTS.md](../AGENTS.md).
 | `src/cli` | Executable commands, terminal interfaces and HTTP adapters |
 | `src/core` | Shared runtime: GGUF loading, sampling, quantization, HIP helpers, diagnostics |
 | `src/cache` | Continuation cache: tiers, ledger and the neutral capture/backing contract |
+| `src/sched` | Text scheduling policy: work-unit decisions and prefill rate, without serving or model code |
 | `src/ext` | Extension runtime: registry, options, neutral continuation and host-service contracts |
 | `src/models/<model>` | One model package: config, weights, engine, kernels, CPU reference |
 | `src/eval` | HTTP capability evaluation |

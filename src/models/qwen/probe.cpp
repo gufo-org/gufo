@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <string>
 
+#include "src/families/qwen/config/qwen_config.hpp"
+
 namespace gufo::models::qwen {
 
 bool ProbeQwenGguf(const core::GgufReader& reader) {
@@ -21,6 +23,20 @@ bool ProbeQwenGguf(const core::GgufReader& reader) {
           .value_or(reader.GetMetadataUint64(prefix + "embedding_length")
                         .value_or(0));
   return embedding_length == 5120;
+}
+
+std::optional<sampling::TextSamplingDefaults> QwenSamplingDefaults(
+    const core::ModelConfig& config) {
+  return sampling::PresetDefaults(sampling::TextPreset(config));
+}
+
+std::optional<sampling::TextSamplingDefaults> QwenSamplingDefaults(
+    const core::GgufReader& reader) {
+  const auto config = ExtractQwenConfig(reader);
+  if (!config.has_value()) {
+    return std::nullopt;
+  }
+  return QwenSamplingDefaults(*config);
 }
 
 bool ProbeQwen(std::string_view model_root) {

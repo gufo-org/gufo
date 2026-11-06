@@ -47,4 +47,17 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
   return {canonical.begin(), canonical.end()};
 }
 
+std::vector<std::uint8_t> DeepSeekProcessIdentity(
+    const void* model, std::uint32_t max_context, bool use_dspark,
+    std::uint32_t max_draft_tokens) {
+  std::ostringstream identity;
+  identity << "schema=gufo-process-text-continuation-v1\n"
+           << "model_instance=" << model << '\n'
+           << "context_tokens=" << max_context << '\n'
+           << "dspark=" << use_dspark << '\n'
+           << "draft_max_tokens=" << max_draft_tokens << '\n';
+  const auto canonical = identity.str();
+  return {canonical.begin(), canonical.end()};
+}
+
 }  // namespace gufo::models::deepseek_v4_flash

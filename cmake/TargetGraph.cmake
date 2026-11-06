@@ -13,7 +13,10 @@ set(GUFO_LINK_GRAPH_PROTECTED
   gufo_cache
   gufo_cache_hip
   gufo_core
-  gufo_ext_runtime)
+  gufo_ext_runtime
+  gufo_ext_core
+  gufo_ext_cache
+  gufo_ext_hip)
 set(GUFO_LINK_GRAPH_FORBIDDEN gufo_serving gufo_http)
 
 # Link items that name a system library rather than a project target. The

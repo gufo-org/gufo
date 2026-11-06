@@ -10,7 +10,9 @@
 
 #include "dspark_internal.h"
 #include "dspark_policy.h"
+#include "model_data_internal.h"
 #include "native_internal.h"
+#include "src/models/deepseek_v4_flash/continuation_hooks.hpp"
 
 #define DS4_SESSION_NEG_INF (-1.0e30f)
 
@@ -29,7 +31,14 @@ struct ds4_session {
     /* Verified target rows for a sampled concurrent cycle; grown on demand. */
     std::unique_ptr<float[]> spec_rows;
     uint32_t spec_rows_cap = 0;
+    gufo::models::deepseek_v4_flash::ContinuationHooks* hooks = nullptr;
 };
+
+static void session_before_write(ds4_session* session, uint32_t first,
+                                 uint32_t end) {
+  if (session->hooks)
+    session->hooks->BeforeWrite(first, end);
+}
 
 static void set_error(char *error,
                       size_t error_capacity,
@@ -152,6 +161,7 @@ void ds4_session_prepare_batch_execution(ds4_session *session) {
  */
 static bool session_commit_and_extend(ds4_session *session, int token) {
     const uint32_t position = (uint32_t)session->checkpoint.len;
+    session_before_write(session, position, position + 1u);
     if (!ds4_rocm_graph_eval(session->graph,
                              session->engine,
                              token,
@@ -175,6 +185,8 @@ static bool sessions_commit_and_extend_batch(
   std::array<ds4_rocm_batch_item, 8> batch{};
   for (size_t index = 0; index < item_count; ++index) {
     ds4_session* session = items[index].session;
+    const auto position = static_cast<uint32_t>(session->checkpoint.len);
+    session_before_write(session, position, position + 1u);
     batch[index] = {
         .graph = session->graph,
         .token = tokens[index],
@@ -305,6 +317,8 @@ int ds4_session_sync(ds4_session *session,
       const uint32_t resume_minimum =
           ds4_rocm_graph_resume_prefill_min_tokens();
       if (suffix > 0 && (uint32_t)suffix >= resume_minimum) {
+        session_before_write(session, (uint32_t)session->checkpoint.len,
+                             (uint32_t)prompt->len);
         const bool ok = ds4_rocm_graph_prefill_range(
             session->graph, session->engine, prompt,
             (uint32_t)session->checkpoint.len, (uint32_t)suffix,
@@ -335,6 +349,10 @@ int ds4_session_sync(ds4_session *session,
       return 0;
     }
 
+    if (session->hooks) {
+      session->hooks->BeforeReset();
+      session->hooks->BeforeWrite(0u, (uint32_t)prompt->len);
+    }
     session->checkpoint_valid = false;
     session_dspark_reset_request_state(session, true);
     if (!ds4_rocm_graph_reset(session->graph)) {
@@ -469,6 +487,10 @@ int ds4_sessions_eval_batch(const ds4_session_batch_item *items,
         };
     }
 
+    for (size_t index = 0; index < item_count; ++index) {
+        const auto position = graph_items[index].position;
+        session_before_write(items[index].session, position, position + 1u);
+    }
     if (!ds4_rocm_graph_eval_batch(engine,
                                    graph_items.data(),
                                    graph_item_count)) {
@@ -524,6 +546,8 @@ int ds4_session_load_snapshot(ds4_session *session,
         set_error(error, error_capacity, "invalid session snapshot load");
         return 1;
     }
+    if (session->hooks)
+      session->hooks->BeforeRestore();
     session->checkpoint_valid = false;
     const int result = ds4_rocm_graph_load_snapshot(
         session->graph, &session->checkpoint, session->logits.get(),
@@ -1015,6 +1039,7 @@ static int session_dspark_step(ds4_session* session, int* emitted,
    * at least the anchor. */
 
   int32_t row_tops[DS4_DSPARK_MAX_BLOCK + 1u];
+  session_before_write(session, (uint32_t)length, (uint32_t)length + drafted);
   if (!ds4_rocm_graph_spec_prepare(session->graph, session->engine, drafted) ||
       !ds4_rocm_graph_spec_frontier_save(session->graph)) {
     set_error(error, error_capacity, "DSpark verification setup failed");
@@ -1284,6 +1309,11 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
   }
 
   verify_counts = drafted_counts;
+  for (size_t index = 0; index < item_count; ++index) {
+    const auto first = static_cast<uint32_t>(lengths[index]);
+    session_before_write(items[index].session, first,
+                         first + verify_counts[index]);
+  }
   std::array<ds4_rocm_verify_item, 8> verify_items{};
   std::array<float*, 8> row_logits{};
   for (size_t index = 0; index < item_count; ++index) {
@@ -1427,4 +1457,90 @@ int ds4_session_ctx(const ds4_session *session) {
 
 uint32_t ds4_session_prefill_capacity(const ds4_session* session) {
   return session ? session->prefill_capacity : 0;
+}
+
+uint32_t ds4_layer_ratio(uint32_t layer) {
+  return ds4_layer_compress_ratio(layer);
+}
+
+uint32_t ds4_engine_dspark_stages(const ds4_engine* engine) {
+  return engine && engine->dspark ? engine->dspark->n_stages : 0u;
+}
+
+void ds4_session_set_hooks(
+    ds4_session* session,
+    gufo::models::deepseek_v4_flash::ContinuationHooks* hooks) {
+  session->hooks = hooks;
+}
+
+bool ds4_session_coherent(const ds4_session* session) {
+  return session->checkpoint_valid || session->checkpoint.len == 0;
+}
+
+void* ds4_session_continuation_tensor(const ds4_session* session,
+                                      ds4_continuation_tensor tensor,
+                                      uint32_t index) {
+  return ds4_rocm_graph_continuation_tensor(session->graph, tensor, index);
+}
+
+ds4_continuation_ring ds4_session_raw_ring(const ds4_session* session,
+                                           uint32_t position) {
+  return ds4_rocm_graph_raw_ring(session->graph, position);
+}
+
+ds4_continuation_ring ds4_session_draft_ring(const ds4_session* session,
+                                             uint32_t position) {
+  return ds4_rocm_graph_draft_ring(session->graph, position);
+}
+
+int* ds4_session_tokens(ds4_session* session) {
+  return session->checkpoint.v;
+}
+
+float* ds4_session_frontier_logits(ds4_session* session) {
+  return session->logits.get();
+}
+
+const ds4_dspark_request_state* ds4_session_dspark_state(
+    const ds4_session* session) {
+  return &session->dspark_state;
+}
+
+uint32_t ds4_session_draft_tokens(const ds4_session* session) {
+  return ds4_rocm_graph_dspark_context_len(session->graph);
+}
+
+bool ds4_session_draft_capture(const ds4_session* session) {
+  return ds4_rocm_graph_draft_capture(session->graph);
+}
+
+bool ds4_session_rows_at(const ds4_session* session, uint32_t position) {
+  return ds4_rocm_graph_rows_at(session->graph, position);
+}
+
+bool ds4_session_begin_restore(ds4_session* session, uint32_t position) {
+  if (!ds4_rocm_graph_reserve_rows(session->graph, position))
+    return false;
+  session->checkpoint_valid = false;
+  session->checkpoint.len = 0;
+  for (uint32_t i = 0; i < position; ++i)
+    ds4_tokens_push(&session->checkpoint, 0);
+  return true;
+}
+
+bool ds4_session_finish_restore(ds4_session* session, uint32_t position,
+                                uint32_t draft_tokens, bool draft_capture,
+                                const ds4_dspark_request_state* state) {
+  if (!ds4_rocm_graph_commit_rows(session->graph, position, draft_tokens,
+                                  draft_capture))
+    return false;
+  session->dspark_state = *state;
+  session->dspark_state.pending_anchor = -1;
+  session->checkpoint_valid = true;
+  return true;
+}
+
+void ds4_session_clear(ds4_session* session) {
+  ds4_session_invalidate(session);
+  session->checkpoint.len = 0;
 }

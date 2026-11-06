@@ -171,7 +171,7 @@ function(gufo_discover_extensions)
       message(STATUS "gufo: unshipped discovered extension ${name}")
     endif()
     get_property(json GLOBAL PROPERTY "GUFO_EXT_${name}_JSON")
-    foreach(field keys model_ids options)
+    foreach(field keys model_ids)
       _gufo_extension_values(values "${json}" "${field}")
       foreach(value IN LISTS values)
         string(SHA256 key "${field}:${value}")
@@ -184,8 +184,10 @@ function(gufo_discover_extensions)
         # the diagnostic names the extension that actually holds the value. Two
         # extensions in the same tier may share an artifact key: overlapping keys
         # are resolved by probes later. Provider IDs and entry symbols may not
-        # collide (GufoExtension.cmake) and option types may not disagree
-        # (Registry::AddProvider); both fail elsewhere, not here.
+        # collide (GufoExtension.cmake); that fails elsewhere, not here. Options
+        # are absent because any extensions may share one name with one type,
+        # such as a draft model path; GufoExtension.cmake and
+        # Registry::AddProvider reject disagreeing types.
         get_property(other_owner GLOBAL PROPERTY "GUFO_DISCOVERY_${key}_${other}")
         if(other_owner)
           message(FATAL_ERROR "gufo: shipped/unshipped ${field} collision '${value}' (${other_owner}, ${name})")
@@ -338,6 +340,8 @@ function(_gufo_validate_external_target tgt)
       gufo_cli gufo_compare gufo_bench gufo_diagnostics
       gufo_runtime_storage gufo_prompt_cache gufo_audio_cache gufo_tool_calls
       gufo_kernel_bench_support)
+  # Audited link contracts: their closure reaches private targets by design.
+  set(public_link_targets gufo_ext_core gufo_ext_cache gufo_ext_hip)
   get_target_property(directory "${tgt}" SOURCE_DIR)
   set(base "${CMAKE_BINARY_DIR}")
   _gufo_external_property("${tgt}" "${tgt}" INCLUDE_DIRECTORIES paths)
@@ -413,6 +417,9 @@ function(_gufo_validate_external_target tgt)
       if(alias)
         set(current "${alias}")
       endif()
+    endif()
+    if(current IN_LIST public_link_targets)
+      continue()
     endif()
     if(current IN_LIST prohibited_private_targets)
       message(FATAL_ERROR "external extension target ${tgt} violates allowlist: links prohibited target '${current}'")

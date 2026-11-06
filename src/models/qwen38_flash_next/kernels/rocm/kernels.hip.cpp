@@ -1605,6 +1605,26 @@ constexpr int kGdnWindow = 4;
 constexpr int kGdnWindowsAhead = 3;
 constexpr int kGdnRows = 2;  // state rows per lane
 
+/// The recurrent state an in-pass checkpoint ending after `rows` rows of
+/// the pass receives, or null.
+__device__ __forceinline__ float* CheckpointState(const GdnCheckpoint& c,
+                                                  std::uint32_t rows) {
+  for (std::uint32_t i = 0; i < c.count; ++i)
+    if (c.tokens[i] == rows)
+      return c.state[i];
+  return nullptr;
+}
+
+/// True when pass row `tok` is one of the three raw rows before an in-pass
+/// checkpoint, which its convolution history copies.
+__device__ __forceinline__ bool CheckpointHistoryRow(const PassCheckpoints& c,
+                                                     std::size_t tok) {
+  for (std::uint32_t i = 0; i < c.count; ++i)
+    if (tok < c.tokens[i] && tok + 3 >= c.tokens[i])
+      return true;
+  return false;
+}
+
 /// grid (value heads, row groups): each block owns kGdnRowsPerBlock state
 /// rows of one head, kGdnLanes threads per row, each lane a contiguous
 /// slice of the key dimension. Rows of the delta rule are independent, so
@@ -1713,9 +1733,9 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
           acc * q_scale;
     }
     if constexpr (!kBatch) {
-      if (checkpoint.state != nullptr && t + 1 == checkpoint.tokens) {
+      if (float* const captured = CheckpointState(checkpoint, t + 1)) {
         float* target =
-            checkpoint.state + static_cast<std::size_t>(h) * d * d + j * d + i0;
+            captured + static_cast<std::size_t>(h) * d * d + j * d + i0;
 #pragma unroll
         for (std::uint32_t i = 0; i < slice; ++i)
           target[i] = row[i];
@@ -2202,12 +2222,12 @@ __launch_bounds__(kGdnPrefillWaves * 32) __global__
           s[rr][i].w = __builtin_fmaf(update, kc[i].w, s[rr][i].w);
         }
       }
-      if (checkpoint.state != nullptr && w * kW + tl + 1 == checkpoint.tokens) {
+      if (float* const captured =
+              CheckpointState(checkpoint, w * kW + tl + 1)) {
 #pragma unroll
         for (int rr = 0; rr < kRows; ++rr) {
           auto* target = reinterpret_cast<float4*>(
-              checkpoint.state +
-              (static_cast<std::size_t>(h) * d + row_local(rr)) * d);
+              captured + (static_cast<std::size_t>(h) * d + row_local(rr)) * d);
 #pragma unroll
           for (int i = 0; i < kVec; ++i)
             target[vec0 + i] = s[rr][i];
@@ -2638,6 +2658,50 @@ __global__ void PoolBlocksKernel(
   if (i < dim) {
     blocks[static_cast<std::size_t>(b) * dim + i] = __float2half_rn(outv);
   }
+}
+
+// Dynamic YaRN: turns cached post-RoPE keys written under `from` into the keys
+// `to` would have written. Each pair recomputes both rounded angles exactly as
+// the writing kernels do (base frequency, YarnFrequency, sincosf of the rope
+// position, YarnScale), inverts the old scaled rotation and applies the new
+// one. Row r of `source` sits at rope position (first_row + r) * pos_stride;
+// `destination` may alias it.
+template<bool kFrom, bool kTo>
+__global__ void RerotateKeysKernel(
+    const __half* source, __half* destination, std::uint32_t first_row,
+    std::uint32_t row_width, std::uint32_t head_dim, std::uint32_t rotary,
+    std::uint32_t pos_stride, float theta, const qwen::vision::DeviceRope* rope,
+    [[maybe_unused]] YarnRope from, [[maybe_unused]] YarnRope to) {
+  const std::uint32_t r = blockIdx.x, h = blockIdx.y, p = threadIdx.x;
+  const std::uint32_t half = rotary / 2;
+  const float base =
+      powf(theta, -2.0f * static_cast<float>(p) / static_cast<float>(rotary));
+  const float position =
+      qwen::vision::RopePosition(rope, (first_row + r) * pos_stride, p);
+  float fa = base, fb = base;
+  if constexpr (kFrom)
+    fa = YarnFrequency(base, p, from);
+  if constexpr (kTo)
+    fb = YarnFrequency(base, p, to);
+  float sa = 0.0f, ca = 0.0f, sb = 0.0f, cb = 0.0f;
+  sincosf(position * fa, &sa, &ca);
+  sincosf(position * fb, &sb, &cb);
+  if constexpr (kFrom)
+    YarnScale(sa, ca, from);
+  if constexpr (kTo)
+    YarnScale(sb, cb, to);
+  const std::size_t offset = static_cast<std::size_t>(r) * row_width +
+                             static_cast<std::size_t>(h) * head_dim;
+  const __half* x = source + offset;
+  __half* y = destination + offset;
+  const float lo = __half2float(x[p]), hi = __half2float(x[p + half]);
+  const float norm = ca * ca + sa * sa;
+  const float a = (lo * ca + hi * sa) / norm;
+  const float b = (hi * ca - lo * sa) / norm;
+  y[p] = __float2half_rn(__fmaf_rn(a, cb, -__fmul_rn(b, sb)));
+  y[p + half] = __float2half_rn(__fmaf_rn(a, sb, __fmul_rn(b, cb)));
+  for (std::uint32_t i = rotary + p; i < head_dim; i += half)
+    y[i] = x[i];
 }
 
 // F16 WMMA fragments (wave32): sixteen halves per lane, eight F32
@@ -7619,7 +7683,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const __half* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
     float* conv_out = nullptr, AttentionProjectionOutput attention = {},
-    std::uint32_t checkpoint_tokens = 0, std::size_t input_stride = 0,
+    PassCheckpoints checkpoint_rows = {}, std::size_t input_stride = 0,
     std::uint32_t first_row_tile = 0) {
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
@@ -8166,7 +8230,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
               const float4 current = src[v];
               if (row >= channels || tok_l < 3 || tok_l >= kOutputTokens - 3 ||
                   tok + 3 >= batch ||
-                  (tok < checkpoint_tokens && tok + 3 >= checkpoint_tokens)) {
+                  CheckpointHistoryRow(checkpoint_rows, tok)) {
                 *reinterpret_cast<float4*>(y + tok * m + row) = current;
               }
               if (row < channels && tok_l >= 3) {
@@ -8323,12 +8387,12 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
     if (batch < 1024 || m != 2560 || k != 6144 || input_stride < k ||
         input_stride % 8 != 0)
       return false;
-    hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 5, false, false,
-                                           false, false, false, true>),
-                       dim3((batch + 127) / 128, (m + 255) / 256),
-                       dim3(kThreads), 0, stream, w, x, out, batch, m, k,
-                       nullptr, nullptr, nullptr, nullptr, nullptr,
-                       AttentionProjectionOutput{}, 0, input_stride);
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<256, 128, 2, 8, 1, 5, false, false, false, false,
+                            false, true>),
+        dim3((batch + 127) / 128, (m + 255) / 256), dim3(kThreads), 0, stream,
+        w, x, out, batch, m, k, nullptr, nullptr, nullptr, nullptr, nullptr,
+        AttentionProjectionOutput{}, PassCheckpoints{}, input_stride);
     return true;
   }
   // The same tile plan as the W8A8 route: a 128-token macro tile for wide
@@ -8386,7 +8450,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens,
+                     hipStream_t stream, PassCheckpoints checkpoints,
                      hipStream_t z_stream, hipEvent_t z_start) {
   if (n_tokens == 0 || m != 16384 || k != 2560 || channels != 10240 ||
       kernel != kSsmConvTaps) {
@@ -8398,7 +8462,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
   hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
                      dim3(token_tiles, qkv_tiles), dim3(kThreads), 0, stream, w,
                      x, qkvz, n_tokens, m, k, nullptr, nullptr, nullptr, conv_w,
-                     convolved, AttentionProjectionOutput{}, checkpoint_tokens);
+                     convolved, AttentionProjectionOutput{}, checkpoints);
   if (z_stream != nullptr) {
     // Start after the QKV tiles: both GEMMs are compute bound, the
     // recurrence that follows them is not. If the fork cannot be ordered,
@@ -8406,11 +8470,11 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
     if (hipEventRecord(z_start, stream) != hipSuccess ||
         hipStreamWaitEvent(z_stream, z_start, 0) != hipSuccess)
       z_stream = stream;
-    hipLaunchKernelGGL(
-        (DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
-        dim3(token_tiles, m / 256 - qkv_tiles), dim3(kThreads), 0, z_stream, w,
-        x, qkvz, n_tokens, m, k, nullptr, nullptr, nullptr, conv_w, convolved,
-        AttentionProjectionOutput{}, checkpoint_tokens, 0, qkv_tiles);
+    hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
+                       dim3(token_tiles, m / 256 - qkv_tiles), dim3(kThreads),
+                       0, z_stream, w, x, qkvz, n_tokens, m, k, nullptr,
+                       nullptr, nullptr, conv_w, convolved,
+                       AttentionProjectionOutput{}, checkpoints, 0, qkv_tiles);
   }
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,
@@ -8573,9 +8637,10 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
   const std::size_t count = static_cast<std::size_t>(n_tokens) * channels;
   const bool saved_history = !convolved && kernel == kSsmConvTaps &&
                              n_tokens <= kSsmConvTokensPerThread;
-  if (checkpoint.history != nullptr)
-    HistoryPrefix(qkv, qkv_stride, conv_state, checkpoint.history,
-                  checkpoint.tokens, channels, kernel - 1, stream);
+  for (std::uint32_t i = 0; i < checkpoint.count; ++i)
+    if (checkpoint.history[i] != nullptr)
+      HistoryPrefix(qkv, qkv_stride, conv_state, checkpoint.history[i],
+                    checkpoint.tokens[i], channels, kernel - 1, stream);
   if (!convolved) {
     if (saved_history) {
       hipLaunchKernelGGL((SsmConv4Kernel<true, false>), dim3(Blocks(channels)),
@@ -8798,6 +8863,31 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        dim3(kThreads), 0, stream, raw_keys, gamma, blocks,
                        first_block, start_pos, n_tokens, ratio, dim, rotary_dim,
                        theta, eps, capacity, rope, yarn);
+}
+
+void RerotateKeys(const __half* source, __half* destination,
+                  std::uint32_t first_row, std::uint32_t n_rows,
+                  std::uint32_t heads, std::uint32_t head_dim,
+                  std::uint32_t rotary, std::uint32_t pos_stride, float theta,
+                  const qwen::vision::DeviceRope* rope, const YarnRope& from,
+                  const YarnRope& to, hipStream_t stream) {
+  if (n_rows == 0 || heads == 0 || rotary == 0) {
+    return;
+  }
+  const dim3 grid(n_rows, heads), block(rotary / 2);
+  const std::uint32_t width = heads * head_dim;
+  if (from.enabled != 0 && to.enabled != 0)
+    hipLaunchKernelGGL((RerotateKeysKernel<true, true>), grid, block, 0, stream,
+                       source, destination, first_row, width, head_dim, rotary,
+                       pos_stride, theta, rope, from, to);
+  else if (from.enabled != 0)
+    hipLaunchKernelGGL((RerotateKeysKernel<true, false>), grid, block, 0,
+                       stream, source, destination, first_row, width, head_dim,
+                       rotary, pos_stride, theta, rope, from, to);
+  else if (to.enabled != 0)
+    hipLaunchKernelGGL((RerotateKeysKernel<false, true>), grid, block, 0,
+                       stream, source, destination, first_row, width, head_dim,
+                       rotary, pos_stride, theta, rope, from, to);
 }
 
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,

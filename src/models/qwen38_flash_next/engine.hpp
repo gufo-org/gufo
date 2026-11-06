@@ -14,11 +14,11 @@
 #include <string_view>
 #include <vector>
 
+#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/families/qwen/vision/encoder.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
-#include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
@@ -163,6 +163,15 @@ public:
                                  std::unique_ptr<SessionSnapshot>* checkpoint,
                                  std::string* error_msg = nullptr,
                                  double* capture_ms = nullptr);
+  /// The same for ascending boundaries anywhere beyond the frontier: each
+  /// is captured inside the pass that covers it (at most
+  /// rocm::kMaxPassCheckpoints per pass), without splitting it.
+  /// `checkpoints` receives one snapshot per boundary.
+  [[nodiscard]] bool SyncThrough(
+      std::span<const std::int32_t> prompt,
+      std::span<const std::uint32_t> boundaries,
+      std::vector<std::unique_ptr<SessionSnapshot>>* checkpoints,
+      std::string* error_msg = nullptr, double* capture_ms = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
   struct DecodeResult {
@@ -246,7 +255,7 @@ public:
   [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 20;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
@@ -275,21 +284,30 @@ private:
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
   void ResetImpl(bool reuse_mtp);
 
-  /// Consumes an in-pass checkpoint, or null when the live session is at
-  /// the boundary.
-  using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint*)>;
-  bool SyncThroughComponents(std::span<const std::int32_t>, std::uint32_t,
-                             const PrefillCapture&, std::string*);
+  /// Receives the index of a boundary and its in-pass checkpoint view, or
+  /// null when the live session is at the boundary.
+  using PrefillCapture =
+      std::function<void(std::size_t, const rocm::PrefillCheckpoint*)>;
+  /// `next`, as for Sync, names the tokens the following step appends.
+  bool SyncThroughComponents(std::span<const std::int32_t>,
+                             std::span<const std::uint32_t>,
+                             const PrefillCapture&, std::string*,
+                             std::span<const std::int32_t> next = {});
+  /// True when `boundaries` ascend strictly beyond the frontier, within
+  /// `prompt`.
+  bool ValidCheckpointBoundaries(std::span<const std::int32_t> prompt,
+                                 std::span<const std::uint32_t> boundaries,
+                                 std::string* error_msg) const;
 
-  bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
-            bool prefill = false, std::uint32_t boundary = 0,
-            std::unique_ptr<SessionSnapshot>* checkpoint = nullptr,
-            double* capture_ms = nullptr,
-            std::span<const std::int32_t> after = {},
-            const PrefillCapture& capture = {});
+  bool Feed(
+      std::span<const std::int32_t> tokens, std::string* error_msg,
+      bool prefill = false, std::span<const std::uint32_t> boundaries = {},
+      std::vector<std::unique_ptr<SessionSnapshot>>* checkpoints = nullptr,
+      double* capture_ms = nullptr, std::span<const std::int32_t> after = {},
+      const PrefillCapture& capture = {});
   bool SyncImpl(std::span<const std::int32_t> prompt, std::string* error_msg,
-                std::uint32_t boundary,
-                std::unique_ptr<SessionSnapshot>* checkpoint,
+                std::span<const std::uint32_t> boundaries,
+                std::vector<std::unique_ptr<SessionSnapshot>>* checkpoints,
                 double* capture_ms = nullptr,
                 std::span<const std::int32_t> next = {},
                 const PrefillCapture& capture = {});
@@ -357,7 +375,7 @@ private:
   bool valid_{true};
   ContinuationHooks* continuation_hooks_{nullptr};
   /// This request's draft vocabulary; the device table follows it.
-  MtpDraftVocab draft_vocab_;
+  speculative::DraftVocab draft_vocab_;
   bool draft_vocab_stale_{false};
   std::vector<std::int32_t> draft_added_;
   /// After the token history is replaced: the table restarts from it.

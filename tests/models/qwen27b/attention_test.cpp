@@ -7,6 +7,8 @@
 #include <iostream>
 #include <numeric>
 #include <span>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -419,6 +421,150 @@ void TestBatchedSelector() {
   }
 }
 
+/// A draft-vocabulary sequence (draft_vocab.hpp) must select exactly what the
+/// full-vocabulary selector selects when every ID outside its prefix and table
+/// scores -inf, in both logit layouts: prefix-wide rows with the table's own
+/// scores, and full rows (a mixed batch) whose table scores are gathered.
+void TestDraftVocabSelector() {
+  using gufo::hip::kernels::DFlashSelectorSequence;
+  using gufo::hip::kernels::DFlashSelectorVocab;
+  using gufo::test::DeviceBuffer;
+  using gufo::test::Expect;
+  // The prefix is not block aligned; the table holds 40 IDs and 8 empty slots.
+  constexpr std::uint32_t vocab = 6200, rank = 32, prefix = 4100,
+                          table_rows = 48;
+  std::vector<std::uint16_t> predecessor(vocab * rank), successor(vocab * rank);
+  for (std::size_t index = 0; index < predecessor.size(); ++index) {
+    predecessor[index] = static_cast<std::uint16_t>(
+        std::bit_cast<std::uint32_t>(Sample(index, 31)) >> 16);
+    successor[index] = static_cast<std::uint16_t>(
+        std::bit_cast<std::uint32_t>(Sample(index, 47)) >> 16);
+  }
+  DeviceBuffer<std::uint16_t> d_predecessor(predecessor),
+      d_successor(successor);
+  std::vector<std::int32_t> ids(table_rows, -1);
+  for (std::uint32_t slot = 0; slot < 40; ++slot)
+    ids[slot + (slot >= 20 ? 8U : 0U)] =
+        static_cast<std::int32_t>(prefix + (slot * 47U) % (vocab - prefix));
+  DeviceBuffer<std::int32_t> d_table_ids(ids);
+  const auto exact = [](const auto& left, const auto& right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin(),
+                      [](float a, float b) {
+                        return std::bit_cast<std::uint32_t>(a) ==
+                               std::bit_cast<std::uint32_t>(b);
+                      });
+  };
+  for (const auto [users, all] : {std::pair{1U, true}, std::pair{3U, false},
+                                  std::pair{8U, false}, std::pair{8U, true}}) {
+    std::vector<DFlashSelectorSequence> sequences(users);
+    std::vector<bool> subset(users);
+    std::uint32_t rows = 0;
+    for (std::uint32_t index = 0; index < users; ++index) {
+      sequences[index] = {1U + (index * 3U) % 7U,
+                          std::array{0.8F, 0.0F, 1.2F}[index % 3]};
+      subset[index] = all || index % 3 != 2;
+      rows += sequences[index].count;
+    }
+    std::vector<std::uint32_t> tokens(rows + users, 0);
+    for (std::uint32_t index = 0, offset = 0; index < users; ++index) {
+      tokens[offset] = 7U + index;
+      offset += sequences[index].count + 1U;
+    }
+    // Strong scores on IDs outside the draft vocabulary: masking must matter.
+    std::vector<float> logits(rows * vocab), hidden(rows * rank),
+        uniforms(rows);
+    for (std::size_t index = 0; index < logits.size(); ++index)
+      logits[index] = Sample(index, 73) + (index % vocab >= prefix ? 0.4F : 0);
+    for (std::size_t index = 0; index < hidden.size(); ++index)
+      hidden[index] = Sample(index, 89);
+    for (std::uint32_t row = 0; row < rows; ++row)
+      uniforms[row] = static_cast<float>((row * 37U) % 101U) / 101.0F;
+    auto masked = logits;
+    std::vector<float> narrow(rows * prefix), table(rows * table_rows);
+    for (std::uint32_t index = 0, row = 0; index < users; ++index) {
+      for (std::uint32_t step = 0; step < sequences[index].count;
+           ++step, ++row) {
+        float* full = logits.data() + std::size_t{row} * vocab;
+        std::copy_n(full, prefix, narrow.data() + std::size_t{row} * prefix);
+        for (std::uint32_t slot = 0; slot < table_rows; ++slot)
+          table[row * table_rows + slot] =
+              ids[slot] < 0 ? Sample(slot, 5) : full[ids[slot]];
+        if (!subset[index])
+          continue;
+        float* out = masked.data() + std::size_t{row} * vocab;
+        std::fill(out + prefix, out + vocab, -INFINITY);
+        for (const auto id : ids)
+          if (id >= 0)
+            out[id] = full[id];
+      }
+    }
+    DeviceBuffer<float> d_logits(logits), d_masked(masked), d_narrow(narrow),
+        d_hidden(hidden), d_uniforms(uniforms), d_confidences(rows),
+        d_table(rows * table_rows);
+    DeviceBuffer<std::uint32_t> d_tokens(tokens);
+    const auto partials =
+        gufo::hip::kernels::DFlashSelectorScratchElements(vocab);
+    DeviceBuffer<float> d_scores(rows * partials);
+    DeviceBuffer<std::uint32_t> d_ids(rows * partials);
+    constexpr std::uint32_t top_k = 16;
+    DeviceBuffer<float> d_probabilities(rows * top_k);
+    DeviceBuffer<std::uint32_t> d_candidates(rows * top_k);
+    const auto run = [&](const float* source, std::uint32_t stride,
+                         std::span<const DFlashSelectorSequence> view) {
+      d_tokens.CopyFrom(tokens);
+      d_candidates.CopyFrom(std::vector<std::uint32_t>(rows * top_k, vocab));
+      d_probabilities.CopyFrom(std::vector<float>(rows * top_k, -1.0F));
+      d_confidences.CopyFrom(std::vector<float>(rows, -1.0F));
+      gufo::hip::kernels::LaunchDFlashSelectorBatch(
+          source, d_hidden.data(), d_predecessor.data(), d_successor.data(),
+          d_tokens.data(), d_confidences.data(), d_scores.data(), d_ids.data(),
+          d_uniforms.data(), d_candidates.data(), d_probabilities.data(), view,
+          vocab, rank, top_k, nullptr, stride);
+      return std::tuple{d_tokens.CopyToHost(), d_candidates.CopyToHost(),
+                        d_probabilities.CopyToHost(),
+                        d_confidences.CopyToHost()};
+    };
+    const auto expected = run(d_masked.data(), 0, sequences);
+    const auto with_vocab = [&]() {
+      auto view = sequences;
+      for (std::uint32_t index = 0, row = 0; index < users;
+           row += sequences[index].count, ++index)
+        if (subset[index])
+          view[index].vocab = {prefix, d_table.data() + row * table_rows,
+                               d_table_ids.data(), table_rows};
+      return view;
+    }();
+    const auto matches = [&](const auto& actual) {
+      return std::get<0>(actual) == std::get<0>(expected) &&
+             std::get<1>(actual) == std::get<1>(expected) &&
+             exact(std::get<2>(actual), std::get<2>(expected)) &&
+             exact(std::get<3>(actual), std::get<3>(expected));
+    };
+    // Full rows: the table gathers each draft-vocabulary row's own scores.
+    for (std::uint32_t index = 0, row = 0; index < users;
+         row += sequences[index].count, ++index)
+      if (subset[index])
+        gufo::hip::kernels::LaunchDFlashDraftTableLogits(
+            d_logits.data() + std::size_t{row} * vocab, vocab,
+            d_table_ids.data(), d_table.data() + row * table_rows,
+            sequences[index].count, table_rows, nullptr);
+    Expect(matches(run(d_logits.data(), vocab, with_vocab)),
+           "a draft-vocabulary selector over full rows matches the masked "
+           "full vocabulary");
+    if (std::ranges::find(subset, false) != subset.end())
+      continue;
+    // Prefix-wide rows: the table's own scores, empty slots masked to -inf.
+    d_table.CopyFrom(table);
+    gufo::hip::kernels::LaunchDFlashDraftTableLogits(
+        nullptr, 0, d_table_ids.data(), d_table.data(), rows, table_rows,
+        nullptr);
+    Expect(matches(run(d_narrow.data(), prefix, with_vocab)),
+           "a draft-vocabulary selector over prefix rows matches the masked "
+           "full vocabulary");
+  }
+}
+
 /// Runs the reference and one candidate route over the same operands and
 /// reports the largest absolute difference. The kernels accumulate the QK dot
 /// product in a different order -- the reference walks head_dim in one thread,
@@ -606,6 +752,7 @@ int main() {
   TestSelector(2065);
   TestSelector(248320);
   TestBatchedSelector();
+  TestDraftVocabSelector();
   // No injected history at all: only the eight in-block keys are attended.
   TestRouteEquivalence(0, 0, "empty history");
   // Shallow: the whole history is inside the sliding window.

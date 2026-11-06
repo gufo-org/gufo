@@ -699,6 +699,40 @@ __device__ inline bool IsSub16DecodedQuant(core::GgmlType t) noexcept {
          t == core::GgmlType::kIQ3_S;
 }
 
+/// Template argument of QuantWarpSub16Dot meaning "decode the runtime type".
+inline constexpr core::GgmlType kRuntimeSub16Type = core::GgmlType::kF32;
+
+/// The sub16 route of QuantWarpBlockDot: each lane owns the sub-blocks
+/// lane_id, lane_id + 32, ... of [s0, s1), then the warp reduces. Type fixes
+/// the format at compile time, or is kRuntimeSub16Type to decode `type`.
+template<core::GgmlType Type, typename TX>
+__device__ inline float QuantWarpSub16Dot(core::GgmlType type,
+                                          const char* __restrict__ row,
+                                          const TX* __restrict__ x,
+                                          std::size_t s0, std::size_t s1,
+                                          std::size_t lane_id) {
+  const core::GgmlType decode_type = (Type == kRuntimeSub16Type) ? type : Type;
+  float sumf = 0.0F;
+  QuantSub16 sub;
+  for (std::size_t sb = s0 + lane_id; sb < s1; sb += 32) {
+    DecodeQuantSub16(decode_type, row, sb, sub);
+    const TX* xb = x + (sb * 16);
+    float dot = 0.0F;
+    float xsum = 0.0F;
+#pragma unroll
+    for (int j = 0; j < 16; ++j) {
+      const float xv = static_cast<float>(xb[j]);
+      dot += static_cast<float>(sub.q[j]) * xv;
+      xsum += xv;
+    }
+    sumf += (sub.scale * dot) - (sub.offset * xsum);
+  }
+  for (int off = 16; off > 0; off >>= 1) {
+    sumf += __shfl_xor(sumf, off);
+  }
+  return sumf;
+}
+
 // opt-r7-decode-parallel: warp-parallel quant row-dot, templated on the input
 // element type TX (float in decode, hip_bfloat16 for the prefill bf16 path).
 // ONE warp cooperates: all 32 lanes process a slice of the row's quant blocks
@@ -712,7 +746,7 @@ __device__ inline bool IsSub16DecodedQuant(core::GgmlType t) noexcept {
 // exactly. The only TX-dependent code is the x reads, wrapped in
 // static_cast<float> so TX=float is identity and TX=hip_bfloat16 converts.
 template<typename TX>
-__device__ inline float QuantWarpBlockDot(
+__device__ __forceinline__ float QuantWarpBlockDot(
     core::GgmlType type, const void* __restrict__ base, std::size_t row_idx,
     const TX* __restrict__ x, std::size_t K, std::size_t lane_id,
     std::size_t warp_id, std::size_t num_warps) {
@@ -780,27 +814,31 @@ __device__ inline float QuantWarpBlockDot(
       // Sixteen and not thirty-two: these kernels are DRAM-bound, and the wider
       // decode raised them from 88 to 120-136 VGPRs, which cut occupancy and
       // measured 13% slower end to end.
-      if (!IsSub16DecodedQuant(type)) {
-        break;
-      }
+      //
+      // The K-quants get a copy of the loop specialized on the format, which
+      // drops the per-sub-block type switch: the Q4_K_M GDN projections go
+      // from 98 to 93 us per layer, with the same arithmetic.
       const std::size_t s0 = b0 * (qk / 16);
       const std::size_t s1 = b1 * (qk / 16);
-      QuantSub16 sub;
-      for (std::size_t sb = s0 + lane_id; sb < s1; sb += 32) {
-        DecodeQuantSub16(type, row, sb, sub);
-        const TX* xb = x + (sb * 16);
-        float dot = 0.0F;
-        float xsum = 0.0F;
-#pragma unroll
-        for (int j = 0; j < 16; ++j) {
-          const float xv = static_cast<float>(xb[j]);
-          dot += static_cast<float>(sub.q[j]) * xv;
-          xsum += xv;
-        }
-        sumf += (sub.scale * dot) - (sub.offset * xsum);
-      }
-      for (int off = 16; off > 0; off >>= 1) {
-        sumf += __shfl_xor(sumf, off);
+      switch (type) {
+        case core::GgmlType::kQ4_K:
+          sumf = QuantWarpSub16Dot<core::GgmlType::kQ4_K>(type, row, x, s0, s1,
+                                                          lane_id);
+          break;
+        case core::GgmlType::kQ5_K:
+          sumf = QuantWarpSub16Dot<core::GgmlType::kQ5_K>(type, row, x, s0, s1,
+                                                          lane_id);
+          break;
+        case core::GgmlType::kQ6_K:
+          sumf = QuantWarpSub16Dot<core::GgmlType::kQ6_K>(type, row, x, s0, s1,
+                                                          lane_id);
+          break;
+        default:
+          if (IsSub16DecodedQuant(type)) {
+            sumf = QuantWarpSub16Dot<kRuntimeSub16Type>(type, row, x, s0, s1,
+                                                        lane_id);
+          }
+          break;
       }
       break;
     }

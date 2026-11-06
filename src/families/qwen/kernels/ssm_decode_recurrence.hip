@@ -32,10 +32,10 @@ __global__ void CaptureBatchedSsmReplayKernel(
 
   const std::size_t row = flat_index / row_width;
   const std::size_t element = flat_index - (row * row_width);
-  const std::size_t slot =
-      (static_cast<std::size_t>(start_pos) + row) % kSsmReplayCapacity;
+  const std::size_t slot = (static_cast<std::size_t>(start_pos) + row) &
+                           (replay_capture.capacity - 1U);
   const std::size_t layer_slot =
-      (static_cast<std::size_t>(layer_idx) * kSsmReplayCapacity) + slot;
+      (static_cast<std::size_t>(layer_idx) * replay_capture.capacity) + slot;
 
   if (element < qkv_size) {
     replay_capture.qkv[(layer_slot * qkv_size) + element] =
@@ -124,10 +124,11 @@ __global__ void SSMConvKernel(
 
     if (capture) {
       const std::size_t slot =
-          static_cast<std::size_t>(replay_capture.position[row]) %
-          kSsmReplayCapacity;
+          static_cast<std::size_t>(replay_capture.position[row]) &
+          (replay_capture.capacity - 1U);
       const std::size_t offset =
-          ((static_cast<std::size_t>(layer_idx) * kSsmReplayCapacity + slot) *
+          ((static_cast<std::size_t>(layer_idx) * replay_capture.capacity +
+            slot) *
            qkv_dim) +
           c;
       replay_capture.qkv[offset] = row_in[c];

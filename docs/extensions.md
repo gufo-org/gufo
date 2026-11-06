@@ -43,6 +43,49 @@ are rejected for external extensions; keep your own implementation headers
 inside your repository. The include checks enforce the source API boundary.
 Extension code still has arbitrary native-code privileges during build and run.
 
+Every text runner provides continuation through the component cache. It
+implements `cache::Adapter` and links `gufo_ext_cache`, the public target for the
+component cache and, in HIP builds, its HIP backing.
+
+### Link targets
+
+`gufo_ext_runtime` declares the whole public surface but implements only its
+neutral contracts. The `gufo` executable supplies everything else at its final
+link, so a registration library needs nothing more. A test, probe or tool that
+is its own executable must link the implementation of each service it uses:
+
+| Target | Provides | Builds |
+| --- | --- | --- |
+| `gufo_ext_core` | GGUF reading and identity, sampling, JSON constraints, dequantization, SHA-256, image decoding, the hipBLASLt plan database, and `WeightUpload` in HIP builds. Also carries OpenSSL, which `sha256.hpp` exposes | all |
+| `gufo_ext_cache` | Component cache; in HIP builds also `transfer_pool`, `host_allocations` and `component_cache_resources` | all |
+| `gufo_ext_hip` | `ENGINE_ENABLE_HIP`, which the public HIP headers need, `hip::host` and the hipCUB and rocPRIM include paths | HIP only; list it under a target that requires `hip` |
+
+These targets add no Gufo include path, so the source API stays the audited
+surface. Linking `gufo_core` or `gufo_cache` directly is still rejected.
+
+## Provide continuation
+
+The cache owns every execution slot and decides what to retain, evict and write
+to disk. A runner describes its state and moves bytes on request:
+
+- `CreateComponentCacheResources` returns the adapter and its backing. Build the
+  backing with `hip::CreateHipComponentCacheResources`, and charge memory to the
+  ledger it receives.
+- `BindComponentState` wraps one slot in the runner's `TextRunnerState`.
+- `ReconcileComponentState` runs after the cache restores rows into a slot, and
+  brings the runner's own bookkeeping to that position.
+- `cache::Adapter` declares each component as append rows or whole private state
+  and copies it in and out. [adapter.hpp](../src/cache/adapter.hpp) states the
+  ordering and failure rules. Report positions per component, never from prompt
+  length.
+
+`gufo/ext/transfer_pool.hpp` and `gufo/ext/snapshot_copy.hpp` are the supported
+helpers for those copies. Set `prefix_reuse` to false only for a runner which must
+start each request cold. The cache identity must change whenever retained bytes
+stop being valid: include the model artifact, context size and every setting that
+alters state. An adapter test should restore each component and compare the
+result byte for byte with an uninterrupted run.
+
 ## Start with the template
 
 Copy [examples/extension_template](../examples/extension_template/README.md) into
@@ -145,16 +188,79 @@ matches must remain errors; do not steal another provider's artifacts with an
 overly broad probe.
 
 For a text model, own tokenization, chat/control framing and tool syntax in the
-extension. Declare supported inputs, state/persistence/resource capabilities and
-sampling defaults accurately. Implement incremental execution, cancellation,
-state isolation, snapshot/restore and batching only under the contracts you
-advertise. Preserve sampler/constraint state and cache compatibility identities
+extension. Declare supported inputs, state/resource capabilities and sampling
+defaults accurately. Implement incremental execution, cancellation, state
+isolation and batching only under the contracts you advertise. To capture prefill
+checkpoints without ending a pass at them, declare `in_pass_checkpoint` and
+`max_in_pass_checkpoints`, and implement `PrefillCheckpointBytes` and
+`PrefillThrough`; each capture must equal the state a pass ending at its boundary
+leaves.
+Preserve sampler/constraint state and cache compatibility identities
 across rollback and continuation. Draft models/heads and sidecars stay with the
 target model's artifact set. Wire the CLI prompt/chat/benchmark drivers as well
 as the HTTP runner when those commands are supported.
 
-Provider options use canonical names and manifest types. CMake checks conflicting
-declarations. The Nix serving helper derives provider arguments and validation
+A text provider supplies its recommended sampling through
+`TextRunnerDescriptor::sampling_defaults` (HTTP) and
+`TextProvider::sampling_defaults` (`prompt`/`chat`), both a
+`sampling::TextSamplingDefaults` holding one set of optional values for thinking
+enabled, disabled and unspecified. A provider with `prompt` or `chat` drivers
+must set both, from one function: core cannot detect a provider that sets only
+one, and its HTTP and command-line defaults would differ. Set values, including
+zero, apply as written; unset controls stay neutral; the seed and output
+constraint are never defaults. Invalid values fail model load or the command
+before generation. Precedence is provider defaults, explicit server/CLI settings,
+then per-request overrides, identically for HTTP, `prompt` and `chat`.
+`sampling_preset` remains for existing extensions; in-tree models no longer use
+it.
+
+A text runner declares the literal framing of its reasoning with
+`TextModelRunner::ReasoningDelimiters()`. The default follows
+`ReasoningBudgetTags()`; override it when the model's text differs from those
+control tokens, such as an opener spanning several tokens. Both describe the same
+block: `ReasoningBudgetTags().start` is the one control token that begins `open`,
+and `ends` include the control token for `close`. `close` must be non-empty and
+`open` must not begin with whitespace; model load rejects either. With
+`InitialOutputState::kThought` the prompt opened reasoning; with `kAuto` the
+output opens it, and the parsers, usage accounting and reasoning budget all
+start at a leading `open`. The budget counts from `start`, so the rest of `open`
+counts toward it. Line breaks after `close` are framing and dropped, and Qwen's
+tool dialect also drops other whitespace there.
+
+### Native tool calls
+
+A text model whose call syntax is not a built-in format registers a
+`ToolDialect` from its extension registration and returns its `id` from
+`TextModelRunner::ToolDialectId()`; no core enum entry or host branch is
+needed. That one identity selects both the constrained grammar and the
+buffered and streamed parsers of the Chat Completions, Responses and Messages
+endpoints, and only its markers start calls. The registration supplies:
+
+- `syntax`, a `JsonConstraint::ToolSyntax`: the call literals (`open`,
+  `name_prefix`, `name_suffix`, `close`) and either `tagged` key/value
+  parameters (the form of the built-in Qwen and DeepSeek grammars, which
+  `JsonConstraint::Syntax()` returns for copying) or JSON-shaped arguments
+  spelled by `values` (string delimiters, bare keys, whitespace, member order).
+  Core compiles each tool's JSON schema into it for `required` and `auto` tool
+  choice, strict and best-effort tools.
+- `markers`, `reasoning_markers` and `closers` for the host's text handling,
+  and `scan_tool_calls`, which reads calls back, including the unfinished call
+  of a streamed partial parse. Values that are not JSON are converted to JSON
+  text, which the host checks against the declared schema.
+
+The constrained reasoning phase before an answer or call uses the runner's
+`ReasoningDelimiters()`, as the response parsers do: it ends at `close` or at a
+complete call header, and for `InitialOutputState::kAuto` the model may open it
+with the complete `open` literal.
+
+The contract, ownership and error rules are documented on `ToolDialect` in
+[`text.hpp`](../include/gufo/ext/text.hpp). Existing runners need no change:
+the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,
+`deepseek`) of `ToolFormat()`.
+
+Provider options use canonical names and manifest types. Extensions may declare
+the same option when the type agrees, as providers sharing `--mtp-model` do; CMake
+rejects conflicting types. The Nix serving helper derives provider arguments and validation
 from metadata, including optional `serving` declarations. New runtime controls
 also need actual command parsing/execution support; metadata alone cannot
 implement them. See [Nix serving](model-extensions/serving.md).

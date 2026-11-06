@@ -86,6 +86,18 @@ candidate for its two requests. Different physical cohorts remain unqualified;
 raw flags are preserved rather than averaged or relabeled as passes. Earlier
 cross-run cache timings likewise do not establish unconditional latency parity.
 
+### Batched verification
+
+Clang 24 spills the sixteen-lane IQ4_XS and IQ4_NL wave64 FFN kernels that serve
+12-, 14- and 16-row verification groups (two or more requests) by 110–407 VGPRs
+when they step one token at a time (`kernel_resources_test`). IQ4_XS now steps
+two tokens and IQ4_NL all of its tokens at once; each token keeps its own dots
+and accumulation order, so `qwen_q4kxl_quant_ops_test` stays bit-exact and every
+completion is unchanged. A sixteen-row IQ4_XS gate/up projection drops from
+2,179 to 458 µs. Aggregate DFlash2 throughput at C2/C4/C8 rises 18–63 %
+(rename 62.2/57.8/57.7 → 95.6/94.2/93.5, prose 37.2/41.9/46.4 → 43.9/59.0/63.4,
+code 48.8/50.8/50.3 → 69.9/70.2/75.7 tok/s); C1 does not use these kernels.
+
 Raw results and profiles remain under
 `gufo-models-rocm101-20261023/port-models` on the development host.
 [BENCHMARKS.md](BENCHMARKS.md) retains its published measurements.
