@@ -1683,7 +1683,7 @@ void TestPromptCancelledInsideYield() {
          "the cancelled prompt takes no further pass and never decodes");
 }
 
-void TestCaptureWaitsForThePassEnd() {
+void TestFinishedCaptureRejoinsYields() {
   auto control = std::make_shared<FakeControl>();
   control->max_context = 4096;
   control->preview_first_token = true;
@@ -1720,11 +1720,12 @@ void TestCaptureWaitsForThePassEnd() {
              b.Wait().tokens == ExpectedTokens(2, 30) &&
              c.Wait().tokens == ExpectedTokens(3, 2),
          "a capture finishing mid-pass keeps every trajectory");
+  // One decoder per round, in turn: A, then B, which left capture before
+  // the first yield.
   const auto rounds = AdvancesPerYield(control->Events(), 3);
   Expect(rounds.size() == 2, "C's pass yields twice");
-  for (const auto& round : rounds)
-    Expect(round == std::vector<TextRunnerToken>{1},
-           "a request leaving capture waits for the pass end, not a yield");
+  Expect(rounds == std::vector<std::vector<TextRunnerToken>>{{1}, {2}},
+         "a decoder whose capture finished mid-pass rejoins the next yields");
 }
 
 void TestSchedulingProfileRequiresIncrementalPrefill() {
@@ -3582,7 +3583,7 @@ int main() {
   TestLayeredPrefillBatchesDecodersPerRound(2);
   TestSchedulingProfileRequiresIncrementalPrefill();
   TestPromptCancelledInsideYield();
-  TestCaptureWaitsForThePassEnd();
+  TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
   TestExpiredQueuedRequestNeverConsumesState();
