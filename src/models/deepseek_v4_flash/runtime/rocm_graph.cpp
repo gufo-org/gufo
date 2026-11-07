@@ -212,6 +212,13 @@ struct ds4_rocm_graph {
     // while sessions still borrow them and are pruned on session creation.
     ds4_rocm_graph* next_batch_workspace;
 
+    /* Layered prefill: after each layer whose bit is set, a layer-major pass
+     * waits for its queued layers and calls prefill_yield, where other
+     * sessions may decode single tokens. Zero runs passes unsplit. */
+    uint64_t prefill_yield_layers;
+    void (*prefill_yield)(void *ctx);
+    void *prefill_yield_ctx;
+
     /* =====================================================================
      * DSpark speculative verification state.
      * =====================================================================
@@ -4470,6 +4477,13 @@ static bool rocm_graph_prefill_layer_major(
       // Keep feature capture and the HC swap in the common layer encoder.
       ok = rocm_graph_encode_layer_batch(g, model, &weights->layer[il], il,
                                          start, n_tokens);
+      // The pass carries its rows across layers in the batch workspace and
+      // its own graph; a single-token decode uses neither.
+      if (ok && g->prefill_yield && il + 1 < DS4_N_LAYER &&
+          (g->prefill_yield_layers >> il & 1u)) {
+        ok = ds4_gpu_synchronize() != 0;
+        if (ok) g->prefill_yield(g->prefill_yield_ctx);
+      }
       if (show_progress) {
         fprintf(stderr, "ds4: gpu prefill layer %u/%u\r", il + 1,
                 (uint32_t)DS4_N_LAYER);
@@ -6993,6 +7007,24 @@ uint32_t ds4_rocm_graph_prefill_capacity(int context_size) {
 
 uint32_t ds4_rocm_graph_resume_prefill_min_tokens(void) {
     return rocm_graph_resume_prefill_min_tokens();
+}
+
+void ds4_rocm_graph_set_prefill_yield(ds4_rocm_graph *graph,
+                                      uint32_t groups,
+                                      void (*yield)(void *ctx),
+                                      void *ctx) {
+    if (!graph) return;
+    graph->prefill_yield_layers = 0;
+    graph->prefill_yield = NULL;
+    graph->prefill_yield_ctx = NULL;
+    if (groups < 2 || !yield) return;
+    static_assert(DS4_N_LAYER <= 64, "yield layers are a 64-bit mask");
+    if (groups > DS4_N_LAYER) groups = DS4_N_LAYER;
+    for (uint32_t k = 1; k < groups; ++k)
+        graph->prefill_yield_layers |=
+            uint64_t{1} << (k * DS4_N_LAYER / groups - 1u);
+    graph->prefill_yield = yield;
+    graph->prefill_yield_ctx = ctx;
 }
 
 ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,

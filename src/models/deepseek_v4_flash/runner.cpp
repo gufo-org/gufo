@@ -93,6 +93,28 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   return *deepseek;
 }
 
+// Arms the session's layer hook from the host's yield for one prefill step.
+class PrefillYieldScope {
+public:
+  PrefillYieldScope(models::deepseek_v4_flash::Session& session,
+                    const TextRunnerState& state)
+      : session_(session) {
+    if (state.prefill_yield_groups() > 1)
+      session_.SetPrefillYield(state.prefill_yield_groups(),
+                               [&state] { state.YieldPrefill(); });
+  }
+  ~PrefillYieldScope() { session_.SetPrefillYield(1, {}); }
+  PrefillYieldScope(const PrefillYieldScope&) = delete;
+  PrefillYieldScope& operator=(const PrefillYieldScope&) = delete;
+
+private:
+  models::deepseek_v4_flash::Session& session_;
+};
+
+// Beside decoders, prompts keep the 4,096-row pass and split it into layer
+// groups: one pass takes about 8.2 s, a decode step about 56 ms.
+constexpr std::size_t kMaxPrefillLayerGroups = 16;
+
 std::vector<TextRunnerToken> DeepSeekRunnerTokens(std::span<const int> tokens) {
   std::vector<TextRunnerToken> converted;
   converted.reserve(tokens.size());
@@ -191,6 +213,18 @@ public:
                 .prefix_reuse = true,
             },
         .sampling_defaults = DeepSeekSamplingDefaults(),
+        // Batched decodes and DSpark verification run in the batch workspace
+        // a prompt pass is using, so only single-token decodes may yield.
+        .scheduling =
+            dspark ? std::optional<TextSchedulingProfile>{}
+                   : TextSchedulingProfile{
+                         .pass_tokens =
+                             models::deepseek_v4_flash::Session::
+                                 PrefillCapacityFor(
+                                     static_cast<int>(max_context_)),
+                         .max_layer_groups = kMaxPrefillLayerGroups,
+                         .max_yield_decode_width = 1,
+                     },
     };
   }
 
@@ -340,6 +374,7 @@ public:
     const std::size_t next_position = offset + consumed;
     const auto prefix = DeepSeekEngineTokens(prompt.first(next_position));
     std::string error;
+    const PrefillYieldScope yield(deepseek.session(), state);
     if (!deepseek.session().Sync(prefix, &error)) {
       deepseek.set_position(0);
       throw std::runtime_error("DeepSeek prefill failed: " + error);

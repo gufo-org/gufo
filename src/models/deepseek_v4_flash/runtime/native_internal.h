@@ -131,6 +131,14 @@ int ds4_sample_top_p_min_p(const float *logits,
                            uint64_t *rng_state);
 
 uint32_t ds4_rocm_graph_prefill_capacity(int context_size);
+/* Splits the following layer-major prefill passes of `graph` into at most
+ * `groups` layer groups of about equal depth and calls yield(ctx) between
+ * them, once the queued layers have finished. Fewer than two groups, or a
+ * NULL yield, restores unsplit passes. */
+void ds4_rocm_graph_set_prefill_yield(ds4_rocm_graph *graph,
+                                      uint32_t groups,
+                                      void (*yield)(void *ctx),
+                                      void *ctx);
 uint32_t ds4_rocm_graph_resume_prefill_min_tokens(void);
 ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
                                       int context_size,

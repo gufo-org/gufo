@@ -121,6 +121,18 @@ if(ENGINE_ENABLE_HIP)
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
+  # Layered prefill (SetPrefillYield) against lone runs, autoregressive.
+  add_executable(ds4_layered_prefill_test layered_prefill_test.cpp)
+  target_link_libraries(ds4_layered_prefill_test PRIVATE
+    gufo_deepseek_v4_flash_hip gufo_test_support)
+  add_test(NAME ds4.layered_prefill COMMAND ds4_layered_prefill_test)
+  set_tests_properties(ds4.layered_prefill PROPERTIES
+    LABELS "gpu;hip;ds4;external-model;slow"
+    RESOURCE_LOCK ds4_model
+    RUN_SERIAL TRUE
+    TIMEOUT 1800
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_serving_test serving_test.cpp)
   # gufo_serving still reaches the Qwen 27B model and vision stack through
   # inference_backend.cpp; step 10 removes that interim edge.
