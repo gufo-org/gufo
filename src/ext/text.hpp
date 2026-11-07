@@ -200,6 +200,15 @@ public:
       const noexcept {
     return prefill_lookahead_;
   }
+  /// The whole prompt's token count during a prefill step, 0 outside one. A
+  /// step's prompt ends at its own frontier, which may be a cache boundary
+  /// short of this.
+  void SetPrefillPromptEnd(std::size_t tokens) noexcept {
+    prefill_prompt_end_ = tokens;
+  }
+  [[nodiscard]] std::size_t prefill_prompt_end() const noexcept {
+    return prefill_prompt_end_;
+  }
 
   virtual void SetCancellationCheck(const CancellationCheck&) {}
 
@@ -211,6 +220,7 @@ public:
 private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
+  std::size_t prefill_prompt_end_{};
 };
 
 struct TextRunnerAdvance {
@@ -436,6 +446,14 @@ public:
       cache::Adapter&, cache::Slot&) const = 0;
   virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const = 0;
   [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
+    return true;
+  }
+  /// Whether the state, live or restored, continues a prompt of
+  /// `prompt_tokens`. A model that skips work on rows far from the prompt's
+  /// end may keep only what longer prompts need; the cache serves a refused
+  /// prompt from a shallower boundary.
+  [[nodiscard]] virtual bool CanContinue(const TextRunnerState&,
+                                         std::size_t /*prompt_tokens*/) const {
     return true;
   }
 

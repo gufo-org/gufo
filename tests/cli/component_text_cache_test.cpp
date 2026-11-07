@@ -839,6 +839,59 @@ void PrefillLookaheadReachesTheNextFrontier() {
     assert(end == (frontier == prompt.size() ? frontier : next));
   }
 }
+void PrefillStepsSeeTheWholePromptEnd() {
+  class PromptEndRunner final : public Runner {
+  public:
+    mutable std::vector<std::size_t> ends, frontiers;
+    mutable const TextRunnerState* state{};
+    void Record(const TextRunnerState& state,
+                std::span<const TextRunnerToken> prompt) const {
+      ends.push_back(state.prefill_prompt_end());
+      frontiers.push_back(prompt.size());
+      this->state = &state;
+    }
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      Record(state, prompt);
+      return Runner::Prefill(state, prompt, offset, budget);
+    }
+    TextPrefillStep PrefillThrough(
+        TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+        std::size_t offset, std::size_t budget,
+        std::span<const std::size_t> boundaries,
+        const InPassConsumer& consume) const override {
+      Record(state, prompt);
+      return Runner::PrefillThrough(state, prompt, offset, budget, boundaries,
+                                    consume);
+    }
+  };
+  auto runner = std::make_shared<PromptEndRunner>();
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(4000);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto request = pool.Acquire(prompt);
+  while (!request.Prefill(1024).decode_ready) {
+  }
+  assert(runner->state && runner->state->prefill_prompt_end() == 0);
+  // A step ending at a cache boundary still sees the whole prompt's end.
+  assert(runner->frontiers.front() < prompt.size());
+  for (const auto end : runner->ends)
+    assert(end == prompt.size());
+
+  auto through_runner = std::make_shared<PromptEndRunner>();
+  through_runner->in_pass = true;
+  TextRunnerPool through_pool(through_runner, 1);
+  std::vector<TextRunnerToken> short_prompt(40);
+  std::iota(short_prompt.begin(), short_prompt.end(), 10);
+  auto through = through_pool.Acquire(short_prompt, sampling::SamplingConfig{},
+                                      {}, {}, true, 35);
+  assert(through.Prefill(64).decode_ready);
+  assert(through_runner->through_calls == 1);
+  assert(through_runner->ends == std::vector<std::size_t>{short_prompt.size()});
+  assert(through_runner->state->prefill_prompt_end() == 0);
+}
 void BackingPreparationFollowsCaptures() {
   class PrepareRunner final : public Runner {
   public:
@@ -940,6 +993,60 @@ void PartialFrontierDoesNotServeAnEqualPrompt() {
     Prefill(resend);
     (void)Generate(resend);
     resend.Invalidate();
+  }
+}
+void RefusedFrontierServesFromShallowerBoundary() {
+  // A runner may keep only the state that longer prompts need. A prompt it
+  // refuses recomputes from a shallower boundary, live or restored; a longer
+  // one continues the frontier.
+  class RefusingRunner final : public Runner {
+  public:
+    bool CanContinue(const TextRunnerState& state,
+                     std::size_t prompt_tokens) const override {
+      return prompt_tokens >= CheckpointPosition(state) + 8;
+    }
+  };
+  // A live frontier left by a cancelled prefill.
+  for (const std::size_t next_size : {20U, 40U}) {
+    auto runner = std::make_shared<RefusingRunner>();
+    runner->partial = true;
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto request = pool.Acquire(prompt, {}, [] { return false; }, {}, true, 0);
+    assert(request.Prefill(16).consumed_tokens == 16);
+    (void)request.Cancel();
+    const std::vector<TextRunnerToken> next_prompt(prompt.begin(),
+                                                   prompt.begin() + next_size);
+    auto next = pool.Acquire(next_prompt, {}, {}, {}, true, 0);
+    assert((next.cached_prompt_tokens() == 16) == (next_size == 40));
+    assert(next.cached_prompt_tokens() <= 16);
+    Prefill(next);
+    (void)Generate(next);
+    next.Invalidate();
+  }
+  // A checkpoint restored after another prompt replaced the slot.
+  for (const std::size_t next_size : {37U, 60U}) {
+    auto runner = std::make_shared<RefusingRunner>();
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(60);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto seed = pool.Acquire(prompt, {}, {}, {}, true, 35);
+    Prefill(seed);
+    (void)seed.Commit();
+    auto unrelated = prompt;
+    unrelated.front() = 999;
+    auto other = pool.Acquire(unrelated, {}, {}, {}, true, 0);
+    Prefill(other);
+    (void)other.Commit();
+    auto next_prompt = prompt;
+    next_prompt.resize(next_size);
+    next_prompt.back() = 998;
+    auto next = pool.Acquire(next_prompt, {}, {}, {}, true, 0);
+    assert((next.cached_prompt_tokens() == 35) == (next_size == 60));
+    Prefill(next);
+    (void)Generate(next);
+    next.Invalidate();
   }
 }
 void CompletedCancelledPromptGetsARetrySnapshot() {
@@ -2980,7 +3087,9 @@ int main() {
   SharedPeerReusesTheCurrentStableCapture();
   BackingPreparationFollowsCaptures();
   PrefillLookaheadReachesTheNextFrontier();
+  PrefillStepsSeeTheWholePromptEnd();
   PartialFrontierDoesNotServeAnEqualPrompt();
+  RefusedFrontierServesFromShallowerBoundary();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
