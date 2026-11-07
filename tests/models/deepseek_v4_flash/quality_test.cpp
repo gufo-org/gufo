@@ -1,3 +1,5 @@
+#include <hip/hip_runtime_api.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -794,7 +796,9 @@ void CheckDsparkSnapshots(
   }
 }
 
-void CheckDsparkScalarQuality(
+enum class ReplayCoverage { kComplete, kSkippedForMemory };
+
+ReplayCoverage CheckDsparkScalarQuality(
     const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
   using namespace gufo::models::deepseek_v4_flash;
   constexpr std::array<std::string_view, 4> kPrompts{
@@ -810,20 +814,35 @@ void CheckDsparkScalarQuality(
   struct Scenario {
     std::size_t concurrency;
     std::size_t depth;
+    std::size_t device_gib;
   };
-  constexpr std::array<Scenario, 8> scenarios{{{1, 0},
-                                               {1, 2048},
-                                               {1, 4096},
-                                               {2, 4096},
-                                               {4, 4096},
-                                               {6, 4096},
-                                               {8, 16384},
-                                               {2, 16384}}};
+  constexpr std::size_t kC8Depth16384DeviceGib = 100;
+  constexpr std::array<Scenario, 8> scenarios{
+      {{1, 0, 0},
+       {1, 2048, 0},
+       {1, 4096, 0},
+       {2, 4096, 0},
+       {4, 4096, 0},
+       {6, 4096, 0},
+       {8, 16384, kC8Depth16384DeviceGib},
+       {2, 16384, 0}}};
+  std::size_t free_bytes = 0, device_bytes = 0;
+  Expect(hipMemGetInfo(&free_bytes, &device_bytes) == hipSuccess,
+         "device memory query");
   std::string error;
   const auto pattern = model->Tokenize(kTrajectoryPrompt);
   Expect(!pattern.empty(), "scalar replay prefix tokenization");
   bool quality_ok = true;
-  for (const auto [concurrency, depth] : scenarios) {
+  auto coverage = ReplayCoverage::kComplete;
+  for (const auto [concurrency, depth, device_gib] : scenarios) {
+    if (device_bytes < (device_gib << 30)) {
+      std::cout << "SKIP: DSpark scalar replay C" << concurrency
+                << " depth=" << depth << " needs " << device_gib
+                << " GiB of device memory; this device has "
+                << static_cast<double>(device_bytes) / (1ULL << 30) << " GiB\n";
+      coverage = ReplayCoverage::kSkippedForMemory;
+      continue;
+    }
     int top1 = 0, greedy_matches = 0, compared = 0, rank_sum = 0,
         worst_rank = 0;
     double worst_rmse = 0, worst_cosine = 1;
@@ -984,6 +1003,7 @@ void CheckDsparkScalarQuality(
   }
   Expect(quality_ok,
          "every scalar replay scenario matches scalar tokens and logits");
+  return coverage;
 }
 
 void CheckConcurrentPolicySnapshot(
@@ -1440,8 +1460,8 @@ int main(int argc, char** argv) try {
     return 0;
   }
   if (dspark_replay) {
-    CheckDsparkScalarQuality(model);
-    return 0;
+    return CheckDsparkScalarQuality(model) == ReplayCoverage::kComplete ? 0
+                                                                        : 77;
   }
   if (indexer_boundary) {
     CheckIndexerBoundary(model, false);
@@ -1454,11 +1474,11 @@ int main(int argc, char** argv) try {
     CheckDsparkReproducibility(model);
     CheckDsparkChangingMembership(model);
     CheckConcurrentPolicySnapshot(model);
-    CheckDsparkScalarQuality(model);
+    const auto replay = CheckDsparkScalarQuality(model);
     CheckDsparkPromptSeed(model);
     CheckDsparkSnapshots(model);
     CheckSessionBounds(model);
-    return 0;
+    return replay == ReplayCoverage::kComplete ? 0 : 77;
   }
 
   gufo::testing::ds4::CheckTokenGoldens(*model);

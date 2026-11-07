@@ -62,6 +62,13 @@ nix develop -c tools/ds4/check.py model --model "$MODEL" --dspark-model "$DSPARK
 Independent FP64 operators and exact sparse top-k checks supplement model/state
 replay. Keep full-logit captures outside Git; do not relax quality gates.
 
+`ds4.dspark` replays C8 at depth 16384 only when HIP reports at least 100 GiB
+of device memory. With the target and DSpark files loaded, that scenario holds
+91.5 GiB after its base snapshot and adds 0.97 GiB per session, so it runs out
+of memory at a 98 GiB GTT limit and passed at 108 GiB. On a smaller device the
+test runs every other check, prints `SKIP` with both sizes and exits with 77,
+which CTest reports as skipped, not passed.
+
 ## Benchmark method
 
 Measured October 30, 2026 on one 128 GB Strix Halo `gfx1151` node, power
