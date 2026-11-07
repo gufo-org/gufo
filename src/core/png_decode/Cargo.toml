@@ -12,10 +12,14 @@ crate-type = ["staticlib"]
 [profile.release]
 debug = 1
 
-# Match the assertion-enabled CMake RelWithDebInfo development/test builds.
+# CMake RelWithDebInfo, the shipped configuration.
 [profile.relwithdebinfo]
 inherits = "release"
 debug = 2
+
+# Optimized test builds (BUILD_TESTING=ON), which keep C++ assertions on too.
+[profile.checked]
+inherits = "relwithdebinfo"
 debug-assertions = true
 overflow-checks = true
 

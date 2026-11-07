@@ -5,8 +5,15 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${PROJECT_SOURCE_DIR}/rust-toolchain.toml")
 
 set(cargo_target_dir "${CMAKE_CURRENT_BINARY_DIR}/cargo")
-set(cargo_profile "$<IF:$<CONFIG:Debug>,dev,$<IF:$<CONFIG:RelWithDebInfo>,relwithdebinfo,release>>")
-set(cargo_profile_dir "$<IF:$<CONFIG:Debug>,debug,$<IF:$<CONFIG:RelWithDebInfo>,relwithdebinfo,release>>")
+# Test builds keep debug assertions and overflow checks, like their C++
+# assertions; shipped builds (BUILD_TESTING=OFF) use the unchecked profiles.
+if(BUILD_TESTING)
+  set(cargo_optimized_profile checked)
+else()
+  set(cargo_optimized_profile relwithdebinfo)
+endif()
+set(cargo_profile "$<IF:$<CONFIG:Debug>,dev,$<IF:$<CONFIG:RelWithDebInfo>,${cargo_optimized_profile},release>>")
+set(cargo_profile_dir "$<IF:$<CONFIG:Debug>,debug,$<IF:$<CONFIG:RelWithDebInfo>,${cargo_optimized_profile},release>>")
 set(png_decode_filename "${CMAKE_STATIC_LIBRARY_PREFIX}gufo_png_decode${CMAKE_STATIC_LIBRARY_SUFFIX}")
 set(png_decode_library "${cargo_target_dir}/${cargo_profile_dir}/${png_decode_filename}")
 file(GLOB_RECURSE png_decode_sources CONFIGURE_DEPENDS
@@ -30,7 +37,7 @@ add_library(gufo_png_decode STATIC IMPORTED GLOBAL)
 set_target_properties(gufo_png_decode PROPERTIES
   IMPORTED_LOCATION "${cargo_target_dir}/release/${png_decode_filename}"
   IMPORTED_LOCATION_DEBUG "${cargo_target_dir}/debug/${png_decode_filename}"
-  IMPORTED_LOCATION_RELWITHDEBINFO "${cargo_target_dir}/relwithdebinfo/${png_decode_filename}"
+  IMPORTED_LOCATION_RELWITHDEBINFO "${cargo_target_dir}/${cargo_optimized_profile}/${png_decode_filename}"
   INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_dependencies(gufo_png_decode gufo_png_decode_cargo)
 
