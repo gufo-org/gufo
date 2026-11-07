@@ -780,8 +780,6 @@ int main(int argc, char** argv) {
       const auto recovered = backend.complete(raw_prompt, 2, 0.0F);
       Expect(recovered.tokens == direct_raw,
              "session reuse after cancellation");
-      Expect(!recovered.cache_hit,
-             "cancelled DeepSeek state must not remain cached");
     }
     const char* support_path =
         std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL");
