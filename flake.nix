@@ -412,6 +412,8 @@
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
+              # Registry installs in the extension module CLI test.
+              pkgsSys.git
               (pkgsSys.python3.withPackages (ps: [ ps.jsonschema ps.numpy ]))
               pkgsSys.icu
               pkgsSys.curl
@@ -664,6 +666,12 @@
           mkServeFn fnArgs;
         mkServe = self.lib.mkGufoServe;
       } // forAllSystems (system: {
+        # gufo loading `extensions` (pinned sources) as modules built against
+        # its SDK; `gufo` defaults to the development package.
+        withExtensionModules =
+          args:
+          gufoPackages.${system}.extensionModules.withExtensions
+            ({ gufo = self.packages.${system}.default; } // args);
         mkGufoServe =
           args:
           self.lib.mkGufoServe (args // { inherit system; });
@@ -689,6 +697,10 @@
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
           release = base.override { inherit releaseVersion; extensionsFromLock = true; };
+          # gufo with its extension SDK, for `gufo extension install`.
+          sdk = gufoPackages.${system}.extensionModules.withSdk base;
+          release-sdk = gufoPackages.${system}.extensionModules.withSdk
+            self.packages.${system}.release;
           # Windows test binaries of the platform leaves and the CPU cache,
           # cross-built here and run on a Windows CI host.
           windows-platform-tests =

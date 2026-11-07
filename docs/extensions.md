@@ -3,7 +3,9 @@
 A Gufo **source extension** adds a model implementation to an existing capability
 such as text generation, embeddings, speech, image/video generation or decisions.
 Gufo compiles its C++/HIP sources into the executable and generates registration
-from its manifest. Users rebuild Gufo with that source to add the model.
+from its manifest. Users rebuild Gufo with that source to add the model, or
+build the same source as a [module](extension-modules.md) that an installed
+Gufo loads (`gufo extension install`, experimental).
 
 Community and niche models live in independent repositories. Promotion to core
 means accepting the in-tree maintenance and release obligations, with a named

@@ -268,6 +268,7 @@ gufo transcribe
 gufo speak
 gufo decide
 gufo diagnose
+gufo extension
 ```
 
 `serve` starts the OpenAI-compatible server. `chat` maintains an interactive
@@ -276,7 +277,8 @@ DS4 capability questions through an already running OpenAI-compatible server.
 `bench` measures model execution, `video` runs MiniMax H3 generation,
 `transcribe` runs speech recognition, `speak` runs speech synthesis and voice
 chat, `decide` answers decision requests, and `diagnose` runs
-non-interactive system and hardware diagnostics.
+non-interactive system and hardware diagnostics. `extension` builds, lists,
+updates and removes [extension modules](extension-modules.md) (experimental).
 
 All commands support `--help` and `--version`. Unknown options and invalid
 combinations return an error instead of being ignored.
