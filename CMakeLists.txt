@@ -445,7 +445,33 @@ target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_ev
 include(CTest)
 gufo_build_discovered_extensions()
 get_property(gufo_selected_extensions GLOBAL PROPERTY GUFO_SELECTED_EXTENSIONS)
-gufo_target_extensions(gufo EXTENSIONS ${gufo_selected_extensions})
+if (GUFO_EXTENSION_MODULES)
+  list(REMOVE_ITEM gufo_selected_extensions ${GUFO_EXTENSION_MODULES})
+endif()
+gufo_target_extensions(gufo LOAD_MODULES EXTENSIONS ${gufo_selected_extensions})
+gufo_extension_modules(EXTENSIONS ${GUFO_EXTENSION_MODULES})
+gufo_extension_build_id(gufo_extension_build_id)
+target_sources(gufo PRIVATE src/cli/extension_modules.cpp)
+set_property(SOURCE src/cli/extension_modules.cpp APPEND PROPERTY
+  COMPILE_DEFINITIONS GUFO_EXTENSION_BUILD_ID="${gufo_extension_build_id}")
+if (NOT WIN32)
+  # Loadable extension modules resolve the host services from the executable:
+  # export its symbols and keep every object of the libraries behind the
+  # public extension surface, including ones no built-in extension uses.
+  set_target_properties(gufo PROPERTIES ENABLE_EXPORTS ON)
+  set(gufo_extension_host_libraries gufo_ext_runtime gufo_logging gufo_platform
+    gufo_core gufo_cache)
+  if (ENGINE_ENABLE_HIP)
+    list(APPEND gufo_extension_host_libraries gufo_cache_hip gufo_hip_host)
+  endif()
+  set(gufo_extension_host_archives)
+  foreach(library IN LISTS gufo_extension_host_libraries)
+    list(APPEND gufo_extension_host_archives "$<TARGET_FILE:${library}>")
+  endforeach()
+  target_link_options(gufo PRIVATE "LINKER:--whole-archive"
+    ${gufo_extension_host_archives} "LINKER:--no-whole-archive")
+  add_dependencies(gufo ${gufo_extension_host_libraries})
+endif()
 gufo_stage_hip_runtime(gufo)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
