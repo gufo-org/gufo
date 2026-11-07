@@ -17,6 +17,22 @@ inline constexpr std::uint32_t kMaxMtpDraftTokens = 7;
 /// probability of a greedy draft, or the proposal probability q of a sampled
 /// one.
 inline constexpr float kMtpGateProbability = 0.85F;
+/// Cached context from which a greedy chain uses the deep gate below.
+inline constexpr std::uint32_t kMtpGateContext = 2048;
+/// The head's greedy proposal confidence falls with cached context while the
+/// rate at which the target accepts those proposals does not, so the
+/// short-context gate ends chains whose next row would still be accepted.
+/// Both gates only decide how many proposals a cycle verifies: every proposal
+/// is still verified over the full target vocabulary, so greedy output is
+/// preserved. Measured crossover: 0.85 wins to 1,024 cached tokens, 0.65 from
+/// 2,048 on (+3.6% at 4,096, +7.7% at 8,192, +5.1% at 16,384, unchanged at 0).
+inline constexpr float kMtpDeepGateProbability = 0.65F;
+
+[[nodiscard]] constexpr float MtpGateProbability(
+    std::uint32_t context) noexcept {
+  return context < kMtpGateContext ? kMtpGateProbability
+                                   : kMtpDeepGateProbability;
+}
 inline constexpr float kMtpSampledGateProbability = 0.95F;
 /// In a jointly planned greedy batch a final proposal below this
 /// probability is not verified: its row costs a C8 cycle more than the

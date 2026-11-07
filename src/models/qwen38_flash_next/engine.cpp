@@ -1033,7 +1033,7 @@ bool Session::GateStops(const PendingDecode& pending) {
     return false;
   return pending.sampled
              ? pending.proposals.back().probability < kMtpSampledGateProbability
-             : pending.draft_confidence < kMtpGateProbability;
+             : pending.draft_confidence < MtpGateProbability(pending.base);
 }
 
 void Session::AppendDraft(PendingDecode& pending) {

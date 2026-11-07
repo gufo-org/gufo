@@ -19,6 +19,21 @@ void Require(bool condition, const char* message) {
     throw std::runtime_error(message);
 }
 
+void CheckGateContext() {
+  Require(qfn::MtpGateProbability(0) == qfn::kMtpGateProbability,
+          "empty context must use the short-context gate");
+  Require(qfn::MtpGateProbability(qfn::kMtpGateContext - 1) ==
+              qfn::kMtpGateProbability,
+          "context below the crossover must use the short-context gate");
+  Require(qfn::MtpGateProbability(qfn::kMtpGateContext) ==
+              qfn::kMtpDeepGateProbability,
+          "context at the crossover must use the deep gate");
+  Require(qfn::MtpGateProbability(262144) == qfn::kMtpDeepGateProbability,
+          "the native context limit must use the deep gate");
+  Require(qfn::kMtpDeepGateProbability < qfn::kMtpGateProbability,
+          "the deep gate must be the wider one");
+}
+
 void CheckLengthController() {
   qfn::MtpLengthController controller(7);
   const auto initial = controller.Choose(7);
@@ -485,6 +500,7 @@ void CheckVerificationBoundaries() {
 int main() {
   try {
     CheckVerificationBoundaries();
+    CheckGateContext();
     CheckLengthController();
     CheckOccupancyOverride();
     CheckPolicyConcurrency();
