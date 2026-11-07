@@ -29,8 +29,11 @@ std::string_view ValueHint(ext::OptionType type) {
 ProviderOptions::ProviderOptions(const ext::Registry& registry,
                                  std::string command)
     : registry_(registry), command_(std::move(command)) {
+  // Only text runners and drivers receive these values; another capability's
+  // options (an embedding model's serve settings, ...) belong to its own path.
   for (const auto& provider : registry_.Providers()) {
-    if (!provider.available) {
+    if (!provider.available ||
+        provider.capability != ext::Capability::kTextGeneration) {
       continue;
     }
     for (const auto& option : provider.options) {

@@ -84,6 +84,13 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
               {"--fixture-count", OptionType::kInteger, all, ""},
           },
   });
+  // Another capability's options never reach the text commands.
+  registry.AddProvider({
+      .id = "test-embedding",
+      .capability = gufo::ext::Capability::kEmbeddings,
+      .keys = {"safetensors:test-embedding"},
+      .options = {{"--fixture-embedding", OptionType::kString, all, ""}},
+  });
   registry.AddTextProvider({
       .id = "test-text",
       .probe_gguf =
@@ -196,6 +203,7 @@ bool CheckProviderOptions(std::string_view command, const std::string& model,
            {"--fixture-count", "1", "--fixture-count", "2"},
            {"--fixture-flag=yes"},
            {"--other-only", "x"},
+           {"--fixture-embedding", "x"},
            {"--not-declared"}}) {
     if (Run(command, model, flags) != 2 || !dispatched.empty()) {
       return Fail(command, std::string("must reject ") + flags.front());
@@ -223,7 +231,8 @@ bool CheckHelp(std::string_view command) {
       help.find("A switch (test-text)") != std::string::npos &&
       help.find("--fixture-count <N>") != std::string::npos &&
       help.find("(test-text, other-text)") != std::string::npos &&
-      help.find("Not delivered") == std::string::npos;
+      help.find("Not delivered") == std::string::npos &&
+      help.find("--fixture-embedding") == std::string::npos;
   const bool scale = help.find("--fixture-scale") != std::string::npos;
   return listed && scale == (command != "bench")
              ? true

@@ -265,8 +265,8 @@ from metadata, including optional `serving` declarations. See
 [Nix serving](model-extensions/serving.md).
 
 Text providers receive their options. `serve`, `prompt`, `chat` and `bench`
-accept every option an available provider declares for that command, list the
-ones core does not own under "Provider options" in `--help`, and parse values
+accept every option an available text provider declares for that command, list
+the ones core does not own under "Provider options" in `--help`, and parse values
 with the manifest types. Once the model's provider is selected, the explicit
 values of its declared options reach `TextRunnerOptions`, `TextPromptOptions`
 or `TextBenchOptions` as `provider_options`; read them with
