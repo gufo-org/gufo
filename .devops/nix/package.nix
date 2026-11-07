@@ -32,7 +32,10 @@ let
   rocmRuntime = rocmPackages.rocm-runtime.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [ ./patches/rocr-fixed-cwsr-rocm10.patch ];
   });
-  cargoSetup = import ./png-decode-cargo.nix { inherit rustPlatform; };
+  cargoSetup = import ./png-decode-cargo.nix {
+    inherit lib rustPlatform;
+    lockFile = sourceRoot + "/src/core/png_decode/Cargo.lock";
+  };
   versionLabel = if releaseVersion == null then "development" else releaseVersion;
   packageVersion =
     if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;

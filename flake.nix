@@ -252,7 +252,7 @@
           };
 
           cargoSetup = import ./.devops/nix/png-decode-cargo.nix {
-            inherit (pkgsSys) rustPlatform;
+            inherit (pkgsSys) lib rustPlatform;
           };
 
           rustCheck = pkgsSys.runCommand "check-rust" {
