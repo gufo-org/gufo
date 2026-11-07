@@ -357,7 +357,8 @@ class SchemaTests(unittest.TestCase):
         validator.validate(broad)
         # A pkg-config entry names one module, as configure requires it.
         for field, value in (("unknown", True), ("packages", "wrong"),
-                             ("packages", [{"pkg_config": "soxr >= 0.1.3"}]), ("tests", [{"target": "test_target"}]),
+                             ("packages", [{"pkg_config": "soxr >= 0.1.3"}]), ("packages", [{"pkg_config": "--static"}]),
+                             ("tests", [{"target": "test_target"}]),
                              ("compile_definitions", {"INVALID": False}), ("production_paths", {"include": []})):
             invalid = copy.deepcopy(broad)
             invalid[field] = value

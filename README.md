@@ -208,7 +208,9 @@ limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
 Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
 Use the development packages for the libraries above. ROCm normally installs
 under `/opt/rocm`. Libraries marked for one extension are required only when
-that extension is built; see `packages` in its `extension.json`.
+that extension is built. The default build includes every extension; leave one
+out with `-DGUFO_EXTENSIONS=<list>` to drop its libraries (see `packages` in
+its `extension.json`).
 
 For example, on Debian/Ubuntu the ordinary system libraries are:
 

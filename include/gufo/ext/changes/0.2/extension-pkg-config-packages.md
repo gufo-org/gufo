@@ -8,7 +8,7 @@ targets `PkgConfig::<module>` with the `<module>_*` variables
 A selected extension's declared modules are now enforced at configure time,
 not only listed, so `packages` must name only modules the extension builds
 against. The metadata schema restricts `pkg_config` to a module name
-(`^[A-Za-z0-9_.+-]+$`, no version constraint), matching the configure check.
+(`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`, no version constraint), matching the configure check.
 
 The root build no longer requires sndfile, soxr, libavformat, libavcodec,
 libavutil and libswscale for every build, and no longer defines
