@@ -151,6 +151,7 @@ public:
 
 private:
   friend class Executor;
+  friend struct ExecutorTestAccess;  // eager/replay checks in GPU tests
   friend struct PrefillCheckpoint;
   friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
   Session() = default;
@@ -523,6 +524,7 @@ public:
   [[nodiscard]] bool has_mtp() const noexcept { return model_->has_mtp(); }
 
 private:
+  friend struct ExecutorTestAccess;  // capture failure injection in GPU tests
   Executor() = default;
 
   /// Visits every device region of a snapshot in payload order with
@@ -709,6 +711,10 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// True only while Run records a graph. Overlapped launches check capture
+  /// membership at the fork; eager/replay tests separately check the results.
+  /// False on replay, which executes no host dispatch or membership queries.
+  mutable bool capturing_{false};
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;

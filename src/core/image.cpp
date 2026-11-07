@@ -1,8 +1,8 @@
 #include "src/core/image.hpp"
 
 #include <curl/curl.h>
+#include <gufo/png_decode.h>
 #include <jpeglib.h>
-#include <png.h>
 #include <webp/decode.h>
 
 #include <algorithm>
@@ -99,91 +99,30 @@ Image DecodeJpeg(std::span<const std::uint8_t> bytes) {
   return std::move(state->image);
 }
 
-struct PngDecoder {
-  png_structp png{nullptr};
-  png_infop info{nullptr};
-  std::span<const std::uint8_t> encoded;
-  std::size_t offset{0};
-  Image image;
-  std::vector<std::uint8_t> grayscale16;
-  std::vector<png_bytep> rows;
-  ~PngDecoder() {
-    if (png)
-      png_destroy_read_struct(&png, &info, nullptr);
-  }
+void CheckPng(GufoPngStatus status) {
+  if (status == GUFO_PNG_INVALID)
+    throw std::invalid_argument("invalid PNG image");
+  if (status != GUFO_PNG_OK)
+    throw std::runtime_error("PNG decoder failed");
+}
+
+struct PngDecoderClose {
+  void operator()(GufoPngDecoder* decoder) const { gufo_png_close(decoder); }
 };
 
 Image DecodePng(std::span<const std::uint8_t> bytes) {
-  auto state = std::make_unique<PngDecoder>();
-  state->encoded = bytes;
-  state->png = png_create_read_struct(
-      PNG_LIBPNG_VER_STRING, nullptr,
-      [](png_structp png, png_const_charp) { png_longjmp(png, 1); },
-      [](png_structp, png_const_charp) {});
-  if (!state->png)
-    throw std::runtime_error("cannot initialize PNG decoder");
-  state->info = png_create_info_struct(state->png);
-  if (!state->info)
-    throw std::runtime_error("cannot initialize PNG metadata");
-  if (setjmp(png_jmpbuf(state->png)) != 0)
-    throw std::invalid_argument("invalid PNG image");
-  png_set_read_fn(
-      state->png, state.get(),
-      [](png_structp png, png_bytep output, png_size_t count) {
-        auto& input = *static_cast<PngDecoder*>(png_get_io_ptr(png));
-        if (count > input.encoded.size() - input.offset)
-          png_error(png, "truncated PNG");
-        std::memcpy(output, input.encoded.data() + input.offset, count);
-        input.offset += count;
-      });
-  png_read_info(state->png, state->info);
-  const auto width = png_get_image_width(state->png, state->info);
-  const auto height = png_get_image_height(state->png, state->info);
-  ValidateDimensions(width, height);
-  const int depth = png_get_bit_depth(state->png, state->info);
-  const int color = png_get_color_type(state->png, state->info);
-  const bool gray16 = color == PNG_COLOR_TYPE_GRAY && depth == 16;
-  // PIL.convert("RGB") ignores gamma/ICC metadata and drops alpha without
-  // compositing. The simplified libpng API applies gamma, so use explicit
-  // transforms.
-  if (color == PNG_COLOR_TYPE_PALETTE)
-    png_set_palette_to_rgb(state->png);
-  if (color == PNG_COLOR_TYPE_GRAY && depth < 8)
-    png_set_expand_gray_1_2_4_to_8(state->png);
-  if (depth == 16 && !gray16)
-    png_set_strip_16(state->png);
-  if ((color == PNG_COLOR_TYPE_GRAY || color == PNG_COLOR_TYPE_GRAY_ALPHA) &&
-      !gray16)
-    png_set_gray_to_rgb(state->png);
-  png_set_strip_alpha(state->png);
-  (void)png_set_interlace_handling(state->png);
-  png_read_update_info(state->png, state->info);
-  const std::size_t row_bytes = std::size_t{width} * (gray16 ? 2 : 3);
-  if (png_get_rowbytes(state->png, state->info) != row_bytes) {
-    throw std::invalid_argument("unsupported PNG pixel layout");
-  }
-  state->image = {width, height,
-                  std::vector<std::uint8_t>(std::size_t{width} * height * 3)};
-  if (gray16)
-    state->grayscale16.resize(row_bytes * height);
-  auto* pixels =
-      gray16 ? state->grayscale16.data() : state->image.pixels.data();
-  state->rows.resize(height);
-  for (std::size_t y = 0; y < height; ++y)
-    state->rows[y] = pixels + y * row_bytes;
-  png_read_image(state->png, state->rows.data());
-  png_read_end(state->png, state->info);
-  if (gray16) {
-    // Pillow's 16-bit grayscale mode converts to RGB by saturating the integer
-    // sample, unlike 16-bit RGB's high-byte conversion.
-    for (std::size_t i = 0; i < std::size_t{width} * height; ++i) {
-      const auto value =
-          std::min(255U, (unsigned{pixels[i * 2]} << 8) | pixels[i * 2 + 1]);
-      std::fill_n(state->image.pixels.data() + i * 3, 3,
-                  static_cast<std::uint8_t>(value));
-    }
-  }
-  return std::move(state->image);
+  GufoPngDecoder* opened = nullptr;
+  GufoPngDimensions size{};
+  const GufoPngStatus status =
+      gufo_png_open(bytes.data(), bytes.size(), &opened, &size);
+  const std::unique_ptr<GufoPngDecoder, PngDecoderClose> decoder(opened);
+  CheckPng(status);
+  ValidateDimensions(size.width, size.height);
+  Image image{size.width, size.height, {}};
+  image.pixels.resize(std::size_t{image.width} * image.height * 3);
+  CheckPng(gufo_png_decode_rgb8(decoder.get(), image.pixels.data(),
+                                image.pixels.size()));
+  return image;
 }
 
 // Bounds-checked TIFF orientation; shared by JPEG APP1 and PNG eXIf.
@@ -386,7 +325,11 @@ Image DecodeImage(std::span<const std::uint8_t> bytes) {
   if (bytes.empty() || bytes.size() > kMaxEncodedImageBytes) {
     throw std::invalid_argument("image exceeds encoded byte limit or is empty");
   }
-  if (bytes.size() >= 8 && png_sig_cmp(bytes.data(), 0, 8) == 0) {
+  constexpr std::array<std::uint8_t, 8> kPngSignature{0x89, 'P',  'N',  'G',
+                                                      '\r', '\n', 0x1a, '\n'};
+  if (bytes.size() >= kPngSignature.size() &&
+      std::memcmp(bytes.data(), kPngSignature.data(), kPngSignature.size()) ==
+          0) {
     return Orient(DecodePng(bytes), PngOrientation(bytes));
   }
   if (bytes.size() >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8) {

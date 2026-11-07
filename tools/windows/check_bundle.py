@@ -13,9 +13,10 @@ import pefile
 
 # Windows 11 inbox libraries, not development tools, CRT or GPU SDK runtimes.
 SYSTEM_DLLS = frozenset(
-    """advapi32.dll bcrypt.dll cfgmgr32.dll crypt32.dll gdi32.dll iphlpapi.dll
-    kernel32.dll ncrypt.dll ntdll.dll ole32.dll oleaut32.dll psapi.dll secur32.dll setupapi.dll
-    shell32.dll shlwapi.dll user32.dll version.dll winmm.dll ws2_32.dll""".split()
+    """advapi32.dll bcrypt.dll bcryptprimitives.dll cfgmgr32.dll crypt32.dll gdi32.dll
+    iphlpapi.dll kernel32.dll ncrypt.dll ntdll.dll ole32.dll oleaut32.dll psapi.dll secur32.dll
+    setupapi.dll shell32.dll shlwapi.dll user32.dll userenv.dll version.dll winmm.dll
+    ws2_32.dll""".split()
 )
 
 

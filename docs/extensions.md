@@ -45,8 +45,23 @@ Extension code still has arbitrary native-code privileges during build and run.
 
 Every text runner provides continuation through the component cache. It
 implements `cache::Adapter` and links `gufo_ext_cache`, the public target for the
-component cache and its HIP backing. That target exists only in HIP builds, so
-list it under a target that requires `hip`.
+component cache and, in HIP builds, its HIP backing.
+
+### Link targets
+
+`gufo_ext_runtime` declares the whole public surface but implements only its
+neutral contracts. The `gufo` executable supplies everything else at its final
+link, so a registration library needs nothing more. A test, probe or tool that
+is its own executable must link the implementation of each service it uses:
+
+| Target | Provides | Builds |
+| --- | --- | --- |
+| `gufo_ext_core` | GGUF reading and identity, sampling, JSON constraints, dequantization, SHA-256, image decoding, the hipBLASLt plan database, and `WeightUpload` in HIP builds. Also carries OpenSSL, which `sha256.hpp` exposes | all |
+| `gufo_ext_cache` | Component cache; in HIP builds also `transfer_pool`, `host_allocations` and `component_cache_resources` | all |
+| `gufo_ext_hip` | `ENGINE_ENABLE_HIP`, which the public HIP headers need, `hip::host` and the hipCUB and rocPRIM include paths | HIP only; list it under a target that requires `hip` |
+
+These targets add no Gufo include path, so the source API stays the audited
+surface. Linking `gufo_core` or `gufo_cache` directly is still rejected.
 
 ## Provide continuation
 
@@ -172,6 +187,13 @@ not need GPU initialization or load the entire model onto a device. Ambiguous
 matches must remain errors; do not steal another provider's artifacts with an
 overly broad probe.
 
+A GGUF whose tensors use a storage type or shape core cannot size, such as the
+extension's own quantization, still opens for text commands: those tensors have
+`sized == false` and a `size_bytes` spanning the bytes the file reserves for
+them. Only a provider with `accepts_unsized_tensors` probes such a file, so a
+built-in provider for the same architecture does not claim it; the provider
+then reads those tensors from their `data` itself.
+
 For a text model, own tokenization, chat/control framing and tool syntax in the
 extension. Declare supported inputs, state/resource capabilities and sampling
 defaults accurately. Implement incremental execution, cancellation, state
@@ -243,11 +265,33 @@ The contract, ownership and error rules are documented on `ToolDialect` in
 the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,
 `deepseek`) of `ToolFormat()`.
 
-Provider options use canonical names and manifest types. CMake checks conflicting
-declarations. The Nix serving helper derives provider arguments and validation
-from metadata, including optional `serving` declarations. New runtime controls
-also need actual command parsing/execution support; metadata alone cannot
-implement them. See [Nix serving](model-extensions/serving.md).
+Provider options use canonical names and manifest types. Extensions may declare
+the same option when the type agrees, as providers sharing `--mtp-model` do; CMake
+rejects conflicting types. The Nix serving helper derives provider arguments and validation
+from metadata, including optional `serving` declarations. See
+[Nix serving](model-extensions/serving.md).
+
+Text providers receive their options. `serve`, `prompt`, `chat` and `bench`
+accept every option an available text provider declares for that command, list
+the ones core does not own under "Provider options" in `--help`, and parse values
+with the manifest types. Once the model's provider is selected, the explicit
+values of its declared options reach `TextRunnerOptions`, `TextPromptOptions`
+or `TextBenchOptions` as `provider_options`; read them with
+`ext::FindOption<T>`:
+
+```cpp
+std::uint32_t image_tokens = kDefaultImageTokens;
+if (const auto* value = ext::FindOption<std::int64_t>(
+        options.provider_options, "--image-tokens")) {
+  image_tokens = ValidateImageTokens(*value);  // provider-owned validation
+}
+```
+
+An option that was not given is absent, so defaults stay with the provider; an
+explicit `false` or `0` is present. An option the selected provider does not
+declare for the command fails before any weights load, as do type errors and a
+repeated option. Spellings core parses itself, such as `--mtp-model`, keep
+their core handling and fields and are not part of `provider_options`.
 
 ## Build and exercise the extension
 

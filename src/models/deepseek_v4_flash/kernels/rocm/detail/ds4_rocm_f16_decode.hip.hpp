@@ -2,8 +2,8 @@
 #include "ds4_rocm_device.hip.hpp"
 
 __global__ static void matmul_f16_ordered_chunks_kernel(
-    float* out, const __half* w, const float* x, uint64_t in_dim,
-    uint64_t out_dim, uint64_t n_tok) {
+    float* out, const __half* w, uint64_t w_stride, const float* x,
+    uint64_t in_dim, uint64_t out_dim, uint64_t n_tok) {
   uint64_t row = (uint64_t)blockIdx.x;
   uint64_t tok = (uint64_t)blockIdx.y;
   if (row >= out_dim || tok >= n_tok)
@@ -17,7 +17,7 @@ __global__ static void matmul_f16_ordered_chunks_kernel(
   uint64_t k1 = k0 + chunk;
   if (k1 > in_dim)
     k1 = in_dim;
-  const __half* wr = w + row * in_dim;
+  const __half* wr = w + row * w_stride;
   const float* xr = x + tok * in_dim;
   for (uint64_t i = k0; i < k1; i++) {
     sum += __half2float(wr[i]) * xr[i];
@@ -37,6 +37,7 @@ constexpr uint32_t F16_ORDERED_LOAD_GROUPS = 16u;
 template<uint32_t BATCH>
 __global__ static void matmul_f16_ordered_batch_reuse_kernel(float* out,
                                                              const __half* w,
+                                                             uint64_t w_stride,
                                                              const float* x,
                                                              uint64_t in_dim,
                                                              uint64_t out_dim) {
@@ -56,7 +57,7 @@ __global__ static void matmul_f16_ordered_batch_reuse_kernel(float* out,
   uint64_t k1 = k0 + chunk;
   if (k1 > in_dim)
     k1 = in_dim;
-  const __half* wr = w + row * in_dim;
+  const __half* wr = w + row * w_stride;
   uint64_t i = k0;
   if ((in_dim & 3u) == 0u && (i & 3u) == 0u) {
     if constexpr (BATCH == 1u) {

@@ -1,7 +1,10 @@
 # Qwen3.8 Flash-Next
 
 Hybrid recurrent/QSA mixture-of-experts text/image model on gfx1151.
-Supported target: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards).
+Supported target: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards),
+Unsloth Dynamic 3.1 revision `d96201194f10`. It keeps the tensor types and
+shapes of the earlier `38bb39ee9782`, which the retained benchmark, quality
+and F32-fixture evidence used; AR pp2048/tg128 speed is unchanged.
 Optional shared-Q8 MTP predictor; optional BF16 vision projector.
 Original unquantized-model and GGUF-conversion parity remain unqualified.
 
@@ -11,8 +14,9 @@ Original unquantized-model and GGUF-conversion parity remain unqualified.
 
 ```sh
 nix develop -c hf download unsloth/Qwen3.8-Flash-Next-GGUF \
-  --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
-  --include "UD-Q4_K_XL/*" "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" "mmproj-BF16.gguf" \
+  --revision d96201194f103c906994f283f504209dc8d2a10c \
+  --include "UD-Q4_K_XL/*" --include "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" \
+  --include "mmproj-BF16.gguf" \
   --local-dir models/qwen3.8-flash-next
 nix build
 MODEL=/path/to/first-target-shard.gguf

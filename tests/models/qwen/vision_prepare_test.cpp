@@ -1,6 +1,6 @@
 // `gufo serve llm` uploads the vision sidecar while loading through
-// Encoder::Upload: the weights upload once, ResidentBytes accounts for exactly
-// them, and a later Encode reuses them instead of uploading again.
+// PrepareForServing: the weights upload once, ResidentBytes accounts for
+// exactly them, and a later Encode reuses them instead of uploading again.
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
 
     const auto before = FreeDeviceBytes();
     observe_upload = true;
-    encoder->Upload();
+    gufo::models::qwen::vision::PrepareForServing(encoder);
     observe_upload = false;
     Require(!pageable_upload && uploaded_bytes == expected,
             "vision upload registered pageable source tensors with the GPU");

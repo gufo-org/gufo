@@ -20,6 +20,15 @@ struct OptionSpec {
   std::string help;
 };
 using ParsedOptions = std::map<std::string, OptionValue, std::less<>>;
+// The explicit value of `name` (spelled with its dashes), or null when it was
+// not given. T follows the declared type: bool, std::int64_t, double, or
+// std::string for string and path options. A different T throws
+// std::bad_variant_access.
+template<typename T>
+const T* FindOption(const ParsedOptions& options, std::string_view name) {
+  const auto found = options.find(name);
+  return found == options.end() ? nullptr : &std::get<T>(found->second);
+}
 
 bool IsCoreOption(std::string_view name);
 // Parse only explicit values: provider defaults/validation run after selection.

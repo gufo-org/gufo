@@ -1,8 +1,6 @@
 {
   "schema": 1,
-  "disabled": {
-    "deepseek4": "Temporarily disabled: its 81 GiB weights and 36-suite PR set make the Devlab run too long to finish within a PR; re-enable by removing this entry"
-  },
+  "disabled": {},
   "representatives": {
     "llm": "flash-next-q4",
     "embedding": "embedding-gemma2",
@@ -12,7 +10,7 @@
   "assets": {
     "flash-next": {
       "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
-      "revision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+      "revision": "d96201194f103c906994f283f504209dc8d2a10c",
       "patterns": [
         "UD-Q4_K_XL/*.gguf",
         "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
@@ -192,7 +190,25 @@
       "draft": "DeepSeek-V4-Flash-DSpark-support-0731.gguf",
       "draft_option": "--dspark-model",
       "mode": "dspark",
-      "sampling": "deepseek4"
+      "sampling": "deepseek4",
+      "suites": [
+        "logprobs",
+        "responses-logprobs",
+        "discovery",
+        "openai-count-tokens",
+        "messages-count-tokens",
+        "responses",
+        "stops",
+        "conversation",
+        "structured",
+        "tool-streaming",
+        "tools",
+        "sampling-defaults",
+        "sampling-ranges",
+        "batch",
+        "state-edges",
+        "cache"
+      ]
     },
     "embedding-gemma2": {
       "title": "EmbeddingGemma 2",

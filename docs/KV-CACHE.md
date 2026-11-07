@@ -318,6 +318,14 @@ checkpoint inside one. Such a position moves to the span's first row, and a step
 that starts at a span takes it whole even beyond its token budget. Contexts that
 declare no spans change no position.
 
+**A checkpoint may hold less than a cold request would.** Each prefill step's
+prompt ends at its own frontier, and `TextRunnerState::prefill_prompt_end()`
+gives the whole prompt's end. A model that runs some work only near that end
+can skip it in steps ending at earlier cache boundaries, so their checkpoints
+lack those rows. Its `TextModelRunner::CanContinue` then refuses prompts that
+would need them, and the cache serves those from a shallower boundary. By
+default every state continues every prompt.
+
 **The reused frontier must be frozen before prefill.** Prefill mutates the
 leased state in place, so a frontier another request might branch from has to
 be captured first.
@@ -388,6 +396,14 @@ RAM, no shared-prefix or branch checkpoint, and no retained history. With
 `--cache-disk`, Qwen and Flash-Next still copy each disk capture through a
 bounded 512 MiB backing, so `backing_prepared` appears in that case only. The
 startup line reports `ram_cache=off capacity_bytes=0`.
+
+When the sessions leave no RAM for the cache above the 4 GiB host reserve,
+the server refuses to load with that reason and the remedies: fewer
+`--sessions`, a smaller `--context`, or `--cache-ram-bytes off`. `off` loads
+even when the host is already below its reserve before the sessions allocate.
+When an explicit value is only partly available, the server loads with what
+the host allows and logs `event=ram_cache_trimmed` with the requested and the
+granted bytes; the same remedies restore the full budget.
 
 `--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
 A positive value replaces the automatic budget and may exceed it: it trades the
@@ -601,6 +617,7 @@ a top-level `cache_persist`; see [the server guide](SERVER.md).
 | --- | --- |
 | `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim; `ram_cache=on` or `ram_cache=off` at the end of the line, and `disk_backing_bytes` for the backing an off cache keeps for disk captures |
 | `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
+| `schema=component-cache-v1 event=ram_cache_trimmed` | Qwen3.8-27B, Flash-Next and DeepSeek V4: an explicit `--cache-ram-bytes` exceeds what the host keeps above its 4 GiB reserve after the sessions allocated; reports `requested_bytes` and the granted `capacity_bytes` |
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory (#460). Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration (#781) |
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |

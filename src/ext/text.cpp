@@ -207,7 +207,10 @@ const TextProvider* ProbeTextProvider(std::string_view model_root) {
 }
 
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader) {
+  const bool unsized = reader.FirstUnsizedTensor() != nullptr;
   for (const auto& provider : g_text_providers) {
+    if (unsized && !provider.accepts_unsized_tensors)
+      continue;
     if (provider.probe_gguf && provider.probe_gguf(reader)) {
       return &provider;
     }

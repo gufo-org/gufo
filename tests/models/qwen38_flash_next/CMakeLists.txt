@@ -24,6 +24,7 @@ function(add_qwen38_flash_next_test name library labels)
 endfunction()
 
 add_qwen38_flash_next_test(runner_options gufo_qwen38_flash_next "cpu")
+add_qwen38_flash_next_test(probe gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(continuation_layout gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
@@ -52,6 +53,12 @@ if (ENGINE_ENABLE_HIP)
       select_ops snapshot_copy verification_sampling wide_verification)
     add_qwen38_flash_next_test(${name} qwen38_flash_next_test_hip "hip;gpu;gfx1151")
   endforeach()
+  # Reuse the synthetic model fixture, with short prompts around a reduced
+  # sparse budget. This exercises actual Executor capture/replay without GGUFs.
+  add_test(NAME qwen38_flash_next.decode_graph
+    COMMAND qwen38_flash_next_wide_verification_test --decode-graph-only)
+  set_tests_properties(qwen38_flash_next.decode_graph PROPERTIES
+    LABELS "qwen38_flash_next;hip;gpu;gfx1151")
   # The rope phase and RMS checks compare against the scalar CPU oracle.
   target_link_libraries(qwen38_flash_next_attention_ops_test PRIVATE
     gufo_qwen38_flash_next_reference)

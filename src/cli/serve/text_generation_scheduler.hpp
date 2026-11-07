@@ -12,6 +12,7 @@
 
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
+#include "src/sched/policy.hpp"
 
 namespace gufo::server {
 
@@ -24,7 +25,8 @@ enum class TextRequestPhase : std::uint8_t {
   kTerminal,
 };
 
-inline constexpr std::size_t kDefaultDecodeActivePrefillTokens = 512;
+inline constexpr std::size_t kDefaultDecodeActivePrefillTokens =
+    sched::kDefaultDecodeActivePrefillTokens;
 inline constexpr std::size_t kDefaultMaxOutputBytes =
     static_cast<std::size_t>(1024) * 1024;
 inline constexpr std::size_t kDefaultMaxBufferedOutputBytes =

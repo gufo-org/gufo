@@ -839,6 +839,59 @@ void PrefillLookaheadReachesTheNextFrontier() {
     assert(end == (frontier == prompt.size() ? frontier : next));
   }
 }
+void PrefillStepsSeeTheWholePromptEnd() {
+  class PromptEndRunner final : public Runner {
+  public:
+    mutable std::vector<std::size_t> ends, frontiers;
+    mutable const TextRunnerState* state{};
+    void Record(const TextRunnerState& state,
+                std::span<const TextRunnerToken> prompt) const {
+      ends.push_back(state.prefill_prompt_end());
+      frontiers.push_back(prompt.size());
+      this->state = &state;
+    }
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      Record(state, prompt);
+      return Runner::Prefill(state, prompt, offset, budget);
+    }
+    TextPrefillStep PrefillThrough(
+        TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+        std::size_t offset, std::size_t budget,
+        std::span<const std::size_t> boundaries,
+        const InPassConsumer& consume) const override {
+      Record(state, prompt);
+      return Runner::PrefillThrough(state, prompt, offset, budget, boundaries,
+                                    consume);
+    }
+  };
+  auto runner = std::make_shared<PromptEndRunner>();
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(4000);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto request = pool.Acquire(prompt);
+  while (!request.Prefill(1024).decode_ready) {
+  }
+  assert(runner->state && runner->state->prefill_prompt_end() == 0);
+  // A step ending at a cache boundary still sees the whole prompt's end.
+  assert(runner->frontiers.front() < prompt.size());
+  for (const auto end : runner->ends)
+    assert(end == prompt.size());
+
+  auto through_runner = std::make_shared<PromptEndRunner>();
+  through_runner->in_pass = true;
+  TextRunnerPool through_pool(through_runner, 1);
+  std::vector<TextRunnerToken> short_prompt(40);
+  std::iota(short_prompt.begin(), short_prompt.end(), 10);
+  auto through = through_pool.Acquire(short_prompt, sampling::SamplingConfig{},
+                                      {}, {}, true, 35);
+  assert(through.Prefill(64).decode_ready);
+  assert(through_runner->through_calls == 1);
+  assert(through_runner->ends == std::vector<std::size_t>{short_prompt.size()});
+  assert(through_runner->state->prefill_prompt_end() == 0);
+}
 void BackingPreparationFollowsCaptures() {
   class PrepareRunner final : public Runner {
   public:
@@ -940,6 +993,60 @@ void PartialFrontierDoesNotServeAnEqualPrompt() {
     Prefill(resend);
     (void)Generate(resend);
     resend.Invalidate();
+  }
+}
+void RefusedFrontierServesFromShallowerBoundary() {
+  // A runner may keep only the state that longer prompts need. A prompt it
+  // refuses recomputes from a shallower boundary, live or restored; a longer
+  // one continues the frontier.
+  class RefusingRunner final : public Runner {
+  public:
+    bool CanContinue(const TextRunnerState& state,
+                     std::size_t prompt_tokens) const override {
+      return prompt_tokens >= CheckpointPosition(state) + 8;
+    }
+  };
+  // A live frontier left by a cancelled prefill.
+  for (const std::size_t next_size : {20U, 40U}) {
+    auto runner = std::make_shared<RefusingRunner>();
+    runner->partial = true;
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto request = pool.Acquire(prompt, {}, [] { return false; }, {}, true, 0);
+    assert(request.Prefill(16).consumed_tokens == 16);
+    (void)request.Cancel();
+    const std::vector<TextRunnerToken> next_prompt(prompt.begin(),
+                                                   prompt.begin() + next_size);
+    auto next = pool.Acquire(next_prompt, {}, {}, {}, true, 0);
+    assert((next.cached_prompt_tokens() == 16) == (next_size == 40));
+    assert(next.cached_prompt_tokens() <= 16);
+    Prefill(next);
+    (void)Generate(next);
+    next.Invalidate();
+  }
+  // A checkpoint restored after another prompt replaced the slot.
+  for (const std::size_t next_size : {37U, 60U}) {
+    auto runner = std::make_shared<RefusingRunner>();
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(60);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto seed = pool.Acquire(prompt, {}, {}, {}, true, 35);
+    Prefill(seed);
+    (void)seed.Commit();
+    auto unrelated = prompt;
+    unrelated.front() = 999;
+    auto other = pool.Acquire(unrelated, {}, {}, {}, true, 0);
+    Prefill(other);
+    (void)other.Commit();
+    auto next_prompt = prompt;
+    next_prompt.resize(next_size);
+    next_prompt.back() = 998;
+    auto next = pool.Acquire(next_prompt, {}, {}, {}, true, 0);
+    assert((next.cached_prompt_tokens() == 35) == (next_size == 60));
+    Prefill(next);
+    (void)Generate(next);
+    next.Invalidate();
   }
 }
 void CompletedCancelledPromptGetsARetrySnapshot() {
@@ -2620,6 +2727,140 @@ void RamCacheOffWithDiskCommitsOnlyStagingBacking() {
   auto& state = dynamic_cast<State&>(lease->state());
   assert(runner->adapter->RecurrentHash(state.slot) == hash);
 }
+// A host that keeps less than its reserve after loading measures a ceiling
+// below what the slots already pinned. With the RAM cache on, the load fails
+// with the remedies instead of a bare bad_alloc. With it off, the server
+// still loads, and the disk cache persists and restores.
+void HostBelowReserveRefusesUnlessRamCacheOff() {
+  constexpr std::size_t kPin = 512 << 10;
+  const TemporaryDirectory temp("gufo-component-host-short-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .min_checkpoint_step_tokens = 1};
+  class ShortHostRunner final : public Runner {
+  public:
+    mutable std::size_t committed{};
+    mutable std::vector<cache::ResourceCharge> pins;
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      // After the slots pinned their buffers, the host has nothing left
+      // above its reserve.
+      claim.retained_snapshot_capacity_bytes = 0;
+      claim.retained_snapshot_ceiling_bytes = 0;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->stream = [this, &ledger,
+                           stream = std::move(resources->stream)] {
+        if (!committed)
+          pins.push_back(
+              ledger.Reserve(cache::ResourceCategory::kMetadata, kPin)
+                  .Convert());
+        return stream();
+      };
+      resources->pinned_bytes = [this] { return pins.size() * kPin; };
+      resources->commit_backing = [this](std::size_t bytes) {
+        committed = bytes;
+      };
+      return resources;
+    }
+  };
+  const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  const auto refused = [](const auto& load) {
+    try {
+      load();
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      return message.find("host reserve") != std::string::npos &&
+             message.find("--cache-ram-bytes off") != std::string::npos;
+    }
+    return false;
+  };
+  for (const bool enabled : {true, false}) {
+    // Through the pool, as serving builds it. A host with nothing above its
+    // reserve reports a ceiling of 0, also before the slots allocate; the
+    // cache's own metadata must still fit to report it, or to serve off.
+    const TemporaryDirectory pool_temp("gufo-component-host-zero-test");
+    const TextRunnerDiskCacheOptions pool_disk{
+        .directory = pool_temp.path().string(),
+        .capacity_bytes = 1 << 20,
+        .min_checkpoint_step_tokens = 1};
+    const TextRunnerRamCacheOptions ram{.capacity_bytes = 1ULL << 30,
+                                        .enabled = enabled};
+    if (enabled) {
+      assert(refused([&] {
+        TextRunnerPool pool(std::make_shared<ShortHostRunner>(), 1, pool_disk,
+                            ram);
+      }));
+      continue;
+    }
+    TextRunnerPool pool(std::make_shared<ShortHostRunner>(), 1, pool_disk, ram);
+    auto request = pool.Acquire(prompt);
+    Prefill(request);
+    assert(Generate(request) != 0);
+  }
+  // An explicit RAM budget, as in --cache-ram-bytes 1073741824.
+  assert(refused([&] {
+    ComponentTextCache cache(std::make_shared<ShortHostRunner>(), 1, 1 << 24,
+                             disk, false, 0, true);
+  }));
+  // The same host serves with --cache-ram-bytes off.
+  constexpr auto kOff = ComponentTextCache::kOffMetadataBytes;
+  std::uint64_t hash;
+  {
+    auto runner = std::make_shared<ShortHostRunner>();
+    ComponentTextCache cache(runner, 1, 0, disk, false, kOff, false);
+    assert(!runner->pins.empty());
+    // Only the disk-only backing of the off mode, no RAM cache budget.
+    assert(runner->committed != 0 && runner->committed <= 512ULL << 20);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    auto snapshot = lease->Capture();
+    assert(snapshot);
+    assert(lease->PublishSnapshot(prompt, std::move(snapshot), false) == 0);
+    assert(lease->Metrics().disk_queued_bytes > 0);
+    (void)lease->Commit(prompt, {}, prompt);
+  }
+  auto runner = std::make_shared<ShortHostRunner>();
+  ComponentTextCache cache(runner, 1, 0, disk, false, kOff, false);
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(lease->restored_from_disk() &&
+         lease->cached_tokens() == prompt.size());
+  auto& state = dynamic_cast<State&>(lease->state());
+  assert(runner->adapter->RecurrentHash(state.slot) == hash);
+}
+// An explicit budget the host cannot hold is trimmed, and the cache reports
+// what it actually got, which the pool logs as ram_cache_trimmed.
+void TrimmedRamBudgetIsReported() {
+  class TrimRunner final : public Runner {
+  public:
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      claim.retained_snapshot_capacity_bytes = 1 << 20;
+      claim.retained_snapshot_ceiling_bytes = 2 << 20;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->commit_backing = [](std::size_t) {};
+      return resources;
+    }
+  };
+  ComponentTextCache trimmed(std::make_shared<TrimRunner>(), 1, 3 << 20, {},
+                             false, 4 << 20, true);
+  assert(trimmed.ram_budget() == 2 << 20);
+  ComponentTextCache off(std::make_shared<TrimRunner>(), 1, 3 << 20, {}, false,
+                         4 << 20, false);
+  assert(off.ram_budget() == 0);
+}
 // With the RAM cache off, a capture within the disk step of a published
 // checkpoint has nowhere to go. The cache refuses it at reservation, so no
 // caller logs a failed capture. With the RAM cache on it goes to RAM.
@@ -2846,7 +3087,9 @@ int main() {
   SharedPeerReusesTheCurrentStableCapture();
   BackingPreparationFollowsCaptures();
   PrefillLookaheadReachesTheNextFrontier();
+  PrefillStepsSeeTheWholePromptEnd();
   PartialFrontierDoesNotServeAnEqualPrompt();
+  RefusedFrontierServesFromShallowerBoundary();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
@@ -2896,5 +3139,7 @@ int main() {
   OverRamCaptureStagesPrivateStateUnderPressure(true);
   RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers();
   RamCacheOffWithDiskCommitsOnlyStagingBacking();
+  HostBelowReserveRefusesUnlessRamCacheOff();
+  TrimmedRamBudgetIsReported();
   RamCacheOffRefusesCapturesWithinTheDiskStep();
 }

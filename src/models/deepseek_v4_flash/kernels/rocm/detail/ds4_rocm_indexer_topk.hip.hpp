@@ -429,15 +429,39 @@ __global__ static void indexer_topk_tree_merge_pow2_kernel(
   }
 }
 
+constexpr uint32_t indexer_topk_histogram_bins = 4096;
+constexpr uint32_t indexer_topk_histogram_keys = 4096;
+
+__global__ static void indexer_topk_histogram_kernel(uint32_t* histogram,
+                                                     const float* scores,
+                                                     uint32_t n) {
+  constexpr uint32_t bins = indexer_topk_histogram_bins;
+  __shared__ uint32_t local[bins];
+  const uint32_t tid = threadIdx.x, token = blockIdx.y;
+  for (uint32_t b = tid; b < bins; b += blockDim.x)
+    local[b] = 0;
+  __syncthreads();
+  scores += uint64_t(token) * n;
+  const uint32_t first = blockIdx.x * indexer_topk_histogram_keys;
+  const uint32_t end = min(n, first + indexer_topk_histogram_keys);
+  for (uint32_t i = first + tid; i < end; i += blockDim.x)
+    atomicAdd(&local[topk_float_ordered_key(scores[i]) >> 20], 1u);
+  __syncthreads();
+  histogram += uint64_t(token) * bins;
+  for (uint32_t b = tid; b < bins; b += blockDim.x)
+    if (local[b])
+      atomicAdd(&histogram[b], local[b]);
+}
+
 // Exact MSD radix selection: narrow the boundary bucket until at most 1024
 // candidates remain, then sort their complete score/index keys. Keeping the
 // input keys in registers avoids rescanning score memory. Prefix compression
 // skips identical digits, including large ties in the floating-point score.
-template<uint32_t MAX_N, uint32_t THREADS = 256>
-__global__ static void indexer_partial_topk_kernel(uint32_t* selected,
-                                                   const float* scores,
-                                                   uint32_t n,
-                                                   uint32_t tokens) {
+// SEEDED starts from the 12-bit boundary bin of indexer_topk_histogram_kernel.
+template<uint32_t MAX_N, uint32_t THREADS = 256, bool SEEDED = false>
+__global__ static void indexer_partial_topk_kernel(
+    uint32_t* selected, const float* scores, uint32_t n, uint32_t tokens,
+    const uint32_t* key_bins = nullptr) {
   constexpr uint32_t threads = THREADS, waves = threads / 32, cap = 1024;
   using Sort = hipcub::BlockRadixSort<uint64_t, threads, cap / threads>;
   __shared__ typename Sort::TempStorage sort_storage;
@@ -469,7 +493,37 @@ __global__ static void indexer_partial_topk_kernel(uint32_t* selected,
     output_count = 0;
   }
   __syncthreads();
-  for (int shift = 60; shift >= 0; shift -= 4) {
+  if constexpr (SEEDED) {
+    constexpr uint32_t bins = indexer_topk_histogram_bins;
+    constexpr uint32_t per_thread = bins / threads;
+    using Scan = hipcub::BlockScan<uint32_t, threads>;
+    __shared__ typename Scan::TempStorage scan_storage;
+    // Thread 0 holds the highest bins, so the exclusive sum counts the keys
+    // above each thread's bins.
+    const uint32_t bin0 = bins - (tid + 1) * per_thread;
+    const uint32_t* row_bins = key_bins + uint64_t(token) * bins + bin0;
+    uint32_t counts[per_thread], total = 0;
+#pragma unroll
+    for (uint32_t j = 0; j < per_thread; ++j) {
+      counts[j] = row_bins[j];
+      total += counts[j];
+    }
+    uint32_t above;
+    Scan(scan_storage).ExclusiveSum(total, above);
+#pragma unroll
+    for (uint32_t j = per_thread; j-- > 0;) {
+      if (above < 512 && above + counts[j] >= 512) {
+        prefix = uint64_t(bin0 + j) << 52;
+        prefix_mask = ~uint64_t(0) << 52;
+        remaining = 512 - above;
+        above_total = above;
+        done = above + counts[j] <= cap;
+      }
+      above += counts[j];
+    }
+    __syncthreads();
+  }
+  for (int shift = SEEDED && done ? -1 : 60; shift >= 0; shift -= 4) {
     // Jump over leading digits shared by every remaining candidate.
     uint64_t local_and = ~uint64_t(0), local_or = 0;
 #pragma unroll
@@ -510,7 +564,7 @@ __global__ static void indexer_partial_topk_kernel(uint32_t* selected,
     for (uint32_t item = 0; item < items; ++item) {
       const uint32_t base = item * threads;
       if (base >= n)
-        break;
+        continue;
       const uint32_t i = base + tid;
       const uint64_t key = input_keys[item];
       const uint32_t digit = uint32_t(key >> shift) & 15u;
@@ -559,7 +613,7 @@ __global__ static void indexer_partial_topk_kernel(uint32_t* selected,
   for (uint32_t item = 0; item < items; ++item) {
     const uint32_t base = item * threads;
     if (base >= n)
-      break;
+      continue;
     const uint32_t i = base + tid;
     const uint64_t key = input_keys[item];
     const bool keep = i < n && key >= prefix;
@@ -592,16 +646,57 @@ __global__ static void indexer_partial_topk_kernel(uint32_t* selected,
 static bool indexer_partial_topk_launch(uint32_t* selected, const float* scores,
                                         uint32_t n_comp, uint32_t n_tokens,
                                         uint32_t top_k) {
-  if (top_k != 512u || n_comp <= 1024u || n_comp > 32768u || n_tokens == 0u)
+  if (top_k != 512u || n_comp <= 1024u || n_comp > 65536u || n_tokens == 0u)
     return false;
-  if (n_comp <= 8192u)
+  if (n_comp <= 8192u && n_tokens <= 8u)
+    indexer_partial_topk_kernel<8192, 512>
+        <<<n_tokens, 512>>>(selected, scores, n_comp, n_tokens);
+  else if (n_comp <= 8192u)
     indexer_partial_topk_kernel<8192>
         <<<n_tokens, 256>>>(selected, scores, n_comp, n_tokens);
   else if (n_comp <= 16384u)
-    indexer_partial_topk_kernel<16384>
-        <<<n_tokens, 256>>>(selected, scores, n_comp, n_tokens);
-  else
+    indexer_partial_topk_kernel<16384, 512>
+        <<<n_tokens, 512>>>(selected, scores, n_comp, n_tokens);
+  else if (n_comp <= 32768u)
     indexer_partial_topk_kernel<32768, 512>
         <<<n_tokens, 512>>>(selected, scores, n_comp, n_tokens);
+  else
+    indexer_partial_topk_kernel<65536, 1024>
+        <<<n_tokens, 1024>>>(selected, scores, n_comp, n_tokens);
   return true;
+}
+
+static bool indexer_seeded_topk_fits(uint32_t n_comp, uint32_t n_tokens,
+                                     uint32_t top_k) {
+  return top_k == 512u && n_comp <= 65536u && n_tokens != 0u &&
+         (n_tokens <= 8u ? n_comp > 9216u : n_comp > 32768u);
+}
+
+// A histogram pass spread over many workgroups resolves the top 12 key bits
+// before the single selection workgroup starts, so the selection usually skips
+// its narrowing passes. Call only when indexer_seeded_topk_fits. `histogram`
+// holds n_tokens * indexer_topk_histogram_bins words.
+static hipError_t indexer_seeded_topk_launch(uint32_t* selected,
+                                             const float* scores,
+                                             uint32_t n_comp, uint32_t n_tokens,
+                                             uint32_t* histogram) {
+  const size_t bytes =
+      size_t(n_tokens) * indexer_topk_histogram_bins * sizeof(uint32_t);
+  const hipError_t err = hipMemsetAsync(histogram, 0, bytes, 0);
+  if (err != hipSuccess)
+    return err;
+  const uint32_t blocks =
+      (n_comp + indexer_topk_histogram_keys - 1u) / indexer_topk_histogram_keys;
+  indexer_topk_histogram_kernel<<<dim3(blocks, n_tokens), 256>>>(
+      histogram, scores, n_comp);
+  if (n_comp <= 16384u)
+    indexer_partial_topk_kernel<16384, 512, true><<<n_tokens, 512>>>(
+        selected, scores, n_comp, n_tokens, histogram);
+  else if (n_comp <= 32768u)
+    indexer_partial_topk_kernel<32768, 512, true><<<n_tokens, 512>>>(
+        selected, scores, n_comp, n_tokens, histogram);
+  else
+    indexer_partial_topk_kernel<65536, 1024, true><<<n_tokens, 1024>>>(
+        selected, scores, n_comp, n_tokens, histogram);
+  return hipGetLastError();
 }

@@ -26,6 +26,7 @@
 
 #include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/decision_service.hpp"
@@ -826,6 +827,10 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--trace", "PATH", kTraceHelp, "Logging", &trace_path);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    ProviderOptions provider(registry, "serve");
+    provider.Register(parser);
     parser.PrintHelp();
     return;
   }
@@ -1509,6 +1514,8 @@ int RunServe(std::span<const char* const> args) {
                          &trace_path);
 
     add_server_options(llm_parser);
+    ProviderOptions provider_options(registry, "serve");
+    provider_options.Register(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << "\n";
       PrintServeHelp("gufo", "llm");
@@ -1602,6 +1609,7 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     try {
+      provider_options.Parse();
       if (!draft_policy.empty() &&
           speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
         throw std::invalid_argument("--draft-policy requires DFlash2");
@@ -1670,8 +1678,19 @@ int RunServe(std::span<const char* const> args) {
             .staging_capacity_bytes = cache_disk_staging_bytes,
             .model_artifact_fingerprint = {},
         },
-        vision_model_path, cache_ram, enable_yarn, projection_vector_path,
-        projection_layers);
+        vision_model_path, cache_ram, enable_yarn,
+        [&provider_options](
+            const ext::TextProvider& provider, const core::GgufReader&,
+            ext::TextRunnerOptions* options, std::string* error) {
+          try {
+            options->provider_options = provider_options.Select(provider.id);
+            return true;
+          } catch (const std::invalid_argument& exception) {
+            *error = exception.what();
+            return false;
+          }
+        },
+        projection_vector_path, projection_layers);
     loading.stop();
     if (!load_ok) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";

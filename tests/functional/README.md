@@ -295,16 +295,19 @@ Selections from separate paths are combined:
 | --- | --- |
 | Shared LLM behavior, cache, sampling or Qwen framing/vision | Flash-Next Q4/MTP |
 | Private Qwen27 implementation | Qwen27 Q4/DFlash2 |
-| Private DeepSeek implementation | DeepSeek V4/DSpark (disabled, see below) |
-| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek (disabled, see below) |
+| Private DeepSeek implementation | DeepSeek V4/DSpark |
+| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek |
 | Embedding, ASR or TTS code | That category's representative |
 | Shared infrastructure or unmapped paths | One representative per supported category |
 | Documentation, image generation or H3-only paths | No GPU job in this workflow |
 
-Models listed under `disabled` in `devlab.json`, with a reason, are left out of
-the plan and named in the report. DeepSeek V4 is disabled for now: its 81 GiB
-of weights and its suite set make the run too long to finish within a PR.
-Remove its entry to restore it.
+Models listed under `disabled` in `devlab.core.json`, with a reason, are left
+out of the plan and named in the report. Remove the entry to restore the model.
+
+A model's `suites` list in its `functional/devlab.json` limits Devlab to those
+suites at every tier; the report counts the others as out of scope. DeepSeek V4
+uses it to run the PR-tier set that passes on the runner. Its other full-tier
+suites still assume Flash-Next checkpoint sizes and Qwen token counts.
 
 The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
 uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
@@ -516,6 +519,7 @@ The disk lifecycle runner is standalone and is never invoked by `all`.
 | `tool-choice-cache` | Required/auto/omitted transitions preserve the complete generated call, unchanged-choice controls, prompt-token equality and zero-prefill retries |
 | `tool-parameter-order` | Wide native schemas retain intended arguments across declaration orders, all three APIs, streaming, sampling and thinking; includes the 10/11/12-field controls from #641 |
 | `tool-native-types` | Focused subset: enum/const/inferred string types, literal delimiters and exact continuation reuse after new literal tool markers; Chat/Responses, text/images |
+| `tool-type-unions` | Grist SQL argument unions preserve mixed JSON types in strict and non-strict native calls, Chat/Responses and streaming; malformed strict unions remain HTTP 400 |
 | `tool-schema-edges` | Wildcard JSON types, conditional fields, impossible schemas, nested metadata and required-call timing; both APIs, cache, stops and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |

@@ -1,4 +1,6 @@
 #include <chrono>
+#include <map>
+#include <tuple>
 
 #include <gufo/ext/platform/mapped_file.hpp>
 #include <gufo/ext/platform/os_info.hpp>
@@ -67,18 +69,10 @@ struct hip_model_range {
     char *device_ptr;
 };
 
-struct hip_q8_f16_range {
-    const void *host_base;
-    uint64_t offset;
-    uint64_t weight_bytes;
-    uint64_t in_dim;
-    uint64_t out_dim;
-    __half *device_ptr;
-};
+/* Keyed by (model mapping, tensor offset, transposed layout). */
+using hip_q8_f16_key = std::tuple<const void *, uint64_t, bool>;
 
-struct hip_q8_f16_transpose_range {
-    const void *host_base;
-    uint64_t offset;
+struct hip_q8_f16_copy {
     uint64_t weight_bytes;
     uint64_t in_dim;
     uint64_t out_dim;
@@ -88,6 +82,40 @@ struct hip_q8_f16_transpose_range {
 static std::vector<hip_model_range> g_model_ranges;
 static std::vector<void*> g_model_allocations;
 static std::unordered_map<uint64_t, size_t> g_model_range_by_offset;
+
+/* On gfx1151 a power-of-two row stride halves F16 GEMV bandwidth. 8 KiB rows
+ * stream at about 103 GB/s, and at about 204 GB/s with 512 B of padding. */
+#define DS4_ROCM_F16_ROW_PAD_HALVES 256u
+
+struct hip_f16_matrix {
+    const __half *w;
+    uint32_t row_stride;
+};
+
+struct hip_f16_padded_range {
+    uint64_t packed_offset;
+    uint64_t packed_bytes;
+    uint64_t in_dim;
+    uint64_t out_dim;
+    __half *device_ptr;
+};
+static std::vector<hip_f16_padded_range> g_f16_padded_ranges;
+static std::unordered_map<uint64_t, size_t> g_f16_padded_by_offset;
+
+/* Packed F16 tensors are uploaded into one staging buffer and padded together
+ * when it fills, so the uploader stays pipelined across tensors. */
+#define DS4_ROCM_F16_ROW_STAGING_BYTES (64ull * 1048576ull)
+
+struct hip_f16_staged_rows {
+    __half *device_ptr;
+    uint64_t staging_offset;
+    uint64_t in_dim;
+    uint64_t out_dim;
+};
+static char *g_f16_row_staging;
+static uint64_t g_f16_row_staging_bytes;
+static uint64_t g_f16_row_staging_used;
+static std::vector<hip_f16_staged_rows> g_f16_staged_rows;
 
 /*
  * Optional DSpark support-model mapping.
@@ -129,14 +157,10 @@ static uint64_t g_support_arena_bytes;
 static uint64_t g_support_arena_used;
 static bool g_support_managed;
 static std::vector<hip_model_range> g_support_ranges;
-static std::vector<hip_q8_f16_range> g_q8_f16_ranges;
-static std::unordered_map<uint64_t, size_t> g_q8_f16_by_offset;
-static std::vector<hip_q8_f16_transpose_range> g_q8_f16_transpose_ranges;
-static std::unordered_map<uint64_t, size_t> g_q8_f16_transpose_by_offset;
+static std::map<hip_q8_f16_key, hip_q8_f16_copy> g_q8_f16_copies;
+/* Registered copies not built yet; the next lookup builds them. */
+static bool g_q8_f16_pending;
 static uint64_t g_model_range_bytes;
-static uint64_t g_q8_f16_bytes;
-static int g_q8_f16_disabled_after_oom;
-static int g_q8_f16_budget_notice_printed;
 static uint64_t g_model_load_progress_next;
 static double g_model_load_progress_last;
 static int g_model_load_progress_started;
@@ -320,6 +344,61 @@ static const char *hip_model_range_ptr(const void *model_map, uint64_t offset, u
     return hip_model_range_ptr_from_fd(model_map, offset, bytes, what);
 }
 
+static const hip_f16_padded_range *hip_f16_padded_overlap(
+        const void *model_map, uint64_t offset, uint64_t bytes) {
+    if (model_map != g_model_host_base) return NULL;
+    for (const hip_f16_padded_range &r : g_f16_padded_ranges) {
+        if (offset < r.packed_offset + r.packed_bytes &&
+            r.packed_offset < offset + bytes) {
+            return &r;
+        }
+    }
+    return NULL;
+}
+
+static int hip_f16_matrix_get(
+        const void *model_map,
+        uint64_t offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const char *what,
+        hip_f16_matrix *m) {
+    if (model_map == g_model_host_base) {
+        auto padded = g_f16_padded_by_offset.find(offset);
+        if (padded != g_f16_padded_by_offset.end()) {
+            const hip_f16_padded_range &r = g_f16_padded_ranges[padded->second];
+            if (r.in_dim != in_dim || r.out_dim != out_dim) {
+                fprintf(stderr,
+                        DS4_GPU_LOG_PREFIX "%s reads the padded F16 weight at "
+                        "offset %llu as %llux%llu, but it holds %llux%llu\n",
+                        what, (unsigned long long)offset,
+                        (unsigned long long)in_dim, (unsigned long long)out_dim,
+                        (unsigned long long)r.in_dim,
+                        (unsigned long long)r.out_dim);
+                return 0;
+            }
+            *m = {r.device_ptr, (uint32_t)(in_dim + DS4_ROCM_F16_ROW_PAD_HALVES)};
+            return 1;
+        }
+    }
+    uint64_t bytes = 0;
+    if (!hip_u64_mul3_checked(out_dim, in_dim, sizeof(__half), &bytes)) return 0;
+    const char *w = hip_model_range_ptr(model_map, offset, bytes, what);
+    if (!w) return 0;
+    *m = {(const __half *)w, (uint32_t)in_dim};
+    return 1;
+}
+
+static int hip_f16_matrix_pair_stride(const hip_f16_matrix &a,
+                                      const hip_f16_matrix &b,
+                                      const char *what) {
+    if (a.row_stride == b.row_stride) return 1;
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX "%s pairs F16 weights with row strides %u and %u\n",
+            what, a.row_stride, b.row_stride);
+    return 0;
+}
+
 static int hip_model_range_is_cached(const void *model_map, uint64_t offset, uint64_t bytes) {
     if (bytes == 0) return 1;
 
@@ -335,164 +414,105 @@ static int hip_model_range_is_cached(const void *model_map, uint64_t offset, uin
     return 0;
 }
 
+/*
+ * F16 copies of the Q8 weights that the hipBLAS prefill routes read.
+ *
+ * The engine registers the whole set when it loads a model. The first lookup
+ * builds every registered copy in one pass, which lets sessions created after
+ * load claim device memory first. Lookups never allocate, so memory cannot run
+ * out partway through a prompt and push later layers onto the Q8 kernels,
+ * whose arithmetic differs.
+ *
+ * gufo::hip::AllocateDevice places each copy. It uses device memory while the
+ * copy fits above the dispatch reserve, then coarse-grain managed memory,
+ * which is the same DRAM on Strix Halo. If managed allocation also fails, the
+ * pass keeps no copies and the Q8 kernels serve every layer for the rest of
+ * the process.
+ */
 static void hip_q8_f16_cache_release_all(void) {
-    for (const hip_q8_f16_transpose_range &r : g_q8_f16_transpose_ranges) {
-        (void)hipFree(r.device_ptr);
+    for (const auto &[key, copy] : g_q8_f16_copies) {
+        (void)hipFree(copy.device_ptr);
     }
-    for (const hip_q8_f16_range &r : g_q8_f16_ranges) {
-        (void)hipFree(r.device_ptr);
-    }
-    g_q8_f16_transpose_ranges.clear();
-    g_q8_f16_transpose_by_offset.clear();
-    g_q8_f16_ranges.clear();
-    g_q8_f16_by_offset.clear();
-    g_q8_f16_bytes = 0;
+    g_q8_f16_copies.clear();
+    g_q8_f16_pending = false;
 }
 
-static uint64_t hip_q8_f16_cache_limit_bytes(void) {
-    return UINT64_MAX;
-}
-
-static uint64_t hip_q8_f16_cache_reserve_bytes(uint64_t total_bytes) {
-    if (total_bytes >= 112ull * 1024ull * 1024ull * 1024ull) {
-        return 512ull * 1048576ull;
+static void hip_q8_f16_cache_build(void) {
+    g_q8_f16_pending = false;
+    std::vector<hip_q8_f16_key> pass;
+    for (const auto &[key, copy] : g_q8_f16_copies) {
+        if (!copy.device_ptr) pass.push_back(key);
     }
-
-    /* The expanded Q8->F16 cache is only an acceleration path.  Keep enough
-     * device memory free for cuBLAS workspaces, transient graph buffers, and
-     * driver bookkeeping instead of letting optional cached weights consume the
-     * last few GiB on 96 GiB cards. */
-    const uint64_t min_reserve = 4096ull * 1048576ull;
-    const uint64_t pct_reserve = total_bytes / 20u; /* 5% */
-    return pct_reserve > min_reserve ? pct_reserve : min_reserve;
-}
-
-static void hip_q8_f16_cache_budget_notice(
-        const char *reason,
-        uint64_t request_bytes,
-        uint64_t free_bytes,
-        uint64_t total_bytes,
-        uint64_t reserve_bytes,
-        uint64_t limit_bytes) {
-    if (g_q8_f16_budget_notice_printed) return;
-    g_q8_f16_budget_notice_printed = 1;
-    if (limit_bytes != UINT64_MAX && free_bytes == 0 && total_bytes == 0 && reserve_bytes == 0) {
+    const auto start = std::chrono::steady_clock::now();
+    uint64_t bytes = 0, managed_bytes = 0;
+    const char *failure = NULL;
+    uint64_t failed_bytes = 0;
+    for (const hip_q8_f16_key &key : pass) {
+        const auto &[host_base, offset, transposed] = key;
+        hip_q8_f16_copy &copy = g_q8_f16_copies[key];
+        const char *q8 = hip_model_range_ptr(host_base, offset, copy.weight_bytes, "q8_0");
+        if (!q8) {
+            failure = "weights not resident";
+            break;
+        }
+        const uint64_t out_bytes = copy.in_dim * copy.out_dim * sizeof(__half);
+        if (gufo::hip::AllocateDevice(&copy.device_ptr, (size_t)out_bytes) != hipSuccess) {
+            (void)hipGetLastError();
+            copy.device_ptr = NULL;
+            failure = "allocation failure";
+            failed_bytes = out_bytes;
+            break;
+        }
+        hipPointerAttribute_t attributes;
+        if (hipPointerGetAttributes(&attributes, copy.device_ptr) == hipSuccess &&
+            attributes.isManaged) {
+            managed_bytes += out_bytes;
+        }
+        const uint64_t blocks = (copy.in_dim + 31u) / 32u;
+        if (transposed) {
+            const dim3 grid(
+                    (unsigned)((copy.out_dim + DS4_Q8_T_TILE_ROW - 1u) / DS4_Q8_T_TILE_ROW),
+                    (unsigned)blocks,
+                    1u);
+            dequant_q8_0_to_f16_transpose_tiled_kernel<<<grid, 256>>>(
+                    copy.device_ptr, (const unsigned char *)q8,
+                    copy.in_dim, copy.out_dim, blocks);
+        } else {
+            const uint64_t n = copy.in_dim * copy.out_dim;
+            dequant_q8_0_to_f16_kernel<<<(n + 255) / 256, 256>>>(
+                    copy.device_ptr, (const unsigned char *)q8,
+                    copy.in_dim, copy.out_dim, blocks);
+        }
+        if (!hip_ok(hipGetLastError(), "q8 fp16 dequant launch")) {
+            failure = "dequant launch failure";
+            break;
+        }
+        bytes += out_bytes;
+    }
+    if (!failure && !hip_ok(hipDeviceSynchronize(), "q8 fp16 dequant")) {
+        failure = "dequant failure";
+    }
+    if (failure) {
+        for (const hip_q8_f16_key &key : pass) {
+            (void)hipFree(g_q8_f16_copies[key].device_ptr);
+            g_q8_f16_copies.erase(key);
+        }
         gufo::server::Logger::LogFormatted(
                 gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB)",
-                reason,
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0,
-                (double)limit_bytes / 1073741824.0);
-    } else if (limit_bytes == UINT64_MAX) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
-                reason,
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0,
-                (double)free_bytes / 1073741824.0,
-                (double)reserve_bytes / 1073741824.0,
-                (double)total_bytes / 1073741824.0);
-    } else {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache %s; using q8 kernels "
-                "(request=%.2f MiB cached=%.2f GiB limit=%.2f GiB free=%.2f GiB reserve=%.2f GiB total=%.2f GiB)",
-                reason,
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0,
-                (double)limit_bytes / 1073741824.0,
-                (double)free_bytes / 1073741824.0,
-                (double)reserve_bytes / 1073741824.0,
-                (double)total_bytes / 1073741824.0);
+                "q8 fp16 weight cache unavailable after %s (request=%.2f MiB "
+                "built=%.2f GiB); using q8 kernels for every layer",
+                failure, (double)failed_bytes / 1048576.0,
+                (double)bytes / 1073741824.0);
+        return;
     }
-}
-
-static int hip_q8_f16_cache_has_budget(uint64_t request_bytes, const char *label) {
-    (void)label;
-    const uint64_t limit = hip_q8_f16_cache_limit_bytes();
-    if (limit == 0) return 0;
-    if (g_q8_f16_bytes > limit || request_bytes > limit - g_q8_f16_bytes) {
-        hip_q8_f16_cache_budget_notice("limit reached", request_bytes, 0, 0, 0, limit);
-        return 0;
-    }
-
-    size_t free_b = 0;
-    size_t total_b = 0;
-    hipError_t err = hipMemGetInfo(&free_b, &total_b);
-    if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache memory query failed: %s; using q8 kernels",
-                hipGetErrorString(err));
-        (void)hipGetLastError();
-        return 0;
-    }
-
-    const uint64_t free_bytes = (uint64_t)free_b;
-    const uint64_t total_bytes = (uint64_t)total_b;
-    const uint64_t reserve_bytes = hip_q8_f16_cache_reserve_bytes(total_bytes);
-    if (request_bytes > free_bytes ||
-        free_bytes - request_bytes < reserve_bytes) {
-        hip_q8_f16_cache_budget_notice("budget exhausted", request_bytes,
-                                        free_bytes, total_bytes,
-                                        reserve_bytes, limit);
-        return 0;
-    }
-    return 1;
-}
-
-static void hip_q8_f16_cache_disable_after_failure(const char *what, uint64_t request_bytes) {
-    if (!g_q8_f16_disabled_after_oom) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache disabled after %s "
-                "(request=%.2f MiB cached=%.2f GiB); using q8 kernels",
-                what ? what : "allocation failure",
-                (double)request_bytes / 1048576.0,
-                (double)g_q8_f16_bytes / 1073741824.0);
-    }
-    g_q8_f16_disabled_after_oom = 1;
-    if (!g_q8_f16_ranges.empty()) {
-        (void)hipDeviceSynchronize();
-        hip_q8_f16_cache_release_all();
-    }
-    (void)hipGetLastError();
-}
-
-static int hip_q8_f16_cache_allowed(const char *label, uint64_t in_dim, uint64_t out_dim) {
-    if (g_q8_f16_disabled_after_oom) return 0;
-    if (!label) return 0;
-    if (strstr(label, "attn_output_a") != NULL ||
-        strstr(label, "attn_output_b") != NULL ||
-        strstr(label, "attention_output_a") != NULL ||
-        strstr(label, "attention_output_b") != NULL) {
-        return 1;
-    }
-    if (strstr(label, "attn_q_b") != NULL) {
-        return 1;
-    }
-    if (strstr(label, "ffn_gate_shexp") != NULL ||
-        strstr(label, "ffn_up_shexp") != NULL ||
-        strstr(label, "ffn_down_shexp") != NULL) {
-        return 1;
-    }
-    return (in_dim == 4096u && out_dim == 2048u) ||
-           (in_dim == 2048u && out_dim == 4096u) ||
-           (in_dim == 4096u && out_dim == 1024u) ||
-           (in_dim == 4096u && out_dim == 512u) ||
-           (in_dim == 1024u && out_dim == 32768u);
-}
-
-static int hip_q8_label_is_attention_output(const char *label) {
-    return label &&
-           (strstr(label, "attn_output_a") != NULL ||
-            strstr(label, "attn_output_b") != NULL ||
-            strstr(label, "attention_output_a") != NULL ||
-            strstr(label, "attention_output_b") != NULL);
+    gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "q8 fp16 weight cache built %zu copies, %.2f GiB "
+            "(%.2f GiB device, %.2f GiB managed) in %.3fs",
+            pass.size(), (double)bytes / 1073741824.0,
+            (double)(bytes - managed_bytes) / 1073741824.0,
+            (double)managed_bytes / 1073741824.0,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 }
 
 static const __half *hip_q8_f16_ptr(
@@ -501,119 +521,59 @@ static const __half *hip_q8_f16_ptr(
         uint64_t weight_bytes,
         uint64_t in_dim,
         uint64_t out_dim,
-        const char *label) {
-    auto exact = g_q8_f16_by_offset.find(offset);
-    if (exact != g_q8_f16_by_offset.end()) {
-        const hip_q8_f16_range &r = g_q8_f16_ranges[exact->second];
-        if (r.host_base == model_map && r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
+        bool transposed) {
+    if (g_q8_f16_pending) hip_q8_f16_cache_build();
+    const auto it = g_q8_f16_copies.find({model_map, offset, transposed});
+    if (it == g_q8_f16_copies.end()) return NULL;
+    const hip_q8_f16_copy &copy = it->second;
+    if (copy.weight_bytes != weight_bytes || copy.in_dim != in_dim || copy.out_dim != out_dim) {
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            gufo::server::Logger::LogFormatted(
+                    gufo::server::LogLevel::kWarn, "ds4",
+                    "q8 fp16 weight copy at offset %llu (%s) was registered as "
+                    "%llu x %llu (%llu bytes) but looked up as %llu x %llu "
+                    "(%llu bytes); using q8 kernels for it",
+                    (unsigned long long)offset, transposed ? "transposed" : "row-major",
+                    (unsigned long long)copy.in_dim, (unsigned long long)copy.out_dim,
+                    (unsigned long long)copy.weight_bytes,
+                    (unsigned long long)in_dim, (unsigned long long)out_dim,
+                    (unsigned long long)weight_bytes);
         }
-    }
-    for (const hip_q8_f16_range &r : g_q8_f16_ranges) {
-        if (r.host_base == model_map && r.offset == offset &&
-            r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
-        }
-    }
-    if (!hip_q8_f16_cache_allowed(label, in_dim, out_dim)) return NULL;
-
-    const char *q8 = hip_model_range_ptr(model_map, offset, weight_bytes, "q8_0");
-    if (!q8) return NULL;
-
-    uint64_t out_bytes = 0;
-    if (in_dim == 0u || out_dim == 0u ||
-        !hip_u64_mul3_checked(in_dim, out_dim, sizeof(__half), &out_bytes)) return NULL;
-    if (!hip_q8_f16_cache_has_budget(out_bytes, label)) return NULL;
-
-    __half *dev = NULL;
-    hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
-    if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 cache alloc failed (%.2f MiB): %s",
-                (double)out_bytes / 1048576.0, hipGetErrorString(err));
-        hip_q8_f16_cache_disable_after_failure("allocation failure", out_bytes);
         return NULL;
     }
-    const uint64_t blocks = (in_dim + 31) / 32;
-    const uint64_t n = in_dim * out_dim;
-    dequant_q8_0_to_f16_kernel<<<(n + 255) / 256, 256>>>(dev,
-                                                          (const unsigned char *)q8,
-                                                          in_dim,
-                                                          out_dim,
-                                                          blocks);
-    if (!hip_ok(hipGetLastError(), "q8 fp16 dequant launch")) {
-        (void)hipFree(dev);
-        hip_q8_f16_cache_disable_after_failure("dequant launch failure", out_bytes);
-        return NULL;
-    }
-    g_q8_f16_ranges.push_back({model_map, offset, weight_bytes, in_dim, out_dim, dev});
-    g_q8_f16_by_offset[offset] = g_q8_f16_ranges.size() - 1u;
-    g_q8_f16_bytes += out_bytes;
-    return dev;
+    return copy.device_ptr;
 }
 
-static const __half *hip_q8_f16_transpose_ptr(
+extern "C" int ds4_gpu_register_q8_f16_weights(
         const void *model_map,
-        uint64_t offset,
-        uint64_t weight_bytes,
-        uint64_t in_dim,
-        uint64_t out_dim,
-        const char *label) {
-    auto exact = g_q8_f16_transpose_by_offset.find(offset);
-    if (exact != g_q8_f16_transpose_by_offset.end()) {
-        const hip_q8_f16_transpose_range &r = g_q8_f16_transpose_ranges[exact->second];
-        if (r.host_base == model_map && r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
+        uint64_t model_size,
+        const ds4_gpu_q8_f16_weight *weights,
+        uint32_t count) {
+    if (!model_map || (count != 0u && !weights)) return 0;
+    std::vector<uint64_t> weight_bytes(count);
+    for (uint32_t i = 0; i < count; i++) {
+        const ds4_gpu_q8_f16_weight &w = weights[i];
+        uint64_t row_bytes = 0, f16_bytes = 0;
+        if (w.in_dim == 0u || w.out_dim == 0u ||
+            !hip_u64_mul_checked((w.in_dim + 31u) / 32u, 34u, &row_bytes) ||
+            !hip_u64_mul_checked(w.out_dim, row_bytes, &weight_bytes[i]) ||
+            !hip_u64_mul3_checked(w.in_dim, w.out_dim, sizeof(__half), &f16_bytes) ||
+            !hip_model_range_fits(model_size, w.offset, weight_bytes[i])) {
+            return 0;
         }
     }
-    for (const hip_q8_f16_transpose_range &r : g_q8_f16_transpose_ranges) {
-        if (r.host_base == model_map && r.offset == offset &&
-            r.weight_bytes == weight_bytes &&
-            r.in_dim == in_dim && r.out_dim == out_dim) {
-            return r.device_ptr;
+    for (uint32_t i = 0; i < count; i++) {
+        const ds4_gpu_q8_f16_weight &w = weights[i];
+        if (g_q8_f16_copies
+                .try_emplace({model_map, w.offset, w.transposed != 0u},
+                             hip_q8_f16_copy{weight_bytes[i], w.in_dim, w.out_dim, NULL})
+                .second) {
+            g_q8_f16_pending = true;
         }
     }
-    if (!hip_q8_f16_cache_allowed(label, in_dim, out_dim)) return NULL;
-    const char *q8 = hip_model_range_ptr(model_map, offset, weight_bytes, "q8_0");
-    if (!q8) return NULL;
-    uint64_t out_bytes = 0;
-    if (in_dim == 0u || out_dim == 0u ||
-        !hip_u64_mul3_checked(in_dim, out_dim, sizeof(__half), &out_bytes)) return NULL;
-    if (!hip_q8_f16_cache_has_budget(out_bytes, label)) return NULL;
-    __half *dev = NULL;
-    hipError_t err = hipMalloc(&dev, (size_t)out_bytes);
-    if (err != hipSuccess) {
-        gufo::server::Logger::LogFormatted(
-                gufo::server::LogLevel::kWarn, "ds4",
-                "q8 fp16 transpose cache alloc failed (%.2f MiB): %s",
-                (double)out_bytes / 1048576.0, hipGetErrorString(err));
-        hip_q8_f16_cache_disable_after_failure("transpose allocation failure", out_bytes);
-        return NULL;
-    }
-    const uint64_t blocks = (in_dim + 31u) / 32u;
-    const dim3 grid(
-            (unsigned)((out_dim + DS4_Q8_T_TILE_ROW - 1u) / DS4_Q8_T_TILE_ROW),
-            (unsigned)blocks,
-            1u);
-    dequant_q8_0_to_f16_transpose_tiled_kernel<<<grid, 256>>>(
-            dev,
-            (const unsigned char *)q8,
-            in_dim,
-            out_dim,
-            blocks);
-    if (!hip_ok(hipGetLastError(), "q8 fp16 transpose dequant launch")) {
-        (void)hipFree(dev);
-        hip_q8_f16_cache_disable_after_failure("transpose launch failure", out_bytes);
-        return NULL;
-    }
-    g_q8_f16_transpose_ranges.push_back({model_map, offset, weight_bytes, in_dim, out_dim, dev});
-    g_q8_f16_transpose_by_offset[offset] = g_q8_f16_transpose_ranges.size() - 1u;
-    g_q8_f16_bytes += out_bytes;
-    return dev;
+    return 1;
 }
 
 static int hip_ok(hipError_t err, const char *what) {
@@ -682,6 +642,11 @@ static uint64_t hip_round_up(uint64_t v, uint64_t align) {
 
 static void hip_model_staging_release(void) {
     g_model_uploader.reset();
+    if (g_f16_row_staging) (void)hipFree(g_f16_row_staging);
+    g_f16_row_staging = NULL;
+    g_f16_row_staging_bytes = 0;
+    g_f16_row_staging_used = 0;
+    g_f16_staged_rows.clear();
 }
 
 /* On a unified-memory machine the driver's device heap is a fraction of system
@@ -742,6 +707,19 @@ static char* hip_model_range_alloc(uint64_t bytes, const char* what) {
   return (char*)dev;
 }
 
+static gufo::hip::WeightUpload *hip_model_uploader(const void *model_map,
+                                                   std::string *error) {
+    if (!g_model_uploader) {
+        const gufo::core::GgufMappedRegion region{
+            .data = model_map,
+            .size = static_cast<size_t>(g_model_registered_size),
+            .file_descriptor = g_model_fd,
+        };
+        g_model_uploader = gufo::hip::WeightUpload::Create({&region, 1}, error);
+    }
+    return g_model_uploader.get();
+}
+
 static const char *hip_model_range_ptr_from_fd(
         const void *model_map,
         uint64_t offset,
@@ -749,20 +727,21 @@ static const char *hip_model_range_ptr_from_fd(
         const char *what, bool wait) {
     if (!gufo::platform::FileValid(g_model_fd) || bytes == 0) return NULL;
     if (g_model_fd_host_base != NULL && model_map != g_model_fd_host_base) return NULL;
+    if (const hip_f16_padded_range *padded =
+            hip_f16_padded_overlap(model_map, offset, bytes)) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "%s reads %llu bytes at offset %llu as packed "
+                "bytes, but the F16 weight at offset %llu has padded rows\n",
+                what ? what : "weights", (unsigned long long)bytes,
+                (unsigned long long)offset, (unsigned long long)padded->packed_offset);
+        return NULL;
+    }
     char* dev = hip_model_range_alloc(bytes, what);
     if (!dev) {
         return NULL;
     }
     std::string error;
-    if (!g_model_uploader) {
-        const gufo::core::GgufMappedRegion region{
-            .data = model_map,
-            .size = static_cast<size_t>(g_model_registered_size),
-            .file_descriptor = g_model_fd,
-        };
-        g_model_uploader = gufo::hip::WeightUpload::Create({&region, 1}, &error);
-    }
-    if (!g_model_uploader ||
+    if (!hip_model_uploader(model_map, &error) ||
         !g_model_uploader->Copy(0, offset, bytes, dev, &error) ||
         (wait && !g_model_uploader->Finish(&error))) {
         fprintf(stderr, DS4_GPU_LOG_PREFIX "model upload failed for %s: %s\n",
@@ -784,6 +763,8 @@ static void hip_model_range_release_all(void) {
   g_model_allocations.clear();
   g_model_ranges.clear();
   g_model_range_by_offset.clear();
+  g_f16_padded_ranges.clear();
+  g_f16_padded_by_offset.clear();
   g_model_range_bytes = 0;
   g_model_weight_alloc.reset();
   hip_model_load_progress_reset();
@@ -855,8 +836,6 @@ extern "C" void ds4_gpu_cleanup(void) {
 #endif
     hip_model_range_release_all();
     hip_q8_f16_cache_release_all();
-    g_q8_f16_disabled_after_oom = 0;
-    g_q8_f16_budget_notice_printed = 0;
     if (g_hip_tmp) {
         (void)hipFree(g_hip_tmp);
         g_hip_tmp = NULL;
@@ -1016,8 +995,6 @@ static int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size) {
     if (g_model_host_base == model_map && g_model_registered_size == model_size) return 1;
     hip_model_range_release_all();
     hip_q8_f16_cache_release_all();
-    g_q8_f16_disabled_after_oom = 0;
-    g_q8_f16_budget_notice_printed = 0;
     g_model_host_base = model_map;
     g_model_registered_size = model_size;
     g_model_cache_full = 0;
@@ -1056,11 +1033,31 @@ extern "C" int ds4_gpu_set_model_fd(gufo::platform::PlatformFile fd) {
     return 1;
 }
 
-extern "C" int ds4_gpu_release_model_staging(void) {
+/* Waits for the queued uploads, then copies every staged tensor into its
+ * padded rows. */
+static int hip_f16_staged_rows_flush(void) {
     std::string error;
-    const bool ok = !g_model_uploader || g_model_uploader->Finish(&error);
+    bool ok = !g_model_uploader || g_model_uploader->Finish(&error);
     if (!ok)
         fprintf(stderr, DS4_GPU_LOG_PREFIX "model upload failed: %s\n", error.c_str());
+    if (g_f16_staged_rows.empty()) return ok;
+    for (const hip_f16_staged_rows &s : g_f16_staged_rows) {
+        const uint64_t row_bytes = s.in_dim * sizeof(__half);
+        const uint64_t stride = s.in_dim + DS4_ROCM_F16_ROW_PAD_HALVES;
+        ok = ok && hip_ok(hipMemcpy2DAsync(s.device_ptr, (size_t)(stride * sizeof(__half)),
+                                           g_f16_row_staging + s.staging_offset,
+                                           (size_t)row_bytes, (size_t)row_bytes,
+                                           (size_t)s.out_dim, hipMemcpyDeviceToDevice, 0),
+                          "f16 row padding copy");
+    }
+    ok = hip_ok(hipStreamSynchronize(0), "f16 row padding sync") && ok;
+    g_f16_staged_rows.clear();
+    g_f16_row_staging_used = 0;
+    return ok;
+}
+
+extern "C" int ds4_gpu_release_model_staging(void) {
+    const int ok = hip_f16_staged_rows_flush();
     hip_model_staging_release();
     return ok;
 }
@@ -1072,6 +1069,68 @@ extern "C" int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_s
     if (!hip_model_range_ptr_from_fd(model_map, offset, bytes,
                                      label ? label : "model_tensor", false)) return 0;
     return hip_model_range_is_cached(model_map, offset, bytes);
+}
+
+extern "C" int ds4_gpu_cache_model_f16_rows(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t in_dim, uint64_t out_dim, const char *label) {
+    const char *what = label ? label : "f16_rows";
+    const uint64_t stride = in_dim + DS4_ROCM_F16_ROW_PAD_HALVES;
+    uint64_t bytes = 0, padded_bytes = 0;
+    if (!model_map || model_map != g_model_host_base ||
+        (g_model_fd_host_base != NULL && model_map != g_model_fd_host_base) ||
+        in_dim == 0 || out_dim == 0 || stride > UINT32_MAX ||
+        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(__half), &bytes) ||
+        !hip_u64_mul3_checked(out_dim, stride, sizeof(__half), &padded_bytes) ||
+        offset > model_size || bytes > model_size - offset) {
+        return 0;
+    }
+    auto exact = g_f16_padded_by_offset.find(offset);
+    if (exact != g_f16_padded_by_offset.end()) {
+        const hip_f16_padded_range &r = g_f16_padded_ranges[exact->second];
+        return r.in_dim == in_dim && r.out_dim == out_dim;
+    }
+    if (hip_f16_padded_overlap(model_map, offset, bytes)) return 0;
+    for (const hip_model_range &r : g_model_ranges) {
+        if (r.host_base == model_map && offset < r.offset + r.bytes &&
+            r.offset < offset + bytes) {
+            fprintf(stderr,
+                    DS4_GPU_LOG_PREFIX "%s is already resident with packed rows\n",
+                    what);
+            return 0;
+        }
+    }
+    char *dev = hip_model_range_alloc(padded_bytes, what);
+    if (!dev) return 0;
+    if (g_f16_row_staging_used + bytes > g_f16_row_staging_bytes &&
+        !hip_f16_staged_rows_flush()) {
+        return 0;
+    }
+    if (bytes > g_f16_row_staging_bytes) {
+        const uint64_t staging_bytes = std::max<uint64_t>(bytes, DS4_ROCM_F16_ROW_STAGING_BYTES);
+        if (g_f16_row_staging) (void)hipFree(g_f16_row_staging);
+        g_f16_row_staging = NULL;
+        g_f16_row_staging_bytes = 0;
+        if (!hip_ok(hipMalloc((void **)&g_f16_row_staging, (size_t)staging_bytes),
+                    "f16 row staging alloc")) {
+            return 0;
+        }
+        g_f16_row_staging_bytes = staging_bytes;
+    }
+    std::string error;
+    if (!gufo::platform::FileValid(g_model_fd) ||
+        !hip_model_uploader(model_map, &error) ||
+        !g_model_uploader->Copy(0, offset, bytes,
+                                g_f16_row_staging + g_f16_row_staging_used, &error)) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "model upload failed for %s: %s\n",
+                what, error.c_str());
+        return 0;
+    }
+    g_f16_staged_rows.push_back({(__half *)dev, g_f16_row_staging_used, in_dim, out_dim});
+    g_f16_row_staging_used += hip_round_up(bytes, 256);
+    g_f16_padded_ranges.push_back({offset, bytes, in_dim, out_dim, (__half *)dev});
+    g_f16_padded_by_offset[offset] = g_f16_padded_ranges.size() - 1u;
+    g_model_range_bytes += bytes;
+    hip_model_load_progress_note(g_model_range_bytes);
+    return 1;
 }
 
 /*
@@ -1151,6 +1210,14 @@ extern "C" void ds4_gpu_set_small_batch_mode(int mode) {
 }
 
 extern "C" void ds4_gpu_release_support_map(void) {
+    for (auto it = g_q8_f16_copies.begin(); it != g_q8_f16_copies.end();) {
+        if (std::get<0>(it->first) != g_support_host_base) {
+            ++it;
+            continue;
+        }
+        (void)hipFree(it->second.device_ptr);
+        it = g_q8_f16_copies.erase(it);
+    }
     if (g_support_arena) (void)hipFree(g_support_arena);
     g_support_arena = NULL;
     g_support_arena_bytes = 0;

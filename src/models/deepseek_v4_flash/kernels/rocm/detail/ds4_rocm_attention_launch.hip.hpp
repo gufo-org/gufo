@@ -1096,19 +1096,15 @@ static int attention_output_q8_batch_launch(
     const __half *out_a_f16 = NULL;
     if (g_hipblas_ready && n_tokens >= 2u) {
       out_a_f16 = hip_q8_f16_ptr(model_map, out_a_offset, out_a_bytes,
-                                 group_dim, low_dim, "attn_output_a");
+                                 group_dim, low_dim, false);
     }
     if (out_a_f16) {
       {
         const int interleaved_b = 1;
         const __half* out_b_f16_t =
-            hip_q8_f16_transpose_ptr(model_map, out_b_offset, out_b_bytes,
-                                     low_dim, out_dim, "attn_output_b");
-        const __half* out_b_f16 =
-            out_b_f16_t ? NULL
-                        : hip_q8_f16_ptr(model_map, out_b_offset, out_b_bytes,
-                                         low_dim, out_dim, "attn_output_b");
-        if (out_b_f16 || out_b_f16_t) {
+            hip_q8_f16_ptr(model_map, out_b_offset, out_b_bytes, low_dim,
+                           out_dim, true);
+        if (out_b_f16_t) {
           const uint64_t heads_h_count =
               (uint64_t)n_groups * n_tokens * group_dim;
           const uint64_t low_h_count = (uint64_t)n_groups * n_tokens * rank;
@@ -1122,7 +1118,7 @@ static int attention_output_q8_batch_launch(
            * pinned trajectory's own twenty-token prefill on the library
            * this envelope was measured against. */
           uint64_t b_pad_n = ds4_gemm_f16_wmma_pad_n(n_tokens);
-          if (out_b_f16_t == NULL || n_tokens < DS4_ROCM_ATTENTION_WIDE_ROWS ||
+          if (n_tokens < DS4_ROCM_ATTENTION_WIDE_ROWS ||
               !ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n, low_dim) ||
               out->bytes < b_pad_n * out_dim * sizeof(float)) {
             b_pad_n = n_tokens;
@@ -1165,7 +1161,6 @@ static int attention_output_q8_batch_launch(
             return 0;
           const float alpha = 1.0f;
           const float beta0 = 0.0f;
-          const float beta1 = 1.0f;
           int a_wmma_ok = 0;
 #ifdef __HIP_PLATFORM_AMD__
                 /* rocBLAS reaches 2.7 TFLOP/s on this strided-batched shape;
@@ -1205,16 +1200,12 @@ static int attention_output_q8_batch_launch(
                                                                HIPBLAS_COMPUTE_32F,
                                                                HIPBLAS_GEMM_DEFAULT);
                 if (st == HIPBLAS_STATUS_SUCCESS && interleaved_b) {
-                    const __half *b_ptr = out_b_f16_t ? out_b_f16_t : out_b_f16;
-                    const auto b_op = out_b_f16_t ? HIPBLAS_OP_N : HIPBLAS_OP_T;
-                    const int b_lda = out_b_f16_t ? (int)out_dim : (int)low_dim;
 #ifdef __HIP_PLATFORM_AMD__
                     /* The rocWMMA tile moves 3.22 GB against Tensile's 5.7 GB on
                      * this shape; see the kernel comment. Needs the transposed
                      * weight cache, so opA is N. `b_pad_n` is n_tokens unless a
                      * tile is available for a rounded-up width. */
-                    if (out_b_f16_t &&
-                        ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n,
+                    if (ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n,
                                                           low_dim) &&
                         ds4_gemm_f16_wmma_padded_launch<false, float>(
                             (float*)out->ptr, out_b_f16_t, low_h, out_dim,
@@ -1223,23 +1214,25 @@ static int attention_output_q8_batch_launch(
                       return 1;
                     }
                     if (hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_ATTN_B) &&
-                        hipblaslt_gemm_f16(out->ptr, b_ptr, low_h,
+                        hipblaslt_gemm_f16(out->ptr, out_b_f16_t,
+                                           (uint32_t)out_dim, low_h,
                                            (uint32_t)out_dim, n_tokens,
-                                           (uint32_t)low_dim, b_op, HIP_R_32F,
+                                           (uint32_t)low_dim, HIPBLAS_OP_N,
+                                           HIP_R_32F,
                                            "attention output b")) {
                       return 1;
                     }
 #endif
                     st = hipblasGemmEx(g_hipblas,
-                                      b_op,
+                                      HIPBLAS_OP_N,
                                       HIPBLAS_OP_N,
                                       (int)out_dim,
                                       (int)n_tokens,
                                       (int)low_dim,
                                       &alpha,
-                                      b_ptr,
+                                      out_b_f16_t,
                                       HIPBLAS_R_16F,
-                                      b_lda,
+                                      (int)out_dim,
                                       low_h,
                                       HIPBLAS_R_16F,
                                       (int)low_dim,
@@ -1251,36 +1244,6 @@ static int attention_output_q8_batch_launch(
                                       HIPBLAS_GEMM_DEFAULT);
                     if (st == HIPBLAS_STATUS_SUCCESS) return 1;
                     fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " attention output interleaved B failed: status %d; falling back\n", (int)st);
-                } else if (st == HIPBLAS_STATUS_SUCCESS) {
-                    int ok_packed_b = 1;
-                    for (uint32_t g = 0; g < n_groups; g++) {
-                        const float *beta = (g == 0u) ? &beta0 : &beta1;
-                        st = hipblasGemmEx(g_hipblas,
-                                           HIPBLAS_OP_T,
-                                           HIPBLAS_OP_N,
-                                           (int)out_dim,
-                                           (int)n_tokens,
-                                           (int)rank,
-                                           &alpha,
-                                           out_b_f16 + (uint64_t)g * rank,
-                                           HIPBLAS_R_16F,
-                                           (int)low_dim,
-                                           low_h + (uint64_t)g * rank * n_tokens,
-                                           HIPBLAS_R_16F,
-                                           (int)rank,
-                                           beta,
-                                           out->ptr,
-                                           HIPBLAS_R_32F,
-                                           (int)out_dim,
-                                           HIPBLAS_COMPUTE_32F,
-                                           HIPBLAS_GEMM_DEFAULT);
-                        if (st != HIPBLAS_STATUS_SUCCESS) {
-                            ok_packed_b = 0;
-                            break;
-                        }
-                    }
-                    if (ok_packed_b) return 1;
-                    fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " attention output packed B failed: status %d; falling back\n", (int)st);
                 } else {
                     fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " attention output packed A failed: status %d; falling back\n", (int)st);
                 }
@@ -1371,19 +1334,6 @@ static int attention_output_q8_batch_launch(
         if (!hip_ok(hipGetLastError(), "attention_output_q8_a preq launch")) return 0;
     }
 
-    if (attn_output_hipblas) {
-        if (hip_matmul_q8_0_tensor_f16_gemm(out,
-                                             model_map,
-                                             model_size,
-                                             out_b_offset,
-                                             low_dim,
-                                             out_dim,
-                                             low,
-                                             n_tokens,
-                                             "attn_output_b")) {
-            return 1;
-        }
-    }
     return hip_matmul_q8_0_tensor_labeled(out,
                                            model_map,
                                            model_size,

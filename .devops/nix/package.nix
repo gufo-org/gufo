@@ -15,6 +15,8 @@
   openssl,
   ffmpeg-headless,
   ccache,
+  rustToolchain,
+  rustPlatform,
   rocmPackages,
   releaseVersion ? null,
   extensionsFromLock ? false,
@@ -30,6 +32,10 @@ let
   rocmRuntime = rocmPackages.rocm-runtime.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [ ./patches/rocr-fixed-cwsr-rocm10.patch ];
   });
+  cargoSetup = import ./png-decode-cargo.nix {
+    inherit lib rustPlatform;
+    lockFile = sourceRoot + "/src/core/png_decode/Cargo.lock";
+  };
   versionLabel = if releaseVersion == null then "development" else releaseVersion;
   packageVersion =
     if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;
@@ -52,7 +58,7 @@ let
         relativePath = lib.removePrefix "${root}/" pathString;
       in
       pathString == root
-      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" "extensions.lock" ]
+      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" "extensions.lock" "rust-toolchain.toml" ]
       || relativePath == "licenses"
       || lib.hasPrefix "licenses/" relativePath
       || relativePath == "cmake"
@@ -92,6 +98,7 @@ stdenv.mkDerivation {
     ninja
     pkg-config
     makeWrapper
+    rustToolchain
     rocmPackages.clr
   ];
 
@@ -129,7 +136,7 @@ stdenv.mkDerivation {
   # C/C++ sources. Keep HIP uncached: Clang emits a bundled preprocessor output
   # whose included headers ccache 4.13.6 does not record. A header-only change
   # can then reuse a stale HIP object, including one from the timing baseline.
-  preConfigure = ''
+  preConfigure = cargoSetup + ''
     ccache_dir=/tmp/gufo-ccache
     if [[ -d "$ccache_dir" && -w "$ccache_dir" ]]; then
       export CCACHE_DIR="$ccache_dir"

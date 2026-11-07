@@ -11,10 +11,11 @@ Enforcement ratchet (one boundary per migrated layer): with
 under src/models/** or src/families/**. Card 06 (RFC step 4) retired the last
 such include, so a new violation fails the check. --fail-on-serving-boundary
 audits the Card 09 (RFC step 6) split: no src/cli/** include from production
-sources under src/models/**, src/families/**, src/cache/**, src/ext/** or
-include/gufo/ext/**; sources under a tests/ tree stay exempt until step 7b.
+sources under src/models/**, src/families/**, src/cache/**, src/sched/**,
+src/ext/** or include/gufo/ext/**; sources under a tests/ tree stay exempt until step 7b.
 --fail-on-model-core-includes audits the Card 11 (RFC step 7) migration:
-no production file under src/models/** may include src/core/** or src/cache/**.
+no production file under src/models/** may include src/core/**, src/cache/**
+or src/sched/**.
 --fail-on-family-graph audits the Card 07 family manifests. --fail-on-target-ownership audits the Card 08
 (RFC step 5) target graph: every model directory needs a manifest, and every
 target that links, compiles or includes a library must be claimed by it, so
@@ -660,8 +661,8 @@ def core_boundary_violations(report):
 
 
 # Layers that reach execution only through neutral contracts (RFC step 6).
-BOUNDARY_LAYERS = ("src/models/", "src/families/", "src/cache/", "src/ext/",
-                   "include/gufo/ext/")
+BOUNDARY_LAYERS = ("src/models/", "src/families/", "src/cache/", "src/sched/",
+                   "src/ext/", "include/gufo/ext/")
 
 
 def in_test_tree(path):
@@ -692,11 +693,11 @@ def serving_boundary_violations(report):
 
 
 def model_core_boundary_violations(report):
-    """Return production src/models/** includes of src/core/** or src/cache/** headers.
+    """Return production src/models/** includes of src/core/**, src/cache/** or src/sched/** headers.
 
     Card 11 (RFC step 7) migrated all eight model implementations to public
     extension headers under <gufo/ext/...>. Production sources under
-    src/models/** must not include src/core/** or src/cache/**.
+    src/models/** must not include src/core/**, src/cache/** or src/sched/**.
     """
     violations = []
     for edge in report["includes"]:
@@ -706,8 +707,8 @@ def model_core_boundary_violations(report):
         inc = edge["include"]
         target = edge["resolved"] or posixpath.normpath(
             posixpath.join(posixpath.dirname(path), inc))
-        if (target.startswith("src/core/") or target.startswith("src/cache/")
-                or inc.startswith(("src/core/", "src/cache/"))):
+        if (target.startswith(("src/core/", "src/cache/", "src/sched/"))
+                or inc.startswith(("src/core/", "src/cache/", "src/sched/"))):
             violations.append(f"{path}:{edge['line']}: {inc}")
     return sorted(violations)
 
@@ -786,9 +787,9 @@ def classify_edge(owner, dep, root=None):
     # 1. STRICT BOUNDARY VIOLATIONS
     if owner == "src/core" and (dep.startswith("models/") or dep.startswith("families/")):
         return ("FAIL", "❌", "core boundary violation (core includes model/family)")
-    if (owner.startswith(("models/", "families/", "src/cache", "src/ext")) or owner.startswith("include/gufo/ext")) and dep == "src/cli":
+    if (owner.startswith(("models/", "families/", "src/cache", "src/sched", "src/ext")) or owner.startswith("include/gufo/ext")) and dep == "src/cli":
         return ("FAIL", "❌", "serving boundary violation (engine/extension includes CLI)")
-    if owner.startswith("models/") and dep in {"src/core", "src/cache"}:
+    if owner.startswith("models/") and dep in {"src/core", "src/cache", "src/sched"}:
         return ("FAIL", "❌", "model core boundary violation (production model includes core/cache)")
     if owner == "src/cli" and m_dep in migrated:
         return ("FAIL", "❌", f"extension boundary violation (CLI includes migrated extension {m_dep})")
@@ -820,11 +821,11 @@ def classify_edge(owner, dep, root=None):
         return ("OK", "✅", "test -> test support")
     if owner.startswith("tests/") and "golden_helpers" in dep:
         return ("OK", "✅", "test -> shared golden helper")
-    if owner == "src/cli" and dep in {"src/core", "src/cache", "src/ext", "src/eval", "src/testing", "configuration", "families/qwen"}:
+    if owner == "src/cli" and dep in {"src/core", "src/cache", "src/sched", "src/ext", "src/eval", "src/testing", "configuration", "families/qwen"}:
         return ("OK", "✅", "serving -> engine/infra")
     if owner in {"src/cache", "src/ext", "src/eval"} and dep in {"src/core", "configuration"}:
         return ("OK", "✅", "engine layer -> core")
-    if owner.startswith("tests/") and dep in {"src/core", "src/cache", "src/cli", "src/ext", "src/eval", "src/testing", "families/qwen"}:
+    if owner.startswith("tests/") and dep in {"src/core", "src/cache", "src/sched", "src/cli", "src/ext", "src/eval", "src/testing", "families/qwen"}:
         return ("OK", "✅", "test -> engine component")
     if owner == "configuration" or dep == "configuration":
         return ("OK", "✅", "build/manifest reference")
@@ -941,12 +942,12 @@ def main():
         violations = model_core_boundary_violations(report)
         if violations:
             print("[check-extension-isolation] MODEL CORE BOUNDARY VIOLATED "
-                  "(production models must not include src/core or src/cache headers):")
+                  "(production models must not include src/core, src/cache or src/sched headers):")
             for violation in violations:
                 print(f"  {violation}")
             return 1
         print("[check-extension-isolation] PASS: model core boundary "
-              "(no production src/models -> src/core|src/cache includes)")
+              "(no production src/models -> src/core|src/cache|src/sched includes)")
     if args.fail_on_extension_boundary:
         violations = extension_boundary_violations(report)
         if violations:

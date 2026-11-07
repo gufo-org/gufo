@@ -115,6 +115,9 @@ void CheckElementwiseKernels() {
     CHECK(d_left && d_right && d_output);
     CHECK(d_left.CopyFrom(left));
     CHECK(d_right.CopyFrom(right));
+    // CopyFrom uploads on the legacy NULL stream, which does not order
+    // with launches on this non-blocking stream; drain before launching.
+    CHECK(hipDeviceSynchronize() == hipSuccess);
     h3ops::LaunchAdd(d_left.get(), d_right.get(), d_output.get(), left.size(),
                      stream);
     CHECK(hipStreamSynchronize(stream) == hipSuccess);
@@ -133,6 +136,8 @@ void CheckElementwiseKernels() {
     DeviceArray<std::uint16_t> d_output(gate.size());
     CHECK(d_gate.CopyFrom(gate));
     CHECK(d_up.CopyFrom(up));
+    // Same ordering edge as the Add case above.
+    CHECK(hipDeviceSynchronize() == hipSuccess);
     h3ops::LaunchSwiGlu(d_gate.get(), d_up.get(), d_output.get(), gate.size(),
                         stream);
     CHECK(hipStreamSynchronize(stream) == hipSuccess);
