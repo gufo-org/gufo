@@ -1635,25 +1635,29 @@ void TestLayeredPrefillBatchesDecodersPerRound(std::size_t width) {
       .pass_tokens = 8, .max_layer_groups = 3, .max_yield_decode_width = width};
   control->supports_batched_advance = true;
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 4, {.decode_active_tokens = 2});
 
   auto request_a = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);
   auto request_b = scheduler->Submit({2}, 30, 0.0F);
+  auto request_d = scheduler->Submit({4}, 30, 0.0F);
   auto request_c = scheduler->Submit({3, 30, 31, 32, 33, 34, 35}, 2, 0.0F);
   control->ReleaseAdvance();
 
   Expect(request_a.Wait().tokens == ExpectedTokens(1, 30) &&
              request_b.Wait().tokens == ExpectedTokens(2, 30) &&
+             request_d.Wait().tokens == ExpectedTokens(4, 30) &&
              request_c.Wait().tokens == ExpectedTokens(3, 2),
          "batched yield rounds preserve every trajectory");
   const auto rounds = AdvancesPerYield(control->Events(), 3);
   Expect(rounds.size() == 2, "the prompt's pass yields twice");
-  for (const auto& round : rounds)
-    Expect(round.size() == width,
-           "a yield round decodes as many sessions as the profile batches");
-  if (width == 1)
-    Expect(rounds[0] != rounds[1], "single-session rounds take turns");
+  // Three decoders, at most `width` per step: every round still steps each
+  // of them once, as between ordinary prefill chunks.
+  for (auto round : rounds) {
+    std::ranges::sort(round);
+    Expect(round == std::vector<TextRunnerToken>{1, 2, 4},
+           "a yield round decodes every decoder once");
+  }
 }
 
 void TestPromptCancelledInsideYield() {
@@ -1720,12 +1724,14 @@ void TestFinishedCaptureRejoinsYields() {
              b.Wait().tokens == ExpectedTokens(2, 30) &&
              c.Wait().tokens == ExpectedTokens(3, 2),
          "a capture finishing mid-pass keeps every trajectory");
-  // One decoder per round, in turn: A, then B, which left capture before
-  // the first yield.
+  // B left capture before the first yield, so every round steps A and B.
   const auto rounds = AdvancesPerYield(control->Events(), 3);
   Expect(rounds.size() == 2, "C's pass yields twice");
-  Expect(rounds == std::vector<std::vector<TextRunnerToken>>{{1}, {2}},
-         "a decoder whose capture finished mid-pass rejoins the next yields");
+  for (auto round : rounds) {
+    std::ranges::sort(round);
+    Expect(round == std::vector<TextRunnerToken>{1, 2},
+           "a decoder whose capture finished mid-pass rejoins the yields");
+  }
 }
 
 void TestSchedulingProfileRequiresIncrementalPrefill() {

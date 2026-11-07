@@ -7,7 +7,8 @@ sessions between them.
 
 - `TextSchedulingProfile` has `pass_tokens` (the pass width used beside
   decoders), `max_layer_groups` (one runs passes unsplit) and
-  `max_yield_decode_width` (sessions one round between groups may batch).
+  `max_yield_decode_width` (sessions one decode step between groups may
+  batch; each round between groups steps every decoder once).
   `TextRunnerDescriptor::scheduling` holds it; empty keeps the host's bounded
   decode-active passes. A profile requires `incremental_prefill`, and every
   field must be at least one; the host rejects the runner at load otherwise.

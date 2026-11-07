@@ -1924,9 +1924,11 @@ struct TextGenerationScheduler::Impl {
   }
 
   /// One decode work unit: a batch from the front of `decoding`, in turn.
-  void RunDecodeUnit(const sched::DecodeWork& decode,
-                     std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
-                     std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
+  /// Returns how many requests it stepped.
+  std::size_t RunDecodeUnit(
+      const sched::DecodeWork& decode,
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
     const auto plan = runner_pool->SelectDecodePlan(decode.candidates);
     const std::size_t batch_size =
         plan.kind == TextExecutionPlanKind::kBatched
@@ -1948,6 +1950,7 @@ struct TextGenerationScheduler::Impl {
           decoding.push_back(std::move(request));
       }
     }
+    return batch_size;
   }
 
   /// Moves requests whose capture has finished back to their queue. Without
@@ -1980,20 +1983,17 @@ struct TextGenerationScheduler::Impl {
   }
 
   /// Between two layer groups of a prompt pass, the prompt's request is in no
-  /// queue: this round only decodes. Nothing is admitted or prefilled. A
-  /// decoder whose capture has finished rejoins the round; a prompt's
-  /// capture waits until the pass ends.
+  /// queue: this round only decodes. Every decoder steps once, in batches of
+  /// at most the profile's width, as every due decoder does between ordinary
+  /// prefill chunks. Nothing is admitted or prefilled. A decoder whose
+  /// capture has finished rejoins the round; a prompt's capture waits until
+  /// the pass ends.
   void RunYieldRound(
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
       std::deque<std::shared_ptr<ScheduledRequest>>& capturing) noexcept {
     try {
       ResumeCaptured(capturing, decoding, nullptr);
-      decoding_view.clear();
-      for (const auto& request : decoding)
-        decoding_view.push_back({.due = request->decode_due,
-                                 .started = !request->result.tokens.empty()});
-      const auto round = policy.BetweenGroups(decoding_view);
-      if (!round)
+      if (decoding.empty())
         return;
       progress.fetch_add(1, std::memory_order_relaxed);
       ++yield_rounds;
@@ -2007,7 +2007,22 @@ struct TextGenerationScheduler::Impl {
                   .count();
         }
       } add_time{start, yield_ms};
-      RunDecodeUnit(*round, decoding, capturing);
+      // Stepped requests move to the back, so the front `remaining` have not
+      // stepped in this round yet.
+      for (std::size_t remaining = decoding.size();
+           remaining != 0 && !decoding.empty();) {
+        remaining = std::min(remaining, decoding.size());
+        decoding_view.clear();
+        for (std::size_t index = 0; index < remaining; ++index)
+          decoding_view.push_back(
+              {.due = decoding[index]->decode_due,
+               .started = !decoding[index]->result.tokens.empty()});
+        const auto unit = policy.BetweenGroups(decoding_view);
+        if (!unit)
+          break;
+        remaining -=
+            std::min(remaining, RunDecodeUnit(*unit, decoding, capturing));
+      }
     } catch (...) {
       // Decode failures complete their own requests; nothing reaches the
       // prompt's pass.
