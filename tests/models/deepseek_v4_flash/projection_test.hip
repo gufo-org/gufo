@@ -577,6 +577,79 @@ void hc_mix_decode(unsigned rows, bool padded, std::mt19937& random) {
               rows, padded ? "padded" : "packed");
 }
 
+void q8_hc_expand(const char* name, unsigned in_dim, unsigned rows, bool add,
+                  std::mt19937& random) {
+  const unsigned blocks = (in_dim + 31) / 32;
+  std::uniform_real_distribution<float> scales(.0001F, .03F), values(-4.F, 4.F),
+      unit(0.F, 1.F);
+  std::vector<unsigned char> weights(size_t(rows) * blocks * 34);
+  for (size_t b = 0; b < size_t(rows) * blocks; ++b) {
+    const auto scale = __float2half(scales(random));
+    std::memcpy(weights.data() + b * 34, &scale, 2);
+    for (unsigned i = 0; i < 32; ++i)
+      weights[b * 34 + 2 + i] =
+          static_cast<unsigned char>(static_cast<int>(random() % 255) - 127);
+  }
+  std::vector<int8_t> input(blocks * 32);
+  for (auto& value : input)
+    value = static_cast<int8_t>(static_cast<int>(random() % 255) - 127);
+  std::vector<float> input_scale(blocks), residual(4 * rows), block_add(rows),
+      split(24);
+  for (auto& value : input_scale)
+    value = scales(random);
+  Device<unsigned char> w(weights.size());
+  Device<int8_t> x(input.size());
+  Device<float> s(blocks), r(residual.size()), a(rows), sp(split.size()),
+      reference_block(rows), reference_hc(residual.size()), block(rows),
+      hc(residual.size());
+  check(
+      hipMemcpy(w.data, weights.data(), weights.size(), hipMemcpyHostToDevice));
+  check(hipMemcpy(x.data, input.data(), input.size(), hipMemcpyHostToDevice));
+  check(hipMemcpy(s.data, input_scale.data(), blocks * sizeof(float),
+                  hipMemcpyHostToDevice));
+  std::vector<float> expected(residual.size()), actual(residual.size());
+  for (float magnitude : {1.F, 1e-4F}) {
+    for (auto& value : residual)
+      value = values(random) * magnitude;
+    for (auto& value : block_add)
+      value = values(random) * magnitude;
+    for (auto& value : split)
+      value = unit(random) * 2.F;
+    check(hipMemcpy(r.data, residual.data(), residual.size() * sizeof(float),
+                    hipMemcpyHostToDevice));
+    check(hipMemcpy(a.data, block_add.data(), rows * sizeof(float),
+                    hipMemcpyHostToDevice));
+    check(hipMemcpy(sp.data, split.data(), split.size() * sizeof(float),
+                    hipMemcpyHostToDevice));
+    matmul_q8_0_preq_rows_w32_kernel<<<rows, 32>>>(reference_block.data, w.data,
+                                                   x.data, s.data, in_dim, rows,
+                                                   blocks, 1, 1);
+    if (add)
+      hc_expand4_add_kernel<<<(rows + 255) / 256, 256>>>(
+          reference_hc.data, reference_block.data, a.data, r.data, sp.data,
+          rows, 1);
+    else
+      hc_expand4_kernel<<<(rows + 255) / 256, 256>>>(
+          reference_hc.data, reference_block.data, r.data, sp.data, rows, 1);
+    matmul_q8_0_hc_expand_preq_rows_w32_kernel<<<(rows + 15) / 16, 512>>>(
+        hc.data, block.data, a.data, r.data, sp.data, w.data, x.data, s.data,
+        in_dim, rows, rows, blocks, 16, add);
+    check(hipGetLastError());
+    check(hipMemcpy(expected.data(), reference_block.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    check(hipMemcpy(actual.data(), block.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("Q8 HC expand projection", expected.data(), actual.data(), rows);
+    check(hipMemcpy(expected.data(), reference_hc.data,
+                    expected.size() * sizeof(float), hipMemcpyDeviceToHost));
+    check(hipMemcpy(actual.data(), hc.data, actual.size() * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("Q8 HC expand streams", expected.data(), actual.data(),
+          actual.size());
+  }
+  std::printf("Q8 HC expand %s: exact to projection + HC expand\n", name);
+}
+
 void hc_prefill_fp32(unsigned tokens) {
   constexpr unsigned embedding = 4096, width = 4 * embedding, mixes = 24;
   std::vector<__half> weights(mixes * width, __float2half(0.0F));
@@ -826,6 +899,10 @@ int main() {
   for (unsigned rows : {24U, 4U})
     for (bool padded : {false, true})
       hc_mix_decode(rows, padded, random);
+  q8_hc_expand("attn_output_b", 8192, 4096, false, random);
+  q8_hc_expand("ffn_down_shexp", 2048, 4096, true, random);
+  q8_hc_expand("partial last block", 2056, 1000, true, random);
+  q8_hc_expand("partial workgroup", 2080, 36, false, random);
   hc_prefill_fp32(128);
   hc_prefill_fp32(129);
   hc_complete_formula(128, 1e-6F, random);

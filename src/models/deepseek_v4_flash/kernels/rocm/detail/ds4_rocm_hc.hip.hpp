@@ -4,6 +4,7 @@
 // static helper visibility and launch behavior.
 
 #include "ds4_rocm_device.hip.hpp"
+#include "ds4_rocm_q8_decode.hip.hpp"
 
 __device__ static void hc4_split_one(float *out, const float *mix, const float *scale, const float *base, uint32_t sinkhorn_iters, float epsv) {
 #if __clang_major__ >= 24
@@ -548,6 +549,71 @@ __global__ __launch_bounds__(256) static void hc_mix_decode_kernel(
     const float scale = hc_plain_rms_scale(r, d, hc_dim, norm_eps);
     hc_mix_row_f16(mix, w + (uint64_t)blockIdx.x * w_stride, residual_hc, scale, hc_dim,
                    blockIdx.x, d);
+}
+
+__global__ static void matmul_q8_0_hc_expand_preq_rows_w32_kernel(
+        float *out_hc,
+        float *block_out,
+        const float *block_add,
+        const float *residual_hc,
+        const float *split,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint32_t n_embd,
+        uint64_t blocks,
+        uint32_t rows_per_block,
+        int has_add) {
+    const uint64_t row = (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+    const uint32_t d = (uint32_t)row;
+    const float *post = split + 4u;
+    const float *comb = split + 8u;
+    const bool hc_lane = lane < 4u;
+    float post_v = 0.0f, add_v = 0.0f, res_v[4] = {}, comb_v[4] = {};
+    if (hc_lane) {
+        post_v = post[lane];
+        if (has_add) add_v = block_add[d];
+#pragma unroll
+        for (uint32_t src = 0; src < 4u; src++) {
+            res_v[src] = residual_hc[(uint64_t)src * n_embd + d];
+            comb_v[src] = comb[src * 4u + lane];
+        }
+    }
+
+    const unsigned char *wr = w + row * blocks * 34u;
+    const uint64_t full = in_dim / 32u;
+    float acc = 0.0f;
+    uint64_t b = lane;
+#pragma unroll 1
+    for (; b < full; b += 32u) {
+        const unsigned char *blk = wr + b * 34u;
+        int32_t q[8];
+#pragma unroll
+        for (uint32_t j = 0; j < 8u; j++) q[j] = load_i8x4_i32_unaligned((const int8_t *)(blk + 2u) + 4u * j);
+        const float scale = __half2float(*(const __half *)blk);
+        const float xs = xscale[b];
+        const int dot = dot_i8x32_dp4a_loaded(q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], xq + b * 32u);
+        acc = q8_0_decode_accumulate(acc, scale, xs, dot);
+    }
+    for (; b < blocks; b += 32u) {
+        const uint64_t i0 = b * 32u;
+        const uint64_t bn = in_dim - i0 < 32u ? in_dim - i0 : 32u;
+        const int dot = dot_i8_block((const int8_t *)(wr + b * 34u + 2u), xq + i0, bn, 1);
+        acc += __half2float(*(const __half *)(wr + b * 34u)) * xscale[b] * (float)dot;
+    }
+    const float total = __shfl(warp_sum_f32(acc), 0, 32);
+    if (lane == 0u) block_out[d] = total;
+    if (hc_lane) {
+        const float block_v = has_add ? hc_add(add_v, total) : total;
+        float hc_acc = hc_mul(post_v, block_v);
+#pragma unroll
+        for (uint32_t src = 0; src < 4u; src++) hc_acc = hc_fma(comb_v[src], res_v[src], hc_acc);
+        out_hc[(uint64_t)lane * n_embd + d] = hc_acc;
+    }
 }
 
 /* Fuse HC RMS scaling, mix projection, Sinkhorn split and weighted sum.

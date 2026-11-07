@@ -1251,7 +1251,7 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
         uint32_t                n_hc,
         const char             *label) {
   if (!out_hc || !block_out || !x || !residual_hc || !split || !model_map ||
-      in_dim == 0 || out_dim == 0 || n_embd == 0 || n_hc == 0 ||
+      in_dim == 0 || out_dim == 0 || n_embd == 0 || n_hc != 4u ||
       out_dim != (uint64_t)n_embd) {
     return 0;
   }
@@ -1274,7 +1274,6 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
 
     int8_t *xq = NULL;
     float *xscale = NULL;
-    const int use_dp4a = 1;
     if (x_q8) {
         if (!hip_q8_0_act(x_q8, 1u, blocks, &xq, &xscale)) return 0;
     } else if (!hip_quantize_q8_0_prequant(x, in_dim, blocks, 1u, &xq, &xscale)) {
@@ -1295,11 +1294,9 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
             in_dim,
             out_dim,
             n_embd,
-            n_hc,
             blocks,
             rows_per_block,
-            block_add ? 1 : 0,
-            use_dp4a);
+            block_add ? 1 : 0);
     return hip_ok(hipGetLastError(), "matmul_q8_0_hc_expand rows launch");
 }
 
