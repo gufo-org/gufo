@@ -358,32 +358,47 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
         };
     const auto direct_prompt =
         model->EncodeChat(direct_messages, ResolveDeepSeekChatOptions({}));
+    const std::array<gufo::sampling::SamplingConfig, 3> samplings{{
+        {.temperature = 0.6F, .seed = 7},
+        {.temperature = 1.0F, .seed = 7},
+        {.temperature = 0.6F,
+         .top_k = 40,
+         .top_p = 0.95F,
+         .seed = 11,
+         .repeat_penalty = 1.2F,
+         .frequency_penalty = 0.3F},
+    }};
+    std::array<std::vector<gufo::tokenization::TokenId>, samplings.size()>
+        served_autoregressive;
+    {
+      InferenceBackend backend;
+      Expect(Load(backend, model, &error, 4096, 1), error);
+      Expect(backend.chat(prompt, 32, 0.0F).draft_tokens == 0,
+             "C1 AR serving does not draft");
+      for (std::size_t i = 0; i < samplings.size(); ++i)
+        served_autoregressive[i] =
+            backend.chat(prompt, 32, samplings[i]).tokens;
+    }
     InferenceBackend backend;
     Expect(Load(backend, model, &error, 4096, 1, {}, {}, speculative), error);
     const auto greedy = backend.chat(prompt, 32, 0.0F);
     std::size_t sampled_drafts = 0;
-    for (const auto& sampling : {
-             gufo::sampling::SamplingConfig{.temperature = 0.6F, .seed = 7},
-             gufo::sampling::SamplingConfig{.temperature = 1.0F, .seed = 7},
-             gufo::sampling::SamplingConfig{.temperature = 0.6F,
-                                            .top_k = 40,
-                                            .top_p = 0.95F,
-                                            .seed = 11,
-                                            .repeat_penalty = 1.2F,
-                                            .frequency_penalty = 0.3F},
-         }) {
+    for (std::size_t i = 0; i < samplings.size(); ++i) {
       const auto direct =
-          GenerateDirect(model, direct_prompt, 32, sampling, true);
+          GenerateDirect(model, direct_prompt, 32, samplings[i], true);
       const auto autoregressive =
-          GenerateDirect(model, direct_prompt, 32, sampling);
-      const auto result = backend.chat(prompt, 32, sampling);
-      const auto repeat = backend.chat(prompt, 32, sampling);
+          GenerateDirect(model, direct_prompt, 32, samplings[i]);
+      const auto result = backend.chat(prompt, 32, samplings[i]);
+      const auto repeat = backend.chat(prompt, 32, samplings[i]);
       sampled_drafts += result.draft_tokens;
       Expect(result.draft_accepted_tokens <= result.draft_tokens,
              "sampled DSpark accounting includes legitimate AR fallback");
-      Expect(result.tokens == direct && direct == autoregressive &&
+      Expect(direct == autoregressive,
+             "C1 direct DSpark retains the direct AR seeded trace");
+      Expect(result.tokens == served_autoregressive[i] &&
                  repeat.tokens == result.tokens,
-             "C1 DSpark, AR, frontend and cached seeded replay agree");
+             "C1 served DSpark retains the served AR seeded trace and replays "
+             "from cache");
     }
     Expect(sampled_drafts > 0,
            "sampled C1 serving exercises DSpark verification");
@@ -455,10 +470,13 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
   }
 
   {
+    auto no_reasoning_prompt = prompt;
+    no_reasoning_prompt.reasoning.enabled = false;
     InferenceBackend backend;
     Expect(Load(backend, model, &error, 64, 2, {}, {}, speculative), error);
-    auto greedy = backend.start_chat(prompt, 128, 0.0F, {}, true);
-    auto sampling = backend.start_chat(prompt, 128, sampled, {}, true);
+    auto greedy = backend.start_chat(no_reasoning_prompt, 128, 0.0F, {}, true);
+    auto sampling =
+        backend.start_chat(no_reasoning_prompt, 128, sampled, {}, true);
     for (const auto& result : {greedy->Wait(), sampling->Wait()}) {
       Expect(result.prompt_tokens + result.completion_tokens == 64,
              "greedy and sampled serving stop exactly at context capacity");
