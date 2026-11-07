@@ -72,6 +72,52 @@ struct TextPreparedPrompt {
   std::size_t cache_prefix_tokens{0};
 };
 
+/// Optional hidden-state encoding, which lets another model use a text
+/// runner's backbone as a frozen encoder (for example, an image model's text
+/// conditioning). Discovered through `TextModelRunner::HiddenStateEncoding()`.
+struct TextHiddenStateEncoding {
+  /// Scalars per row: the model's hidden size.
+  std::size_t width{0};
+  /// Most tokens one `EncodeHiddenStates` call accepts.
+  std::size_t max_tokens{0};
+};
+
+/// One complete prompt, framed and tokenized by the caller.
+struct TextHiddenStateRequest {
+  /// Encoded as a whole from position zero with the model's causal attention.
+  std::span<const TextRunnerToken> tokens;
+  /// Polled during execution; returning true stops the call with
+  /// `TextHiddenStateStatus::kCancelled`.
+  std::function<bool()> is_cancelled;
+};
+
+/// Hidden states of one request. `values` holds `rows * width` FP32 scalars
+/// in row-major order; row `i` belongs to request token `i`, so rows follow
+/// token order and `rows` equals the request's token count.
+///
+/// Each row is the residual stream after the last decoder layer, before the
+/// model's final output norm. Runners apply no normalization: a consumer that
+/// conditions on normalized states applies that final norm exactly once.
+///
+/// The result owns its storage; it never aliases runner memory and remains
+/// valid after the runner is destroyed.
+struct TextHiddenStates {
+  std::size_t rows{0};
+  std::size_t width{0};
+  std::vector<float> values;
+};
+
+enum class TextHiddenStateStatus : std::uint8_t {
+  kOk,
+  /// `is_cancelled` returned true; no states are returned.
+  kCancelled,
+  /// Empty prompt, more than `max_tokens` tokens, or a token outside the
+  /// model's vocabulary. Nothing was executed.
+  kInvalidInput,
+  /// Execution failed. A later call may succeed.
+  kFailed,
+};
+
 struct TextRunnerRamCacheOptions {
   static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
   std::size_t capacity_bytes{0};
@@ -427,6 +473,31 @@ public:
   }
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
+
+  /// The runner's hidden-state encoder, or std::nullopt when it offers none.
+  [[nodiscard]] virtual std::optional<TextHiddenStateEncoding>
+  HiddenStateEncoding() const {
+    return std::nullopt;
+  }
+  /// Encodes `request.tokens` as one complete prompt (see `TextHiddenStates`
+  /// for the returned layout and normalization). Every call starts from an
+  /// empty context and is independent of all `TextRunnerState`s: it neither
+  /// reads nor changes sessions, prefix caches or snapshots, so repeating a
+  /// request returns the same states. Concurrent calls on one runner
+  /// serialize. Any working memory belongs to the runner and is released with
+  /// it. `states` must not be null. On `kOk`, `*states` holds the result;
+  /// otherwise it is empty and `*error` (when not null) explains why. Throws
+  /// std::logic_error when
+  /// `HiddenStateEncoding()` is std::nullopt, so an unsupported capability is
+  /// never reported as an execution failure.
+  [[nodiscard]] virtual TextHiddenStateStatus EncodeHiddenStates(
+      const TextHiddenStateRequest& request, TextHiddenStates* states,
+      std::string* error) const {
+    (void)request;
+    (void)states;
+    (void)error;
+    throw std::logic_error("runner does not support hidden-state encoding");
+  }
 
   /// Continuation contract. The cache owns every execution slot: it creates
   /// the resources once, binds a state to each slot, and reconciles a state
