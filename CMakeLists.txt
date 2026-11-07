@@ -65,7 +65,6 @@ find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(PNG REQUIRED)
-find_package(ZLIB REQUIRED)
 find_package(JPEG REQUIRED)
 if (WIN32)
   # Windows has no system pkg-config; locate the pkgconf tool vcpkg installs.
@@ -763,6 +762,8 @@ endfunction()
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
 
+  # The test writes its PNG cases with zlib directly.
+  find_package(ZLIB REQUIRED)
   add_executable(png_decode_test
     tests/core/png_decode_test.cpp
     tests/core/png_reference.cpp)
