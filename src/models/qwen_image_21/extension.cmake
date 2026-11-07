@@ -12,6 +12,7 @@ gufo_extension_target(
     gufo_core
     gufo_qwen_text
     ICU::i18n
+    PNG::PNG
 )
 
 if(TARGET gufo_qwen_image_21)

@@ -35,6 +35,9 @@ release packaging builds the upstream runtime instead.
   workload (MSVC x64).
 - **Git**, **CMake ≥ 3.29**, **Ninja** (Visual Studio bundles both;
   `vs-env.cmd` puts them on `PATH`) and **Python 3**.
+- **Rust 1.88 or newer** from [rustup](https://rustup.rs), with the
+  `x86_64-pc-windows-msvc` target. Rustup reads the pinned version from
+  `rust-toolchain.toml`; Cargo builds the PNG decoder.
 - **vcpkg**, a full clone (the manifest baseline resolves through its
   history), with `VCPKG_ROOT` set to it:
 

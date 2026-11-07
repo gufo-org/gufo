@@ -200,6 +200,7 @@ limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
 | ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
 | hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
+| Rust 1.88 or newer (`cargo`, `rustc`), from [rustup](https://rustup.rs) if your distribution's is older | PNG decoding; rustup uses `rust-toolchain.toml`, and cargo fetches the crates in `src/core/png_decode/Cargo.lock` |
 | FFmpeg development libraries | Video embedding decoding and RGB conversion |
 | libsndfile, libsoxr | Audio decoding and reference-compatible resampling |
 | FFmpeg and ffprobe | Video/audio output; invoked as separate executables |

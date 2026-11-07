@@ -291,6 +291,7 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_subdirectory(src/core/platform)
+add_subdirectory(src/core/png_decode)
 
 add_library(gufo_core STATIC
   src/core/image.cpp
@@ -308,7 +309,7 @@ add_library(gufo_core STATIC
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
-  Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_png_decode JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
 # Family libraries come before the model that needs them; they may depend on
@@ -422,7 +423,7 @@ add_library(gufo_http STATIC
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text PNG::PNG)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -760,6 +761,15 @@ endfunction()
   target_link_libraries(json_test PRIVATE gufo_core)
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
+
+  # The test writes its PNG cases with zlib directly.
+  find_package(ZLIB REQUIRED)
+  add_executable(png_decode_test
+    tests/core/png_decode_test.cpp
+    tests/core/png_reference.cpp)
+  target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
+  add_test(NAME png_decode_test COMMAND png_decode_test)
+  set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
 
   add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)

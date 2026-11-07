@@ -29,6 +29,8 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "libpng",
     "libjpeg-turbo",
     "libwebp",
+    "png (Rust crate)",
+    "Rust standard library and crates",
     "libsndfile",
     "libsoxr",
     "DS4",
