@@ -81,6 +81,10 @@ struct ds4_engine {
     ds4_weights *weights;
     ds4_dspark_model *dspark;
     ds4_rocm_graph* batch_workspace;
+    /* Every session graph, and the small batch workspace their decodes use
+     * while a layered prefill pass of one of them yields. */
+    ds4_rocm_graph* graphs;
+    ds4_rocm_graph* decode_workspace;
     bool rocm_ready;
 };
 

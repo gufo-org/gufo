@@ -114,6 +114,8 @@ private:
 // Beside decoders, prompts keep the 4,096-row pass and split it into layer
 // groups: one pass takes about 8.2 s, a decode step about 56 ms.
 constexpr std::size_t kMaxPrefillLayerGroups = 16;
+// Batched AR decode and DSpark verification take two to eight sessions.
+constexpr std::size_t kMaxBatchWidth = 8;
 
 std::vector<TextRunnerToken> DeepSeekRunnerTokens(std::span<const int> tokens) {
   std::vector<TextRunnerToken> converted;
@@ -213,18 +215,16 @@ public:
                 .prefix_reuse = true,
             },
         .sampling_defaults = DeepSeekSamplingDefaults(),
-        // Batched decodes and DSpark verification run in the batch workspace
-        // a prompt pass is using, so only single-token decodes may yield.
+        // Decodes between layer groups, batched ones and DSpark verification
+        // included, use their own batch workspace (rocm_graph_yield_prefill).
         .scheduling =
-            dspark ? std::optional<TextSchedulingProfile>{}
-                   : TextSchedulingProfile{
-                         .pass_tokens =
-                             models::deepseek_v4_flash::Session::
-                                 PrefillCapacityFor(
-                                     static_cast<int>(max_context_)),
-                         .max_layer_groups = kMaxPrefillLayerGroups,
-                         .max_yield_decode_width = 1,
-                     },
+            TextSchedulingProfile{
+                .pass_tokens =
+                    models::deepseek_v4_flash::Session::PrefillCapacityFor(
+                        static_cast<int>(max_context_)),
+                .max_layer_groups = kMaxPrefillLayerGroups,
+                .max_yield_decode_width = kMaxBatchWidth,
+            },
     };
   }
 
@@ -253,7 +253,7 @@ public:
             .physical_width = 1,
         },
     };
-    for (std::size_t width = 2; width <= 8; ++width) {
+    for (std::size_t width = 2; width <= kMaxBatchWidth; ++width) {
       plans.push_back({
           .kind = TextExecutionPlanKind::kBatched,
           .physical_width = width,

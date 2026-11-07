@@ -2,10 +2,12 @@
 // with another session decoding between them, must leave every token and
 // log-probability of both unchanged (gufo::test::CheckLayeredPrefill).
 //
-// ds4_layered_prefill_test [MODEL.gguf]
-// Without an argument, GUFO_DEEPSEEK_V4_FLASH_MODEL names the target; the
-// test is skipped without it. Only autoregressive decoding yields: batched
-// decodes and DSpark share the prompt pass's batch workspace.
+// ds4_layered_prefill_test [MODEL.gguf [DSPARK.gguf]]
+// Without arguments, GUFO_DEEPSEEK_V4_FLASH_MODEL and
+// GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL name the weights; the test is skipped
+// without a target and runs autoregressive decoding only without DSpark.
+// Each mode loads the model on its own: two copies do not fit beside each
+// other.
 
 #include <cstdlib>
 #include <iostream>
@@ -20,7 +22,7 @@ namespace {
 
 constexpr std::uint32_t kContext = 16384;
 
-// Varied text, so the decoders' tokens depend on every layer.
+// Varied text, so DSpark drafts are rejected as well as accepted.
 std::string Ledger(std::size_t entries) {
   std::string text = "Inventory ledger.\n";
   for (std::size_t i = 0; i < entries; ++i)
@@ -42,58 +44,84 @@ bool Check(const std::string& name,
 
 }  // namespace
 
+std::shared_ptr<gufo::ext::TextModelRunner> Create(const std::string& model,
+                                                   const std::string& dspark) {
+  gufo::ext::TextRunnerOptions options;
+  options.model_path = model;
+  options.max_context = kContext;
+  options.session_count = 4;
+  if (!dspark.empty()) {
+    options.speculative.backend = gufo::ext::TextSpeculativeBackend::kDSpark;
+    options.speculative.draft_model_path = dspark;
+  }
+  std::string error;
+  auto runner = gufo::models::deepseek_v4_flash::CreateDeepSeekTextRunner(
+      options, &error);
+  if (!runner)
+    throw std::runtime_error(error);
+  return runner;
+}
+
 int main(int argc, char** argv) {
-  std::string model;
-  if (argc > 2) {
-    std::cerr << "Usage: ds4_layered_prefill_test [MODEL.gguf]\n";
+  std::string model, dspark;
+  if (argc > 3) {
+    std::cerr << "Usage: ds4_layered_prefill_test [MODEL.gguf [DSPARK.gguf]]\n";
     return 2;
   }
-  if (argc == 2) {
+  if (argc > 1) {
     model = argv[1];
+    dspark = argc > 2 ? argv[2] : "";
   } else {
     const char* target = std::getenv("GUFO_DEEPSEEK_V4_FLASH_MODEL");
+    const char* support = std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL");
     if (!target || !*target) {
       std::cerr << "GUFO_DEEPSEEK_V4_FLASH_MODEL is not set; skipping\n";
       return 77;
     }
     model = target;
+    dspark = support ? support : "";
   }
   try {
-    gufo::ext::TextRunnerOptions options;
-    options.model_path = model;
-    options.max_context = kContext;
-    options.session_count = 2;
-    std::string error;
-    const auto runner =
-        gufo::models::deepseek_v4_flash::CreateDeepSeekTextRunner(options,
-                                                                  &error);
-    if (!runner)
-      throw std::runtime_error(error);
-
-    gufo::test::LayeredPrefillCase test;
-    // Three passes: two full 4,096-row ones and a tail.
-    test.prompt = runner->Tokenize(Ledger(800));
-    if (test.prompt.size() <= 2 * 4096)
-      throw std::runtime_error("layered prompt has " +
-                               std::to_string(test.prompt.size()) +
-                               " tokens, fewer than two passes");
-    test.decoder_prompt = runner->Tokenize(
-        "Write a C function that reverses a singly linked list in place, "
-        "then explain its complexity.");
-    // Enough tokens to decode in every yield of every pass.
-    test.decoder_output_tokens = 64;
-    test.prompt_output_tokens = 8;
-
     bool passed = true;
-    // With the cache, passes also plan prompt checkpoints, as serving does.
-    for (const bool cache_prompt : {false, true}) {
-      for (const std::size_t groups : {16u, 3u}) {
-        test.layer_groups = groups;
-        test.cache_prompt = cache_prompt;
-        passed = Check("AR," + std::to_string(groups) + "_groups" +
-                           (cache_prompt ? "_cached" : ""),
-                       runner, test) &&
-                 passed;
+    for (const std::string mode : {"AR", "DSpark"}) {
+      if (mode == "DSpark" && dspark.empty())
+        continue;
+      const auto runner = Create(model, mode == "DSpark" ? dspark : "");
+
+      gufo::test::LayeredPrefillCase test;
+      // Three passes: two full 4,096-row ones and a tail.
+      test.prompt = runner->Tokenize(Ledger(800));
+      if (test.prompt.size() <= 2 * 4096)
+        throw std::runtime_error("layered prompt has " +
+                                 std::to_string(test.prompt.size()) +
+                                 " tokens, fewer than two passes");
+      test.decoder_prompt = runner->Tokenize(
+          "Write a C function that reverses a singly linked list in place, "
+          "then explain its complexity.");
+      // Enough tokens to decode in every yield of every pass.
+      test.decoder_output_tokens = 64;
+      test.prompt_output_tokens = 8;
+
+      // Three decoders batched in every round, as the profile lets the host
+      // run them: batched AR decode and batched DSpark verification.
+      auto batched = test;
+      batched.layer_groups = 16;
+      batched.more_decoder_prompts = {
+          runner->Tokenize(
+              "List the planets of the solar system with one fact each."),
+          runner->Tokenize("Translate 'the quick brown fox jumps over the "
+                           "lazy dog' into French, German and Italian.")};
+      passed = Check(mode + ",batched_3", runner, batched) && passed;
+      // With the cache, passes also plan prompt checkpoints, as serving does.
+      for (const bool cache_prompt : {false, true}) {
+        for (const std::size_t groups : {16u, 3u}) {
+          test.layer_groups = groups;
+          test.cache_prompt = cache_prompt;
+          passed = Check(mode + "," + std::to_string(groups) + "_groups" +
+                             (cache_prompt ? "_cached" : ""),
+                         runner, test) &&
+                   passed;
+        }
       }
     }
     return passed ? 0 : 1;

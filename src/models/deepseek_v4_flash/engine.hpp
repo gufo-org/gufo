@@ -167,7 +167,7 @@ public:
                                      std::string* error_msg = nullptr);
   void SetCancellationCheck(CancellationCheck is_cancelled);
   /// Splits the following prefill passes into at most `groups` layer groups
-  /// and calls `yield` between them, where other sessions may Evaluate. One
+  /// and calls `yield` between them, where other sessions may decode. One
   /// group, or an empty `yield`, restores unsplit passes.
   void SetPrefillYield(std::size_t groups, std::function<void()> yield);
   void Invalidate() noexcept;

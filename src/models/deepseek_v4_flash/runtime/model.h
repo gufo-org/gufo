@@ -158,7 +158,7 @@ uint32_t ds4_session_prefill_capacity(const ds4_session* session);
 uint32_t ds4_session_prefill_capacity_for(int context_size);
 /* Splits this session's following prefill passes into at most `groups` layer
  * groups and calls yield(user_data) between them, where other sessions may
- * decode single tokens (not batches, which share the pass's workspace).
+ * decode, batched and with DSpark too.
  * Fewer than two groups, or a NULL yield, restores unsplit passes. */
 void ds4_session_set_prefill_yield(ds4_session* session, uint32_t groups,
                                    void (*yield)(void* user_data),
