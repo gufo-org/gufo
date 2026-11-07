@@ -80,6 +80,13 @@ to the repository's discovery manifests. Use a package override to validate a
 custom extension selection. `extraArgs` remains an explicit caller-managed
 escape hatch and is not checked against manifests.
 
+Options declared for bare `serve` apply to every serving command; options for
+`serve <modality>` apply to that command only. The C++ registry uses the same
+rule (`OptionApplies`). `gufo serve image` parses and validates manifest
+options for `serve image` at runtime and forwards them to the provider that
+claims the model, so an image provider option such as `--text-encoder` (Nix
+`textEncoder`) needs no host change.
+
 The current `serve llm` parser still explicitly registers its existing draft
 flags and speculative modes. Rendering a newly declared option or speculative
 mode in Nix does not by itself implement its CLI parsing or execution. External

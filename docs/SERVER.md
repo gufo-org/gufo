@@ -512,7 +512,16 @@ conditioning, are refused with 400 rather than dropped.
 Use `gufo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](models/qwen-image-2.1/README.md). Generation accepts JSON;
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
-and work through llama-swap's image routes.
+and work through llama-swap's image routes. An image extension provider that
+claims the model directory is served the same way. Its manifest options for
+`serve image` (or bare `serve`) are listed under `Provider` in
+`gufo serve image --help` and reach only that provider; for example
+`--text-encoder PATH` for a provider that declares it. Another provider's
+option, a wrong value type or a `path` that does not exist stops startup with
+exit status 2 before weights load. `background` is `auto` (model's choice),
+`opaque` (any alpha composited over white) or `transparent`; edits and
+`transparent` need a provider that advertises them, and otherwise return 400
+before inference.
 
 Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 1.7B variants are supported; the variant is detected from the checkpoint's

@@ -273,6 +273,32 @@ The contract, ownership and error rules are documented on `ToolDialect` in
 the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,
 `deepseek`) of `ToolFormat()`.
 
+For an image model, set `ImageProvider::create_with_options` when the provider
+declares startup options. Declare each option for `serve image` with a canonical
+name and type, for example one path sidecar:
+
+```json
+{
+  "options": [
+    {
+      "name": "--text-encoder",
+      "type": "path",
+      "commands": ["serve image"],
+      "providers": ["my-image"],
+      "help": "Text encoder GGUF (default: text_encoder.gguf beside the model)"
+    }
+  ]
+}
+```
+
+The factory receives only explicitly supplied options of the selected provider,
+already typed, with existing paths; it keeps its own defaults for absent ones.
+Override `ImageRunner::Capabilities()` to accept reference images (`edits`) or
+`ImageBackground::kTransparent`, and `ImageRunner::ValidateRequest` for
+narrower limits; both are enforced with HTTP 400 before `Generate`. The request
+carries the caller's `background` unchanged, so model-specific conditioning
+(such as prompt framing for alpha output) stays in the provider.
+
 Provider options use canonical names and manifest types. Extensions may declare
 the same option when the type agrees, as providers sharing `--mtp-model` do; CMake
 rejects conflicting types. The Nix serving helper derives provider arguments and validation
