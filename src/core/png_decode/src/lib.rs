@@ -40,52 +40,83 @@ fn guarded(call: impl FnOnce() -> GufoPngStatus) -> GufoPngStatus {
     catch_unwind(AssertUnwindSafe(call)).unwrap_or(GufoPngStatus::Internal)
 }
 
+/// Opaque to C. Holds a PNG opened by `gufo_png_open` until it is decoded.
+pub struct GufoPngDecoder {
+    png: Option<decode::Png<'static>>,
+}
+
 /// # Safety
-/// `bytes` points to `len` readable bytes, or `len` is 0. `out` points to a
-/// writable `GufoPngDimensions`.
+/// `bytes` points to `len` readable bytes, or `len` is 0, and they stay
+/// readable and unchanged until the decoder stored in `decoder` is closed.
+/// `decoder` and `out` point to writable values.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gufo_png_dimensions(
+pub unsafe extern "C" fn gufo_png_open(
     bytes: *const u8,
     len: usize,
+    decoder: *mut *mut GufoPngDecoder,
     out: *mut GufoPngDimensions,
 ) -> GufoPngStatus {
     guarded(|| {
-        // SAFETY: the caller upholds the contract above; `as_mut` rejects a null `out`.
-        let (Some(bytes), Some(out)) = (unsafe { input(bytes, len) }, unsafe { out.as_mut() })
+        // SAFETY: the caller upholds the contract above; `as_mut` rejects nulls.
+        let (Some(decoder), Some(out)) = (unsafe { decoder.as_mut() }, unsafe { out.as_mut() })
         else {
             return GufoPngStatus::Internal;
         };
-        status(decode::dimensions(bytes).map(|(width, height)| {
+        *decoder = std::ptr::null_mut();
+        // SAFETY: the caller keeps the bytes readable and unchanged until the
+        // decoder that borrows them is closed, so `'static` never outlives them.
+        let Some(bytes) = (unsafe { input(bytes, len) }) else {
+            return GufoPngStatus::Internal;
+        };
+        status(decode::open(bytes).map(|png| {
+            let (width, height) = png.size();
             *out = GufoPngDimensions { width, height };
+            *decoder = Box::into_raw(Box::new(GufoPngDecoder { png: Some(png) }));
         }))
     })
 }
 
 /// # Safety
-/// `bytes` points to `len` readable bytes, or `len` is 0. `rgb` points to
-/// `rgb_len` writable bytes, or `rgb_len` is 0. The two ranges do not overlap.
+/// `decoder` comes from `gufo_png_open` and is not closed. `rgb` points to
+/// `rgb_len` writable bytes, or `rgb_len` is 0, and does not overlap the PNG
+/// bytes.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_png_decode_rgb8(
-    bytes: *const u8,
-    len: usize,
+    decoder: *mut GufoPngDecoder,
     rgb: *mut u8,
     rgb_len: usize,
 ) -> GufoPngStatus {
     guarded(|| {
+        // SAFETY: the caller upholds the contract above; `as_mut` rejects null.
+        let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+            return GufoPngStatus::Internal;
+        };
+        // A decoder decodes once.
+        let Some(png) = decoder.png.take() else {
+            return GufoPngStatus::Internal;
+        };
         let rgb = match (rgb.is_null(), rgb_len) {
             (_, 0) => &mut [],
             // SAFETY: the caller upholds the contract above, and `rgb` is not null.
             (false, _) => unsafe { std::slice::from_raw_parts_mut(rgb, rgb_len) },
             (true, _) => return GufoPngStatus::Internal,
         };
-        // SAFETY: the caller upholds the contract above.
-        let Some(bytes) = (unsafe { input(bytes, len) }) else {
-            return GufoPngStatus::Internal;
-        };
-        status(decode::decode_rgb8(bytes, rgb))
+        status(png.decode_rgb8(rgb))
     })
+}
+
+/// # Safety
+/// `decoder` is null or comes from `gufo_png_open` and is not yet closed.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gufo_png_close(decoder: *mut GufoPngDecoder) {
+    if !decoder.is_null() {
+        // SAFETY: `gufo_png_open` made `decoder` with `Box::into_raw`, and the
+        // caller closes it once.
+        drop(unsafe { Box::from_raw(decoder) });
+    }
 }
 
 /// # Safety

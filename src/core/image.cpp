@@ -106,13 +106,21 @@ void CheckPng(GufoPngStatus status) {
     throw std::runtime_error("PNG decoder failed");
 }
 
+struct PngDecoderClose {
+  void operator()(GufoPngDecoder* decoder) const { gufo_png_close(decoder); }
+};
+
 Image DecodePng(std::span<const std::uint8_t> bytes) {
+  GufoPngDecoder* opened = nullptr;
   GufoPngDimensions size{};
-  CheckPng(gufo_png_dimensions(bytes.data(), bytes.size(), &size));
+  const GufoPngStatus status =
+      gufo_png_open(bytes.data(), bytes.size(), &opened, &size);
+  const std::unique_ptr<GufoPngDecoder, PngDecoderClose> decoder(opened);
+  CheckPng(status);
   ValidateDimensions(size.width, size.height);
   Image image{size.width, size.height, {}};
   image.pixels.resize(std::size_t{image.width} * image.height * 3);
-  CheckPng(gufo_png_decode_rgb8(bytes.data(), bytes.size(), image.pixels.data(),
+  CheckPng(gufo_png_decode_rgb8(decoder.get(), image.pixels.data(),
                                 image.pixels.size()));
   return image;
 }

@@ -157,12 +157,28 @@ fn reader(bytes: &[u8]) -> Result<Reader<Cursor<Cow<'_, [u8]>>>, Error> {
     Ok(reader)
 }
 
-pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), Error> {
-    Ok(reader(bytes)?.info().size())
+/// A PNG whose header and chunks before the image data have been read.
+pub struct Png<'a> {
+    reader: Reader<Cursor<Cow<'a, [u8]>>>,
 }
 
-pub fn decode_rgb8(bytes: &[u8], rgb: &mut [u8]) -> Result<(), Error> {
-    let mut reader = reader(bytes)?;
+pub fn open(bytes: &[u8]) -> Result<Png<'_>, Error> {
+    Ok(Png {
+        reader: reader(bytes)?,
+    })
+}
+
+impl Png<'_> {
+    pub fn size(&self) -> (u32, u32) {
+        self.reader.info().size()
+    }
+
+    pub fn decode_rgb8(self, rgb: &mut [u8]) -> Result<(), Error> {
+        decode_rgb8(self.reader, rgb)
+    }
+}
+
+fn decode_rgb8(mut reader: Reader<Cursor<Cow<'_, [u8]>>>, rgb: &mut [u8]) -> Result<(), Error> {
     let (width, height) = reader.info().size();
     let stride = width as usize * 3;
     if stride.checked_mul(height as usize) != Some(rgb.len()) {

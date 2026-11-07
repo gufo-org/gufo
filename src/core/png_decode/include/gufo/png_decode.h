@@ -22,17 +22,25 @@ typedef struct GufoPngDimensions {
   uint32_t height;
 } GufoPngDimensions;
 
-/* Reads the header and every chunk before the image data. */
-GufoPngStatus gufo_png_dimensions(const uint8_t* bytes, size_t len,
-                                  GufoPngDimensions* out);
+typedef struct GufoPngDecoder GufoPngDecoder;
 
-/* Decodes into packed RGB8: alpha dropped without compositing, gamma and ICC
-   ignored, 16-bit gray saturated at 255, other 16-bit samples reduced to the
-   high byte. rgb_len must be 3 * width * height for these bytes. The output
-   is unspecified unless the result is GUFO_PNG_OK. Neither buffer may change
-   or overlap during the call; nothing is retained after it. */
-GufoPngStatus gufo_png_decode_rgb8(const uint8_t* bytes, size_t len,
-                                   uint8_t* rgb, size_t rgb_len);
+/* Reads the header and every chunk before the image data. On GUFO_PNG_OK,
+   *decoder receives a decoder that reads the bytes until gufo_png_close, so
+   they must stay unchanged until then; otherwise *decoder is null. */
+GufoPngStatus gufo_png_open(const uint8_t* bytes, size_t len,
+                            GufoPngDecoder** decoder, GufoPngDimensions* out);
+
+/* Decodes the opened image into packed RGB8: alpha dropped without
+   compositing, gamma and ICC ignored, 16-bit gray saturated at 255, other
+   16-bit samples reduced to the high byte. rgb_len must be 3 * width * height,
+   and rgb must not overlap the PNG bytes. A decoder decodes once; a second
+   call returns GUFO_PNG_INTERNAL. The output is unspecified unless the result
+   is GUFO_PNG_OK. */
+GufoPngStatus gufo_png_decode_rgb8(GufoPngDecoder* decoder, uint8_t* rgb,
+                                   size_t rgb_len);
+
+/* Releases a decoder from gufo_png_open. A null decoder is ignored. */
+void gufo_png_close(GufoPngDecoder* decoder);
 
 #ifdef __cplusplus
 }
