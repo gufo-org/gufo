@@ -484,8 +484,9 @@ public:
   /// reads nor changes sessions, prefix caches or snapshots, so repeating a
   /// request returns the same states. Concurrent calls on one runner
   /// serialize. Any working memory belongs to the runner and is released with
-  /// it. On `kOk`, `*states` holds the result; otherwise it is empty and
-  /// `*error` (when not null) explains why. Throws std::logic_error when
+  /// it. `states` must not be null. On `kOk`, `*states` holds the result;
+  /// otherwise it is empty and `*error` (when not null) explains why. Throws
+  /// std::logic_error when
   /// `HiddenStateEncoding()` is std::nullopt, so an unsupported capability is
   /// never reported as an execution failure.
   [[nodiscard]] virtual TextHiddenStateStatus EncodeHiddenStates(

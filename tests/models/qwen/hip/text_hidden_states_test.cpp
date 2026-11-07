@@ -274,6 +274,16 @@ void Run(const char* model_path) {
   Expect(SameBytes(Encode(*runner, positive).values, a.values),
          "session activity changed hidden-state encoding");
 
+  // Past the first 1,024-token step the private executor is rebuilt larger
+  // and the capture spans several prefill chunks; neither may change results.
+  std::vector<TextRunnerToken> long_prompt;
+  while (long_prompt.size() < 2500)
+    long_prompt.insert(long_prompt.end(), positive.begin(), positive.end());
+  const auto long_states = Encode(*runner, long_prompt);
+  Expect(SameBytes(Encode(*runner, positive).values, a.values) &&
+             SameBytes(Encode(*runner, long_prompt).values, long_states.values),
+         "a larger private executor changed hidden-state encoding");
+
   TextHiddenStates states;
   Expect(runner->EncodeHiddenStates(
              {.tokens = positive, .is_cancelled = [] { return true; }}, &states,
