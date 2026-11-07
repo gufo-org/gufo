@@ -313,6 +313,41 @@ class SchemaTests(unittest.TestCase):
         schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
         jsonschema.Draft202012Validator(schema).validate(decision)
 
+    def test_readme_schema(self):
+        import jsonschema
+        schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
+        validator = jsonschema.Draft202012Validator(schema)
+        manifest = copy.deepcopy(BASE[0])
+        manifest["docs"] = {"title": "Example", "inputs": "Text", "guide": "README.md"}
+        manifest["readme"] = {
+            "license": {"name": "MIT", "url": "https://spdx.org/licenses/MIT.html"},
+            "rows": [{"section": "Text generation", "title": "Example", "guide": "README.md",
+                      "license": {"name": "MIT", "url": "https://spdx.org/licenses/MIT.html"},
+                      "cells": {"Weights": "Q4", "Single-user decode": {
+                          "template": "{0} tok/s", "values": [
+                              {"bench": "decode", "row": "C1", "column": "tok/s"}]}}}],
+        }
+        validator.validate(manifest)
+        for path, value in (
+            (("readme", "unknown"), True),
+            (("readme", "license"), {"name": "MIT"}),
+            (("readme", "rows", 0, "section"), "Unknown"),
+            (("readme", "rows", 0, "cells", "Weights"), 4),
+            (("readme", "rows", 0, "cells", "Weights"), {"template": "{0}"}),
+            (("readme", "rows", 0, "cells", "Single-user decode", "values", 0),
+             {"bench": "decode", "row": "C1"}),
+        ):
+            invalid = copy.deepcopy(manifest)
+            parent = invalid
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = value
+            with self.subTest(path=path), self.assertRaises(jsonschema.ValidationError):
+                validator.validate(invalid)
+        del manifest["docs"]
+        with self.assertRaises(jsonschema.ValidationError):
+            validator.validate(manifest)
+
     def test_full_schema(self):
         import jsonschema
         schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())

@@ -15,27 +15,87 @@ for user-facing changes and release history.
 > [!TIP]
 > Check out **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)**, a Gufo variant that has not been merged yet!
 
+## Contents
+
+- [Models and benchmarks](#models-and-benchmarks)
+  - [Embeddings](#embeddings)
+  - [Image generation](#image-generation)
+  - [Speech recognition](#speech-recognition)
+  - [Speech synthesis](#speech-synthesis)
+  - [Text generation](#text-generation)
+  - [Video generation](#video-generation)
+- [Philosophy](#philosophy)
+- [Quickstart](#quickstart)
+- [Harness notes](#harness-notes)
+- [Build from source](#build-from-source)
+- [License](#license)
+- [Reference Projects](#reference-projects)
+
 ## Models and benchmarks
 
-All model documentation lives under [docs/models](docs/models/README.md):
+### Embeddings
 
-| Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
-| --- | --- | --- | --- | --- |
-| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
-| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/d96201194f103c906994f283f504209dc8d2a10c/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/d96201194f103c906994f283f504209dc8d2a10c/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
-| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **474.87 tok/s pp**; up to **29.57 tok/s tg** single user with DSpark and **77.12 aggregated tok/s** on 8 concurrent requests with AR · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
-| [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/models/qwen3-asr/QUALITY.md) |
-| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Text and image embeddings | [BF16](https://huggingface.co/google/embeddinggemma-2/tree/914f7f89142e33e77833254d9c9b90c3cef7303b) | Up to **41.5k tokens/s** over HTTP; **13.0 ms** for a 404-token request · [Benchmarks](docs/models/embeddinggemma-2/BENCHMARKS.md) | [Quality](docs/models/embeddinggemma-2/QUALITY.md) |
-| [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/models/qwen3-tts/QUALITY.md) |
-| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/models/qwen-image-2.1/QUALITY.md) |
-| [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1/README.md#qwen-image-21-turbo) | BF16 eight-step image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | **18.6 s** per 1024² image, **4.8×** faster than the 40-step base model · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md#qwen-image-21-turbo) | [Quality](docs/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo) |
-| [MiniMax H3](docs/models/minimax-h3/README.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | In progress · [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) | [Quality](docs/models/minimax-h3/QUALITY.md) |
+<!-- BEGIN GENERATED README TABLE: Embeddings -->
+| Model | Input | License | Latency (one input) | Throughput |
+| --- | --- | --- | ---: | ---: |
+| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Audio | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | **99.7 ms** (10 s of speech, 254 tokens) | TODO |
+| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Images | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | **583.75 ms** (320×180 image, 269 tokens) | **461 – 479** tokens/s |
+| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Text | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | **13.04 ms** (404 tokens) | **30,372 – 41,501** tokens/s |
+| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Video | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | TODO | TODO |
+<!-- END GENERATED README TABLE: Embeddings -->
 
-Peak measured workloads; text pp is autoregressive (AR), while tg uses the
-named speculative mode. Peaks include repetitive output; aggregate tg sums
-individual request decode rates. Qwen27B's single-user peak uses the short-prompt
-C1 workload. Audio excludes loading.
-Each model guide lists the required files and complete benchmark settings.
+Throughput runs from one request at a time to concurrent clients sharing device
+batches. Text uses 128-word inputs.
+
+### Image generation
+
+<!-- BEGIN GENERATED README TABLE: Image generation -->
+| Model | Modes | License | Speed |
+| --- | --- | --- | --- |
+| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | Generation, editing | [Qwen Research (non-commercial)](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE) | **89.89 s** per 1024×1024 image, 40 steps |
+| [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1/README.md#qwen-image-21-turbo) | Eight-step generation and editing | [Qwen Research (non-commercial)](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/fc13ba1986fcb905854dc8de2f52eee395f49b5b/LICENSE) | **18.63 s** per 1024×1024 image, 8 steps, **4.8×** faster than the base model |
+<!-- END GENERATED README TABLE: Image generation -->
+
+### Speech recognition
+
+<!-- BEGIN GENERATED README TABLE: Speech recognition -->
+| Model | License | Speed (excludes loading) |
+| --- | --- | ---: |
+| [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | **15.27×** realtime |
+<!-- END GENERATED README TABLE: Speech recognition -->
+
+### Speech synthesis
+
+<!-- BEGIN GENERATED README TABLE: Speech synthesis -->
+| Model | Modes | License | Speed (excludes loading) |
+| --- | --- | --- | ---: |
+| [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | CustomVoice, VoiceDesign, voice cloning (Base) | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | RTF **0.394**; first audio after **0.201 s** (CustomVoice) |
+<!-- END GENERATED README TABLE: Speech synthesis -->
+
+### Text generation
+
+<!-- BEGIN GENERATED README TABLE: Text generation -->
+| Model | Weights | Inputs | License | Prompt processing | Single-user decode | 8-user decode |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | IQ2XXS | Text | [MIT](https://spdx.org/licenses/MIT.html) | **469.49** tok/s | **17.65 – 29.57** tok/s | **77.12** tok/s |
+| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | UD-Q4_K_XL | Text, images | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | **648.89** tok/s | **12.42 – 71.55** tok/s | **74.95 – 128.42** tok/s |
+| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | UD-Q8_K_XL | Text, images | [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) | **479.25** tok/s | **7.21 – 51.69** tok/s | **51.63 – 123.47** tok/s |
+| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | UD-Q4_K_XL | Text, images | [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/LICENSE) | **1801.01** tok/s | **28.29 – 116.93** tok/s | **125.48 – 245.81** tok/s |
+<!-- END GENERATED README TABLE: Text generation -->
+
+Prompt processing is autoregressive (AR). Decode ranges run from AR to the
+repetitive-text speculative run, the best case; mixed prose falls between the
+two, as each Benchmarks page shows. 8-user decode sums individual request rates.
+The 27B single-user peaks are the 1-user rows of its multi-user table.
+DeepSeek's 8-user cell is the AR rate because DSpark is slower there.
+
+### Video generation
+
+<!-- BEGIN GENERATED README TABLE: Video generation -->
+| Model | Modes | License | Speed |
+| --- | --- | --- | --- |
+| [MiniMax H3](docs/models/minimax-h3/README.md) | Text to video and audio | [MiniMax H3 Community (not for the US, EU, UK or Korea)](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE) | In progress |
+<!-- END GENERATED README TABLE: Video generation -->
 
 To add or maintain a model, start with the [source extension guide](docs/extensions.md).
 

@@ -103,6 +103,101 @@
     "inputs": "BF16 safetensors; text/image to embeddings",
     "guide": "docs/models/embeddinggemma-2/README.md"
   },
+  "readme": {
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://spdx.org/licenses/Apache-2.0.html"
+    },
+    "rows": [
+      {
+        "section": "Embeddings",
+        "cells": {
+          "Input": "Audio",
+          "Latency (one input)": {
+            "template": "**{0} ms** (10 s of speech, 254 tokens)",
+            "values": [
+              {
+                "bench": "audio",
+                "row": "Ten-second English speech, 254 tokens",
+                "column": "Second (ms)"
+              }
+            ]
+          },
+          "Throughput": "TODO"
+        }
+      },
+      {
+        "section": "Embeddings",
+        "cells": {
+          "Input": "Images",
+          "Latency (one input)": {
+            "template": "**{0}** (320×180 image, 269 tokens)",
+            "values": [
+              {
+                "bench": "batching",
+                "row": "1 × 1 image",
+                "column": "This PR median"
+              }
+            ]
+          },
+          "Throughput": {
+            "template": "**{0} – {1}** tokens/s",
+            "values": [
+              {
+                "bench": "batching",
+                "row": "1 × 1 image",
+                "column": "This PR tokens/s"
+              },
+              {
+                "bench": "batching",
+                "row": "16 × 1 image",
+                "column": "This PR tokens/s"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "section": "Embeddings",
+        "cells": {
+          "Input": "Text",
+          "Latency (one input)": {
+            "template": "**{0}** (404 tokens)",
+            "values": [
+              {
+                "bench": "batching",
+                "row": "1 × 1 × 128",
+                "column": "This PR median"
+              }
+            ]
+          },
+          "Throughput": {
+            "template": "**{0} – {1}** tokens/s",
+            "values": [
+              {
+                "bench": "batching",
+                "row": "1 × 1 × 128",
+                "column": "This PR tokens/s"
+              },
+              {
+                "bench": "batching",
+                "row": "16 × 8 × 128",
+                "column": "This PR tokens/s"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "section": "Embeddings",
+        "cells": {
+          "Input": "Video",
+          "Latency (one input)": "TODO",
+          "Throughput": "TODO"
+        }
+      }
+    ]
+  },
   "tests": [
     {
       "target": "embedding_gemma2_config_test",

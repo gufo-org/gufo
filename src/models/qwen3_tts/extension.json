@@ -58,6 +58,36 @@
     "inputs": "BF16 safetensors; text/reference audio to speech",
     "guide": "docs/models/qwen3-tts/README.md"
   },
+  "readme": {
+    "title": "Qwen3-TTS 1.7B",
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://spdx.org/licenses/Apache-2.0.html"
+    },
+    "rows": [
+      {
+        "section": "Speech synthesis",
+        "cells": {
+          "Modes": "CustomVoice, VoiceDesign, voice cloning (Base)",
+          "Speed (excludes loading)": {
+            "template": "RTF **{0}**; first audio after **{1}** (CustomVoice)",
+            "values": [
+              {
+                "bench": "single",
+                "row": "CustomVoice",
+                "column": "RTF"
+              },
+              {
+                "bench": "single",
+                "row": "CustomVoice",
+                "column": "First PCM audio"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
   "tests": [
     {
       "target": "qwen3_tts_config_test",

@@ -621,6 +621,65 @@
         ],
         "additionalProperties": false
       }
+    },
+    "readme": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "license": {
+          "$ref": "#/$defs/readme_license"
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "section": {
+                "enum": [
+                  "Embeddings",
+                  "Image generation",
+                  "Speech recognition",
+                  "Speech synthesis",
+                  "Text generation",
+                  "Video generation"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "guide": {
+                "type": "string",
+                "minLength": 1
+              },
+              "license": {
+                "$ref": "#/$defs/readme_license"
+              },
+              "cells": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": {
+                  "$ref": "#/$defs/readme_cell"
+                }
+              }
+            },
+            "required": [
+              "section",
+              "cells"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "license",
+        "rows"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -694,6 +753,18 @@
     },
     {
       "$ref": "#/$defs/nul_free"
+    },
+    {
+      "if": {
+        "required": [
+          "readme"
+        ]
+      },
+      "then": {
+        "required": [
+          "docs"
+        ]
+      }
     }
   ],
   "$defs": {
@@ -729,6 +800,71 @@
               "$ref": "#/$defs/nul_free"
             }
           }
+        }
+      ]
+    },
+    "readme_license": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "readme_cell": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "template": {
+              "type": "string",
+              "minLength": 1
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "bench": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "row": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "column": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "bench",
+                  "row",
+                  "column"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "template",
+            "values"
+          ],
+          "additionalProperties": false
         }
       ]
     }

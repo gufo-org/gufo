@@ -173,6 +173,10 @@ and the table says so.
    do not sum stage medians into a headline.
 6. Retained JSON goes to `docs/models/<model>/artifacts/`; raw samples,
    traces, audio, images and videos stay in the ignored top-level `artifacts/`.
+7. Run `python3 tools/ci/generate-infrastructure.py --write`. Cells that cite a
+   `BENCHMARKS.md` table update in [README.md](../../../README.md#models-and-benchmarks)
+   from its `bench:` marker; literal cells in the model's `extension.json` `readme`
+   entry need an edit by hand.
 
 ## Results-card format
 

@@ -32,11 +32,13 @@ loaded speaker encoder.
 requests after one warmup; PCM streaming is one separate check.
 RTF = request time / generated audio duration, lower is better.
 
+<!-- bench:single -->
 | Variant | Buffered WAV | RTF | First PCM audio | Complete PCM |
 | --- | ---: | ---: | ---: | ---: |
 | CustomVoice | 2.018 s | 0.394 | 0.201 s | 2.059 s |
 | VoiceDesign | 2.024 s | 0.395 | 0.201 s | 2.065 s |
 | Base ICL | 2.234 s | 0.436 | 0.345 s | 2.247 s |
+<!-- /bench -->
 
 All three variants return identical buffered/streamed PCM and repeat their
 seeded waveforms exactly. Base uses a cached 15.05-second reference clip with

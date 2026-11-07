@@ -1,5 +1,9 @@
 # Qwen3.8 Flash-Next
 
+<!-- BEGIN GENERATED WEIGHTS LICENSE -->
+Weights license: [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/LICENSE).
+<!-- END GENERATED WEIGHTS LICENSE -->
+
 Hybrid recurrent/QSA mixture-of-experts text/image model on gfx1151.
 Supported target: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards),
 Unsloth Dynamic 3.1 revision `d96201194f10`. It keeps the tensor types and

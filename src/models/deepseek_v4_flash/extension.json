@@ -84,6 +84,56 @@
     "inputs": "Flash 0731 mixed IQ2/Q2/Q8 GGUF; text",
     "guide": "docs/models/deepseek-v4-flash/README.md"
   },
+  "readme": {
+    "license": {
+      "name": "MIT",
+      "url": "https://spdx.org/licenses/MIT.html"
+    },
+    "rows": [
+      {
+        "section": "Text generation",
+        "cells": {
+          "Weights": "IQ2XXS",
+          "Inputs": "Text",
+          "Prompt processing": {
+            "template": "**{0}** tok/s",
+            "values": [
+              {
+                "bench": "single-ar",
+                "row": "0",
+                "column": "Gufo pp (tok/s)"
+              }
+            ]
+          },
+          "Single-user decode": {
+            "template": "**{0} – {1}** tok/s",
+            "values": [
+              {
+                "bench": "single-ar",
+                "row": "0",
+                "column": "Gufo tg (tok/s)"
+              },
+              {
+                "bench": "single-dspark",
+                "row": "0",
+                "column": "Gufo tg repetitive (tok/s)"
+              }
+            ]
+          },
+          "8-user decode": {
+            "template": "**{0}** tok/s",
+            "values": [
+              {
+                "bench": "multi-ar",
+                "row": "8",
+                "column": "Gufo AR (tok/s)"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
   "tests": [
     {
       "target": "deepseek_v4_flash_continuation_identity_test",

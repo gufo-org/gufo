@@ -55,6 +55,29 @@
     "inputs": "BF16 safetensors; audio to text",
     "guide": "docs/models/qwen3-asr/README.md"
   },
+  "readme": {
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://spdx.org/licenses/Apache-2.0.html"
+    },
+    "rows": [
+      {
+        "section": "Speech recognition",
+        "cells": {
+          "Speed (excludes loading)": {
+            "template": "**{0}×** realtime",
+            "values": [
+              {
+                "bench": "single",
+                "row": "Audio seconds per wall second",
+                "column": "Result"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
   "tests": [
     {
       "target": "qwen3_asr_config_test",
