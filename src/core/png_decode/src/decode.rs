@@ -1,6 +1,7 @@
 //! Decodes PNG bytes to packed RGB8 as Pillow's `convert("RGB")` does. It
 //! ignores gamma and ICC profiles and drops alpha without compositing.
 
+use std::borrow::Cow;
 use std::io::Cursor;
 
 use png::{BitDepth, ColorType, Decoder, InterlaceInfo, Reader, Transformations};
@@ -89,8 +90,47 @@ fn transformations(color: ColorType, depth: BitDepth) -> Transformations {
     }
 }
 
-fn reader(bytes: &[u8]) -> Result<Reader<Cursor<&[u8]>>, Error> {
-    let mut decoder = Decoder::new(Cursor::new(bytes));
+/// Returns the bytes without acTL, fcTL and fdAT chunks. libpng, which this
+/// decoder replaced, does not know APNG and skips them as unknown ancillary
+/// chunks, while the png crate validates them even after the default image.
+/// Only animated files pay for the copy. A malformed chunk structure stops the
+/// walk and is left for the decoder to reject.
+fn without_animation(bytes: &[u8]) -> Cow<'_, [u8]> {
+    const SIGNATURE_LEN: usize = 8;
+    let mut kept: Option<Vec<u8>> = None;
+    let mut copied = 0;
+    let mut offset = SIGNATURE_LEN;
+    while let Some(&[l0, l1, l2, l3, t0, t1, t2, t3]) = bytes.get(offset..offset + 8) {
+        let length = u32::from_be_bytes([l0, l1, l2, l3]) as usize;
+        let Some(end) = length
+            .checked_add(12)
+            .and_then(|size| offset.checked_add(size))
+            .filter(|&end| end <= bytes.len())
+        else {
+            break;
+        };
+        match &[t0, t1, t2, t3] {
+            b"acTL" | b"fcTL" | b"fdAT" => {
+                kept.get_or_insert_with(|| Vec::with_capacity(bytes.len()))
+                    .extend_from_slice(&bytes[copied..offset]);
+                copied = end;
+            }
+            b"IEND" => break,
+            _ => {}
+        }
+        offset = end;
+    }
+    match kept {
+        None => Cow::Borrowed(bytes),
+        Some(mut kept) => {
+            kept.extend_from_slice(&bytes[copied..]);
+            Cow::Owned(kept)
+        }
+    }
+}
+
+fn reader(bytes: &[u8]) -> Result<Reader<Cursor<Cow<'_, [u8]>>>, Error> {
+    let mut decoder = Decoder::new(Cursor::new(without_animation(bytes)));
     // The png crate skips the zlib Adler-32 check by default.
     decoder.ignore_checksums(false);
     decoder.set_ignore_text_chunk(true);

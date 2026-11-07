@@ -44,9 +44,6 @@ constexpr std::string_view kIend =
 constexpr std::string_view kStrayIdat =
     "libpng accepts IDAT after another chunk once the image data is complete; "
     "the png crate rejects it";
-constexpr std::string_view kFctl =
-    "libpng ignores APNG chunks; the png crate rejects an fcTL outside "
-    "the image";
 
 const std::map<std::string_view, std::string_view> kKnownDeviations{
     {"missing-adler", kNoAdler},
@@ -58,10 +55,6 @@ const std::map<std::string_view, std::string_view> kKnownDeviations{
     {"iend-bad-crc", kIend},
     {"iend-nonempty", kIend},
     {"stray-idat-after-text", kStrayIdat},
-    {"apng-fctl-out-of-bounds", kFctl},
-    {"apng-later-fctl-out-of-bounds", kFctl},
-    {"apng-first-fctl-narrow", kFctl},
-    {"apng-first-fctl-offset", kFctl},
 };
 
 struct Outcome {
@@ -284,6 +277,13 @@ Chunk Fctl(std::uint32_t sequence, std::uint32_t width, std::uint32_t height,
   data.push_back(0);
   data.push_back(0);
   return Make("fcTL", std::move(data));
+}
+
+// An fcTL with one byte changed: offset 24 is dispose_op, 25 blend_op.
+Chunk FctlWith(std::size_t offset, std::uint8_t value) {
+  Chunk chunk = Fctl(1, 8, 8, 0, 0);
+  chunk.data[offset] = value;
+  return chunk;
 }
 
 Chunk Fdat(std::uint32_t sequence, const Bytes& zlib_stream) {
@@ -916,6 +916,34 @@ void AddApngCases(Cases& cases) {
             std::vector<Chunk>{Ihdr(8, 8), Actl(2), Fctl(0, 8, 8, 0, 0),
                                Make("IDAT", good), Fctl(1, 8, 8, 4, 4),
                                Fdat(2, frame), Make("IEND")});
+  // Malformed animation chunks after a complete default image. libpng skips
+  // them all, with or without acTL.
+  const auto after_image = [&](std::vector<Chunk> animation, bool actl) {
+    std::vector<Chunk> chunks{Ihdr(8, 8)};
+    if (actl)
+      chunks.push_back(Actl(2));
+    chunks.push_back(Make("IDAT", good));
+    chunks.insert(chunks.end(), animation.begin(), animation.end());
+    chunks.push_back(Make("IEND"));
+    return chunks;
+  };
+  cases.Add("apng-fctl-bad-sequence",
+            after_image({Fctl(7, 8, 8, 0, 0), Fdat(8, frame)}, true));
+  cases.Add("apng-fctl-short",
+            after_image({Make("fcTL", Bytes(25, 0)), Fdat(2, frame)}, true));
+  cases.Add("apng-fctl-bad-dispose",
+            after_image({FctlWith(24, 9), Fdat(2, frame)}, true));
+  cases.Add("apng-fctl-bad-blend",
+            after_image({FctlWith(25, 9), Fdat(2, frame)}, true));
+  cases.Add("apng-fdat-without-fctl", after_image({Fdat(1, frame)}, true));
+  cases.Add("apng-fdat-bad-sequence",
+            after_image({Fctl(1, 8, 8, 0, 0), Fdat(5, frame)}, true));
+  cases.Add(
+      "apng-fdat-short",
+      after_image({Fctl(1, 8, 8, 0, 0), Make("fdAT", Bytes(3, 0))}, true));
+  cases.Add("apng-fctl-without-actl",
+            after_image({Fctl(7, 8, 8, 4, 4), Fdat(8, frame)}, false));
+  cases.Add("apng-actl-after-idat", after_image({Actl(1)}, false));
 }
 
 void AddOrientationCases(Cases& cases) {
