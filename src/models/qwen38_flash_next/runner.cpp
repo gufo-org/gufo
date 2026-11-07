@@ -121,7 +121,8 @@ std::optional<std::size_t> CountQwenPromptTokens(
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    bool projection_loaded) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
   const auto options = QwenChatOptions(request, max_context);
@@ -135,17 +136,35 @@ TextPreparedPrompt PrepareQwenPrompt(
           encoder && has_images ? encoder->identity() : std::string_view{},
           max_context, request.cache_prompt ? &image_cache : nullptr));
   const auto cache_prefix = prompt->stable_prefix_tokens;
-  if (prompt->images.empty())
-    return {std::move(prompt->tokens), {}, cache_prefix};
+  // While a projection vector is loaded, its per-request state leads every
+  // cache identity, including each image-prefix boundary: a prefix prefilled
+  // under one state must not be restored for a request running under the
+  // other, so cross-state requests re-prefill (the flag only reaches device
+  // control state, never the restored continuation).
+  std::vector<std::uint8_t> projection_identity;
+  if (projection_loaded)
+    projection_identity.assign(1, request.projection.value_or(false) ? 1 : 0);
+  if (prompt->images.empty()) {
+    if (!projection_loaded)
+      return {std::move(prompt->tokens), {}, cache_prefix};
+    auto context = std::make_shared<QwenImageContext>();
+    context->cache_identity = std::move(projection_identity);
+    return {std::move(prompt->tokens), std::move(context), cache_prefix};
+  }
   if (!encoder)
     throw std::invalid_argument(
         "image input requires a matching --mmproj BF16 sidecar");
+  const auto with_projection = [&](std::span<const std::uint8_t> identity) {
+    std::vector<std::uint8_t> bytes = projection_identity;
+    bytes.insert(bytes.end(), identity.begin(), identity.end());
+    return bytes;
+  };
   auto context = std::make_shared<QwenImageContext>();
-  context->cache_identity = prompt->cache_identity;
+  context->cache_identity = with_projection(prompt->cache_identity);
   for (const auto& image : prompt->images) {
-    const auto identity = prompt->IdentityForPrefix(image.grid.offset);
     context->cache_prefixes.push_back(
-        {image.grid.offset, {identity.begin(), identity.end()}});
+        {image.grid.offset,
+         with_projection(prompt->IdentityForPrefix(image.grid.offset))});
   }
   context->prompt = prompt;
   return {prompt->tokens, std::move(context), cache_prefix};
@@ -174,6 +193,9 @@ public:
   }
   void SetCancellationCheck(const CancellationCheck& check) override {
     session_->SetCancellationCheck(check);
+  }
+  void SetProjectionEnabled(bool enabled) override {
+    session_->SetProjectionEnabled(enabled);
   }
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
@@ -240,7 +262,8 @@ public:
           use_mtp_, max_context_, max_draft_tokens_,
           model_->DecodeConcurrency(),
           models::qwen38_flash_next::RopePositionPolicy(
-              model_->config().rope_scaling));
+              model_->config().rope_scaling),
+          model_->ProjectionAdapterIdentity());
     } else {
       component_identity_ = QwenFlashNextProcessIdentity(
           model_.get(), max_context_, use_mtp_, max_draft_tokens_,
@@ -289,6 +312,7 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
+                .runtime_projection = model_->ProjectionLoaded(),
                 // Sparse prefill tiles group four queries from each pass
                 // start: one selection block (compress ratio).
                 .prefill_alignment =
@@ -373,7 +397,7 @@ public:
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->tokenizer(),
                              model_->VisionEncoder(), max_context_,
-                             image_cache_);
+                             image_cache_, model_->ProjectionLoaded());
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
@@ -829,6 +853,8 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
           .mtp_model_path =
               use_mtp ? options.speculative.draft_model_path : std::string{},
           .vision_model_path = options.vision_model_path,
+          .projection_vector_path = options.projection_vector_path,
+          .projection_layers = options.projection_layers,
           .decode_concurrency =
               DecodeConcurrencyForSessions(options.session_count),
           .rope_scaling = rope_scaling,

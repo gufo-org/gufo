@@ -45,6 +45,28 @@
         "flash-next-q4"
       ],
       "help": "MTP draft model path for speculative decoding"
+    },
+    {
+      "name": "--projection-vector",
+      "type": "path",
+      "commands": [
+        "serve"
+      ],
+      "providers": [
+        "flash-next-q4"
+      ],
+      "help": "Optional llama.cpp control-vector GGUF; projects the residual stream at the steered FFN/MoE combines (off unless a request sets \"projection\": true)"
+    },
+    {
+      "name": "--projection-layers",
+      "type": "string",
+      "commands": [
+        "serve"
+      ],
+      "providers": [
+        "flash-next-q4"
+      ],
+      "help": "Steered layer range at the FFN/MoE combine boundary, LO-HI with 1 <= LO <= HI <= L-1 (default: every layer the vector carries)"
     }
   ],
   "targets": {

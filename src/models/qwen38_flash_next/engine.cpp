@@ -147,6 +147,22 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->mtp_weights_ = std::make_unique<MtpWeights>(std::move(*mtp));
   }
+  if (!options.projection_vector_path.empty()) {
+    std::string warning;
+    if (!LoadControlVector(options.projection_vector_path, c.num_layers,
+                           c.hidden_size, "qwen4exp", &m->projection_,
+                           error_msg, &warning)) {
+      return nullptr;
+    }
+    if (!SelectProjectionLayers(options.projection_layers, &m->projection_,
+                                error_msg)) {
+      return nullptr;
+    }
+    m->projection_loaded_ = true;
+    if (!warning.empty()) {
+      std::fprintf(stderr, "gufo: warning: %s\n", warning.c_str());
+    }
+  }
   m->device_ = rocm::DeviceModel::Upload(*m->weights_, *m->reader_,
                                          m->mtp_weights_.get(),
                                          m->mtp_reader_.get(), error_msg);
@@ -179,6 +195,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
           : 1;
   exec.max_speculative = exec.max_logit_rows;
   exec.max_context = options.max_context;
+  exec.projection = m->projection_loaded_ ? &m->projection_ : nullptr;
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
   if (!m->executor_) {
@@ -253,6 +270,15 @@ std::uint32_t Model::PrefillThroughCapacity() const noexcept {
 
 bool Model::HasMtp() const noexcept {
   return device_->has_mtp();
+}
+
+std::string Model::ProjectionAdapterIdentity() const {
+  if (!projection_loaded_) {
+    return "none";
+  }
+  return "projection-v1;layers=" + std::to_string(projection_.first_layer) +
+         "-" + std::to_string(projection_.last_layer) +
+         ";sha256=" + ProjectionFingerprint(projection_);
 }
 
 std::size_t Model::ExpandedQ8_0Tensors() const noexcept {
@@ -349,6 +375,14 @@ bool Session::SyncDraftVocab(std::string* error_msg) {
 }
 
 Session::~Session() = default;
+
+void Session::SetProjectionEnabled(bool enabled) {
+  session_->SetProjectionEnabled(enabled);
+}
+
+bool Session::ProjectionEnabled() const {
+  return session_->ProjectionEnabled();
+}
 
 void Session::ResetDraftPolicy() {
   if (continuation_hooks_)

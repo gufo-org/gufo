@@ -11,7 +11,8 @@ bool IsSha256Hex(std::string_view value) noexcept;
 std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
     bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
-    std::uint32_t decode_concurrency, std::string_view position_policy);
+    std::uint32_t decode_concurrency, std::string_view position_policy,
+    std::string_view adapters = "none");
 
 std::vector<std::uint8_t> QwenFlashNextProcessIdentity(
     const void* model, std::uint32_t max_context, bool use_mtp,

@@ -11,6 +11,7 @@ gufo_extension_target(
     bench_yarn.cpp
     probe.cpp
     continuation_identity.cpp
+    projection.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime

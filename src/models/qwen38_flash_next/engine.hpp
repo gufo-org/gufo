@@ -21,6 +21,7 @@
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/projection.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -49,6 +50,13 @@ struct ModelOptions {
   /// Maximum proposals per cycle; acceptance history selects the length.
   std::uint32_t max_draft_tokens = kMaxMtpDraftTokens;
   std::string vision_model_path;
+  /// Optional runtime projection vector (llama.cpp control-vector GGUF,
+  /// `direction.N` tensors). Empty leaves the feature off entirely and the
+  /// engine on today's code path.
+  std::string projection_vector_path;
+  /// Inclusive steered layer range "LO-HI" at the FFN/MoE combine boundary;
+  /// empty selects every layer the file carries (1..L-1).
+  std::string projection_layers;
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
@@ -90,6 +98,15 @@ public:
     return options_.max_context;
   }
   [[nodiscard]] bool HasMtp() const noexcept;
+  /// Whether a runtime projection vector is loaded (see ModelOptions).
+  /// Sessions start unsteered; Session::SetProjectionEnabled switches each
+  /// one on.
+  [[nodiscard]] bool ProjectionLoaded() const noexcept {
+    return projection_loaded_;
+  }
+  /// Durable-cache adapter identity: "none" without a vector, otherwise the
+  /// loaded vector's fingerprint and steered range.
+  [[nodiscard]] std::string ProjectionAdapterIdentity() const;
   /// Trunk tensors the official GGUF keeps in F32 but this artifact stores
   /// as Q8_0 (see `ExpandedQ8_0Tensors`). The official MTP sidecar ships its
   /// inject as Q8_0, so the draft block is not counted.
@@ -119,6 +136,10 @@ private:
   Model() = default;
 
   ModelOptions options_;
+  /// Loaded projection (see ModelOptions::projection_vector_path); owned
+  /// here so the executor's device table stays valid for its lifetime.
+  ProjectionVector projection_;
+  bool projection_loaded_{false};
   std::shared_ptr<core::GgufReader> reader_;
   std::shared_ptr<core::GgufReader> mtp_reader_;
   std::unique_ptr<ModelWeights> weights_;
@@ -174,6 +195,12 @@ public:
       std::string* error_msg = nullptr, double* capture_ms = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
+  /// Toggles this session's runtime projection (armed by the model's
+  /// --projection-vector option). Takes effect at the next forward; a
+  /// request that never toggles keeps the session's current state, and a
+  /// model without a loaded vector ignores the toggle entirely.
+  void SetProjectionEnabled(bool enabled);
+  [[nodiscard]] bool ProjectionEnabled() const;
   struct DecodeResult {
     std::vector<std::int32_t> tokens;
     bool stop{false};

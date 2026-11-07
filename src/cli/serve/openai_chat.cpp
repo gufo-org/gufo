@@ -991,6 +991,14 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     }
     output->chat.return_progress = progress->as_bool();
   }
+  if (const json::Value* projection = body.find("projection");
+      projection != nullptr && !projection->is_null()) {
+    if (!projection->is_bool()) {
+      return Error(400, "Bad Request", "'projection' must be a boolean",
+                   "invalid_projection");
+    }
+    output->chat.projection = projection->as_bool();
+  }
   if (const json::Value* options = body.find("stream_options");
       options != nullptr && !options->is_null()) {
     if (!options->is_object()) {
