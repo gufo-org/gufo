@@ -110,6 +110,10 @@ public:
   /// Caps wide copy verification (Executor::LimitCopyRows); call before any
   /// session is created.
   void LimitCopyRows(std::uint32_t rows) noexcept;
+  /// Splits the following prefill passes into at most `groups` layer groups
+  /// and calls `yield` between them, where other sessions may decode. One
+  /// group, or an empty `yield`, restores unsplit passes.
+  void SetPrefillYield(std::size_t groups, std::function<void()> yield) const;
   [[nodiscard]] const std::shared_ptr<qwen::vision::Encoder>& VisionEncoder()
       const noexcept {
     return vision_;

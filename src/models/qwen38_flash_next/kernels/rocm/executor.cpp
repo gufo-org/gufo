@@ -953,6 +953,7 @@ Executor::~Executor() {
     (void)ngram_->WaitRead();
   }
   (void)hipFree(batch_logits_);
+  (void)hipFree(hook_park_);
   (void)hipFree(wide_controls_);
   for (float* p : wide_allocations_)
     (void)hipFree(p);
@@ -2501,6 +2502,9 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
   }
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
+  // Rows a previous pass prefetched are ready by the PLE layer; any others
+  // are read now, and that layer waits for them.
+  ple_cold_ = true;
   if ((prefetch_.pending || prefetch_.ready) && !speculative &&
       session.ngram_ == prefetch_.before) {
     // A cache checkpoint or another step budget can end this chunk before
@@ -2518,8 +2522,10 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
             c, session.ngram_, tokens,
             std::span<std::uint32_t>(host_rows_.data(), n * c.ple_heads));
       }
-      if (shared == tokens.size())
+      if (shared == tokens.size()) {
+        ple_cold_ = false;
         return true;
+      }
       // Only one table read runs at a time: finish the prefetch, which had a
       // whole chunk to complete, then read the rows past it.
       FinishPrefetch();
@@ -2635,8 +2641,15 @@ bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
     return false;
   }
   if (!embeddings_ready && !prefetch_next_.empty()) {
-    PrefetchPle(session, prefetch_next_);
-    prefetch_next_ = {};
+    // A decode between layer groups first finishes the table read in
+    // flight, so a pass that yields starts this one after its first decode
+    // round (RunLayerHook); it still has most of the pass to complete.
+    if (hook_ && prefill_phase) {
+      prefetch_deferred_ = true;
+    } else {
+      PrefetchPle(session, prefetch_next_);
+      prefetch_next_ = {};
+    }
   }
   const std::uint32_t hc_dim = c.HcDim();
   Q8Input emb;
@@ -3415,11 +3428,16 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::string* error_msg,
                        std::span<PrefillCheckpoint* const> checkpoints,
                        std::span<const std::int32_t> next) const {
-  // Only this call's PLE layer may start the prefetch of `next`.
+  // Only this call's PLE layer, or its first layer hook, may start the
+  // prefetch of `next`.
   struct NextHint {
     std::span<const std::int32_t>& hint;
-    ~NextHint() { hint = {}; }
-  } next_hint{prefetch_next_};
+    bool& deferred;
+    ~NextHint() {
+      hint = {};
+      deferred = false;
+    }
+  } next_hint{prefetch_next_, prefetch_deferred_};
   if (mode == ForwardMode::kPrefill) {
     prefetch_next_ = next;
   }
@@ -3591,6 +3609,153 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   return true;
 }
 
+std::vector<std::uint32_t> Executor::LayerHookBoundaries(
+    std::size_t groups) const {
+  const Config& c = config();
+  // The pass reads its PLE rows at that layer; until then the table read's
+  // pinned buffers belong to it.
+  const std::uint32_t first =
+      c.ple_layer >= 0 ? static_cast<std::uint32_t>(c.ple_layer) : 0;
+  std::vector<std::uint32_t> after;
+  for (std::size_t k = 1; k < groups; ++k) {
+    const auto layer =
+        static_cast<std::uint32_t>(k * c.num_layers / groups) - 1;
+    if (layer >= first && layer + 1 < c.num_layers &&
+        (after.empty() || after.back() != layer))
+      after.push_back(layer);
+  }
+  return after;
+}
+
+bool Executor::RunLayerHook(Session& session, std::string* error_msg) const {
+  // The host may read pinned buffers this pass still copies from (the PLE
+  // rows), and `between` rewrites them: finish the queued layers first.
+  if (!Check(hipStreamSynchronize(stream_), "layer hook sync", error_msg))
+    return false;
+  // Everything that carries one layer's output into the next: the scratch
+  // views and the producer bookkeeping.
+  const Scratch base = s_;
+  const auto xn_half = xn_half_;
+  const auto inject_parts = inject_parts_;
+  const auto inject_fused = inject_fused_;
+  const auto q8_slot = q8_slot_;
+  const auto xn_ready = xn_q8_ready_;
+  const auto mixed_ready = mixed_q8_ready_;
+  const auto pending = pending_combine_;
+  const auto moe_pending = moe_pending_;
+  const auto defer = defer_residual_;
+  const auto deferred = res_deferred_;
+  const auto shexp_half = shexp_half_ready_;
+  const auto selected = selected_logits_;
+  const auto wide_rows = wide_rows_;
+  const auto prefetch_next = prefetch_next_;
+  // A decode's Forward clears both on return.
+  const bool prefetch_deferred = prefetch_deferred_;
+  const auto routed_max_rows = routed_max_rows_;
+  const auto routed_n_tiles = routed_n_tiles_;
+  const auto routed_wide_tiles = routed_wide_tiles_;
+  const auto routed_tile_rows = routed_tile_rows_;
+  const auto routed_tile_cols = routed_tile_cols_;
+  const bool phase = prefill_phase;
+  // Decode rows, MTP verification and batched chains included, stay below
+  // kHookParkedRows of the shared scratch. Park those rows of the buffers
+  // this pass still reads: the residual stream, the inject parts, the wide
+  // combine's norm in xn_half/xn_q8t (otherwise xn), and a deferred residual
+  // update in block_out/hc_defer_w.
+  const Config& c = config();
+  constexpr std::size_t kParked = kHookParkedRows;
+  struct Parked {
+    void* buffer;
+    std::size_t bytes;
+  };
+  std::vector<Parked> parked{
+      {s_.res, kParked * c.HcDim() * sizeof(float)},
+      {s_.inject,
+       kParked * c.hc_count * HcInjectParts(c.hidden_size) * sizeof(float)}};
+  if (xn_half) {
+    parked.push_back({s_.xn_half, kParked * c.HcDim() * sizeof(__half)});
+    parked.push_back({s_.xn_q8t, Q8TiledBytes(kParked, c.HcDim())});
+  } else {
+    parked.push_back({s_.xn, kParked * c.HcDim() * sizeof(float)});
+  }
+  if (deferred) {
+    parked.push_back({s_.block_out, kParked * c.hidden_size * sizeof(float)});
+    parked.push_back({s_.hc_defer_w, kParked * c.hc_count * sizeof(float)});
+  }
+  if (hook_park_ == nullptr) {
+    const std::size_t most =
+        kParked * (c.HcDim() * (sizeof(float) + sizeof(__half)) +
+                   c.hc_count * HcInjectParts(c.hidden_size) * sizeof(float) +
+                   c.hidden_size * sizeof(float) + c.hc_count * sizeof(float)) +
+        Q8TiledBytes(kParked, c.HcDim());
+    if (!Check(hipMalloc(&hook_park_, most), "layer hook park", error_msg))
+      return false;
+  }
+  auto* at = static_cast<std::uint8_t*>(hook_park_);
+  for (const auto& p : parked) {
+    if (!Check(hipMemcpyAsync(at, p.buffer, p.bytes, hipMemcpyDeviceToDevice,
+                              stream_),
+               "layer hook park", error_msg))
+      return false;
+    at += p.bytes;
+  }
+  // A pass ends with no deferred work; hand `between` that state. Moving the
+  // hook out also keeps a decode inside it from yielding again.
+  inject_fused_ = nullptr;
+  xn_q8_ready_ = {};
+  mixed_q8_ready_ = {};
+  pending_combine_ = {};
+  defer_residual_ = false;
+  res_deferred_ = false;
+  shexp_half_ready_ = false;
+  auto hook = std::move(hook_);
+  hook_ = {};
+  {
+    // Decode entry points other than Forward rely on the decode phase
+    // outside any pass; prefill routes would also grow arenas a graph
+    // capture forbids.
+    PrefillPhase decode_phase(false);
+    hook();
+  }
+  hook_ = std::move(hook);
+  prefill_phase = phase;
+  UseScratch(base);
+  at = static_cast<std::uint8_t*>(hook_park_);
+  for (const auto& p : parked) {
+    if (!Check(hipMemcpyAsync(p.buffer, at, p.bytes, hipMemcpyDeviceToDevice,
+                              stream_),
+               "layer hook unpark", error_msg))
+      return false;
+    at += p.bytes;
+  }
+  xn_half_ = xn_half;
+  inject_parts_ = inject_parts;
+  inject_fused_ = inject_fused;
+  q8_slot_ = q8_slot;
+  xn_q8_ready_ = xn_ready;
+  mixed_q8_ready_ = mixed_ready;
+  pending_combine_ = pending;
+  moe_pending_ = moe_pending;
+  defer_residual_ = defer;
+  res_deferred_ = deferred;
+  shexp_half_ready_ = shexp_half;
+  selected_logits_ = selected;
+  wide_rows_ = wide_rows;
+  prefetch_next_ = prefetch_next;
+  routed_max_rows_ = routed_max_rows;
+  routed_n_tiles_ = routed_n_tiles;
+  routed_wide_tiles_ = routed_wide_tiles;
+  routed_tile_rows_ = routed_tile_rows;
+  routed_tile_cols_ = routed_tile_cols;
+  UseYarn(session);
+  prefetch_deferred_ = false;
+  if (prefetch_deferred) {
+    PrefetchPle(session, prefetch_next_);
+    prefetch_next_ = {};
+  }
+  return true;
+}
+
 bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            std::uint32_t n_logits, bool download_logits,
                            bool speculative, bool sparse,
@@ -3740,6 +3905,13 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
       return false;
     }
     normed = next_norm != nullptr;
+    // A pass whose n-gram rows were not prefetched (a prompt's first) waits
+    // for the table read at the PLE layer: yield right after it as well.
+    if (hook_ && prefill_phase && il + 1 < c.num_layers &&
+        (std::ranges::binary_search(hook_layers_, il) ||
+         (ple_cold_ && c.IsPleLayer(il))) &&
+        !RunLayerHook(session, error_msg))
+      return false;
   }
   if (end_layer < c.num_layers) {
     return true;
