@@ -38,7 +38,8 @@ bool Check(hipError_t err, const char* what, std::string* error_msg) {
   if (err == hipSuccess) {
     return true;
   }
-  AssignError(error_msg, std::string(what) + ": " + hipGetErrorString(err));
+  if (error_msg != nullptr)
+    AssignError(error_msg, std::string(what) + ": " + hipGetErrorString(err));
   return false;
 }
 
@@ -3044,15 +3045,21 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // The shared expert (gated by the last router row) does not depend on
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
-  // A wide batch runs them on the side stream beside the routed experts,
-  // which leave compute idle while they stream expert weights. The shared
+  // The side stream runs them beside the routed experts. Any gain depends on
+  // the workload: both paths read weights and can contend for DRAM. The shared
   // expert writes its own scratch and may quantize x into s_.x_q8t, so no
   // main-stream work may use s_.x_q8t before JoinSide.
   // Only the Q8_0 shared expert overlaps: its kernels take stream_, while
   // the BF16, F16 and F32 routes go through BLAS handles bound to the main
   // stream.
-  const bool overlap = ExpertMatrixRows(n_tokens) && !last_only &&
-                       l.shexp_gate.type == GgmlType::kQ8_0 &&
+  // A decode pass replays from a captured graph, so the fork and join below
+  // must stay inside the capture region: side_stream_ joins the capture
+  // through side_start_, and the main stream joins back through side_done_.
+  // Extend the existing wide/prefill overlap only to 1-8 decode rows. The
+  // intermediate 9-32-row route keeps its previous serial dispatch until it
+  // is separately qualified. Rows are the total token rows, not sessions.
+  const bool overlap = (ExpertMatrixRows(n_tokens) || n_tokens <= kVecBatch) &&
+                       !last_only && l.shexp_gate.type == GgmlType::kQ8_0 &&
                        l.shexp_up.type == GgmlType::kQ8_0 &&
                        l.shexp_down.type == GgmlType::kQ8_0;
   const hipStream_t main = stream_;
@@ -3063,8 +3070,53 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
                "side stream wait", error_msg)) {
       return false;
     }
-    stream_ = side_stream_;
+    // Waiting on an event recorded inside the capture is what makes the side
+    // stream part of it. This checks the fork, not the replayed arithmetic:
+    // exact eager/replay comparisons must also cover the side-stream writes.
+    if (capturing_) {
+      hipStreamCaptureStatus side_status = hipStreamCaptureStatusNone;
+      if (!Check(hipStreamIsCapturing(side_stream_, &side_status),
+                 "side stream capture query", error_msg) ||
+          side_status != hipStreamCaptureStatusActive) {
+        AssignError(error_msg,
+                    "shared-expert overlap did not join the graph capture");
+        return false;
+      }
+    }
   }
+  // Restore the launch stream and publish any queued side work even when a
+  // shared-expert launch throws. The join guard runs after this scope unwinds.
+  struct JoinGuard {
+    const Executor* executor;
+    ~JoinGuard() { (void)executor->JoinSide(nullptr); }
+  } join_guard{this};
+  struct SharedScope {
+    const Executor* executor;
+    hipStream_t main;
+    bool overlap;
+    bool finished{false};
+    hipError_t Finish() noexcept {
+      executor->stream_ = main;
+      if (finished)
+        return hipSuccess;
+      finished = true;
+      if (!overlap)
+        return hipSuccess;
+      const auto status =
+          hipEventRecord(executor->side_done_, executor->side_stream_);
+      if (status == hipSuccess) {
+        executor->side_pending_ = true;
+      } else if (!executor->capturing_) {
+        // Capture cleanup discards recorded work; only eager work needs a
+        // host wait when no completion event could be recorded.
+        (void)hipStreamSynchronize(executor->side_stream_);
+      }
+      return status;
+    }
+    ~SharedScope() { (void)Finish(); }
+  } shared_scope{this, main, overlap};
+  if (overlap)
+    stream_ = side_stream_;
   const auto shared_expert = [&] {
     shexp_half_ready_ = false;
     if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
@@ -3084,22 +3136,8 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
     return Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens, error_msg);
   };
   const bool shared_ok = shared_expert();
-  stream_ = main;
-  if (overlap) {
-    if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
-               error_msg)) {
-      // Nothing to join: wait for the whole side stream instead.
-      (void)hipStreamSynchronize(side_stream_);
-      return false;
-    }
-    side_pending_ = true;
-  }
-  // Every exit, including errors, orders the main stream after the shared
-  // expert: its side-stream writes must not race the next pass.
-  struct JoinGuard {
-    const Executor* executor;
-    ~JoinGuard() { (void)executor->JoinSide(nullptr); }
-  } join_guard{this};
+  if (!Check(shared_scope.Finish(), "side stream join", error_msg))
+    return false;
   if (!shared_ok) {
     return false;
   }
@@ -3130,8 +3168,10 @@ bool Executor::JoinSide(std::string* error_msg) const {
   if (!side_pending_)
     return true;
   side_pending_ = false;
-  return Check(hipStreamWaitEvent(stream_, side_done_, 0),
-               "side stream join wait", error_msg);
+  const auto status = hipStreamWaitEvent(stream_, side_done_, 0);
+  if (status != hipSuccess && !capturing_)
+    (void)hipStreamSynchronize(side_stream_);
+  return Check(status, "side stream join wait", error_msg);
 }
 
 bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
@@ -3378,10 +3418,30 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
               "graph capture", error_msg)) {
         return false;
       }
+      // Overlapped launches verify that their side stream joined this
+      // capture (see Moe). An exception must end the HIP capture too, not
+      // merely clear our flag, or subsequent requests inherit a live capture.
+      struct CaptureScope {
+        const Executor* executor;
+        hipStream_t origin;
+        bool active{true};
+        ~CaptureScope() {
+          executor->capturing_ = false;
+          if (active) {
+            hipGraph_t abandoned = nullptr;
+            (void)hipStreamEndCapture(origin, &abandoned);
+            if (abandoned != nullptr)
+              (void)hipGraphDestroy(abandoned);
+          }
+        }
+      } capture_scope{this, stream_};
+      capturing_ = true;
       const bool ok = body();
-      if (!Check(hipStreamEndCapture(stream_, &captured), "graph capture end",
-                 error_msg) ||
-          !ok) {
+      capturing_ = false;
+      const auto capture_status =
+          hipStreamEndCapture(capture_scope.origin, &captured);
+      capture_scope.active = false;
+      if (!Check(capture_status, "graph capture end", error_msg) || !ok) {
         if (captured != nullptr) {
           (void)hipGraphDestroy(captured);
         }
