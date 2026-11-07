@@ -6,6 +6,7 @@ gufo_extension_target(
     image.cpp
     weights.cpp
     tokenizer.cpp
+    lora.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime

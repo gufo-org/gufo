@@ -239,6 +239,19 @@ void ValidateRequest(const ext::ImageRequest& request) {
   if (pixels > core::kMaxImagePixels)
     throw std::invalid_argument(
         "reference images exceed 32 megapixels combined");
+  if (request.loras.size() > 16)
+    throw std::invalid_argument("image requests apply at most 16 LoRAs");
+  for (std::size_t i = 0; i < request.loras.size(); ++i) {
+    const auto& lora = request.loras[i];
+    if (lora.name.empty())
+      throw std::invalid_argument("LoRA name must not be empty");
+    for (std::size_t j = 0; j < i; ++j)
+      if (request.loras[j].name == lora.name)
+        throw std::invalid_argument("duplicate LoRA " + lora.name);
+    if (!std::isfinite(lora.scale) || std::abs(lora.scale) > 10)
+      throw std::invalid_argument(
+          "LoRA scale must be finite and at most 10 in magnitude");
+  }
 }
 
 struct Parsed {
@@ -339,7 +352,7 @@ Parsed Multipart(const HttpRequest& request) {
       if (data.size() > (64U << 10U))
         throw std::invalid_argument("multipart field too large");
       if (name == "n" || name == "seed" || name == "steps" ||
-          name == "stream") {
+          name == "stream" || name == "loras") {
         parsed.fields[name] = ParseJson(data);
       } else {
         parsed.fields[name] = std::string(data);
@@ -375,16 +388,79 @@ std::string String(const json::Value& fields, const char* name,
   return value->str();
 }
 
+std::vector<ext::ImageLora> ParseLoras(const json::Value& fields,
+                                       const ImageService& service) {
+  const auto* value = fields.find("loras");
+  if (!value)
+    return service.loras().defaults;
+  if (!value->is_array())
+    throw std::invalid_argument("loras must be an array");
+  std::vector<ext::ImageLora> loras;
+  for (const auto& entry : value->items()) {
+    if (!entry.is_object())
+      throw std::invalid_argument("loras entries must be objects");
+    for (const auto& [key, member] : entry.members()) {
+      (void)member;
+      if (key != "name" && key != "scale")
+        throw std::invalid_argument("unsupported LoRA parameter: " + key);
+    }
+    const auto* name = entry.find("name");
+    if (!name || !name->is_string())
+      throw std::invalid_argument("LoRA name must be a string");
+    if (!service.HasLora(name->str()))
+      throw std::invalid_argument("unknown LoRA adapter: " + name->str());
+    auto& lora = loras.emplace_back(ext::ImageLora{name->str()});
+    if (const auto* scale = entry.find("scale")) {
+      if (!scale->is_number())
+        throw std::invalid_argument("LoRA scale must be a number");
+      // Converting an out-of-range double to float is undefined.
+      const double value = scale->as_double();
+      if (!std::isfinite(value) || std::abs(value) > 10)
+        throw std::invalid_argument(
+            "LoRA scale must be finite and at most 10 in magnitude");
+      lora.scale = static_cast<float>(value);
+    }
+  }
+  return loras;
+}
+
+std::string LoraList(const std::vector<ext::ImageLora>& loras) {
+  std::ostringstream list;
+  for (const auto& lora : loras)
+    if (lora.scale != 0)
+      list << (list.tellp() > 0 ? "," : "") << lora.name << ':' << lora.scale;
+  return list.tellp() > 0 ? list.str() : "none";
+}
+
 }  // namespace
 
 ImageService::ImageService(const std::filesystem::path& root,
                            std::string model_id, Runner runner,
-                           std::vector<std::string> model_aliases)
+                           std::vector<std::string> model_aliases,
+                           ImageLoraOptions loras)
     : model_id_(std::move(model_id)),
       model_aliases_(std::move(model_aliases)),
-      runner_(std::move(runner)) {
+      runner_(std::move(runner)),
+      loras_(std::move(loras)) {
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
+  for (const auto& [name, path] : loras_.files) {
+    (void)path;
+    if (name.empty() || name.size() > 64 ||
+        name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs"
+                               "tuvwxyz0123456789._-") != std::string::npos)
+      throw std::invalid_argument("LoRA name '" + name +
+                                  "' must be 1-64 of [A-Za-z0-9._-]");
+    if (!lora_info_.emplace(name, ext::ImageLoraInfo{}).second)
+      throw std::invalid_argument("duplicate --lora name '" + name + "'");
+  }
+  for (const auto& lora : loras_.defaults)
+    if (!HasLora(lora.name))
+      throw std::invalid_argument("--lora-default names unknown adapter '" +
+                                  lora.name + "'");
+  Request defaults;
+  defaults.loras = loras_.defaults;
+  ValidateRequest(defaults);
   if (!runner_) {
     const auto* provider = ext::ProbeImageProvider(root.string());
     if (!provider) {
@@ -403,6 +479,16 @@ ImageService::ImageService(const std::filesystem::path& root,
           "failed to create runner for " + root.string() +
           (create_error.empty() ? "" : ": " + create_error));
     }
+    for (const auto& [name, path] : loras_.files) {
+      const auto& info = lora_info_[name] =
+          model_->AddLora(name, path.string());
+      Logger::Info("image", "event=lora_registered name=" + name +
+                                " file=" + path.filename().string() +
+                                " format=" + info.format +
+                                " targets=" + std::to_string(info.targets) +
+                                " rank=" + std::to_string(info.min_rank) + '-' +
+                                std::to_string(info.max_rank));
+    }
     runner_ = [this](const Request& request,
                      const CancellationCheck& cancelled) {
       return model_->Generate(request, cancelled);
@@ -411,6 +497,18 @@ ImageService::ImageService(const std::filesystem::path& root,
 }
 
 ImageService::~ImageService() = default;
+
+bool ImageService::HasLora(std::string_view name) const {
+  return lora_info_.contains(name);
+}
+
+const ext::ImageLoraInfo& ImageService::lora_info(std::string_view name) const {
+  return lora_info_.find(name)->second;
+}
+
+std::vector<ext::ImageLora> ImageService::ActiveLoras() const {
+  return model_ ? model_->ActiveLoras() : std::vector<ext::ImageLora>{};
+}
 
 ImageService::Result ImageService::Generate(
     const Request& request, const CancellationCheck& cancelled) {
@@ -503,6 +601,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
         Number(fields, "seed",
                (static_cast<std::uint64_t>(entropy()) << 21) ^ entropy(), 0,
                (1ULL << 53) - 1);
+    generation.loras = ParseLoras(fields, service);
     const auto count = Number(fields, "n", 1, 1, 10);
     ValidateRequest(generation);
     auto body = json::Value::object();
@@ -528,8 +627,11 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
               << " seed=" << generation.seed << " size=" << generation.width
               << 'x' << generation.height
               << " references=" << generation.images.size()
-              << " steps=" << result.metrics.steps
-              << " prompt_ms=" << result.metrics.prompt_ms
+              << " steps=" << result.metrics.steps;
+      if (!service.loras().files.empty())
+        details << " loras=" << LoraList(generation.loras)
+                << " lora_ms=" << result.metrics.lora_ms;
+      details << " prompt_ms=" << result.metrics.prompt_ms
               << " denoise_ms=" << result.metrics.denoise_ms
               << " vae_ms=" << result.metrics.vae_ms
               << " total_ms=" << result.metrics.total_ms
@@ -548,6 +650,50 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
   } catch (const std::exception& error) {
     return Error(500, error.what(), "image_generation_failed");
   }
+}
+
+HttpResponse HandleImageLorasRequest(const HttpRequest& request,
+                                     const ImageService& service) {
+  if (request.method != "GET")
+    return Error(400, "/sdapi/v1/loras requires GET", "invalid_method");
+  const auto active = service.ActiveLoras();
+  const auto scale = [](const std::vector<ext::ImageLora>& loras,
+                        const std::string& name) -> json::Value {
+    for (const auto& lora : loras)
+      if (lora.name == name) {
+        // Shortest float text, so 0.8 is listed as 0.8.
+        char text[32];
+        const auto end =
+            std::to_chars(text, text + sizeof(text), lora.scale).ptr;
+        double value = lora.scale;
+        std::from_chars(text, end, value);
+        return value;
+      }
+    return nullptr;
+  };
+  auto body = json::Value::array();
+  for (const auto& [name, path] : service.loras().files) {
+    const auto& info = service.lora_info(name);
+    auto metadata = json::Value::object();
+    metadata["format"] = info.format;
+    metadata["targets"] = info.targets;
+    metadata["rank"] =
+        std::to_string(info.min_rank) + '-' + std::to_string(info.max_rank);
+    auto item = json::Value::object();
+    item["name"] = name;
+    item["alias"] = name;
+    item["path"] = path.filename().string();
+    item["metadata"] = std::move(metadata);
+    item["default_scale"] = scale(service.loras().defaults, name);
+    item["active_scale"] = scale(active, name);
+    body.push_back(std::move(item));
+  }
+  return {.status = 200,
+          .reason = "OK",
+          .body = body.dump(),
+          .headers = {{"Content-Type", "application/json"}},
+          .streaming_body = {},
+          .log_details = {}};
 }
 
 }  // namespace gufo::server
