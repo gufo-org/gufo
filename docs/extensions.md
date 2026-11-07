@@ -165,6 +165,33 @@ factory implements the public runner contract and reports errors through that
 contract. CPU-only registration retains probe/resolve support with unavailable
 execution factories where appropriate.
 
+## A community example: `flint-gufo-extension`
+
+The [Flint 40B repository](https://github.com/brunobarbosaux-ai/flint-gufo-extension)
+is a community-maintained external implementation. It adapts a model
+implementation originally developed in a Gufo fork to the external contract and
+records that provenance and license chain in its third-party notices. The
+examples here refer to revision
+`6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85`:
+
+| Part | What to read |
+| --- | --- |
+| Manifest and target layout | [`extension.json`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/extension.json), [`extension.cmake`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/extension.cmake) |
+| Host registration and artifact probe | [`extension.cpp`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/extension.cpp), [`probe.cpp`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/probe.cpp) |
+| Text provider, runner and CLI drivers | [`provider.cpp`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/provider.cpp), [`runner.cpp`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/runner.cpp) |
+| Component-cache continuation | [`continuation_adapter.cpp`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/continuation_adapter.cpp) |
+| Published limitations and quality evidence | [`docs/QUALITY.md`](https://github.com/brunobarbosaux-ai/flint-gufo-extension/blob/6dc4ce0f8889e69fe530dcb5ad66a44aabc4fb85/docs/QUALITY.md) |
+
+Its `flint` extension contributes one text provider over a `gguf:flint` artifact
+key, with vendored kernels namespaced under `gufo::vendor::*`. It is a worked
+example of the reasoning contracts above: the model frames reasoning with a
+literal XML opener/closer rather than control tokens, so the runner overrides
+`ReasoningDelimiters()` and the tokenizer's control-token handling for budget
+enforcement, and sets the sampling defaults for both the descriptor and the
+provider from one function. Its quality report separates passing checks from
+comparisons against a reference recording it could not reproduce, and states
+its open items.
+
 ## Implement the model contract
 
 Choose the capability interface first:
