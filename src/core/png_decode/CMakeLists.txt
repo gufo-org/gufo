@@ -16,20 +16,14 @@ set(cargo_profile "$<IF:$<CONFIG:Debug>,dev,$<IF:$<CONFIG:RelWithDebInfo>,${carg
 set(cargo_profile_dir "$<IF:$<CONFIG:Debug>,debug,$<IF:$<CONFIG:RelWithDebInfo>,${cargo_optimized_profile},release>>")
 set(png_decode_filename "${CMAKE_STATIC_LIBRARY_PREFIX}gufo_png_decode${CMAKE_STATIC_LIBRARY_SUFFIX}")
 set(png_decode_library "${cargo_target_dir}/${cargo_profile_dir}/${png_decode_filename}")
-file(GLOB_RECURSE png_decode_sources CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/*.rs")
 
-# Let Cargo check compiler/environment changes even when the archive exists.
-# Cargo's own dependency tracking keeps unchanged builds inexpensive.
+# A custom target runs on every build, so Cargo, not CMake, decides what to
+# rebuild from sources, manifests and the toolchain. Unchanged builds stay cheap.
 add_custom_target(gufo_png_decode_cargo
   COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${cargo_target_dir}"
     "${CARGO_EXECUTABLE}" build --profile "${cargo_profile}" --locked
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   BYPRODUCTS "${png_decode_library}"
-  DEPENDS ${png_decode_sources}
-    "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock"
-    "${PROJECT_SOURCE_DIR}/rust-toolchain.toml"
   COMMENT "Building the Rust PNG decoder (${cargo_profile})"
   VERBATIM)
 
