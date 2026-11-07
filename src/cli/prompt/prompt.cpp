@@ -411,7 +411,8 @@ int RunPrompt(std::span<const char* const> args) {
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  auto reader_owner = gufo::core::GgufReader::OpenFile(
+      opt.model_path, &err, {.allow_unsized_tensors = true});
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
@@ -422,6 +423,12 @@ int RunPrompt(std::span<const char* const> args) {
       std::move(reader_owner));
 
   const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+    std::cerr << "Error loading GGUF model '" << opt.model_path
+              << "': " << reader->UnsizedTensorError() << "\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   if (provider == nullptr || provider->prompt_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for prompt\n";
     PrintModelLoadTime(model_load_start, false);
@@ -464,7 +471,8 @@ int RunChat(std::span<const char* const> args) {
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  auto reader_owner = gufo::core::GgufReader::OpenFile(
+      opt.model_path, &err, {.allow_unsized_tensors = true});
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
@@ -475,6 +483,12 @@ int RunChat(std::span<const char* const> args) {
       std::move(reader_owner));
 
   const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+    std::cerr << "Error loading GGUF model '" << opt.model_path
+              << "': " << reader->UnsizedTensorError() << "\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   if (provider == nullptr || provider->chat_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for chat\n";
     PrintModelLoadTime(model_load_start, false);

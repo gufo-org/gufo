@@ -858,11 +858,19 @@ struct TextProvider {
   TextPromptDriver prompt_driver = nullptr;
   TextChatDriver chat_driver = nullptr;
   TextSamplingDefaultsProbe sampling_defaults = nullptr;
+  /// Whether `probe_gguf` may see a GGUF with tensors core cannot size
+  /// (`core::GgufTensorInfo::sized`), such as an extension's own
+  /// quantization. A provider that sets it loads those tensors itself from
+  /// their `data` and reserved `size_bytes`; the others never probe such a
+  /// file.
+  bool accepts_unsized_tensors = false;
 };
 
 void RegisterTextProvider(TextProvider provider);
 const TextProvider* FindTextProvider(std::string_view id);
 const TextProvider* ProbeTextProvider(std::string_view model_root);
+/// The first provider whose `probe_gguf` accepts `reader`, skipping providers
+/// without `accepts_unsized_tensors` when the file has unsized tensors.
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader);
 
 void RegisterToolDialect(ToolDialect dialect);
