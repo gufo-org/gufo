@@ -256,6 +256,9 @@ template<typename T>
 /// Preallocated, zero-allocation GPU execution arena on gfx1151.
 class QwenGpuArena {
 public:
+  /// Rows of one prompt pass, or the context when it is shorter.
+  static constexpr std::uint32_t kMaxPromptBatch = 4096;
+
   explicit QwenGpuArena(
       const core::ModelConfig& config, std::uint32_t max_context = 4096,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
@@ -578,6 +581,11 @@ public:
     cancellation_check_ = std::move(check);
     vision_input_.SetCancellationCheck(cancellation_check_);
   }
+  /// Splits the following prompt passes into at most `groups` layer groups
+  /// of about equal depth and calls `yield` between them, once the queued
+  /// layers have finished; other sessions may decode there on their own
+  /// executors. One group, or an empty `yield`, restores unsplit passes.
+  void SetPrefillYield(std::size_t groups, std::function<void()> yield);
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
   void ConfigureVision(
@@ -611,6 +619,8 @@ private:
   void PrefillLayerCheckpoint(std::uint32_t layer);
   std::function<bool()> cancellation_check_;
   std::array<hipEvent_t, 2> prefill_events_{};
+  std::vector<std::uint32_t> yield_layers_;  ///< yield before these, ascending
+  std::function<void()> yield_;
   void CheckReset() const {
     if (reset_failure_)
       std::rethrow_exception(reset_failure_);
