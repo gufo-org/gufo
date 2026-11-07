@@ -11,6 +11,7 @@ weights and DSpark sidecar are [pinned](artifacts/model-identities.json).
 | Sparse-indexer boundary | DSpark C1 and AR C2: 0/128 token differences, bit-identical full logits |
 | Reproducibility | 1280/1280 choices and 20 full-logit vectors repeat exactly |
 | Sampling / sessions | p/q acceptance, residual correction, seeded replay, EOS/cancellation, three-turn continuation and disk restore pass |
+| Official continuations | `ds4.target` limit: NLL ≤ 0.407 and ≥ 53/100 first tokens; ROCm 10.1 scores 0.4026 and 59 |
 | Optimized versus Debug | **33/2327** greedy choices differ |
 | Historical capability set | **53/75** correct; 22 failures, no execution errors, nine length finishes |
 
@@ -21,8 +22,32 @@ Evidence: [DSpark sampling/replay](artifacts/dspark-sampling.json),
 [formula audit](artifacts/prefill-formula-audit.json).
 Gufo-path agreement cannot detect shared target errors. Sampled DSpark need not
 match AR's same-seed sequence; replay requires the same execution configuration
-and schedule. The build-sensitive target differences remain under investigation.
-Ask before rerunning the 75-question capability set.
+and schedule. Ask before rerunning the 75-question capability set.
+
+## Target quality limit
+
+`ds4.target` first compares the SHA-256 of `GUFO_DEEPSEEK_V4_FLASH_MODEL` with
+the pinned target file. It then scores the 100 official continuations, 2,313
+teacher-forced tokens from the hosted model, with ordinary decoding. The
+token-weighted NLL must be at most 0.407, and at least 53 of the 100 first
+tokens must match. Scoring takes about 3.5 minutes on gfx1151.
+
+| Build | NLL | First tokens |
+| --- | ---: | ---: |
+| Gufo, September 11, ROCm 7.2.3 | 0.3994 | 56 |
+| Gufo `f86cd0d9`, ROCm 7.2.3 | 0.4006 | 56 |
+| Gufo `211dba49`, ROCm 10.1 | 0.4026 | 59 |
+| antirez/ds4 `6289c516` | 0.4034 | 54 |
+| Rejected compressor and router prototype, September 11 | 0.4073 | 53 |
+| Rejected compressor prototype, September 11 | 0.4085 | 56 |
+
+The limits admit every accepted build and reject both prototypes that the
+[operator audit](artifacts/captured-operator-audit.json) rejected. The scorer is
+deterministic for one build, so the margin of 0.0044 over ROCm 10.1 covers only
+arithmetic changes. Accepted Gufo builds since September span 0.0032. Token
+choices move more than these scores: at unchanged source, ROCm 10.1 changed
+greedy agreement with a 128-token antirez/ds4 trajectory from 115 to 106 while
+NLL moved from 0.4006 to 0.4026.
 
 ## Reproduce
 

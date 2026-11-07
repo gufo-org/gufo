@@ -23,6 +23,8 @@ void CheckTokenGoldens(const models::deepseek_v4_flash::Model& model);
 void ScoreOfficialReference(
     const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
     const std::string& output_path);
+void CheckOfficialContinuations(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model);
 void DumpReferenceFrontiers(
     const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
     const std::string& output_directory, bool prefill_only, bool narrow);
@@ -146,55 +148,6 @@ constexpr std::array<int, 128> kPinnedDs4Trajectory{
     16,    983,   9347, 270,   15599, 294,  270,  20616, 14,    2918,  436,
     2231,  366,   9026, 295,   6464,  9694, 436,
 };
-
-void CheckPinnedTrajectory(
-    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
-  std::string error;
-  const auto prompt = model->Tokenize(kTrajectoryPrompt);
-  Expect(!prompt.empty(), "trajectory prompt tokenization");
-
-  auto session = model->CreateSession(
-      model->HasDspark() ? gufo::core::SessionMode::kSpeculative
-                         : gufo::core::SessionMode::kAutoregressive,
-      512, &error);
-  Expect(session != nullptr, error);
-  Expect(session->Sync(prompt, &error), error);
-
-  int top1_matches = 0;
-  std::uint64_t rank_sum = 0;
-  int worst_rank = 0;
-  gufo::crypto::Sha256Hasher fingerprint;
-  for (const int expected_token : kPinnedDs4Trajectory) {
-    const auto logits = session->CopyLogits(&error);
-    Expect(!logits.empty(), error);
-    fingerprint.Update({reinterpret_cast<const std::uint8_t*>(logits.data()),
-                        logits.size() * sizeof(float)});
-    Expect(expected_token >= 0 &&
-               static_cast<std::size_t>(expected_token) < logits.size(),
-           "trajectory token range");
-
-    const int selected_token = session->SelectNext(0.0F, nullptr);
-    const float expected_logit =
-        logits[static_cast<std::size_t>(expected_token)];
-    const int rank =
-        1 + static_cast<int>(std::count_if(logits.begin(), logits.end(),
-                                           [expected_logit](float value) {
-                                             return value > expected_logit;
-                                           }));
-    top1_matches += selected_token == expected_token ? 1 : 0;
-    rank_sum += static_cast<std::uint64_t>(rank);
-    worst_rank = std::max(worst_rank, rank);
-
-    Expect(session->Evaluate(expected_token, &error), error);
-  }
-
-  std::cout << "Pinned DS4 trajectory: top1=" << top1_matches
-            << "/128 rank_sum=" << rank_sum << " worst_rank=" << worst_rank
-            << " logits_sha256=" << fingerprint.FinishHex() << '\n';
-  Expect(top1_matches >= 116, "128-token top-1 agreement");
-  Expect(rank_sum <= 142, "128-token aggregate rank");
-  Expect(worst_rank <= 3, "128-token worst rank");
-}
 
 void CheckSessionBounds(
     const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
@@ -1393,6 +1346,9 @@ void CheckDsparkReproducibility(
   }
 }
 
+constexpr std::string_view kPinnedModelSha256 =
+    "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0";
+
 }  // namespace
 
 int main(int argc, char** argv) try {
@@ -1417,6 +1373,7 @@ int main(int argc, char** argv) try {
   const bool template_only =
       argc == 2 && std::string_view(argv[1]) == "--template-only";
   const bool official = argc == 3 && std::string_view(argv[1]) == "--official";
+  const bool target_quality = argc == 1;
   const bool frontiers =
       argc >= 3 && std::string_view(argv[1]) == "--reference-frontiers";
   bool prefill_only = false, narrow = false;
@@ -1447,6 +1404,14 @@ int main(int argc, char** argv) try {
   if (dspark && (dspark_model_path == nullptr || *dspark_model_path == '\0')) {
     std::cout << "SKIP: GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL is not set\n";
     return 77;
+  }
+  if (target_quality) {
+    const auto digest = gufo::crypto::Sha256FileHex(model_path);
+    Expect(digest == kPinnedModelSha256,
+           "GUFO_DEEPSEEK_V4_FLASH_MODEL has SHA-256 " + digest +
+               ", not the pinned Flash 0731 file " +
+               std::string(kPinnedModelSha256) +
+               "; the quality limits apply only to that file");
   }
   std::string error;
   const auto model =
@@ -1501,6 +1466,7 @@ int main(int argc, char** argv) try {
     std::cout << "DeepSeek Hugging Face template token goldens passed\n";
     return 0;
   }
+  gufo::testing::ds4::CheckOfficialContinuations(model);
   const auto prompt =
       model->EncodeChat("You are a concise assistant.", "Reply with one word.");
   Expect(!prompt.empty(), "chat prompt tokenization");
@@ -1541,7 +1507,6 @@ int main(int argc, char** argv) try {
          "restored greedy token");
   Expect(session->CopyLogits(&error) == logits, "restored logits");
 
-  CheckPinnedTrajectory(model);
   CheckBatchedPrefill(model);
   CheckConversationalPrefill(model);
   CheckWidePrefill(model);
