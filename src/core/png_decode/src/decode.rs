@@ -102,7 +102,19 @@ fn reader(bytes: &[u8]) -> Result<Reader<Cursor<&[u8]>>, Error> {
         return Err(Error::Invalid);
     }
     decoder.set_transformations(transformations(color, depth));
-    decoder.read_info().map_err(|_| Error::Invalid)
+    let reader = decoder.read_info().map_err(|_| Error::Invalid)?;
+    // png 0.18.1 panics while expanding such a palette; libpng rejects it too.
+    // Check before the caller allocates the output.
+    if color == ColorType::Indexed
+        && reader
+            .info()
+            .palette
+            .as_ref()
+            .is_some_and(|palette| palette.len() % 3 != 0)
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(reader)
 }
 
 pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), Error> {

@@ -33,11 +33,11 @@ fn status(result: Result<(), Error>) -> GufoPngStatus {
     }
 }
 
-/// The png crate panics on some malformed input, such as a PLTE whose length
-/// is not a multiple of 3. A panic reports an invalid image and must not unwind
-/// into C++.
+/// A panic must not unwind into C++. The decoder rejects the malformed input
+/// known to panic in the png crate before decoding, so a panic here is a
+/// decoder bug and reports `Internal`.
 fn guarded(call: impl FnOnce() -> GufoPngStatus) -> GufoPngStatus {
-    catch_unwind(AssertUnwindSafe(call)).unwrap_or(GufoPngStatus::Invalid)
+    catch_unwind(AssertUnwindSafe(call)).unwrap_or(GufoPngStatus::Internal)
 }
 
 /// # Safety
