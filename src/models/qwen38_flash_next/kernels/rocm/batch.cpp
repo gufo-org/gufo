@@ -1236,10 +1236,23 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
                       error)) {
         return false;
       }
-      CombineBatch(base.res, l.hc_ffn.norm.f32(), rows);
-      if (!HcMixBatch(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,
-                      error))
-        return false;
+      // This immediate combine/mix pair has no intervening residual reader.
+      // Reuse the scalar route's existing exact fused decode implementation;
+      // wider rows and deferred/other-format states keep the batched path.
+      if (rows != 0 && FusedMixer(l.hc_ffn, rows) &&
+          pending_combine_.mixer == nullptr && !res_deferred_ &&
+          !defer_residual_ && !moe_pending_) {
+        DropReadyQ8();
+        Combine(base.res, l.hc_ffn.norm.f32(), rows, nullptr, &l.hc_ffn);
+        if (!HcMix(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,
+                   error))
+          return false;
+      } else {
+        CombineBatch(base.res, l.hc_ffn.norm.f32(), rows);
+        if (!HcMixBatch(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,
+                        error))
+          return false;
+      }
       if (!MoeBatch(l, base.mixed, base.block_out, rows, error))
         return false;
       const float* next_norm =
