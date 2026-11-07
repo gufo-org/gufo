@@ -305,9 +305,11 @@ Models listed under `disabled` in `devlab.core.json`, with a reason, are left
 out of the plan and named in the report. Remove the entry to restore the model.
 
 A model's `suites` list in its `functional/devlab.json` limits Devlab to those
-suites at every tier; the report counts the others as out of scope. DeepSeek V4
-uses it to run the PR-tier set that passes on the runner. Its other full-tier
-suites still assume Flash-Next checkpoint sizes and Qwen token counts.
+suites at every tier; the report counts the others as out of scope. Listed
+release-tier suites still run only in the release tier. DeepSeek V4 lists the
+suites that pass on the runner. Its other full-tier suites still assume
+Flash-Next checkpoint sizes, Qwen token counts, or fixture wording the model
+copies into its answers.
 
 The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
 uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and

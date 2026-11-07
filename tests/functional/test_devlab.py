@@ -42,14 +42,19 @@ class PlanTest(unittest.TestCase):
                 devlab_models.registry()
 
     def test_curated_suites_apply_at_every_tier(self):
-        suites = self.registry['models']['deepseek4']['suites']
-        for tier in ('pr', 'full'):
-            with self.subTest(tier=tier):
-                plan = self.plan('src/models/deepseek_v4_flash/engine.cpp', tier=tier)
-                planned = [suite for group in plan['groups'] for suite in group['suites']]
-                self.assertEqual(planned, suites)
-                self.assertFalse(plan['release_only'] or plan['deferred'])
-                self.assertIn('cache-growth', {row['suite'] for row in plan['out_of_scope']})
+        suites = set(self.registry['models']['deepseek4']['suites'])
+        path = 'src/models/deepseek_v4_flash/engine.cpp'
+        planned = lambda plan: {suite for group in plan['groups'] for suite in group['suites']}
+        full = self.plan(path, tier='full')
+        self.assertEqual(planned(full), suites)
+        pr = self.plan(path, tier='pr')
+        release = {row['suite'] for row in pr['release_only']}
+        self.assertTrue(planned(pr) and release)
+        self.assertEqual(planned(pr) | release, suites)
+        self.assertFalse(planned(pr) & release)
+        for plan in (full, pr):
+            self.assertFalse(plan['deferred'])
+            self.assertIn('cache-growth', {row['suite'] for row in plan['out_of_scope']})
         unknown = {**self.data, 'models': {**self.data['models'], 'deepseek4': {
             **self.data['models']['deepseek4'], 'suites': ['cache', 'no-such-suite']}}}
         with self.assertRaises(ValueError):
