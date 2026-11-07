@@ -25,8 +25,11 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: python3 tools/ci/check-pr-title.py "$PR_TITLE"
 
+      # The checkout is the merge of the pull request into main, so diff it
+      # against that merge's main parent. The event's base SHA can be older
+      # than the merged main, which would attribute main's later API changes
+      # to the pull request.
       - name: Validate extension API diff and policy
         env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: python3 tools/ci/check-extension-api.py --base "$PR_BASE" --labels "$PR_LABELS"
+        run: python3 tools/ci/check-extension-api.py --base "$(git rev-parse HEAD^1)" --labels "$PR_LABELS"
