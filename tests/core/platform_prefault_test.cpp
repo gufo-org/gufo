@@ -64,12 +64,12 @@ void CheckReleaseMappedPages() {
 #include <vector>
 
 // Survives NDEBUG: the release builds run these tests too.
-#define REQUIRE(condition)                                                \
-  do {                                                                    \
-    if (!(condition)) {                                                   \
+#define REQUIRE(condition)                                                 \
+  do {                                                                     \
+    if (!(condition)) {                                                    \
       std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); \
-      std::abort();                                                       \
-    }                                                                     \
+      std::abort();                                                        \
+    }                                                                      \
   } while (false)
 
 // Pages of [memory, memory + bytes) in this process's working set.
@@ -101,9 +101,9 @@ void CheckReleaseMappedPages(std::size_t page_size) {
       out.put(static_cast<char>(i % 251));
     REQUIRE(out.good());
   }
-  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-                            nullptr);
+  HANDLE file =
+      CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   REQUIRE(file != INVALID_HANDLE_VALUE);
   HANDLE section =
       CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
