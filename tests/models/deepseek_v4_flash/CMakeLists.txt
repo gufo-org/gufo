@@ -103,7 +103,7 @@ if(ENGINE_ENABLE_HIP)
     GUFO_DS4_BOUNDARY_PROMPT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/indexer-boundary-prompt.txt"
     GUFO_DS4_OFFICIAL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/official-0731.json"
     GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
-  target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash_hip)
+  target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash_hip hip::host)
   add_test(NAME ds4.target COMMAND ds4_quality_test)
   add_test(NAME ds4.dspark COMMAND ds4_quality_test --dspark)
   set_tests_properties(ds4.target ds4.dspark PROPERTIES
