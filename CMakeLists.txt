@@ -75,9 +75,8 @@ if (WIN32)
 endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
-pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
-pkg_check_modules(SOXR REQUIRED IMPORTED_TARGET soxr)
-pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
+# Extension-only libraries come from each selected extension's manifest
+# `packages` (gufo_build_discovered_extensions).
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")

@@ -119,6 +119,12 @@ In the manifest, distinguish:
 - `options`, `packages`, `licenses`, `install_data` and `runtime_libraries`:
   option declarations and the dependency/distribution inventory. Keep them in
   agreement with the build and install recipe.
+- `packages[].pkg_config`: a pkg-config module the extension builds against.
+  Configure requires it only when the extension is selected, and provides it
+  as the global imported target `PkgConfig::<module>` with the `<module>_*`
+  variables of `pkg_check_modules` (for example `PkgConfig::soxr`,
+  `libavformat_INCLUDE_DIRS`). Omit the key for a package used only at run
+  time, such as an executable.
 
 Separate host parsing/probes from HIP execution so diagnostics and probes can
 work without creating a GPU context. Keep test-only code under the `testing`

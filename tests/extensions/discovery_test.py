@@ -263,6 +263,32 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         path.write_text(json.dumps(data))
         self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="conflicting option types")
 
+    @unittest.skipUnless(shutil.which("pkg-config") or shutil.which("pkgconf"), "needs pkg-config")
+    def test_selected_extension_packages(self):
+        # Only a selected extension requires its manifest's pkg-config modules,
+        # which it then links as PkgConfig::<module>.
+        pkgconfig = self.source / "pkgconfig"
+        pkgconfig.mkdir()
+        (pkgconfig / "gufo-fixture-pkg.pc").write_text(
+            "Name: gufo-fixture-pkg\nDescription: fixture\nVersion: 1.0\nCflags: -DGUFO_FIXTURE_PKG=1\n")
+        self.env["PKG_CONFIG_PATH"] = str(pkgconfig)
+        for name, module in (("alpha", "gufo-fixture-pkg"), ("beta", "gufo-missing-pkg")):
+            path = self.source / f"src/models/{name}/extension.json"
+            manifest = json.loads(path.read_text())
+            manifest["packages"] = [{"pkg_config": module}]
+            path.write_text(json.dumps(manifest))
+        alpha = self.source / "src/models/alpha/extension.cmake"
+        alpha.write_text(alpha.read_text().replace(
+            "LINK_LIBRARIES gufo_ext_runtime)\n",
+            "LINK_LIBRARIES gufo_ext_runtime PkgConfig::gufo-fixture-pkg)\n", 1))
+        (self.source / "src/models/alpha/registration.cpp").write_text(
+            '#include "gufo/ext/registry.hpp"\n'
+            "static_assert(GUFO_FIXTURE_PKG == 1);\n"
+            "void alpha_register(gufo::ext::Registry&) {}\n")
+        self.configure(error="extension beta requires pkg-config module gufo-missing-pkg")
+        self.configure("-DGUFO_EXTENSIONS=alpha;base")
+        self.assertEqual([e["name"] for e in self.run_fixture()["builtExtensions"]], ["base", "alpha"])
+
     def test_disabled_target_dependency(self):
         path = self.source / "src/models/alpha/extension.cmake"
         path.write_text(path.read_text().replace("LINK_LIBRARIES gufo_ext_runtime)",
