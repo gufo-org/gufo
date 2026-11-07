@@ -215,6 +215,40 @@ void ProfiledPassesSplitByLayers() {
   assert(work.max_tokens == 512u && work.layer_groups == 1);
 }
 
+void OnePassPeersGoFirst() {
+  const Policy policy({.incremental_prefill = true,
+                       .profile = TextSchedulingProfile{
+                           .pass_tokens = 4096, .max_layer_groups = 8}});
+  const std::vector<DecodingRequest> decoding{{.started = true}};
+  PrefillRate rate;
+  rate.Observe(4096, 2100);
+  // A 12K prompt ahead of two that one pass finishes: the first of those
+  // goes, with groups sized for its own 800 tokens (about 410 ms, two).
+  const std::vector<PrefillingRequest> burst{{.remaining_tokens = 12000},
+                                             {.remaining_tokens = 800},
+                                             {.remaining_tokens = 3000}};
+  auto work =
+      Prefill(policy.Next({.prefilling = burst, .decoding = decoding}, rate));
+  assert(work.request == 1 && work.beside_decoders &&
+         work.max_tokens == 4096u && work.layer_groups == 2);
+  // Exactly one pass still fits; only longer peers keep queue order.
+  const std::vector<PrefillingRequest> full{{.remaining_tokens = 9000},
+                                            {.remaining_tokens = 4097},
+                                            {.remaining_tokens = 4096}};
+  assert(Prefill(policy.Next({.prefilling = full, .decoding = decoding}, rate))
+             .request == 2);
+  const std::vector<PrefillingRequest> longer{{.remaining_tokens = 9000},
+                                              {.remaining_tokens = 5000}};
+  assert(
+      Prefill(policy.Next({.prefilling = longer, .decoding = decoding}, rate))
+          .request == 0);
+  // Without decoders, or without a profile, the front runs.
+  assert(Prefill(policy.Next({.prefilling = burst}, rate)).request == 0);
+  const Policy unprofiled({.incremental_prefill = true});
+  assert(Prefill(unprofiled.Next({.prefilling = burst, .decoding = decoding}))
+             .request == 0);
+}
+
 void RoundsBetweenGroups() {
   const Policy unprofiled({.incremental_prefill = true});
   const Policy batched(
@@ -258,6 +292,7 @@ int main() {
   CustomBudget();
   PrefillRateTracksRecentWork();
   ProfiledPassesSplitByLayers();
+  OnePassPeersGoFirst();
   RoundsBetweenGroups();
   InvalidProfiles();
 }

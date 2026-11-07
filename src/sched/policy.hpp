@@ -55,8 +55,11 @@ struct WorkQueues {
   bool after_decode{true};
 };
 
-/// Prefill the front of `prefilling`.
+/// Prefill one request of `prefilling`.
 struct PrefillWork {
+  /// Index of that request in `WorkQueues::prefilling`; the front unless a
+  /// profiled pass lets a peer that one pass finishes go first.
+  std::size_t request{0};
   /// Decoders are runnable and wait for this unit.
   bool beside_decoders{false};
   /// A short prompt or a pending capture waits for this unit.

@@ -2149,8 +2149,10 @@ struct TextGenerationScheduler::Impl {
       }
 
       const auto& prefill = std::get<sched::PrefillWork>(work);
-      auto request = std::move(prefilling.front());
-      prefilling.pop_front();
+      const auto chosen =
+          prefilling.begin() + static_cast<std::ptrdiff_t>(prefill.request);
+      auto request = std::move(*chosen);
+      prefilling.erase(chosen);
       StepPrefill(request, prefill,
                   prefill.layer_groups > 1 ? PrefillYield([&] {
                     RunYieldRound(decoding, capturing);

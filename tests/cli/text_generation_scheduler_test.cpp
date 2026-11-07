@@ -1567,6 +1567,35 @@ void TestLayeredPrefillDecodesBetweenGroups() {
          "a lone prompt runs unsplit");
 }
 
+void TestOnePassPromptPrefillsBeforeLongerPeer() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+
+  auto decoder = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  // Both arrive while the decoder runs: the long prompt first, then one that
+  // a single pass finishes.
+  auto long_prompt =
+      scheduler->Submit({2, 20, 21, 22, 23, 24, 25, 26, 27}, 2, 0.0F);
+  auto short_prompt = scheduler->Submit({3, 30, 31}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  Expect(decoder.Wait().tokens == ExpectedTokens(1, 30) &&
+             long_prompt.Wait().tokens == ExpectedTokens(2, 2) &&
+             short_prompt.Wait().tokens == ExpectedTokens(3, 2),
+         "reordered prompts keep their trajectories");
+  std::vector<TextRunnerToken> prefill_order;
+  for (const auto& event : control->Events())
+    if (event.kind == EventKind::kPrefill && event.label != 1)
+      prefill_order.push_back(event.label);
+  Expect(!prefill_order.empty() && prefill_order.front() == 3,
+         "beside a decoder, a prompt one pass finishes goes before a longer "
+         "peer");
+}
+
 void TestLayeredPrefillTimeExcludesYieldRounds() {
   auto control = std::make_shared<FakeControl>();
   control->scheduling =
@@ -3582,6 +3611,7 @@ int main() {
   }
   TestNonIncrementalRunnerFallsBackSafely();
   TestLayeredPrefillDecodesBetweenGroups();
+  TestOnePassPromptPrefillsBeforeLongerPeer();
   TestLayeredPrefillTimeExcludesYieldRounds();
   TestLayeredPrefillAloneRunsUnsplit();
   TestDecoderFinishesInsideYield();

@@ -67,11 +67,25 @@ Work Policy::Next(const WorkQueues& queues, const PrefillRate& rate) const {
       (due == 0 || assemble_initial_batch)) {
     // A profiled runner keeps its efficient pass width and splits the pass
     // by layers instead, so decoders wait for one group, not one pass.
-    if (options_.profile)
-      return PrefillWork{.beside_decoders = true,
+    if (options_.profile) {
+      // Full passes would make a prompt that one pass finishes wait a whole
+      // pass of each longer peer per turn (chunks of the legacy budget
+      // interleaved them). It goes first, in queue order; a longer prompt
+      // waits at most one pass per such peer.
+      const auto fits = std::ranges::find_if(
+          queues.prefilling, [&](const PrefillingRequest& request) {
+            return request.remaining_tokens <= options_.profile->pass_tokens;
+          });
+      const std::size_t index =
+          fits == queues.prefilling.end()
+              ? 0
+              : static_cast<std::size_t>(fits - queues.prefilling.begin());
+      return PrefillWork{.request = index,
+                         .beside_decoders = true,
                          .max_tokens = options_.profile->pass_tokens,
                          .layer_groups = LayerGroups(
-                             rate, queues.prefilling.front().remaining_tokens)};
+                             rate, queues.prefilling[index].remaining_tokens)};
+    }
     return PrefillWork{
         .beside_decoders = true,
         .max_tokens = options_.incremental_prefill
