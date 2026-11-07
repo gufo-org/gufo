@@ -94,9 +94,10 @@ public:
   [[nodiscard]] Work Next(const WorkQueues& queues,
                           const PrefillRate& rate = {}) const;
 
-  /// The decode round between two layer groups of a pass: every decoder in
-  /// turn, as many per round as the profile batches. Empty without
-  /// decoders.
+  /// One decode step of the round between two layer groups of a pass, from
+  /// the decoders that have not stepped in it yet: as many as the profile
+  /// batches. The host repeats it until each has stepped once. Empty
+  /// without decoders.
   [[nodiscard]] std::optional<DecodeWork> BetweenGroups(
       std::span<const DecodingRequest> decoding) const;
 

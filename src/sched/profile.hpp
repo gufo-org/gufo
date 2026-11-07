@@ -16,8 +16,8 @@ struct TextSchedulingProfile {
   /// Layer groups one such pass may be split into, with a decode round for
   /// the other sessions between groups. One runs the pass unsplit.
   std::size_t max_layer_groups{1};
-  /// Sessions one decode round between layer groups may batch; one runs a
-  /// single session per round.
+  /// Sessions one decode step between layer groups may batch. Each round
+  /// steps every decoder once, in as many steps as this width needs.
   std::size_t max_yield_decode_width{1};
 
   bool operator==(const TextSchedulingProfile&) const = default;

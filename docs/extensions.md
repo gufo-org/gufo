@@ -101,8 +101,9 @@ in `TextRunnerDescriptor::scheduling` and split its passes by layers instead:
   tokens and capped at `max_layer_groups`; a short remainder runs unsplit. Split the pass into about that many groups of similar
   duration, not layer count, and add a boundary right after any point where the
   pass waits, such as an input read: decoders wait for the longest group.
-  Between groups, the runner calls `state.YieldPrefill()`, which decodes up to
-  `max_yield_decode_width` other sessions in one round and returns.
+  Between groups, the runner calls `state.YieldPrefill()`, which steps every
+  other decoding session once, at most `max_yield_decode_width` per batch,
+  and returns.
 - Every layer must do the same arithmetic as in an unsplit pass. Keep the
   rows the pass carries from one layer to the next, and any flags or graphs
   that depend on them, out of reach of the decode paths, and hold no lock they
