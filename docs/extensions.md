@@ -123,8 +123,10 @@ In the manifest, distinguish:
   Configure requires it only when the extension is selected, and provides it
   as the global imported target `PkgConfig::<module>` with the `<module>_*`
   variables of `pkg_check_modules` (for example `PkgConfig::soxr`,
-  `libavformat_INCLUDE_DIRS`). Omit the key for a package used only at run
-  time, such as an executable.
+  `libavformat_INCLUDE_DIRS`). An extension target may link
+  `PkgConfig::<module>` only for modules its own manifest declares, so it
+  does not build by accident beside another extension. Omit the key for a
+  package used only at run time, such as an executable.
 
 Separate host parsing/probes from HIP execution so diagnostics and probes can
 work without creating a GPU context. Keep test-only code under the `testing`

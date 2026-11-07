@@ -14,6 +14,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+PKG_CONFIG = (os.environ.get("GUFO_PKG_CONFIG_EXECUTABLE")
+              or shutil.which("pkg-config") or shutil.which("pkgconf"))
+
+
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.timings = {"configure": 0.0, "build": 0.0}
@@ -263,10 +267,12 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         path.write_text(json.dumps(data))
         self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="conflicting option types")
 
-    @unittest.skipUnless(shutil.which("pkg-config") or shutil.which("pkgconf"), "needs pkg-config")
+    # The build passes its pkg-config, which Windows finds in vcpkg's tools.
+    @unittest.skipUnless(PKG_CONFIG, "needs pkg-config")
     def test_selected_extension_packages(self):
         # Only a selected extension requires its manifest's pkg-config modules,
         # which it then links as PkgConfig::<module>.
+        flag = f"-DPKG_CONFIG_EXECUTABLE={PKG_CONFIG}"
         pkgconfig = self.source / "pkgconfig"
         pkgconfig.mkdir()
         (pkgconfig / "gufo-fixture-pkg.pc").write_text(
@@ -289,15 +295,24 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
             '#include "gufo/ext/registry.hpp"\n'
             "static_assert(GUFO_FIXTURE_PKG == 1);\n"
             "void alpha_register(gufo::ext::Registry&) {}\n")
-        self.configure(error="extension beta requires pkg-config module gufo-missing-pkg")
-        self.configure("-DGUFO_EXTENSIONS=alpha;base")
+        self.configure(flag, error="extension beta requires pkg-config module gufo-missing-pkg")
+        self.configure(flag, "-DGUFO_EXTENSIONS=alpha;base")
         self.assertEqual([e["name"] for e in self.run_fixture()["builtExtensions"]], ["base", "alpha"])
-        # Two selected extensions may declare one module; it is checked once.
+        # An extension cannot link a module only another extension declares.
+        beta_cmake = self.source / "src/models/beta/extension.cmake"
+        beta_cmake.write_text(beta_cmake.read_text().replace(
+            "NAME beta_registration SOURCES registration.cpp LINK_LIBRARIES gufo_ext_runtime)",
+            "NAME beta_registration SOURCES registration.cpp LINK_LIBRARIES gufo_ext_runtime PkgConfig::gufo-fixture-pkg)"))
         beta = self.source / "src/models/beta/extension.json"
         manifest = json.loads(beta.read_text())
+        manifest["packages"] = []
+        beta.write_text(json.dumps(manifest))
+        self.configure(flag, "-DGUFO_EXTENSIONS=alpha;base;beta",
+                       error="links PkgConfig::gufo-fixture-pkg, which extension beta does not declare")
+        # Two selected extensions may declare one module; it is checked once.
         manifest["packages"] = [{"pkg_config": "gufo-fixture-pkg"}]
         beta.write_text(json.dumps(manifest))
-        self.configure("-DGUFO_EXTENSIONS=alpha;base;beta")
+        self.configure(flag, "-DGUFO_EXTENSIONS=alpha;base;beta")
 
     def test_disabled_target_dependency(self):
         path = self.source / "src/models/alpha/extension.cmake"

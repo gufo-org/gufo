@@ -495,6 +495,16 @@ function(gufo_extension_target)
   endif()
   get_property(owner GLOBAL PROPERTY "GUFO_EXT_TARGET_${ARG_NAME}_OWNER")
   get_property(is_external GLOBAL PROPERTY "GUFO_EXT_${owner}_IS_EXTERNAL")
+  # A manifest module is global once any selected extension declares it; an
+  # extension that links it must declare it too, or it builds only beside one.
+  get_property(package_modules GLOBAL PROPERTY GUFO_EXT_PKG_CONFIG_MODULES)
+  get_property(declared_modules GLOBAL PROPERTY "GUFO_EXT_${owner}_PKG_CONFIG")
+  foreach(dependency IN LISTS ARG_LINK_LIBRARIES)
+    if(dependency MATCHES "^PkgConfig::(.+)$" AND CMAKE_MATCH_1 IN_LIST package_modules
+       AND NOT CMAKE_MATCH_1 IN_LIST declared_modules)
+      message(FATAL_ERROR "extension target ${ARG_NAME} links ${dependency}, which extension ${owner} does not declare in packages")
+    endif()
+  endforeach()
   if(is_external)
     target_include_directories(${ARG_NAME} BEFORE PRIVATE "${GUFO_EXTENSION_BUILD_ROOT}")
     target_include_directories(${ARG_NAME} SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/include")

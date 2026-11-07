@@ -7,7 +7,9 @@ targets `PkgConfig::<module>` with the `<module>_*` variables
 `pkg_check_modules` sets. Modules of unselected extensions are not required.
 A selected extension's declared modules are now enforced at configure time,
 not only listed, so `packages` must name only modules the extension builds
-against. The metadata schema restricts `pkg_config` to a module name
+against, and `gufo_extension_target` rejects a `PkgConfig::<module>` link to a
+manifest module the extension does not declare itself. The metadata schema
+restricts `pkg_config` to a module name
 (`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`, no version constraint), matching the configure check.
 
 The root build no longer requires sndfile, soxr, libavformat, libavcodec,

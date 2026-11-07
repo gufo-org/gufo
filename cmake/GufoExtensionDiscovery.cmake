@@ -498,6 +498,8 @@ function(gufo_build_discovered_extensions)
       endif()
       # A leading '-' would reach pkg-config as an option.
       _gufo_identifier("${module}" "^[A-Za-z0-9_][A-Za-z0-9_.+-]*$" "pkg-config module")
+      set_property(GLOBAL APPEND PROPERTY "GUFO_EXT_${name}_PKG_CONFIG" "${module}")
+      set_property(GLOBAL APPEND PROPERTY GUFO_EXT_PKG_CONFIG_MODULES "${module}")
       if(TARGET PkgConfig::${module})
         continue()
       endif()

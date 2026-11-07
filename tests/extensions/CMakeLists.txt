@@ -48,7 +48,7 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     # Nested projects configure and build repeatedly; Windows needs the headroom.
     # They use the build's own compiler instead of whichever one CMake finds.
     set_tests_properties(extension_discovery_test PROPERTIES LABELS "cpu;extensions" PROCESSORS 2 COST 90 TIMEOUT 900
-      ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}")
+      ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER};GUFO_PKG_CONFIG_EXECUTABLE=${PKG_CONFIG_EXECUTABLE}")
     add_test(NAME extension_api_policy_test COMMAND ${Python3_EXECUTABLE}
       ${PROJECT_SOURCE_DIR}/tests/tools/check_extension_api_test.py)
     add_test(NAME extension_api_surface COMMAND ${Python3_EXECUTABLE}
