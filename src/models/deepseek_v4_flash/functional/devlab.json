@@ -31,7 +31,25 @@
       "draft": "DeepSeek-V4-Flash-DSpark-support-0731.gguf",
       "draft_option": "--dspark-model",
       "mode": "dspark",
-      "sampling": "deepseek4"
+      "sampling": "deepseek4",
+      "suites": [
+        "logprobs",
+        "responses-logprobs",
+        "discovery",
+        "openai-count-tokens",
+        "messages-count-tokens",
+        "responses",
+        "stops",
+        "conversation",
+        "structured",
+        "tool-streaming",
+        "tools",
+        "sampling-defaults",
+        "sampling-ranges",
+        "batch",
+        "state-edges",
+        "cache"
+      ]
     }
   },
   "rules": [

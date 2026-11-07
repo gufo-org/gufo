@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_DATA_INTERNAL_H_
 #define GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_DATA_INTERNAL_H_
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -48,6 +49,10 @@ inline constexpr float DS4_ROPE_YARN_BETA_FAST = 32.0F;
 inline constexpr float DS4_ROPE_YARN_BETA_SLOW = 1.0F;
 inline constexpr float DS4_COMPRESS_ROPE_FREQ_BASE = 160000.0F;
 inline constexpr uint64_t DS4_ROPE_ORIG_CTX = 65536;
+
+inline bool ds4_config_f32_matches(float got, float expected) {
+    return std::fabs(got - expected) <= std::fabs(expected) * 1.0e-6F;
+}
 
 struct ds4_str {
     const char *ptr;

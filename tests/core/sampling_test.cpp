@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
 
 namespace {
@@ -251,6 +252,77 @@ void TestReasoningBudgetWithGrammar() {
          "after the forced end the answer still follows the grammar");
 }
 
+// The grammar decides when reasoning ends: the close spelled as ordinary
+// text, or a native call header, ends it before the budget runs out, and the
+// budget must not force its close into the answer afterwards.
+void TestReasoningBudgetFollowsGrammarEnd() {
+  const auto generate = [](std::shared_ptr<const JsonConstraint> grammar,
+                           const std::vector<std::string>& pieces,
+                           std::size_t tokens,
+                           const std::vector<TokenId>& reasoning,
+                           const std::vector<TokenId>& preferred) {
+    auto binding = std::make_shared<TokenConstraint>();
+    binding->grammar = std::move(grammar);
+    binding->vocabulary = std::make_shared<ConstraintVocabulary>(
+        pieces.size(), [&](std::uint32_t i) {
+          return ConstraintVocabulary::Piece{pieces[i], pieces[i].empty()};
+        });
+    SamplingConfig config;
+    config.constraint = binding;
+    auto budget = std::make_shared<ReasoningBudget>();
+    budget->tokens = tokens;
+    budget->forced = {1};
+    budget->ends = {1};
+    config.reasoning_budget = budget;
+    SamplerState sampler(config);
+    std::string text;
+    try {
+      sampler.Accept(reasoning);
+      for (const auto token : reasoning)
+        text += pieces[token];
+      for (const auto token : preferred) {
+        std::vector<float> logits(pieces.size(), 0.0F);
+        logits[token] = 5.0F;
+        const auto sampled = sampler.Sample(logits);
+        sampler.Accept(sampled);
+        text += pieces[sampled];
+      }
+    } catch (const std::exception& error) {
+      text += std::string("[") + error.what() + "]";
+    }
+    return text;
+  };
+
+  const auto json = JsonConstraint::WithReasoning(JsonConstraint::Object());
+  const std::vector<std::string> pieces{"thinking", "</think>", "</", "think>",
+                                        "{\"x\":",  "true}",    ""};
+  const auto spelled = generate(json, pieces, 4, {0, 2, 3, 4}, {5, 6});
+  Expect(spelled == "thinking</think>{\"x\":true}",
+         "a close spelled as text ends the budget too, got " + spelled);
+  const auto spent = generate(json, pieces, 4, {0, 0, 0, 2}, {4, 4, 5, 6});
+  Expect(spent == "thinkingthinkingthinking</</think>{\"x\":true}",
+         "a partial close still reasons and the budget forces the end, got " +
+             spent);
+
+  const auto arguments = JsonConstraint::ToolParameters(
+      gufo::json::parse(R"({"type":"object",
+        "properties":{"value":{"type":"string","const":"42"}},
+        "required":["value"],"additionalProperties":false})"),
+      true, JsonConstraint::ToolFormat::kDeepSeek);
+  const auto tools = JsonConstraint::WithReasoning(
+      JsonConstraint::WithTools(nullptr, {{"record", arguments}}, true, false,
+                                JsonConstraint::ToolFormat::kDeepSeek));
+  const std::vector<std::string> native{
+      "thinking", "</think>",
+      "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n",
+      "<｜DSML｜parameter name=\"value\" string=\"true\">42"
+      "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+      ""};
+  const auto called = generate(tools, native, 2, {0, 2}, {3, 4});
+  Expect(called == native[0] + native[2] + native[3],
+         "a native call header ends the budget too, got " + called);
+}
+
 void TestCompactTargetContract() {
   using gufo::sampling::LogitCandidate;
   const std::vector<float> logits{0.0F, 0.75F, -1.0F, 0.75F, 3.0F, 0.1F};
@@ -452,6 +524,7 @@ int main() {
   TestReasoningBudgetMatchesLlamaCpp();
   TestReasoningBudgetKeepsLiteralAnswer();
   TestReasoningBudgetWithGrammar();
+  TestReasoningBudgetFollowsGrammarEnd();
   TestCompactTargetContract();
   TestTopPOverLargeVocabularyMatchesDefinition();
   std::cout << "sampling_test passed\n";

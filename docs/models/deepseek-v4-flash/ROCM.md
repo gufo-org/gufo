@@ -46,9 +46,11 @@ layouts, zero rows and nearby floating-point values.
 
 HC/Sinkhorn order and FP64 router transcendental evaluation are restricted to
 Clang 24 and later. Applying those corrections to Clang 22 worsened its
-long-context result, so its arithmetic remains unchanged. Global fast-math,
-tensor precision and quality tolerances do not change. Historical GPU references
-freeze their accumulation order; separate FP64 formulas remain independent.
+long-context result, so its arithmetic remains unchanged. Global fast-math and
+tensor precision do not change. The only quality tolerance widened for ROCm 10.1
+is the 32-token prefill limit in [QUALITY.md](QUALITY.md#prefill-agreement-limits).
+Historical GPU references freeze their accumulation order; separate FP64
+formulas remain independent.
 
 The original 4K/12K narrow-prefill failure from #483 is covered without importing
 its rolled MMQ K-loop. The teacher is independent `antirez/ds4` revision

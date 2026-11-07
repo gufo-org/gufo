@@ -2620,6 +2620,140 @@ void RamCacheOffWithDiskCommitsOnlyStagingBacking() {
   auto& state = dynamic_cast<State&>(lease->state());
   assert(runner->adapter->RecurrentHash(state.slot) == hash);
 }
+// A host that keeps less than its reserve after loading measures a ceiling
+// below what the slots already pinned. With the RAM cache on, the load fails
+// with the remedies instead of a bare bad_alloc. With it off, the server
+// still loads, and the disk cache persists and restores.
+void HostBelowReserveRefusesUnlessRamCacheOff() {
+  constexpr std::size_t kPin = 512 << 10;
+  const TemporaryDirectory temp("gufo-component-host-short-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .min_checkpoint_step_tokens = 1};
+  class ShortHostRunner final : public Runner {
+  public:
+    mutable std::size_t committed{};
+    mutable std::vector<cache::ResourceCharge> pins;
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      // After the slots pinned their buffers, the host has nothing left
+      // above its reserve.
+      claim.retained_snapshot_capacity_bytes = 0;
+      claim.retained_snapshot_ceiling_bytes = 0;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->stream = [this, &ledger,
+                           stream = std::move(resources->stream)] {
+        if (!committed)
+          pins.push_back(
+              ledger.Reserve(cache::ResourceCategory::kMetadata, kPin)
+                  .Convert());
+        return stream();
+      };
+      resources->pinned_bytes = [this] { return pins.size() * kPin; };
+      resources->commit_backing = [this](std::size_t bytes) {
+        committed = bytes;
+      };
+      return resources;
+    }
+  };
+  const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  const auto refused = [](const auto& load) {
+    try {
+      load();
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      return message.find("host reserve") != std::string::npos &&
+             message.find("--cache-ram-bytes off") != std::string::npos;
+    }
+    return false;
+  };
+  for (const bool enabled : {true, false}) {
+    // Through the pool, as serving builds it. A host with nothing above its
+    // reserve reports a ceiling of 0, also before the slots allocate; the
+    // cache's own metadata must still fit to report it, or to serve off.
+    const TemporaryDirectory pool_temp("gufo-component-host-zero-test");
+    const TextRunnerDiskCacheOptions pool_disk{
+        .directory = pool_temp.path().string(),
+        .capacity_bytes = 1 << 20,
+        .min_checkpoint_step_tokens = 1};
+    const TextRunnerRamCacheOptions ram{.capacity_bytes = 1ULL << 30,
+                                        .enabled = enabled};
+    if (enabled) {
+      assert(refused([&] {
+        TextRunnerPool pool(std::make_shared<ShortHostRunner>(), 1, pool_disk,
+                            ram);
+      }));
+      continue;
+    }
+    TextRunnerPool pool(std::make_shared<ShortHostRunner>(), 1, pool_disk, ram);
+    auto request = pool.Acquire(prompt);
+    Prefill(request);
+    assert(Generate(request) != 0);
+  }
+  // An explicit RAM budget, as in --cache-ram-bytes 1073741824.
+  assert(refused([&] {
+    ComponentTextCache cache(std::make_shared<ShortHostRunner>(), 1, 1 << 24,
+                             disk, false, 0, true);
+  }));
+  // The same host serves with --cache-ram-bytes off.
+  constexpr auto kOff = ComponentTextCache::kOffMetadataBytes;
+  std::uint64_t hash;
+  {
+    auto runner = std::make_shared<ShortHostRunner>();
+    ComponentTextCache cache(runner, 1, 0, disk, false, kOff, false);
+    assert(!runner->pins.empty());
+    // Only the disk-only backing of the off mode, no RAM cache budget.
+    assert(runner->committed != 0 && runner->committed <= 512ULL << 20);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    auto snapshot = lease->Capture();
+    assert(snapshot);
+    assert(lease->PublishSnapshot(prompt, std::move(snapshot), false) == 0);
+    assert(lease->Metrics().disk_queued_bytes > 0);
+    (void)lease->Commit(prompt, {}, prompt);
+  }
+  auto runner = std::make_shared<ShortHostRunner>();
+  ComponentTextCache cache(runner, 1, 0, disk, false, kOff, false);
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(lease->restored_from_disk() &&
+         lease->cached_tokens() == prompt.size());
+  auto& state = dynamic_cast<State&>(lease->state());
+  assert(runner->adapter->RecurrentHash(state.slot) == hash);
+}
+// An explicit budget the host cannot hold is trimmed, and the cache reports
+// what it actually got, which the pool logs as ram_cache_trimmed.
+void TrimmedRamBudgetIsReported() {
+  class TrimRunner final : public Runner {
+  public:
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      claim.retained_snapshot_capacity_bytes = 1 << 20;
+      claim.retained_snapshot_ceiling_bytes = 2 << 20;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->commit_backing = [](std::size_t) {};
+      return resources;
+    }
+  };
+  ComponentTextCache trimmed(std::make_shared<TrimRunner>(), 1, 3 << 20, {},
+                             false, 4 << 20, true);
+  assert(trimmed.ram_budget() == 2 << 20);
+  ComponentTextCache off(std::make_shared<TrimRunner>(), 1, 3 << 20, {}, false,
+                         4 << 20, false);
+  assert(off.ram_budget() == 0);
+}
 // With the RAM cache off, a capture within the disk step of a published
 // checkpoint has nowhere to go. The cache refuses it at reservation, so no
 // caller logs a failed capture. With the RAM cache on it goes to RAM.
@@ -2896,5 +3030,7 @@ int main() {
   OverRamCaptureStagesPrivateStateUnderPressure(true);
   RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers();
   RamCacheOffWithDiskCommitsOnlyStagingBacking();
+  HostBelowReserveRefusesUnlessRamCacheOff();
+  TrimmedRamBudgetIsReported();
   RamCacheOffRefusesCapturesWithinTheDiskStep();
 }

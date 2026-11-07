@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -251,6 +252,10 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
       impl_->state = std::move(new_state);
     }
     return true;
+  } catch (const std::bad_alloc&) {
+    SetError(error, "out of host memory while preparing " +
+                        std::to_string(session_count) + " sessions");
+    return false;
   } catch (const std::exception& exception) {
     SetError(error, exception.what());
     return false;

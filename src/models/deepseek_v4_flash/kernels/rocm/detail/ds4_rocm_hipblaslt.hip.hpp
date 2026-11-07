@@ -8,6 +8,7 @@ struct hip_hipblaslt_gemm_plan {
     uint32_t out_dim;
     uint32_t n_tok;
     uint32_t in_dim;
+    uint32_t a_ld;
     hipblasOperation_t op_a;
     hipDataType output_type;
     hipblasLtMatmulDesc_t desc;
@@ -43,13 +44,14 @@ static hip_hipblaslt_gemm_plan *hipblaslt_gemm_plan_get(
         uint32_t out_dim,
         uint32_t n_tok,
         uint32_t in_dim,
+        uint32_t a_ld,
         hipblasOperation_t op_a,
         hipDataType output_type,
         const char *label) {
     for (size_t i = 0; i < g_hipblaslt_gemm_plans.size(); i++) {
         hip_hipblaslt_gemm_plan &p = g_hipblaslt_gemm_plans[i];
         if (p.out_dim == out_dim && p.n_tok == n_tok && p.in_dim == in_dim &&
-            p.op_a == op_a && p.output_type == output_type) {
+            p.a_ld == a_ld && p.op_a == op_a && p.output_type == output_type) {
             return &p;
         }
     }
@@ -72,7 +74,6 @@ static hip_hipblaslt_gemm_plan *hipblaslt_gemm_plan_get(
                           "set transB")) break;
         const uint32_t a_rows = op_a == HIPBLAS_OP_T ? in_dim : out_dim;
         const uint32_t a_cols = op_a == HIPBLAS_OP_T ? out_dim : in_dim;
-        const uint32_t a_ld = a_rows;
         if (!hipblaslt_ok(hipblasLtMatrixLayoutCreate(&a_desc, HIP_R_16F,
                                                        a_rows, a_cols, a_ld),
                           "A layout create")) break;
@@ -115,6 +116,7 @@ static hip_hipblaslt_gemm_plan *hipblaslt_gemm_plan_get(
     p.out_dim = out_dim;
     p.n_tok = n_tok;
     p.in_dim = in_dim;
+    p.a_ld = a_ld;
     p.op_a = op_a;
     p.output_type = output_type;
     p.desc = desc;
@@ -228,9 +230,12 @@ static int hipblaslt_route_enabled(unsigned int which) {
     return (hipblaslt_route_mask() & (int)which) != 0;
 }
 
+/* a is column-major with leading dimension a_ld: in_dim x out_dim for
+ * HIPBLAS_OP_T, out_dim x in_dim otherwise. */
 static int hipblaslt_gemm_f16(
         void *out,
         const __half *a,
+        uint32_t a_ld,
         const __half *b,
         uint32_t out_dim,
         uint32_t n_tok,
@@ -241,28 +246,9 @@ static int hipblaslt_gemm_f16(
     if (!g_hipblaslt_ready || !out || !a || !b ||
         out_dim == 0 || n_tok == 0 || in_dim == 0) return 0;
     hip_hipblaslt_gemm_plan *p = hipblaslt_gemm_plan_get(
-        out_dim, n_tok, in_dim, op_a, output_type, label);
+        out_dim, n_tok, in_dim, a_ld, op_a, output_type, label);
     if (!p) return 0;
     if (!p->selected && !hipblaslt_gemm_plan_select(p, out, a, b))
       return 0;
     return hipblaslt_gemm_f16_launch(p, out, a, b, &p->algo);
-}
-
-static int hipblaslt_gemm_tn_f16_out_f16(
-        __half *out,
-        const __half *w_rowmajor_out_in,
-        const __half *x_rowmajor_tok_in,
-        uint32_t out_dim,
-        uint32_t n_tok,
-        uint32_t in_dim,
-        const char *label) {
-    return hipblaslt_gemm_f16(out,
-                              w_rowmajor_out_in,
-                              x_rowmajor_tok_in,
-                              out_dim,
-                              n_tok,
-                              in_dim,
-                              HIPBLAS_OP_T,
-                              HIP_R_16F,
-                              label);
 }

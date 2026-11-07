@@ -24,6 +24,11 @@ target_link_libraries(ds4_sampling_test PRIVATE gufo_core gufo_deepseek_v4_flash
 add_test(NAME ds4.sampling COMMAND ds4_sampling_test)
 set_tests_properties(ds4.sampling PROPERTIES LABELS "cpu;ds4;sampling")
 
+add_executable(ds4_config_f32_test config_f32_test.cpp)
+target_link_libraries(ds4_config_f32_test PRIVATE gufo_deepseek_v4_flash)
+add_test(NAME ds4.config_f32 COMMAND ds4_config_f32_test)
+set_tests_properties(ds4.config_f32 PROPERTIES LABELS "cpu;ds4;loader")
+
 add_executable(ds4_chat_template_test chat_template_test.cpp)
 target_link_libraries(ds4_chat_template_test PRIVATE gufo_core
   gufo_deepseek_v4_flash_text)
@@ -41,7 +46,7 @@ set_tests_properties(ds4.cli PROPERTIES LABELS "cpu;ds4;cli")
 
 if(ENGINE_ENABLE_HIP)
   add_executable(ds4_markov_test markov_test.cpp)
-  target_link_libraries(ds4_markov_test PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(ds4_markov_test PRIVATE gufo_deepseek_v4_flash_hip)
   add_test(NAME ds4.markov COMMAND ds4_markov_test)
   set_tests_properties(ds4.markov PROPERTIES
     LABELS "gpu;hip;gfx1151;ds4;quality"
@@ -49,7 +54,7 @@ if(ENGINE_ENABLE_HIP)
     SKIP_RETURN_CODE 77)
 
   add_executable(ds4_compressor_test compressor_test.cpp)
-  target_link_libraries(ds4_compressor_test PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(ds4_compressor_test PRIVATE gufo_deepseek_v4_flash_hip)
   add_test(NAME ds4.compressor COMMAND ds4_compressor_test)
   set_tests_properties(ds4.compressor PROPERTIES
     LABELS "gpu;hip;gfx1151;ds4;quality"
@@ -65,8 +70,16 @@ if(ENGINE_ENABLE_HIP)
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
+  add_executable(ds4_f16_rows_test f16_rows_test.cpp)
+  target_link_libraries(ds4_f16_rows_test PRIVATE gufo_deepseek_v4_flash_hip)
+  add_test(NAME ds4.f16_rows COMMAND ds4_f16_rows_test)
+  set_tests_properties(ds4.f16_rows PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_router_test router_test.cpp)
-  target_link_libraries(ds4_router_test PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(ds4_router_test PRIVATE gufo_deepseek_v4_flash_hip)
   add_test(NAME ds4.router COMMAND ds4_router_test)
   set_tests_properties(ds4.router PROPERTIES
     LABELS "gpu;hip;gfx1151;ds4;quality"
@@ -74,7 +87,7 @@ if(ENGINE_ENABLE_HIP)
     SKIP_RETURN_CODE 77)
 
   add_executable(ds4_load_test load_test.cpp)
-  target_link_libraries(ds4_load_test PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(ds4_load_test PRIVATE gufo_deepseek_v4_flash_hip)
   add_test(NAME ds4.load COMMAND ds4_load_test)
   set_tests_properties(ds4.load PROPERTIES LABELS "cpu;ds4;loader")
 
@@ -90,7 +103,7 @@ if(ENGINE_ENABLE_HIP)
     GUFO_DS4_BOUNDARY_PROMPT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/indexer-boundary-prompt.txt"
     GUFO_DS4_OFFICIAL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/official-0731.json"
     GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
-  target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash_hip hip::host)
   add_test(NAME ds4.target COMMAND ds4_quality_test)
   add_test(NAME ds4.dspark COMMAND ds4_quality_test --dspark)
   set_tests_properties(ds4.target ds4.dspark PROPERTIES
@@ -111,7 +124,8 @@ if(ENGINE_ENABLE_HIP)
   add_executable(ds4_serving_test serving_test.cpp)
   # gufo_serving still reaches the Qwen 27B model and vision stack through
   # inference_backend.cpp; step 10 removes that interim edge.
-  target_link_libraries(ds4_serving_test PRIVATE gufo_serving)
+  target_link_libraries(ds4_serving_test PRIVATE gufo_serving
+    gufo_deepseek_v4_flash_hip)
   add_test(NAME ds4.serving COMMAND ds4_serving_test)
   set_tests_properties(ds4.serving PROPERTIES
     LABELS "gpu;hip;ds4;server;external-model;slow"
