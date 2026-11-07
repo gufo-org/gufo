@@ -532,6 +532,51 @@ void plain_norm(unsigned rows, std::mt19937& random) {
       rows);
 }
 
+void hc_mix_decode(unsigned rows, bool padded, std::mt19937& random) {
+  constexpr unsigned width = 16384, embd = 4096;
+  constexpr float eps = 1e-6F;
+  const unsigned stride = padded ? width + 256 : width;
+  std::uniform_real_distribution<float> values(-4.F, 4.F);
+  __half_raw padding_nan{};
+  padding_nan.x = 0x7e00;
+  std::vector<__half> weights(size_t(rows) * stride, __half(padding_nan));
+  for (unsigned row = 0; row < rows; ++row)
+    for (unsigned i = 0; i < width; ++i)
+      weights[size_t(row) * stride + i] = __float2half(values(random) * .01F);
+  std::vector<float> input(width), expected(rows), actual(rows);
+  Device<__half> w(weights.size());
+  Device<float> x(width), flat(width), reference(rows), output(rows);
+  check(hipMemcpy(w.data, weights.data(), weights.size() * sizeof(__half),
+                  hipMemcpyHostToDevice));
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    for (size_t i = 0; i < input.size(); ++i) {
+      input[i] = values(random);
+      if (mode == 1)
+        input[i] = 0.F;
+      if (mode == 2)
+        input[i] *= 1e-20F;
+      if (mode == 3)
+        input[i] *= (i % 2) ? 1e12F : 1e-12F;
+    }
+    check(hipMemcpy(x.data, input.data(), input.size() * sizeof(float),
+                    hipMemcpyHostToDevice));
+    rms_norm_plain_regs_kernel<64>
+        <<<1, 256>>>(flat.data, x.data, width, 1, eps);
+    matmul_f16_ordered_batch_reuse_kernel<1>
+        <<<rows, 32>>>(reference.data, w.data, stride, flat.data, width, rows);
+    hc_mix_decode_kernel<<<rows, 256>>>(output.data, x.data, w.data, stride,
+                                        embd, width, eps);
+    check(hipGetLastError());
+    check(hipMemcpy(expected.data(), reference.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    check(hipMemcpy(actual.data(), output.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("decode HC mix", expected.data(), actual.data(), rows);
+  }
+  std::printf("HC mix decode rows=%u %s: 4 cases exact to norm + projection\n",
+              rows, padded ? "padded" : "packed");
+}
+
 void hc_prefill_fp32(unsigned tokens) {
   constexpr unsigned embedding = 4096, width = 4 * embedding, mixes = 24;
   std::vector<__half> weights(mixes * width, __float2half(0.0F));
@@ -778,6 +823,9 @@ int main() {
   f16_ordered<1>(16384, 4, random);
   for (unsigned rows : {1U, 2U, 6U, 8U})
     plain_norm(rows, random);
+  for (unsigned rows : {24U, 4U})
+    for (bool padded : {false, true})
+      hc_mix_decode(rows, padded, random);
   hc_prefill_fp32(128);
   hc_prefill_fp32(129);
   hc_complete_formula(128, 1e-6F, random);

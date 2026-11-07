@@ -386,6 +386,12 @@ __device__ __forceinline__ static float hc_fma(float a, float b, float c) {
     return c;
 }
 
+__device__ __forceinline__ static float hc_add(float a, float b) {
+    float r;
+    asm("v_add_f32 %0, %1, %2" : "=v"(r) : "v"(a), "v"(b));
+    return r;
+}
+
 /* Each of a row's SLICES blocks repeats the split, the whole weighted sum and
  * the sum-of-squares tree, so every block derives the same RMS scale. The
  * residual loads come before the split so that they complete during it. */
@@ -463,6 +469,85 @@ __global__ __launch_bounds__(256) static void hc_split_weighted_sum_norm_fused_k
                                  norm_q8_scale + (uint64_t)t * (n_embd / 32u) + slice * N * 8u);
         if (norm_q8k) quantize_q8_K_cols256<N>(y, d, norm_q8k + (uint64_t)t * COLS + slice * N);
     }
+}
+
+__device__ __forceinline__ static float hc_plain_rms_scale(const float (&r)[4][16], uint32_t d,
+                                                           uint32_t n, float eps) {
+    float sum = 0.0f;
+#pragma unroll
+    for (uint32_t h = 0; h < 4u; h++) {
+#pragma unroll
+        for (uint32_t k = 0; k < 16u; k++) sum += r[h][k] * r[h][k];
+    }
+    __shared__ float partial[256];
+    partial[d] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (d < stride) partial[d] += partial[d + stride];
+        __syncthreads();
+    }
+    return rsqrtf(partial[0] / (float)n + eps);
+}
+
+__device__ __forceinline__ static void hc_mix_row_f16(float *out, const __half *wr, const float *x,
+                                                      float scale, uint32_t in_dim, uint32_t row,
+                                                      uint32_t tid) {
+    constexpr uint32_t kGroups = 16u;
+    __shared__ float partial[32];
+    if (tid < 32u) {
+        float sum = 0.0f;
+        const uint64_t chunk = in_dim / 32u;
+        const uint64_t k1 = (uint64_t)(tid + 1u) * chunk;
+        for (uint64_t i = (uint64_t)tid * chunk; i + 4u * kGroups - 1u < k1; i += 4u * kGroups) {
+            float2 weight01[kGroups], weight23[kGroups];
+            float4 activation[kGroups];
+#pragma unroll
+            for (uint32_t group = 0; group < kGroups; group++) {
+                weight01[group] = __half22float2(
+                    *reinterpret_cast<const __half2 *>(wr + i + 4u * group));
+                weight23[group] = __half22float2(
+                    *reinterpret_cast<const __half2 *>(wr + i + 4u * group + 2u));
+                const float4 v = *reinterpret_cast<const float4 *>(x + i + 4u * group);
+                activation[group] = make_float4(hc_mul(v.x, scale), hc_mul(v.y, scale),
+                                                hc_mul(v.z, scale), hc_mul(v.w, scale));
+            }
+#pragma unroll
+            for (uint32_t group = 0; group < kGroups; group++) {
+                sum = fmaf(weight01[group].x, activation[group].x, sum);
+                sum = fmaf(weight01[group].y, activation[group].y, sum);
+                sum = fmaf(weight23[group].x, activation[group].z, sum);
+                sum = fmaf(weight23[group].y, activation[group].w, sum);
+            }
+        }
+        partial[tid] = sum;
+    }
+    __syncthreads();
+    if (tid == 0u) {
+        float total = partial[0];
+#pragma unroll
+        for (uint32_t lane = 1; lane < 32u; lane++) total = hc_add(partial[lane], total);
+        out[row] = total;
+    }
+}
+
+__global__ __launch_bounds__(256) static void hc_mix_decode_kernel(
+        float *mix,
+        const float *residual_hc,
+        const __half *w,
+        uint32_t w_stride,
+        uint32_t n_embd,
+        uint32_t hc_dim,
+        float norm_eps) {
+    const uint32_t d = threadIdx.x;
+    float r[4][16];
+#pragma unroll
+    for (uint32_t k = 0; k < 16u; k++) {
+#pragma unroll
+        for (uint32_t h = 0; h < 4u; h++) r[h][k] = residual_hc[(uint64_t)h * n_embd + k * 256u + d];
+    }
+    const float scale = hc_plain_rms_scale(r, d, hc_dim, norm_eps);
+    hc_mix_row_f16(mix, w + (uint64_t)blockIdx.x * w_stride, residual_hc, scale, hc_dim,
+                   blockIdx.x, d);
 }
 
 /* Fuse HC RMS scaling, mix projection, Sinkhorn split and weighted sum.
