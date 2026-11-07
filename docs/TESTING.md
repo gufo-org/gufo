@@ -54,9 +54,9 @@ CMake Debug builds use Cargo's development profile. RelWithDebInfo uses an
 optimized profile with full debug information; with `BUILD_TESTING=ON` that
 profile also enables debug assertions and overflow checks, matching the C++
 test assertions, while shipped builds leave them off. Other configurations use
-the release profile. CMake invokes Cargo on
-every build, leaving incremental rebuild decisions to Cargo, and validates
-Rust's native system-library requirements during configuration. The C++
+the release profile. CMake invokes Cargo on every build, leaving incremental
+rebuild decisions to Cargo, and links the native system libraries that the
+configured `rustc` reports for its standard library. The C++
 sanitizer preset does not instrument the Rust library; it uses the development
 profile when configured as Debug.
 

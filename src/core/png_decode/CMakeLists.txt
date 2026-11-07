@@ -21,6 +21,7 @@ set(png_decode_library "${cargo_target_dir}/${cargo_profile_dir}/${png_decode_fi
 # rebuild from sources, manifests and the toolchain. Unchanged builds stay cheap.
 add_custom_target(gufo_png_decode_cargo
   COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${cargo_target_dir}"
+    "RUSTC=${RUSTC_EXECUTABLE}"
     "${CARGO_EXECUTABLE}" build --profile "${cargo_profile}" --locked
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   BYPRODUCTS "${png_decode_library}"
@@ -35,16 +36,9 @@ set_target_properties(gufo_png_decode PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_dependencies(gufo_png_decode gufo_png_decode_cargo)
 
-# Keep these explicit for CMake's link-graph classification. Check them against
-# the actual compiler so toolchain upgrades cannot silently stale the list.
-if(WIN32)
-  set(png_decode_native_libs kernel32 ntdll userenv ws2_32 dbghelp)
-else()
-  set(png_decode_native_libs gcc_s util rt pthread m dl c)
-endif()
-
 # A tiny std-using staticlib reports the same standard-library requirements as
-# the decoder. Probe from the source directory so rustup uses our toolchain file.
+# the decoder. Probe from the source directory so rustup uses our toolchain
+# file, with the same rustc that Cargo builds the decoder with.
 set(native_probe "${CMAKE_CURRENT_BINARY_DIR}/native-libs")
 file(WRITE "${native_probe}.rs" "pub fn probe() { let _ = std::env::args(); }\n")
 execute_process(
@@ -65,22 +59,21 @@ if(NOT native_probe_match)
   message(FATAL_ERROR "rustc did not report native-static-libs")
 endif()
 separate_arguments(native_probe_libs NATIVE_COMMAND "${CMAKE_MATCH_1}")
-set(native_probe_names "")
+set(png_decode_native_libs "")
 foreach(lib IN LISTS native_probe_libs)
+  # Linker directives such as /defaultlib:msvcrt are embedded in Rust's
+  # objects; MSVC supplies the dynamic CRT they name.
+  if(lib MATCHES "^[-/]" AND NOT lib MATCHES "^-l")
+    continue()
+  endif()
   string(REGEX REPLACE "^-l" "" lib "${lib}")
   string(REGEX REPLACE "\\.lib$" "" lib "${lib}")
-  list(APPEND native_probe_names "${lib}")
+  list(APPEND png_decode_native_libs "${lib}")
 endforeach()
-list(REMOVE_DUPLICATES native_probe_names)
-list(SORT native_probe_names)
-set(expected_native_libs ${png_decode_native_libs})
-if(WIN32)
-  # Rust embeds this directive in its objects; MSVC supplies the dynamic CRT.
-  list(APPEND expected_native_libs "/defaultlib:msvcrt")
+list(REMOVE_DUPLICATES png_decode_native_libs)
+if(NOT png_decode_native_libs)
+  message(FATAL_ERROR "rustc reported no native-static-libs")
 endif()
-list(SORT expected_native_libs)
-if(NOT native_probe_names STREQUAL expected_native_libs)
-  message(FATAL_ERROR
-    "Rust native libraries changed: expected [${expected_native_libs}], got [${native_probe_names}]. Update the decoder linkage and cmake/TargetGraph.cmake.")
-endif()
+# cmake/TargetGraph.cmake classifies these as system libraries.
+set(GUFO_PNG_DECODE_LIBS ${png_decode_native_libs} PARENT_SCOPE)
 target_link_libraries(gufo_png_decode INTERFACE ${png_decode_native_libs})
