@@ -1348,13 +1348,11 @@ endfunction()
   set_tests_properties(platform_publish_test PROPERTIES LABELS "cpu;platform")
   endif()
 
-  # the prefault fixture maps pages with mmap
-  if (NOT WIN32)
+  # POSIX checks with mmap, Windows with a file view and QueryWorkingSetEx
   add_executable(platform_prefault_test tests/core/platform_prefault_test.cpp)
   target_link_libraries(platform_prefault_test PRIVATE Threads::Threads)
   add_test(NAME platform_prefault_test COMMAND platform_prefault_test)
   set_tests_properties(platform_prefault_test PROPERTIES LABELS "cpu;platform")
-  endif()
 
   include(cmake/PlatformTests.cmake)
 
