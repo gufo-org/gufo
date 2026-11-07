@@ -1172,10 +1172,12 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     // an unusable live frontier) can require another reset before cold use.
     bool clean = !live;
     // A frontier captured between prefill passes cannot select the next token
-    // of a prompt that ends there; serve that prompt from a shallower boundary.
+    // of a prompt that ends there, and a runner may refuse other prompts; serve
+    // those from a shallower boundary.
     const auto decodable = [&](std::size_t boundary) {
-      return boundary < prompt.size() ||
-             impl_->runner->HasDecodeFrontier(*request.state);
+      return (boundary < prompt.size() ||
+              impl_->runner->HasDecodeFrontier(*request.state)) &&
+             impl_->runner->CanContinue(*request.state, prompt.size());
     };
     // Prefill must not resume inside an indivisible input of this prompt,
     // which a checkpoint from another prompt with the same tokens can do.

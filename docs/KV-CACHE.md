@@ -318,6 +318,14 @@ checkpoint inside one. Such a position moves to the span's first row, and a step
 that starts at a span takes it whole even beyond its token budget. Contexts that
 declare no spans change no position.
 
+**A checkpoint may hold less than a cold request would.** Each prefill step's
+prompt ends at its own frontier, and `TextRunnerState::prefill_prompt_end()`
+gives the whole prompt's end. A model that runs some work only near that end
+can skip it in steps ending at earlier cache boundaries, so their checkpoints
+lack those rows. Its `TextModelRunner::CanContinue` then refuses prompts that
+would need them, and the cache serves those from a shallower boundary. By
+default every state continues every prompt.
+
 **The reused frontier must be frozen before prefill.** Prefill mutates the
 leased state in place, so a frontier another request might branch from has to
 be captured first.

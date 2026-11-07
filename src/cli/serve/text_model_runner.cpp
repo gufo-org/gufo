@@ -1197,10 +1197,14 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   }
   struct ClearLookahead {
     TextRunnerState& state;
-    ~ClearLookahead() { state.SetPrefillLookahead({}); }
+    ~ClearLookahead() {
+      state.SetPrefillLookahead({});
+      state.SetPrefillPromptEnd(0);
+    }
   } clear_lookahead{state};
   state.SetPrefillLookahead(std::span<const TextRunnerToken>(impl_->prompt)
                                 .subspan(frontier, lookahead_end - frontier));
+  state.SetPrefillPromptEnd(impl_->prompt.size());
   std::vector<std::size_t> in_pass_positions;
   for (const auto& capture : in_pass)
     in_pass_positions.push_back(capture.position);
