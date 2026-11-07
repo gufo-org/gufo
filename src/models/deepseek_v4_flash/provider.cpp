@@ -38,6 +38,9 @@ void deepseek_v4_flash_provider_register(gufo::ext::Registry& registry) {
       .chat_driver = &gufo::models::deepseek_v4_flash::RunDeepSeekChat,
       .sampling_defaults =
           &gufo::models::deepseek_v4_flash::DeepSeekSamplingDefaults,
+      .speculative_defaults = {{.backend = "dspark",
+                                .max_draft_tokens = 7,
+                                .min_draft_tokens = 1}},
   });
 #endif
 }

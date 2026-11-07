@@ -372,7 +372,8 @@ add_subdirectory(src/eval)
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp
-  src/cli/provider_options.cpp)
+  src/cli/provider_options.cpp
+  src/cli/speculative_settings.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_ext_runtime)
 
 add_subdirectory(src/ext)

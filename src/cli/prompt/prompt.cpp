@@ -15,6 +15,7 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/provider_options.hpp"
 #include "src/cli/sampling_options.hpp"
+#include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
 
@@ -187,7 +188,9 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
 std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
                                               std::string* error_msg,
                                               std::string_view command,
-                                              ProviderOptions& provider) {
+                                              const ext::Registry& registry,
+                                              ProviderOptions& provider,
+                                              SpeculativeFlags& speculative) {
   ArgParser parser("gufo " + std::string(command),
                    command == "chat" ? "Interactive conversation."
                                      : "Execute one prompt request and exit.");
@@ -240,19 +243,20 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
       *error_msg = "DSpark requires --dspark-model";
     return std::nullopt;
   }
-  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
-      opt.min_draft_tokens > opt.draft_tokens) {
+  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0) {
     if (error_msg != nullptr) {
-      *error_msg = "min-draft-tokens cannot exceed draft-tokens";
+      *error_msg = "draft-tokens and min-draft-tokens must be positive";
     }
     return std::nullopt;
   }
-
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
+  // Unset draft settings take the selected provider's defaults later.
+  speculative = SpeculativeFlags::Given(parser, opt.draft_tokens,
+                                        opt.min_draft_tokens, opt.draft_policy);
+  try {
+    CheckSpeculativeFlags(registry, opt.speculative_backend, speculative);
+  } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+      *error_msg = exception.what();
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
@@ -296,12 +300,18 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
   return opt;
 }
 
-// Delivers the selected provider's options; false after reporting an error.
-bool SelectProviderOptions(const ProviderOptions& provider,
-                           const ext::TextProvider& selected,
-                           PromptOptions* opt) {
+// Delivers the selected provider's options and resolves its draft settings;
+// false after reporting an error.
+bool PrepareForProvider(const ProviderOptions& provider,
+                        const SpeculativeFlags& speculative,
+                        const ext::TextProvider& selected, PromptOptions* opt) {
   try {
     opt->provider_options = provider.Select(selected.id);
+    const auto settings = ResolveSpeculativeSettings(
+        selected, opt->speculative_backend, speculative);
+    opt->draft_tokens = settings.max_draft_tokens;
+    opt->min_draft_tokens = settings.min_draft_tokens;
+    opt->draft_policy = settings.draft_policy;
   } catch (const std::invalid_argument& exception) {
     std::cerr << "Error: " << exception.what() << "\n";
     return false;
@@ -359,7 +369,9 @@ std::optional<PromptOptions> ParsePromptOptions(
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider(registry, "prompt");
-  return ParseTextOptions(args, error_msg, "prompt", provider);
+  SpeculativeFlags speculative;
+  return ParseTextOptions(args, error_msg, "prompt", registry, provider,
+                          speculative);
 }
 
 int RunPrompt(std::span<const char* const> args) {
@@ -367,8 +379,9 @@ int RunPrompt(std::span<const char* const> args) {
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider_options(registry, "prompt");
-  const auto opt_res =
-      ParseTextOptions(args, &parse_err, "prompt", provider_options);
+  SpeculativeFlags speculative;
+  const auto opt_res = ParseTextOptions(args, &parse_err, "prompt", registry,
+                                        provider_options, speculative);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -434,7 +447,7 @@ int RunPrompt(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!SelectProviderOptions(provider_options, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, speculative, *provider, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }
@@ -450,8 +463,9 @@ int RunChat(std::span<const char* const> args) {
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider_options(registry, "chat");
-  const auto opt_res =
-      ParseTextOptions(args, &parse_err, "chat", provider_options);
+  SpeculativeFlags speculative;
+  const auto opt_res = ParseTextOptions(args, &parse_err, "chat", registry,
+                                        provider_options, speculative);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -494,7 +508,7 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!SelectProviderOptions(provider_options, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, speculative, *provider, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }

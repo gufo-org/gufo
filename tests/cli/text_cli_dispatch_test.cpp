@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/cli/bench/bench.hpp"
@@ -23,6 +24,9 @@ namespace {
 std::string dispatched;
 gufo::sampling::SamplingConfig dispatched_sampling;
 gufo::ext::ParsedOptions dispatched_options;
+std::size_t dispatched_draft_tokens = 0;
+std::size_t dispatched_min_draft_tokens = 0;
+std::string dispatched_draft_policy;
 bool invalid_defaults = false;
 
 std::optional<gufo::sampling::TextSamplingDefaults> SamplingDefaults(
@@ -37,8 +41,13 @@ std::optional<gufo::sampling::TextSamplingDefaults> SamplingDefaults(
   return defaults;
 }
 
+template<typename Options>
 int Dispatch(std::string_view command, const gufo::core::GgufReader& reader,
-             const gufo::ext::ParsedOptions& options) {
+             const Options& driver_options) {
+  const auto& options = driver_options.provider_options;
+  dispatched_draft_tokens = driver_options.draft_tokens;
+  dispatched_min_draft_tokens = driver_options.min_draft_tokens;
+  dispatched_draft_policy = driver_options.draft_policy;
   const std::string_view architecture =
       reader.GetMetadataString("general.architecture").value_or("");
   if (architecture != "test-text" && architecture != "other-text" &&
@@ -102,21 +111,26 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
           +[](const TextBenchOptions& options,
               const std::shared_ptr<const core::GgufReader>& reader,
               std::chrono::steady_clock::time_point) {
-            return Dispatch("bench", *reader, options.provider_options);
+            return Dispatch("bench", *reader, options);
           },
       .prompt_driver =
           +[](const TextPromptOptions& options, const core::GgufReader& reader,
               std::chrono::steady_clock::time_point) {
             dispatched_sampling = options.sampling;
-            return Dispatch("prompt", reader, options.provider_options);
+            return Dispatch("prompt", reader, options);
           },
       .chat_driver =
           +[](const TextPromptOptions& options, const core::GgufReader& reader,
               std::chrono::steady_clock::time_point) {
             dispatched_sampling = options.sampling;
-            return Dispatch("chat", reader, options.provider_options);
+            return Dispatch("chat", reader, options);
           },
       .sampling_defaults = &SamplingDefaults,
+      .speculative_defaults = {{.backend = "mtp",
+                                .max_draft_tokens = 15,
+                                .min_draft_tokens = 2,
+                                .draft_policy = "calibrated",
+                                .draft_policies = {"calibrated", "fixed"}}},
   });
   registry.AddTextProvider({
       .id = "other-text",
@@ -128,17 +142,17 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
           +[](const TextBenchOptions& options,
               const std::shared_ptr<const core::GgufReader>& reader,
               std::chrono::steady_clock::time_point) {
-            return Dispatch("bench", *reader, options.provider_options);
+            return Dispatch("bench", *reader, options);
           },
       .prompt_driver =
           +[](const TextPromptOptions& options, const core::GgufReader& reader,
               std::chrono::steady_clock::time_point) {
-            return Dispatch("prompt", reader, options.provider_options);
+            return Dispatch("prompt", reader, options);
           },
       .chat_driver =
           +[](const TextPromptOptions& options, const core::GgufReader& reader,
               std::chrono::steady_clock::time_point) {
-            return Dispatch("chat", reader, options.provider_options);
+            return Dispatch("chat", reader, options);
           },
   });
   // Owns a tensor layout core cannot size; the others never see such a file.
@@ -152,19 +166,19 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
           +[](const TextBenchOptions& options,
               const std::shared_ptr<const core::GgufReader>& reader,
               std::chrono::steady_clock::time_point) {
-            return Dispatch("bench", *reader, options.provider_options);
+            return Dispatch("bench", *reader, options);
           },
       .prompt_driver =
           +[](const TextPromptOptions& options, const core::GgufReader& reader,
               std::chrono::steady_clock::time_point) {
             dispatched_sampling = options.sampling;
-            return Dispatch("prompt", reader, options.provider_options);
+            return Dispatch("prompt", reader, options);
           },
       .chat_driver =
           +[](const TextPromptOptions& options, const core::GgufReader& reader,
               std::chrono::steady_clock::time_point) {
             dispatched_sampling = options.sampling;
-            return Dispatch("chat", reader, options.provider_options);
+            return Dispatch("chat", reader, options);
           },
       .sampling_defaults = &SamplingDefaults,
       .accepts_unsized_tensors = true,
@@ -243,6 +257,97 @@ bool CheckProviderOptions(std::string_view command, const std::string& model,
       dispatched_options.size() != 1 ||
       *FindOption<std::string>(dispatched_options, "--other-only") != "x") {
     return Fail(command, "the other provider must receive only its options");
+  }
+  return true;
+}
+
+// Draft settings: the explicit flag, else the provider's default for the
+// backend, else the host's 7, 1 and no policy.
+bool CheckSpeculativeDefaults(std::string_view command,
+                              const std::string& model,
+                              const std::string& other) {
+  struct Case {
+    const std::string* model;
+    std::vector<const char*> flags;
+    std::size_t max;
+    std::size_t min;
+    std::string_view policy;
+    const char* what;
+  };
+  const std::vector<Case> cases = {
+      {&model,
+       {"--speculative", "mtp", "--mtp-model", "x"},
+       15,
+       2,
+       "calibrated",
+       "the defaults"},
+      {&model,
+       {"--speculative", "mtp", "--mtp-model", "x", "--draft-tokens", "9"},
+       9,
+       2,
+       "calibrated",
+       "an explicit limit"},
+      {&model,
+       {"--speculative", "mtp", "--mtp-model", "x", "--min-draft-tokens", "1",
+        "--draft-policy", "fixed"},
+       15,
+       1,
+       "fixed",
+       "an explicit minimum and policy"},
+      {&model, {}, 7, 1, "", "no backend"},
+      {&model,
+       {"--speculative", "dspark", "--dspark-model", "x"},
+       7,
+       1,
+       "",
+       "a backend the provider does not declare"},
+      {&other,
+       {"--speculative", "mtp", "--mtp-model", "x"},
+       7,
+       1,
+       "",
+       "a provider declaring none"},
+      {&other,
+       {"--speculative", "dflash2", "--dflash-model", "x", "--draft-policy",
+        "fixed"},
+       7,
+       1,
+       "fixed",
+       "the host's DFlash2 policies"},
+  };
+  for (const auto& entry : cases) {
+    if (Run(command, *entry.model, entry.flags) != 42 ||
+        dispatched_draft_tokens != entry.max ||
+        dispatched_min_draft_tokens != entry.min ||
+        dispatched_draft_policy != entry.policy) {
+      return Fail(command,
+                  std::string("wrong draft settings for ") + entry.what);
+    }
+  }
+  const std::vector<std::pair<const std::string*, std::vector<const char*>>>
+      rejected = {
+          // No provider accepts these; rejected without a probe.
+          {&model, {"--draft-policy", "fixed"}},
+          {&model,
+           {"--speculative", "mtp", "--mtp-model", "x", "--draft-policy",
+            "unknown"}},
+          {&model,
+           {"--speculative", "mtp", "--mtp-model", "x", "--draft-tokens", "2",
+            "--min-draft-tokens", "3"}},
+          // Accepted by another provider or above the resolved limit.
+          {&other,
+           {"--speculative", "mtp", "--mtp-model", "x", "--draft-policy",
+            "fixed"}},
+          {&model,
+           {"--speculative", "mtp", "--mtp-model", "x", "--min-draft-tokens",
+            "16"}},
+          {&model,
+           {"--speculative", "mtp", "--mtp-model", "x", "--draft-tokens", "1"}},
+      };
+  for (const auto& [selected, flags] : rejected) {
+    if (Run(command, *selected, flags) != 2 || !dispatched.empty()) {
+      return Fail(command, "must reject impossible draft settings");
+    }
   }
   return true;
 }
@@ -377,6 +482,7 @@ int main(int argc, char** argv) {
       command == "bench" || CheckSamplingDefaults(command, model.c_str());
   const bool options_ok =
       CheckProviderOptions(command, model, other_path.string()) &&
+      CheckSpeculativeDefaults(command, model, other_path.string()) &&
       CheckHelp(command);
   const bool unsized_ok = CheckUnsizedTensors(command);
   std::filesystem::remove(path);

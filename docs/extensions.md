@@ -279,6 +279,24 @@ rejects conflicting types. The Nix serving helper derives provider arguments and
 from metadata, including optional `serving` declarations. See
 [Nix serving](model-extensions/serving.md).
 
+Text providers declare the draft settings a speculative backend runs with in
+`TextProvider::speculative_defaults`, one entry per backend (`mtp`, `dflash2`,
+`dspark`). Core resolves each setting once the provider is selected, before any
+weights load, and logs the result in `load_completed`: an explicit
+`--draft-tokens`, `--min-draft-tokens` or `--draft-policy`, else the declared
+value, else the host's fallback of 7, 1 and no policy (DFlash2 accepts `fixed`
+and `adaptive`). `--draft-policy` must be in the entry's `draft_policies`. The
+resolved values reach `TextSpeculativeConfig`, `TextPromptOptions` and
+`TextBenchOptions`.
+
+```cpp
+.speculative_defaults = {{.backend = "mtp",
+                          .max_draft_tokens = 15,
+                          .min_draft_tokens = 1,
+                          .draft_policy = "calibrated",
+                          .draft_policies = {"calibrated", "fixed"}}},
+```
+
 Text providers receive their options. `serve`, `prompt`, `chat` and `bench`
 accept every option an available text provider declares for that command, list
 the ones core does not own under "Provider options" in `--help`, and parse values
