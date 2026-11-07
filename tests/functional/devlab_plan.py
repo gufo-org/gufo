@@ -33,9 +33,28 @@ def timing_checks(model, reasons):
     return checks
 
 
+def curated(planned, suites):
+    rows = {'groups': [], 'out_of_scope': list(planned['out_of_scope']), 'obligations': planned['obligations']}
+    for group in planned['groups']:
+        kept = [suite for suite in group['suites'] if suite in suites]
+        rows['out_of_scope'].extend({'profile': group['profile'], 'suite': suite,
+                                     'configuration': group['configuration']}
+                                    for suite in group['suites'] if suite not in suites)
+        if kept:
+            rows['groups'].append({**group, 'suites': kept})
+    for field in ('deferred', 'release_only'):
+        rows[field] = [row for row in planned[field] if row['suite'] in suites]
+        rows['out_of_scope'].extend(row for row in planned[field] if row['suite'] not in suites)
+    return rows
+
+
 def select(paths, data, tier='pr', ar=False, benchmark=False):
     manifest = json.loads((HERE / 'impact.json').read_text())
-    impact.validate(manifest, impact.suite_names(HERE / 'run.py'))
+    names = impact.suite_names(HERE / 'run.py')
+    impact.validate(manifest, names)
+    for key, model in data['models'].items():
+        if not set(model.get('suites', names)) <= set(names):
+            raise ValueError('Unknown Devlab suite for ' + key)
     selected, resolutions = {}, []
     for path in sorted(set(paths)):
         if PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts:
@@ -77,6 +96,8 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
             if not affected:
                 affected = ['src/models/qwen38_flash_next/engine.cpp']
             planned = impact.plan(manifest, affected, profiles, tier)
+            if 'suites' in model:
+                planned = curated(planned, set(model['suites']))
             for field in ('groups', 'deferred', 'release_only', 'out_of_scope', 'obligations'):
                 result[field].extend(planned[field])
         else:

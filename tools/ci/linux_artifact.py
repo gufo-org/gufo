@@ -110,10 +110,11 @@ def pack(package, revision, destination):
     loader = runtime_path(loaders[0], root).relative_to(root).as_posix()
     environment = {}
     for dependency in closure:
-        for key, suffix in [('HIPBLASLT_TENSILE_LIBPATH', 'lib/hipblaslt/library'),
-                            ('ROCBLAS_TENSILE_LIBPATH', 'lib/rocblas/library')]:
-            if (dependency / suffix).is_dir():
-                environment[key] = runtime_path(dependency / suffix, root).relative_to(root).as_posix()
+        # HIPBLASLT_TENSILE_LIBPATH stays unset. hipBLASLt finds its gfx1151
+        # library beside libhipblaslt.so, as in the Nix package.
+        if (dependency / 'lib/rocblas/library').is_dir():
+            environment['ROCBLAS_TENSILE_LIBPATH'] = runtime_path(
+                dependency / 'lib/rocblas/library', root).relative_to(root).as_posix()
         ids = dependency / 'share/libdrm/amdgpu.ids'
         if ids.is_file():
             copy_runtime(ids, root)
