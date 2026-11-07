@@ -280,7 +280,11 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         alpha = self.source / "src/models/alpha/extension.cmake"
         alpha.write_text(alpha.read_text().replace(
             "LINK_LIBRARIES gufo_ext_runtime)\n",
-            "LINK_LIBRARIES gufo_ext_runtime PkgConfig::gufo-fixture-pkg)\n", 1))
+            "LINK_LIBRARIES gufo_ext_runtime PkgConfig::gufo-fixture-pkg)\n", 1)
+            # Results pkg_check_modules does not cache reach the extension too.
+            + 'if(NOT DEFINED gufo-fixture-pkg_LINK_LIBRARIES)\n'
+              '  message(FATAL_ERROR "gufo-fixture-pkg_LINK_LIBRARIES is not visible")\n'
+              'endif()\n')
         (self.source / "src/models/alpha/registration.cpp").write_text(
             '#include "gufo/ext/registry.hpp"\n'
             "static_assert(GUFO_FIXTURE_PKG == 1);\n"
@@ -288,6 +292,12 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         self.configure(error="extension beta requires pkg-config module gufo-missing-pkg")
         self.configure("-DGUFO_EXTENSIONS=alpha;base")
         self.assertEqual([e["name"] for e in self.run_fixture()["builtExtensions"]], ["base", "alpha"])
+        # Two selected extensions may declare one module; it is checked once.
+        beta = self.source / "src/models/beta/extension.json"
+        manifest = json.loads(beta.read_text())
+        manifest["packages"] = [{"pkg_config": "gufo-fixture-pkg"}]
+        beta.write_text(json.dumps(manifest))
+        self.configure("-DGUFO_EXTENSIONS=alpha;base;beta")
 
     def test_disabled_target_dependency(self):
         path = self.source / "src/models/alpha/extension.cmake"

@@ -481,6 +481,8 @@ function(gufo_build_discovered_extensions)
   # Only selected extensions require their `packages[].pkg_config` modules.
   # Each becomes the global imported target PkgConfig::<module>, with the
   # <module>_* variables pkg_check_modules sets, before any extension builds.
+  # Its non-cached results (<module>_LINK_LIBRARIES) reach the extension
+  # directories because they are added from this same function scope.
   foreach(name IN LISTS selected)
     get_property(json GLOBAL PROPERTY "GUFO_EXT_${name}_JSON")
     _gufo_optional(packages "${json}" packages "[]")

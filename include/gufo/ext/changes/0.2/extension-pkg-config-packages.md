@@ -5,6 +5,10 @@ Extension CMake contract (`cmake/GufoExtensionDiscovery.cmake`, manifest
 required at configure time, before extensions build, as global imported
 targets `PkgConfig::<module>` with the `<module>_*` variables
 `pkg_check_modules` sets. Modules of unselected extensions are not required.
+A selected extension's declared modules are now enforced at configure time,
+not only listed, so `packages` must name only modules the extension builds
+against. The metadata schema restricts `pkg_config` to a module name
+(`^[A-Za-z0-9_.+-]+$`, no version constraint), matching the configure check.
 
 The root build no longer requires sndfile, soxr, libavformat, libavcodec,
 libavutil and libswscale for every build, and no longer defines
