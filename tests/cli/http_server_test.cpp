@@ -637,8 +637,7 @@ void TestLlamaTokenize() {
   server.backend->token_ids = std::vector<std::uint32_t>{};
   const auto empty = server.Post("/tokenize", R"({"content":""})");
   ExpectStatus(empty, 200);
-  const auto none =
-      gufo::json::parse(empty.substr(empty.find("\r\n\r\n") + 4));
+  const auto none = gufo::json::parse(empty.substr(empty.find("\r\n\r\n") + 4));
   assert(none.find("tokens") != nullptr && none.find("tokens")->is_array() &&
          none.find("tokens")->empty());
   // Tokenizing never generates.

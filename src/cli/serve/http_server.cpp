@@ -1422,16 +1422,16 @@ HttpResponse LlamaTokenize(const HttpRequest& req, TextGenerationBackend& b) {
       return InvalidCompatibilityRequest("'" + std::string(field) +
                                          "' must be a boolean");
     if (value->as_bool() != supported)
-      return InvalidCompatibilityRequest(
-          "'" + std::string(field) + "' is supported only as " +
-          (supported ? "true" : "false"));
+      return InvalidCompatibilityRequest("'" + std::string(field) +
+                                         "' is supported only as " +
+                                         (supported ? "true" : "false"));
   }
   const auto tokens = b.tokenize(content->str());
   if (!tokens)
     return NotImplemented(req, b);
   json::Value ids = json::Value::array();
   for (const auto token : *tokens)
-    ids.push_back(token);
+    ids.push_back(static_cast<std::size_t>(token));
   json::Value resp = json::Value::object();
   resp["tokens"] = std::move(ids);
   return Ok(resp);
