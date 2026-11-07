@@ -31,6 +31,17 @@ namespace gufo::platform {
                               std::string* output,
                               std::string* error = nullptr);
 
+/// Runs `program` (searched on PATH) with `arguments`, which exclude the
+/// program name, sharing this process's standard output and error. Returns
+/// the exit status, or -1 with `error` set when the program cannot start.
+[[nodiscard]] int RunInherited(const char* program,
+                               std::span<const std::string> arguments,
+                               std::string* error = nullptr);
+
+/// Resolves `name` against PATH the way RunInherited does. Returns an empty
+/// path when no executable file is found.
+[[nodiscard]] std::filesystem::path FindExecutable(std::string_view name);
+
 struct MuxProcessTelemetry {
   std::uint64_t video_bytes{0};
   std::uint64_t audio_bytes{0};

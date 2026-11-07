@@ -37,7 +37,10 @@ build and inference, with the permissions and resources of those processes.
 The include allowlist enforces API boundaries; it is not a security sandbox.
 A Nix build sandbox does not sandbox a subsequently running model server.
 Review and pin source revisions before building or running third-party code.
-Official selection includes only reviewed core extensions.
+Official selection includes only reviewed core extensions. The same applies to
+[extension modules](../extension-modules.md): `gufo extension install` warns
+before building unvalidated code, and `diagnose` reports a module's source as
+`module:<path>`.
 
 Retain the Gufo and extension source revisions, toolchain, build options,
 `extensions.lock`, model artifact identities, install inventory and capability

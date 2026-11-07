@@ -356,8 +356,9 @@ if (ENGINE_ENABLE_HIP)
   target_include_directories(gufo_ext_hip SYSTEM INTERFACE
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR})
+  # `hip_utils.hpp` in the public surface includes hipBLAS.
   target_link_libraries(gufo_ext_hip INTERFACE $<LINK_ONLY:gufo_hip_host>
-    hip::host)
+    hip::host roc::hipblas)
 else()
   target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
 endif()
@@ -445,7 +446,24 @@ target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_ev
 include(CTest)
 gufo_build_discovered_extensions()
 get_property(gufo_selected_extensions GLOBAL PROPERTY GUFO_SELECTED_EXTENSIONS)
-gufo_target_extensions(gufo EXTENSIONS ${gufo_selected_extensions})
+if (GUFO_EXTENSION_MODULES)
+  list(REMOVE_ITEM gufo_selected_extensions ${GUFO_EXTENSION_MODULES})
+endif()
+gufo_target_extensions(gufo LOAD_MODULES EXTENSIONS ${gufo_selected_extensions})
+set(GUFO_EXTENSION_MODULE_HOST gufo)
+gufo_extension_modules(EXTENSIONS ${GUFO_EXTENSION_MODULES})
+gufo_extension_build_id(gufo_extension_build_id)
+include(cmake/GufoExtensionSdk.cmake)
+gufo_extension_sdk(gufo)
+target_sources(gufo PRIVATE src/cli/extension/modules.cpp
+  src/cli/extension/store.cpp src/cli/extension/extension.cpp
+  src/cli/extension/registry.cpp)
+set_property(SOURCE src/cli/extension/modules.cpp
+  src/cli/extension/store.cpp APPEND PROPERTY
+  COMPILE_DEFINITIONS GUFO_EXTENSION_BUILD_ID="${gufo_extension_build_id}"
+  GUFO_EXECUTABLE_FILE_NAME="$<TARGET_FILE_NAME:gufo>")
+include(cmake/GufoExtensionHost.cmake)
+gufo_extension_host(gufo)
 gufo_stage_hip_runtime(gufo)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"

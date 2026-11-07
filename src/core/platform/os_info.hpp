@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
@@ -75,6 +76,14 @@ bool UtcTime(std::time_t seconds, std::tm* out) noexcept;
 /// Whether standard error is attached to a terminal. Log and trace sinks
 /// use it to decide between plain and colored output.
 bool StderrIsTerminal() noexcept;
+
+/// Whether standard input is attached to a terminal, so a command can ask
+/// for confirmation instead of requiring an explicit flag.
+bool StdinIsTerminal() noexcept;
+
+/// Absolute path of the running executable. Throws std::runtime_error when
+/// the platform cannot report it.
+std::filesystem::path ExecutablePath();
 
 /// Minor and major page faults of this process since it started.
 struct PageFaults {

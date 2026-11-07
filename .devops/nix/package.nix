@@ -43,6 +43,8 @@ let
   # Revisions before model extensions have no extensions.lock, keep the eval
   # fixture under the DeepSeek tests and report no extension selection.
   hasExtensions = builtins.pathExists (sourceRoot + "/extensions.lock");
+  # Revisions before extension modules have no SDK to install.
+  hasExtensionSdk = builtins.pathExists (sourceRoot + "/cmake/GufoExtensionSdk.cmake");
   evalFixture =
     if hasExtensions then
       "tests/fixtures/eval/antirez-ds4.json"
@@ -92,6 +94,9 @@ stdenv.mkDerivation {
   pname = "gufo";
   version = packageVersion;
   src = productionSource;
+  # The extension SDK pins the build toolchain, so it lives in its own output:
+  # the runtime closure stays free of compilers and development libraries.
+  outputs = [ "out" ] ++ lib.optional hasExtensionSdk "sdk";
 
   nativeBuildInputs = [
     cmake
@@ -130,7 +135,8 @@ stdenv.mkDerivation {
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
-  ] ++ lib.optional (extensions != [ ]) "-DGUFO_EXTENSION_DIRS=${lib.concatMapStringsSep ";" (ext: "${ext}") extensions}";
+  ] ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
+  ++ lib.optional (extensions != [ ]) "-DGUFO_EXTENSION_DIRS=${lib.concatMapStringsSep ";" (ext: "${ext}") extensions}";
 
   # CI exposes a persistent /tmp/gufo-ccache through extra-sandbox-paths for
   # C/C++ sources. Keep HIP uncached: Clang emits a bundled preprocessor output
@@ -177,6 +183,12 @@ stdenv.mkDerivation {
     test ! -e $out/bin/gufo-kernel-bench
     test -f $out/share/licenses/gufo/LICENSE
     test -f $out/share/licenses/gufo/third-party/LICENSE.ds4
+  '' + lib.optionalString hasExtensionSdk ''
+    test ! -e $out/lib/gufo/sdk
+    test -f $sdk/lib/gufo/sdk/profile.cmake
+    GUFO_SDK_DIR=$sdk/lib/gufo/sdk GUFO_EXTENSIONS_DIR=$TMPDIR/extensions \
+      $out/bin/gufo extension list --json > extension-list.json
+  '' + ''
 
     runHook postInstallCheck
   '';
