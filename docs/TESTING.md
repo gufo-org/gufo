@@ -42,8 +42,9 @@ not a quality pass.
 ## PNG decoding
 
 The Rust decoder uses the toolchain pinned in `rust-toolchain.toml`.
-`nix build .#checks.x86_64-linux.rust` checks rustfmt and clippy offline;
-this check also runs in `check-pr`. Outside Nix, run:
+`nix build .#checks.x86_64-linux.rust` checks rustfmt and clippy offline, and
+`nix flake check` includes it; the CMake `check-pr` target does not lint Rust.
+Outside Nix, run:
 
 ```sh
 cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
