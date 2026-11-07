@@ -41,6 +41,11 @@ public:
                             std::string* text,
                             std::string* error = nullptr) const;
 
+  /// Id of an added (special) token by its exact spelling, e.g. a shared
+  /// `tokenization::k*` control-token constant. False when absent.
+  [[nodiscard]] bool AddedTokenId(std::string_view content,
+                                  std::uint32_t* id) const;
+
   [[nodiscard]] std::size_t vocabulary_size() const noexcept {
     return inverse_vocab_.size();
   }

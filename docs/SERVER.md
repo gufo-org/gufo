@@ -506,8 +506,8 @@ cache snapshots. HTTP handlers do not implement model kernels.
 
 As in llama.cpp, vLLM, TEI and Ollama, these routes ignore request fields they
 do not know, so a client that adds one still works. Known fields whose behavior
-a route cannot provide, such as transcription timestamps or video image
-conditioning, are refused with 400 rather than dropped.
+a route cannot provide, such as transcription timestamps or video
+reference-image conditioning, are refused with 400 rather than dropped.
 
 Use `gufo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](models/qwen-image-2.1/README.md). Generation accepts JSON;
@@ -650,12 +650,23 @@ Malformed JSON and requests the model rejects return 400, and requests are
 serialized over the one loaded model.
 
 The MiniMax H3 subset follows the asynchronous OpenAI-style video resource
-shape and is versioned independently as `gufo.video-api.v1`. Its supported
-fields, frozen presets, queue behavior, and deliberate conditioning
-omissions are documented in the [H3 upstream contract](models/minimax-h3/QUALITY.md).
+shape and is versioned independently as `gufo.video-api.v1`. Its frozen
+presets and numerical qualification are documented in the
+[H3 upstream contract](models/minimax-h3/QUALITY.md).
 Create requests accept both `application/json` and OpenAI-client-compatible
 `multipart/form-data`; duplicate form fields, malformed boundaries, unsupported
 media types, and reference-image parts fail explicitly.
+Optional `first_frame` and `last_frame` anchors condition generation on a
+keyframe, alone or together: a base64 PNG, JPEG or WebP data URL in JSON, or a
+file part in multipart. Remote URLs are not fetched. With an anchor, `size`
+sets the pixel budget and the first keyframe (or a lone last one) sets the
+aspect ratio, so the video follows the keyframe's shape instead of being
+squeezed into `size`; the job telemetry reports the generated canvas. A
+keyframe outside 1:4 to 4:1 fails the job. An anchor that is not a
+data URL or upload, is empty, exceeds 20 MiB, or does not decode returns 400
+`invalid_frame_image`. `input_reference` and `references` remain unsupported
+and return 400 `unsupported_input_reference`. See
+[keyframe conditioning](models/minimax-h3/README.md#cli-and-server).
 H3 accepts `seconds` as a JSON number or string (including multipart), at
 `512x512` or `1344x768`. Durations from 5 seconds are converted to 24-fps frames
 and rounded up to the official VAE grid (`17n + 5`), within upstream's

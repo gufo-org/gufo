@@ -154,7 +154,15 @@ seed. Speed depends on acceptance and verification cost.
 
 ### Video
 
-TODO
+`gufo video --model DIR "PROMPT"` runs MiniMax H3 generation directly;
+`gufo serve --video-model DIR --video-root DIR` serves the asynchronous
+`/v1/videos` API. `--preset` selects `exact`, `exact-1344x768`, `fast`,
+`aggressive` or `dev`. `--first-frame FILE` and `--last-frame FILE` condition
+the generation on a PNG, JPEG or WebP keyframe, alone or together; the
+keyframe sets the video's aspect ratio and the preset its size budget. The
+server takes the same anchors as `first_frame`/`last_frame`. See
+[MiniMax H3](models/minimax-h3/README.md#cli-and-server) for presets, outputs
+and keyframe behavior.
 
 ### Audio (TTS and ASR)
 
