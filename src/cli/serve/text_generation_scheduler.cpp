@@ -546,7 +546,8 @@ struct TextGenerationScheduler::Impl {
         runner_pool->runner().Descriptor().capabilities.incremental_prefill;
     policy = sched::Policy(
         {.decode_active_tokens = prefill_policy.decode_active_tokens,
-         .incremental_prefill = incremental_prefill_supported});
+         .incremental_prefill = incremental_prefill_supported,
+         .profile = runner_pool->runner().Descriptor().scheduling});
     final_token_advance_required =
         runner_pool->runner()
             .Descriptor()
@@ -1293,7 +1294,8 @@ struct TextGenerationScheduler::Impl {
   }
 
   void StepPrefill(const std::shared_ptr<ScheduledRequest>& request,
-                   const sched::PrefillWork& work) {
+                   const sched::PrefillWork& work,
+                   const PrefillYield& yield = {}) {
     const bool decoder_runnable = work.beside_decoders;
     const bool peer_waiting = work.peer_waiting;
     try {
@@ -1312,10 +1314,20 @@ struct TextGenerationScheduler::Impl {
             "incremental_prefill_unavailable";
       }
       const auto start = Clock::now();
-      const auto step = request->runner_request.Prefill(budget);
+      const std::size_t rounds_before = yield_rounds;
+      const double yield_ms_before = yield_ms;
+      const auto step =
+          request->runner_request.Prefill(budget, work.layer_groups, yield);
+      request->result.prefill_yield_rounds += yield_rounds - rounds_before;
+      if (yield_rounds != rounds_before)
+        request->result.max_prefill_layer_groups = std::max(
+            request->result.max_prefill_layer_groups, work.layer_groups);
+      // Decode rounds between layer groups count as the decoders' time, not
+      // this prompt's.
       const double step_ms =
           std::chrono::duration<double, std::milli>(Clock::now() - start)
-              .count();
+              .count() -
+          (yield_ms - yield_ms_before);
       request->result.prefill_ms += step_ms;
       request->result.prefill_tokens += step.consumed_tokens;
       if (!decoder_runnable && !peer_waiting)
@@ -1911,6 +1923,112 @@ struct TextGenerationScheduler::Impl {
     return request;
   }
 
+  /// One decode work unit: a batch from the front of `decoding`, in turn.
+  /// Returns how many requests it stepped.
+  std::size_t RunDecodeUnit(
+      const sched::DecodeWork& decode,
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
+    const auto plan = runner_pool->SelectDecodePlan(decode.candidates);
+    const std::size_t batch_size =
+        plan.kind == TextExecutionPlanKind::kBatched
+            ? std::min(decode.candidates, plan.physical_width)
+            : 1;
+    std::vector<std::shared_ptr<ScheduledRequest>> batch;
+    batch.reserve(batch_size);
+    for (std::size_t index = 0; index < batch_size; ++index) {
+      auto request = PopDecoder(decoding, decode.due_only);
+      request->decode_due = false;
+      batch.push_back(std::move(request));
+    }
+    StepDecodeBatch(batch);
+    for (auto& request : batch) {
+      if (!IsTerminal(request)) {
+        if (request->runner_request.SnapshotPending())
+          capturing.push_back(std::move(request));
+        else
+          decoding.push_back(std::move(request));
+      }
+    }
+    return batch_size;
+  }
+
+  /// Moves requests whose capture has finished back to their queue. Without
+  /// `prefilling` (inside a pass), a prompt's capture stays in `capturing`.
+  void ResumeCaptured(
+      std::deque<std::shared_ptr<ScheduledRequest>>& capturing,
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>* prefilling) {
+    for (std::size_t count = capturing.size(); count != 0; --count) {
+      auto request = std::move(capturing.front());
+      capturing.pop_front();
+      if (request->runner_request.SnapshotPending() ||
+          (prefilling == nullptr &&
+           !request->runner_request.prefill_complete())) {
+        capturing.push_back(std::move(request));
+        continue;
+      }
+      progress.fetch_add(1, std::memory_order_relaxed);
+      if (!CompleteIfStopped(request)) {
+        if (request->runner_request.prefill_complete()) {
+          // Its capture already waited through peer prefill. Resume it
+          // before another bounded chunk, as for any due decoder.
+          request->decode_due = true;
+          decoding.push_back(std::move(request));
+        } else {
+          prefilling->push_back(std::move(request));
+        }
+      }
+    }
+  }
+
+  /// Between two layer groups of a prompt pass, the prompt's request is in no
+  /// queue: this round only decodes. Every decoder steps once, in batches of
+  /// at most the profile's width, as every due decoder does between ordinary
+  /// prefill chunks. Nothing is admitted or prefilled. A decoder whose
+  /// capture has finished rejoins the round; a prompt's capture waits until
+  /// the pass ends.
+  void RunYieldRound(
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>& capturing) noexcept {
+    try {
+      ResumeCaptured(capturing, decoding, nullptr);
+      if (decoding.empty())
+        return;
+      progress.fetch_add(1, std::memory_order_relaxed);
+      ++yield_rounds;
+      const auto start = Clock::now();
+      struct AddTime {
+        Clock::time_point start;
+        double& total;
+        ~AddTime() {
+          total +=
+              std::chrono::duration<double, std::milli>(Clock::now() - start)
+                  .count();
+        }
+      } add_time{start, yield_ms};
+      // Stepped requests move to the back, so the front `remaining` have not
+      // stepped in this round yet.
+      for (std::size_t remaining = decoding.size();
+           remaining != 0 && !decoding.empty();) {
+        remaining = std::min(remaining, decoding.size());
+        decoding_view.clear();
+        for (std::size_t index = 0; index < remaining; ++index)
+          decoding_view.push_back(
+              {.due = decoding[index]->decode_due,
+               .started = !decoding[index]->result.tokens.empty()});
+        const auto unit = policy.BetweenGroups(decoding_view);
+        if (!unit)
+          break;
+        remaining -=
+            std::min(remaining, RunDecodeUnit(*unit, decoding, capturing));
+      }
+    } catch (...) {
+      // Decode failures complete their own requests; nothing reaches the
+      // prompt's pass.
+    }
+  }
+
   void CancelRemaining(
       std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
       std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
@@ -1955,25 +2073,7 @@ struct TextGenerationScheduler::Impl {
       loop_working.store(true, std::memory_order_relaxed);
       ProcessQueuedCancellations();
 
-      for (std::size_t count = capturing.size(); count != 0; --count) {
-        auto request = std::move(capturing.front());
-        capturing.pop_front();
-        if (request->runner_request.SnapshotPending()) {
-          capturing.push_back(std::move(request));
-          continue;
-        }
-        progress.fetch_add(1, std::memory_order_relaxed);
-        if (!CompleteIfStopped(request)) {
-          if (request->runner_request.prefill_complete()) {
-            // Its capture already waited through peer prefill. Resume it
-            // before another bounded chunk, as for any due decoder.
-            request->decode_due = true;
-            decoding.push_back(std::move(request));
-          } else {
-            prefilling.push_back(std::move(request));
-          }
-        }
-      }
+      ResumeCaptured(capturing, decoding, &prefilling);
       Admit(prefilling, decoding, capturing, waiting, stop_token);
       if (device_lost.load(std::memory_order_acquire))
         break;
@@ -2040,37 +2140,22 @@ struct TextGenerationScheduler::Impl {
                        .decoding = decoding_view,
                        .capturing = !capturing.empty(),
                        .forming_batch = preparing_multi_token_batch,
-                       .after_decode = consecutive_active_prefill_chunks == 0});
+                       .after_decode = consecutive_active_prefill_chunks == 0},
+                      publication_prefill);
 
       if (const auto* decode = std::get_if<sched::DecodeWork>(&work)) {
-        const auto plan = runner_pool->SelectDecodePlan(decode->candidates);
-        const std::size_t batch_size =
-            plan.kind == TextExecutionPlanKind::kBatched
-                ? std::min(decode->candidates, plan.physical_width)
-                : 1;
-        std::vector<std::shared_ptr<ScheduledRequest>> batch;
-        batch.reserve(batch_size);
-        for (std::size_t index = 0; index < batch_size; ++index) {
-          auto request = PopDecoder(decoding, decode->due_only);
-          request->decode_due = false;
-          batch.push_back(std::move(request));
-        }
-        StepDecodeBatch(batch);
-        for (auto& request : batch) {
-          if (!IsTerminal(request)) {
-            if (request->runner_request.SnapshotPending())
-              capturing.push_back(std::move(request));
-            else
-              decoding.push_back(std::move(request));
-          }
-        }
+        RunDecodeUnit(*decode, decoding, capturing);
         continue;
       }
 
       const auto& prefill = std::get<sched::PrefillWork>(work);
       auto request = std::move(prefilling.front());
       prefilling.pop_front();
-      StepPrefill(request, prefill);
+      StepPrefill(request, prefill,
+                  prefill.layer_groups > 1 ? PrefillYield([&] {
+                    RunYieldRound(decoding, capturing);
+                  })
+                                           : PrefillYield());
       if (!IsTerminal(request)) {
         if (request->runner_request.SnapshotPending()) {
           capturing.push_back(std::move(request));
@@ -2096,6 +2181,10 @@ struct TextGenerationScheduler::Impl {
   // Reused by every work-unit decision.
   std::vector<sched::PrefillingRequest> prefilling_view;
   std::vector<sched::DecodingRequest> decoding_view;
+  // Decode rounds run between layer groups since startup.
+  std::size_t yield_rounds{0};
+  // Time those rounds took, which their prompt's pass excludes.
+  double yield_ms{0};
   detail::PublicationWaitEstimate publication_prefill;
   std::shared_ptr<OutputBudget> output_budget;
   std::shared_ptr<SessionTable> sessions;

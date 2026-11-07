@@ -531,7 +531,8 @@ if (BUILD_TESTING)
   # In-tree test support for model API tests (RFC Step 7b, Card 12).
   # Wraps HTTP and serving fixtures so tests stop reaching src/cli/ directly.
   # Excluded from production, external extensions, and installation.
-  add_library(gufo_test_support STATIC tests/support/test_support.cpp)
+  add_library(gufo_test_support STATIC tests/support/test_support.cpp
+    tests/support/layered_prefill_conformance.cpp)
   target_include_directories(gufo_test_support PUBLIC ${CMAKE_SOURCE_DIR})
   target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
 
@@ -949,6 +950,15 @@ endfunction()
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
+
+  add_executable(layered_prefill_conformance_test
+    tests/cli/layered_prefill_conformance_test.cpp)
+  target_link_libraries(layered_prefill_conformance_test PRIVATE
+    gufo_cache_fake gufo_test_support)
+  add_test(NAME layered_prefill_conformance_test
+    COMMAND layered_prefill_conformance_test)
+  set_tests_properties(layered_prefill_conformance_test PROPERTIES
+    LABELS "cpu;server;scheduler;runner" TIMEOUT 30)
 
   # the disk-store suite exercises permission faults with chmod and lstat
   if (NOT WIN32)
