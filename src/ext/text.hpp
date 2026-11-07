@@ -24,6 +24,7 @@
 #include "gufo/ext/gguf_reader.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/ledger.hpp"
+#include "gufo/ext/options.hpp"
 #include "gufo/ext/reasoning.hpp"
 #include "gufo/ext/sampling.hpp"
 #include "gufo/ext/text_contracts.hpp"
@@ -586,6 +587,10 @@ struct TextRunnerOptions {
   TextDiskCacheConfig disk_cache{};
   TextRunnerRamCacheOptions ram_cache{};
   bool enable_yarn{false};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 };
 
 struct TextBenchOptions {
@@ -610,6 +615,10 @@ struct TextBenchOptions {
   }()};
   bool enable_yarn{false};
   bool verbose{false};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 };
 
 struct TextPromptOptions {
@@ -637,6 +646,10 @@ struct TextPromptOptions {
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 
   /// Thinking mode these options select; a reasoning effort implies enabled.
   [[nodiscard]] std::optional<bool> thinking_mode() const {

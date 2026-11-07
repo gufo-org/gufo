@@ -13,6 +13,7 @@
 #include "gufo/ext/registry.hpp"
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
@@ -185,13 +186,15 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
 
 std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
                                               std::string* error_msg,
-                                              std::string_view command) {
+                                              std::string_view command,
+                                              ProviderOptions& provider) {
   ArgParser parser("gufo " + std::string(command),
                    command == "chat" ? "Interactive conversation."
                                      : "Execute one prompt request and exit.");
   PromptOptions opt;
   bool speculative_explicit = false;
   RegisterTextOptions(parser, opt, speculative_explicit, command);
+  provider.Register(parser);
 
   if (!parser.Parse(args, error_msg)) {
     return std::nullopt;
@@ -201,6 +204,7 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
   }
   opt.sampling_supplied = SamplingOptionsSupplied(parser);
   try {
+    provider.Parse();
     opt.sampling.Validate();
   } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr) {
@@ -292,6 +296,19 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
   return opt;
 }
 
+// Delivers the selected provider's options; false after reporting an error.
+bool SelectProviderOptions(const ProviderOptions& provider,
+                           const ext::TextProvider& selected,
+                           PromptOptions* opt) {
+  try {
+    opt->provider_options = provider.Select(selected.id);
+  } catch (const std::invalid_argument& exception) {
+    std::cerr << "Error: " << exception.what() << "\n";
+    return false;
+  }
+  return true;
+}
+
 // Applies the provider's recommended sampling defaults under the explicit
 // command-line settings, with the thinking mode `--think` selects.
 bool ResolvePromptSampling(const ext::TextProvider& provider,
@@ -322,6 +339,10 @@ static void PrintTextHelp(std::string_view program_name,
                    command == "chat" ? "Interactive conversation."
                                      : "Execute one prompt request and exit.");
   RegisterTextOptions(parser, opt, speculative_explicit, command);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, std::string(command));
+  provider.Register(parser);
   parser.PrintHelp();
 }
 
@@ -335,12 +356,19 @@ void PrintChatHelp(std::string_view program_name) {
 
 std::optional<PromptOptions> ParsePromptOptions(
     std::span<const char* const> args, std::string* error_msg) {
-  return ParseTextOptions(args, error_msg, "prompt");
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, "prompt");
+  return ParseTextOptions(args, error_msg, "prompt", provider);
 }
 
 int RunPrompt(std::span<const char* const> args) {
   std::string parse_err;
-  const auto opt_res = ParsePromptOptions(args, &parse_err);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "prompt");
+  const auto opt_res =
+      ParseTextOptions(args, &parse_err, "prompt", provider_options);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -393,13 +421,15 @@ int RunPrompt(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
   if (provider == nullptr || provider->prompt_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for prompt\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
+  }
+  if (!SelectProviderOptions(provider_options, *provider, &opt)) {
+    PrintModelLoadTime(model_load_start, false);
+    return 2;
   }
   if (!ResolvePromptSampling(*provider, *reader, &opt)) {
     PrintModelLoadTime(model_load_start, false);
@@ -410,7 +440,11 @@ int RunPrompt(std::span<const char* const> args) {
 
 int RunChat(std::span<const char* const> args) {
   std::string parse_err;
-  const auto opt_res = ParseTextOptions(args, &parse_err, "chat");
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "chat");
+  const auto opt_res =
+      ParseTextOptions(args, &parse_err, "chat", provider_options);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -440,13 +474,15 @@ int RunChat(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
   if (provider == nullptr || provider->chat_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for chat\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
+  }
+  if (!SelectProviderOptions(provider_options, *provider, &opt)) {
+    PrintModelLoadTime(model_load_start, false);
+    return 2;
   }
   if (!ResolvePromptSampling(*provider, *reader, &opt)) {
     PrintModelLoadTime(model_load_start, false);
