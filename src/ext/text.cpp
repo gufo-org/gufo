@@ -207,7 +207,10 @@ const TextProvider* ProbeTextProvider(std::string_view model_root) {
 }
 
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader) {
+  const bool unsized = reader.FirstUnsizedTensor() != nullptr;
   for (const auto& provider : g_text_providers) {
+    if (unsized && !provider.accepts_unsized_tensors)
+      continue;
     if (provider.probe_gguf && provider.probe_gguf(reader)) {
       return &provider;
     }
@@ -231,15 +234,6 @@ std::string_view BuiltinToolDialectId(
 
 std::string TextModelRunner::ToolDialectId() const {
   return std::string(BuiltinToolDialectId(ToolFormat()));
-}
-
-const TextProvider* ClaimTextProviderForFile(const std::string& model_path) {
-  for (const auto& provider : g_text_providers) {
-    if (provider.claim_file != nullptr && provider.claim_file(model_path)) {
-      return &provider;
-    }
-  }
-  return nullptr;
 }
 
 void RegisterToolDialect(ToolDialect dialect) {

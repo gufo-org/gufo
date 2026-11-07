@@ -41,7 +41,8 @@ int Dispatch(std::string_view command, const gufo::core::GgufReader& reader,
              const gufo::ext::ParsedOptions& options) {
   const std::string_view architecture =
       reader.GetMetadataString("general.architecture").value_or("");
-  if (architecture != "test-text" && architecture != "other-text") {
+  if (architecture != "test-text" && architecture != "other-text" &&
+      architecture != "test-unsized") {
     return 1;
   }
   dispatched = std::string(command) + ":" + std::string(architecture);
@@ -139,6 +140,34 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
               std::chrono::steady_clock::time_point) {
             return Dispatch("chat", reader, options.provider_options);
           },
+  });
+  // Owns a tensor layout core cannot size; the others never see such a file.
+  registry.AddTextProvider({
+      .id = "test-unsized",
+      .probe_gguf =
+          +[](const core::GgufReader& reader) {
+            return ProbeArchitecture(reader, "test-unsized");
+          },
+      .bench_driver =
+          +[](const TextBenchOptions& options,
+              const std::shared_ptr<const core::GgufReader>& reader,
+              std::chrono::steady_clock::time_point) {
+            return Dispatch("bench", *reader, options.provider_options);
+          },
+      .prompt_driver =
+          +[](const TextPromptOptions& options, const core::GgufReader& reader,
+              std::chrono::steady_clock::time_point) {
+            dispatched_sampling = options.sampling;
+            return Dispatch("prompt", reader, options.provider_options);
+          },
+      .chat_driver =
+          +[](const TextPromptOptions& options, const core::GgufReader& reader,
+              std::chrono::steady_clock::time_point) {
+            dispatched_sampling = options.sampling;
+            return Dispatch("chat", reader, options.provider_options);
+          },
+      .sampling_defaults = &SamplingDefaults,
+      .accepts_unsized_tensors = true,
   });
 }
 
@@ -275,6 +304,40 @@ bool CheckSamplingDefaults(std::string_view command, const char* model) {
 
 }  // namespace
 
+// Only a provider that accepts unsized tensors receives such a file, through
+// the usual reader, probe and sampling defaults; for the others the command
+// fails as before, without dispatching.
+bool CheckUnsizedTensors(std::string_view command) {
+  const auto path =
+      std::filesystem::temp_directory_path() /
+      ("gufo-text-dispatch-" + std::to_string(gufo::platform::ProcessId()) +
+       "-unsized.gguf");
+  const auto write = [&](std::string_view architecture) {
+    gufo::test_fixture::GgufBuilder builder;
+    builder.AddMetadataString("general.architecture",
+                              std::string(architecture));
+    // Q4_K rows are whole 256-element blocks; core cannot size 100 columns.
+    builder.AddTensor("custom.weight", {100, 2}, gufo::core::GgmlType::kQ4_K,
+                      0);
+    const auto bytes = builder.Build(256);
+    std::ofstream file(path, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    return static_cast<bool>(file);
+  };
+  const auto model = path.string();
+  const std::array<const char*, 2> args = {"--model", model.c_str()};
+  bool ok = write("test-text") && Run(command, args) == 1 && dispatched.empty();
+  dispatched_sampling = {};
+  ok = ok && write("test-unsized") && Run(command, args) == 42 &&
+       dispatched == std::string(command) + ":test-unsized" &&
+       (command == "bench" || dispatched_sampling.temperature == 0.75F);
+  std::filesystem::remove(path);
+  return ok ? true
+            : Fail(command,
+                   "unsized tensors must reach only a provider accepting "
+                   "them");
+}
+
 int main(int argc, char** argv) {
   if (argc != 2) {
     return 2;
@@ -315,6 +378,7 @@ int main(int argc, char** argv) {
   const bool options_ok =
       CheckProviderOptions(command, model, other_path.string()) &&
       CheckHelp(command);
+  const bool unsized_ok = CheckUnsizedTensors(command);
   std::filesystem::remove(path);
   std::filesystem::remove(other_path);
   if (!dispatched_command) {
@@ -327,5 +391,5 @@ int main(int argc, char** argv) {
               << " must resolve its provider's sampling defaults\n";
     return 1;
   }
-  return options_ok ? 0 : 1;
+  return options_ok && unsized_ok ? 0 : 1;
 }

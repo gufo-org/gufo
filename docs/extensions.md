@@ -187,6 +187,13 @@ not need GPU initialization or load the entire model onto a device. Ambiguous
 matches must remain errors; do not steal another provider's artifacts with an
 overly broad probe.
 
+A GGUF whose tensors use a storage type or shape core cannot size, such as the
+extension's own quantization, still opens for text commands: those tensors have
+`sized == false` and a `size_bytes` spanning the bytes the file reserves for
+them. Only a provider with `accepts_unsized_tensors` probes such a file, so a
+built-in provider for the same architecture does not claim it; the provider
+then reads those tensors from their `data` itself.
+
 For a text model, own tokenization, chat/control framing and tool syntax in the
 extension. Declare supported inputs, state/resource capabilities and sampling
 defaults accurately. Implement incremental execution, cancellation, state

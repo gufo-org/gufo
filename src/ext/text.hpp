@@ -759,33 +759,29 @@ using TextChatDriver =
     int (*)(const TextPromptOptions& options, const core::GgufReader& reader,
             std::chrono::steady_clock::time_point load_start);
 
-using TextFileClaim = bool (*)(const std::string& model_path);
-
 struct TextProvider {
   std::string id;
   TextProbe probe = nullptr;
   TextProbeGguf probe_gguf = nullptr;
-  /// Optional first-refusal claim on the raw artifact path, consulted
-  /// before core opens or inspects the file. A claiming provider owns
-  /// loading the file end to end (including GGUF layouts the core loader
-  /// rejects) and must not rely on a core-provided reader: runners and
-  /// drivers created for a claimed file receive an empty `reader`.
-  TextFileClaim claim_file = nullptr;
   TextRunnerFactory create = nullptr;
   TextBenchDriver bench_driver = nullptr;
   TextPromptDriver prompt_driver = nullptr;
   TextChatDriver chat_driver = nullptr;
   TextSamplingDefaultsProbe sampling_defaults = nullptr;
+  /// Whether `probe_gguf` may see a GGUF with tensors core cannot size
+  /// (`core::GgufTensorInfo::sized`), such as an extension's own
+  /// quantization. A provider that sets it loads those tensors itself from
+  /// their `data` and reserved `size_bytes`; the others never probe such a
+  /// file.
+  bool accepts_unsized_tensors = false;
 };
 
 void RegisterTextProvider(TextProvider provider);
 const TextProvider* FindTextProvider(std::string_view id);
 const TextProvider* ProbeTextProvider(std::string_view model_root);
+/// The first provider whose `probe_gguf` accepts `reader`, skipping providers
+/// without `accepts_unsized_tensors` when the file has unsized tensors.
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader);
-/// First-refusal claim over raw artifact paths, consulted before core
-/// opens a file. Returns the first provider whose optional claim_file
-/// callback accepts the path, or nullptr when no provider claims it.
-const TextProvider* ClaimTextProviderForFile(const std::string& model_path);
 
 void RegisterToolDialect(ToolDialect dialect);
 /// The registered dialect with this identity, or null.
