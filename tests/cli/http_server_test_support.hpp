@@ -160,6 +160,13 @@ public:
   std::optional<std::string> rendered_prompt;
   std::optional<std::string> render_error;
   mutable gufo::server::ChatRequest rendered_chat;
+  std::optional<std::vector<std::uint32_t>> tokenize(
+      std::string_view text) const override {
+    tokenized_text = std::string(text);
+    return token_ids;
+  }
+  std::optional<std::vector<std::uint32_t>> token_ids;
+  mutable std::string tokenized_text;
   Result complete(std::string_view prompt, std::size_t limit,
                   const gufo::sampling::SamplingConfig& sampling,
                   const CancellationCheck& cancel, const TokenCallback& token,

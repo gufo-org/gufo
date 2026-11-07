@@ -395,6 +395,14 @@ public:
       const ChatRequest&) const {
     return std::nullopt;
   }
+
+  /// Token ids of raw text as a raw prompt tokenizes: control-token spellings
+  /// become their special tokens and nothing is prepended. Empty when the
+  /// backend cannot tell.
+  [[nodiscard]] virtual std::optional<std::vector<std::uint32_t>> tokenize(
+      std::string_view) const {
+    return std::nullopt;
+  }
 };
 
 inline std::shared_ptr<TextGenerationBackend::GenerationRequest>
