@@ -19,6 +19,7 @@
 
 #include <gufo/ext/platform/mapped_file.hpp>
 #include <gufo/ext/platform/os_info.hpp>
+#include <gufo/ext/experimental/arch.hpp>
 #include "src/models/minimax_h3/json.hpp"
 #include "src/models/minimax_h3/video_vae.hpp"
 #include "src/models/minimax_h3/video_vae_ops.hip.hpp"
@@ -81,11 +82,11 @@ bool ValidateTarget(int* device, std::string* error) {
     SetError(error, HipError("hipGetDeviceProperties", status));
     return false;
   }
-  if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
+  if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
       properties.integrated == 0) {
     SetError(error,
-             "MiniMax H3 VisualVAE supports only integrated gfx1151 Gufo "
-             "Halo; detected " +
+             "MiniMax H3 VisualVAE supports only integrated RDNA 3.5 APUs "
+             "(gfx1151 Strix Halo, gfx1150 Strix Point); detected " +
                  std::string(properties.gcnArchName));
     return false;
   }

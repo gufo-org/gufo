@@ -252,7 +252,7 @@ static __device__ void no_device_code(
 
 }
 
-#define NO_DEVICE_CODE no_device_code(__FILE__, __LINE__, __FUNCTION__, 1151, "gfx1151")
+#define NO_DEVICE_CODE no_device_code(__FILE__, __LINE__, __FUNCTION__, 1150, "gfx1150/gfx1151")
 
 // The compiler is always able to unroll loops if they contain continue expressions.
 // In such cases loop unrolling can still be achieved via recursion:

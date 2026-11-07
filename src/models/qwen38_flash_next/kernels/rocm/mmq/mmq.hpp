@@ -2485,7 +2485,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     }
 }
 
-#if defined(__gfx1151__)
+#if defined(__gfx1150__) || defined(__gfx1151__)
 static __device__ __forceinline__ uint32_t iq2_xxs_apply_sign4(
         const uint32_t grid, const uint32_t signs) {
     const uint32_t bits = signs & 0x0fu;
@@ -2514,7 +2514,7 @@ template <int mmq_y, bool need_check, int fixed_stride = 0> static __device__ __
     constexpr int nrows = warp_size / threads_per_row;
     const int kqsx = warp_size > threads_per_row ? threadIdx.x % threads_per_row : threadIdx.x;
 
-#if defined(__gfx1151__)
+#if defined(__gfx1150__) || defined(__gfx1151__)
 // Limit concurrent row decompression while retaining two-row ILP.
 #pragma unroll 2
 #else
@@ -2540,7 +2540,7 @@ template <int mmq_y, bool need_check, int fixed_stride = 0> static __device__ __
 
 #pragma unroll
         for (int l = 0; l < QR2_XXS; ++l) {
-#if defined(__gfx1151__)
+#if defined(__gfx1150__) || defined(__gfx1151__)
             const uint32_t sign_bits = (aux32 >> (7 * l)) & 0x7fu;
             int grid0;
             int grid1;
@@ -2634,7 +2634,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const half  * dq = (const half  *)  x;
     const uint2 * qs = (const uint2 *) (x + dq_bytes);
 
-#if defined(__gfx1151__)
+#if defined(__gfx1150__) || defined(__gfx1151__)
 #pragma unroll 2
 #else
 #pragma unroll
@@ -2658,7 +2658,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 #pragma unroll
         for (int l = 0; l < QR2_XXS; ++l) {
             const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[l]];
-#if defined(__gfx1151__)
+#if defined(__gfx1150__) || defined(__gfx1151__)
             const uint32_t sign_bits = (aux32 >> (7 * l)) & 0x7fu;
             const uint32_t signs = sign_bits | ((__popc(sign_bits) & 1u) << 7);
 

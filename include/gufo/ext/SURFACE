@@ -11,6 +11,7 @@ include/gufo/ext/decision.hpp
 include/gufo/ext/device_probe.hpp
 include/gufo/ext/draft_backend.hpp
 include/gufo/ext/embeddings.hpp
+include/gufo/ext/experimental/arch.hpp
 include/gufo/ext/experimental/dispatch_telemetry.hpp
 include/gufo/ext/experimental/gemv_dispatcher.hpp
 include/gufo/ext/experimental/ggml_dequant.hpp
@@ -72,6 +73,7 @@ src/core/cancellable_gate.hpp
 src/core/crypto/sha256.hpp
 src/core/gguf_identity.hpp
 src/core/gguf_reader.hpp
+src/core/hip/arch.hpp
 src/core/hip/component_cache_resources.hpp
 src/core/hip/detail/dispatch_telemetry.hpp
 src/core/hip/detail/gemv_dispatcher.hpp

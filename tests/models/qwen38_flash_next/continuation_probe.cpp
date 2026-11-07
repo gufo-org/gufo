@@ -82,8 +82,8 @@ int main(int argc, char** argv) {
     Check(hipInit(0));
     hipDeviceProp_t device{};
     Check(hipGetDeviceProperties(&device, 0));
-    Require(std::string_view(device.gcnArchName).starts_with("gfx1151"),
-            "requires gfx1151");
+    Require(std::string_view(device.gcnArchName).starts_with("gfx115"),
+            "requires an RDNA 3.5 GPU (gfx1151 or gfx1150)");
     std::cout << "device," << device.gcnArchName << ",visible_bytes,"
               << device.totalGlobalMem << '\n';
     std::string error;

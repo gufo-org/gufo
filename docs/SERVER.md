@@ -23,7 +23,8 @@ The reference protocols are:
 The local server does not need to reproduce OpenAI-hosted storage, billing,
 organization, or account behavior.
 
-The only supported production platform is Linux x86-64 on Strix Halo.
+The only supported production platform is Linux x86-64 on an AMD RDNA 3.5
+integrated GPU (`gfx1151` Strix Halo or `gfx1150` Strix Point).
 
 ## Implementation
 

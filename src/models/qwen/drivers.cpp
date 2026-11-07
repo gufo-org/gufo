@@ -830,7 +830,7 @@ int RunQwenPromptImpl(const ext::TextPromptOptions& opt,
 
       if (opt.verbose) {
         const auto& config = gpu_exec->GetConfig();
-        std::cout << "[Engine]: AMD Strix Halo gfx1151 GPU Executor\n"
+        std::cout << "[Engine]: AMD RDNA 3.5 GPU Executor\n"
                   << "Model: " << config.architecture << " ("
                   << config.num_layers
                   << " layers, hidden=" << config.hidden_size
@@ -957,7 +957,7 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
     tokenizer = &gpu_executor->GetTokenizer();
     architecture = gpu_executor->GetConfig().architecture;
     if (opt.verbose)
-      std::cout << "[Engine]: AMD Strix Halo gfx1151 GPU Executor\n";
+      std::cout << "[Engine]: AMD RDNA 3.5 GPU Executor\n";
   }
 #endif
   if (tokenizer == nullptr) {

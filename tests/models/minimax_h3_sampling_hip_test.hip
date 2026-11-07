@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/models/minimax_h3/sampling.hpp"
 
 namespace {
@@ -62,7 +63,7 @@ bool CheckTarget() {
       hipGetDeviceProperties(&properties, device) != hipSuccess) {
     return false;
   }
-  return std::string(properties.gcnArchName).starts_with("gfx1151") &&
+  return gufo::hip::IsRdna35(properties.gcnArchName) &&
          properties.integrated != 0;
 }
 
@@ -180,7 +181,8 @@ bool RunEulerTrajectory(
 
 int main() {
   if (!CheckTarget()) {
-    std::cerr << "MiniMax H3 sampling HIP test requires integrated gfx1151\n";
+    std::cerr << "MiniMax H3 sampling HIP test requires an integrated "
+                 "RDNA 3.5 GPU (gfx1151 or gfx1150)\n";
     return 77;
   }
   std::array<float, 7> first{};
@@ -242,6 +244,6 @@ int main() {
     std::cerr << "MiniMax H3 HIP Euler accepted an out-of-bounds range\n";
     return 1;
   }
-  std::cout << "MiniMax H3 gfx1151 GPU-state Euler checks passed\n";
+  std::cout << "MiniMax H3 GPU-state Euler checks passed on RDNA 3.5\n";
   return 0;
 }
