@@ -202,7 +202,8 @@ public:
   }
   /// The whole prompt's token count during a prefill step, 0 outside one. A
   /// step's prompt ends at its own frontier, which may be a cache boundary
-  /// short of this.
+  /// short of this. A caller driving the runner outside the serve cache
+  /// leaves it 0; treat 0 as the step's own prompt end.
   void SetPrefillPromptEnd(std::size_t tokens) noexcept {
     prefill_prompt_end_ = tokens;
   }
