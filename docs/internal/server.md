@@ -1487,13 +1487,17 @@ tokens. `stream` is ignored, as in llama-server; template errors return 400
 as in Chat, and backends that cannot render a template as text return 501.
 
 `POST /tokenize` takes `{"content": "..."}` and returns `{"tokens": [...]}`,
-the ids the loaded model's tokenizer gives that text, as llama-server's route
-does, so tooling can count a prompt `/apply-template` rendered. Control-token
-spellings become their special tokens and nothing is prepended, which is how
-`/completion` tokenizes a prompt and llama-server's defaults (`add_special`
-false, `parse_special` true). Those two fields and `with_pieces` are accepted
-only at their defaults; any other value returns 400 rather than being ignored.
+the loaded model's token IDs for raw text. Control-token spellings become their
+special tokens and nothing is prepended, as in `/completion` and llama-server's
+defaults (`add_special` false, `parse_special` true). Those two fields and
+`with_pieces` are accepted only at their defaults; other values return 400.
 Nothing is prefilled or cached. Backends that cannot tokenize return 501.
+
+Tokenizing an `/apply-template` result counts the rendered text as a raw
+prompt. It may differ from the Chat request's token count: literal control-token
+spellings in message content are preserved as text by Chat, and images expand
+to visual tokens. For the Chat count, send the original request to
+`/v1/chat/completions/input_tokens`.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
