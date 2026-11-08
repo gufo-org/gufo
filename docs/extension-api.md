@@ -8,10 +8,10 @@ type.
 ## Versions
 
 The API has its own version, `0.MINOR.REVISION`, separate from Gufo's. As of
-November 2026 it is 0.2.15; `gufo diagnose --section extensions` prints it.
+November 2026 it is 0.2.16; `gufo diagnose --section extensions` prints it.
 
 - A **revision** only adds things. An extension built for 0.2.10 builds against
-  0.2.15.
+  0.2.16.
 - A **minor** bump may break extensions. The minor in your `api_version` must
   equal the host's, so `">= 0.1.12"` doesn't build against 0.2.
 - Headers under `include/gufo/ext/experimental/` carry no promise; check them
@@ -65,6 +65,33 @@ To capture checkpoints in the middle of a prefill pass, declare
 `in_pass_checkpoint` and `max_in_pass_checkpoints` and implement
 `PrefillCheckpointBytes` and `PrefillThrough`. Each capture must equal the state
 a pass ending at that position leaves.
+
+## Scheduling beside decoders
+
+While other sessions decode, Gufo bounds each prompt pass so they don't wait
+for all of it. Without a profile, a runner gets short passes (512 tokens by
+default) and pays their overhead. A runner whose full pass takes more than about
+half a second should declare a `TextSchedulingProfile` in
+`TextRunnerDescriptor::scheduling` (header `gufo/ext/scheduling.hpp`) and split
+its passes by layers instead:
+
+- `pass_tokens` is the width Gufo uses for a prompt beside decoders, normally
+  the model's own prefill pass. A prompt running alone isn't bounded.
+- Before such a pass, Gufo calls `SetPrefillYield(groups, yield)` on the
+  prompt's state. `groups` comes from the measured time of the pass, capped at
+  `max_layer_groups` and at one group per 512 tokens.
+- Split the pass into about that many groups of similar **duration**, not layer
+  count, with a boundary right after any wait such as an input read. Between
+  groups, call `state.YieldPrefill()`: it steps every other decoding session
+  once, at most `max_yield_decode_width` per batch.
+- Every layer must do the same arithmetic as an unsplit pass, so output stays
+  bit-identical. While yielding, hold no lock or scratch the decode paths use.
+
+A profile requires `incremental_prefill`. In-tree tests check a profiled runner
+with `gufo::test::CheckLayeredPrefill`
+(`tests/support/layered_prefill_conformance.hpp`): every token and
+log-probability must match between running alone and interleaved, on real
+weights for each mode the profile covers.
 
 ## Sampling defaults
 
