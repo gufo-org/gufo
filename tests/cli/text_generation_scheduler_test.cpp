@@ -1528,7 +1528,7 @@ void TestLayeredPrefillDecodesBetweenGroups() {
   control->scheduling =
       gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 1});
 
   auto request_a = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);
@@ -1602,7 +1602,7 @@ void TestLayeredPrefillTimeExcludesYieldRounds() {
       gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
   control->yield_advance_delay = std::chrono::milliseconds(25);
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 1});
 
   auto request_a = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);

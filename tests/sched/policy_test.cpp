@@ -177,11 +177,16 @@ void ProfiledPassesSplitByLayers() {
   assert(Prefill(policy.Next(queues, tiny)).layer_groups == 1);
 
   // A shorter remainder is a shorter pass, with fewer groups: 1,000 tokens
-  // at 2.1 s per 4,096 take about 513 ms, three groups.
+  // at 2.1 s per 4,096 take about 513 ms, three groups of 250 ms, but get
+  // no more than legacy 512-token chunks would: two.
   const std::vector<PrefillingRequest> tail{{.remaining_tokens = 1000}};
   const WorkQueues tail_queues{.prefilling = tail, .decoding = decoding};
   work = Prefill(policy.Next(tail_queues, rate));
-  assert(work.max_tokens == 4096u && work.layer_groups == 3);
+  assert(work.max_tokens == 4096u && work.layer_groups == 2);
+  // 1,600 tokens take about 820 ms: four groups, the legacy chunk count.
+  const std::vector<PrefillingRequest> mid{{.remaining_tokens = 1600}};
+  assert(Prefill(policy.Next({.prefilling = mid, .decoding = decoding}, rate))
+             .layer_groups == 4);
   // A cached continuation's few tokens run unsplit.
   const std::vector<PrefillingRequest> continuation{{.remaining_tokens = 300}};
   assert(Prefill(policy.Next({.prefilling = continuation, .decoding = decoding},
@@ -195,10 +200,14 @@ void ProfiledPassesSplitByLayers() {
   assert(
       Prefill(policy.Next({.prefilling = budget, .decoding = decoding}, slow))
           .layer_groups == 1);
+  // Past it, a slow pass gets at most one group per legacy chunk: 513 tokens
+  // take about 1 s, four target waits, but two chunks.
   const std::vector<PrefillingRequest> past_budget{{.remaining_tokens = 513}};
   assert(Prefill(policy.Next({.prefilling = past_budget, .decoding = decoding},
                              slow))
-             .layer_groups == 5);
+             .layer_groups == 2);
+  // A slow full pass (8 s) reaches the profile's maximum.
+  assert(Prefill(policy.Next(queues, slow)).layer_groups == 8);
   // Uncalibrated, the most groups scale with the remainder: ceil(8 * 1000 /
   // 4096) = 2, and a continuation still runs unsplit.
   assert(Prefill(policy.Next(tail_queues)).layer_groups == 2);

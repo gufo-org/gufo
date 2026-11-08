@@ -37,8 +37,17 @@ std::size_t Policy::LayerGroups(const PrefillRate& rate,
            : std::ceil(static_cast<double>(profile.max_layer_groups) *
                        static_cast<double>(tokens) /
                        static_cast<double>(profile.pass_tokens));
-  return std::clamp<std::size_t>(static_cast<std::size_t>(groups), 1,
-                                 profile.max_layer_groups);
+  // At most one group per legacy chunk of these tokens, which is how
+  // arXiv 2510.08055 (section 4.4) sizes its groups: every group adds a
+  // decode round to the prompt's time to first token. A dense model's full
+  // pass saves too little over legacy chunks to pay for more rounds; a deep
+  // pass still gets groups no longer than a legacy chunk at that depth.
+  const std::size_t legacy_chunks =
+      (tokens + options_.decode_active_tokens - 1) /
+      options_.decode_active_tokens;
+  return std::clamp<std::size_t>(
+      static_cast<std::size_t>(groups), 1,
+      std::min(profile.max_layer_groups, legacy_chunks));
 }
 
 std::optional<DecodeWork> Policy::BetweenGroups(

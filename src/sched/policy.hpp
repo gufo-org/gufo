@@ -18,7 +18,7 @@ inline constexpr std::size_t kDefaultDecodeActivePrefillTokens = 512;
 
 /// Longest a decoder should wait for one layer group of a prompt pass. The
 /// group count follows from the measured pass time, up to the profile's
-/// maximum.
+/// maximum and one group per decode-active budget of the pass's tokens.
 inline constexpr std::chrono::milliseconds kTargetDecoderWait{250};
 
 struct PolicyOptions {
