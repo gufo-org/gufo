@@ -71,6 +71,7 @@ podman run --rm \
   --ulimit memlock=-1 \
   -p 8080:8080 \
   -v ./models:/models:ro \
+  -v gufo-extensions:/home/gufo/.local/share/gufo/extensions \
   ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
   gufo serve --host 0.0.0.0 --port 8080 llm \
   --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
