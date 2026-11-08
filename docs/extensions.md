@@ -88,6 +88,38 @@ stop being valid: include the model artifact, context size and every setting tha
 alters state. An adapter test should restore each component and compare the
 result byte for byte with an uninterrupted run.
 
+## Schedule prompts beside decoders
+
+While other sessions decode, the host bounds each prompt pass so they do not
+wait for a whole pass. Without a scheduling profile, a runner gets short
+passes (512 tokens by default), which costs it pass overhead. A runner whose
+full-width pass takes more than about half a second should declare a profile
+in `TextRunnerDescriptor::scheduling` and split its passes by layers instead:
+
+- `pass_tokens` is the width the host uses for a prompt beside decoders,
+  normally the model's own prefill pass. A lone prompt is not bounded.
+- Before such a pass, the host calls `SetPrefillYield(groups, yield)` on the
+  prompt's state, with `groups` chosen from the measured time of that pass's
+  tokens and capped at `max_layer_groups` and at one group per 512 of those
+  tokens, so a prompt never waits for more decode rounds than 512-token
+  chunks would give it; a short remainder runs unsplit. Split the pass into about that many groups of similar
+  duration, not layer count, and add a boundary right after any point where the
+  pass waits, such as an input read: decoders wait for the longest group.
+  Between groups, the runner calls `state.YieldPrefill()`, which steps every
+  other decoding session once, at most `max_yield_decode_width` per batch,
+  and returns.
+- Every layer must do the same arithmetic as in an unsplit pass. Keep the
+  rows the pass carries from one layer to the next, and any flags or graphs
+  that depend on them, out of reach of the decode paths, and hold no lock they
+  take. Declare only the decode kinds the loaded mode can run between groups.
+
+The header is `gufo/ext/scheduling.hpp`; it needs no extra link target. In-tree
+tests check a profiled runner with `gufo::test::CheckLayeredPrefill`
+(`tests/support/layered_prefill_conformance.hpp`): the prompt and a decoder run
+alone, then interleaved in layered passes, and every token and
+log-probability must match. Run it on real weights for each loaded mode the
+profile covers.
+
 ## Start with the template
 
 Copy [examples/extension_template](../examples/extension_template/README.md) into

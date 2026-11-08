@@ -107,6 +107,8 @@ void TestPublicationWaitUsesRecentSubstantialPrefill() {
 enum class EventKind : std::uint8_t {
   kPrefill,
   kAdvance,
+  kYield,
+  kResume,
 };
 
 struct Event {
@@ -218,6 +220,12 @@ struct FakeControl {
   std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
   bool preview_first_token{false};
+  std::optional<gufo::ext::TextSchedulingProfile> scheduling;
+  // Runs on the scheduler thread before each yield of a layered pass.
+  std::function<void()> before_yield;
+  // Each decode advance inside a yield takes this long.
+  std::chrono::milliseconds yield_advance_delay{0};
+  std::atomic<bool> yielding{false};
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
@@ -326,6 +334,7 @@ public:
             },
         .sampling_defaults = control_->sampling_defaults,
         .sampling_preset = control_->sampling_preset,
+        .scheduling = control_->scheduling,
     };
   }
 
@@ -453,6 +462,23 @@ public:
       }
     }
 
+    // Layer groups: the host decodes other sessions between them.
+    for (std::size_t group = 1; group < fake.prefill_yield_groups(); ++group) {
+      control_->Log({.kind = EventKind::kYield,
+                     .label = fake.label,
+                     .index = fake.position,
+                     .count = group});
+      if (control_->before_yield)
+        control_->before_yield();
+      control_->yielding = true;
+      fake.YieldPrefill();
+      control_->yielding = false;
+      control_->Log({.kind = EventKind::kResume,
+                     .label = fake.label,
+                     .index = fake.position,
+                     .count = group});
+    }
+
     const auto rows = prompt.subspan(offset, consumed);
     fake.adapter.Append(fake.slot, rows, rows);
     fake.position += consumed;
@@ -514,6 +540,8 @@ public:
     if (!fake.frontier.has_value() || token != *fake.frontier) {
       throw std::logic_error("scheduler fake frontier mismatch");
     }
+    if (control_->yielding)
+      std::this_thread::sleep_for(control_->yield_advance_delay);
 
     {
       std::unique_lock<std::mutex> lock(control_->mutex);
@@ -1475,6 +1503,278 @@ void TestNonIncrementalRunnerFallsBackSafely() {
           result_b.max_prefill_chunk_tokens == 5 &&
           result_b.prefill_fallback_reason == "incremental_prefill_unavailable",
       "non-incremental runners report their full-prefill fallback");
+}
+
+// Decoder advances inside each of a request's yields.
+std::vector<std::vector<TextRunnerToken>> AdvancesPerYield(
+    std::span<const Event> events, TextRunnerToken prompt) {
+  std::vector<std::vector<TextRunnerToken>> rounds;
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    if (events[index].kind != EventKind::kYield ||
+        events[index].label != prompt)
+      continue;
+    auto& round = rounds.emplace_back();
+    for (std::size_t next = index + 1;
+         next < events.size() && events[next].kind != EventKind::kResume;
+         ++next)
+      if (events[next].kind == EventKind::kAdvance)
+        round.push_back(events[next].label);
+  }
+  return rounds;
+}
+
+void TestLayeredPrefillDecodesBetweenGroups() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 1});
+
+  auto request_a = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto request_b = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  const auto result_a = request_a.Wait();
+  const auto result_b = request_b.Wait();
+  Expect(result_a.tokens == ExpectedTokens(1, 30) &&
+             result_b.tokens == ExpectedTokens(2, 2),
+         "layered prefill preserves both trajectories");
+
+  const auto events = control->Events();
+  std::size_t passes = 0;
+  for (const auto& event : events) {
+    if (event.kind == EventKind::kPrefill && event.label == 2) {
+      Expect(event.count <= 4, "a profiled pass keeps the profile's width");
+      ++passes;
+    }
+  }
+  Expect(passes == 2, "a profiled prompt takes full-width passes");
+  // Uncalibrated, each pass is split into the most groups: two yields, each
+  // advancing the decoder once.
+  const auto rounds = AdvancesPerYield(events, 2);
+  Expect(rounds.size() == 4, "each pass yields between its layer groups");
+  for (const auto& round : rounds)
+    Expect(round == std::vector<TextRunnerToken>{1},
+           "each yield runs one decode round for the other session");
+  Expect(result_b.max_prefill_layer_groups == 3 &&
+             result_b.prefill_yield_rounds == 4 &&
+             result_b.active_decode_prefill_chunks == 2 &&
+             result_b.max_prefill_chunk_tokens == 4,
+         "layered prefill metrics describe the split passes");
+  Expect(result_a.max_prefill_layer_groups == 1 &&
+             result_a.prefill_yield_rounds == 0,
+         "a lone prompt runs unsplit");
+}
+
+void TestOnePassPromptPrefillsBeforeLongerPeer() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+
+  auto decoder = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  // Both arrive while the decoder runs: the long prompt first, then one that
+  // a single pass finishes.
+  auto long_prompt =
+      scheduler->Submit({2, 20, 21, 22, 23, 24, 25, 26, 27}, 2, 0.0F);
+  auto short_prompt = scheduler->Submit({3, 30, 31}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  Expect(decoder.Wait().tokens == ExpectedTokens(1, 30) &&
+             long_prompt.Wait().tokens == ExpectedTokens(2, 2) &&
+             short_prompt.Wait().tokens == ExpectedTokens(3, 2),
+         "reordered prompts keep their trajectories");
+  std::vector<TextRunnerToken> prefill_order;
+  for (const auto& event : control->Events())
+    if (event.kind == EventKind::kPrefill && event.label != 1)
+      prefill_order.push_back(event.label);
+  Expect(!prefill_order.empty() && prefill_order.front() == 3,
+         "beside a decoder, a prompt one pass finishes goes before a longer "
+         "peer");
+}
+
+void TestLayeredPrefillTimeExcludesYieldRounds() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->yield_advance_delay = std::chrono::milliseconds(25);
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 1});
+
+  auto request_a = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto request_b = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  (void)request_a.Wait();
+  const auto result_b = request_b.Wait();
+  // Four rounds of at least 25 ms ran inside the prompt's passes; the fake
+  // passes themselves take microseconds.
+  Expect(result_b.prefill_yield_rounds == 4 && result_b.prefill_ms < 50.0,
+         "a prompt's prefill time excludes the decode rounds between groups");
+}
+
+void TestLayeredPrefillAloneRunsUnsplit() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  const auto result =
+      scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F).Wait();
+  Expect(result.tokens == ExpectedTokens(2, 2) && result.prefill_chunks == 1 &&
+             result.max_prefill_layer_groups == 1,
+         "a lone prompt keeps one unsplit pass");
+  for (const auto& event : control->Events())
+    Expect(event.kind != EventKind::kYield, "a lone prompt never yields");
+}
+
+void TestDecoderFinishesInsideYield() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 8, .max_layer_groups = 4};
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+
+  auto request_a = scheduler->Submit({1}, 2, 0.0F);
+  control->WaitForAdvance(1);
+  auto request_b = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  const auto result_a = request_a.Wait();
+  const auto result_b = request_b.Wait();
+  Expect(result_a.tokens == ExpectedTokens(1, 2) &&
+             result_b.tokens == ExpectedTokens(2, 2),
+         "a decoder may complete inside a yield");
+  // A needs one more token after its gated first one, so the first yield
+  // finishes it and the later yields find no decoder.
+  const auto rounds = AdvancesPerYield(control->Events(), 2);
+  Expect(rounds.size() == 3 && rounds[0] == std::vector<TextRunnerToken>{1} &&
+             rounds[1].empty() && rounds[2].empty(),
+         "yields after the last decoder finished decode nothing");
+  Expect(result_b.prefill_yield_rounds == 1,
+         "only rounds that decoded are counted");
+}
+
+void TestLayeredPrefillBatchesDecodersPerRound(std::size_t width) {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling = gufo::ext::TextSchedulingProfile{
+      .pass_tokens = 8, .max_layer_groups = 3, .max_yield_decode_width = width};
+  control->supports_batched_advance = true;
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 4, {.decode_active_tokens = 2});
+
+  auto request_a = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto request_b = scheduler->Submit({2}, 30, 0.0F);
+  auto request_d = scheduler->Submit({4}, 30, 0.0F);
+  auto request_c = scheduler->Submit({3, 30, 31, 32, 33, 34, 35}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  Expect(request_a.Wait().tokens == ExpectedTokens(1, 30) &&
+             request_b.Wait().tokens == ExpectedTokens(2, 30) &&
+             request_d.Wait().tokens == ExpectedTokens(4, 30) &&
+             request_c.Wait().tokens == ExpectedTokens(3, 2),
+         "batched yield rounds preserve every trajectory");
+  const auto rounds = AdvancesPerYield(control->Events(), 3);
+  Expect(rounds.size() == 2, "the prompt's pass yields twice");
+  // Three decoders, at most `width` per step: every round still steps each
+  // of them once, as between ordinary prefill chunks.
+  for (auto round : rounds) {
+    std::ranges::sort(round);
+    Expect(round == std::vector<TextRunnerToken>{1, 2, 4},
+           "a yield round decodes every decoder once");
+  }
+}
+
+void TestPromptCancelledInsideYield() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+
+  auto decoder = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto prompt = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  std::atomic<bool> cancelled{false};
+  control->before_yield = [&] {
+    if (!cancelled.exchange(true))
+      prompt.Cancel();
+  };
+  control->ReleaseAdvance();
+
+  const auto result = prompt.Wait();
+  Expect(result.cancelled, "a prompt cancelled between its layer groups ends");
+  Expect(decoder.Wait().tokens == ExpectedTokens(1, 30),
+         "the decoder keeps its trajectory after the cancellation");
+  const auto events = control->Events();
+  Expect(EventIndex(events, EventKind::kPrefill, 2, 1) == events.size() &&
+             EventIndex(events, EventKind::kAdvance, 2) == events.size(),
+         "the cancelled prompt takes no further pass and never decodes");
+}
+
+void TestFinishedCaptureRejoinsYields() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->preview_first_token = true;
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 8, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  control->block_prefill_label = 3;
+  // The second capture (B's prompt) is held until the test releases it.
+  std::binary_semaphore entered(0), release(0), finished(0);
+  std::atomic<unsigned> captures{0};
+  control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 1) {
+      entered.release();
+      release.acquire();
+      finished.release();
+    }
+  };
+  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+
+  auto a = scheduler->Submit({1, 10}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto b = scheduler->Submit({2, 20}, 30, 0.0F);
+  auto c = scheduler->Submit({3, 30, 31, 32, 33, 34, 35}, 2, 0.0F);
+  control->ReleaseAdvance();
+  // B is capturing; C's pass starts and holds before its first yield.
+  Expect(entered.try_acquire_for(kTestTimeout), "B's capture starts");
+  control->WaitForPrefill(3);
+  release.release();
+  Expect(finished.try_acquire_for(kTestTimeout), "B's capture finishes");
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  control->ReleasePrefill();
+
+  Expect(a.Wait().tokens == ExpectedTokens(1, 30) &&
+             b.Wait().tokens == ExpectedTokens(2, 30) &&
+             c.Wait().tokens == ExpectedTokens(3, 2),
+         "a capture finishing mid-pass keeps every trajectory");
+  // B left capture before the first yield, so every round steps A and B.
+  const auto rounds = AdvancesPerYield(control->Events(), 3);
+  Expect(rounds.size() == 2, "C's pass yields twice");
+  for (auto round : rounds) {
+    std::ranges::sort(round);
+    Expect(round == std::vector<TextRunnerToken>{1, 2},
+           "a decoder whose capture finished mid-pass rejoins the yields");
+  }
+}
+
+void TestSchedulingProfileRequiresIncrementalPrefill() {
+  auto control = std::make_shared<FakeControl>();
+  control->incremental_prefill = false;
+  control->scheduling =
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 2};
+  bool rejected = false;
+  try {
+    (void)MakeScheduler(control, 2);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "a profile without incremental prefill is rejected");
 }
 
 void TestPendingLimitsRejectBeforeStateAdmission() {
@@ -3310,6 +3610,16 @@ int main() {
     }
   }
   TestNonIncrementalRunnerFallsBackSafely();
+  TestLayeredPrefillDecodesBetweenGroups();
+  TestOnePassPromptPrefillsBeforeLongerPeer();
+  TestLayeredPrefillTimeExcludesYieldRounds();
+  TestLayeredPrefillAloneRunsUnsplit();
+  TestDecoderFinishesInsideYield();
+  TestLayeredPrefillBatchesDecodersPerRound(1);
+  TestLayeredPrefillBatchesDecodersPerRound(2);
+  TestSchedulingProfileRequiresIncrementalPrefill();
+  TestPromptCancelledInsideYield();
+  TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
   TestExpiredQueuedRequestNeverConsumesState();
