@@ -14,7 +14,8 @@ SUITES = {
     "kernels": ("^ds4\\.(compressor|router|quantization|projections|attention)$",
                 ["ds4_compressor_test", "ds4_router_test", "ds4_quantize_test", "ds4_projection_test",
                  "ds4_attention_test"]),
-    "model": ("^ds4\\.(target|dspark|serving|chat)$", ["ds4_quality_test", "ds4_serving_test", "ds4_cli_test"]),
+    "model": ("^ds4\\.(target|dspark|dspark_verify|serving|chat)$",
+              ["ds4_quality_test", "ds4_dspark_verify_test", "ds4_serving_test", "ds4_cli_test"]),
 }
 
 
