@@ -1199,6 +1199,35 @@ void WindowPeersAlignByRow() {
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }
+void RecordTurnoverAdmitsOptionalCopies() {
+  // Small checkpoints fill every record before byte pressure. A conversation
+  // unused for one record-table turnover then gives way to an optional copy;
+  // a retained descendant's use keeps its ancestors.
+  Fixture f(4);
+  f.Add({1, 2});
+  const auto child = f.Add({1, 2, 3});
+  f.Add({7, 7});
+  const auto last = f.Add({8, 8});
+  const auto admit = [&](std::vector<Token> tokens, RetentionPurpose purpose) {
+    return f.policy.Admit({tokens, {1}, {}, purpose},
+                          [&] { return IndexCheckpoint(f.ledger, tokens); });
+  };
+  assert(!admit({9, 9, 9}, RetentionPurpose::kRetry));
+  assert(f.log.events.back().reason == RetentionReason::kRecordCapacity);
+  for (int i = 0; i < 2; ++i) {
+    f.policy.Touch(child);
+    f.policy.Touch(last);
+  }
+  assert(admit({9, 9, 9}, RetentionPurpose::kRetry));
+  assert(f.Cached({7, 7, 1}) == 0 && f.Cached({1, 2, 5}) == 2);
+  assert(f.Cached({1, 2, 3, 4}) == 3 && f.Cached({8, 8, 1}) == 2);
+  const auto removed = f.log.events[f.log.events.size() - 2];
+  assert(removed.action == RetentionAction::kRemoved &&
+         removed.reason == RetentionReason::kRecordCapacity);
+  // Every remaining conversation was used within the last turnover.
+  assert(!admit({6, 6, 6}, RetentionPurpose::kHistory));
+  assert(f.policy.Size() == 4);
+}
 int main() {
   Planning();
   Branches();
@@ -1227,4 +1256,5 @@ int main() {
   InvalidInventoriesPreserveReplacement();
   WindowPeersAlignByRow();
   ShortWindowCheckpointsAreCheap();
+  RecordTurnoverAdmitsOptionalCopies();
 }
