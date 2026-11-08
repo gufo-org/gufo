@@ -65,7 +65,8 @@ manifest; release automation owns them. Tags are `vX.Y.Z` and never move.
    and `devlab/functional`. On any failure, error or timeout it leaves the pull
    request open and comments on it.
 4. When everything passes, it squash-merges, creates the tag and the GitHub
-   Release, and sends the tag to Toolboxes as a `gufo-release` dispatch.
+   Release, and sends the tag as a `gufo-release` dispatch to Toolboxes and to
+   the [website](https://github.com/gufo-org/website).
 
 Nix keeps release and source identity apart. The default package reports
 `gufo version development (<revision>)`; the `release` package, built from a
@@ -84,6 +85,12 @@ Toolboxes' `publish_release.yml` handles the dispatch:
   doesn't run the Windows Devlab GPU checks.
 - **Debian package:** builds `gufo_<version>-1_amd64.deb` for Debian 13,
   verifies it in a fresh container, and attaches it with its checksum.
+
+- **Documentation:** the website's `sync-docs.yml` copies the public docs at
+  the tag into a new version of [gufo.blog/docs](https://gufo.blog/docs),
+  keeping the 10 newest releases, and deploys the site. Between releases,
+  `docs-website.yml` refreshes the site's `development` version whenever a
+  push to `main` changes the public docs.
 
 Uploading to the Gufo release needs the release GitHub App, installed on Gufo
 with Contents write, through `RELEASE_APP_CLIENT_ID` and
