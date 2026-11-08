@@ -1,7 +1,7 @@
 # Gufo Extension Template
 
 This repository template provides the blueprint for authoring an out-of-tree model extension for Gufo.
-Start with the [extension author guide](../../docs/extensions.md), including the
+Start with the [extension author guide](../../docs/writing-extensions.md), including the
 LFM3 example and ongoing maintenance workflow.
 
 ## Overview
@@ -28,8 +28,8 @@ extension_template/
 The template registers metadata only. Implement an actual capability runner and
 independent model tests before claiming inference support or conformance.
 Community and niche models stay out-of-tree until promotion; see
-[distribution/support policy](../../docs/model-extensions/DISTRIBUTION.md) and
-[capability conformance](../../docs/model-extensions/CONFORMANCE.md).
+[distribution/support policy](../../docs/internal/extension-distribution.md) and
+[capability conformance](../../docs/internal/extension-conformance.md).
 
 ## Include Boundary Policy
 
@@ -68,7 +68,7 @@ gufo.override {
 ```
 
 The serving helper reads the overridden package's manifests automatically; see
-[Nix serving from extension metadata](../../docs/model-extensions/serving.md)
+[Nix serving from extension metadata](../../docs/internal/nix-serving.md)
 for provider validation, draft paths, voices and lock selection.
 
 ## Windows Packaging (ZIP Recipe)

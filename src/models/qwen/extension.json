@@ -75,7 +75,7 @@
   "docs": {
     "title": "Qwen3.8 27B",
     "inputs": "Q4/Q8 GGUF; text/images",
-    "guide": "docs/models/qwen3.8-27b/README.md"
+    "guide": "docs/models/qwen3.8-27b.md"
   },
   "tests": [
     {

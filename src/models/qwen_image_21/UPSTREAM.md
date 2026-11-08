@@ -9,7 +9,7 @@ at `fc13ba1986fcb905854dc8de2f52eee395f49b5b` and Diffusers at
 `aaf57d03a3edfbd9de457d2872417a92f149a91d` for its reference. Its eight
 checkpoint `sample_sigmas` replace base dynamic shifting; the base pins and
 numerical contracts below are unchanged. See the
-[Turbo quality checks](../../../docs/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo).
+[Turbo quality checks](../../../docs/internal/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo).
 
 | Source | Pinned revision |
 | --- | --- |

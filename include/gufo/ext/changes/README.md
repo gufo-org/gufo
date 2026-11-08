@@ -48,5 +48,5 @@ python3 tools/ci/check-extension-api.py --write
 ```
 
 Run `python3 tools/ci/check-extension-api.py` to verify the surface and record
-inventory. See [the release policy](../../../../docs/RELEASING.md) for the
+inventory. See [the release policy](../../../../docs/internal/releasing.md) for the
 source compatibility guarantee and PR requirements.

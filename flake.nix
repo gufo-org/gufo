@@ -204,7 +204,7 @@
               "rust-toolchain.toml"
               "extensions.lock"
               "AGENTS.md"
-              "docs/RELEASING.md"
+              "docs/internal/releasing.md"
               "docs/models/README.md"
               "tools/prof/prof.py"
               "tools/bench/speculative-corpus.py"

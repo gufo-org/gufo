@@ -2,7 +2,7 @@
 
 Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
-[the release guide](docs/RELEASING.md).
+[the release guide](docs/internal/releasing.md).
 
 ## [0.31.0](https://github.com/gufo-org/gufo/compare/v0.30.0...v0.31.0) (2026-11-05)
 

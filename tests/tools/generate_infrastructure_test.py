@@ -112,7 +112,7 @@ class GenerateInfrastructureTest(unittest.TestCase):
                 "docs": {
                     "title": "Full Model",
                     "inputs": "SafeTensors",
-                    "guide": "docs/models/full-model/README.md",
+                    "guide": "docs/models/full-model.md",
                 },
                 "tests": [
                     {"target": "full_test", "check_pr": True},
@@ -178,7 +178,7 @@ class GenerateInfrastructureTest(unittest.TestCase):
 
             # Generate README.md
             readme = GEN.generate_models_readme(root, manifests)
-            self.assertIn("| Full Model | SafeTensors | [Usage](full-model/README.md) |", readme)
+            self.assertIn("| Full Model | SafeTensors | [Usage](full-model.md) |", readme)
 
     def test_drift_detection_detects_changes(self):
         """Simulate drift in a managed file and verify check_targets flags it."""
@@ -195,7 +195,7 @@ class GenerateInfrastructureTest(unittest.TestCase):
                         "docs": {
                             "title": "M1 Model",
                             "inputs": "SafeTensors",
-                            "guide": "docs/models/m1/README.md",
+                            "guide": "docs/models/m1.md",
                         },
                     }
                 ),

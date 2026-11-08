@@ -9,7 +9,7 @@ HttpResponse HandleTtsWebSocket(const HttpRequest& request,
 HttpResponse HandleAsrWebSocket(const HttpRequest& request,
                                 AsrService& service);
 // A spoken conversation (OpenAI Realtime "realtime" sessions) with a model
-// that hears and speaks; see docs/SERVER.md.
+// that hears and speaks; see docs/internal/server.md.
 HttpResponse HandleVoiceWebSocket(const HttpRequest& request,
                                   AsrService& service);
 // A browser client of the conversation WebSocket, served at /voice.

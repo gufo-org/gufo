@@ -6,9 +6,9 @@ operators and vision live in [`src/families/qwen/`](../../families/qwen/README.m
 which Flash-Next, Qwen3-TTS, Qwen-Image-2.1 and MiniMax H3 also use. Audio
 implementations are model-private.
 
-[27B usage](../../../docs/models/qwen3.8-27b/README.md) ·
-[27B quality](../../../docs/models/qwen3.8-27b/QUALITY.md) ·
-[Flash-Next](../../../docs/models/qwen3.8-flash-next/README.md)
+[27B usage](../../../docs/models/qwen3.8-27b.md) ·
+[27B quality](../../../docs/internal/models/qwen3.8-27b/QUALITY.md) ·
+[Flash-Next](../../../docs/models/qwen3.8-flash-next.md)
 
 ## Source ownership
 

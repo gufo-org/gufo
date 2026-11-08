@@ -78,7 +78,7 @@
   "docs": {
     "title": "Qwen3.8 Flash-Next",
     "inputs": "Sharded Q4 GGUF; text/images",
-    "guide": "docs/models/qwen3.8-flash-next/README.md"
+    "guide": "docs/models/qwen3.8-flash-next.md"
   },
   "tests": [
     {

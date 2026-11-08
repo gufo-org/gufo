@@ -586,7 +586,7 @@ static void session_dspark_note_cycle(ds4_session* session,
 
 // Cost units are hundredths of one ordinary batch decode step, calibrated
 // offline on gfx1151 at 0/4K/16K with tg128, rounded up to five units.
-// See docs/models/deepseek-v4-flash/artifacts/cost-calibration.json. Runtime wall clocks
+// See docs/internal/models/deepseek-v4-flash/artifacts/cost-calibration.json. Runtime wall clocks
 // never influence token decisions.
 static uint32_t session_dspark_cycle_cost(const ds4_session* session,
                                           uint32_t tail, size_t concurrency) {

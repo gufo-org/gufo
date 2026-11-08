@@ -53,7 +53,7 @@
   "docs": {
     "title": "Qwen-Image-2.1",
     "inputs": "BF16 safetensors; generation and image editing",
-    "guide": "docs/models/qwen-image-2.1/README.md"
+    "guide": "docs/models/qwen-image-2.1.md"
   },
   "tests": [
     {

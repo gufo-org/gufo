@@ -1,0 +1,22 @@
+/* Canonical figure style. Every SVG under docs/ embeds this block verbatim
+   inside its style element; tools/ci/check-docs.py compares it. Colors match the
+   website (gufo.blog) tokens and the blog figure palette. Fonts read the
+   site's variables when the SVG is inlined there and fall back to system
+   fonts inside a GitHub image. */
+.fig-bg { fill: #eceee6; stroke: #c0c5b8; stroke-width: 1; }
+.fig-panel { fill: #f7f8f3; stroke: #c0c5b8; stroke-width: 1; }
+.fig-head { font: 10.5px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); letter-spacing: 0.06em; text-transform: uppercase; fill: #737a72; }
+.fig-title { font: 11px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); fill: #141714; }
+.fig-sub { font: italic 10.5px var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif); fill: #545a54; }
+.fig-note { font: italic 11px var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif); fill: #3a3f3a; }
+.fig-flow { fill: none; stroke: #545a54; stroke-width: 1.2; stroke-opacity: 0.6; }
+.fig-dash { fill: none; stroke: #545a54; stroke-width: 1.2; stroke-dasharray: 5 3; }
+.fig-arrowhead { fill: #545a54; }
+.fig-box { stroke-width: 1.4; }
+.fig-green { fill: #e8efea; stroke: #3f7a4f; }
+.fig-blue { fill: #eaf0f6; stroke: #4f86b8; }
+.fig-teal { fill: #e8f1f1; stroke: #3d8a8a; }
+.fig-amber { fill: #f8efe6; stroke: #c27a2c; }
+.fig-plum { fill: #f3ebf1; stroke: #9a5c8a; }
+.fig-rose { fill: #f6e7ed; stroke: #b8336a; }
+.fig-muted { fill: #e2e5db; stroke: #c0c5b8; }

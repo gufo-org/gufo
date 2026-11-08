@@ -1,0 +1,556 @@
+# Qwen3.8 Flash-Next experiments
+
+## Raw completion fallback (November 4, 2026)
+
+Retained: capture the aligned prompt tail in-pass before retaining the exact
+raw prompt. Keeping only the exact unaligned prompt made the Devlab follow-up
+lose its entire cached prefix (1.23 s prefill versus about 0.30 s). The fix
+restores at 1,548 tokens and keeps zero-prefill exact retries. AR/MTP raw
+continuations above the sparse budget match cold output. This path activates
+136 MiB of existing reserved device checkpoint scratch and retains another
+fallback within the same cache budget; the measured memory cost is recorded
+in QUALITY.md. The timing fixture uses an aligned prefix for matched work;
+unaligned extensions retain a separate regression test and raw evidence.
+
+## Cache readahead progress (November 4, 2026)
+
+Retained: skip files already consumed by the reader before computing the
+unsigned prefetch-window distance. Otherwise a reader that overtakes the
+helpers can stop all further hints. Four helpers and the 32 MiB window are
+unchanged; no larger allocation or new option is needed.
+
+On Strix Halo, ROCm 10.1, Flash-Next UD-Q4_K_XL with shared Q8_0 MTP,
+`--sessions 2 --context 32768`, old and fixed production builds alternated
+against reflinked copies of the same persisted records. The 200,142,032-byte
+restore measured 92.06/92.23 ms before and 74.03/84.34 ms after; the
+305,368,752-byte restore measured 135.29/127.41 ms before and
+118.25/122.94 ms after. These are retained observations, not a global speed
+claim. Both restore outputs remain exact. The deterministic cursor regression
+fails with the original scheduling and passes with the fix; the full
+`cache_streaming_test` takes 0.55 seconds.
+
+Those exploratory timings preceded discovery of an unrelated desktop crash
+reporter repeatedly writing cores. They remain advisory. Final qualification
+uses quiet, sequential controls against main `1c75887b`; variable disk
+restore timings remain explicitly inconclusive rather than a speed claim.
+
+## Wide prompt-lookup verification (November 1, 2026)
+
+Measured downstream, on a fork that runs Swift 1.5 IQ4_XS with its Q8_0 MTP
+head (formats main does not load): Strix Halo gfx1151, ROCm 7.2.4, 120 W
+package limit, `--sessions 8`, HTTP streaming, thinking off, one fresh server
+per build, both builds in one block. Rewrites re-emit a file from the prompt.
+Client decode tok/s:
+
+| Workload | Before | After | Verifications |
+| --- | ---: | ---: | ---: |
+| 220-line Python file, rename (2,222 tokens), greedy | 124.1 | 187.9 | 280 → 53 |
+| same file, add docstrings, greedy | 122.4 | 186.9 | 286 → 54 |
+| same file, add return hints, greedy | 123.5 | 194.4 | 279 → 41 |
+| 150-line C++ header, rename (1,675 tokens), greedy | 124.1 | 186.5 | 212 → 41 |
+| SEARCH/REPLACE blocks (1,122 tokens), greedy | 106.4 | 119.9 | 159 → 104 |
+| lines 60–160 of a line-numbered listing, greedy | 88.9 | 89.0 | 185 → 185 |
+| prose / code / Czech, 512 tokens, greedy | 66.5 / 83.6 / 57.6 | 66.3 / 83.4 / 57.6 | unchanged |
+| Python rename, temperature 1, unseeded | 123.9 | 182.9 | 280 → 58 |
+| Python rename, eight requests (aggregate) | 206.0 | 205.7 | unchanged |
+
+Every greedy output, alone, staggered and eight-way, is byte-identical.
+
+| Variant | Outcome |
+| --- | --- |
+| 32-row limit | Rejected: the four rewrites ran at 157–174 tok/s against 186–195 at 64 in the same block. |
+| Double the width after one whole copy | Rejected: copies of the line-numbered listing break at every line number, so doubled copies wasted rows (87.9 → 85.1 tok/s). Two whole copies in a row: 89.0–89.2. |
+
+## Routed prefill experts (October 23, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Register-resident routed down projection over 128-token tiles (`RoutedDownF16Kernel`, Q5_1/Q8_0) and a rewritten paired gate/up (`RoutedPairF16Kernel`, Q4_K/Q5_K) sharing one 128-token map | Retained. gfx1151 WMMA reads row r's A operand from one lane only (r for even rows, r + 16 for odd; the other copy is ignored, verified with garbage in the unread lanes), so each lane decodes one K16 half and one `v_permlanex16` per dword supplies the other: no duplicate decode, no selects. Down keeps each wave's 16 rows' codes in registers (activations are the only LDS stage, 155 VGPRs); the pair loads superblocks raw and decodes them at commit, removing a full memory wait every fourth stage. Loop VALU per WMMA: down 11 → 4.6, pair 6.8 → 3.9. Every row is bit-identical across 16/48/128-row tiles, paired vs separate, and 1/7/9/33/95/96-row passes (`CheckPassRoutes`). `routed_gemm_bench` (synthetic skewed top-10, Q4_K gate/up, Q5_1 down) on main `34ebb5fe`, two rounds, ms per layer at 4,096 / 26,541 rows: gate/up 10.61, 11.06 → 10.30, 10.34 / 54.43, 59.42 → 52.30, 56.35; down 6.58, 6.77 → 5.72, 6.16 / 32.83, 37.83 → 28.29, 31.50. On the production fork (quiet GPU, alternating medians), TFLOPS at 4,096 / 26,541 rows: down Q5_1 21.1 → 23.8 / 25.1 → 30.6, Q8_0 17.8 → 20.4 / 23.6 → 29.0; gate/up Q4_K 26.7 → 28.3 / 32.6 → 33.1, Q5_K 24.1 → 25.3 / 30.2 → 30.7. The GPU runs these kernels power-limited near 1.9 GHz (~110 W), so the measured WMMA ceiling is about 39–48 TFLOPS. `gufo bench` UD-Q4_K_XL pp16384, two rounds: 1,590 / 1,583 → 1,624 / 1,629 tok/s. Rejected (all exact): prefetching two stages ahead, the next token tile's B fragments (199 VGPRs), double-buffered activation stages with one barrier (BK 1 or 2), and 256-row × 64-token down tiles; none beat the version kept. Ablation at 26.5K rows: without WMMA the down kernel takes 16 of 30 ms, without decode −5%, without B fragment reads −3%, without stores −2%. |
+| Weighted top-10 combine folded into the down epilogue | Not done: a token's ten slot rows come from ten experts' tiles spread over the whole launch, so an exact slot-order sum needs every partial first; integer atomics would be order-independent but cost more than the 51 KB/token read and would change every route. The combine already streams about 190 GB/s. |
+
+## Long prefill passes (October 23, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| 16,384-row lone-prompt passes, dense prefill GEMMs launched in 4,096-row token-tile groups | Retained (grouped rasters); the 16,384-row passes were reverted to 4,096 on November 2, 2026: see the next row. `GroupedRasterTile` maps blocks so each group of 4,096 rows sweeps every row tile before the next group starts (`DenseF16GEMMKernel`, `W8A8BlockedWmmaGEMMKernel`); grids up to one group keep their order, and only the block-to-tile mapping changes. On the production fork (mixed K-quant recipe + MTP, ROCm 7.2.4): routed experts per token at 16K rows pair 106.9 → 101.4, down 65.3 → 57.4 µs; the HC down GEMM 23.8 → 21.3. Long greedy replies (21,022 and 25,580-token prompts through `gufo serve`, 4,096 against 16,384-row plans) byte-identical; retrieval 48/48 (16.5K and 38.3K prompts). `gufo bench` MTP, alternating twice: pp32768 1,666/1,666 → 1,711/1,696; pp8192 1,758/1,734 → 1,749/1,754. HTTP probe, alternating twice: 26.5K 1,551/1,549 → 1,597/1,605, 7.3K 1,598/1,585 → 1,626/1,624. Peak GTT in `gufo bench` 68.5 → 72.6 GiB. On main `34ebb5fe` with UD-Q4_K_XL, `gufo bench -n 0 -r 2`, two rounds: pp16384 1,590 / 1,583 → 1,632 / 1,625 tok/s. A request that arrives during a lone long prefill now waits for up to one 16K pass (about 10 s). `projection_ops` checks W8A8 and F16 rows of 9,001-row passes against 1,031/4,096-row passes, including rows that straddle a group. |
+| Prefill pass rows versus device memory (November 2, 2026) | Reverted to 4,096 rows; tracked in #952. The forward scratch is sized from the pass at load, whatever `--prefill-chunk` says. On main `6246d77a` (ROCm 10.1, UD-Q4_K_XL + MTP), GTT after `gufo serve` load and `gufo bench -n 16 -r 3` (one ordered pass, 16K → 8K → 4K), 4,096 / 8,192 / 16,384 rows: GTT 89.12 / +1.36 / +4.09 GiB; pp8192 1,987 / 2,055 / 2,062; pp16384 1,955 / 2,021 / 2,055; pp32768 1,927 / 1,990 / 2,023 tok/s; pp2048 and tg16 unchanged. The extra memory left Windows hosts without snapshot headroom (#937). |
+| 16,384-row passes in the original tile order | Rejected: experts −13.9 µs/token, but the dense GEMMs re-read activations for every row tile once a pass outgrew the caches (+17 µs/token; HC down +5.4, fused SSM projection +4.5), so pp32768 stayed 1,661 → 1,663. |
+| Per-pass fixed cost | Not a lever: head GEMV, MTP boundary row and idle gaps total about 3 ms per 4,096-row pass (0.7 µs/token); the GPU is 99.8% busy across a bench prefill. |
+
+## One-launch decode HC mixer (October 29, 2026)
+
+Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
+
+| Experiment | Outcome |
+| --- | --- |
+| `HcMixQ8Fused`: a decode batch's combine, Q8_0 down/up projections, SiLU and epilogue in one launch (1-8 rows) | Retained as a component result: outputs bit for bit the five separate kernels (`hc_mix_ops`, eager, in place and replayed). `hc_mix_bench`, graph-replayed, µs per mixer: T1 47.8 → 44.5, T2 48.2 → 44.3, T4 51.7 → 48.5, T8 59.2 → 57.2. End to end, replies byte-identical; AR 28.81/29.38 (main before/after) against 29.82 and 29.55 tok/s, MTP 50.3 → 50.7/50.8 (main, three runs); C4 MTP wall throughput (4 × 32,768, four unique 256-token prompts) 76.2/76.9 → 80.0 tok/s. Rejected (exact): warming the down weights during the combine (T8 0.92×), LDS-staged up rows (0.75-0.93×), all 16 up rows ahead at T5-T8 (1.00×). |
+
+## Prefill DeltaNet (October 23, 2026)
+
+Component results from the production fork (ROCm 7.2.4); end to end on main
+`34ebb5fe` with UD-Q4_K_XL, `gufo bench -p 2048,16384 -n 0 -r 2`, two
+alternated rounds, ROCm 7.2.4, no cooldown between processes, tok/s:
+
+| Build | pp2048 | pp16384 |
+| --- | ---: | ---: |
+| main | 1,591 / 1,502 | 1,590 / 1,583 |
+| fused GDN, both #758 side streams (this change) | 1,624 / 1,542 | 1,617 / 1,610 |
+| fused GDN, side streams off | 1,627 / 1,561 | 1,647 / 1,658 |
+
+pp2048 drifted with temperature between rounds; pp16384 gains 1.7%, and
+2.4% more without the Z-row and shared-expert overlap. The fused kernel
+reads z from its first token, so the Z overlap cannot hide anything, and
+both side streams contend with it (on the production fork's recipe + MTP at
+pp32768: 1,658-1,662 with either overlap, 1,693 without the shared-expert
+one, 1,741 without both). Their removal is left to a ROCm 10.1 measurement.
+
+| Experiment | Outcome |
+| --- | --- |
+| One fused prefill launch per GDN layer (`GdnPrefillKernel`): one 8-wave block per value head computes the q/k norms and gates when it commits each 4-token window to LDS, runs the row-split recurrence, and does the epilogue from LDS. That replaces `GdnPrepKq`, `GdnPrepAb`, `GdnRowSplit` and `GdnEpilogue` (the raw/qn/kn round trips). Every thread issues the same three loads per window, so the in-order vmcnt wait no longer drains later windows. Barriers are LDS-only, the row stores have no branch (the rows' FMA chains were serialized), and the decay comes from an SGPR (+29 dual issues) | Retained. Rows, state, checkpoint captures and the F32, F16-strided and Q8-tiled outputs are byte-identical to the four separate kernels (hashes from `tools/bench/qfn_gdn_prefill_bench.hip`, fixed history, 1,031 rows). Inlining reassociated the norm sums and the epilogue products, so they are spelled out. µs per row per layer for the whole GDN after the fused projection, alternating, quiet GPU, 2048/4096/8192/16384 rows: 1.30/1.28/1.27/1.29 → 1.05/1.05/1.05/1.05. Contended GPU, min of 5, 2048/4096/8192/26541 rows: 1.28/1.51/1.53/1.56 → 0.92/1.18/1.19/1.18. Counters: busiest SIMD at about 59% VALU issue. With 48 head blocks on 20 WGPs, 8 WGPs run 3 blocks (grid 40 → 48 costs 1.28×). |
+| Chunked (WY, 16-token) recurrence | Not built. The split contract rules it out: a pass that ends inside a block hands over the state at that row, and the next pass cannot reproduce the single pass's whole-block arithmetic. The single pass cannot know where later splits fall. |
+| q/k held by quad lanes, broadcast as DPP operands of the FMAs | Rejected. Byte-identical, with 4× fewer LDS loads, but the combiner left 300 `v_mov_dpp` per token (1.10 → 1.24 µs/row). Inline-asm `v_fmac_f32_dpp` lost dual issue and chained badly (1.36–1.80). |
+| 4 rows per lane (4 waves); 8 lanes × 16 keys × 4 rows; scheduling barriers interleaving the row chains; crossed-component update order for dual issue | Rejected: 1.73 / 1.19–1.24 / unchanged / unchanged against 1.10 µs/row (the last cut the instruction count 200 → 180 with no time gain). Microbenchmark: dual FMAs with six VGPR reads issue no faster than two single FMAs, so the recurrence is bound by VGPR operand reads rather than by instruction count. |
+
+## Prefill route independence (October 23, 2026)
+
+A prompt restored from a checkpoint and finished by a short prefill pass must
+decode like the same prompt prefilled in one pass. Short passes (below 96
+rows, or eight rows and fewer) take different kernels for the HC combines and
+mixers, the SSM convolution, the W8A8 GEMMs and the routed experts than wide
+passes, so every such pair must give a row the same bits.
+
+| Experiment | Outcome |
+| --- | --- |
+| HC mixer epilogue's inject partials in `HcInjectPart`'s pinned order | Retained. On a downstream Q3_K-expert GGUF, a two-session replay decoded differently after a checkpoint restore; the first differing value was layer 0's FFN-mixer inject partial of the last row, one ulp apart: a wide pass gets it from the attention combine (explicit product and FMA order), a short pass from `HcMixEpilogueF16Kernel`, whose `dot +=` chain fast-math contracts and reassociates per instantiation. It is data dependent. On main, `hc_mix_ops` finds 38 of 84 partials different at 7 tokens and `hc_route_ops` carries the difference into the residual, norms and mixed rows of short passes; both pass with the change. |
+| Every F16 k = 2560 projection on `UnquantizedF16Gemm` | Retained. Only m = 96 and 513 (the production router and GDN alpha/beta) took the row-independent kernel; other expert counts took a library plan chosen per token count, and `blaslt_ops` m = 17 changes across a 94/136 split on main. |
+| SSM convolution, HC combine sums and the wave64 W8A8 GEMM in the wide route's order | Retained as guards: `SsmConv4Kernel` uses `SsmConv4Value`, the combines sum their inject partials with `__fadd_rn` from zero, and the wave64 output-projection GEMM (from 1,024 rows) writes `(dx * c)` then one FMA with `dw` through an opt-in template flag (Qwen27B and Qwen3.6 instantiations unchanged). They compile to the same gfx1151 instructions as before (operand swaps at most), so results and speed are unchanged; `gdn_ops`, `hc_route_ops` and `projection_ops` now hold them to it. |
+| Route checks | `routed_wmma_ops`: Q4_K/Q5_K gate/up × Q5_1/Q8_0 down at model shapes (640 × 2560, top-10 of 128 experts, ragged buckets), paired 128-row gate/up against separate 16/48-row tiles, 64-row down against 16/48, wide-pass rows against 7-, 1- and 33-token passes; gated decode GEMVs over 2–8 tokens against per-token launches. `projection_ops`: W8A8 rows of 1/7/9/95/96-row passes at the head, middle and tail of a 1,619- or 1,549-row pass. `gdn_ops`: a 99-row prefill split into a prefix and a 1–40-row tail. `blaslt_ops`: F16/BF16 k = 2560 splits at the short tails a restore leaves (1, 7, 96 rows). All bit for bit. |
+
+## Confidence-gated MTP chains (October 29, 2026)
+
+Upstream `main` 34ebb5fe against the branch, Strix Halo (ROCm 7.2.4), UD-Q4_K_XL + shared Q8_0 MTP, `gufo serve --sessions 1 --context 65536`, greedy, thinking off, five fixed prompts (CPU caches, a Python red-black tree, TCP congestion control, Czech railway history, a C++ ISO 8601 parser) of 384 generated tokens; one server process per arm, means of the five decode rates. The first process after another workload reads cold PLE rows and runs 2-4% slower, so every hold started with a discarded warm-up and main ran before and after the candidates.
+
+| Experiment | Outcome |
+| --- | --- |
+| End a chain after its first draft below the head's probability 0.85 (sampled: q below 0.95); unplanned cycles draft to `--draft-tokens`; planned greedy batches keep their width and drop a final proposal below 0.6 | Retained. Replies byte-identical. C1 MTP 50.3 (main, three runs) → 55.8/55.9 tok/s (+11%; every prompt faster, +4% to +16%). On a four-session server: C1 49.7 → 53.3, C4 wall throughput 76.2/76.9 → 85.4 tok/s (+11%). 16-token replies (four runs per arm), decode rate after the first token, main against the branch: prompts 1 and 2 41.5-42.0 → 37.5-37.7 and 52.7-54.0 → 47.5-48.2 tok/s (about −10%, +35 to +65 ms per reply), prompt 3 unchanged, prompt 4 24.3 → 25.3-25.6, prompt 5 within its run-to-run spread (44.9-63.1 against 59.9-62.0). This short-reply cost is not fixed; keeping the controller's first-cycle width until acceptance is observed did not change it. Two 1.5-1.8 s first-token outliers on the branch (and 0.35-0.37 s ones on main) are prefill time, before any drafting. |
+| Downstream sweeps (Q4_K/Q3_K-class recipe) | Greedy gate 0.7-0.95: 0.85 best on prose and four/eight users; sampled 0.9-0.98 within noise. Acceptance of verified C8 drafts by head probability: 0.1-0.2 22%, 0.4-0.5 53%, 0.6-0.7 71%, 0.8-0.9 86%, ≥ 0.9 97%; batch drop thresholds 0.35/0.5/0.65/0.8 gave 347.9/345.9/345.8/349.3 s against 352.6 s on an eight-way 28-question slice. Rejected: continuing while the product of acceptance estimates stays above 0.55/0.45; C1 gates 0.7/0.5 (−3.0%/−7.1%). |
+
+## Chunked DeltaNet removed (October 27, 2026)
+
+The release-tier functional `tool-reasoning` suite failed in both MTP and AR
+modes at `literal_protocol_raw_xml`: asked to echo a short XML literal with a
+tool declared (a 299-token prompt), Flash-Next answered "Hello! I'm here to
+help you with any questions or tasks you might have." at temperature 0 and
+presence penalty 0.
+
+- Bisect with the `rocm10` package of each commit (ROCm 10.1): `4a4a47c`
+  echoes the literal, `538e2fd` (#758) greets.
+- Main with the chunked scan compiled out echoes it, with and without MTP.
+- llama.cpp b11382 on Gufo's rendered prompt ranks `<` first (log
+  probability −0.715) and `Hello` third (−2.12): the scan flips a 1.4-nat
+  greedy decision. The same request without tools (48 tokens, below the
+  scan's 256-token threshold) echoes on every build.
+- The scan's F16 Q/K/T/P operands put its layer error 500 times above the
+  F32 recurrence (2.6e-4 against 5.1e-7 relative RMS), and its chat prompt
+  NLL rose by a significant 0.0145 nats (table below).
+
+The scan, its prep, the fused norm and their operator test are removed: about
+4 % of prefill does not justify flipping greedy decisions. Both side streams
+stay; they are lossless, and beside the row-split recurrence on ROCm 10.1
+they still shorten short passes. `gufo bench -n 0 -r 3`, two alternated
+rounds, 55 °C cooldown before each process:
+
+| Build | pp512 | pp2048 | pp4096 |
+| --- | ---: | ---: | ---: |
+| main (chunked scan, both side streams) | 1,348/1,346 | 1,936/1,932 | 2,010/1,993 |
+| row split, no side streams | 1,286/1,288 | 1,858/1,825 | 1,909/1,897 |
+| row split, both side streams (retained) | 1,331/1,329 | 1,855/1,853 | 1,916/1,908 |
+
+## Sparse attention and routed repacks from the updated source branch (October 27, 2026)
+
+Ideas from the October 25–27 revision of halo-box/strix-llama.cpp's
+Flash-Next prefill work, after rebasing onto main `c0e0be58`. All runs use
+the `rocm10` shell, whose library path loads the CWSR-patched ROCr; the
+binaries' own RPATH points at the unpatched runtime. Every process waits for
+the GPU to cool to 55 °C, and builds alternate round-robin. Both experiments
+are lossless (bit-identical by construction or by output hash). Neither is
+retained.
+
+| Experiment | Outcome |
+| --- | --- |
+| Depth profile before porting | Diagnostic: a pp2048 pass takes 1,056 ms at d0 and 1,153 ms at d50K (`prof.py`, timed pass only). Of the +97 ms, attention adds 63 and block scoring 39. The source branch's own d0 → d50K cost is +162 ms, so Gufo already degrades less with depth; its d50K pp2048 is 1,766–1,772 tok/s. |
+| Sparse-window attention with K and V read into WMMA registers (8 waves split the head dimension, S partials summed through LDS, no K/V staging) | Rejected. The operator test passes with the same error as the current kernel. Synthetic `attn_bench` at 16K/50K/100K: 6.98/8.06/9.46 ms now, 7.22/7.78/8.92 ms reading V rows directly. A per-call block-packed V copy was slower again, about 1 ms at 100K. Deriving each step's key mask from the union membership bits was required, without it the kernel ran 2.6 ms slower. End to end at d50K pp2048: 1,772/1,763 now against 1,766/1,740 tok/s. The kernel stays at 210 VGPRs, and `amdgpu_waves_per_eu(8)` does not reduce them. |
+| Expert gate/up rows interleaved per 8-row tile (one 128-byte line per 16-byte piece of the eight rows) | Not retained. Bit-identical in `routed_gemm_bench`: 5.45 → 5.26 ms at 2,048 tokens, 8.55 → 8.06 ms at 4,096. It needs the decode, MMQ and unpaired readers rewritten for the new layout. |
+| High-nibble Q4_K codes decoded as F16 subnormals (one `pk_fma` with the scale × 2^20) | Not retained: within noise, 0 to −2 %. Low nibbles cannot use the trick without a shift: at mantissa bits 8–11 they overlap the exponent. The scale must be widened in F32, because fast-math folds the two F16 doublings into one overflowing constant. The largest sampled F16(d × sc) is 0.054, under the 0.0625 limit. |
+| Q5_1 down experts read into registers from 16-row tiles, then re-encoded so a 5-bit code is an F16 subnormal (one `pk_fma` per two weights) | Not retained. Bit-identical in `routed_gemm_bench`: 3.08/3.89/5.47 → 2.87/3.66/5.06 ms at 512/2,048/4,096 tokens. Prefill-only end to end, with the layout applied at load: pp512 1,356/1,373 → 1,393/1,389, pp2048 1,983/1,976 → 1,988/1,995, pp4096 2,051/2,035 → 2,065/2,066 tok/s (+0.5 to +1.8 %). The repack would replace the only copy of the weights, so decode, MTP verification and the MMQ tier would each need a reader for it. Probes that run short passes fail until those readers exist. |
+
+### ROCm 7.2 (the default package)
+
+Clang 22 spills `GdnChunkScanKernel` to 1,172–1,400 bytes of scratch per
+lane (240 VGPRs, 307–383 spilled; ROCm 10's Clang 24 fits it in 237/185
+VGPRs). With the spill, the head was slower than main on ROCm 7.2:
+pp512/2048/4096 1,283/1,849/1,936 → 1,246/1,734/1,824 tok/s. Lifting the
+launch bound to 256 VGPRs, scheduling barriers per state tile and a later V
+prefetch did not remove it. Clang 22 builds therefore keep the row-split
+recurrence and do not emit the scan.
+
+Beside the row split, both side streams also cost ROCm 7.2 prefill: pp2048
+1,851/1,838 for main, 1,813/1,685 with both, 1,829/1,701 without the Z
+overlap, 1,823/1,794 without the shared-expert overlap and 1,852/1,853 with
+neither. The overlaps were tuned beside the chunked scan, so they now follow
+it. On ROCm 7.2 the branch then matches main: wide-prefill logits are
+byte-identical on the four fixture prompts. Speed is equal within noise:
+pp512 1,288/1,285 → 1,291/1,290, pp2048 1,853/1,853 → 1,851/1,852, pp4096
+1,924/1,919 → 1,925/1,920, d10K 1,747/1,747 → 1,746/1,746 tok/s. ROCm 10
+logits and speed are unchanged. All 20 Flash-Next CTest targets pass on
+ROCm 7.2.
+
+### Lossy changes in combination
+
+Builds on main `c0e0be58`, each with the fixture probe commit: lossless
+(L: side streams and mixer down tiles), + chunked DeltaNet and fused norm
+(G), + BF16 residual streams (B), and both (A, the head before the BF16
+residual streams were removed). G merged in #758; its chunked DeltaNet and
+fused norm were removed on October 27, which leaves L.
+`gufo bench -n 0 -r 3`, two round-robin rounds (pp512 from two dedicated
+rounds), tok/s as the mean of the rounds. NLL intervals are 95 % paired
+bootstraps from `f32_reference.py compare --against`; G's overall change is
+within noise, but its chat prompt rises by a significant +0.0145 (+0.0049
+to +0.0241).
+
+| Build | pp512 | pp2048 | pp4096 | pp2048 at d10K | Next-token NLL vs main (95 %) | Largest per-prompt NLL change |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| main | 1,286 | 1,854 | 1,909 | 1,732 | — | — |
+| L | 1,332 (+3.6 %) | 1,858 (+0.2 %) | 1,909 (0.0 %) | 1,740 (+0.5 %) | byte-identical | — |
+| G | 1,349 (+4.9 %) | 1,930 (+4.1 %) | 1,992 (+4.3 %) | 1,801 (+4.0 %) | +0.0021 (−0.0128 to +0.0162) | chat +0.0145 (+0.0049 to +0.0241) |
+| B | 1,349 (+4.9 %) | 1,879 (+1.4 %) | 1,948 (+2.0 %) | 1,764 (+1.8 %) | +0.0104 (−0.0040 to +0.0245) | tools +0.0192 (−0.0259 to +0.0661) |
+| A | 1,369 (+6.4 %) | 1,961 (+5.8 %) | 2,029 (+6.3 %) | 1,824 (+5.3 %) | +0.0175 (+0.0030 to +0.0318) | tools +0.0444 (0.0000 to +0.0913) |
+
+## Prefill overlap and chunked DeltaNet on ROCm 10.1 (October 24, 2026)
+
+Ideas adapted from halo-box/strix-llama.cpp's Flash-Next prefill work.
+`gufo bench -n 0 -r 3` on the `rocm10` toolchain, main `8b52b42c` as
+the control; every run waits for the GPU to cool to 55 °C. Main measures
+pp512/2048/4096 1,265–1,284 / 1,811–1,860 / 1,880–1,924 tok/s across
+these sessions. Native pp2048 at d0 spends about 1,116 ms per pass: routed
+experts 388 (DRAM floor about 305), dense F16 GEMMs about 350, HC combines
+133, DeltaNet 97, W8A8 62, attention 34. At pp512 the routed experts
+(200 ms of 404) already stream their weights at the measured DRAM peak.
+
+| Experiment | Outcome |
+| --- | --- |
+| Shared expert on a side stream beside the routed experts | Retained: byte-identical logits. The two streams' kernels slow each other (routed gate/up 223 → 251 ms per pass), but the pass shortens: with chunked DeltaNet, disabling only this overlap gives 1,309/1,896/1,965 against 1,335/1,907/1,976 tok/s. Kept after the chunked scan's [removal](#chunked-deltanet-removed-october-27-2026). |
+| GDN Z rows on a side stream after the QKV tiles | Retained: byte-identical. Beside the row-split recurrence (96 blocks) it was neutral at pp2048: the recurrence slowed 62 → 115 ms per pass. Starting Z together with QKV was also neutral. With chunked DeltaNet, disabling only this overlap gives 1,320/1,898/1,964 tok/s. Kept after the chunked scan's [removal](#chunked-deltanet-removed-october-27-2026). |
+| Chunked WMMA DeltaNet for row-split prefills of 256+ tokens | Rejected (lossy), removed on October 27 after merging in #758: on a 299-token tool prompt it turns a greedy literal echo into an unrelated greeting ([removal](#chunked-deltanet-removed-october-27-2026)). 32-token chunks: parallel prep (L2 norms, log-decay prefix sums, `(I + A)^-1` by forward substitution, F16 Q/K/T/P), then one block per value head scanning the chunks with an F32 state in WMMA accumulators. V is read in F32 from the convolution output. The gates are computed in prep. A checkpoint inside a chunk does not change the pass: the scan saves the state at the chunk boundary before it, and the row split carries that copy over the remaining tokens (at most 31). With both overlaps, against main: 1,281/1,850/1,906 → 1,333/1,888/1,964 tok/s. `--validate-prefill 2048` against the sequential path: rmse 0.252 → 0.266, cosine 0.99694 → 0.99662. |
+| Gated norm inside the chunked scan | Rejected: removed with the chunked scan on October 27. It removed the epilogue pass and the raw F32 rows (22 ms per pp2048 pass). 1,335/1,907/1,976 → 1,344/1,928/1,993 tok/s. Last 64 rows of a 2,228-token prompt against main: KL 0.0098 → 0.0079 mean. |
+| 32-row, rows-first W8A8 tiles for the mixer down up to 1,024 tokens | Retained: byte-identical. At pp512 the call falls from 187 to 165 µs (20 → 40 blocks); end to end it is within noise. At 2,048 tokens it is slower (649 vs 444 µs), so wider batches keep 64-row tiles. |
+| Residual streams kept as BF16 between two normed wide layers | Rejected (lossy), removed on October 27: on top of chunked DeltaNet it adds only 1.5–2 % (combination table above) for a measurable NLL cost, worst on tool text. On the F32 fixtures it raises the next-token NLL by 0.0175 nats (interval +0.003 to +0.033), mostly on chat and tool text. Only the two fused combines read the residual there. They hold BF16 (round to nearest even) at the front of each F32 row, convert at the PLE layer, the last layer and pass boundaries, and save 126 MB per layer at pp2048. Same-session A/B: 1,335/1,925/1,989 → 1,367/1,945/2,014 tok/s (repeat 1,286/1,933/1,983 → 1,367/1,954/2,026). F32 oracle in the table below. |
+| The same 32-row tiles for the shared expert | Rejected: the copies on the side stream only stretch beside the routed experts; the pass span is unchanged (393 → 394 ms at pp512). |
+| 128 × 64 dense F16 tiles for wide-tile grids under 160 blocks | Rejected: byte-identical, but at pp512 1,302–1,307 against 1,333 tok/s (same binary, toggled); pp1024 flat. |
+| F16 Z rows stored by the SSM projection for the chunked norm | Rejected: +0.9 % at pp512 only, flat at pp2048/4096; rmse rises to 0.274. |
+| Benchmark tokens drawn like llama-bench (seeded random vocabulary) | Diagnostic: 1,335/1,925/1,997 against 1,345/1,934/2,008 tok/s for Gufo's sequential ids, so expert coverage does not explain the gap to the reference numbers. |
+
+Accuracy against the F32 CPU reference (`reference_probe --dump`, run alone),
+on a 661-token prompt prefilled as 512 + 149 rows. The last 64 positions are
+compared. These are single-prompt figures: differences near 0.001 KL are
+within this sample's spread.
+
+| Build | KL mean | KL median | KL max | Top-1 agreement | Logit RMSE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| main `8b52b42c` | 0.00637 | 0.00190 | 0.0947 | 59/64 | 0.217 |
+| + overlap, chunked DeltaNet, fused norm, mixer down tiles | 0.00796 | 0.00379 | 0.1148 | 60/64 | 0.249 |
+| + BF16 residual streams | 0.00627 | 0.00246 | 0.0853 | 58/64 | 0.242 |
+
+The reference took 858 s for 661 tokens on an otherwise idle host (3.8 s
+for the first token). Running it inside `gpu_probe --reference` while the
+GPU model is resident starves the page cache and costs 46 s per token.
+
+F32 reference fixtures (`tests/fixtures/qwen38_flash_next/f32_reference`,
+2,479 positions: the last 256 rows of every prefill pass over documentation,
+C++ source, a four-turn chat and a tool-calling session). Paired
+differences against main, 95 % bootstrap intervals (`f32_reference.py
+compare --against`):
+
+| Build | KL to F32, all prompts | NLL of the next prompt token | Largest per-prompt NLL change |
+| --- | ---: | ---: | --- |
+| main | 0.0341 | 1.1112 | — |
+| without BF16 residual streams | 0.0301 (−0.0040, −0.0107 to +0.0029) | +0.0021 (−0.0128 to +0.0162) | chat +0.0145 (+0.0049 to +0.0241) |
+| with BF16 residual streams | 0.0358 (+0.0017, −0.0039 to +0.0071) | +0.0175 (+0.0030 to +0.0318) | tools +0.0444 (0.0000 to +0.0913) |
+
+The F32 reference's own NLL on these positions is 1.1079. Main is already far
+from it on the tool-calling prompt (KL 0.0997, p99 2.02); the other prompts
+stay below 0.011.
+
+Final alternated A/B (main → head with the BF16 residual streams, two
+rounds, 55 °C cooldown before each process): pp512 1,260/1,280 → 1,362/1,374 (+7.6 %), pp2048 1,845/1,861 →
+1,965/1,970 (+6.3 %), pp4096 1,918/1,913 → 2,038/2,034 (+6.3 %), pp2048 at
+d10K 1,736/1,719 → 1,794/1,819 (+4.2 %). At d100K the untimed 100K-token
+preparation heats the GPU to 100 °C, so multi-rep runs varied by up to
+±276 tok/s on both builds. With one rep per process from 50 °C, the three
+alternated rounds give 1,125/1,168/1,195 → 1,210/1,257/1,417 tok/s.
+
+Perplexity over 116,213 positions of repository documentation and Flash-Next
+sources (`gpu_probe --nll`, 2,048-token passes): main 4.5669, without the
+BF16 residual streams 4.5643, with them 4.5685. Paired block bootstrap (512-token
+blocks) of the per-token NLL difference against main: −0.055 % (95 %
+interval −0.16 to +0.06 %) and +0.037 % (−0.064 to +0.16 %). Neither change
+is distinguishable from main at this resolution. Individual positions do
+move: about 23 % differ by more than 0.1 nats in either direction.
+
+Batching several sequences into one prefill pass is not ported: Gufo
+prefills sessions one at a time.
+
+## Selector scheduling on newer LLVM (October 23, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Keep one selector query head live on Clang 23 and newer | Retained: full head unrolling causes 304 scalar-register spills with ROCm 10.1's Clang 24; the bounded loop reduces this to 18 and VGPR use from 169 to 164. Neither 10.1 variant uses private scratch; the original Clang 23 build does. The F32 queries, FMA sequence, reduction tree and selected blocks stay unchanged. On Clang 24, the isolated 64-query × 8,192-block scorer falls from 109.3 to 76.3 µs, with identical output bytes. Clang 22 retains its original unrolling. |
+| Reproduce older activation rounding on newer compilers | Rejected: first-layer Q8 codes differ at 37 of 327,680 values; the newer compiler agrees more often with independent FP32 and FP64 calculations. Restoring the old fused remainder matches the first mixer but does not recover sampled thinking throughput. Production rounding and sampling remain unchanged. |
+| Price the actual C1 sampled draft head | Retained with the compact target path: fixed-history measurements replace full-head estimates only for eligible sampled C1 cycles. The first cycle and short tails keep their established costs; the focused short-reply control passes all 84 phases. Full target-row verification also keeps the original curve, removing a thinking/tool pause increase (111 → 120 ms, then 113 ms with the guard; all 63 focused phases pass). Full-head, greedy and concurrent curves stay unchanged. See [migration qualification and timing limits](ROCM.md). |
+
+The scorer measurement is the median of five warmed calls with production
+compiler flags. Full-model and request-level qualification are recorded in
+[quality](QUALITY.md#llvm-selector-scheduling-october-23-2026); the microbenchmark
+percentage is not an end-to-end speedup.
+
+An independent `tools/prof/prof.py` capture of the final pp2048 pass at d32K
+retains all 1,574 launches, including 45 scorer calls. Scoring falls from
+41.25 to 25.86 ms; total GPU time falls from 1203.93 to 1189.16 ms and the
+pass span from 1207.74 to 1192.95 ms. These are diagnostic profiled timings;
+the HTTP table uses separate unprofiled production runs.
+
+## Exact sampled decode (October 21, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Skip a redundant neural proposal after an established sampled copy | Retained only with an accepted source, a full 24-token match and at least three available copies. New sources and short resume matches still use the neural proposal. Target rejection/correction, private history and restored RNG remain authoritative. |
+| Compact sampled target verification | Retained for unconstrained top-k/min-keep up to 64 and bounded penalty history. Transfer the exact top 64 unpenalized logits plus every penalized logit, then apply the existing FP64 target sampler. Grammar activation, forced reasoning closure and unsupported settings use full rows. Independent CPU sorting and full-row distributions agree bit for bit, including correction RNG. Complete transfer/selection/sampling costs for 1/3/7 rows: 94.60/273.17/594.92 → 75.84/156.63/323.45 µs. Reconstructing full CPU rows first was exact but slower and was removed. |
+| KV-only predictor catch-up when no proposal is needed | Retained: scalar and uniform cache-only cohorts stop after K/V and indexer updates; mixed cohorts preserve the original row arithmetic. No discarded attention/output/FFN residual is produced in the uniform path. Independent predictor checks and full-logit/RNG/cache replay pass. |
+| Prepare image-capable slots' stable RoPE descriptor before text graphs | Retained after a cancellation/resume control exposed a repeatable 5.8 ms first-token regression. Admission profiling locates 5.61 ms in image-context setup; the first image descriptor invalidated previously captured text graphs. Preparing the empty descriptor at session creation keeps its pointer stable. The same resumed request falls from 9.45–9.46 to 3.71 ms TTFT (main 3.62–3.78), with identical output and faster decode. Other Qwen models retain their existing lazy initialization. |
+| Recalibrate deterministic sampled draft lengths | Rejected after auditing depths 0/4096/32768, C1/2/4/6/8 and widths 1–8 with the actual small sampled head. New-code generation improved 75.27 → 81.57 tok/s, but thinking fell 51.90 → 49.18 and the focused repeat reproduced 51.67 → 49.04. That global replacement was not retained. |
+| Pack Q8 output waves and vary Q4 expert rows per wave | Rejected. Q8 variants were flat/slower after matching production allocation and rotating weights beyond MALL. Q4 one-row waves changed result bits for a sub-1% gain; exact four/eight-row variants were slower than the existing two-row path. No production GEMV changes retained. |
+| Wider lookup blocks, lookup without a sidecar and Flash-Next DFlash2 | Not retained. Wider blocks need independently qualified decode arithmetic and recurrent rollback beyond eight rows; the AR-only path currently has no speculative reserve. The available DFlash2 fork still needs an audit of its exported proposal probabilities and restore/batch fallback before a lossless port. These are separate implementation projects, not enabled features. |
+
+Matched serving gains are modest: about 1–2.5% for copying and flat ordinary
+coding/thinking. See [the focused comparison and quality limits](QUALITY.md#exact-sampled-decode-october-21-2026).
+
+## Mid-size prefill passes (October 21, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| Wide prefill routes for every prefill pass above eight rows | Retained: the fused SSM projection/convolution, fused attention projection, half-only HC mix, last-layer query skip and paired 128-row gate/up with 64-row down tiles started at 1,024 rows, so pp1023 ran at 1,432 tok/s against 1,624 for pp1024. Native AR pp, before → after: pp9 93.5 → 98.3, pp33 229.8 → 243.7, pp128 541.7 → 594.1, pp256 802.5 → 899.3, pp470 1,054.4 → 1,225.5, pp768 1,216.7 → 1,446.9, pp1023 1,432.2 → 1,578.7; pp1024+ unchanged. The paired experts supply most of the gain (pp470 1,082 → 1,225). Every row's prefill logits are byte-identical to main at 30–845 tokens and for 2,518 tokens split at 2,048; AR/MTP tg64 after 33/470/900-token prefixes keeps output hashes and draft counts. Decode and verification batches keep their routes. HTTP, pi system prompt on a new prefix (2,048 + 477-token passes), alternating arms: TTFT 1,745–1,756 → 1,684–1,696 ms; a 2,968-token single pass is unchanged. |
+
+## Component-cache admission (October 20, 2026)
+
+| Experiment | Outcome |
+| --- | --- |
+| One rank per eligible slot, checkpoint-presence queries and one cold reset | Retained: the 128-checkpoint CPU fixture measures 107.05 µs for a full lookup and 31.49 µs for presence. All six HTTP profiles pass correctness, with exact responses and cache/prefill work. Native AR/MTP replay and d0/C1–C8 controls retain quality. Per-request timings remain partly inconclusive; see [qualification](QUALITY.md). |
+| Share completed full-prompt retry captures across peers | Rejected under the existing phase gate. The identical cohort avoids three 133,129,584-byte copies, and sampled MTP replies replay exactly, but larger physical decode batches repeatedly add 7–9 ms to some decode phases. Total request time improves; eight phase measurements fail. The default fix preserves capture behavior. |
+
+## Host compaction and cache transfers (October 18, 2026)
+
+KFD SMI events and HIP traces distinguish queue suspension from slower model
+kernels. Host page migration can suspend every GPU queue in the process,
+including text work unrelated to the allocation that moved. Controls against
+main `bff0eec6` also exposed smaller delays from preparing cache backing while
+capturing a checkpoint.
+
+| Experiment | Outcome |
+| --- | --- |
+| Nonpaged gfx1151 queue-save areas, launch/copy arenas and loader staging | Retained in the bundled ROCr patch. HIP can obtain kernel arguments from the coarse pool, bypassing ROCr's dedicated kernarg pool; traces also locate runtime-owned code-object upload buffers. Application SVM and ordinary fine-grained host allocations retain their policies. |
+| Long-term pins for owned HIP host buffers | Retained for uploads, Flash-Next execution and disk staging. Exact GPU/CPU visibility and restricted-policy fallback tests pass. |
+| Vision device weights and bounded pinned uploads | Retained with existing heap headroom and managed fallback. All 29 observed vision stages remain byte-identical. |
+| Bounded cache growth outside captures | Retained: approximately 128 MiB segments, bounded page population and pinning ranges, a 2 GiB reserve before readiness/substantial prefill chunks, and smaller reserves for short prefill chunks. Preparation follows any pending fallback capture. Existing budgets remain authoritative. |
+| Prepare cold HC, Q8 and argmax functions | Retained: resolve actual function variants before readiness, without trial launches or activation changes. |
+| Aligned snapshot upload kernel | Retained: use the existing exact byte-copy kernel for registered host-to-device restores, preserving unaligned, pageable and borrowed-device fallbacks. |
+| Default `HSA_USERPTR_FOR_PAGED_MEM=0` | Rejected: removed eviction events but slowed short prefill by 5–6%. The narrower runtime fix preserves normal prefill speed. |
+| Extra priority transfer queues | Rejected: two short C4 decodes rose from approximately 46/45 ms to 104/58 ms. Keeping the original shared queue pool removes this regression. |
+| Grow backing during each allocation or every prompt capture | Rejected: background population/registration delayed captures and the following decode. Request-release refill also delayed the next admission. Preparation now follows pending fallback captures, immediately before actual prefill work. Fully cached decode does not start it. |
+| Disable all ROCr SVM | Rejected: faults when a kernel writes application-managed storage. The independent memory test covers this failure. |
+
+See [quality and timing controls](QUALITY.md) for measured scope and remaining
+limitations. Raw requests, profiles and rejected controls remain outside Git.
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Vector loads for F16/BF16 small projections, October 20 (#681) | Retained: the whole-pass `SmallGemm` path (#518) took only F32 rows, while Flash-Next narrows router and GDN alpha/beta to F16 and keeps the indexer in BF16, so every decode and verification call used the scalar, bounds-checked loop. F16/BF16 rows of whole passes now take one 8-byte load per step, widened exactly, with the same FMA order. Production fixtures (F16 513/96x2560, BF16 128/512x2560) are bit-identical to the grouped scalar kernel. Isolated calls with weights rotated past MALL: router w2 29.4 to 17.7 us, alpha/beta w2 17.0 to 8.1 us. Served decode median 1.7% less time (compare.py, within margin). |
+| CPU image preprocessing reuse, October 18 (#627) | Retained: backend-owned 128 MiB combined encoded/RGB cache, fast lookup hash followed by exact byte equality, immutable request ownership and unchanged continuation hashing. Flash-Next queue medians: 45.01/82.40/161.49 → 9.65/13.25/20.63 ms for 1/2/4 screenshots. Miss median differences: −0.26 ms small PNG, +0.42 ms 6.2 MB PNG; individual stalls and broad timing flags remain inconclusive. Rejected: SHA-256 lookup added about 6.7 ms for large PNG misses; unconditional reuse changed forced-cold behavior, so `cache_prompt:false` bypasses reuse. [Evidence](https://github.com/gufo-org/gufo/pull/645). |
+| Prepare indexer plans before readiness, October 17 (#632) | Retained: the first heuristic query loads a hipBLASLt code object for 104–115 ms, overlapping a 115 ms GPU idle gap. Preparing actual indexer geometry during model startup runs no trial GEMMs and preserves exact-shape selection. Cold 13-token PP falls from 257–260 to 145–146 ms; all 12 d0 control outputs/work match, with no timing flags. Independent F64 and prepared/lazy F16/BF16 checks, native snapshot replay and Pi tools/edit/code pass. |
+| Long-term pins for committed cache backing, October 17 (#632) | Retained as migration protection when process policy permits: registered base pages can still move under ordinary compaction. io_uring buffer registration supplies long-term pins without I/O; ranges split at Linux's 1 GiB per-buffer limit. Lifetime, failure, large-buffer and restricted-policy fallback tests pass. A 4 GiB held-memory control preserves all 24 outputs and timings, but neither arm repeats main's earlier 2.83-second gap. Podman syscall policy can disable the pins despite unlimited memlock. Cache timing outliers remain inconclusive as detailed in [quality](QUALITY.md); this is not a blanket stall or timing pass. |
+| Reuse PLE gather scratch, October 17 | Retained: an 8K MTP prefill twice lost about 100 ms while constructing the per-gather n-gram deduplication map. Lightweight timestamps locate 87.35 ms in that construction overlapping background cache page population/registration; GPU arithmetic is unchanged. A reusable flat index preserves the first occurrence and read/copy order, and the executor prepares its maximum scratch before readiness. The original short history now measures 1673.55 tok/s versus 1535.61 before and 1675.25 on main, with identical output and cache work. Independent BF16/IQ4 row tests pass, including wide/tiny/wide gathers, duplicate output slots and buffer guards. |
+| Bound sampled copy sources to existing context, October 17 | Retained: do not index the current sampled answer or copy beyond its starting context; previous answers become eligible on the next request. Greedy self-repetition remains available. A broader corpus exposed a 4% C++ slowdown and a debugging answer taking 5.5% longer with changed wording. Both now match main exactly; ordinary aggregate 46.57 → 46.64 tok/s, existing-file edits 85.44 → 105.86, fresh Python 74.82 → 75.49. Five real Pi tasks remain about flat (26.12 → 25.92 seconds); a thinking bug-fix case is 0.87 seconds slower with 35 more sampled tokens, so this is not a claim of universal agent speedup. Native mixed-session/logit/RNG/snapshot tests, both default sampling presets and HTTP stops/replay pass. See [quality and timing limits](QUALITY.md) for all retained flags and shared baseline failures. |
+| Private prompt lookup in C1–C8, October 17 | Retained for Flash-Next MTP: the same request-local proposal rule works alone and in batches, with isolated RNG and restored lookup state. Greedy matches supplying at least three copies bypass the neural head; copies stop at EOS. Same Nix/toolchain/weights versus main `3389a585`, prepared pp2048/tg128: repetitive C1 73.18 → 115.77 tok/s; C6 aggregate 177.98 → 231.31. C6 ordinary 108.74 → 109.54. Exact outputs and expected cache work. Lookup and its next catch-up cannot train neural batch costs. Full target verification and the eight-row cap remain; no shared hint pool, wider verifier or sampler replacement is imported from the parked experiment. See [qualification and timing limitations](QUALITY.md). |
+| Sampled copy confidence and request boundary, October 17 | Retained: sampled requests first make a neural proposal, require 24 matching generated tokens (greedy remains 12), and enable five-token resumption only after accepting at least half a copy. The saved request boundary prevents shared chat wrappers from inflating a short answer into a full match. Copy-before-head for sampled requests was rejected after a 216-token Pi code write fell from 68.76 to 62.78 tok/s. The earlier actual Pi replay is 68.51 → 67.72 with identical code. A 27-token tool call's separate 72.44 → 61.37 regression is fixed at 72.75 by the boundary. Public extraction/URI generation retain exact output and speed; frozen 115K file edits improve 63.26 → 74.77 and 67.50 → 74.90 tok/s with exact intended files and literal tags. Target sampling math is unchanged; private author prompts were unavailable. |
+| Greedy batch probes after copying, October 17 | Retained: measure the cheapest neural width before widening; hold a new bounded probe for two usable samples instead of escalating through unmeasured widths. This removes repeated cold-width exploration after copied text. C8 ordinary generation immediately after copies retains exact output: maximum token gap about 215 → 162 ms, but decode is still 18.00 → 17.56 tok/s per session (7.11 → 7.29 seconds for 128 tokens). This small throughput cost remains visible; the policy does not change sampled execution. |
+| Bound copies alongside new text, October 17 | Retained for all-greedy mixed cohorts: cap copied suffixes at half the verifier or the planned neural width, whichever is larger. A trace locates the excess pause in target verification: four eight-token copies plus four three-token neural chains require 44 rows and about 186 ms of forward time. The final production C8 mixed case reduces the copy requests' maximum gap from 200 to 145 ms (main 157–163); copy/new-text decode is 28.08/18.58 versus main's 21.63/17.95 tok/s. All-copy cohorts retain full width (31.42 versus main's 25.29 tok/s). Exact outputs; sampled streams and C1 are unchanged. Earlier 3–7 ms first-token flags remain inconclusive across unchanged main controls; see [quality](QUALITY.md). |
+| Exact scorer query/key sharing, October 17 | Rejected: 16 variants covering paired keys, earlier tree reductions, bounded loops and two/four/eight-lane groups retain every valid score bit in 160 cases (1/8/31/129/512 rows at 32K and 128K, including causal tails). Production compiler flags, original FP32 queries and reduction tree. Unrolled head sharing spills registers; bounded loops remove spills but lose throughput on repeated loads; lane sharing also loses. The closest 512-row candidate is 0.805 / 3.322 ms at 32K / 128K versus 0.387 / 1.703 ms for the unchanged scorer. None reaches model qualification or changes the published benchmark. The existing scorer remains the fastest tested exact path, not a proven optimization limit. |
+| One runtime cache reserve segment, October 17 | Rejected: keeping one free segment instead of two cuts the first 8K calibration prefill from 1323.53 to 1232.86 ms, but an earlier calibration request's decode rises 257.96 → 304.45 ms and its maximum token gap rises 76.55 → 173.37 ms. The change moves registration work into decode; the original two-segment policy remains. |
+| Copied vision weights in coarse managed storage, October 17 | Retained: #616 prepares the auto-discovered vision sidecar before HTTP readiness. With the published `32c4ece8` binary, the original uncached repetitive d0 history still reaches 73.35 tok/s (published 73.44); with the current device-heap uploads it reaches 42.53, despite identical prompt/output/draft counts. Excluding sidecar discovery restores 73.82. Keeping the real upload but suppressing its BLAS handles only reaches 58.01. Moving the copied, read-only vision weights to the existing coarse managed allocator restores 73.77 with the full 903,984,064-byte sidecar and both BLAS paths ready; the maximum token gap falls from 1353.69 to 82.98 ms. Activations, arithmetic, readiness and resident-byte accounting are unchanged. This isolates allocation placement; the underlying driver stall mechanism is not established. |
+| Image regression control for managed weights, October 17 | Retained: Flash-Next and 27B each produce 29 finite, byte-identical encoder stages on a deterministic 1024² texture (134,742,016 and 137,363,456 F32 values). Prepared-upload/idempotence/residency checks pass for both projectors. Four matched production HTTP requests cover first image, a different aspect ratio, cached image retry and text after image; all outputs, token/cache/draft counts agree and no request phase exceeds both 5% and 3 ms. First-image wall time falls 5930 → 1231 ms; cached-image time stays 647 ms, with zero prefill. Text after image reaches 73.74 tok/s. The one-time vision upload increases 65 → 158 ms; total model loading is 15.90 → 15.62 s in this pair, not a cold-loading benchmark refresh. This preserves native image results; it does not requalify the existing reference accuracy gap. |
+| Bound sparse QK fragment scheduling, October 17 | Retained against PR #626 head `c1088f89`: prevent the compiler from hoisting all eight K fragments by bounding scheduling in groups of two. Same WMMA dot products, two-half reduction, selected blocks, tile order and softmax; dense attention is unchanged. VGPRs 227 → 221, no spills. One measured sample per shape: sparse pp2048 at d32K 7.795 → 7.459 ms; all 12 saved real selections at d30K total 100.314 → 95.837 ms, with identical output hashes. The independent FP64 attention error report is identical, including ragged rows and positions around 128K. All 17,134,080 full-vocabulary logits after a 133,945-token prompt and 69 fixed continuation steps are finite and byte-identical. |
+| Published AR history control, October 17 | The shortened d0/d32K/d128K experiment changes tokenizer calibration and actual deep prompts; it is not a control for the published eight-depth table. With the complete original history, main `78248de2` measures pp128K 1511.26 tok/s versus the published 1517.44; PR #626 plus bounded QK scheduling measures 1538.78. All 12 captured requests have identical inputs, completions and token/cache counts; no phase exceeds both 5% and 3 ms. This measures the combined PR, not the six-line scheduling change alone. |
+| Reuse healthy MTP cache-slot scratch, October 17 | Retained: slot reassignment previously called full reset, freeing rollback rows and destroying verifier graphs that capture their addresses. The next request paid for the same allocations and graph recording again. Preserve already-allocated rows only for a healthy resident MTP slot; clear all logical/recurrent state as before, and keep explicit reset and failure cleanup. The maximum rollback reserve remains about 147 MiB per MTP slot, already included in admission and actual allocation accounting. AR/MTP fresh-session comparisons retain exact logits, greedy/sampled tokens and draft counts; cancellation and explicit reset release the scratch. Focused HTTP cache/long-context checks pass with default Qwen sampling, including image/tool cancellation and RAM/disk resume. |
+| Remaining PP depth cost, October 17 | A separate full-model trace attributes most d32K → d128K GPU growth to exact indexer scoring (20.34 → 80.32 ms per pp2048); attention grows 114.39 → 132.28 ms, while SSM work stays near 92 ms. Traces also expose first-use allocation/launch pauses, which must be separated from steady kernel cost. Profiled wall times include instrumentation overhead and are not benchmark cells. No approximate selection or precision reduction was retained. |
+| Further sparse scheduling variants, October 17 | Rejected: explicitly reusing P fragments (the compiler already reuses the LDS reads), scalar tile metadata with `readfirstlane` (lower register use without a speed gain), and scheduling groups of one or four (no useful advantage over two). Skipping QK row blocks whose queries select none of a tile preserves output bytes, but only 3.7–7.1% of real row blocks qualify and the branch cost makes results inconsistent. No tile reordering, PV skipping or precision change was retained. |
+| Where pp2048 loses time with depth, October 17 | Analysis (MTP, native, one profile each): d0 → d32K adds 98 ms of GPU time per forward (1109 → 1207 ms). Sparse attention replaces the dense window (37.7 → 107.1 ms, 12 layers), block selection adds 23.8 ms (scores 20.1, marks 3.7) and the indexer query projection 3.7 ms; dense and routed GEMMs vary by ±1–4% with clock and routing. The MTP prompt pass runs no attention and costs the same at every depth (23 ms GPU per 2,048 tokens). Selection masks dumped from a 38,090-token docs/code prefill (temporary hook) give four-query unions of 812 / 885 / 959 blocks at 8K / 16K / 30K, 1.59 / 1.73 / 1.87× the 512 per query; the synthetic `attn_bench` selection assumes about 1.6×. `attn_bench --masks` replays such dumps: the 12 layers at 30K take 101.1 ms against 107.1 ms in the model profile. The sparse kernel issues about 21% VALU and 11% SALU per SIMD with six resident waves and is about 41% WMMA-busy, so it is latency-bound. Scoring is VALU-bound (about 76% of issue: 384 `v_fma_mix_f32` per key and query) and grows linearly with depth. |
+| Rejected depth-cost variants, October 17 | One union pre-pass per four-query group for both KV heads (global lists, scalar tile loads): byte-identical, LDS 38.2 → 30.0 KB, VGPRs 232 → 219, but replayed time unchanged (101.1 ms); adding an eight-wave cap spills 36 B and gains only 1.3% while dense attention slows 9%. Half-wave `v_permlanex16` K fragments in the sparse window alone: exact, 101.1 → 106.0 ms. Membership-sorted union tiles that skip row blocks without a member query: 26% fewer row-block WMMAs on the real masks but only 101.1 → 96.1 ms, and the changed tile composition changes the output bits. Four queries per scoring thread with F32 keys and restricted pointers keeps scalar query loads and exact scores, but only 98 of 275 FMAs pair (a VOPD pair reads one SGPR) and 512 rows at d32K take 386 → 426 µs; decode rows also slow. 64-token MTP Q8 projection tiles (exact): two `fc_hidden` calls 17.6 → 20.0 ms, the kernel is VALU-bound by its per-block scale FMAs. |
+| Coalesced routed Q5_1 down weights, October 17 | Retained: a row's two Q5_1 blocks per stage are 48 contiguous, 16-byte aligned bytes, so the block loads them as whole 16-byte chunks (1.5 per thread) and stages them in LDS as stored; each wave then reads its rows' scale, high-bit word and codes there. Before, each thread issued three 8-byte loads at 24-byte block offsets and committed separate code, high-bit and scale planes. Same decoded F16 values and WMMA order; VGPRs 103 → 96, which allows 16 resident waves per SIMD instead of 12. `qwen38_flash_next_routed_gemm_bench` (new) replays the per-layer expert counts of a real pp2048 prompt (47 layers, 255–441 active experts): down 160.5 → 153.0 ms, gate/up unchanged, hashes identical; 128–900-token batches neutral. Routed operator test passes; logits over an 11,359-token prefill plus 366 decode rows are byte-identical. Native pp2048 `-r 5`, alternating, candidate first: 1867.8/1859.8 → 1869.1/1878.5 tok/s. |
+| Routed GEMM bounding and rejected variants at pp2048, October 17 | Analysis on real per-layer counts (only 66% of experts active on average, so gate/up streams about 130 GB/s and down 120 GB/s of unique weights; about 32 and 22 TFLOPS): removing down's weight loads saves 26%, its WMMA 14%, its activation gathers 5%, its F16 output stores 12% (the 105 MB/layer write itself); gate/up: weights 20%, WMMA 20%, gathers 8%. Rejected, all exact: two register sets keeping down's loads two stages ahead (−1.3% alone; with coalescing 112 VGPRs, 12 waves, slower than one set at 96); dispatching an expert's token tiles together per row block (down −0.8%, gate/up +0.3–0.9%; gate/up's extra L2→memory reads are activation gathers, not weight rereads); a lane-exchange F16 epilogue without LDS or barriers (153.8 vs 152.2 ms); skipping dead token tiles in the old epilogue (flat); capping the paired kernel at 14 waves (24-VGPR granules force 96 VGPRs: 300 B scratch, 3.4× slower). HC down W8A8 runs int8 WMMA (the F16 rate on gfx1151) about 72% busy with its per-block rescale; PLE norms are bandwidth-bound passes worth about 2 ms per pp2048. |
+| Selection top-k scans at depth, October 17 | Retained: the mark kernel's passes over a row's scores issue four 16-byte loads per thread before using them, the no-tie final pass writes whole mask words per thread, and rows of narrow batches (four or fewer) run 1,024 threads per block. `qwen38_flash_next_decode_attn_bench` selection, 1/8 rows: d32K 17.6/26.3 → 14.3/22.2 µs, d128K 54.0/81.5 → 30.4/56.0 µs; every mask hash identical, `select_ops_test` 0 mismatches, attention operator report and 11,359-token prefill/366-row decode logits byte-identical. Native AR tg64 at d128K keeps its output hash, 27.51/27.47 → 27.85 tok/s (with the head-group attention). Rejected: scoring four rows per thread to reuse each key (exact, but the row loop broke the scorer's register schedule: d32K one row 14.3 → 18.4 µs, d128K eight rows 56 → 127 µs). |
+| Narrow attention head groups and one-pass selection compaction, October 17 | Retained: decode and MTP verification attention serves two (one or two rows) or four (wider batches) query heads of a KV head per block, so each K/V row load feeds every head's unchanged dot product, wave/block reductions, softmax update and FMA sequence; selection compaction gives each thread four consecutive mask words, one pass per 131,072 tokens instead of a barrier-separated scan per 1,024 blocks, so its cost no longer grows with context. `qwen38_flash_next_decode_attn_bench` (attention including compaction, 512 selected blocks): rows 1/8 at d32K 40.3/163.8 → 30.4/125.6 µs, at d128K 55.0/186.5 → 30.5/123.3 µs, hashes identical at d2K/32K/128K; three heads per block or six were slower. Operator report identical; logits over an 11,359-token prefill and 366 decode rows byte-identical; native MTP tg128 at d32K keeps its output hash and 111/111 drafts, 83.4/83.0 → 84.1/83.9 tok/s. Unchanged with depth before this: the MTP cycle cost audit (C1, widths 1–8) measured 35.3–88.9 ms at d0 and 36.4–94.3 ms at d32K, 37.3–94.3 ms at d128K, below the September table (38.5–96.8, 42.5–112.6 ms) with a similar width shape. |
+| Sparse prefill attention softmax and phase order, October 17 | Retained: a softmax lane's four keys form one selection block, so the sparse window decides the mask bit once per lane; lanes with a visible block read their eight scores under one condition (one LDS wait instead of four predicated round trips; reading every score unconditionally was 14% slower because masked lanes then cost LDS bandwidth); and the PV WMMAs are pinned before the phase barrier, where the compiler had sunk them behind the softmax. Isolated sparse call d16K/d32K 8.08/8.53 → 7.35/7.81 ms, dense unchanged; every attention-bench hash, the operator test's error report and logits over an 11,359-token prefill plus 366 decode rows are byte-identical. Native pp2048 at d32K, head-first alternating pairs: 1636.9/1634.4 → 1644.2/1647.0 tok/s. Counters at d32K: L2 misses 82–87% (about 3.5 GB per 4,096-token call in the model), yet cache-resident K/V addresses save only 3%; LDS is about 69% active with 12% bank-conflict cycles. Rejected, exact: gathering the next tile one phase early as one uniform 16-byte read (neutral); score waves loading K fragments straight from global memory instead of LDS (12.5 ms with a one-tile register prefetch that spills, 13.7 ms just in time). |
+| Dense prefill attention per-tile overhead, October 17 | Retained: the dense window computes its tiles' key positions directly instead of through the sparse block lookup, stages V^T as key pairs (one DPP swap per word, 32-bit stores instead of 16-bit), reads each lane's four scores as a float4 from 20-float rows, stores its four probabilities as one 8-byte write and groups the rescale factors by fragment parity for vector reads. The sparse window keeps its layout (the vector softmax slowed it 12%). Isolated 2,048-token dense call 3.382 → 2.969 ms; sparse d16K/d32K unchanged (7.945/8.411 → 7.896/8.400 ms). Every attention-bench hash and the operator test's error report are identical; logits over an 11,359-token prefill and 366 decode rows are byte-identical. Native pp2048 1857.5 → 1867.8 tok/s. Counters: LDS stays about 65% active, VALU is 45% busy, so the kernel remains LDS-bandwidth/latency bound. |
+| HC mixer xn prefetch, paired-chunk decode and sparse softmax vectors, October 17 | Rejected, all exact: the HC up projection spends 0.311 of 0.478 ms in its K loop and the rest streaming 42 MB of xn rows; fetching them before the K loop or all at the epilogue start keeps every byte but slows it to 0.530 ms. Paired Q4_K lanes decoding both 16-byte chunks instead of exchanging halves raise VGPRs 168 → 184 and the kernel 442.7 → 446.3 ms per profile. On the sparse window the dense path's vector score reads slow d16K–d64K 6–12%; 8-byte probability stores and parity-grouped rescale factors are flat. Counters: paired gate/up spends about 60% of SIMD cycles in WMMA and 22% in other VALU at pp2048. |
+| Larger dense attention blocks and query LDS staging | Rejected: 16 queries × 4 heads per block keep exact output but reach 256 VGPRs with spills (3.63 ms); moving queries to swizzled LDS then needs 64 KB per block and halves residency (4.26 ms). |
+| Expert GEMM layout, prefetch and staging, SSM/attention input padding | Rejected (exact or timing-only): Q4_K superblock prefetch three stages ahead (pp2048 flat), contiguous tiled expert-weight reads (gate/up −4% on identical routing, not worth repacking), double-buffered paired activations (VGPR 168 → 224, slower), skipping dead activation slots (+0.2%, noise), early HC-mix xn loads (slower), padded SSM/attention projection inputs (flat; attention's strided path 2× slower). WMMA on gfx1151 reads the replicated A half: the SSM fragment selects are required. A timing hack that corrupts outputs changes routing (485 → 353 tiles) and fakes a +5.9% gain; compare variants on identical routing. |
+| Chunked GDN prefill (strix-llama.cpp, hipfire) | Rejected on a dumped real layer, relative RMS against FP64: current FP32 recurrence 5.1e-7, chunked F16 WMMA 2.6e-4 (about 500× worse), split-F16 everywhere 4.3e-6 but three times the matrix work for an estimated 2.5% gain. In FP32 the chunked form has no fewer state FMAs than the sequential kernel. |
+| Cost-bound disk publication admission, October 16 (#621) | Retained: recent isolated prefill bounds one tracked checkpoint, with no deadline extension/restart and immediate fallback without an estimate. Matched admission is 120.018 → 32.240 s and 120.017 → 34.520 s; early publication releases after 277.571 ms. Exact controlled outputs/work, 272 functional requests, independent MTP checks and actual Pi tools pass. A 416-request reporter-pattern run reaches 155,587 tokens, with maximum admission 0.152 s. All timing flags remain visibly inconclusive; no global speed pass is claimed. Queue priority is deferred. |
+| Component-cache allocation and history overhead, October 16 | Retained in the follow-up to #603: bounded parallel population with no huge pages, one ledger lock per segment, incremental payload accounting, preserved shared chunks across allocation retries and compact owners. Larger payloads allocate first; private states use the opposite end of the same pool from ascending KV rows. Native capacity, fragmentation, lifetime and restore regressions pass. The completed HTTP card gives AR pp128K 1496.49 tok/s (+7.5% versus post-#603 main), MTP pp64K/128K 1547.21/1484.85 tok/s, and exact outputs/work throughout the depth sweep. |
+| Retry admission and shallow side requests | Retained: reclaim only eligible covered history while preserving reused frontiers, last copies, forks and edit boundaries; longer resumed turns reclaim only their own ancestors. Cold side traffic prefers shallow live slots. Native regressions and affected HTTP histories preserve outputs and reuse; a concurrent arrival-order mismatch also reproduced on unchanged main remains separately recorded. |
+| Registered snapshot integer copy | Retained: aligned GPU aliases use exact vector copies; pageable, small and unaligned cases retain HIP copies. All 150 independent byte cases, real AR/MTP snapshots, sampled/logit replay and copying during peer graph capture pass. Batching the component-copy launches was rejected: 2.689 → 2.605 ms did not justify extra machinery. |
+| Overlap target graph recording with execution | Retained at `fdc21849`: enqueue an already-warm target pass once, restore host dispatch fields and record its graph while the GPU executes, without launching it twice. Fixes 8–10 ms MTP and 5 ms AR short-request regressions caused by exposed graph setup. The AR pressure prefix has 316 passing phases; the flagged decode improves from main's 76.25 to 73.02 ms. Complete native AR/MTP, sampling, image, cancellation and C2/4/6/8 checks pass. Dropping warmed-shape keys was rejected because it moved the delay to later requests. |
+| Blocking host wait for large-prefill expert counts | Rejected: a separate blocking event for target prefills of at least 1024 rows preserved all ten AR/MTP request outputs, cache work and draft counts, but pp2048 was 0.2–0.4% slower at d0 and d16K. No production event or decode-path change retained. |
+| Prepared concurrency startup | Accepted tradeoff: C6/C8 first-token latency is approximately 12/28 ms higher, with aggregate decode changes of −0.25%/−0.02% and about 0.5% extra C8 whole-request time. Exact outputs and cache/draft work are retained. GPU traces show waiting before reset kernels. Row-only HIP copies, all-snapshot HIP fallback and a larger queue cap did not resolve it; none was adopted. |
+| Prepare capture backing before prefill, October 14 functional fixes | Retained: prepare a bounded two-segment free reserve before readiness and substantial prefill; private/tail copies do not start speculative registration. Existing budgets and headroom remain authoritative. Cold AR decode is 318.3 ms; identical-stem C2 capture is 8.0/8.7 ms AR/MTP. AR C2 has 255 passing phase measurements; three MTP measurements overlap main variation and remain inconclusive. Rejected: per-allocation speculative pinning delayed cold image AR decode to about 450 ms; capture-only growth and a one-segment reserve moved about 120 ms onto later captures. [Evidence](artifacts/functional-fixes.json) retains raw flags, rejected controls and the extra-checkpoint C1 snapshot cost; no global timing pass is claimed. |
+| Cheaper expert selection, direct MTP normalization and partial SSM tiles | Retained: exact dequantization and live matrix operations, no added allocation. Mixed pp2048 d0/d32K: AR 1697.86/1534.50 tok/s; MTP 1650.29/1497.00. Separate d128K code continuation improves 1381.32 → 1400.23 tok/s AR and 1341.04 → 1361.96 MTP. Default sampled MTP PP improves 1543.99 → 1584.22 tok/s; TG 38.79 → 39.04. One sample per control; outputs, counts and acceptance match. [Evidence](artifacts/prefill-long-context.json). |
+| Four-phase expert loop and rolling boundary convolution | Rejected: exact microbenchmarks improved, but full HTTP did not establish a useful gain. Reverse d0 AR: four-phase 1690.95 versus simpler loop 1692.07 tok/s; deep AR/MTP were slightly slower. Both specializations removed. [Evidence](artifacts/prefill-long-context.json). |
+| Further barriers, selector scheduling and tail launches | Rejected: LDS-only barriers, code-cache rotations, smaller selector histograms, dot-product ILP groups and separate tail launches did not improve complete operations. Skipping ineffective tail checks also remained exact but slowed projection/convolution at 2040/2048/2060/4096 tokens. |
+| Skip unused SSM activation copies and routed-row clears | Retained: 96 fewer launches per pp2048. d0 AR 1675.26 → 1681.77 tok/s; MTP 1622.87 → 1629.90 tok/s against the preceding private increment. d32K stays within 0.6%, TG within 0.2%; no material depth gain. Full logits, sampled replay and all six greedy completions remain exact. [Evidence](artifacts/prefill-long-context.json). |
+| Fixed/split HC residual blocks | Rejected: the faster fixed-width variant changed F16 normalization bytes; exact variants and smaller blocks did not improve speed. |
+| Wider SSM projection launch groups | Rejected: groups 1/4/8/16/32 preserve output bytes but are 1.3–4.0% slower than the existing group of two at 2048/4096 rows. |
+| Canonical pp2048 HTTP control | Complete branch versus matched main: MTP d0 1581.01 → 1623.99 tok/s; d32K 1490.59 → 1524.10 tok/s. All 12 mixed/repetitive completions and draft counts match; TG stays within 0.5%. One sample per workload/depth through 32K. [Evidence](artifacts/prefill-long-context.json). |
+| Packed selector loads and grouped MTP Q8 projections | Retained: exact arithmetic, fewer narrow loads and projection launches, no added allocation. A separate default-sampling code continuation (2217 new tokens at 32K) gains 1.9% PP; d0/128K and TG are essentially unchanged. [Evidence](artifacts/prefill-long-context.json). |
+| MTP catch-up at the sparse boundary | Fixed: final-tile execution now uses the full predictor's dense/sparse split and query grouping. Exact stage/candidate/carry checks pass; target arithmetic and sampling policy are unchanged. |
+| First decode after cold 32K prefill | Timing remains inconclusive: initial 4.3 ms flags did not recur in the reverse-order pair (50.92 → 51.29 ms); unchanged baseline itself varied by 4.7 ms. GPU work and graph setup match. Retained separately from tg128 results. [Evidence](artifacts/prefill-long-context.json). |
+| Q8 vocabulary-head prefetch | Rejected: exact isolated kernels improved, but sampled tg128 stayed at 38.54 → 38.50 tok/s. No prefetch specialization retained. [Evidence](artifacts/prefill-long-context.json). |
+| Direct mapped n-gram input | Retained: GPU reads the existing coherent pinned buffer, removing one upload per target forward and 40 MiB of shared scratch at 4096-row capacity. AR/MTP, images, cancellation and C2/4/6/8 sampled replay stay exact. No material d0 TG gain. [Evidence](artifacts/prefill-long-context.json). |
+| Pinned weights and aligned Q8 head layouts | Rejected: coherent/noncoherent pinned weights and registered huge-page storage did not improve decode. A lossless planar head improved isolated kernels but only 0.8% in full MTP decoding while retaining another 644 MiB; no second head or private weight format retained. [Evidence](artifacts/prefill-long-context.json). |
+| GDN row reuse, padded SSM rows and full selector scratch utilization | Retained: pp2048 d0 1648.38 tok/s (+2.1%), MTP 1592.39 (+2.4%) in matched single-run HTTP controls. Cold 131K AR +1.3%; late AR prefill after 196K +2.0%. Cold 194K MTP +0.9%; its short continuation was 0.9% slower, so no deep-MTP continuation gain is established. No added model/session allocation; exact logits and state checks. [Evidence](artifacts/prefill-long-context.json). |
+| Cooperative FP32 selector scoring and other GDN layouts | Rejected: sharing score lanes or keys preserved bits but was slower. Two GDN state rows/four waves beat the other tested row/wave layouts. [Evidence](artifacts/prefill-long-context.json). |
+| Final-layer AR prefill pruning | Retained: pp2048 reaches 1501.84 tok/s at 128K (+1.8%) and 1713.11 at d0 (+1.2%) in matched single-run controls. Only unused output rows are skipped; target logits and cache replay remain exact. MTP needs the full hidden sequence. [Evidence](artifacts/prefill-final-rows.json). |
+| GPU kernels from the XDNA2 fork (#558) and SSM gate overlap | Rejected (2026-10-12, main `956f3d6`, single runs): the fork's routed-GEMM load scheduling gave pp4096 1840 → 1838 tok/s with unchanged routed kernel time; 32-half SSM output padding stays faster than 64/128/256; 8192-token chunks stayed within run drift at about 3 GiB more scratch. Computing the SSM gate rows on a second stream beside the GDN recurrence overlapped 163 ms but slowed the recurrence from 3.75 to 6.76 ms per layer (pp4096 1823 tok/s); disjoint CU masks were slower still. Candidates kept 23,991-token prefill, 2,317 matched decode and 3,552-token logits byte-identical to main. |
+| Further 128K selector/attention tuning | Rejected: FP32 key staging, lane/register scheduling, histogram aggregation and attention LDS/row tiling retained exact outputs but did not improve complete operations. [Profile](artifacts/prefill-final-rows.json). |
+| Bounded selector score scratch | Retained: exact deep-context logits; pp2048 gains about 1.4% AR / 1.2% MTP at 128K in single-run controls, with no measured shallow-context regression. Shared scratch falls from 128 to 20 MiB. [Evidence](artifacts/prefill-deep-context.json). |
+| Deep attention packing and skipped work | Rejected: shared selection lists and skipping masked matrix rows were slower; rescaling and fragment prefetch gave no compelling model-level gain. [Experiments](artifacts/prefill-deep-context.json). |
+| Skip unused final HC normalization | Retained: residuals and 64 full-vocabulary logit rows are exact. PP is within 0.3% of main at d0/d32K, AR and MTP; no significant speedup demonstrated. [Controls](artifacts/prefill-normalization.json). |
+| Prefill expert tiles, load scheduling and GDN stores | Rejected: mixed expert tiles slowed PP about 1.1%; smaller dense tiles and streaming loads were slower; GDN changes had no repeatable gain. [Experiments](artifacts/prefill-normalization.json). |
+| Conversation checkpoints and asynchronous capture | Retained: edits, growing histories and rotation with bounded RAM; AR/MTP cancellation, image replay and disk restart pass, including four execution sessions. Intermediate copies allow peers to continue, and coincident RAM/disk boundaries share one copy. [Functional checks](../../../../tests/functional/README.md). |
+| Prefix-independent MTP cache projections | Retained: exact seeded replay across prompt splits and checkpoint replacement, using shared Q8 row arithmetic. [Checks and timings](artifacts/mtp-cache-replay.json). |
+| Skip discarded MTP outputs | Retained: K/V-only prefill, compact catch-up and wider projection tiles; C1 costs remeasured. Prefill is within 0.3% of main; d0 TG remains 1.1% slower, d4K TG is 0.4% faster. |
+| Group vocabulary rows per block | Rejected: no measurable end-to-end gain. |
+| Full-width MTP RMSNorm and split projection | Retained after independent CPU stage audit; one 10240-wide normalization, embedding projection shared across HC branches. |
+| Full Q8 vocabulary head | Retained; private Q4 shortlist removed. Sampled top-64 proposals use exact target verification. |
+| Per-request MTP draft vocabulary with the existing length controller | Retained: C1 sampling, including both real default presets, scores 98,304 prefix rows plus a 1,024-row table with vocabulary fallback. Greedy C1 and jointly planned greedy batches without penalties/constraints also use the subset. Every request retains its existing length controller and AR backoff. Standard d0/d32K greedy MTP gains 5–12%; default Python/story gains 3–10%, and two 35K default Python continuations gain 5–8%. Target logits are byte-exact; sampled wording can change. A non-default translation slowdown and cache timing outliers remain in the [quality record](QUALITY.md). The extra 2,793,472 bytes/speculative session are reserved; tables rebuild from committed history after restore. |
+| Confidence-based draft stopping | Rejected in review: an exact-output C4 code request regressed from 5.37 s to 6.14 s, and maximum token gaps increased. C1 sampled changes shifted slowdowns between requests. Even limiting greedy confidence to the existing budget slowed a 16-token request from 286 ms to 322 ms; removing that gate while retaining the small head takes 260 ms with identical output and draft acceptance. The new sampled calibration also broke native snapshot replay because its state was not persisted. Retain the established length policy for both greedy and sampled requests. |
+| Batched MTP transformer and heads | Retained; independent body/head comparisons, private KV/recurrent/rollback/RNG state. |
+| Batched decode mixers, residual epilogues and MTP norms | Retained; each request keeps its scalar reduction and private state; exact C2/C4/C6/C8 logits, acceptance and RNG. |
+| HC Q8 weight prefetch | Retained for 1–8 rows of the 320×10240 projection; exact original products/FMA order, no extra allocation. |
+| Q4 shared-expert weight reuse | Retained with a separate compact kernel for single-request experts; faster repetitive C1/C4/C8, no mixed-work regression, exact projection/model replay. |
+| Q5 high-bit expansion | Retained; exact integer multiply/mask replaces repeated shifts, with unchanged dot products and faster serving. |
+| Short convolution/history fusion | Retained for 1–8 tokens; exact output, rolling state and rollback snapshots, fewer launches and no additional allocation. |
+| Batched GDN recurrence | Retained; private ragged state/rollback rows, cancellation isolation and exact session replay. Helps shallow batches most; end-to-end gains are modest. |
+| Batched small projections and MoE preparation | Retained; group independent rows, quantize activations once in existing scratch, and batch router/shared-expert work. Exact scalar/batch outputs and sampled state; C1 unchanged. |
+| Q4 expert grouping across the full batch | Retained; bounded groups share weights across request boundaries, with original scalar arithmetic and exact session replay. Q5 down grouping/reordering was slower on mixed routing and was rejected. |
+| Expert-ordered prefill intermediates | Rejected: exact gate/up → down results with captured routing at 1024/2048 tokens, but no useful projection-chain gain for Q4_K/Q5_1 or Q5_K/Q8_0. |
+| Wave64 batched Q4 gate/up | Retained above eight rows; independent 32-lane reductions preserve exact outputs and sampled state. Repetitive serving improves, C1 remains stable. Four output rows, 16-input groups and replacing the slot scan did not improve performance. |
+| Register-cached vision softmax | Retained for bounded row sizes; unchanged reduction order, byte-identical Flash-Next/Qwen27B embeddings, no additional allocation. |
+| 4096-patch vision attention tiles | Retained; byte-identical GEMMs/embeddings, lower latency and 24 MiB less attention scratch. Other shapes keep their original tiles. |
+| Partitioned BF16 WMMA vision value projection | Rejected: failed the full-encoder reference gate despite lower isolated FP64 error. |
+| Integer WMMA Q8 verification | Retained through 48 input rows for wide target projections/heads; preserves K8 partials/FMA order and reduces each result once, with exact session replay. Small batches retain vector kernels. |
+| Q8 activation reuse across output rows | Rejected: no repeatable gain on the real projection shapes. |
+| Wider Q8 decode and Q5 expert tiles | Rejected: 56–64 dense rows, phased/packed token tiles, Q5 wave64 and 16/32 Q5 expert rows were slower despite exact output. |
+| Decode producer-written Q8_1 rows, up-front loads, DPP/`permlanex16` reductions and branch-free Q4_K/HC reads | Retained; bit-identical verify-width logit dumps (widths 1–8, four repository documents) and served output hashes. tg32 +5.8–6.0% at d0 and +7.1–7.2% at d32K on two machines (interleaved ABBA, `-r 6`); served agent replay +6.8%/+7.1%, everyday prompts +5.9%, speedbench +6.0–6.8%, 2–4 concurrent sessions +3.9–4.4%. Prefill and peak memory unchanged. |
+| Compact expert launch groups | Rejected: improved shared routing but negligible mixed-routing gain. |
+| Sparse attention register/cache retuning | Rejected: exact d128K output, but register scheduling/occupancy gave no material gain and reloading queries was slower. |
+| Shared attention selection lists | Rejected: exact outputs, but roughly 1% isolated gain did not justify another buffer and setup kernel. |
+| Skip unused attention Q8 staging | Rejected: exact chunk/full-logit checks passed, but no clear end-to-end prefill gain justified the extra dispatch logic. |
+| FP32 selector load scheduling | Retained; bounded scheduling removes scalar-register spills, preserves every score bit and lowers d32K selection time to 22.4 ms per pp2048. Matched d128K AR prefill improves about 1.5%. |
+| Integer WMMA value transpose and paired FP32 selector lanes | Rejected: bit-preserving transpose and exact selector scores, but both were slower on deep-context inputs. |
+| Packed Q8 prefill staging | Rejected: exact output, but extra decode/register/transpose costs outweighed reduced LDS use. |
+| Persistent packed Q8 SSM weights | Rejected: small prefill/1–4-row gains would cost roughly 14% on eight-row decoding; two-step prefetch did not recover it. No second weight copy or private format retained. |
+| Transient F16 SSM weights and parallel HC branches | Rejected: F16 staging was exact but slower overall; parallel HC branches changed quantization ties. |
+| Smaller-LDS SSM projection, unrolled HC expert sum and wave64 HC combine | Rejected: exact output but no useful prefill speed gain. |
+| HC quantized-output store layouts | Rejected: row-major staging plus transpose is slower; cooperative stores within one kernel save only about 2% in isolation. Residuals, normalized activations and Q8 bytes remain exact, including ragged rows. |
+| Transient key transpose and mixed expert tiles | Rejected: exact outputs; key transpose slows deep selection, mixed tile sizes provide no useful prefill gain. |
+| Query sharing, paired-key FP32 scoring, query LDS caching, MoE prefetch barriers/unrolling | Rejected: exact outputs, but no useful speed gain. Four-wave Q8 matrix reduction also lost to eight waves. |
+| Approximate selector screening followed by exact rescoring | Rejected: GPU thresholding and compaction erased the isolated gain, before accounting for runtime error bounds. Remains a synthetic experiment; no approximate production selector added. |
+| Ratio-four predictor QSA, FP32 ranking queries | Retained with sparse state, rewind and deep selector checks. |
+| Greedy batch cost controller | Retained only for all-greedy C>1; separate occupancy/context bins, stable plain controls, no transition timings. Sampled replay uses fixed curves calibrated from median warmed cycles on 2026-09-20. |
+| One-row MTP prefill lag | Retained; 320 KiB kept hidden state/session, avoids replaying a final prefill chunk. |
+| Final-tile MTP catch-up | Retained; preserve every KV/indexer row, rank only the final attention tile, then restrict output projection, mixers and shared experts to the final aligned tile(s), with one routed Q8 expert row. Full predictor/catch-up stages, candidates and recursive carry match exactly at 224/257/2047/2048 rows. |
+| Batched MTP catch-up tail | Retained; after writing every attention cache row, compact final request rows into existing scratch and skip unused output projections/FFNs. Preserve the scalar arithmetic of one-row tails; full-head candidates and recursive carry match independent execution. |
+| Routed Q8 accumulation order | Retained; explicit rounded product/FMA prevents identical rows changing with column placement. Independent FP64 dot and predictor carry checks pass. |
+| Isolated MMQ quantizer rounding change | Deferred: it changes half-integer tie behavior shared with W8A8 and fails their existing agreement gate. No quantizer change retained. |
+| SSM tile, wave and compiler scheduling variants | Rejected: four/sixteen-wave groups, wave64, wider token tiles and iterative ILP scheduling retained exact output but did not beat the existing eight-wave projection. |
+| SSM fragment lifetime and prefetch pipeline | Rejected: shorter-lived K16 fragments reduce register use without a useful gain; delayed prefetch and double-buffered LDS are slower. Projection/convolution outputs remain exact at 2048/2049 tokens. |
+| Captured shared stages in batched target decoding | Rejected: exact C2/C4/C6/C8 logits, sampled state and cancellation checks, but no serving or warmed-cycle gain justified graph metadata/capture overhead. |
+| Compact recurrent rollback | Retained; one full state plus exact FP32 update operands, with the original product/FMA order. All rollback prefixes match fresh execution. Depth grows on demand; seven-draft cap about 147 MiB/session, released on reset. |
+| Live final frontier and async prompt snapshots | Retained; immutable branch snapshot, worker capture, bounded persistence outside the lookup lock. |
+| Thread-local decode graph capture | Retained; independent snapshot workers no longer invalidate a peer's capture. Snapshot bytes and captured/replayed logits are exact; no request serialization added. |
+| Chunk-equivalent projections/attention | Retained with exact continued-image/cache/full-logit gates; one-token tails keep prefill arithmetic. |
+| Dense split at the indexer budget | Retained; pre-budget queries always take the dense tiles, so prefill logits no longer depend on the prefill batch. Before: batches 4096 and 8192 differed from 2048 on 4/4 repository documents; after: byte-identical decode dumps at 2048/4096/8192. |
+| 4096-token prefill chunks | Retained together with 128 readers and the next-chunk prefetch; exact given the dense split (byte-identical dumps on 4/4 repository documents, identical served greedy outputs). Served repository prompts on two gfx1151 machines, ABBA, 8+ samples per prompt: 24K–102K-token prompts +6–11% (median per prompt), 7K–8K prompts −0.1% to +0.6% in dedicated rechecks; pp4096 +5.3%/+5.4% at d0 and +5.8%/+5.9% at d32K; TG unchanged. Peak memory at 262K +1.3 GiB. Prefill beside an active decode stays at `--prefill-chunk` (512); two-session gaps unchanged. |
+| Next-chunk n-gram prefetch | Retained; a prefill chunk reads the next chunk's rows once its own have arrived, and a batch uses them only with identical tokens and history, so output is unchanged. With 4096-token chunks the gather then overlaps a whole chunk's forward instead of only layer 0. Adds one row buffer (≤ 40 MiB pageable, allocated on first use). |
+| More Q8 vocabulary rows/block | Rejected: no C1 improvement. |
+| Private shared-expert F16 rows | Retained; the shared expert's SwiGLU rows for its F16 down projection get their own buffer instead of overwriting the routed experts' narrowed token rows, which removes one full-batch narrowing pass per layer. Every GEMM reads identical bytes; greedy output, chunk-boundary logits and the C2–C8 batch checks are exact. Interleaved Nix A/B at d0: 1559.6 → 1568.1 tok/s (+0.6%); the profiled kernel time fell 1362.8 → 1333.1 ms. |
+| 256-row routed down-projection blocks | Rejected: exact output, Q5_1 unchanged and Q8_0 slower. The routed kernels already stream expert weights at roughly two thirds of DRAM bandwidth, so per-block prologue/epilogue and activation restaging were not the bound. |
+| 64-token HC down-projection tiles | Rejected: exact output, 23% slower than the 128-token tile despite twice the resident blocks. |
+| One-tile-ahead LDS fragment prefetch (dense and routed WMMA) | Rejected: exact output, but the explicit double buffer raised register use (dense 221 → 253 VGPRs; the 128-token pair reached 256 with spills) and every GEMM slowed 3–14%. |
+| hipBLASLt F16 dense projections | Rejected: the pinned library reaches 19–26 TFLOPS on the 2048-token dense shapes against 30–34 TFLOPS for the Q8→F16 WMMA kernels; `tools/qwen-flash/dense_blaslt_sweep.hip` reproduces the sweep. |
+| Side-stream inject/shared-expert overlap | Rejected: exact output and real kernel overlap in the trace, but the co-running kernels slowed each other and interleaved wall-clock runs were 0.5–0.9% slower. |
+| Sparse attention tiles cut across selection windows | Retained; distribute tiles across splits using a 64-block carry, keeping four resident blocks/CU. Independent review: AR +6.7% at 32K and +16.5% at 128K, d0 unchanged. Same keys, reassociated FP32 sums; FP64 operator and model-level rounding checks pass. [Evidence](artifacts/attention-tiles-review.json). |
+| Whole-tile carry across windows | Rejected: same output, but 16.5 KiB of LDS cost a resident block per CU and slowed d2K eight-row verification 8.5%. |
+| GPU greedy penalties and linear CPU anchor selection | Retained; exact FP64 penalties, unchanged proposals and snapshots. Short heat-pump tg400: 32.12 → 33.80 tok/s; C2/4/6/8 improve 7.6/8.5/16.3/14.2%. Unpenalized control unchanged. [Evidence](artifacts/penalty-verification.json). |
+| Prefill projection, attention and indexer kernels | Retained; bit-identical logit dumps and greedy hashes, plus a bitwise GEMM sweep against hipBLASLt for every routed n ≤ 4096. pp4096 +1.4% at d0 and +2.5–2.8% at 32K/115K (interleaved ABBA, `-r 6`, two machines); repository prompts 6.5K–102K +3.2% median; tg unchanged. The indexer projections use the own kernel only when hipBLASLt selects algorithm 4438 and otherwise stay on the library. |
+| 128 n-gram readers | Retained with 4096-token chunks, which double each gather; readers block in `pread`, so the pool sets the queue depth. Readers are woken per read, so small gathers do not wake the pool; 96 more threads. Fresh 5K–66K prompts on gfx1151 (#538): median prefill 0.3–0.6 s shorter per request, about 6–7% at 5K–8K and 1% at 65K. |
+| Paired routed GEMM code-cache blend | Superseded by fixed-index stages below. The original mask blend avoided clang 23's address-selected private cache (80 B, 0 spills), retaining byte-identical output: pp2048 +0.7%, pp8–pp64 +1.6–2.7%, MTP pp2048 +0.9%; clang 22 pp2048 was 0.7% slower. |
+| Deferred attention-side residual update | Retained: wide prefill chunks whose FFN takes the fused routed-MoE combine keep the attention-side residual update in registers for the norm and store only four stream weights. The FFN combine reapplies the rounded FMA before its own update and writes the residual once per layer. About 126 MB less traffic per 4,096-token layer chunk. Original PR controls, pp16384 (interleaved, `-r 3`): 1776.3/1768.1 → 1802.9/1796.1 tok/s; 18,267-token prefill and 421 decode rows byte-exact to main, greedy MTP exact. The register-only implementation below now preserves the normalization arithmetic too. |
+| Paired waves and fixed-index routed code cache | Retained (October 13): each WMMA tile interleaves eight gate rows with their matching up rows, computes SwiGLU in registers, and stages F16 results once for coalesced full-row stores. Four unrolled K-quant stages remove the runtime cache selectors and unused header helper, with no scratch or extra accumulator set. Q4 narrow/wide profile time 326.19/146.99 → 320.31/142.42 ms; unchanged stages show clock drift, so gains are qualified by HTTP controls. Combined with the residual change below: AR pp about +0.5% at d0 and +0.4–1.2% at d32K; MTP one-capture pp +0.6–1.3%/+0.6%. All 99,328,000 fixed-history logits and 12 measured HTTP completions/counts are exact. |
+| Register-only deferred FFN residual | Retained in the same increment: remove the intermediate residual store/reload, preserve its F32 boundary and the compiled square-FMA/gamma multiplication order explicitly. HC profile total 183.45 → 178.73 ms. Unguarded folding and dropping the square-FMA order fail exact F16 norm checks; both are rejected. One normalized HC specialization loses occupancy, but the complete matched requests retain the gain. Independent host inject, residual, F16 and packed Q8 checks pass. |
+| Separate gate/up accumulator sets, compact tiles and larger K stages | Rejected: duplicate accumulator sets raise register pressure; compact output tiles repeat activation gathers; BK4's larger stage is slower. The retained interleaved layout keeps one accumulator set and BK2. The earlier native candidate's reverse-run failure and high-variance d32K sample remain inconclusive and excluded from retained speeds. All diagnostic captures remain local. |
+| Cache prior HC weights and delay prior loads | Rejected (October 13): exact epilogue checks and unchanged resources, but the affected HC profile stayed within 0.3% of the retained build while unchanged stages also drifted. Delaying the prior load also stays flat and increases normalized VGPR use 98 → 101 / 104 → 108 with inject. No further speed claim. |
+| Grouped paired tails and uniform 48-row tiles | Rejected: splitting 48/64/128-row launches raises paired Q4 time 11.6%; a uniform 48-row map is also slower than 64. Independent mixed-offset, tail and replay checks pass. All extra maps, launches and specializations removed. |
+| Non-temporal paired expert-code loads | Rejected: routed numerical checks pass, but narrow/wide Q4 time rises 34.7%/18.1%. Cached loads remain the default. |
+| Earlier narrow fragments and two-tile WMMA scheduling | Rejected: removing the fragment barrier raises VGPR use 127 → 176, lowers occupancy and slows narrow Q4 7.0%. Interleaving two independent token tiles preserves resources and exact outputs but stays flat at 320.21 versus 320.31 ms. |
+| Direct code-cache writes to LDS | Rejected: direct array reads acquire 80 B private scratch even with template-constant stage indices. Four named vectors remove scratch and pass routed checks, but narrow Q4 317.14 ms matches an unchanged paired-kernel control at 317.19 ms; the extra structure has no established gain. |
+| Wave-owned paired and SSM weight fragments | Retained (October 13): paired Q4_K/Q5_K waves decode each K16 fragment once and exchange packed F16 bits across wave halves; fused Q8_0 SSM waves retain rounded fragments in registers. Both remove weight LDS staging while preserving BK2 and the K16 accumulation order. Paired Q4 VGPR narrow/wide 127/173 → 116/164, LDS 13,440/21,632 → 8,448/16,896 B; SSM LDS 48 → 36 KiB, VGPR 245 → 254 in the same wave-limit bin. All five hot kernels have zero scratch. Fresh profile: paired Q4 326.15/146.39 → 322.16/144.36 ms, SSM 328.07 → 324.87 ms. Matched HTTP AR pp gains 0.9–2.5% at d0 and 0.3–0.7% at d32K; MTP and every request phase pass. All 99,328,000 logits and 16 HTTP outputs/counts are exact. |
+| Chunk-wise inject/norm and fixed dense padding removal | Rejected: exact epilogue checks, but chunk-wise inject has no qualified gain under unrelated-stage drift. Removing SSM padding checks stays flat; broad removal causes attention spills (32 B), while excluding attention leaves aggregate timing flat/slower. Original checks remain. |
+| BK1 register-owned SSM weights | Rejected: projection/convolution/state/replay are exact and LDS/registers fall, but SSM time rises 328.07 → 359.16 ms (+9.5%). The retained register path keeps BK2. |
+| 128-token routed down-projection tiles | Rejected: byte-identical output, but pp16384 1782.5/1777.2 → 1775.5/1773.1 tok/s and pp4096 unchanged; the larger activation stage costs more than decoding each expert's weights once. |
+| Inject partials in the combines | Retained: on wide prefill chunks both combines also write the next mixer's inject partials from the F16 norm they just produced (the MoE combine holds those elements already; the attention-side combine regathers its row through 20 KB of LDS), removing the separate inject pass that reread the 84 MB norm twice per layer. Explicit product/FMA order and the original wave and block sums. Profiled pp4096 kernel time 4604.6 → 4559.0 ms; interleaved `-r 3`: pp4096 1861.3/1865.5 → 1887.2/1876.1 tok/s, pp16384 1806.7/1809.7 → 1824.5/1820.2. Logits after a 22,264-token prefill (`--batch 4096`) and 483 decode rows are byte-identical. |
+| 128 × 128 unquantized F16 tiles | Retained for batches of 1,024+ rows: the router (513 rows) and GDN alpha/beta (96 rows) projections stage 128-row × 128-token tiles instead of 64 × 64, with the same two K16 chains per output. Isolated at 4,096 tokens: router 0.61 → 0.52 ms, alpha/beta 0.14 → 0.09 ms; 64 × 256, 128 × 256 and one-block stages were slower. Interleaved `-r 3`: pp4096 1872.7/1872.0 → 1893.5/1887.0 tok/s, pp16384 1816.2/1816.5 → 1833.0/1829.6. Logits after a 22,264-token prefill and 483 decode rows are byte-identical. |
+| SSM boundary convolutions per four channels | Retained: one thread computes four channels of a 32-token tile's three boundary tokens (float4 loads, same `SsmConv4Value` per output) instead of one output per thread over 15,360 blocks. 310 → 243 µs per GDN layer at 4,096 tokens, now bound by rereading the boundary rows; byte-identical logits after a 22,264-token prefill and 483 decode rows. |
+| SSM projection GEMM retuning | Rejected (2026-10-12, isolated at 4,096 tokens, all byte-identical): baseline 8.9 ms (38 TFLOPS). One-block stages 11.6 ms; row groups 1/4/8 9.0–9.2 ms; 4 × 2 and 2 × 4 wave layouts 9.4/14.4 ms; explicit B-fragment double buffering with `sched_group_barrier` 9.0 ms (the register allocator still reuses one B buffer). Bounding hacks: with no global fetch, dequantization or A-fragment LDS reads the main loop alone still takes 9.0 ms, so the stage barriers and LDS→WMMA loop, not memory, set the time. A WMMA microbenchmark reaches 47–52 TFLOPS from LDS fragments and 53–54 TFLOPS for dependent K16 pairs at four or more waves per SIMD. |
+| Routed gate/up bounding | Analysis only (Q4_K pair, 128-token tiles, skewed top-10 routing at 4,096 tokens): 8.7 ms in isolation. Executed WMMA is about 298 GFLOP (5.4 ms at the measured 55 TFLOPS peak); without dequantization 8.15 ms, without WMMA 5.7 ms, without activation gathers 7.8 ms, without weight loads 8.25 ms, and with no loads or math 2.6 ms. Reusing one B fragment per K step did not change the time, so LDS fragment bandwidth is not the limit. |
+| Fixed routed tile heights | Retained (October 13): every 1,024+ row batch pairs gate/up over 128-token tiles and runs the down projection over 64-token tiles, instead of choosing by tile-count ratios; the unused 48-token map is no longer built and the 64-token paired kernel is removed. Profiled pp2048: paired Q4 226.0 → 221.0 ms, Q5_1 down 154.6 → 151.6 ms; pp1024/pp4096 neutral to +0.3%. |
+| Skip the FFN mixer's F32 rows | Retained: the wide FFN reads its mix only as F16 (router, routed experts) and tiled Q8 (shared expert), so the fused HC projection no longer stores the 21 MB F32 copy per 2,048-token layer. HC mix 49.1 → 46.4 ms per pp2048. |
+| Software-pipelined prefill attention | Retained: K and V^T get separate LDS buffers, so tile j's PV overlaps tile j + 1's S and the softmax overlaps the next staging: two barriers per 16-key tile instead of four, single-buffered prefetch registers, the deep-window V variant removed. The running sum's fused update is written explicitly after fast-math reassociated it. Hash-identical outputs; isolated pp2048 dense 3.43 → 3.40 ms, sparse d32K/d64K 8.59/8.97 → 8.34/8.90 ms. |
+| Attention bounding and LDS traffic | Analysis and rejected variants: removing QK, PV, the V transpose or the K/V loads saves 47%/29%/10%/5% of the dense kernel (removing the softmax also drops the unread S work, 64%). LDS is 70–78% active with 19% bank conflicts. Half-wave fragment loads exchanged by `v_permlanex16` keep exact fragments but are flat to 29% slower; 32-key dense tiles spill (5.37 ms); a 192-VGPR cap spills and slows both windows. |
+| Register-resident GDN window loads | Retained: the recurrence's three in-flight q/k windows held their float4 pairs in an array the compiler left in private memory (112 B scratch, stored and reloaded every four tokens); two named vectors keep them in registers (184 → 208 VGPRs, same wave-limit bin). Isolated GDN call 3.47 → 3.32 ms; pp2048 d0 1844.5 → 1853.5 tok/s median (3/3 rounds). Output, raw rows, state and fixed-history logits are byte-identical; no Flash-Next kernel now uses scratch. |
+| Combined tile, mix and attention increment | Native interleaved A/B against the previous PR head, pp2048: d0 1826.1 → 1847.0 tok/s median (+1.1%, faster in 4/4 rounds); d32K 1615.9 → 1633.2 median but inconclusive (−0.9% to +2.2% per round, base itself 1594.7–1682.2). Logits of all 718 fixed continuation rows (178.3M values) after a 35,559-token prompt are byte-identical at batch 2048 and 4096; attention, routed WMMA, HC mix and MoE epilogue operator checks pass unchanged. |
+| W8A8 tails past a full wave | Retained: at 2,048 rows the HC down and shared-expert W8A8 grids fill exactly the 80 resident 128-token blocks, so a prompt a few tokens longer ran a second, almost empty wave (pp2051 1797.8/1792.3 versus pp2048 1856.4 tok/s; HC down +15.5 ms, shared expert +7.0 ms). Tails of up to 16 tokens past the last full tile now take one wave per output: lanes form each K block's exact integer dot and dx · c, then the K blocks' FMAs run in order. The tiled kernel states that compiled order explicitly (identical ISA). pp2051/2056/2062 +1.1/+1.0/+0.4%; 22-token tails stay tiled (−0.3% otherwise); pp2048 unchanged. Tail rows equal tiled rows bit for bit; logits over 17 prompt chunks of 2,051 tokens and 718 decode rows are byte-identical. |
+| Further exact attention, selection and combine variants | Rejected (October 13), all byte-identical: packing dense windows as 4 queries × 12 heads 3.42 → 3.51 ms (time follows per-row LDS/WMMA traffic, not tile count); 4 × 4 register-transposed V staging dense −0.5% but sparse d32K +4%; tiled Q8 attention output in the epilogue removes the quantize pass but slows the sparse loop 3% (net ~2 ms at d0); F32-widened selection keys dual-issue but move queries to vector loads (6× slower); hoisted MoE-combine expert loads ~1%; overlapping block selection with the attention projection on a second stream d32K 1707.4/1701.5 → 1701.6/1673.7 tok/s. Removing the combines' inject partials bounds their cost at 8.5 ms per pp2048. |
+| GDN row/wave layouts and paired shared-expert W8A8 | Rejected: 1–4 rows per lane with 1–8 waves are byte-identical, but the retained 2 × 4 stays fastest (3.47 ms; others 3.54–4.82 ms). One 160-block launch for the shared expert's gate and up is exact but slower than two 80-block launches (21.4 versus 20.4 ms per pp2048). |
+
+Separate d32K pp2048 profiling attributes 29.1% of kernel time to MoE, 34.9%
+to dense projections and 12.6% to attention/indexing. Final-tile catch-up
+takes 20.9 ms of MTP kernel time; the target takes 1450.2 ms.
+
+A d0 pp2048 profile (2026-09-21) is GPU-bound: 1362.8 ms of kernel time in a
+1380 ms span. Routed expert GEMMs take 35%, dense F16 projections 29%,
+hyper-connection combines 10.5%, the GDN recurrence 9.5%, HC down/inject/shared
+projections 7% and attention 5.5%. The dense projections run at 30–34 TFLOPS
+against the measured 59 TFLOPS matrix ceiling and the combines at about
+200 GB/s; the routed gate/up and down kernels stream 0.9–1.1 GB of expert
+weights per layer at 160–190 GB/s.
+
+A C4 mixed MTP trace with 32 output tokens per request is 84.9% GPU-busy
+during inference, excluding model loading. Batched GDN updates take 40.9 ms,
+rollback replay 14.5 ms and lazy allocations 31.8 ms. The scheduling thread
+spends 5.4% of the window outside HIP API calls, including model-side CPU
+work; this is not pure scheduler overhead. These are profile observations,
+not unprofiled throughput measurements.
+
+Next: improve prefill at depth and target/draft batch projection reuse while
+preserving [quality](QUALITY.md). The 1750 tok/s PP and flat d0–d128K
+objectives remain unmet; see [current benchmarks](BENCHMARKS.md).

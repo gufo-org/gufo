@@ -58,7 +58,7 @@ class ImpactTest(unittest.TestCase):
         self.assertEqual(result["timing_qualification"], "not performed; candidate correctness only")
 
     def test_docs_select_nothing_but_graph_changes_expand(self):
-        self.assertFalse(impact.plan(self.manifest, ["docs/SERVER.md"])["groups"])
+        self.assertFalse(impact.plan(self.manifest, ["docs/server.md"])["groups"])
         self.assertTrue(impact.plan(self.manifest, ["tests/functional/impact.json"])["groups"])
 
     def test_deleted_and_renamed_paths_are_retained(self):

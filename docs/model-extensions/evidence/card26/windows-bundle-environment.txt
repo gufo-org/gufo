@@ -1,7 +1,0 @@
-error:
-       … while calling the 'import' builtin
-         at «string»:1:12:
-            1| let pkgs = import /nix/store/6nwzgfvznah5rg192x0hnl5ykchdgi59-source { system = "x86_64-linux"; }; in pkgs.python313.withPackages (ps: [ ps.pefile ])
-             |            ^
-
-       error: access to absolute path '/nix/store/6nwzgfvznah5rg192x0hnl5ykchdgi59-source' is forbidden in pure evaluation mode (use '--impure' to override)
