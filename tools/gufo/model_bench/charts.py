@@ -92,7 +92,7 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
     layout = layout_for(config, table)
     labels = layout.rows
     ref = config.reference_name
-    spec_label = config.speculative["label"]
+    spec_label = config.speculative.get("label", "")
     kind = table.kind
     title = f"{model_label(config, table)} · {table.spec.get('title', table.id)}"
     plt = _plt()

@@ -114,7 +114,7 @@ def layout_for(config: BenchConfig, table: TableSpec) -> Layout:
 
 def _layout_for(config: BenchConfig, table: TableSpec) -> Layout:
     ref = config.reference_name
-    spec_label = config.speculative["label"]
+    spec_label = config.speculative.get("label", "")
     kind = table.kind
     if kind == "loading":
         return Layout(
