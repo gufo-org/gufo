@@ -161,8 +161,13 @@ the
 and [Qwen3.8 Flash-Next](../models/qwen3.8-flash-next.md) for the memory
 cost.
 
-Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
-between active decode rounds without changing a lone request's kernel policy.
+Each model chooses its prefill chunk. Beside decoders, a runner with a
+scheduling profile (every in-tree text model) keeps that width and splits each
+pass by layers, with a decode round between groups; a runner without one gets
+fixed 512-token passes. A lone request keeps the model's own pass width.
+`--prefill-chunk` is deprecated: it is accepted, ignored with a
+`event=deprecated_option` warning, and will be removed together with the
+512-token legacy path (#1028).
 
 Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
 hash and exact encoded-byte comparison under the preprocessing version and

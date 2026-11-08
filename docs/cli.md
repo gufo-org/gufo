@@ -109,7 +109,7 @@ the same distribution.
 
 | Option | Default | Use |
 | --- | --- | --- |
-| `--prefill-chunk` | 512 | Prompt tokens processed between decode steps of other requests. |
+| `--prefill-chunk` | ignored | Deprecated and ignored; it will be removed. A prompt beside decoding requests is split by layers, so they keep decoding. |
 | `--max-pending` | 16 | Requests waiting for a session. |
 | `--max-pending-per-client` | `--max-pending` | Waiting requests per client IP. |
 | `--request-timeout-ms` | off | Cancel a request after this long, waiting included. |

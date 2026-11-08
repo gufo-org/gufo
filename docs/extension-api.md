@@ -69,8 +69,8 @@ a pass ending at that position leaves.
 ## Scheduling beside decoders
 
 While other sessions decode, Gufo bounds each prompt pass so they don't wait
-for all of it. Without a profile, a runner gets short passes (512 tokens by
-default) and pays their overhead. A runner whose full pass takes more than about
+for all of it. Without a profile, a runner gets short passes of 512 tokens and
+pays their overhead. A runner whose full pass takes more than about
 half a second should declare a `TextSchedulingProfile` in
 `TextRunnerDescriptor::scheduling` (header `gufo/ext/scheduling.hpp`) and split
 its passes by layers instead:

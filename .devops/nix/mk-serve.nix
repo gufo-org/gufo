@@ -368,7 +368,9 @@ let
             "--min-draft-tokens"
             (toString minDraftTokens)
           ]
-          ++ lib.optionals (prefillChunk != null) [
+          ++ lib.optionals (lib.warnIf (prefillChunk != null)
+            "gufo serve: prefillChunk is deprecated and ignored; prompts beside decoders are split by layers"
+            (prefillChunk != null)) [
             "--prefill-chunk"
             (toString prefillChunk)
           ]
