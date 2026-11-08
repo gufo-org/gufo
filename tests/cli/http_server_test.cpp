@@ -243,8 +243,9 @@ void TestContentTrace() {
 }
 
 // The threshold covers the lifecycle lines too: `--log-level=warn|error` boots
-// and stops without a word, which docs/server.md states, while an escalation
-// keeps its own tier and a filtered INFO receipt line never reaches the log.
+// and stops without a word, which docs/internal/server.md states, while an
+// escalation keeps its own tier and a filtered INFO receipt line never reaches
+// the log.
 void TestQuietTiersSuppressLifecycle() {
   const CapturedLogs warn = CaptureTraffic(LogLevel::kWarn);
   assert(warn.text.find("event=listening") == std::string::npos);

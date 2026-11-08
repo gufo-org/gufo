@@ -5,7 +5,7 @@ platform and advertised capability set. There is no universal certification
 command. Shared API fixtures, model numerical checks and production HTTP
 workloads establish different parts of the contract.
 
-Start with the [extension author guide](../../../extensions.md) for implementation and
+Start with the [extension author guide](../../../writing-extensions.md) for implementation and
 the real LFM3 example.
 
 ## Evidence required from an extension author

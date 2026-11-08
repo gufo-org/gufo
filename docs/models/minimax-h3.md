@@ -60,9 +60,9 @@ For a full video, use `--preset exact --output /tmp/h3.mp4`.
 Start a video server:
 
 ```sh
-gufo serve --host 127.0.0.1 --port 8080 \
-  --video-model /var/llms/huggingface/MiniMax-H3 \
-  --video-root /var/llms/huggingface/gufo-h3-jobs --video-ttl 3600
+gufo serve --host 127.0.0.1 --port 8080 video \
+  --model /var/llms/huggingface/MiniMax-H3 \
+  --root /var/llms/huggingface/gufo-h3-jobs --ttl 3600
 ```
 
 `POST /v1/videos` takes JSON or multipart form data:
@@ -79,8 +79,10 @@ gufo serve --host 127.0.0.1 --port 8080 \
 
 ## Limits
 
-- Video is 24 frames per second. `seconds` is 1, or 5 to 14.375; Gufo rounds
-  to the frame counts the model supports (5 seconds gives 124 frames).
+- `size` is `512x512` or `1344x768`, at 24 frames per second. `seconds` is 1,
+  or 5 to 14.375; Gufo rounds up to the frame counts the model supports (5
+  seconds gives 124 frames).
+- Finished videos are deleted after `--ttl` seconds, 3600 by default.
 - The prompt can be up to 4,096 tokens.
 - Over HTTP, `dev` needs `size: "256x256"` and `gufo.output_format: "ppm"`,
   and returns one frame.

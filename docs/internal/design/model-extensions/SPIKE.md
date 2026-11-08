@@ -4,7 +4,7 @@ Card 03's throwaway investigation and review integration are complete. Its code 
 jj workspace `/tmp/gufo-card03-spike`, change `ovmkszut`, exact source
 `50ba836fc4ab2fe7003371f3f290bdd48ea68b0a`, based on `79930b75`.
 The code is deliberately absent from the main workspace; its
-[source patch and evidence](evidence/card03/README.md) are retained.
+[source patch and evidence](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/model-extensions/evidence/card03/README.md) are retained.
 
 ## Implemented experiment
 
@@ -114,7 +114,7 @@ between workspace roots. No whole-image or universal ISA identity is claimed.
 
 The first diagnostic baseline overlapped compilation and is excluded from
 performance qualification. Every attempt, including failures and controls,
-is retained in the [evidence archive](evidence/card03/README.md).
+is retained in the [evidence archive](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/model-extensions/evidence/card03/README.md).
 No arithmetic/kernel optimization or speed gain is claimed.
 
 The standard C1 HTTP pp2048/tg128 controls cover AR and MTP prose/repetitive
@@ -130,7 +130,7 @@ The metadata executable enumerates the artifact key, both option names and
 speculative value; asserts all typed option fields; and typechecks the factory
 signature without linking HIP or loading weights. This resolves the fixture gap
 while explicitly leaving production metadata selection/parser/driver registration
-to dependent cards. The [retained evidence](evidence/card03/README.md) records
+to dependent cards. The [retained evidence](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/model-extensions/evidence/card03/README.md) records
 all three agents, review dispositions and actual commands/results.
 
 This throwaway experiment does not qualify other

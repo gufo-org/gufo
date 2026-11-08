@@ -269,7 +269,7 @@ sixteen continuation logit rows/token decisions after transfer to another slot.
 These are Gufo execution-consistency checks. They do not extend upstream or
 weight-conversion parity, qualify alternate BF16 recurrence, or qualify the
 common checkpoint allocator. The [adapter inventory and commands](CONTINUATION-ADAPTER.md)
-and [card 15 results](../../design/cache-redesign/cards/15-qwen27b-ar-adapter.md)
+and [card 15 results](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/cache-redesign/cards/15-qwen27b-ar-adapter.md)
 record the scope and retained evidence.
 
 ## Long-context FP32 attention qualification (2026-10-13)

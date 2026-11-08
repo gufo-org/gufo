@@ -6,7 +6,7 @@ reviewed extensions selected by `extensions.lock`. The ordinary development
 package uses discovery; a directory being discovered does not make it shipped.
 
 For the architecture, a creation walkthrough, the LFM3 example and maintenance,
-start with the [extension author guide](../../../extensions.md).
+start with the [extension author guide](../../../writing-extensions.md).
 
 ## Core, community, promotion and abandoned maintainers
 
@@ -38,7 +38,7 @@ The include allowlist enforces API boundaries; it is not a security sandbox.
 A Nix build sandbox does not sandbox a subsequently running model server.
 Review and pin source revisions before building or running third-party code.
 Official selection includes only reviewed core extensions. The same applies to
-[extension modules](../../../extension-modules.md): `gufo extension install` warns
+[extension modules](../../../extensions.md#modules): `gufo extension install` warns
 before building unvalidated code, and `diagnose` reports a module's source as
 `module:<path>`.
 
@@ -199,5 +199,5 @@ The existing `gufo-dev` image is a development image. Its existence does not pro
 that builder contract. The inspected Toolboxes revision derives edge from the
 ordinary default package and changes only version identity for releases; it does
 not explicitly select `extensionsFromLock = true`. This external work and actual
-runtime checks remain pending. See [Card 26 evidence](evidence/card26/README.md)
+runtime checks remain pending. See [Card 26 evidence](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/model-extensions/evidence/card26/README.md)
 for inspected revisions, registry digests, completed checks and open gates.

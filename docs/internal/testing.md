@@ -125,7 +125,7 @@ The directory needs `red.png` and `blue.png`. This compares complete target
 logits when images are attached early or after a cached prefix, including
 snapshot restoration and sampled Flash-Next MTP replay.
 Qwen27B also checks exact restoration after cancellation between layers.
-Use the [HTTP continuation check](../server.md#hip-execution)
+Use the [HTTP continuation check](server.md#hip-execution)
 for cancellation, thinking controls and disk restart.
 
 ## Boundary and link-graph gates

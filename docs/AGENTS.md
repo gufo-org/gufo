@@ -10,7 +10,8 @@ short, consistent and readable by people and agents alike.
 | `docs/*.md`, `docs/models/*.md` | People using or extending Gufo | Website, one copy per release |
 | `docs/figures/` | Figures for public pages | Website, with the pages |
 | `docs/internal/` | Contributors and agents working on Gufo | Repository only |
-| `docs/internal/models/<model>/` | Benchmarks, quality and experiment evidence | Repository only |
+| `docs/internal/models/<model>/` | Implementation notes (`README.md`), benchmarks, quality and experiment evidence | Repository only |
+| `docs/internal/server.md`, `docs/internal/cache.md` | Complete server and cache references behind the public pages | Repository only |
 | `docs/internal/design/` | RFCs, cards and their evidence | Repository only |
 
 A public page explains how to use something. An internal page explains how it

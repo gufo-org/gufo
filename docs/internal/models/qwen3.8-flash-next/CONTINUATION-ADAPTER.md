@@ -99,10 +99,10 @@ allocation policy: that policy must charge each actual backing assignment,
 including slab slack, and select suitable precommitted block classes for the
 256-row chunks and private component sizes.
 
-Measured capacity and timings are recorded in [card 14 Results](../../design/cache-redesign/cards/14-flash-next-adapter.md#results-2026-10-10).
+Measured capacity and timings are recorded in [card 14 Results](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/cache-redesign/cards/14-flash-next-adapter.md#results-2026-10-10).
 The C=8 probe is a short-history row; eight long histories remain excluded.
 The draft HTTP integration, functional results, numerical checks and matched
-RAM observations are recorded in [card 19 Results](../../design/cache-redesign/cards/19-switch-over.md#results-flash-next-draft-integration-october-10-2026).
+RAM observations are recorded in [card 19 Results](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/cache-redesign/cards/19-switch-over.md#results-flash-next-draft-integration-october-10-2026).
 That early Flash-Next branch does not establish the final all-model switch-over.
 
 
@@ -112,4 +112,4 @@ partial tails remain copies. Native row views stay fixed until their mutation
 or release guard drains every reader; RAM restore retains pins through all load
 completions. Idle spill and deferred durable publication are integrated in the
 Flash-only branch. Its current correctness evidence and remaining qualification
-gates are recorded in [card 19](../../design/cache-redesign/cards/19-switch-over.md#borrowed-serving-rows-and-idle-spill-october-11-2026).
+gates are recorded in [card 19](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/cache-redesign/cards/19-switch-over.md#borrowed-serving-rows-and-idle-spill-october-11-2026).

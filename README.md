@@ -37,7 +37,7 @@ individual request decode rates. Qwen27B's single-user peak uses the short-promp
 C1 workload. Audio excludes loading.
 Each model guide lists the required files and complete benchmark settings.
 
-To add or maintain a model, start with the [source extension guide](docs/extensions.md).
+To add or maintain a model, start with the [source extension guide](docs/writing-extensions.md).
 
 ## Philosophy
 

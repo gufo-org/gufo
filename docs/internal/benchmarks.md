@@ -107,7 +107,7 @@ NLL/perplexity, top-1 agreement, and top-k overlap as applicable. Aggregates
 are over scored positions. A changed tokenizer, template, suite, or history
 changes the comparison identity.
 
-Capability evaluation is separate: [gufo eval](../cli.md#benchmarks-and-evaluations) grades free-running
+Capability evaluation is separate: [gufo eval](../cli.md#measuring) grades free-running
 answers through the OpenAI-compatible server.
 
 ## Focused kernel measurements

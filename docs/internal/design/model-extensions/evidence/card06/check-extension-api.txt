@@ -1,2 +1,0 @@
-PASS: extension API surface (6 paths)
-api_exit=0

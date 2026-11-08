@@ -562,7 +562,7 @@ model must not qualify the image suite by skipping its assertions.
 
 `image-detail` also requires `--mmproj`. Each of its two requests leaves a new
 stable boundary in the RAM cache. Retry copies cannot displace stable
-boundaries, as [KV-CACHE.md](../../docs/cache.md) describes, so in a full
+boundaries, as the [cache reference](../../docs/internal/cache.md) describes, so in a full
 cache these two boundaries can make a later unchanged retry prefill its
 assistant opening again. Select `image-detail` after `image-count`, whose
 unchanged retries expect full reuse.
@@ -750,7 +750,7 @@ and continues the compacted conversation. Cold controls run after every warm
 request. The seed is a genuine model reply; tool calls/results and the summary
 are deterministic client-authored fixtures. This covers compaction mechanics,
 not a real client's summary generation or retention under RAM/disk pressure.
-The [card 01 results](../../docs/internal/design/cache-redesign/cards/01-functional-coverage.md#results)
+The [card 01 results](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/cache-redesign/cards/01-functional-coverage.md#results)
 record all scenario families.
 
 Run `cache-transforms` with a roomy RAM budget in its own invocation. Its
@@ -910,7 +910,7 @@ Reports and logs survive failures. These checks complement the standard speed
 benchmark and numerical quality tests; they do not establish upstream model
 parity. Sampled DSpark may differ across concurrency levels; fixed-path replay
 and greedy equality remain checked. API behavior and references are in
-[SERVER.md](../../docs/server.md).
+[server reference](../../docs/internal/server.md).
 
 `embedding_images.py` checks typed text/image `/v1/embeddings` requests against
 the official float32 image fixtures, including mixed batches, multiple images,

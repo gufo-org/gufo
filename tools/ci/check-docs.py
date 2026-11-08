@@ -287,7 +287,7 @@ def check_public_pages(repo_root: Path) -> List[str]:
         lines = content.splitlines()
         if not lines or not lines[0].startswith("# "):
             errors.append(f"{rel}:1: Public page must start with a '# Title' line")
-        elif len(lines) < 3 or lines[1] != "" or not lines[2].strip() or lines[2].startswith(("#", "|", "-", "`", "!", ">")):
+        elif len(lines) < 3 or lines[1] != "" or not lines[2].strip() or lines[2].startswith(("#", "|", "- ", "* ", "```", "~~~", "!", ">")):
             errors.append(f"{rel}:3: Title must be followed by a blank line and a summary paragraph")
         if rel not in (DOCS_INDEX, MODELS_INDEX) and page.resolve() not in index_links:
             errors.append(f"{rel}: Public page is not linked from {DOCS_INDEX} or {MODELS_INDEX}")

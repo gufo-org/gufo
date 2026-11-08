@@ -1,7 +1,7 @@
 # Gufo Extension Template
 
 This repository template provides the blueprint for authoring an out-of-tree model extension for Gufo.
-Start with the [extension author guide](../../docs/extensions.md), including the
+Start with the [extension author guide](../../docs/writing-extensions.md), including the
 LFM3 example and ongoing maintenance workflow.
 
 ## Overview
