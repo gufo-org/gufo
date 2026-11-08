@@ -80,7 +80,7 @@ class BenchConfig:
 
     @property
     def speculative(self) -> dict[str, Any]:
-        return self.data["speculative"]
+        return self.data.get("speculative") or {}
 
     @property
     def reference_speculative(self) -> list[str] | None:
