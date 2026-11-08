@@ -2735,22 +2735,11 @@ static bool rocm_graph_encode_layer_attention_batch(
             ok = false;
         }
         if (ok && !compressor_projection_ready) {
-            ok = ds4_gpu_matmul_f16_tensor(g->batch_comp_kv,
-                                             model->map,
-                                             model->size,
-                                             layer->attn_compressor_kv->abs_offset,
-                                             DS4_N_EMBD,
-                                             comp_width,
-                                             g->batch_attn_norm,
-                                             n_tokens) != 0;
-            if (ok) ok = ds4_gpu_matmul_f16_tensor(g->batch_comp_sc,
-                                                     model->map,
-                                                     model->size,
-                                                     layer->attn_compressor_gate->abs_offset,
-                                                     DS4_N_EMBD,
-                                                     comp_width,
-                                                     g->batch_attn_norm,
-                                                     n_tokens) != 0;
+            ok = ds4_gpu_matmul_f16_pair_tensor(
+                     g->batch_comp_kv, g->batch_comp_sc, model->map, model->size,
+                     layer->attn_compressor_kv->abs_offset,
+                     layer->attn_compressor_gate->abs_offset, DS4_N_EMBD,
+                     comp_width, g->batch_attn_norm, n_tokens) != 0;
         }
         uint32_t n_comp = g->layer_n_comp[il];
         if (zero_prefix) {
@@ -3065,22 +3054,11 @@ static bool rocm_graph_encode_layer_attention_batch(
               ok = false;
             }
             if (ok) {
-                ok = ds4_gpu_matmul_f16_tensor(g->batch_comp_kv,
-                                                 model->map,
-                                                 model->size,
-                                                 layer->indexer_compressor_kv->abs_offset,
-                                                 DS4_N_EMBD,
-                                                 index_width,
-                                                 g->batch_attn_norm,
-                                                 n_tokens) != 0;
-                if (ok) ok = ds4_gpu_matmul_f16_tensor(g->batch_comp_sc,
-                                                         model->map,
-                                                         model->size,
-                                                         layer->indexer_compressor_gate->abs_offset,
-                                                         DS4_N_EMBD,
-                                                         index_width,
-                                                         g->batch_attn_norm,
-                                                         n_tokens) != 0;
+                ok = ds4_gpu_matmul_f16_pair_tensor(
+                         g->batch_comp_kv, g->batch_comp_sc, model->map,
+                         model->size, layer->indexer_compressor_kv->abs_offset,
+                         layer->indexer_compressor_gate->abs_offset, DS4_N_EMBD,
+                         index_width, g->batch_attn_norm, n_tokens) != 0;
             }
             if (ok && !indexer_query_projection_ready) {
                 ok = ds4_gpu_matmul_f16_tensor(g->batch_indexer_q,

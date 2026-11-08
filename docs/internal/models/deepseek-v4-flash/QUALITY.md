@@ -9,6 +9,7 @@ weights and DSpark sidecar are [pinned](artifacts/model-identities.json).
 | DSpark greedy replay | 736/736 token choices match AR; maximum full-logit error 0, through C8 / 16K |
 | HTTP AR/DSpark, C1/2/4/6/8 | All 63 tg128 responses match fresh AR; mixed/repetitive prompts, October 30, 108 GiB GTT |
 | Sparse-indexer boundary | DSpark C1 and AR C2: 0/128 token differences, bit-identical full logits |
+| DSpark target state | `ds4.dspark_verify`: after every cycle through 32 tokens, snapshot target state equals AR |
 | Reproducibility | 1280/1280 choices and 20 full-logit vectors repeat exactly |
 | Sampling / sessions | p/q acceptance, residual correction, seeded replay, EOS/cancellation, three-turn continuation and disk restore pass |
 | Official continuations | `ds4.target` limit: NLL ≤ 0.407 and ≥ 53/100 first tokens; ROCm 10.1 scores 0.4026 and 59 |
@@ -48,6 +49,26 @@ arithmetic changes. Accepted Gufo builds since September span 0.0032. Token
 choices move more than these scores: at unchanged source, ROCm 10.1 changed
 greedy agreement with a 128-token antirez/ds4 trajectory from 115 to 106 while
 NLL moved from 0.4006 to 0.4026.
+
+## DSpark target state
+
+A DSpark cycle verifies its anchor and drafts in one pass. That pass projects
+the attention and indexer compressor pairs with decode's one-row kernel, so
+each verified row stores the compressor state that a one-token decode stores.
+Until November 2026, verification projected the 4,096×256 indexer compressor
+as two single matrices. That shape is also the router's, so it took the ordered
+batch kernel, and the stored rows differed from AR in their low bits. Logits
+cannot show these rows below about 2,048 tokens: while a layer holds at most
+512 compressed rows, the indexer selects all of them. Past that depth the rows
+change indexer scores, and a greedy chat turn at a depth of 2,048 tokens
+diverged from AR at token 78 of 128.
+
+`ds4.dspark_verify` syncs an AR session and a DSpark session on one short chat
+prompt and generates 32 greedy tokens. After every DSpark cycle, the test
+requires the AR token choices and the AR target sections of the session
+snapshot: tokens, logits, raw rows, compressed rows, and compressor state. It
+names each section that differs. The snapshot header, the DSpark request
+state, and the drafter rows differ by mode, so the test does not compare them.
 
 ## Prefill agreement limits
 
