@@ -91,6 +91,7 @@ quality; successful optimizations become the default, without extra switches.
 ## Development
 
 - Keep model code, tests, tools and numerical contracts with their model.
+- Follow [docs/AGENTS.md](docs/AGENTS.md) when writing or changing documentation.
 - Use the shared Qwen control-token constants for framing; see
   [src/families/qwen/AGENTS.md](src/families/qwen/AGENTS.md). Inspect their definitions
   when reviewing or changing behavior, and keep reference fixtures independent.
