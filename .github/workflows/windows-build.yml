@@ -114,7 +114,7 @@ jobs:
           $archive = "$env:RUNNER_TEMP\therock-archive\$env:SDK_TARBALL"
           New-Item -ItemType Directory -Force -Path (Split-Path $archive), $env:SDK_ROOT | Out-Null
           if (-not (Test-Path $archive)) {
-            curl.exe --fail --location --retry 3 --no-progress-meter --output "$archive.part" $env:SDK_URL
+            curl.exe --fail --location --retry 5 --retry-delay 30 --no-progress-meter --output "$archive.part" $env:SDK_URL
             if ($LASTEXITCODE -ne 0) { throw "cannot download $env:SDK_TARBALL" }
             Move-Item "$archive.part" $archive
           }
@@ -150,8 +150,13 @@ jobs:
 
       - name: Install Ninja and ccache
         run: |
-          choco install ninja ccache -y --no-progress
-          if ($LASTEXITCODE -ne 0) { throw 'cannot install ninja and ccache' }
+          # The ccache package downloads from GitHub releases, which can 5xx.
+          foreach ($attempt in 1..4) {
+            choco install ninja ccache -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 4) { throw 'cannot install ninja and ccache' }
+            Start-Sleep -Seconds (30 * $attempt)
+          }
 
       # CMakeLists.txt compiles C, CXX and (with clang-cl) HIP through ccache
       # when it is on PATH. The SDK is unpacked fresh each run, so the
