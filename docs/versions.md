@@ -33,5 +33,12 @@ Extensions have a separate version; see the
 A released version never changes. Development builds report their exact Git
 revision in `gufo --version`, so a bug report says what ran.
 
-This documentation is published for each release; the copy in the repository
-describes the development version.
+## Which documentation to read
+
+[gufo.blog/docs](https://gufo.blog/docs) keeps two kinds of versions, and the
+version picker switches between them:
+
+- the **ten newest releases**, each frozen as it was released; `/docs` opens
+  the newest one;
+- a **development** version that follows `main`, like the repository's `docs/`
+  folder, and can describe features no release has yet.
