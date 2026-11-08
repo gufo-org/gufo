@@ -12,7 +12,7 @@ short, consistent and readable by people and agents alike.
 | `docs/internal/` | Contributors and agents working on Gufo | Repository only |
 | `docs/internal/models/<model>/` | Implementation notes (`README.md`), benchmarks, quality and experiment evidence | Repository only |
 | `docs/internal/server.md`, `docs/internal/cache.md` | Complete server and cache references behind the public pages | Repository only |
-| `docs/internal/design/` | RFCs, cards and their evidence | Repository only |
+| `docs/internal/design/` | Design RFCs | Repository only |
 
 A public page explains how to use something. An internal page explains how it
 is built, measured or changed. When a page needs both, split it: the public

@@ -36,7 +36,7 @@ selection) and `gufo_http` are the top of the graph. Nothing under
 `gufo_ext_runtime` includes `src/cli/**` or links either library, which
 `extension_serving_boundary_gate` and `extension_link_graph_gate` enforce; see
 [testing](testing.md#boundary-and-link-graph-gates) and
-[target ownership](design/model-extensions/target-ownership.md).
+[target ownership](target-ownership.md).
 
 ## Build
 

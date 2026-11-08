@@ -1,6 +1,7 @@
 # Nix serving from extension metadata
 
-`lib.mkGufoServe` (also available as `lib.mkServe`) renders a shell command.
+`lib.mkGufoServe` (also `lib.mkServe`) renders the `gufo serve` command line for
+a service.
 Model-specific option arguments come from the selected package's extension
 manifests. For example, `--mtp-model` becomes `mtpModel`; path, string, integer,
 number and boolean options retain their manifest types. Shared declarations must
@@ -80,11 +81,11 @@ to the repository's discovery manifests. Use a package override to validate a
 custom extension selection. `extraArgs` remains an explicit caller-managed
 escape hatch and is not checked against manifests.
 
-The current `serve llm` parser still explicitly registers its existing draft
-flags and speculative modes. Rendering a newly declared option or speculative
-mode in Nix does not by itself implement its CLI parsing or execution. External
-providers using the existing serving contract work without such additions;
-new runtime controls need serving integration as well as metadata.
+`serve` parses every option a built provider declares for it, with the
+manifest type, and hands the selected provider its values as
+`provider_options` (see the [extension API](../extension-api.md#options)). A
+newly declared option therefore works from Nix and the CLI alike; a new
+speculative mode still needs its provider to implement it.
 
 ## Checks
 

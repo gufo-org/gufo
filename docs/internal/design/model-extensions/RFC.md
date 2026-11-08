@@ -1330,7 +1330,7 @@ each model, and for `gufo_core`, in the PR that migrates it.
 - The name: "extension", "model module" or "plugin".
 - Resolved: community and niche extensions remain out-of-tree until promotion
   to core with a named maintainer. Abandoned core extensions require a reviewed
-  replacement/retirement decision; see [distribution policy](DISTRIBUTION.md).
+  replacement/retirement decision; see [distribution policy](../../extension-distribution.md).
 - Whether draft models from a different architecture (for example a DFlash
   draft) are ever loaded by a different extension than the target; the
   current answer is no.

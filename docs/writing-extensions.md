@@ -120,7 +120,7 @@ unavailable, with a reason.
 ## Validate before publishing
 
 A model that answers one prompt isn't done. The
-[conformance guide](internal/design/model-extensions/CONFORMANCE.md) lists
+[conformance guide](internal/extension-conformance.md) lists
 what each capability must prove. In short:
 
 1. Test configuration, tokenizer and operators against an independent
@@ -159,5 +159,5 @@ For each Gufo update:
 If your model fits Gufo's goal, the best model for each use case on Strix
 Halo, you can ask for it to become official. That needs a named maintainer and
 the evidence above; the
-[support policy](internal/design/model-extensions/DISTRIBUTION.md#core-community-promotion-and-abandoned-maintainers)
+[support policy](internal/extension-distribution.md#support-states)
 describes the process.
