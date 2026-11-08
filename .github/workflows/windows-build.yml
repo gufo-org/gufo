@@ -188,8 +188,13 @@ jobs:
         run: |
           git clone --quiet https://github.com/microsoft/vcpkg.git C:\vcpkg-gufo
           if ($LASTEXITCODE -ne 0) { throw 'cannot clone vcpkg' }
-          & C:\vcpkg-gufo\bootstrap-vcpkg.bat -disableMetrics
-          if ($LASTEXITCODE -ne 0) { throw 'cannot bootstrap vcpkg' }
+          # GitHub release downloads intermittently return 5xx; retry the tool fetch.
+          foreach ($attempt in 1..4) {
+            & C:\vcpkg-gufo\bootstrap-vcpkg.bat -disableMetrics
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 4) { throw 'cannot bootstrap vcpkg' }
+            Start-Sleep -Seconds (30 * $attempt)
+          }
           New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\vcpkg-archives" | Out-Null
           "VCPKG_ROOT=C:\vcpkg-gufo" >> $env:GITHUB_ENV
           "VCPKG_DEFAULT_BINARY_CACHE=$env:RUNNER_TEMP\vcpkg-archives" >> $env:GITHUB_ENV
