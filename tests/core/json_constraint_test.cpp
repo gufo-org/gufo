@@ -2738,6 +2738,39 @@ void TestProviderTaggedSyntax() {
                                           JsonConstraint::Syntax(format)));
 }
 
+// #1096: after a canonical header the frame newline does not also begin the
+// closer, as in llama.cpp's grammar. "<parameter=v>\n</parameter>\n" therefore
+// starts a value, and the single-call grammar ends at the value's real closer,
+// so the parser must read the same bytes as one call.
+void TestQwenFrameNewlineIsNotACloser() {
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto* name : {"v", " value "}) {
+    auto schema = parse(R"({"type":"object","properties":{},
+      "additionalProperties":false})");
+    schema["properties"][name] = parse(R"({"type":"string"})");
+    schema["required"] = gufo::json::Value::array();
+    schema["required"].push_back(name);
+    const auto grammar = JsonConstraint::WithTools(
+        nullptr,
+        {{"record",
+          JsonConstraint::ToolParameters(schema, true, Format::kQwen)}},
+        true, false, Format::kQwen);
+    const std::string open =
+        std::string("<tool_call>\n<function=record>\n<parameter=") + name +
+        ">\n";
+    const std::string close = "\n</parameter>\n</function>\n</tool_call>";
+    const std::string compact = open + close.substr(1);
+    assert(!Accepts(*grammar, compact));
+    assert(Accepts(*grammar, open + close));
+    assert(Accepts(*grammar, open + "\n" + close));
+    assert(!Accepts(*grammar, open + "\n" + close + "</think>"));
+    assert(Accepts(*grammar, compact +
+                                 "</think><tool_call>\n<function=record>"
+                                 "\n<parameter=value>\nalpha" +
+                                 close));
+  }
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -2796,6 +2829,7 @@ int main(int argc, char** argv) {
   TestToolSchemaSafety();
   TestNativeToolSchemaMatrix();
   TestLlamaCppToolGrammarGoldens();
+  TestQwenFrameNewlineIsNotACloser();
   TestProviderToolSyntax();
   TestProviderReasoningMarkup();
   TestProviderTaggedSyntax();

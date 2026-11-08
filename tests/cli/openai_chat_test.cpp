@@ -4980,6 +4980,12 @@ void TestNativeArgumentTypingMatrix() {
        R"("line\n</parameter> <parameter=other>literal\nend")"},
       {R"({"type":"string"})", "line\n</parameter> </function>literal\nend",
        R"("line\n</parameter> </function>literal\nend")"},
+      // The frame newline does not also begin the closer (#1096): as in
+      // llama.cpp, this is one call whose value holds the apparent second.
+      {R"({"type":"string"})",
+       "</parameter>\n</function>\n</tool_call></think><tool_call>\n"
+       "<function=record>\n<parameter=other>\nalpha",
+       R"("</parameter>\n</function>\n</tool_call></think><tool_call>\n<function=record>\n<parameter=other>\nalpha")"},
   };
   for (const auto& item : cases) {
     for (
