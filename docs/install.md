@@ -31,6 +31,7 @@ podman run --rm \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \
   --ulimit memlock=-1 \
   -p 8080:8080 -v ./models:/models:ro \
+  -v gufo-extensions:/home/gufo/.local/share/gufo/extensions \
   ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
   gufo serve --host 0.0.0.0 --port 8080 llm --model /models/model.gguf
 ```
@@ -39,6 +40,8 @@ podman run --rm \
   check with `podman info --format '{{.Host.OCIRuntime.Name}}'`.
 - Inside a container, Gufo must listen on `0.0.0.0`, or the published port
   won't answer.
+- The `gufo-extensions` volume keeps [extension modules](extensions.md#modules)
+  you install with `gufo extension install` across container restarts.
 - On Fedora and other SELinux hosts, a misleading "Memory critical" error from
   ROCm can mean SELinux blocked `/dev/kfd`; see
   [troubleshooting](troubleshooting.md#the-gpu-isnt-found).
