@@ -11,3 +11,4 @@ crate-type = ["staticlib"]
 
 [dependencies]
 gufo-png-decode = { path = "../png_decode" }
+gufo-wav-decode = { path = "../wav_decode" }

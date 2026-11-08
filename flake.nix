@@ -265,6 +265,7 @@
               directories = [
                 "src/core/rust"
                 "src/core/png_decode"
+                "src/core/wav_decode"
               ];
               files = [
                 "rust-toolchain.toml"

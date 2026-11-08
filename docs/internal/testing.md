@@ -74,6 +74,16 @@ must match unless the case is in `kKnownDeviations`. It runs in `check-pr`.
 the `.png` files under each directory and prints the median decode time of both
 decoders per file. CTest does not run this mode.
 
+`wav_decode_test` decodes generated WAVs with `core::DecodeWav`, under the
+limits and messages of each caller (server, Qwen3-ASR, Qwen3-TTS), and with
+frozen copies of the three C++ decoders from 0.32.0 in
+`tests/core/wav_reference.cpp`. The cases cover a grid of formats, sample
+widths, channel counts and sample rates, extreme sample values, chunk layouts,
+the length limits and 8,000 random mutations. The samples must match bit for
+bit, or the exception type and message must match. It runs in `check-pr`.
+`wav_decode_test --time [--repeat N]` prints the median decode time of both
+decoders for long inputs; CTest does not run this mode.
+
 ## Hosted versus local checks
 
 GitHub runs `nix flake check`: formatting, documentation, dependency inventory,

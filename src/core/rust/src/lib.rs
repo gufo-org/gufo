@@ -7,3 +7,4 @@
 // Linking a component keeps its `#[unsafe(no_mangle)]` C functions in the
 // static library; an unused dependency would not be linked at all.
 extern crate gufo_png_decode;
+extern crate gufo_wav_decode;
