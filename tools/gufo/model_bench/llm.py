@@ -170,7 +170,7 @@ class Session:
             if shutil.which(command[0]) is None:
                 raise RuntimeError(
                     f"{command[0]} not on PATH; select its optional Nix reference package "
-                    "(see docs/BENCHMARKS.md)"
+                    "(see docs/internal/benchmarks.md)"
                 )
             self.reference_version(mode)
         placeholder.command = command

@@ -7,7 +7,7 @@ metadata:
 
 # Optimize gfx1151 kernels
 
-Read the affected model's `docs/models/<model>/{BENCHMARKS,QUALITY,EXPERIMENTS}.md`
+Read the affected model's `docs/internal/models/<model>/{BENCHMARKS,QUALITY,EXPERIMENTS}.md`
 and its launch code. Establish the timed scope and arithmetic contract before
 changing dispatch. Follow the user's machine, time, and Git instructions.
 

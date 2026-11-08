@@ -101,7 +101,7 @@
   "docs": {
     "title": "EmbeddingGemma 2",
     "inputs": "BF16 safetensors; text/image to embeddings",
-    "guide": "docs/models/embeddinggemma-2/README.md"
+    "guide": "docs/models/embeddinggemma-2.md"
   },
   "tests": [
     {

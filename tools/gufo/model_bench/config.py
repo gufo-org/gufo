@@ -52,7 +52,7 @@ class BenchConfig:
 
     @property
     def model_dir(self) -> Path:
-        return self.root / "docs" / "models" / self.model
+        return self.root / "docs" / "internal" / "models" / self.model
 
     @property
     def artifacts_dir(self) -> Path:
@@ -135,7 +135,7 @@ class BenchConfig:
 
 
 def load_config(root: Path, model: str, path: Path | None = None) -> BenchConfig:
-    path = path or root / "docs" / "models" / model / "artifacts" / "bench.json"
+    path = path or root / "docs" / "internal" / "models" / model / "artifacts" / "bench.json"
     if not path.exists():
         raise SystemExit(f"no bench.json for {model}: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))

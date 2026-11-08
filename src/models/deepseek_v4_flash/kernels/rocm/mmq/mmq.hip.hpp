@@ -2560,7 +2560,7 @@ template <int mmq_y, bool need_check, int fixed_stride = 0> static __device__ __
              * table -- one 8-byte load replacing two loads and six operations --
              * was slightly worse (412.1 against 418.7). The loader's time is not
              * sensitive to its own instruction mix; see the counter table in
-             * docs/models/deepseek-v4-flash/BENCHMARKS.md. */
+             * docs/internal/models/deepseek-v4-flash/BENCHMARKS.md. */
             if constexpr (fixed_stride == 16) {
                 const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[l]];
                 const uint2 sign_mask = ((const uint2 *) ksigns64)[sign_bits];
@@ -4000,7 +4000,7 @@ static size_t mmq_get_nbytes_shared(
      * workgroups per CU -- the one measurement that isolates residency, since
      * the grid, tile shape and per-wave work stay identical -- gave 4 wgs/WGP
      * 453.6, 3 wgs 445.0-454.1 and 2 wgs 418.2 tok/s: halving residency costs
-     * 7.8% and 4->3 is free. See docs/models/deepseek-v4-flash/BENCHMARKS.md. */
+     * 7.8% and 4->3 is free. See docs/internal/models/deepseek-v4-flash/BENCHMARKS.md. */
     return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
 }
 

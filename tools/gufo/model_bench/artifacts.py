@@ -1,4 +1,4 @@
-"""Retained per-table JSON artifacts under docs/models/<model>/artifacts."""
+"""Retained per-table JSON artifacts under docs/internal/models/<model>/artifacts."""
 
 from __future__ import annotations
 

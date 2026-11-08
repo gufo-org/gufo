@@ -1576,7 +1576,7 @@ void LaunchBatchedDualQuantGEMMPreQuantized(
   // blocked launches measured faster than a blocked dual (23.0 vs 24.4 ms for
   // the FFN shape at batch 2048) because the dual doubles LDS and halves
   // occupancy. See opt-c163-blocked-dual in
-  // docs/models/qwen3.8-27b/BENCHMARKS.md.
+  // docs/internal/models/qwen3.8-27b/BENCHMARKS.md.
   LaunchBatchedQuantGEMMPreQuantized(type, w_gate, q8_1_x, y_gate, batch, m, k,
                                      stream);
   LaunchBatchedQuantGEMMPreQuantized(type, w_up, q8_1_x, y_up, batch, m, k,

@@ -156,7 +156,7 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
 
 ## External source extensions
 
-Use the [extension distribution recipe](docs/model-extensions/DISTRIBUTION.md#native-windows-and-zip-recipe)
+Use the [extension distribution recipe](docs/internal/design/model-extensions/DISTRIBUTION.md#native-windows-and-zip-recipe)
 for vcpkg dependency preflight, external source selection, CMake installation,
 license/data staging and fresh-ZIP runtime checks. Declared metadata dependencies
 do not install additional vcpkg ports automatically.

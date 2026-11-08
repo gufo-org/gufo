@@ -97,7 +97,7 @@ class PlanTest(unittest.TestCase):
             ('src/models/qwen3_tts/hip/synthesis_runtime.cpp', {'qwen3-tts-base'}),
             ('tests/functional/fixtures/audio/clear-english-voice.wav', {'qwen3-asr', 'qwen3-tts-base'})]:
             self.assertEqual(self.models(path), expected)
-        self.assertEqual(self.models('docs/SERVER.md'), set())
+        self.assertEqual(self.models('docs/server.md'), set())
         self.assertEqual(self.models('src/models/qwen_image_21/model.cpp'), set())
         self.assertEqual(self.models('src/models/minimax_h3/runtime.cpp'), set())
 
@@ -127,7 +127,7 @@ class PlanTest(unittest.TestCase):
                          ['asr', 'tts-base'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/models/deepseek_v4_flash/model.cpp'), self.data),
                          ['deepseek4', 'dspark'])
-        self.assertEqual(devlab_models.asset_keys(self.plan('docs/SERVER.md'), self.data), [])
+        self.assertEqual(devlab_models.asset_keys(self.plan('docs/server.md'), self.data), [])
         for asset in self.data['assets'].values():
             self.assertRegex(asset['revision'], r'^[0-9a-f]{40}$')
 

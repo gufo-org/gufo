@@ -28,8 +28,8 @@ extension_template/
 The template registers metadata only. Implement an actual capability runner and
 independent model tests before claiming inference support or conformance.
 Community and niche models stay out-of-tree until promotion; see
-[distribution/support policy](../../docs/model-extensions/DISTRIBUTION.md) and
-[capability conformance](../../docs/model-extensions/CONFORMANCE.md).
+[distribution/support policy](../../docs/internal/design/model-extensions/DISTRIBUTION.md) and
+[capability conformance](../../docs/internal/design/model-extensions/CONFORMANCE.md).
 
 ## Include Boundary Policy
 
@@ -68,7 +68,7 @@ gufo.override {
 ```
 
 The serving helper reads the overridden package's manifests automatically; see
-[Nix serving from extension metadata](../../docs/model-extensions/serving.md)
+[Nix serving from extension metadata](../../docs/internal/design/model-extensions/serving.md)
 for provider validation, draft paths, voices and lock selection.
 
 ## Windows Packaging (ZIP Recipe)

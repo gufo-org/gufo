@@ -10,7 +10,7 @@ Gufo loads (`gufo extension install`, experimental).
 Community and niche models live in independent repositories. Promotion to core
 means accepting the in-tree maintenance and release obligations, with a named
 maintainer. This guide takes a new author from the template through implementation,
-validation and ongoing maintenance. The [distribution guide](model-extensions/DISTRIBUTION.md)
+validation and ongoing maintenance. The [distribution guide](internal/design/model-extensions/DISTRIBUTION.md)
 contains platform recipes and the full support policy.
 
 ## How the pieces fit
@@ -311,7 +311,7 @@ Provider options use canonical names and manifest types. Extensions may declare
 the same option when the type agrees, as providers sharing `--mtp-model` do; CMake
 rejects conflicting types. The Nix serving helper derives provider arguments and validation
 from metadata, including optional `serving` declarations. See
-[Nix serving](model-extensions/serving.md).
+[Nix serving](internal/design/model-extensions/serving.md).
 
 Text providers declare the draft settings a speculative backend runs with in
 `TextProvider::speculative_defaults`, one entry per backend (`mtp`, `dflash2`,
@@ -401,7 +401,7 @@ adding a source directory alone does not make it an official extension.
 
 ## Validate before publishing
 
-Follow the [conformance guide](model-extensions/CONFORMANCE.md) for the capability
+Follow the [conformance guide](internal/design/model-extensions/CONFORMANCE.md) for the capability
 matrix, existing API suites and evidence requirements. Start with independent
 configuration/tokenizer/operator tests, compare CPU/reference and GPU results,
 then test actual model execution and HTTP contracts. Test session isolation,
@@ -418,7 +418,7 @@ Install into a fresh prefix, inventory required runtime libraries/data/licenses,
 and test the installed executable. Repeat on each advertised platform and on
 the extracted ZIP or exact image digest being published. Source and model-weight
 licenses are separate responsibilities; document both and avoid bundling weights
-without the necessary redistribution rights. The [distribution recipes](model-extensions/DISTRIBUTION.md)
+without the necessary redistribution rights. The [distribution recipes](internal/design/model-extensions/DISTRIBUTION.md)
 cover CMake, Nix, Windows and artifact auditing.
 
 ## Maintain an extension
@@ -450,5 +450,5 @@ When the model fits Gufo's selection goals and meets core requirements, request
 promotion with a named maintainer and the retained evidence. Until that review,
 it remains a community extension outside the tree. If a core maintainer leaves,
 seek a replacement or an explicit reviewed retirement decision; do not silently
-weaken its gates. The [support policy](model-extensions/DISTRIBUTION.md#core-community-promotion-and-abandoned-maintainers)
+weaken its gates. The [support policy](internal/design/model-extensions/DISTRIBUTION.md#core-community-promotion-and-abandoned-maintainers)
 describes that lifecycle.

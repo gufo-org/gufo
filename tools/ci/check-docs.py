@@ -22,20 +22,24 @@ REQUIRED_DOC_FILES = [
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
     "AGENTS.md",
-    "docs/CLI.md",
-    "docs/DEVELOPMENT.md",
-    "docs/RELEASING.md",
+    "docs/cli.md",
+    "docs/internal/development.md",
+    "docs/internal/releasing.md",
     "docs/models/README.md",
-    "docs/SERVER.md",
-    "docs/TESTING.md",
-    "docs/BENCHMARKS.md",
-    "docs/PERFORMANCE.md",
+    "docs/server.md",
+    "docs/internal/testing.md",
+    "docs/internal/benchmarks.md",
+    "docs/internal/performance.md",
     # BEGIN GENERATED MODEL DOCS
-    *[f"docs/models/{model}/{document}.md"
+    *[f"docs/models/{model}.md"
+      for model in ("deepseek-v4-flash", "embeddinggemma-2", "minimax-h3",
+                    "qwen-image-2.1", "qwen3-asr", "qwen3-tts",
+                    "qwen3.8-27b", "qwen3.8-flash-next")],
+    *[f"docs/internal/models/{model}/{document}.md"
       for model in ("deepseek-v4-flash", "embeddinggemma-2", "minimax-h3",
                     "qwen-image-2.1", "qwen3-asr", "qwen3-tts",
                     "qwen3.8-27b", "qwen3.8-flash-next")
-      for document in ("README", "BENCHMARKS", "QUALITY", "EXPERIMENTS")],
+      for document in ("BENCHMARKS", "QUALITY", "EXPERIMENTS")],
     # END GENERATED MODEL DOCS
 ]
 
