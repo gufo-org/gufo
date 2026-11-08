@@ -1,93 +1,90 @@
 # Qwen3.8 27B
 
-Dense text/image model on gfx1151. Production target GGUFs are **UD-Q4_K_XL**
-(16.35 GiB weights) and **UD-Q8_K_XL** (29.30 GiB); request state and an optional
-draft/projector need additional memory. BF16 targets are reference-only.
+Qwen3.8 27B is a dense model that reads text and images and writes text. Gufo
+runs its Q4 and Q8 GGUF files, optionally sped up with the DFlash2 draft model.
 
-[Benchmarks](../internal/models/qwen3.8-27b/BENCHMARKS.md) · [Quality](../internal/models/qwen3.8-27b/QUALITY.md) · [Experiments](../internal/models/qwen3.8-27b/EXPERIMENTS.md)
-· [ROCm 10.1 migration](../internal/models/qwen3.8-27b/ROCM.md)
+## Files
 
-## Load and run
+| File | Size | Needed for |
+| --- | --- | --- |
+| `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 16.35 GiB | Text, Q4 target |
+| `Qwen3.8-27B-UD-Q8_K_XL.gguf` | 29.30 GiB | Text, Q8 target |
+| `mmproj-BF16.gguf` | | Images |
+| `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` | | DFlash2, with either target |
+
+Pick one target. Each request also needs memory for its context, and the draft
+and image projector add their own weights.
 
 ```sh
-nix develop -c hf download unsloth/Qwen3.8-27B-GGUF \
+hf download unsloth/Qwen3.8-27B-GGUF \
   Qwen3.8-27B-UD-Q4_K_XL.gguf mmproj-BF16.gguf \
+  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
   --local-dir models/qwen3.8-27b
-nix develop -c hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
-  Qwen3.8-27B-DFlash2-Q4_K_M.gguf --local-dir models/qwen3.8-27b
-nix build
+hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
+  Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
+  --revision 2d9571f8ce46e151f61c6499c99dee6079e1d610 \
+  --local-dir models/qwen3.8-27b
+```
+
+## Run
+
+```sh
 MODEL=models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
 DRAFT=models/qwen3.8-27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
-./result/bin/gufo chat --model "$MODEL"
-./result/bin/gufo serve llm --model "$MODEL" --speculative dflash2 \
+gufo chat --model "$MODEL"
+gufo serve llm --model "$MODEL" --speculative dflash2 \
   --dflash-model "$DRAFT" --sessions 2 --context 32768
 ```
 
-Substitute `Qwen3.8-27B-UD-Q8_K_XL.gguf` for Q8. Targets and drafts need not
-have matching precision. Use the Q4_K_M DFlash2 draft with either target.
+## Decoding modes
 
-| Mode | Selection | Behavior |
+| Mode | Options | What happens |
 | --- | --- | --- |
-| AR | No speculative option | Target-only generation. |
-| DFlash2 | `--speculative dflash2 --dflash-model PATH` | Adaptive default; `--draft-tokens` caps proposals, `--draft-policy fixed` is a comparison mode. |
+| AR | none | The target produces one token per step. |
+| DFlash2 | `--speculative dflash2 --dflash-model PATH` | The draft proposes several tokens; the target checks them in one pass and keeps the ones it agrees with. |
 
-A request decoding alone can verify a prompt-lookup copy wider than the DFlash2
-block: greedy requests, and sampled ones without a seed. Copy-only steps start
-at the ordinary eight rows; two whole copies in a row at the current width
-double it, up to 64 rows, and any rejected copy returns it to eight. The wide
-pass shares every projection across its rows and runs attention in eight-row
-segments, so each row's logits and DFlash2 target features equal those of
-consecutive ordinary verifications (`qwen27b_wide_verification_test` also checks
-decoding after cutting back to any kept prefix). Rollback replays the captured
-recurrent inputs of every kept row, so the session's SSM replay ring grows from
-16 to 64 rows (about 91 MiB) on first use; the resource claim includes it, and
-the load narrows the widest pass when the configured sessions would not fit.
-When more than eight rows are kept, the draft injects all but the last at once,
-so snapshots and batched steps still hold at most eight pending rows. Seeded
-sampled requests and batched steps keep the ordinary width.
+DFlash2 adapts how many tokens it proposes. `--draft-tokens` caps the number,
+and `--draft-policy fixed` always proposes that many, for comparisons.
 
-Greedy speculation must match AR. Sampled modes preserve the target policy,
-but AR and speculation need not share the same-seed sequence. See the
-[quality contract](../internal/models/qwen3.8-27b/QUALITY.md). Thinking/template controls and HTTP
-sampling defaults are described in [the server guide](../server.md#reasoning-controls).
+When a request decodes alone, Gufo also proposes copies of earlier text from
+the same conversation and checks up to 64 of them in one pass. Copies help
+most when the answer repeats code or text the model has already seen.
+
+With greedy decoding, DFlash2 produces exactly the AR output. With sampling,
+both modes follow the same distribution, but the same seed gives different
+text. Thinking and sampling defaults are set per request; see
+[reasoning controls](../server.md#reasoning-controls).
 
 ## Images
 
-Use the matching `mmproj-BF16.gguf` beside the target or pass `--mmproj PATH`.
-Vision weights upload lazily. Repeat `--image` in `prompt` or `chat`; chat
-attaches them to the first user turn. Images count toward context capacity.
+Gufo finds `mmproj-BF16.gguf` next to the target; pass `--mmproj PATH` to use
+another location. Repeat `--image` to attach several images:
 
 ```sh
-./result/bin/gufo prompt --model "$MODEL" --image photo.jpg \
+gufo prompt --model "$MODEL" --image photo.jpg \
   --prompt "Describe this image." --temperature 0
 ```
 
-Send an image to the server:
+Over HTTP, send images as `image_url` parts of a chat message; the
+[server guide](../server.md#images) lists the accepted formats and limits.
+Images count toward the context. `detail: low` scales an image to fit 512 × 512
+pixels and uses at most 256 image tokens; `auto` (the default), `high` and
+`original` allow 64 to 16,384.
 
-```python
-import base64, json, urllib.request
-image = base64.b64encode(open("photo.jpg", "rb").read()).decode()
-body = {"model": "vision-test", "temperature": 0, "max_tokens": 64,
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image}},
-            {"type": "text", "text": "Describe this image."}]}]}
-request = urllib.request.Request("http://127.0.0.1:8080/v1/chat/completions",
-    data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-print(urllib.request.urlopen(request).read().decode())
-```
+To number images as `Picture 1:`, `Picture 2:` and so on, start the server with
+`--add-vision-id` or send `chat_template_kwargs: {"add_vision_id": true}`.
 
-Start that server with `--served-model-name vision-test`. Ordered text/image
-parts, multiple images and later turns work with AR/DFlash2 and caches.
-PNG/JPEG data URLs and public HTTPS are supported; requests
-share a 20 MiB encoded-byte, 16-image and 15-second download budget. Each image
-is capped at 32 megapixels; private/loopback/link-local destinations are rejected.
-Official dynamic resizing allows 64–16384 merged image tokens. `detail: low`
-scales the image down to fit within 512 × 512 pixels and keeps its aspect ratio,
-so it uses at most 256 merged image tokens and never more than `auto`.
-`detail: high`, `original`, and `auto` use the full range, and `auto` is the
-default.
+## Performance
 
-Image numbering is off by default; `--add-vision-id` or
-`chat_template_kwargs: {"add_vision_id": true}` adds `Picture N:` prefixes.
-Cache identity includes processed pixels, placement, preprocessing version and
-projector contents. See [vision checks and limits](../internal/models/qwen3.8-27b/QUALITY.md#vision).
+As of October 19, 2026, on Strix Halo with the Q4 target:
+
+| Workload | Speed |
+| --- | --- |
+| Prefill, AR | 648.89 tokens/s |
+| Decode, one user, DFlash2 | up to 71.55 tokens/s |
+| Decode, 8 concurrent users, DFlash2 | 128.42 tokens/s in total |
+
+The [full benchmarks](../internal/models/qwen3.8-27b/BENCHMARKS.md) compare
+with llama.cpp at every depth and include Q8. The
+[quality report](../internal/models/qwen3.8-27b/QUALITY.md) covers text and
+vision accuracy.

@@ -1,8 +1,8 @@
 # Models
 
-Linux x86-64 / AMD Strix Halo gfx1151 is the production target. Build with
-`nix build`; Python/reference toolchains are development-only. Model weights
-are downloaded separately and are not part of the runtime package.
+These are the official models: the ones Gufo releases build in and the
+maintainers test on AMD Strix Halo. Each page lists the files to download, how
+to run the model and what speed to expect.
 
 <!-- BEGIN GENERATED MODEL TABLE -->
 | Model | Weights / supported inputs | Guide |
@@ -17,23 +17,9 @@ are downloaded separately and are not part of the runtime package.
 | Qwen3.8 Flash-Next | Sharded Q4 GGUF; text/images | [Usage and modes](qwen3.8-flash-next.md) |
 <!-- END GENERATED MODEL TABLE -->
 
-Each model folder contains:
+Gufo doesn't ship weights; download them from Hugging Face as each page shows.
+Every speed on these pages was measured on Strix Halo with 128 GB of memory,
+on the date given next to it.
 
-- `README.md`: model card, acquisition, usage and modes.
-- `BENCHMARKS.md`: current retained measurements, scope/date and TODO cells.
-- `QUALITY.md`: measured quality, reference/scope, replay guarantees and unresolved gaps.
-- `EXPERIMENTS.md`: short retained/rejected decisions.
-- `artifacts/`: only useful machine-readable results/calibration, when present.
-
-Keep executable fixtures with their tests. New logit/trace dumps and local
-profiles belong in ignored top-level `artifacts/`; commit only independent
-reference evidence needed by a maintained check. Old experiment records remain
-in Git history. See [benchmark methodology](../internal/benchmarks.md).
-
-Quality reports distinguish agreement with an independent model implementation
-from consistency between Gufo execution modes. Greedy speculative decoding
-should reproduce AR; sampled speculation can use different random draws.
-Seeded replay is checked within the same execution configuration.
-For numerical comparisons, lower KL divergence, total variation, relative L2
-and word-error rate are better; higher cosine similarity and image PSNR are
-better. These bounded checks are not broad capability or perceptual scores.
+Community extensions add other models and variants; see
+[extensions](../extensions.md).

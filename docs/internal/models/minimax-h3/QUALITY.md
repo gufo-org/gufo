@@ -60,7 +60,7 @@ verify their hashes before comparison. Never loosen a ceiling for an optimizatio
 The exact route follows Diffusers' 50-point/49-forward schedule and decoder
 context. Implementation attribution remains in
 [third-party notices](../../../../THIRD_PARTY_NOTICES.md); model weights retain
-their separate terms in the [model guide](../../../models/minimax-h3.md#model-acquisition).
+their separate terms in the [model guide](../../../models/minimax-h3.md#files).
 
 ## ROCm 10.1 migration
 

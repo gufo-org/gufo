@@ -1,43 +1,53 @@
 # Qwen3-ASR 1.7B
 
-Native BF16 safetensors speech recognition on gfx1151. The 1.7B checkpoint is
-supported; 0.6B, forced alignment and audio GGUFs are unsupported. Python runs
-only offline reference checks. Generation is deterministic greedy decoding.
+Qwen3-ASR turns speech into text. Gufo runs the 1.7B BF16 checkpoint, for
+recorded files and for live audio over a WebSocket.
 
-[Benchmarks](../internal/models/qwen3-asr/BENCHMARKS.md) · [Quality](../internal/models/qwen3-asr/QUALITY.md) · [Experiments](../internal/models/qwen3-asr/EXPERIMENTS.md)
-· [ROCm migration](../internal/models/qwen3-asr/ROCM.md)
+## Files
 
 ```sh
-nix develop -c hf download Qwen/Qwen3-ASR-1.7B \
+hf download Qwen/Qwen3-ASR-1.7B \
   --revision 7278e1e70fe206f11671096ffdd38061171dd6e5 \
   --local-dir models/Qwen3-ASR-1.7B
-nix build
-./result/bin/gufo transcribe --model models/Qwen3-ASR-1.7B --audio speech.wav
-./result/bin/gufo serve asr --model models/Qwen3-ASR-1.7B
 ```
 
+The 0.6B checkpoint, forced alignment and audio GGUF files aren't supported.
+
+## Run
+
 ```sh
+gufo transcribe --model models/Qwen3-ASR-1.7B --audio speech.wav
+gufo serve asr --model models/Qwen3-ASR-1.7B
 curl -sS http://127.0.0.1:8080/v1/audio/transcriptions \
   -F file=@speech.wav -F model=qwen3-asr-1.7b -F response_format=json
 ```
 
-Inputs: PCM16/24/32 or float32 WAV, up to eight channels and 192 kHz. The
-frontend mixes to mono and uses windowed-sinc resampling to 16 kHz.
-The WAV loader accepts recordings up to 30 minutes; HTTP request-byte limits
-and the CLI's 256-MiB input limit still apply.
-HTTP supports `json`, `text`, `verbose_json`, optional `language` and `prompt`,
-and temperature zero. Long recordings are split at low-energy boundaries
-within the configured context capacity, then transcribed and merged. CLI
-`--max-tokens` and HTTP `max_tokens` limit output **per chunk**; increasing the
-recording length does not require increasing model capacity.
+The endpoint accepts `response_format` set to `json`, `text` or
+`verbose_json`, plus optional `language` and `prompt`. Decoding is always
+greedy, so `temperature` must be 0.
 
-## Streaming
+## Audio input
 
-For an uploaded file, add `-F stream=true -F response_format=json`. The server
-emits OpenAI `transcript.text.delta` events while decoding, followed by
-`transcript.text.done`. This retains the same transcript as buffered execution.
+Gufo reads WAV files with 16-, 24- or 32-bit integer or 32-bit float samples,
+up to eight channels and 192 kHz, and converts them to 16 kHz mono. A
+recording can be up to 30 minutes long; the CLI also caps input at 256 MiB,
+and the server applies its request size limit.
 
-For microphone input, connect a WebSocket to `/v1/realtime?intent=transcription`:
+Gufo splits long recordings at quiet points, transcribes each piece and joins
+the results. `--context` sets the capacity for one piece, and `--max-tokens`
+(CLI) or `max_tokens` (HTTP) limits the output **per piece**, so longer
+recordings need no extra capacity.
+
+## Streaming a file
+
+Add `-F stream=true -F response_format=json` to receive the transcript while
+it is decoded, as OpenAI `transcript.text.delta` events followed by
+`transcript.text.done`. The final text is the same as without streaming.
+
+## Live audio
+
+For microphone input, open a WebSocket to
+`/v1/realtime?intent=transcription` and use OpenAI's manual-turn messages:
 
 ```jsonl
 {"type":"session.update","session":{"type":"transcription","audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":{"model":"qwen3-asr-1.7b","language":"en"},"turn_detection":null}}}}
@@ -45,22 +55,28 @@ For microphone input, connect a WebSocket to `/v1/realtime?intent=transcription`
 {"type":"input_audio_buffer.commit"}
 ```
 
-Send mono PCM16 at 24 kHz; Gufo resamples to 16 kHz. Append messages can arrive
-continuously. Commit an utterance when it is ready for transcription; the server
-returns `input_audio_buffer.committed`, an identified conversation item, and
-`conversation.item.input_audio_transcription.delta` / `.completed` events.
-Further utterances reuse the connection. `input_audio_buffer.clear` discards
-uncommitted audio. Each buffer is limited to 120 seconds, with a 100-ms minimum
-for commit.
+Send 16-bit mono PCM at 24 kHz, appending as audio arrives. Commit each
+utterance when it is complete. The server answers with
+`input_audio_buffer.committed`, a conversation item, and
+`conversation.item.input_audio_transcription.delta` and `.completed` events.
+`input_audio_buffer.clear` drops audio not yet committed. An utterance must be
+between 100 ms and 120 seconds long, and one connection can carry many.
 
-This uses OpenAI's manual-turn interface. It does not implement server VAD,
-revisable rolling hypotheses, timestamps or forced alignment. Choosing shorter
-utterances reduces latency and future context; their concatenated transcript
-need not equal recognition of a complete recording.
+Shorter utterances return text sooner, but each is transcribed on its own, so
+the joined text can differ from transcribing the whole recording at once.
+Gufo doesn't detect speech turns itself, revise earlier text, or return
+timestamps.
 
-Two requests can prepare CPU frontends concurrently. Device state remains
-isolated by FIFO admission between audio chunks; cancellation removes queued
-work. `--context` controls capacity per chunk; `--served-model-name` sets
-the public model ID (repeatable; extra names are accepted aliases). TTS runs
-separately with `gufo serve tts`.
-See [server limits](../server.md) and [quality gaps](../internal/models/qwen3-asr/QUALITY.md).
+## Serving
+
+Two requests can prepare audio at the same time; the GPU work runs one piece at
+a time in arrival order, and cancelling a request removes its queued pieces.
+`--served-model-name` sets the model ID clients send; repeat it to accept
+aliases. Speech synthesis runs as a separate server, `gufo serve tts`.
+
+## Performance
+
+As of September 21, 2026, on Strix Halo, transcription runs at **15.27×
+real time** once the model is loaded. See the
+[full benchmarks](../internal/models/qwen3-asr/BENCHMARKS.md) and the
+[quality report](../internal/models/qwen3-asr/QUALITY.md).

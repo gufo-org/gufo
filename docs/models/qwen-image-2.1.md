@@ -1,35 +1,36 @@
 # Qwen-Image-2.1
 
-[Benchmarks](../internal/models/qwen-image-2.1/BENCHMARKS.md) · [Quality](../internal/models/qwen-image-2.1/QUALITY.md) · [Experiments](../internal/models/qwen-image-2.1/EXPERIMENTS.md) · [ROCm migration](../internal/models/qwen-image-2.1/ROCM.md)
+Qwen-Image-2.1 generates images from text and edits images you upload. Gufo
+runs the BF16 checkpoint and its eight-step Turbo variant behind the OpenAI
+Images API.
 
-Native HIP image generation and editing on AMD Strix Halo (`gfx1151`). Loads
-BF16 safetensors directly; Python is not needed for inference. The checkpoint
-contains a diffusion transformer, Qwen3-VL prompt encoder and RGBA VAE.
+> **Warning:** The weights use the non-commercial Qwen Research License, not
+> Gufo's MIT license. See the
+> [pinned sources and model contract](../../src/models/qwen_image_21/UPSTREAM.md).
 
-Weights use the **non-commercial Qwen Research License**, separate from Gufo's
-MIT license. See the [pinned sources and model contract](../../src/models/qwen_image_21/UPSTREAM.md).
+## Files
 
-Download about 33.1 GB and start the server:
+The checkpoint is about 33.1 GB:
 
 ```sh
 MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1 \
   --revision b3179ad355be050328e483a9dfdd9e60cd62adfa)
-nix build
-./result/bin/gufo serve image --model "$MODEL_DIR" \
-  --served-model-name Qwen-Image-2.1 --port 8080
 ```
 
-Generate an image:
+## Run
 
 ```sh
+gufo serve image --model "$MODEL_DIR" \
+  --served-model-name Qwen-Image-2.1 --port 8080
 curl --fail-with-body http://127.0.0.1:8080/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen-Image-2.1","prompt":"A red ceramic teapot on a wooden table",
        "size":"1024x1024","seed":42}' > response.json
+jq -r '.data[0].b64_json' response.json | base64 --decode > output.png
 ```
 
-Edit with multiple references, in the order they are uploaded. For a single
-reference, keep just one `image[]` field:
+To edit, upload one or more references; the prompt refers to them in upload
+order:
 
 ```sh
 curl --fail-with-body http://127.0.0.1:8080/v1/images/edits \
@@ -39,51 +40,39 @@ curl --fail-with-body http://127.0.0.1:8080/v1/images/edits \
   -F size=1024x1024 -F seed=42 > response.json
 ```
 
-Both use the OpenAI Images response format. Save the first PNG:
-
-```sh
-jq -r '.data[0].b64_json' response.json | base64 --decode > output.png
-```
+## Settings
 
 | Setting | Behavior |
 | --- | --- |
-| `size` | Default `auto`: 1024² generation; reference aspect ratio for edits. Explicit sides must be multiples of 32, at most 4096 per side and 4 megapixels total. |
-| `seed`, `steps` | Seeded replay within the same build and request configuration. Default 40 steps; range 2–100. Fewer steps change quality. |
-| `n` | 1–10 outputs with independent seeds; requests execute serially on the GPU. |
-| References | Up to 10 PNG/JPEG uploads, 20 MiB encoded and 32 megapixels combined; the HTTP body limit also applies. |
-| `background` | `auto`, `transparent`, or `opaque` (composite over white). |
+| `size` | `auto` (the default) gives 1024 × 1024, or the reference's aspect ratio when editing. Sides must be multiples of 32, at most 4096, and 4 megapixels in total. |
+| `steps` | 40 by default, from 2 to 100. Fewer steps are faster and lower quality. |
+| `seed` | The same seed, settings and build give the same image, also after a restart. |
+| `n` | 1 to 10 images, each with its own seed, made one after another. |
+| `background` | `auto`, `transparent`, or `opaque` (over white). |
+| References | Up to 10 PNG or JPEG files, 20 MiB and 32 megapixels in total. |
 
-Edit noise combines `seed` with the resized reference pixels. The same edit
-replays exactly, including after restarting the server, while editing an image
-with its generation seed no longer reuses its original noise. Seeded edits
-therefore differ from older Gufo releases; generation seeds are unchanged.
+Output is base64 PNG. URL output, separate masks, streaming and
+`input_fidelity` aren't supported. With the OpenAI SDK, pass `seed` and
+`steps` through `extra_body`.
 
-The official repository recommends 2048²; Gufo follows the pinned Diffusers
-1024² default. Set `size` explicitly for larger output. Output is PNG/base64;
-URL output, separate masks, streaming and `input_fidelity` are unsupported.
-OpenAI SDK clients use the local `/v1` base URL; `seed` and `steps` are Gufo
-extensions supplied through `extra_body`.
+The upstream project recommends 2048 × 2048; Gufo defaults to 1024 × 1024,
+like the pinned Diffusers version. Set `size` for larger images.
 
 ## Qwen-Image-2.1-Turbo
 
-The separately trained Turbo checkpoint (about 32.5 GB, same license) runs on
-the same engine, API and editing paths with its fixed eight-step schedule:
+Turbo is a separately trained checkpoint (about 32.5 GB, same license) that
+always uses eight steps. It runs on the same server, API and editing paths:
 
 ```sh
 MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1-Turbo \
   --revision fc13ba1986fcb905854dc8de2f52eee395f49b5b --exclude 'assets/*')
-./result/bin/gufo serve image --model "$MODEL_DIR" \
+gufo serve image --model "$MODEL_DIR" \
   --served-model-name Qwen-Image-2.1-Turbo --port 8080
 ```
 
-Omit `steps` or pass `8`; other counts return HTTP 400. The checkpoint's eight
-`sample_sigmas` replace the base model's dynamic shift. It is about 4.8× faster
-than the 40-step base model at 1024²; see [benchmarks](../internal/models/qwen-image-2.1/BENCHMARKS.md#qwen-image-21-turbo)
-and [quality](../internal/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo).
+Omit `steps` or pass `8`; any other value returns HTTP 400.
 
-## llama-swap
-
-For llama-swap, add this model and send the same requests to the proxy:
+## Serving behind llama-swap
 
 ```yaml
 models:
@@ -93,9 +82,18 @@ models:
       --served-model-name Qwen-Image-2.1 --port ${PORT}
 ```
 
-For larger uploads, raise `--max-request-bytes` and the proxy's body limit.
-`/health`, `/ready` and `/v1/models` are available. Nix `mkGufoServe` supports
-`modality = "image"` with `model` and `servedModelName`.
+For large uploads, raise `--max-request-bytes` and the proxy's body limit. See
+[llama-swap](../server.md#llama-swap) for the general setup.
 
-[Benchmarks](../internal/models/qwen-image-2.1/BENCHMARKS.md) · [Quality](../internal/models/qwen-image-2.1/QUALITY.md) ·
-[Experiments](../internal/models/qwen-image-2.1/EXPERIMENTS.md)
+## Performance
+
+As of November 1, 2026, on Strix Halo, one 1024 × 1024 image takes:
+
+| Checkpoint | Steps | Time |
+| --- | --- | --- |
+| Qwen-Image-2.1 | 40 | 89.9 s |
+| Qwen-Image-2.1, editing one reference | 40 | 130.2 s |
+| Qwen-Image-2.1-Turbo | 8 | 18.6 s |
+
+See the [full benchmarks](../internal/models/qwen-image-2.1/BENCHMARKS.md) and
+the [quality report](../internal/models/qwen-image-2.1/QUALITY.md).
