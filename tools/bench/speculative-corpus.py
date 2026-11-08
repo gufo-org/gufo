@@ -357,7 +357,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--suite",
-        default="docs/models/qwen3.8-27b/artifacts/speculative-corpus.json",
+        default="docs/internal/models/qwen3.8-27b/artifacts/speculative-corpus.json",
     )
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument(

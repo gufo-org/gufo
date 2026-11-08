@@ -86,13 +86,28 @@ if (ENGINE_ENABLE_HIP)
     SKIP_RETURN_CODE 77
     RUN_SERIAL TRUE
     TIMEOUT 1800)
+  # Layered prefill (SetPrefillYield) against lone runs, in AR and MTP modes.
+  # Built with qwen38_flash_next_model_tests; needs the same model variables
+  # and is skipped without them.
+  add_executable(qwen38_flash_next_layered_prefill_test EXCLUDE_FROM_ALL
+    layered_prefill_test.cpp)
+  target_link_libraries(qwen38_flash_next_layered_prefill_test PRIVATE
+    gufo_test_support qwen38_flash_next_test_hip)
+  add_test(NAME qwen38_flash_next.layered_prefill
+    COMMAND qwen38_flash_next_layered_prefill_test)
+  set_tests_properties(qwen38_flash_next.layered_prefill PROPERTIES
+    LABELS "qwen38_flash_next;hip;gpu;gfx1151;external-model"
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE
+    TIMEOUT 1800)
   add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL
     continuation_probe.cpp)
   target_link_libraries(qwen38_flash_next_continuation_probe PRIVATE
     qwen38_flash_next_test_hip)
   add_custom_target(qwen38_flash_next_model_tests
     DEPENDS qwen38_flash_next_session_test qwen38_flash_next_snapshot_test
-      qwen38_flash_next_continuation_adapter_test)
+      qwen38_flash_next_continuation_adapter_test
+      qwen38_flash_next_layered_prefill_test)
 
   add_executable(qwen38_flash_next_dense_gemm_bench EXCLUDE_FROM_ALL
     dense_gemm_bench.cpp)

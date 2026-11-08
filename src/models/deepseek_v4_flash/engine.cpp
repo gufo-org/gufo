@@ -479,12 +479,32 @@ void Session::SetCancellationCheck(CancellationCheck is_cancelled) {
   ds4_session_set_cancel(session_, callback, this);
 }
 
+void Session::SetPrefillYield(std::size_t groups, std::function<void()> yield) {
+  prefill_yield_ = groups > 1 ? std::move(yield) : std::function<void()>{};
+  if (!prefill_yield_) {
+    ds4_session_set_prefill_yield(session_, 1, nullptr, nullptr);
+    return;
+  }
+  ds4_session_set_prefill_yield(
+      session_,
+      static_cast<std::uint32_t>(
+          std::min<std::size_t>(groups, std::numeric_limits<int>::max())),
+      +[](void* user_data) {
+        static_cast<const Session*>(user_data)->prefill_yield_();
+      },
+      this);
+}
+
 int Session::Position() const {
   return ds4_session_pos(session_);
 }
 
 int Session::ContextSize() const {
   return ds4_session_ctx(session_);
+}
+
+std::uint32_t Session::PrefillCapacityFor(int context_size) {
+  return ds4_session_prefill_capacity_for(context_size);
 }
 
 std::uint32_t Session::PrefillCapacity() const {

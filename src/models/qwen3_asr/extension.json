@@ -53,7 +53,7 @@
   "docs": {
     "title": "Qwen3-ASR 1.7B",
     "inputs": "BF16 safetensors; audio to text",
-    "guide": "docs/models/qwen3-asr/README.md"
+    "guide": "docs/models/qwen3-asr.md"
   },
   "tests": [
     {

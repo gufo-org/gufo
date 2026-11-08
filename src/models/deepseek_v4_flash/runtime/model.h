@@ -154,6 +154,15 @@ void ds4_session_invalidate(ds4_session* session);
 int ds4_session_pos(const ds4_session* session);
 int ds4_session_ctx(const ds4_session* session);
 uint32_t ds4_session_prefill_capacity(const ds4_session* session);
+/* Rows of one prefill pass of a session with this context. */
+uint32_t ds4_session_prefill_capacity_for(int context_size);
+/* Splits this session's following prefill passes into at most `groups` layer
+ * groups and calls yield(user_data) between them, where other sessions may
+ * decode, batched and with DSpark too.
+ * Fewer than two groups, or a NULL yield, restores unsplit passes. */
+void ds4_session_set_prefill_yield(ds4_session* session, uint32_t groups,
+                                   void (*yield)(void* user_data),
+                                   void* user_data);
 uint64_t ds4_session_payload_bytes(const ds4_session* session);
 
 /* Continuation components. A session with hooks is owned by the cache adapter,

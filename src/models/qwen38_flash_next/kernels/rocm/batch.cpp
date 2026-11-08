@@ -16,6 +16,8 @@ namespace {
 
 constexpr std::uint32_t kBatchSessions = 8;
 constexpr std::uint32_t kDecodeRows = 8;
+static_assert(kBatchSessions * kDecodeRows <= Executor::kHookParkedRows,
+              "a batched decode inside a layer hook must fit the parked rows");
 
 bool Fail(std::string* error, const std::string& message) {
   if (error != nullptr) {

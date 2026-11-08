@@ -49,7 +49,7 @@ adapted code. Model-private changes and import boundaries are recorded in the
 [DS4 provenance](src/models/deepseek_v4_flash/UPSTREAM.md),
 [DS4 HIP import](src/models/deepseek_v4_flash/kernels/rocm/mmq/VENDOR.md),
 [Flash-Next HIP import](src/models/qwen38_flash_next/kernels/rocm/mmq/VENDOR.md)
-and [H3 quality record](docs/models/minimax-h3/QUALITY.md).
+and [H3 quality record](docs/internal/models/minimax-h3/QUALITY.md).
 
 This software is based in part on the work of the Independent JPEG Group.
 
@@ -180,5 +180,5 @@ determination about a downstream operator.
 - **Relationship**: External model component within the operator-supplied H3
   checkpoint; not distributed by gufo
 
-See [the MiniMax H3 guide](docs/models/minimax-h3/README.md) for the acquisition, release, and
+See [the MiniMax H3 guide](docs/models/minimax-h3.md) for the acquisition, release, and
 runtime boundary.

@@ -129,5 +129,49 @@ class CheckDocsTest(unittest.TestCase):
         self.assertIn("a.md:3: Invalid JSON in fenced code block", errors[0])
 
 
+    def tree(self, files, check):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, text in files.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text, newline="")
+            return [error.split(": ", 1)[1] for error in check(root)]
+
+    def test_public_pages_follow_the_docs_rules(self):
+        index = "# Docs\n\nIndex.\n\n- [Cache](cache.md)\n- [Models](models/README.md)\n"
+        models = "# Models\n\nAll models.\n\n[One](one.md)\n"
+        good = "# Cache\n\nHow reuse works.\n\nUse `just` in code and [step 12](#12-step).\n"
+        files = {"docs/README.md": index, "docs/models/README.md": models,
+                 "docs/models/one.md": good, "docs/cache.md": good,
+                 "docs/AGENTS.md": "rules", "docs/internal/x.md": "Simply #12."}
+        self.assertEqual(self.tree(files, DOCS.check_public_pages), [])
+        files["docs/cache.md"] = "# Cache\n\nIt simply works since #123.\n"
+        files["docs/orphan.md"] = "Orphan\n"
+        files["docs/models/one.md"] = good + "x\n" * DOCS.MODEL_PAGE_BUDGET
+        errors = self.tree(files, DOCS.check_public_pages)
+        self.assertIn("Filler word 'simply'; see docs/AGENTS.md", errors)
+        self.assertIn("Issue or pull request reference '#123' on a public page", errors)
+        self.assertIn("Public page must start with a '# Title' line", errors)
+        self.assertIn("Public page is not linked from docs/README.md or docs/models/README.md", errors)
+        self.assertTrue(any("exceed the 120-line budget" in error for error in errors), errors)
+
+    def test_figures_embed_the_canonical_style(self):
+        style = ".fig-bg { fill: #eceee6; }\n"
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="760" height="100" viewBox="0 0 760 100" '
+               'role="img">\n<title>Alt.</title>\n<style>\n' + style + '</style>\n'
+               '<defs><marker id="flow-arrow"/></defs>\n'
+               '<rect x="0" y="0" width="760" height="100" class="fig-bg"/>\n</svg>\n')
+        files = {"docs/figures/style.css": style, "docs/figures/flow.svg": svg}
+        self.assertEqual(self.tree(files, DOCS.check_figures), [])
+        files["docs/figures/flow.svg"] = (svg.replace("#eceee6", "#000000").replace('id="flow-', 'id="')
+                                          .replace("</svg>", '<rect fill="red"/><script/></svg>'))
+        self.assertEqual(sorted(self.tree(files, DOCS.check_figures)), sorted([
+            "Figure contains forbidden '<script'",
+            "Figure uses inline presentation; use classes from docs/figures/style.css",
+            "<style> must embed docs/figures/style.css verbatim, once",
+            "id 'arrow' must start with 'flow-'",
+        ]))
+
+
 if __name__ == "__main__":
     unittest.main()

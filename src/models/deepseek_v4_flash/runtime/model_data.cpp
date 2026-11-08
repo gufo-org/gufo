@@ -1824,6 +1824,8 @@ void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
     ds4_rocm_graph_destroy(e->batch_workspace);
     e->batch_workspace = NULL;
+    ds4_rocm_graph_destroy(e->decode_workspace);
+    e->decode_workspace = NULL;
     ds4_dspark_close(e->dspark);
     e->dspark = NULL;
     weights_free(e->weights);

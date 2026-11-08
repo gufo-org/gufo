@@ -313,7 +313,7 @@ def check_http(binary, model, draft, policies, selection="both"):
                             ("xtc_probability", 0.5), ("dry_multiplier", 0.8),
                             ("top_n_sigma", 2), ("logit_bias", {"42": 1})):
                         request(path, {**payload, field: value}, expected=400)
-                # Suffix-conditioned infill is not implemented (docs/SERVER.md).
+                # Suffix-conditioned infill is not implemented (docs/internal/server.md).
                 request("/infill", {"input_prefix": prompt}, expected=501)
                 print(f"{policy}: {len(SAMPLING_CASES)} sampling configurations, "
                       "serve defaults, five HTTP adapters, replay, SSE and C2 exact")

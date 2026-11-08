@@ -16,9 +16,9 @@ FILE_ROLES = ("gguf", "draft", "mtp", "dspark", "mmproj")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="model-bench",
-        description="Measure docs/models/<model>/BENCHMARKS.md tables for Gufo and its reference server.",
+        description="Measure docs/internal/models/<model>/BENCHMARKS.md tables for Gufo and its reference server.",
     )
-    parser.add_argument("--model", required=True, help="docs/models/<model> directory name")
+    parser.add_argument("--model", required=True, help="docs/internal/models/<model> directory name")
     parser.add_argument("--gufo", type=Path, default=Path("result/bin/gufo"), help="Gufo binary")
     for role in FILE_ROLES:
         parser.add_argument(f"--{role}", action="append", default=[], metavar="[VARIANT=]PATH")
@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="server logs (ignored directory)")
     parser.add_argument("--config", type=Path, default=None, help="bench.json override (experiments)")
     parser.add_argument("--artifacts-dir", type=Path, default=None,
-                        help="write/read artifacts here instead of docs/models/<model>/artifacts")
+                        help="write/read artifacts here instead of docs/internal/models/<model>/artifacts")
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="measure tables for one target")
