@@ -1397,6 +1397,46 @@ HttpResponse AnthropicCountTokens(const HttpRequest& req,
              "invalid_prompt");
 }
 
+// llama-server's /tokenize at its defaults: raw text, control-token spellings
+// parsed and nothing prepended, as /completion tokenizes a prompt. The options
+// that would change that are refused rather than ignored.
+HttpResponse LlamaTokenize(const HttpRequest& req, TextGenerationBackend& b) {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  const auto* content = body.find("content");
+  if (content == nullptr || !content->is_string()) {
+    return InvalidCompatibilityRequest("'content' must be a string");
+  }
+  for (const auto& [field, supported] :
+       {std::pair{"add_special", false}, std::pair{"parse_special", true},
+        std::pair{"with_pieces", false}}) {
+    const auto* value = body.find(field);
+    if (value == nullptr || value->is_null())
+      continue;
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'" + std::string(field) +
+                                         "' must be a boolean");
+    if (value->as_bool() != supported)
+      return InvalidCompatibilityRequest("'" + std::string(field) +
+                                         "' is supported only as " +
+                                         (supported ? "true" : "false"));
+  }
+  const auto tokens = b.tokenize(content->str());
+  if (!tokens)
+    return NotImplemented(req, b);
+  json::Value ids = json::Value::array();
+  for (const auto token : *tokens)
+    ids.push_back(static_cast<std::size_t>(token));
+  json::Value resp = json::Value::object();
+  resp["tokens"] = std::move(ids);
+  return Ok(resp);
+}
+
 HttpResponse LlamaCompletion(const HttpRequest& req,
                              TextGenerationBackend& b) try {
   json::Value body;
@@ -1963,6 +2003,7 @@ void HttpServer::register_routes() {
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);
   add("POST", "/apply-template", HandleApplyTemplate);
+  add("POST", "/tokenize", LlamaTokenize);
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);

@@ -1486,6 +1486,19 @@ cached. An image renders as its single placeholder, not its expanded visual
 tokens. `stream` is ignored, as in llama-server; template errors return 400
 as in Chat, and backends that cannot render a template as text return 501.
 
+`POST /tokenize` takes `{"content": "..."}` and returns `{"tokens": [...]}`,
+the loaded model's token IDs for raw text. Control-token spellings become their
+special tokens and nothing is prepended, as in `/completion` and llama-server's
+defaults (`add_special` false, `parse_special` true). Those two fields and
+`with_pieces` are accepted only at their defaults; other values return 400.
+Nothing is prefilled or cached. Backends that cannot tokenize return 501.
+
+Tokenizing an `/apply-template` result counts the rendered text as a raw
+prompt. It may differ from the Chat request's token count: literal control-token
+spellings in message content are preserved as text by Chat, and images expand
+to visual tokens. For the Chat count, send the original request to
+`/v1/chat/completions/input_tokens`.
+
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed
 tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every

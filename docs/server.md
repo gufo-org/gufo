@@ -36,6 +36,7 @@ can't honor return 400 instead of being silently dropped. The
 | `POST /v1/messages` | Anthropic Messages: text, images, thinking and custom tools. |
 | `POST /v1/completions`, `/completion` | Plain text completion from one prompt. |
 | `POST /v1/chat/completions/input_tokens`, `/v1/responses/input_tokens`, `/v1/messages/count_tokens` | Count a prompt's tokens without running it. |
+| `POST /tokenize` | Get token IDs for raw text. |
 | `GET /v1/models` | The served model, its context length and whether it accepts images. |
 | `GET /health`, `GET /ready` | Liveness and readiness. |
 | `GET /metrics`, `/slots`, `/props` | Prometheus metrics and llama-server status. |
