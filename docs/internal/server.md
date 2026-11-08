@@ -1,18 +1,13 @@
 # Server reference
 
-Status: implemented subset, 2026-09-25
+The complete contract of `gufo serve`: execution and queues, every endpoint and
+field, errors, lifecycle, metrics and logs. The user-facing guide is
+[server](../server.md); this page holds the detail behind it. Supported fields
+behave as documented here, and unsupported ones return explicit errors. Gufo
+doesn't reproduce OpenAI-hosted storage, billing, organization or account
+behavior.
 
-## Purpose
-
-The server exposes a focused OpenAI-compatible API while keeping inference,
-scheduling, and device execution in the C++ process. Compatibility is a
-versioned contract: supported fields behave as documented, and unsupported
-fields return explicit errors.
-
-Chat Completions is the main API, including streaming, images and tools.
-Responses supports text, images and function tools with optional streaming.
-Anthropic Messages supports text, images and custom tools.
-The reference protocols are:
+Reference protocols:
 
 - https://developers.openai.com/api/reference/resources/responses/methods/create/
 - https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create/
@@ -20,44 +15,21 @@ The reference protocols are:
 - https://platform.claude.com/docs/en/api/handling-stop-reasons
 - https://developers.openai.com/api/docs/guides/streaming-responses
 
-The local server does not need to reproduce OpenAI-hosted storage, billing,
-organization, or account behavior.
-
-The only supported production platform is Linux x86-64 on Strix Halo.
-
 ## Implementation
 
-The C++20 runtime uses bounded HTTP/1.1 requests, one connection worker per
-request, and a separate inference scheduler. Connections close after each
-response. Chat Completions and Responses support Server-Sent Events; socket closure
-propagates cancellation to the scheduler. JSON parsing rejects duplicate keys,
-invalid numbers and nesting beyond 128 containers.
+The C++20 runtime serves bounded HTTP/1.1 requests with one connection worker
+per request and a separate inference scheduler. Connections close after each
+response. Chat Completions, Responses and Messages stream with Server-Sent
+Events; closing the socket cancels the request in the scheduler. JSON parsing
+rejects duplicate keys, invalid numbers and nesting beyond 128 containers.
+Python may serve development tools and conformance tests, never requests.
 
-Python may be used for development tools and API conformance tests, but it must
-not be required to serve requests.
+One `gufo` executable holds every built model graph, tokenizer and HIP kernel;
+`chat` and `prompt` drive the same scheduler without HTTP, `video` runs the H3
+route the video worker uses, and `transcribe` the ASR route. Commands and
+options are in the [command line](../cli.md).
 
-## Single Executable and Model Configuration
-
-The deployed product is one `gufo` executable. Supported model graphs,
-tokenizers and HIP kernels are compiled into it.
-
-The executable provides subcommands rather than separate inference binaries:
-
-```text
-gufo serve
-gufo chat
-gufo prompt
-gufo video
-gufo transcribe
-```
-
-`chat` and `prompt` are transport adapters over the same scheduler and may
-either load the runtime directly or connect to a running server. `video`
-executes the direct MiniMax H3 route used by the asynchronous video worker.
-`transcribe` executes the native Qwen3-ASR-1.7B route used by the synchronous
-audio transcription endpoint.
-Their detailed contracts are defined in [Command-Line Interface](../cli.md) and
-[MiniMax H3 upstream contract](models/minimax-h3/QUALITY.md).
+## Model execution
 
 ### HIP execution
 
@@ -1217,7 +1189,7 @@ Repeat `--served-model-name` to serve one model under several IDs; the
 first is primary. Text routes report the ID the request named; the other
 modalities report the primary ID, with video aliases acting as the root
 `minimax-h3`. Every `gufo serve` modality accepts the repeated option, so
-llama-swap `aliases:` entries can reach the process unchanged (#957).
+llama-swap `aliases:` entries can reach the process unchanged.
 Requests naming another model return 404, except on audio and video routes,
 which answer `400 invalid_model`.
 
@@ -1301,15 +1273,14 @@ curl --fail-with-body http://127.0.0.1:8080/upstream/gufo-model/ready
 
 The browser Load action and startup preloading (`hooks.onStartup.preload`)
 request the upstream root `/`. Gufo answers `GET /` with the `/health` body,
-503 while the model loads and 200 once ready, so both actions report success
-(#957). `checkEndpoint` controls readiness polling, not the triggering
+503 while the model loads and 200 once ready, so both actions report success.
+`checkEndpoint` controls readiness polling, not the triggering
 request.
 
 ## Exposure
 
 The server binds to `127.0.0.1` by default and answers every route without
-credentials: it has no authentication layer (`--api-key` was removed for
-#957). Any process that can reach the listener can run inference and read
+credentials: it has no authentication layer. Any process that can reach the listener can run inference and read
 metrics, so keep the bind local or place a reverse proxy in front. Select
 the listen address with `--host`; it must be a numeric IPv4 or IPv6 address,
 not a host name. `--host ::` is dual-stack: it accepts IPv6 clients and IPv4
@@ -1515,7 +1486,7 @@ without `stream_options.include_usage`. `prompt_n` counts newly processed
 tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every
 turn. Gufo-specific details stay in `usage.gufo`.
 
-TODO: retained-cache KV metrics, a validated administrative reload/drain
+Not implemented yet: retained-cache KV metrics, a validated administrative reload/drain
 interface, and in-process recovery after device reset or suspend/resume.
 
 ## Troubleshooting logs

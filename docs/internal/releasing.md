@@ -1,12 +1,13 @@
 # Releasing
 
-Gufo uses squash merges and Conventional Commit pull request titles to keep
-`main` machine-readable. A pull request may contain arbitrary work-in-progress
-commits; its title becomes the single commit retained on `main`.
+How pull request titles drive versions, how a release is cut and published, and
+how the extension API is versioned alongside. What a version promises to users
+is in [versions](../versions.md).
 
 ## Pull request titles
 
-Titles have this form:
+Gufo squash-merges every pull request, so its title becomes the one commit on
+`main` and the input to release automation. Titles have this form:
 
 ```text
 <type>[(optional-scope)][!]: <description>
@@ -28,7 +29,7 @@ The accepted types are:
 | `style` | Change formatting without changing behavior | None |
 | `revert` | Revert an earlier change | Determined from the reverted change |
 
-Use a short, lowercase scope when it adds useful ownership context. Examples:
+Use a short, lowercase scope when it adds ownership context. Examples:
 
 ```text
 fix(cache): preserve image prefixes after cancellation
@@ -38,194 +39,117 @@ docs: explain the release policy
 feat(server)!: remove the legacy completion endpoint
 ```
 
-Breaking changes must include `!` before the colon. Do not rely only on a pull
-request body footer: the title is the canonical release signal retained by a
-single-line squash merge.
+Mark a breaking change with `!` before the colon; a footer in the body is lost
+in the squash. `tools/ci/check-pr-title.py` enforces this table, and its test
+reads the table and examples from this page.
 
-## Version policy
+## Versions
 
-Release versions follow Semantic Versioning. The compatibility surface is the
-documented command-line interface, HTTP API and public Nix flake outputs. A
-change is breaking when an existing documented use must be changed to keep
-working.
+Gufo follows Semantic Versioning over the documented CLI, HTTP API and public
+Nix flake outputs. Before 1.0.0, `fix` and `perf` bump the patch, and `feat` and
+breaking changes bump the minor. After 1.0.0, breaking changes bump the major;
+1.0.0 itself is an explicit decision, never automatic. A release takes the
+largest bump among its changes.
 
-Before `1.0.0`, Gufo uses this policy:
+Ordinary pull requests never edit `version.txt`, `CHANGELOG.md` or the release
+manifest; release automation owns them. Tags are `vX.Y.Z` and never move.
 
-- `fix` and `perf` changes increment the patch version.
-- `feat` changes increment the minor version.
-- breaking changes increment the minor version.
-- `1.0.0` is an explicit stability decision and is never selected implicitly.
+## Cutting a release
 
-After `1.0.0`, breaking changes increment the major version. A release uses the
-largest required increment among all changes since the previous release.
-Ordinary pull requests do not bump the version; release automation owns version
-and changelog updates.
+1. A maintainer runs **Release automation** (`release-please.yml`) on `main`
+   from the Actions tab; it has no schedule.
+2. It opens or updates the release pull request, which bumps `version.txt`,
+   `CHANGELOG.md` and the release manifest from the Conventional Commit history.
+   That pull request runs the normal CI plus the full Devlab functional tier.
+3. The workflow waits up to 160 minutes for the title check, repository checks
+   and `devlab/functional`. On any failure, error or timeout it leaves the pull
+   request open and comments on it.
+4. When everything passes, it squash-merges, creates the tag and the GitHub
+   Release, and sends the tag to Toolboxes as a `gufo-release` dispatch.
 
-Git tags use `vX.Y.Z`. A released version is immutable. Development builds keep
-their exact Git revision so diagnostics can identify the source independently
-of the release version.
+Nix keeps release and source identity apart. The default package reports
+`gufo version development (<revision>)`; the `release` package, built from a
+tag, reads `version.txt` and reports `gufo version X.Y.Z (<revision>)`.
 
-## Release flow
+## Publishing artifacts
 
-`version.txt` is the canonical release version. A maintainer starts a release
-by running the *Release automation* workflow from the GitHub Actions tab ("Run
-workflow" on `main`); it has no schedule. The workflow reads the Conventional
-Commit history after the latest release and opens or updates one release pull
-request. That pull request updates `version.txt`, `CHANGELOG.md` and the
-release manifest. It receives the same CI as any other change, plus the
-complete Devlab functional suite on Strix Halo (other pull requests run its
-smaller PR tier). The workflow waits up to 160 minutes for the pull request
-title, the repository checks and `devlab/functional`. If any of them fails,
-errors or is still pending, it leaves the pull request open without publishing
-a release and comments on it to notify the maintainers.
+Toolboxes' `publish_release.yml` handles the dispatch:
 
-After the checks pass, the workflow squash-merges the release pull request and
-immediately creates the immutable tag and GitHub Release. Do not edit the
-version, changelog or release manifest in an ordinary feature or fix pull
-request.
+- **Container images:** builds from the tag and pushes `X.Y.Z`, `X.Y` and
+  `latest`. Rolling images follow `main` as `edge` and `sha-<revision>`.
+- **Windows ZIP:** calls Gufo's reusable `windows-build.yml@main` with the tag
+  as source, sets the version and revision, and checks `gufo.exe --version` and
+  diagnostics with only the bundled runtime on `PATH`. It attaches
+  `gufo-vX.Y.Z-windows-x86_64.zip` and its `.sha256` to the Gufo release. This
+  doesn't run the Windows Devlab GPU checks.
+- **Debian package:** builds `gufo_<version>-1_amd64.deb` for Debian 13,
+  verifies it in a fresh container, and attaches it with its checksum.
 
-Nix keeps release identity and source identity separate. The default package is
-a development build and reports `gufo version development (<revision>)`.
-Official artifacts build the `release` package from a `vX.Y.Z` tag and report
-`gufo version X.Y.Z (<revision>)`. Both package outputs retain the exact flake
-revision; only the explicitly selected release output reads the semantic version
-from `version.txt`.
+Uploading to the Gufo release needs the release GitHub App, installed on Gufo
+with Contents write, through `RELEASE_APP_CLIENT_ID` and
+`RELEASE_APP_PRIVATE_KEY` in Toolboxes. Uploads never overwrite existing
+assets; the workflow's manual inputs rebuild one release, or only its Windows or
+Debian assets, for recovery.
 
-After Release Please creates a GitHub Release, the same workflow sends its exact
-`vX.Y.Z` tag to the Toolboxes repository. Toolboxes builds the release package
-from that tag and publishes OCI images tagged `X.Y.Z`, `X.Y` and `latest`.
-Rolling Toolboxes images remain separate: they follow Gufo `main` and use `edge`
-and `sha-<revision>` tags.
+## Extension API versioning
 
-In parallel with the OCI builds, Toolboxes calls Gufo's reusable Windows
-workflow from `main`, with the same exact release tag as its source checkout.
-It uses the existing Windows toolchain and host contract suite, sets the
-release version and source revision explicitly, and checks the packaged
-`gufo.exe --version` and platform diagnosis with only the bundled runtime on
-`PATH`. This does not run the manual Windows Devlab GPU/model checks.
+The extension API is versioned separately and sits outside Gufo's release
+surface: an extension API break alone doesn't need `!`, while a CLI, HTTP or
+public flake break does. The flake's experimental `extensions` argument is
+outside the surface too.
 
-The called workflow uploads its artifact to the Toolboxes workflow run.
-Toolboxes then attaches `gufo-vX.Y.Z-windows-x86_64.zip` and its `.sha256`
-checksum to the existing Gufo GitHub Release. The ZIP includes `gufo.exe`,
-the HIP and other runtime DLLs, kernel directories and notices. Extract the
-entire archive before running the executable; use `gufo.exe serve` for the
-HTTP server.
+The version is `0.MINOR.REVISION`. A revision only adds; a minor bump may break
+source compatibility. Extensions request a floor within one minor series. After
+1.0, minor bumps are additive and breaking changes bump the major, with an
+adapter for the previous major for at least 60 days where feasible and
+configure-time deprecation reports. Compatibility means rebuilding from source;
+there is no binary ABI promise. Experimental hooks graduate only by explicit
+review after 60 unchanged days. API 1.0 stays gated by the RFC criteria (the
+measured text surface, an external pilot, a pinned external compatibility
+fixture, five additive features and a real 60-day period); no 1.0 claim is made
+today.
 
-Merge the reusable Windows workflow in Gufo before enabling its Toolboxes
-caller. Toolboxes needs `RELEASE_APP_CLIENT_ID` and
-`RELEASE_APP_PRIVATE_KEY` available to its release workflow. The app must be
-installed on Gufo with Contents write permission; Toolboxes' own
-`GITHUB_TOKEN` cannot upload assets to Gufo. The upload job creates a fresh app
-token after the build and does not overwrite existing release assets.
-Toolboxes' manual release workflow accepts a tag for recovery runs.
+**Change records.** Every declaration or contract change in the
+[SURFACE](../../include/gufo/ext/SURFACE) closure (forwarded core and cache
+headers included), the manifest schema or the public CMake contracts needs the
+`ext-api` label and one new, descriptively named record under
+`include/gufo/ext/changes/<major>.<minor>/`, as the
+[record instructions](../../include/gufo/ext/changes/README.md) describe.
+Records are never edited, renamed or removed. In-tree extensions are fixed in
+the same pull request.
 
-
-## Extension API and build selection
-
-Gufo's CLI, HTTP API and existing public flake outputs retain the release
-compatibility rules above. The separately versioned source extension API and
-the future experimental flake `extensions` argument are outside that surface.
-A source extension API break alone does not require `!`; a CLI/HTTP/public flake
-break made during migration does. Extension API versioning and its generated change log
-remain independent of release automation's ownership of Gufo's version/changelog.
-
-Before 1.0, the API version is `0.MINOR.REVISION`: a minor bump may break source
-compatibility, while revision bumps are additive. Extensions request a revision
-floor within one minor series. From 1.0, minor bumps are additive and breaking
-changes increment the major; retain an adapter from the preceding major for at
-least 60 days where feasible and report deprecations at configure time. Fix
-in-tree extensions in the same PR. Compatibility means rebuilding extension
-source against a compatible Gufo release; there is no binary ABI promise.
-Experimental hooks have no stability guarantee and graduate only by explicit
-review after their own 60 unchanged days. API 1.0 remains gated by all RFC
-criteria, including the measured text surface, external pilot, independently
-pinned external text compatibility fixture, five additive API features and an
-actual 60-day period. In-tree migrations alone do not establish external
-compatibility. No 1.0 stability claim is made today.
-
-Every declaration/contract change in the generated
-[SURFACE](../../include/gufo/ext/SURFACE) transitive closure, including forwarded
-core/cache headers, and every public CMake/schema contract change requires the
-`ext-api` PR label and a new, uniquely named Markdown change record under
-`include/gufo/ext/changes/<major>.<minor>/` (for example `serving-metadata.md`).
-Use a descriptive filename and heading without an assigned API version; see the
-[record instructions](../../include/gufo/ext/changes/README.md).
-Describe the concrete declaration or contract change. Additive API PRs do not
-edit version constants or a shared changelog. Existing records must never be
-modified, renamed or removed, including after a release. The one-time
-normalization of the original numbered records removes assigned versions while
-preserving their contract descriptions and the computed API revision.
-
-[api-series.json](../../include/gufo/ext/api-series.json) defines `major`, `minor`
-and `revision_base`. The revision is `revision_base + number of revision records in the
-active series`; CMake generates the public version constants and uses the same
-value for manifest compatibility checks. The baseline is fixed within a series.
-[baseline.md](../../include/gufo/ext/changes/0.1/baseline.md) describes the initial
-contracts and is excluded from the revision count. Records in older series
-remain permanent but do not count toward the active series. A breaking change
-explicitly advances the compatibility series, sets its initial baseline, and
-adds a record in that series. Review the compatibility transition; it is not
-inferred from a record's prose.
-
-Two parallel additive PRs each add a different, descriptively named record.
-Their merge counts both, advancing the revision twice without editing a shared
-counter or reconciling assigned versions in filenames or headings.
-Branch revisions are provisional until merged; numeric revision floors promise
-compatibility along the canonical main history, not between divergent branches.
-An extension using an API available only on a branch must pin that Gufo source
-revision, then choose its minimum API version from main after the feature merges.
-Older minimum requirements in existing manifests remain valid and need no bump.
-Source archives and Nix builds compute the same version without Git metadata.
-
-Generate a combined changelog with:
+**Revision.** [api-series.json](../../include/gufo/ext/api-series.json) sets
+`major`, `minor` and `revision_base`; the revision is `revision_base` plus the
+number of records in the active series, excluding `baseline.md`. CMake
+generates the version header from it, also without Git metadata. Two parallel
+additive pull requests each add a record, and merging both advances the revision
+twice with no shared counter to reconcile. Branch revisions are provisional: an
+extension that needs an unmerged API pins that Gufo revision and picks its floor
+after the merge. A breaking change explicitly advances the series in
+`api-series.json` and adds a record in the new series; that transition is
+reviewed, never inferred.
 
 ```sh
+python3 tools/ci/check-extension-api.py --write        # after header or include changes
 python3 tools/ci/check-extension-api.py --changelog /tmp/gufo-extension-api-changes.md
 ```
 
-The generated log groups all records by series and preserves the assigned
-headings of converted historical revisions. New record ordering does not assign
-per-record revision numbers. CMake regenerates
-its version header automatically when records are added. The generated header
-is provided through the extension runtime's public include requirements; build
-extensions through CMake rather than using the source include directory alone.
+In pull requests, CI runs `check-extension-api.py --base <base-sha> --labels
+<labels>`. Its token check counts inline bodies, initializers and CMake and
+schema statements; comments and whitespace don't trigger it.
 
-The PR workflow runs `tools/ci/check-extension-api.py --base <base-sha>
---labels <json-label-list>`; the hosted suite checks inventory drift and policy
-fixtures. The initial token check conservatively includes inline bodies,
-initializers and CMake/schema statements; comments/whitespace do not trigger it.
-Card10 will expand classification of stable/platform/experimental/private
-headers and measure declarations; the initial inventory is no claim that all
-future text interfaces are already stable.
+## Extension selection in builds
 
-`nix build` / `.#default`, every normal CMake preset and both Devlab build paths
-use discovery: all supported in-tree extensions are selected, including ones
-not in [extensions.lock](../../extensions.lock). `.#release` and the release-tag
-Windows ZIP use `GUFO_EXTENSIONS_FROM_LOCK=ON`. Toolboxes can select the same
-policy through `gufo.override { extensionsFromLock = true; }`; publishing actual
-Toolboxes images remains an external distribution deliverable. The lock is an
-exact name list, including every family dependency, not an implicit dependency
-closure. An unavailable platform or missing dependency in the lock is an error
-in every configure mode, including plain discovery, so a stale lock also fails
-development builds. `GUFO_EXTENSIONS` is also an exact semicolon list; `*`
-selects discovery and an explicitly empty list selects none. An explicit list
-and lock mode conflict, and an empty entry from a stray `;` is rejected.
+| Build | Selection |
+| --- | --- |
+| `nix build` (`.#default`), CMake presets, Devlab | Discovery: every supported in-tree extension |
+| `.#release`, the release-tag Windows ZIP | `GUFO_EXTENSIONS_FROM_LOCK=ON`: exactly [extensions.lock](../../extensions.lock) |
+| Toolboxes images | The default package with the release version; `gufo.override { extensionsFromLock = true; }` would select the lock |
 
-Bootstrap: the current lock contains no migrated extensions. Existing legacy
-models still build and serve through their existing routes in both modes; they
-are not falsely reported as extension providers. Lock mode controls discovered
-extension manifests only. The pilot and later model cards populate this list as
-providers move, while Card14 adds metadata for remaining models before code
-migration. `gufo --version` preserves the version line first, then reports API,
-selection and extension provenance. `gufo diagnose --section extensions
-[--json]` inspects provenance without model loads/HIP probes; ordinary human
-`diagnose` also lists extensions. Existing diagnostic JSON schema is unchanged.
-
-Hosted CPU checks build a real lock-mode executable, report unshipped
-extensions and reject shipped/unshipped artifact-key, option-name and model-ID
-collisions. They do not establish HIP release behavior or performance parity.
-Run affected functional, numerical and performance gates on the actual shipped
-HIP lock artifact as well as the default artifact when providers migrate;
-include dialect selection/fallback and forced tool choice. Keep unshipped
-discovery evidence separate. The RFC's strict-subset/default-Devlab inference
-is not accepted as release qualification.
+The lock is an exact name list, family dependencies included, validated in
+every configure. Hosted CPU checks build a real lock-mode executable and reject
+artifact-key, option-name and model-ID collisions between shipped and unshipped
+extensions. They don't establish HIP behavior or performance: when a change
+affects providers, run the functional, numerical and performance gates on the
+shipped lock-mode HIP build as well. [Extension build](extension-build.md)
+describes selection in full.

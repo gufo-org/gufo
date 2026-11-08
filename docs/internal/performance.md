@@ -1,10 +1,11 @@
-# Strix Halo Performance Engineering
+# Performance engineering
 
-Status: stable guidance, 2026-08-19.
-
-This document defines the measurement and promotion rules for performance
-work. Current model numbers belong in `docs/internal/models/<model>/BENCHMARKS.md`; issue
-comments and local artifacts hold detailed experiment history.
+The measurement and promotion rules for performance work on Strix Halo, and the
+commands that support it. Current model numbers belong in
+`docs/internal/models/<model>/BENCHMARKS.md` under the
+[benchmark methodology](benchmarks.md); experiment history stays in issues and
+local artifacts. The [kernel optimization skill](../../.agents/skills/optimize-kernel/SKILL.md)
+applies these rules step by step.
 
 ## Target
 

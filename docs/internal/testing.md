@@ -1,8 +1,9 @@
 # Testing
 
-Run the smallest check that covers the change. Correctness and model-owned
-quality limits pass before performance results count. Production targets
-Linux gfx1151. CMake/CTest work with either system dependencies or `nix develop`.
+Which checks cover which change, and how to run them. Run the smallest check
+that covers the change; correctness and model-owned quality limits must pass
+before performance results count. CMake and CTest work with system
+dependencies or inside `nix develop`.
 
 ## Commands
 
@@ -73,9 +74,9 @@ decoders per file. CTest does not run this mode.
 ## Hosted versus local checks
 
 GitHub runs `nix flake check`: formatting, documentation, dependency inventory,
-server-command checks and one CPU build/test derivation. The CPU suite selects
-168 tests, runs with up to four CTest slots, and validates a separate lock-mode
-CLI build. It does not build ROCm, download weights, run H3 qualification or run
+server-command checks and one CPU build/test derivation. The CPU suite runs the
+`check-pr` selection from [cmake/Checks.cmake](../../cmake/Checks.cmake) with up
+to four CTest slots, and validates a separate lock-mode CLI build. It does not build ROCm, download weights, run H3 qualification or run
 whole-tree clang-tidy. Missing-model skips remain visible and are not quality
 passes. The workflow cancels superseded runs and has a 25-minute limit.
 
@@ -107,7 +108,7 @@ The default `.clang-tidy` runs the static analyzer and selected correctness
 checks. Run it explicitly against an affected source file:
 
 ```sh
-nix develop -c clang-tidy -p build/cpu-test src/core/json.cpp
+nix develop -c clang-tidy -p build/cpu-test src/core/sampling.cpp
 ```
 
 The compilation database must already be configured (the `cpu-test` preset
@@ -169,9 +170,8 @@ cmake --build build/windows-extensions --config RelWithDebInfo --parallel 4 --ta
 ctest --test-dir build/windows-extensions -C RelWithDebInfo --output-on-failure --no-tests=error --timeout 60 -R '^(extension_runtime_test|extension_role_test|ext_runtime_neutral_contracts_test)$'
 ```
 
-The qualification window must use a `BUILD_TESTING=OFF` artifact. Test-preset
-binaries now assert inside serving sources where the previous executable did not;
-assertion state differs from production.
+Qualify performance with a `BUILD_TESTING=OFF` artifact: test-preset binaries
+keep assertions on inside the serving sources, unlike production.
 
 ## Text API functional tests
 
@@ -185,7 +185,7 @@ AR/speculative model modes; full model runs stay outside hosted CI.
 
 | Change | Relevant checks |
 | --- | --- |
-| Documentation | local links, anchors, JSON examples |
+| Documentation | `check-docs.py`: links, anchors, JSON examples, public-page and figure rules ([docs/AGENTS.md](../AGENTS.md)) |
 | Loader/container/tokenizer | independent fixtures, malformed/truncated input, exact token IDs |
 | Kernel or quantizer | analytic oracle, affected layer/model boundaries, declared quality limits |
 | Attention or state layout | long-context boundaries, snapshot/restore, fresh-versus-reused state |
@@ -206,6 +206,7 @@ Model-owned procedures and outstanding qualification gaps live with the model:
 - [Qwen3-TTS](models/qwen3-tts/QUALITY.md)
 - [Qwen3-ASR](models/qwen3-asr/QUALITY.md)
 - [EmbeddingGemma 2](models/embeddinggemma-2/QUALITY.md)
+- [Qwen-Image-2.1](models/qwen-image-2.1/QUALITY.md)
 
 ## Independent references and artifacts
 

@@ -1,14 +1,17 @@
 # Benchmark methodology
 
-Build with `nix build` and measure binaries under `result/bin`. Per-model
-results and qualification gaps live in:
+How benchmark numbers are produced, compared and retained. The public summary
+is [benchmarks](../benchmarks.md). Measure release binaries (`nix build`, then
+`result/bin`). Per-model results and qualification gaps live in:
 
 - [DeepSeek V4 Flash](models/deepseek-v4-flash/BENCHMARKS.md)
+- [EmbeddingGemma 2](models/embeddinggemma-2/BENCHMARKS.md)
+- [MiniMax H3](models/minimax-h3/BENCHMARKS.md)
+- [Qwen-Image-2.1](models/qwen-image-2.1/BENCHMARKS.md)
 - [Qwen3.8 27B](models/qwen3.8-27b/BENCHMARKS.md)
 - [Qwen3.8 Flash-Next](models/qwen3.8-flash-next/BENCHMARKS.md)
-- [Qwen3-TTS](models/qwen3-tts/BENCHMARKS.md)
 - [Qwen3-ASR](models/qwen3-asr/BENCHMARKS.md)
-- [MiniMax H3](models/minimax-h3/BENCHMARKS.md)
+- [Qwen3-TTS](models/qwen3-tts/BENCHMARKS.md)
 
 ## Model benchmark driver
 
@@ -16,7 +19,7 @@ results and qualification gaps live in:
 over HTTP for Gufo and for the reference project of its category (llama.cpp
 for Qwen; antirez/ds4 for DeepSeek), writes per-table artifacts, and renders the tables
 and SVG charts between the `<!-- bench:<id> -->` markers. Workloads and table
-layouts are declared in `docs/models/<model>/artifacts/bench.json`; the
+layouts are declared in `docs/internal/models/<model>/artifacts/bench.json`; the
 `benchmark-model` skill in `.agents/skills` describes the procedure.
 
 Reference runtimes are explicitly selected Nix packages, excluded from Gufo,

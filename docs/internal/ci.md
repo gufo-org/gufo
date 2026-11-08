@@ -1,64 +1,57 @@
 # CI workflows
 
-Workflow names identify the platform and purpose. Job and step names start with
-an action. Reusable workflow callers appear as `caller / called job` in GitHub.
-All workflow files below live in `.github/workflows/`.
+What runs on a pull request, on `main` and at release, and which checks gate a
+merge. All workflow files live in `.github/workflows/`. Job and step names start
+with a verb; a reusable workflow's jobs appear as `caller / called job`.
 
-| Workflow file | Display name | Jobs | Runner | Activation and connections |
+| File | Display name | Job | Runner | When |
 | --- | --- | --- | --- | --- |
-| `checks.yml` | Repository checks | Run CPU and repository checks | GitHub Ubuntu | PRs to main, pushes to main, manual. Runs bounded CPU/repository and functional harness tests. |
-| `checks.yml` | Repository checks | Warm Linux package cache | GitHub Ubuntu through `linux-build.yml` | Main/manual only. Builds the production package and populates its shared cache. |
-| `linux-build.yml` | Linux build | Linux package | GitHub Ubuntu | Reusable only. Called for main cache warming or candidate/baseline comparison packages. |
-| `windows-build.yml` | Windows build | Windows package | GitHub Windows | Reusable only; called by Windows validation and Toolboxes releases. Builds the native application, runs CPU contracts, and verifies bundles. |
-| `devlab-windows.yml` | Windows validation | Build | Through `windows-build.yml` | PRs to main, pushes to main and manual runs. Calls the reusable native builder. |
-| `devlab-windows.yml` | Windows validation | Run Windows model checks | Devlab Windows Strix Halo | After the build on Gufo PR/manual runs. Downloads the same run’s Windows bundle and runs GPU diagnostics and model smoke checks. |
-| `devlab-linux.yml` | Linux validation | Authorize and select checks | GitHub Ubuntu | Non-draft PR updates/readiness and manual runs. Pins revisions and produces the selection plan. |
-| `devlab-linux.yml` | Linux validation | Build | GitHub Ubuntu through `linux-build.yml` | After authorization when selected work exists. Builds candidate and main packages. |
-| `devlab-linux.yml` | Linux validation | Run Linux model checks | Devlab Linux Strix Halo | Starts preparation after authorization, overlaps hosted compilation, and waits for comparison artifacts before running tests. |
-| `devlab-linux.yml` | Linux validation | Publish results | GitHub Ubuntu | After authorization/testing, including failure paths when a head revision is available. Publishes the report and `devlab/functional` status. |
-| `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | Linux validation PR runs starting/completing. Maintains placeholders and publishes fork reports without executing PR code. |
-| `pr-title.yml` | PR title | Validate PR title | GitHub Ubuntu | PR open/edit/reopen/synchronize events targeting main. |
-| `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual (Actions tab). Waits for repository checks, PR title and `devlab/functional`, then merges/publishes and requests Toolboxes artifacts. |
+| `checks.yml` | Repository checks | Run CPU and repository checks | GitHub Ubuntu | PRs to main, pushes to main, manual. Bounded CPU, repository and functional-harness tests. |
+| `checks.yml` | Repository checks | Warm Linux package cache | GitHub Ubuntu, via `linux-build.yml` | Main and manual only. Builds the production package to fill the shared cache. |
+| `linux-build.yml` | Linux build | Linux package | GitHub Ubuntu | Reusable. Main cache warming, and candidate and baseline packages for comparisons. |
+| `windows-build.yml` | Windows build | Windows package | GitHub Windows | Reusable. Builds the native application, runs CPU contracts and verifies the bundle. Called by Windows validation and by Toolboxes releases. |
+| `devlab-windows.yml` | Windows validation | Build, then Run Windows model checks | GitHub Windows, then Devlab Windows Strix Halo | PRs to main, pushes to main, manual. GPU diagnostics and model smoke checks on the same run's bundle. |
+| `devlab-linux.yml` | Linux validation | Authorize and select checks | GitHub Ubuntu | Non-draft PR updates and manual runs. Pins revisions and plans the affected checks. |
+| `devlab-linux.yml` | Linux validation | Build | GitHub Ubuntu, via `linux-build.yml` | When the plan selects work. Builds the candidate and `main` packages. |
+| `devlab-linux.yml` | Linux validation | Run Linux model checks | Devlab Linux Strix Halo | Prepares while the hosted build runs, then tests once the packages arrive. |
+| `devlab-linux.yml` | Linux validation | Publish results | GitHub Ubuntu | After testing, failures included. Publishes the report and the `devlab/functional` status. |
+| `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | When Linux validation starts or ends. Keeps the PR comment current, also for forks, without running PR code. |
+| `pr-title.yml` | PR title | Validate PR title | GitHub Ubuntu | PR opened, edited, reopened or updated. |
+| `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual. Waits for the required checks, publishes the release and asks Toolboxes to build its artifacts. |
 
-`devlab/functional` is an aggregate commit status rather than a runner job.
-Correctness failures and consistently slower checked phases fail it. Missing or
-incomparable evidence is an error. Complete noisy comparisons succeed with a
-visible warning on both ordinary and release PRs.
+## Required checks
 
-## Cache ownership
+The **Required CI** ruleset requires these contexts on `main`:
 
-- Repository checks retain the compiler cache restore prefix, Cachix, and Magic
-  Nix Cache. Fresh per-run save keys refresh the immutable Actions cache rather
-  than retaining an initially empty archive for the entire week.
-- Linux package builds retain the package compiler cache and Cachix. Main's
-  warming invocation remains because functional PR runs do not push to Cachix.
-- Windows builds retain the SDK archive, compiler cache, and vcpkg binary cache,
-  including their existing keys, restore prefixes, and save conditions.
-- Devlab consumers download verified bundles; the Linux consumer also reuses its
-  persistent runtime cache. Both validation workflows call reusable builders; Windows consumes its
-  bundle in the same workflow run.
-- The removed MinGW jobs duplicated native Windows platform/cache tests. Native
-  `check-pr` includes all Windows tests from the platform-only build, with test
-  assertions enabled. The optional local MinGW Nix package remains available.
-
-## Rename rollout
-
-The release workflow's explicit check-name references and the reporting
-workflow's `workflow_run` subscription are updated alongside the workflow names.
-Toolboxes must use `gufo-org/gufo/.github/workflows/windows-build.yml@main` after
-the renamed workflow reaches Gufo main; its caller change must not land first.
-
-GitHub's live **Required CI** ruleset (25949571) has been migrated to the
-renamed check contexts:
-
-| Existing required context | Replacement |
+| Context | From |
 | --- | --- |
-| CPU contracts & repository checks | Run CPU and repository checks |
-| Conventional Commit title | Validate PR title |
-| Windows build | Build / Windows package |
-| Windows Devlab checks | Run Windows model checks |
-| devlab/functional | Unchanged |
+| Run CPU and repository checks | `checks.yml` |
+| Validate PR title | `pr-title.yml` |
+| Build / Windows package | `devlab-windows.yml` calling `windows-build.yml` |
+| Run Windows model checks | `devlab-windows.yml` |
+| `devlab/functional` | Commit status from `devlab-linux.yml` |
 
-The Required CI ruleset is migrated with the job names. Reusable check contexts
-include the caller and leaf job names; workflow display names are not part of
-the required context. Linux and Windows retain distinct check contexts.
+A required context is the caller and leaf job name, not the workflow display
+name, so renaming a job means updating the ruleset, `release-please.yml`'s check
+names and `devlab-comment.yml`'s `workflow_run` subscription in the same change.
+Toolboxes calls `windows-build.yml@main` by path.
+
+`devlab/functional` fails on correctness failures and on checked phases that
+are consistently slower than `main`. Missing or incomparable evidence is an
+error. Noisy but complete comparisons pass with a visible warning, on ordinary
+and release PRs alike. See [testing](testing.md#text-api-functional-tests) for
+how checks are selected.
+
+## Caches
+
+- **Repository checks** use the compiler cache, Cachix and the Magic Nix Cache.
+  Each run saves under a fresh key, so the Actions cache stays current.
+- **Linux package builds** use the package compiler cache and Cachix. Main's
+  warming job exists because PR builds don't push to Cachix.
+- **Windows builds** cache the SDK archive, the compiler cache and the vcpkg
+  binary cache.
+- **Devlab runners** download the verified bundles that the hosted builds
+  produce; Windows uses the bundle from the same workflow run.
+
+Native Windows `check-pr` runs every Windows test from the platform-only build
+with assertions enabled. A MinGW Nix package remains for local use only.

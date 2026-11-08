@@ -1,10 +1,11 @@
 # Development
 
-Production targets Linux x86-64 on AMD Strix Halo (`gfx1151`). CMake owns the
-compiler flags, dependencies and installation for every build; Nix supplies the
-pinned toolchain. System dependencies and the qualified compiler/ROCm versions
-are listed in [the README](../../README.md#build-from-source). Repository rules for
-agents and contributors are in [AGENTS.md](../../AGENTS.md).
+How the repository is laid out, how to build and test it, and the conventions
+for adding code. Production targets Linux x86-64 on AMD Strix Halo
+(`gfx1151`); CMake owns compiler flags, dependencies and installation, and Nix
+supplies the pinned toolchain. Dependencies and versions are in
+[install](../install.md#build-from-source); repository rules for agents and
+contributors are in [AGENTS.md](../../AGENTS.md).
 
 ## Repository layout
 
@@ -15,21 +16,23 @@ agents and contributors are in [AGENTS.md](../../AGENTS.md).
 | `src/cache` | Continuation cache: tiers, ledger and the neutral capture/backing contract |
 | `src/sched` | Text scheduling policy: work-unit decisions and prefill rate, without serving or model code |
 | `src/ext` | Extension runtime: registry, options, neutral continuation and host-service contracts |
-| `src/models/<model>` | One model package: config, weights, engine, kernels, CPU reference |
+| `src/models/<model>` | One model extension: manifest, config, weights, engine, kernels, CPU reference |
+| `src/families/<family>` | Libraries shared by several models of one family, such as Qwen |
 | `src/eval` | HTTP capability evaluation |
 | `src/testing` | Test-only comparison helpers |
 | `tests` | Maintained fixtures and focused checks, mirroring `src` |
 | `tools` | CI entrypoints, profiling, microbenchmarks, offline evaluation and reference runners |
 | `cmake` | Shared CMake modules, including the hosted `check-pr` selection |
-| `docs` | Cross-cutting guides; `docs/models/<model>.md` is each model page; `docs/internal` holds developer documents and per-model evidence |
+| `docs` | Public pages; `docs/internal` holds developer documents and per-model evidence (see [docs/AGENTS.md](../AGENTS.md)) |
 | `.devops/nix` | Production package, reference packages and server configuration |
 | `.github/workflows` | Hosted CI definition |
 | `artifacts`, `models` | Ignored local outputs and weights; never committed |
 
 Model code, kernels, tests, tools and numerical contracts stay with their model.
-A model package builds as its own static library and is attached in the root
-`CMakeLists.txt` with `add_subdirectory`; heavy CPU oracles are declared
-`EXCLUDE_FROM_ALL` so routine builds stay cheap.
+Every model is an extension: configure discovers its `extension.json`, builds
+the libraries its `extension.cmake` declares, and links them into `gufo` through
+the generated registry (see [extension build](extension-build.md)). Heavy CPU
+oracles are `EXCLUDE_FROM_ALL` so routine builds stay cheap.
 
 `gufo_serving` (`src/cli/serve`: scheduler, model runner, cache facade, model
 selection) and `gufo_http` are the top of the graph. Nothing under
@@ -137,21 +140,25 @@ such as `slow` or `external-model`. Add cheap host contracts to `gufo_pr_targets
 in [cmake/Checks.cmake](../../cmake/Checks.cmake) only when they belong in every PR;
 model oracles stay out of the hosted set.
 
-**A model.** Create `src/models/<model>` with its own `CMakeLists.txt` exporting
-a `gufo_<model>` library, attach it with `add_subdirectory`, keep kernels under
-`kernels/` and the CPU reference behind `EXCLUDE_FROM_ALL`. Add tests under
-`tests/models/<model>`, a row in [the model index](../models/README.md), and the
-four required documents `README.md`, `BENCHMARKS.md`, `QUALITY.md` and
-`EXPERIMENTS.md` under `docs/internal/models/<model>/`.
+**A model.** Follow [writing an extension](../writing-extensions.md): create
+`src/models/<model>` with `extension.json`, `extension.cmake` and a
+`library.json` ([target ownership](target-ownership.md)), keep kernels under
+`kernels/` and the CPU reference behind `EXCLUDE_FROM_ALL`, and add tests under
+`tests/models/<model>`. Set `docs` in the manifest, run
+`python3 tools/ci/generate-infrastructure.py --write` to update the model index
+and generated CI, then write the public page `docs/models/<model>.md` and
+`BENCHMARKS.md`, `QUALITY.md` and `EXPERIMENTS.md` under
+`docs/internal/models/<model>/`. Shipping it is a one-line change to
+`extensions.lock`.
 
 **A dependency.** Record it in `THIRD_PARTY_NOTICES.md`; `tools/ci/check-dependencies.py`
 validates that shipped and evaluation components carry license, version and
 source records.
 
-**Documentation.** `tools/ci/check-docs.py` enforces the presence of the
-maintained documents, resolves every local link and heading anchor offline, and
-parses fenced JSON blocks. Run `nix build .#checks.x86_64-linux.docs` for
-documentation-only changes.
+**Documentation.** Follow [docs/AGENTS.md](../AGENTS.md).
+`tools/ci/check-docs.py` checks required documents, every local link and
+anchor, fenced JSON, and the public-page and figure rules. Run
+`nix build .#checks.x86_64-linux.docs` for documentation-only changes.
 
 ## Performance work
 
@@ -183,11 +190,9 @@ hosted selection is described in [testing](testing.md).
 
 ## Related documents
 
-[CLI](../cli.md), [server](../server.md), [testing](testing.md),
-[releasing](releasing.md),
-[performance](performance.md), [benchmarking](benchmarks.md) and
-[models](../models/README.md).
+[Testing](testing.md), [CI](ci.md), [releasing](releasing.md),
+[performance](performance.md), [benchmarking](benchmarks.md),
+[server reference](server.md), [cache reference](cache.md) and
+[extension build](extension-build.md).
 
-The production package ships the HIP backend only. Experimental accelerator work
-remains on `perf/qwen27b-dflash2-npu`; offline quantization research remains in
-PR #234. Neither toolchain is required to install or run main.
+The production package ships the HIP backend only.

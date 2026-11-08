@@ -1,5 +1,9 @@
 # Cache reference
 
+How the cross-request cache works inside: components, checkpoints, retention,
+budgets, the disk tier, invariants and log lines. The user-facing summary is
+[cache](../cache.md).
+
 ## What "KV cache" means here
 
 Two different things share the name. Keeping them apart avoids most of the
@@ -140,7 +144,7 @@ and all remaining checkpoints fall after the edit, reuse is impossible:
 | 3', no usable earlier checkpoint | 5,620 | 0 | 5,620 | 5,599 |
 
 That gap between "common prefix" and "reused" is the signature of the
-exact-prefix limitation. See #331.
+exact-prefix limitation.
 
 ## Concurrent requests sharing a prefix
 
@@ -467,11 +471,9 @@ conversations:
 - Add `--cache-disk` so checkpoints that leave RAM can still be restored from
   disk. Checkpoints of any size stream through the internal buffer.
 
-See #343.
-
 Snapshot size scales with retained tokens and differs sharply between models:
 roughly 0.5 GB at 5k tokens on Flash-Next, and 3.7 GB at 24k tokens on
-Qwen3.8-27B **(measured)**. See #259.
+Qwen3.8-27B **(measured)**.
 
 RAM eviction follows the checkpoint priorities above. Disk eviction remains
 global least-recently-used, without conversation or rebuild-cost awareness.
@@ -484,7 +486,7 @@ Qwen27B and Flash-Next use the same options with these meanings:
 | --- | --- |
 | `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
 | `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints by creation order: use history does not survive a restart. |
-| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed (#562), and a larger value only took pinned RAM and device heap. Earlier advice to raise staging no longer applies. |
+| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed, and a larger value only took pinned RAM and device heap. |
 | `--cache-disk DIR` | Owned by one server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory.  model's server sharing it. |
 
 The 128-record limit stays internal. The following measured sizes and timings
@@ -526,8 +528,9 @@ free pages **(measured)**. Captures run on the scheduler thread, so concurrent
 requests pause for that long too; an 8 GiB budget fills in eight steps. When the
 kernel must first reclaim page cache, such as the model files read at load, a
 step takes longer: a 157K-token turn that retained 4.8 GB right after a restart
-spent about 3.5 s growing in 256 MiB steps. The eager pool paid the same reclaim at startup; at a
-17 GiB budget model load took 29–39 s against 16 s now **(measured)**. Segments
+spent about 3.5 s growing in 256 MiB steps. Committing pages on demand keeps
+that reclaim out of model load: committing a 17 GiB budget up front took
+29–39 s at load, against 16 s without it **(measured)**. Segments
 cannot be joined, so a payload stays within one, and each edge strands space
 that a ~140 MB private state cannot use; equal segments of about 1 GiB keep that
 small. A step is skipped while the host would keep less than 4 GiB available
@@ -575,7 +578,7 @@ unaffected.
 
 Disk entries are evicted by global LRU on last access, so one active run whose
 checkpoints are all recent will displace every other conversation in age order
-**(measured)**. See #275.
+**(measured)**.
 
 ## What invalidates reuse
 
@@ -594,7 +597,7 @@ Anything that changes the token prefix. In practice:
   boundary before the assistant opening, so the next turn can reuse the prior
   history and process the rewritten assistant plus new input. That boundary
   must be saved on warm hits too; retaining only the old resume point caused
-  cache reuse to stop advancing for the rest of the session. See #335.
+  cache reuse to stop advancing for the rest of the session.
 
 These do **not** invalidate reuse **(measured)**: changing `temperature`,
 `top_p`, `seed`, `max_tokens`, penalties or `stop` between turns; streaming
@@ -619,7 +622,7 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
 | `schema=component-cache-v1 event=ram_cache_trimmed` | Qwen3.8-27B, Flash-Next and DeepSeek V4: an explicit `--cache-ram-bytes` exceeds what the host keeps above its 4 GiB reserve after the sessions allocated; reports `requested_bytes` and the granted `capacity_bytes` |
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
-| `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory (#460). Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration (#781) |
+| `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory. Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration |
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints (creation order) to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
@@ -667,7 +670,7 @@ Reading them:
   `event=shared_prefix_wait` and `event=shared_prefix_ready` name the leader
   and position.
 - `cache_n` **pinned** at the same value while `prompt_n` grows every turn is a
-  checkpoint that stopped advancing. See #335.
+  checkpoint that stopped advancing.
 - A large `cache_common_prefix_tokens` on a miss means a long prefix agreed and
   could not be resumed from: a mid-history edit, or an evicted checkpoint.
 
@@ -692,8 +695,3 @@ Reading them:
   runners without snapshots, without loading a model.
 - `tests/cli/component_text_cache_test.cpp` and `tests/cache/` cover
   retention, admission, eviction and persistence without loading a model.
-
-## Known gaps
-
-Tracked under #336, with the upstream reports #331, #335, #259, #267, #275,
-#300 and #318.
