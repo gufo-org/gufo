@@ -79,6 +79,24 @@ Gufo finds `mmproj-BF16.gguf` next to the target; pass `--mmproj PATH` to use
 another location. Images work the same way as for
 [Qwen3.8 27B](qwen3.8-27b.md#images), with AR and MTP.
 
+## Residual projection
+
+`gufo serve llm --projection-vector CV.gguf` loads a direction file in the
+llama.cpp control-vector format. At each layer the file covers, the server
+removes the hidden state's component along that direction. This is a
+projection, not llama.cpp's additive steering. `--projection-layers LO-HI`
+limits it to an inclusive range of layers.
+
+Projection is off unless a chat request sets `"projection": true`. Requests
+that leave it out run unchanged, and cached prompts never cross between the
+two states. A request that sets it on a server started without a vector fails
+with a 400 error.
+
+How well a direction works depends on the model it was measured on. Check any
+vector against your own evaluations. The
+[implementation notes](../internal/models/qwen3.8-flash-next/README.md#runtime-residual-projection)
+cover the file format, scaling and caching.
+
 ## Performance
 
 As of October 18, 2026, on Strix Halo:
