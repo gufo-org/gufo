@@ -212,6 +212,19 @@ struct ds4_rocm_graph {
     // while sessions still borrow them and are pruned on session creation.
     ds4_rocm_graph* next_batch_workspace;
 
+    /* Layered prefill: after each layer whose bit is set, a layer-major pass
+     * waits for its queued layers and calls prefill_yield, where other
+     * sessions may decode (rocm_graph_yield_prefill). Zero runs passes
+     * unsplit. */
+    uint64_t prefill_yield_layers;
+    void (*prefill_yield)(void *ctx);
+    void *prefill_yield_ctx;
+    ds4_engine *engine;
+    ds4_rocm_graph *next_graph;  ///< engine->graphs list
+    /* While another graph's pass yields: this graph's own batch binding and
+     * prefill_cap, restored after the decode round. */
+    ds4_rocm_graph *yield_saved;
+
     /* =====================================================================
      * DSpark speculative verification state.
      * =====================================================================
@@ -706,6 +719,134 @@ static bool rocm_graph_reserve_compressed_position(ds4_gpu_graph* g,
  * ROCm Release Graph Allocation.
  * ========================================================================= */
 
+/* Allocates the batch tensors of a prefill pass or batched decode of `pc`
+ * rows (shared by sessions, see rocm_graph_bind_batch_workspace). */
+static bool rocm_graph_alloc_batch_tensors(ds4_gpu_graph *g,
+                                           const ds4_layer_weights *layer,
+                                           uint64_t pc) {
+  const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
+  const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
+  const uint64_t q_rank = layer->attn_q_a->dim[1];
+  const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
+  const uint64_t low_dim = (uint64_t)DS4_N_OUT_GROUP * DS4_N_LORA_O;
+  const uint64_t group_dim =
+      (uint64_t)DS4_N_HEAD_DIM * (DS4_N_HEAD / DS4_N_OUT_GROUP);
+  const uint64_t shared_dim = layer->ffn_gate_shexp->dim[1];
+  const uint64_t routed_mid_dim = layer->ffn_gate_exps->dim[1];
+  const uint64_t comp_width_max =
+      2ull * (DS4_N_HEAD_DIM > DS4_N_INDEXER_HEAD_DIM ? DS4_N_HEAD_DIM
+                                                      : DS4_N_INDEXER_HEAD_DIM);
+  const uint64_t indexer_q_dim =
+      (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM;
+  // These stages run in order, including across grouped requests:
+  // HC normalization -> attention Q/heads -> routed MoE -> shared expert.
+  // Only routed down survives into the shared-expert stage. Keep it
+  // beyond both sets of FFN intermediates, then reuse the other ranges.
+  const uint64_t q_bytes = pc * q_dim * sizeof(float);
+  const uint64_t hc_bytes = pc * hc_dim * sizeof(float);
+  const uint64_t routed_mid_bytes =
+      pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float);
+  const uint64_t routed_down_bytes =
+      pc * DS4_N_EXPERT_USED * DS4_N_EMBD * sizeof(float);
+  const uint64_t shared_mid_bytes = pc * shared_dim * sizeof(float);
+  const uint64_t shared_out_bytes = pc * DS4_N_EMBD * sizeof(float);
+  const uint64_t down_offset = std::max(
+      3 * routed_mid_bytes, 3 * shared_mid_bytes + shared_out_bytes);
+  g->batch_stage_scratch = ds4_gpu_tensor_alloc(
+      std::max({2 * q_bytes, hc_bytes, down_offset + routed_down_bytes}));
+  g->prefill_tokens = ds4_gpu_tensor_alloc(pc * sizeof(int32_t));
+  g->batch_cur_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
+  g->batch_next_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
+  g->batch_flat_hc =
+      ds4_gpu_tensor_view(g->batch_stage_scratch, 0, hc_bytes);
+  g->batch_hc_mix = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
+  g->batch_hc_split = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
+  g->batch_attn_cur = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+  g->batch_attn_norm =
+      ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+  g->batch_qr = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
+  g->batch_qr_norm = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
+  g->batch_q = ds4_gpu_tensor_view(g->batch_stage_scratch, 0, q_bytes);
+  g->batch_kv_raw =
+      ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
+  g->batch_kv = ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
+  g->batch_comp_kv =
+      ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
+  g->batch_comp_sc =
+      ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
+  g->batch_indexer_q =
+      ds4_gpu_tensor_alloc(pc * indexer_q_dim * sizeof(float));
+  g->batch_indexer_weights =
+      ds4_gpu_tensor_alloc(pc * DS4_N_INDEXER_HEAD * sizeof(float));
+  // Indexer scoring may borrow this range for F16 keys and queries before
+  // attention writes its heads. It is disjoint from live attention Q.
+  g->batch_heads =
+      ds4_gpu_tensor_view(g->batch_stage_scratch, q_bytes, q_bytes);
+  g->batch_attn_low = ds4_gpu_tensor_alloc(pc * low_dim * sizeof(float));
+  g->batch_attn_out = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+  g->batch_group_tmp = ds4_gpu_tensor_alloc(pc * group_dim * sizeof(float));
+  g->batch_low_tmp =
+      ds4_gpu_tensor_alloc(pc * DS4_N_LORA_O * sizeof(float));
+  g->batch_after_attn_hc =
+      ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
+  g->batch_ffn_cur = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+  g->batch_ffn_norm = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+  g->batch_shared_gate =
+      ds4_gpu_tensor_view(g->batch_stage_scratch, 0, shared_mid_bytes);
+  g->batch_shared_up = ds4_gpu_tensor_view(
+      g->batch_stage_scratch, shared_mid_bytes, shared_mid_bytes);
+  g->batch_shared_mid = ds4_gpu_tensor_view(
+      g->batch_stage_scratch, 2 * shared_mid_bytes, shared_mid_bytes);
+  g->batch_shared_out = ds4_gpu_tensor_view(
+      g->batch_stage_scratch, 3 * shared_mid_bytes, shared_out_bytes);
+  g->batch_router_logits =
+      ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
+  g->batch_router_probs =
+      ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
+  g->batch_router_selected =
+      ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int));
+  g->batch_router_weights =
+      ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(float));
+  g->batch_routed_gate =
+      ds4_gpu_tensor_view(g->batch_stage_scratch, 0, routed_mid_bytes);
+  g->batch_routed_up = ds4_gpu_tensor_view(
+      g->batch_stage_scratch, routed_mid_bytes, routed_mid_bytes);
+  g->batch_routed_mid = ds4_gpu_tensor_view(
+      g->batch_stage_scratch, 2 * routed_mid_bytes, routed_mid_bytes);
+  g->batch_routed_down = ds4_gpu_tensor_view(
+      g->batch_stage_scratch, down_offset, routed_down_bytes);
+  g->batch_routed_out =
+      ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+  return g->batch_stage_scratch &&
+         g->prefill_tokens &&
+         g->batch_cur_hc &&
+         g->batch_next_hc &&
+         g->batch_hc_mix &&
+         g->batch_hc_split &&
+         g->batch_attn_cur &&
+         g->batch_attn_norm &&
+         g->batch_qr &&
+         g->batch_qr_norm &&
+         g->batch_kv_raw &&
+         g->batch_kv &&
+         g->batch_comp_kv &&
+         g->batch_comp_sc &&
+         g->batch_indexer_q &&
+         g->batch_indexer_weights &&
+         g->batch_attn_low &&
+         g->batch_attn_out &&
+         g->batch_group_tmp &&
+         g->batch_low_tmp &&
+         g->batch_after_attn_hc &&
+         g->batch_ffn_cur &&
+         g->batch_ffn_norm &&
+         g->batch_router_logits &&
+         g->batch_router_probs &&
+         g->batch_router_selected &&
+         g->batch_router_weights &&
+         g->batch_routed_out;
+}
+
 /* Allocate the ROCm graph state for a chosen raw-cache capacity.  The model
  * weights are not copied here; tensors reference the mapped GGUF. */
 static bool rocm_graph_alloc_raw_cap(
@@ -752,7 +893,6 @@ static bool rocm_graph_alloc_raw_cap(
     const uint64_t q_rank = layer->attn_q_a->dim[1];
     const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
     const uint64_t low_dim = (uint64_t)DS4_N_OUT_GROUP * DS4_N_LORA_O;
-    const uint64_t group_dim = (uint64_t)DS4_N_HEAD_DIM * (DS4_N_HEAD / DS4_N_OUT_GROUP);
     const uint64_t shared_dim = layer->ffn_gate_shexp->dim[1];
     const uint64_t routed_mid_dim = layer->ffn_gate_exps->dim[1];
     const uint64_t vocab_dim = weights->output->dim[1];
@@ -910,85 +1050,7 @@ static bool rocm_graph_alloc_raw_cap(
       }
         rocm_graph_bind_batch_workspace(g, batch_workspace);
     } else {
-      // These stages run in order, including across grouped requests:
-      // HC normalization -> attention Q/heads -> routed MoE -> shared expert.
-      // Only routed down survives into the shared-expert stage. Keep it
-      // beyond both sets of FFN intermediates, then reuse the other ranges.
-      const uint64_t q_bytes = pc * q_dim * sizeof(float);
-      const uint64_t hc_bytes = pc * hc_dim * sizeof(float);
-      const uint64_t routed_mid_bytes =
-          pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float);
-      const uint64_t routed_down_bytes =
-          pc * DS4_N_EXPERT_USED * DS4_N_EMBD * sizeof(float);
-      const uint64_t shared_mid_bytes = pc * shared_dim * sizeof(float);
-      const uint64_t shared_out_bytes = pc * DS4_N_EMBD * sizeof(float);
-      const uint64_t down_offset = std::max(
-          3 * routed_mid_bytes, 3 * shared_mid_bytes + shared_out_bytes);
-      g->batch_stage_scratch = ds4_gpu_tensor_alloc(
-          std::max({2 * q_bytes, hc_bytes, down_offset + routed_down_bytes}));
-      g->prefill_tokens = ds4_gpu_tensor_alloc(pc * sizeof(int32_t));
-      g->batch_cur_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
-      g->batch_next_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
-      g->batch_flat_hc =
-          ds4_gpu_tensor_view(g->batch_stage_scratch, 0, hc_bytes);
-      g->batch_hc_mix = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
-      g->batch_hc_split = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
-      g->batch_attn_cur = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-      g->batch_attn_norm =
-          ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-      g->batch_qr = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
-      g->batch_qr_norm = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
-      g->batch_q = ds4_gpu_tensor_view(g->batch_stage_scratch, 0, q_bytes);
-      g->batch_kv_raw =
-          ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
-      g->batch_kv = ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
-      g->batch_comp_kv =
-          ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
-      g->batch_comp_sc =
-          ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
-      g->batch_indexer_q =
-          ds4_gpu_tensor_alloc(pc * indexer_q_dim * sizeof(float));
-      g->batch_indexer_weights =
-          ds4_gpu_tensor_alloc(pc * DS4_N_INDEXER_HEAD * sizeof(float));
-      // Indexer scoring may borrow this range for F16 keys and queries before
-      // attention writes its heads. It is disjoint from live attention Q.
-      g->batch_heads =
-          ds4_gpu_tensor_view(g->batch_stage_scratch, q_bytes, q_bytes);
-      g->batch_attn_low = ds4_gpu_tensor_alloc(pc * low_dim * sizeof(float));
-      g->batch_attn_out = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-      g->batch_group_tmp = ds4_gpu_tensor_alloc(pc * group_dim * sizeof(float));
-      g->batch_low_tmp =
-          ds4_gpu_tensor_alloc(pc * DS4_N_LORA_O * sizeof(float));
-      g->batch_after_attn_hc =
-          ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
-      g->batch_ffn_cur = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-      g->batch_ffn_norm = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-      g->batch_shared_gate =
-          ds4_gpu_tensor_view(g->batch_stage_scratch, 0, shared_mid_bytes);
-      g->batch_shared_up = ds4_gpu_tensor_view(
-          g->batch_stage_scratch, shared_mid_bytes, shared_mid_bytes);
-      g->batch_shared_mid = ds4_gpu_tensor_view(
-          g->batch_stage_scratch, 2 * shared_mid_bytes, shared_mid_bytes);
-      g->batch_shared_out = ds4_gpu_tensor_view(
-          g->batch_stage_scratch, 3 * shared_mid_bytes, shared_out_bytes);
-      g->batch_router_logits =
-          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
-      g->batch_router_probs =
-          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
-      g->batch_router_selected =
-          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int));
-      g->batch_router_weights =
-          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(float));
-      g->batch_routed_gate =
-          ds4_gpu_tensor_view(g->batch_stage_scratch, 0, routed_mid_bytes);
-      g->batch_routed_up = ds4_gpu_tensor_view(
-          g->batch_stage_scratch, routed_mid_bytes, routed_mid_bytes);
-      g->batch_routed_mid = ds4_gpu_tensor_view(
-          g->batch_stage_scratch, 2 * routed_mid_bytes, routed_mid_bytes);
-      g->batch_routed_down = ds4_gpu_tensor_view(
-          g->batch_stage_scratch, down_offset, routed_down_bytes);
-      g->batch_routed_out =
-          ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+      (void)rocm_graph_alloc_batch_tensors(g, layer, pc);
     }
 
     bool layer_cache_ok = true;
@@ -4429,6 +4491,73 @@ static bool rocm_graph_reset_prefill_state(ds4_gpu_graph *g) {
 
 /* Execute ROCm prefill in layer-major order so intermediate activations stay
  * on the GPU and cache state is built exactly once. */
+/* Runs `g`'s yield between two layer groups of its prefill pass. The pass
+ * keeps its rows in the batch workspace every session shares, and batched
+ * decodes and DSpark verification use that workspace too. For the yield,
+ * every other session graph is bound to a small decode workspace sized for
+ * the largest decode a round runs (8 sessions, each up to a DSpark block
+ * plus its anchor), with its prefill_cap lowered to match so a larger batch
+ * fails its capacity checks instead of overrunning it. */
+static bool rocm_graph_yield_prefill(ds4_gpu_graph *g) {
+    ds4_engine *engine = g->engine;
+    if (!engine) {
+        g->prefill_yield(g->prefill_yield_ctx);
+        return true;
+    }
+    const uint32_t rows =
+        engine->dspark ? 8u * (engine->dspark->block_size + 1u) : 8u;
+    if (!engine->decode_workspace) {
+        auto *workspace =
+            static_cast<ds4_rocm_graph *>(ds4_xcalloc(1, sizeof(ds4_rocm_graph)));
+        bool ok = rocm_graph_alloc_batch_tensors(
+            workspace, &engine->weights->layer[0], rows);
+        if (ok && engine->dspark) {
+            const uint64_t verify_bytes =
+                (uint64_t)rows * DS4_N_HC * DS4_N_EMBD * sizeof(float);
+            workspace->batch_dspark_verify_cur_hc =
+                ds4_gpu_tensor_alloc(verify_bytes);
+            workspace->batch_dspark_verify_after_attn_hc =
+                ds4_gpu_tensor_alloc(verify_bytes);
+            workspace->batch_dspark_verify_rows_cap = rows;
+            ok = workspace->batch_dspark_verify_cur_hc &&
+                 workspace->batch_dspark_verify_after_attn_hc;
+        }
+        if (!ok) {
+            rocm_graph_free_batch_workspace(workspace);
+            free(workspace);
+            return false;
+        }
+        workspace->prefill_cap = rows;
+        engine->decode_workspace = workspace;
+        gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kInfo, "ds4",
+            "decodes between layer groups use a %u-row batch workspace", rows);
+    }
+    for (ds4_rocm_graph *other = engine->graphs; other;
+         other = other->next_graph) {
+        if (other == g) continue;
+        auto *saved =
+            static_cast<ds4_rocm_graph *>(ds4_xcalloc(1, sizeof(ds4_rocm_graph)));
+        rocm_graph_bind_batch_workspace(saved, other);
+        saved->prefill_cap = other->prefill_cap;
+        other->yield_saved = saved;
+        rocm_graph_bind_batch_workspace(other, engine->decode_workspace);
+        other->prefill_cap = std::min(other->prefill_cap, rows);
+    }
+    g->prefill_yield(g->prefill_yield_ctx);
+    // A graph destroyed during the round has left the list (and freed its
+    // saved binding).
+    for (ds4_rocm_graph *other = engine->graphs; other;
+         other = other->next_graph) {
+        if (!other->yield_saved) continue;
+        rocm_graph_bind_batch_workspace(other, other->yield_saved);
+        other->prefill_cap = other->yield_saved->prefill_cap;
+        free(other->yield_saved);
+        other->yield_saved = nullptr;
+    }
+    return true;
+}
+
 static bool rocm_graph_prefill_layer_major(
         ds4_gpu_graph *g,
         const ds4_model       *model,
@@ -4470,6 +4599,13 @@ static bool rocm_graph_prefill_layer_major(
       // Keep feature capture and the HC swap in the common layer encoder.
       ok = rocm_graph_encode_layer_batch(g, model, &weights->layer[il], il,
                                          start, n_tokens);
+      // The pass carries its rows across layers in the shared batch
+      // workspace; the decodes between groups use their own (see
+      // rocm_graph_yield_prefill).
+      if (ok && g->prefill_yield && il + 1 < DS4_N_LAYER &&
+          (g->prefill_yield_layers >> il & 1u)) {
+        ok = ds4_gpu_synchronize() != 0 && rocm_graph_yield_prefill(g);
+      }
       if (show_progress) {
         fprintf(stderr, "ds4: gpu prefill layer %u/%u\r", il + 1,
                 (uint32_t)DS4_N_LAYER);
@@ -6995,6 +7131,24 @@ uint32_t ds4_rocm_graph_resume_prefill_min_tokens(void) {
     return rocm_graph_resume_prefill_min_tokens();
 }
 
+void ds4_rocm_graph_set_prefill_yield(ds4_rocm_graph *graph,
+                                      uint32_t groups,
+                                      void (*yield)(void *ctx),
+                                      void *ctx) {
+    if (!graph) return;
+    graph->prefill_yield_layers = 0;
+    graph->prefill_yield = NULL;
+    graph->prefill_yield_ctx = NULL;
+    if (groups < 2 || !yield) return;
+    static_assert(DS4_N_LAYER <= 64, "yield layers are a 64-bit mask");
+    if (groups > DS4_N_LAYER) groups = DS4_N_LAYER;
+    for (uint32_t k = 1; k < groups; ++k)
+        graph->prefill_yield_layers |=
+            uint64_t{1} << (k * DS4_N_LAYER / groups - 1u);
+    graph->prefill_yield = yield;
+    graph->prefill_yield_ctx = ctx;
+}
+
 ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
                                       int context_size,
                                       uint32_t prefill_capacity) {
@@ -7064,6 +7218,9 @@ ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
     }
     graph->batch_workspace_owner = batch_workspace;
     ++batch_workspace->batch_workspace_borrowers;
+    graph->engine = engine;
+    graph->next_graph = engine->graphs;
+    engine->graphs = graph;
     return graph;
 }
 
@@ -7072,6 +7229,20 @@ void ds4_rocm_graph_destroy(ds4_rocm_graph *graph) {
     ds4_rocm_graph* next = graph->next_batch_workspace;
     if (graph->batch_workspace_owner)
       --graph->batch_workspace_owner->batch_workspace_borrowers;
+    if (graph->engine) {
+      for (auto** link = &graph->engine->graphs; *link;
+           link = &(*link)->next_graph) {
+        if (*link == graph) {
+          *link = graph->next_graph;
+          break;
+        }
+      }
+    }
+    if (graph->yield_saved) {
+      // Destroyed inside a yield: its own buffers come back for freeing.
+      rocm_graph_bind_batch_workspace(graph, graph->yield_saved);
+      free(graph->yield_saved);
+    }
     rocm_graph_free(graph);
     free(graph);
     graph = next;

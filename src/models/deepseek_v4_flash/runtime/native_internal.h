@@ -81,6 +81,10 @@ struct ds4_engine {
     ds4_weights *weights;
     ds4_dspark_model *dspark;
     ds4_rocm_graph* batch_workspace;
+    /* Every session graph, and the small batch workspace their decodes use
+     * while a layered prefill pass of one of them yields. */
+    ds4_rocm_graph* graphs;
+    ds4_rocm_graph* decode_workspace;
     bool rocm_ready;
 };
 
@@ -131,6 +135,14 @@ int ds4_sample_top_p_min_p(const float *logits,
                            uint64_t *rng_state);
 
 uint32_t ds4_rocm_graph_prefill_capacity(int context_size);
+/* Splits the following layer-major prefill passes of `graph` into at most
+ * `groups` layer groups of about equal depth and calls yield(ctx) between
+ * them, once the queued layers have finished. Fewer than two groups, or a
+ * NULL yield, restores unsplit passes. */
+void ds4_rocm_graph_set_prefill_yield(ds4_rocm_graph *graph,
+                                      uint32_t groups,
+                                      void (*yield)(void *ctx),
+                                      void *ctx);
 uint32_t ds4_rocm_graph_resume_prefill_min_tokens(void);
 ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
                                       int context_size,

@@ -1459,6 +1459,17 @@ uint32_t ds4_session_prefill_capacity(const ds4_session* session) {
   return session ? session->prefill_capacity : 0;
 }
 
+uint32_t ds4_session_prefill_capacity_for(int context_size) {
+  return ds4_rocm_graph_prefill_capacity(context_size);
+}
+
+void ds4_session_set_prefill_yield(ds4_session* session, uint32_t groups,
+                                   void (*yield)(void* user_data),
+                                   void* user_data) {
+  if (session)
+    ds4_rocm_graph_set_prefill_yield(session->graph, groups, yield, user_data);
+}
+
 uint32_t ds4_layer_ratio(uint32_t layer) {
   return ds4_layer_compress_ratio(layer);
 }
