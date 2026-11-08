@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include "gufo/ext/options.hpp"
 #include "gufo/ext/reasoning.hpp"
 #include "gufo/ext/sampling.hpp"
+#include "gufo/ext/scheduling.hpp"
 #include "gufo/ext/text_contracts.hpp"
 #include "src/cache/component_resources.hpp"
 #include "src/core/text_sampling_defaults.hpp"
@@ -34,6 +36,8 @@
 namespace gufo::ext {
 
 using ComponentCacheResources = cache::ComponentCacheResources;
+using TextSchedulingProfile = sched::TextSchedulingProfile;
+using PrefillYield = sched::PrefillYield;
 using TextRunnerToken = ContinuationToken;
 
 /// Immutable model-owned input which travels with one scheduled request.
@@ -186,6 +190,9 @@ struct TextRunnerDescriptor {
   /// Core preset kept for existing extensions.
   sampling::TextModelPreset sampling_preset{
       sampling::TextModelPreset::kUnspecified};
+  /// Prompt scheduling beside other sessions' decoding. Empty keeps passes
+  /// bounded by the host's decode-active budget.
+  std::optional<TextSchedulingProfile> scheduling{};
 };
 
 struct TextRunnerResourceClaim {
@@ -269,6 +276,27 @@ public:
   /// generation; runners without the feature ignore it.
   virtual void SetProjectionEnabled(bool /*enabled*/) {}
 
+  /// Set by the host for the next Prefill or PrefillThrough call only. A
+  /// runner whose descriptor has a scheduling profile splits each pass into
+  /// about `groups` layer groups of similar duration and calls YieldPrefill()
+  /// between them; it may add a boundary where the pass would otherwise
+  /// stall, such as a wait for input rows. Every layer keeps the arithmetic
+  /// of an unsplit pass. A runner may ignore it and run unsplit passes.
+  /// While yielding, it must hold no lock or scratch its decode paths take.
+  void SetPrefillYield(std::size_t groups, PrefillYield yield) {
+    prefill_yield_groups_ = yield ? std::max<std::size_t>(groups, 1) : 1;
+    prefill_yield_ = std::move(yield);
+  }
+  /// One when the host asked for unsplit passes.
+  [[nodiscard]] std::size_t prefill_yield_groups() const noexcept {
+    return prefill_yield_groups_;
+  }
+  /// Runs the host's decode round between two layer groups.
+  void YieldPrefill() const {
+    if (prefill_yield_)
+      prefill_yield_();
+  }
+
   [[nodiscard]] virtual TextRunnerMeasuredResources MeasuredResources()
       const noexcept {
     return {};
@@ -278,6 +306,8 @@ private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
   std::size_t prefill_prompt_end_{};
+  std::size_t prefill_yield_groups_{1};
+  PrefillYield prefill_yield_;
 };
 
 struct TextRunnerAdvance {
@@ -669,6 +699,9 @@ struct TextSpeculativeConfig {
   std::uint32_t max_draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
   TextDFlashDraftPolicy dflash_policy{TextDFlashDraftPolicy::kAdaptive};
+  /// The resolved `--draft-policy` (see `TextSpeculativeDefaults`); empty when
+  /// the backend has no policy.
+  std::string draft_policy{};
 };
 
 struct TextDiskCacheConfig {
@@ -870,6 +903,23 @@ using TextChatDriver =
     int (*)(const TextPromptOptions& options, const core::GgufReader& reader,
             std::chrono::steady_clock::time_point load_start);
 
+/// A provider's draft settings for one speculative backend. The commands
+/// resolve each setting as the explicit flag, else this default, else the
+/// host's (7 draft tokens, minimum 1, no policy; DFlash2 accepts `fixed` and
+/// `adaptive`) when the provider declares nothing for the backend.
+struct TextSpeculativeDefaults {
+  /// The `--speculative` value: `mtp`, `dflash2` or `dspark`.
+  std::string backend;
+  /// `--draft-tokens` when it is not given.
+  std::uint32_t max_draft_tokens{7};
+  /// `--min-draft-tokens` when it is not given.
+  std::uint32_t min_draft_tokens{1};
+  /// `--draft-policy` when it is not given; may be empty.
+  std::string draft_policy;
+  /// The `--draft-policy` values this backend accepts; empty accepts none.
+  std::vector<std::string> draft_policies;
+};
+
 struct TextProvider {
   std::string id;
   TextProbe probe = nullptr;
@@ -885,6 +935,8 @@ struct TextProvider {
   /// their `data` and reserved `size_bytes`; the others never probe such a
   /// file.
   bool accepts_unsized_tensors = false;
+  /// Draft settings per speculative backend the provider supports.
+  std::vector<TextSpeculativeDefaults> speculative_defaults{};
 };
 
 void RegisterTextProvider(TextProvider provider);

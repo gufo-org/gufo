@@ -163,6 +163,56 @@ std::filesystem::path PartialMediaPath(
   return destination.parent_path() / name;
 }
 
+std::filesystem::path FindExecutable(std::string_view name) {
+  const auto executable = [](const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec) &&
+           access(path.c_str(), X_OK) == 0;
+  };
+  if (name.find('/') != std::string_view::npos)
+    return executable(std::filesystem::path(name)) ? std::filesystem::path(name)
+                                                   : std::filesystem::path{};
+  const char* search = std::getenv("PATH");
+  std::string_view rest = search != nullptr ? search : "";
+  while (!rest.empty()) {
+    const auto end = rest.find(':');
+    const auto directory = rest.substr(0, end);
+    if (!directory.empty()) {
+      auto candidate = std::filesystem::path(directory) / std::string(name);
+      if (executable(candidate))
+        return candidate;
+    }
+    rest = end == std::string_view::npos ? std::string_view{}
+                                         : rest.substr(end + 1);
+  }
+  return {};
+}
+
+int RunInherited(const char* program, std::span<const std::string> arguments_in,
+                 std::string* error) {
+  std::vector<std::string> storage;
+  storage.reserve(arguments_in.size() + 1);
+  storage.emplace_back(program);
+  storage.insert(storage.end(), arguments_in.begin(), arguments_in.end());
+  std::vector<char*> arguments = MutableArgv(storage);
+  pid_t child = -1;
+  const int code = posix_spawnp(&child, program, nullptr, nullptr,
+                                arguments.data(), environ);
+  if (code != 0) {
+    SetError(error, "cannot start " + std::string(program) + ": " +
+                        std::string(std::strerror(code)));
+    return -1;
+  }
+  int status = 0;
+  if (!WaitForChild(child, &status, error))
+    return -1;
+  if (!WIFEXITED(status)) {
+    SetError(error, std::string(program) + " terminated abnormally");
+    return -1;
+  }
+  return WEXITSTATUS(status);
+}
+
 bool RunCapture(const char* program, std::span<const std::string> arguments_in,
                 std::string* output, std::string* error) {
   std::vector<std::string> storage(arguments_in.begin(), arguments_in.end());

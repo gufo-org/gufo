@@ -341,6 +341,16 @@ std::filesystem::path UserCacheDirectory() noexcept {
   return std::filesystem::path(home) / ".cache";
 }
 
+std::filesystem::path UserDataDirectory() noexcept {
+  const char* base = std::getenv("XDG_DATA_HOME");
+  if (base != nullptr && *base != '\0')
+    return base;
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || *home == '\0')
+    return {};
+  return std::filesystem::path(home) / ".local" / "share";
+}
+
 std::size_t Write(PlatformFile file, const void* data, std::size_t bytes,
                   std::error_code& ec) noexcept {
   ec.clear();

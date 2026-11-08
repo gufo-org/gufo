@@ -398,6 +398,10 @@ std::filesystem::path UserCacheDirectory() noexcept {
   return base;
 }
 
+std::filesystem::path UserDataDirectory() noexcept {
+  return UserCacheDirectory();
+}
+
 std::size_t Write(PlatformFile file, const void* data, std::size_t bytes,
                   std::error_code& ec) noexcept {
   ec.clear();

@@ -200,6 +200,11 @@ bool ListDirectory(
 /// cannot determine one; callers without a cache then skip caching.
 std::filesystem::path UserCacheDirectory() noexcept;
 
+/// Base directory for per-user data: XDG_DATA_HOME, then $HOME/.local/share,
+/// then Windows %LOCALAPPDATA%. Returns an empty path when the platform
+/// cannot determine one.
+std::filesystem::path UserDataDirectory() noexcept;
+
 /// Writes to the current file position. Clamps to INT_MAX bytes per call so
 /// multi-gigabyte spans cannot truncate on 32-bit length limits. Returns the
 /// bytes written; 0 with `ec` set on failure, including EINTR.

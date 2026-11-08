@@ -15,6 +15,7 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/provider_options.hpp"
 #include "src/cli/serve/inference_backend.hpp"
+#include "src/cli/speculative_settings.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "tests/fixtures/gguf_builder.hpp"
 
@@ -22,11 +23,13 @@ namespace {
 
 int created = 0;
 gufo::ext::ParsedOptions received;
+gufo::ext::TextSpeculativeConfig received_speculative;
 
 std::shared_ptr<gufo::ext::TextModelRunner> Create(
     const gufo::ext::TextRunnerOptions& options, std::string* error) {
   ++created;
   received = options.provider_options;
+  received_speculative = options.speculative;
   *error = "fixture runner";
   return nullptr;
 }
@@ -54,6 +57,11 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
                    "serve-text";
           },
       .create = &Create,
+      .speculative_defaults = {{.backend = "dflash2",
+                                .max_draft_tokens = 15,
+                                .min_draft_tokens = 1,
+                                .draft_policy = "fixed",
+                                .draft_policies = {"fixed", "adaptive"}}},
   });
 }
 
@@ -70,25 +78,39 @@ bool Expect(bool condition, std::string_view what) {
 bool Load(const gufo::ext::Registry& registry, const std::string& model,
           std::vector<const char*> flags, std::string* error) {
   gufo::cli::ArgParser parser("gufo serve");
-  std::size_t draft_tokens = 7;
+  std::uint32_t draft_tokens = 7;
+  std::uint32_t min_draft_tokens = 1;
+  std::string draft_policy;
   parser.AddOption("-d", "--draft-tokens", "N", "", "Speculative",
                    &draft_tokens);
+  parser.AddOption("", "--min-draft-tokens", "N", "", "Speculative",
+                   &min_draft_tokens);
+  parser.AddOption("", "--draft-policy", "NAME", "", "Speculative",
+                   &draft_policy);
   gufo::cli::ProviderOptions provider_options(registry, "serve");
   provider_options.Register(parser);
   if (!parser.Parse(flags, error)) {
     return false;
   }
   provider_options.Parse();
+  const auto speculative = gufo::cli::SpeculativeFlags::Given(
+      parser, draft_tokens, min_draft_tokens, draft_policy);
   created = 0;
   received.clear();
   gufo::server::InferenceBackend backend;
   return backend.load(
-      model, error, 0, 1, {}, {}, {}, {}, {}, {}, false,
+      model, error, 0, 1, {}, {},
+      {.backend = gufo::ext::TextSpeculativeBackend::kDFlash}, {}, {}, {},
+      false,
       [&](const gufo::ext::TextProvider& provider,
           const gufo::core::GgufReader&, gufo::ext::TextRunnerOptions* options,
           std::string* message) {
         try {
           options->provider_options = provider_options.Select(provider.id);
+          gufo::cli::ApplySpeculativeSettings(
+              gufo::cli::ResolveSpeculativeSettings(provider, "dflash2",
+                                                    speculative),
+              &options->speculative);
           return true;
         } catch (const std::invalid_argument& exception) {
           *message = exception.what();
@@ -132,6 +154,24 @@ int main() {
                        "provider serve-text does not support --other-only for "
                        "serve",
                "another provider's option must fail before the runner");
+  ok &= Expect(!Load(registry, model, {}, &error) && created == 1 &&
+                   received_speculative.max_draft_tokens == 15 &&
+                   received_speculative.draft_policy == "fixed" &&
+                   received_speculative.dflash_policy ==
+                       gufo::ext::TextDFlashDraftPolicy::kFixed,
+               "the factory must receive the provider's draft defaults");
+  ok &= Expect(!Load(registry, model, {"-d", "9", "--draft-policy", "adaptive"},
+                     &error) &&
+                   created == 1 && received_speculative.max_draft_tokens == 9 &&
+                   received_speculative.draft_policy == "adaptive" &&
+                   received_speculative.dflash_policy ==
+                       gufo::ext::TextDFlashDraftPolicy::kAdaptive,
+               "explicit draft settings must win over the defaults");
+  ok &= Expect(!Load(registry, model, {"--draft-policy", "unknown"}, &error) &&
+                   created == 0 &&
+                   error.find("does not support --draft-policy unknown") !=
+                       std::string::npos,
+               "an unsupported policy must fail before the runner");
   std::filesystem::remove(path);
   return ok ? 0 : 1;
 }

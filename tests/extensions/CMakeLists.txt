@@ -47,13 +47,19 @@ if(NOT GUFO_EXTENSION_FIXTURE)
   if(Python3_EXECUTABLE)
     add_test(NAME extension_cli_provenance_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/cli_provenance_test.py $<TARGET_FILE:gufo>)
-    set_tests_properties(extension_cli_provenance_test PROPERTIES LABELS "cpu;extensions")
+    # The provenance contract covers this build, not the user's installed modules.
+    set_tests_properties(extension_cli_provenance_test PROPERTIES LABELS "cpu;extensions"
+      ENVIRONMENT "GUFO_EXTENSIONS_DIR=${CMAKE_CURRENT_BINARY_DIR}/empty-extension-store")
+    add_test(NAME extension_module_cli_test COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_LIST_DIR}/module_cli_test.py $<TARGET_FILE:gufo>)
+    set_tests_properties(extension_module_cli_test PROPERTIES
+      LABELS "cpu;extensions" PROCESSORS 2 TIMEOUT 600)
     add_test(NAME extension_discovery_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/discovery_test.py)
     # Nested projects configure and build repeatedly; Windows needs the headroom.
     # They use the build's own compiler instead of whichever one CMake finds.
     set_tests_properties(extension_discovery_test PROPERTIES LABELS "cpu;extensions" PROCESSORS 2 COST 90 TIMEOUT 900
-      ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}")
+      ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER};GUFO_PKG_CONFIG_EXECUTABLE=${PKG_CONFIG_EXECUTABLE}")
     add_test(NAME extension_api_policy_test COMMAND ${Python3_EXECUTABLE}
       ${PROJECT_SOURCE_DIR}/tests/tools/check_extension_api_test.py)
     add_test(NAME extension_api_surface COMMAND ${Python3_EXECUTABLE}

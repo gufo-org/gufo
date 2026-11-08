@@ -1,7 +1,9 @@
 #include "src/core/platform/os_info.hpp"
 
 #include <cstddef>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #if defined(_WIN32)
@@ -190,6 +192,38 @@ bool StderrIsTerminal() noexcept {
   return ::_isatty(::_fileno(stderr)) != 0;
 #else
   return ::isatty(STDERR_FILENO) != 0;
+#endif
+}
+
+bool StdinIsTerminal() noexcept {
+#if defined(_WIN32)
+  return ::_isatty(::_fileno(stdin)) != 0;
+#else
+  return ::isatty(STDIN_FILENO) != 0;
+#endif
+}
+
+std::filesystem::path ExecutablePath() {
+#if defined(_WIN32)
+  std::wstring path(MAX_PATH, L'\0');
+  while (true) {
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(),
+                                            static_cast<DWORD>(path.size()));
+    if (length == 0)
+      throw std::runtime_error("cannot determine the executable path");
+    if (length < path.size()) {
+      path.resize(length);
+      return std::filesystem::path(path);
+    }
+    path.resize(path.size() * 2);
+  }
+#else
+  std::error_code ec;
+  auto path = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (ec)
+    throw std::runtime_error("cannot determine the executable path: " +
+                             ec.message());
+  return path;
 #endif
 }
 

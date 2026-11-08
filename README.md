@@ -201,13 +201,16 @@ limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
 | hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
 | Rust 1.88 or newer (`cargo`, `rustc`), from [rustup](https://rustup.rs) if your distribution's is older | PNG decoding; rustup uses `rust-toolchain.toml`, and cargo fetches the crates in `src/core/png_decode/Cargo.lock` |
-| FFmpeg development libraries | Video embedding decoding and RGB conversion |
-| libsndfile, libsoxr | Audio decoding and reference-compatible resampling |
+| FFmpeg development libraries (EmbeddingGemma 2 only) | Video embedding decoding and RGB conversion |
+| libsndfile, libsoxr (EmbeddingGemma 2 only) | Audio decoding and reference-compatible resampling |
 | FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
 
 Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
 Use the development packages for the libraries above. ROCm normally installs
-under `/opt/rocm`.
+under `/opt/rocm`. Libraries marked for one extension are required only when
+that extension is built. The default build includes every extension; leave one
+out with `-DGUFO_EXTENSIONS=<list>` to drop its libraries (see `packages` in
+its `extension.json`).
 
 For example, on Debian/Ubuntu the ordinary system libraries are:
 

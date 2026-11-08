@@ -37,22 +37,18 @@
   },
   "packages": [
     {
-      "pkg_config": "libavformat",
       "nix": "ffmpeg-headless",
       "windows": "ffmpeg[avformat]"
     },
     {
-      "pkg_config": "libavcodec",
       "nix": "ffmpeg-headless",
       "windows": "ffmpeg[avcodec]"
     },
     {
-      "pkg_config": "libavutil",
       "nix": "ffmpeg-headless",
       "windows": "ffmpeg"
     },
     {
-      "pkg_config": "libswscale",
       "nix": "ffmpeg-headless",
       "windows": "ffmpeg[swscale]"
     }

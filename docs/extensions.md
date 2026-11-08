@@ -3,7 +3,9 @@
 A Gufo **source extension** adds a model implementation to an existing capability
 such as text generation, embeddings, speech, image/video generation or decisions.
 Gufo compiles its C++/HIP sources into the executable and generates registration
-from its manifest. Users rebuild Gufo with that source to add the model.
+from its manifest. Users rebuild Gufo with that source to add the model, or
+build the same source as a [module](extension-modules.md) that an installed
+Gufo loads (`gufo extension install`, experimental).
 
 Community and niche models live in independent repositories. Promotion to core
 means accepting the in-tree maintenance and release obligations, with a named
@@ -86,6 +88,38 @@ stop being valid: include the model artifact, context size and every setting tha
 alters state. An adapter test should restore each component and compare the
 result byte for byte with an uninterrupted run.
 
+## Schedule prompts beside decoders
+
+While other sessions decode, the host bounds each prompt pass so they do not
+wait for a whole pass. Without a scheduling profile, a runner gets short
+passes (512 tokens by default), which costs it pass overhead. A runner whose
+full-width pass takes more than about half a second should declare a profile
+in `TextRunnerDescriptor::scheduling` and split its passes by layers instead:
+
+- `pass_tokens` is the width the host uses for a prompt beside decoders,
+  normally the model's own prefill pass. A lone prompt is not bounded.
+- Before such a pass, the host calls `SetPrefillYield(groups, yield)` on the
+  prompt's state, with `groups` chosen from the measured time of that pass's
+  tokens and capped at `max_layer_groups` and at one group per 512 of those
+  tokens, so a prompt never waits for more decode rounds than 512-token
+  chunks would give it; a short remainder runs unsplit. Split the pass into about that many groups of similar
+  duration, not layer count, and add a boundary right after any point where the
+  pass waits, such as an input read: decoders wait for the longest group.
+  Between groups, the runner calls `state.YieldPrefill()`, which steps every
+  other decoding session once, at most `max_yield_decode_width` per batch,
+  and returns.
+- Every layer must do the same arithmetic as in an unsplit pass. Keep the
+  rows the pass carries from one layer to the next, and any flags or graphs
+  that depend on them, out of reach of the decode paths, and hold no lock they
+  take. Declare only the decode kinds the loaded mode can run between groups.
+
+The header is `gufo/ext/scheduling.hpp`; it needs no extra link target. In-tree
+tests check a profiled runner with `gufo::test::CheckLayeredPrefill`
+(`tests/support/layered_prefill_conformance.hpp`): the prompt and a decoder run
+alone, then interleaved in layered passes, and every token and
+log-probability must match. Run it on real weights for each loaded mode the
+profile covers.
+
 ## Start with the template
 
 Copy [examples/extension_template](../examples/extension_template/README.md) into
@@ -119,6 +153,14 @@ In the manifest, distinguish:
 - `options`, `packages`, `licenses`, `install_data` and `runtime_libraries`:
   option declarations and the dependency/distribution inventory. Keep them in
   agreement with the build and install recipe.
+- `packages[].pkg_config`: a pkg-config module the extension builds against.
+  Configure requires it only when the extension is selected, and provides it
+  as the global imported target `PkgConfig::<module>` with the `<module>_*`
+  variables of `pkg_check_modules` (for example `PkgConfig::soxr`,
+  `libavformat_INCLUDE_DIRS`). An extension target may link
+  `PkgConfig::<module>` only for modules its own manifest declares, so it
+  does not build by accident beside another extension. Omit the key for a
+  package used only at run time, such as an executable.
 
 Separate host parsing/probes from HIP execution so diagnostics and probes can
 work without creating a GPU context. Keep test-only code under the `testing`
@@ -270,6 +312,24 @@ the same option when the type agrees, as providers sharing `--mtp-model` do; CMa
 rejects conflicting types. The Nix serving helper derives provider arguments and validation
 from metadata, including optional `serving` declarations. See
 [Nix serving](model-extensions/serving.md).
+
+Text providers declare the draft settings a speculative backend runs with in
+`TextProvider::speculative_defaults`, one entry per backend (`mtp`, `dflash2`,
+`dspark`). Core resolves each setting once the provider is selected, before any
+weights load, and logs the result in `load_completed`: an explicit
+`--draft-tokens`, `--min-draft-tokens` or `--draft-policy`, else the declared
+value, else the host's fallback of 7, 1 and no policy (DFlash2 accepts `fixed`
+and `adaptive`). `--draft-policy` must be in the entry's `draft_policies`. The
+resolved values reach `TextSpeculativeConfig`, `TextPromptOptions` and
+`TextBenchOptions`.
+
+```cpp
+.speculative_defaults = {{.backend = "mtp",
+                          .max_draft_tokens = 15,
+                          .min_draft_tokens = 1,
+                          .draft_policy = "calibrated",
+                          .draft_policies = {"calibrated", "fixed"}}},
+```
 
 Text providers receive their options. `serve`, `prompt`, `chat` and `bench`
 accept every option an available text provider declares for that command, list

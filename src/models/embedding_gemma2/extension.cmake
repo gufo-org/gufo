@@ -18,8 +18,8 @@ gufo_extension_target(
     gufo_ext_runtime
     gufo_platform
     Threads::Threads
-    PkgConfig::SNDFILE
-    PkgConfig::SOXR
+    PkgConfig::sndfile
+    PkgConfig::soxr
 )
 
 if(TARGET gufo_embedding_gemma2)
@@ -28,23 +28,26 @@ if(TARGET gufo_embedding_gemma2)
     ${GUFO_EXTENSION_BUILD_ROOT}
   )
 
-  # Video libraries load on the first video request.
-  target_include_directories(gufo_embedding_gemma2 PRIVATE ${AV_INCLUDE_DIRS})
-  target_compile_options(gufo_embedding_gemma2 PRIVATE ${AV_CFLAGS_OTHER})
+  # Video libraries load on the first video request; the manifest's packages
+  # provide their headers and locations.
   set(video_libraries "")
   foreach(component IN ITEMS avformat avcodec avutil swscale)
     string(TOUPPER "${component}" upper)
+    target_include_directories(gufo_embedding_gemma2 PRIVATE
+      ${lib${component}_INCLUDE_DIRS})
+    target_compile_options(gufo_embedding_gemma2 PRIVATE
+      ${lib${component}_CFLAGS_OTHER})
     if(WIN32)
-      string(REGEX MATCH "^[0-9]+" major "${AV_lib${component}_VERSION}")
+      string(REGEX MATCH "^[0-9]+" major "${lib${component}_VERSION}")
       if(NOT major)
         message(FATAL_ERROR "Missing FFmpeg ${component} runtime version")
       endif()
-      list(GET AV_LIBRARY_DIRS 0 runtime_libdir)
+      list(GET lib${component}_LIBRARY_DIRS 0 runtime_libdir)
       cmake_path(SET runtime NORMALIZE "${runtime_libdir}/../bin/${component}-${major}.dll")
       string(APPEND video_libraries "${component}-${major}.dll\n")
     else()
       find_library(GUFO_${upper}_LIBRARY NAMES ${component}
-        HINTS ${AV_LIBRARY_DIRS} REQUIRED)
+        HINTS ${lib${component}_LIBRARY_DIRS} REQUIRED)
       file(REAL_PATH "${GUFO_${upper}_LIBRARY}" runtime)
     endif()
     target_compile_definitions(gufo_embedding_gemma2 PRIVATE

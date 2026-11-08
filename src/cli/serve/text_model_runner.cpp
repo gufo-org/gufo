@@ -971,7 +971,9 @@ void TextRunnerPool::Request::PrepareBatchExecution() {
       dynamic_cast<TextRunnerState&>(impl_->lease->state()));
 }
 
-TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
+TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens,
+                                                 std::size_t layer_groups,
+                                                 const PrefillYield& yield) {
   if (!*this) {
     throw std::logic_error("text runner request is empty");
   }
@@ -1205,6 +1207,14 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   state.SetPrefillLookahead(std::span<const TextRunnerToken>(impl_->prompt)
                                 .subspan(frontier, lookahead_end - frontier));
   state.SetPrefillPromptEnd(impl_->prompt.size());
+  // The yield lives for this step only: a later step, or a lone pass, runs
+  // unsplit unless the scheduler asks again.
+  struct ClearYield {
+    TextRunnerState& state;
+    ~ClearYield() { state.SetPrefillYield(1, {}); }
+  } clear_yield{state};
+  if (layer_groups > 1 && yield)
+    state.SetPrefillYield(layer_groups, yield);
   std::vector<std::size_t> in_pass_positions;
   for (const auto& capture : in_pass)
     in_pass_positions.push_back(capture.position);

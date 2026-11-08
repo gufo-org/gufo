@@ -2242,6 +2242,8 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   metrics["prefill_chunks"] = result.prefill_chunks;
   metrics["active_decode_prefill_chunks"] = result.active_decode_prefill_chunks;
   metrics["max_prefill_chunk_tokens"] = result.max_prefill_chunk_tokens;
+  metrics["max_prefill_layer_groups"] = result.max_prefill_layer_groups;
+  metrics["prefill_yield_rounds"] = result.prefill_yield_rounds;
   metrics["queue_depth_at_submit"] = result.queue_depth_at_submit;
   metrics["client_queue_depth_at_submit"] = result.client_queue_depth_at_submit;
   metrics["resident_requests_at_admission"] =
