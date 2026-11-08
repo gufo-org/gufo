@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -18,6 +19,11 @@ struct ComponentCacheHooks {
   std::function<std::size_t()> host_ceiling;
   std::function<void(std::string_view)> warn;
   std::function<void(std::string_view)> info;
+  // Transfer streams, created up front for captures, restores and idle spill.
+  // Each keeps HIP queue memory resident (about 9 MiB on gfx1151). A capture
+  // or restore batch leases up to 16 at once; with fewer free, concurrent
+  // batches run narrower or wait. Must be nonzero.
+  std::size_t transfer_streams{64};
 };
 
 // HIP component-cache backing for any adapter: pinned committed pages, a
