@@ -87,7 +87,8 @@ DeepSeek maps `minimal`/`low` to `low`, `medium`/`high`/`xhigh` to `high`,
 and `max` to `max`.
 The [functional suite](../../tests/functional/README.md) with
 `--suite sampling-defaults --sampling-preset qwen38` (or
-`deepseek4`) compares omitted and explicit settings, including C2 replay.
+`deepseek4`, or `provider` for a model with its own defaults) compares omitted
+and explicit settings, including C2 replay.
 
 Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
 [Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices),

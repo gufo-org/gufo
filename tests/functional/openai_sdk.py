@@ -21,6 +21,7 @@ from typing import Literal
 import zlib
 from urllib.parse import urlsplit
 
+import httpx
 import openai
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from openai.types import Completion, CompletionChoice
@@ -310,9 +311,36 @@ def image_content(color):
     }
 
 
+# What /props reports in default_generation_settings.params, by request field.
+PROVIDER_SAMPLING = ("temperature", "top_p", "presence_penalty", "frequency_penalty",
+                     "top_k", "min_p", "repeat_penalty", "repeat_last_n")
+
+
+def provider_sampling(base_url):
+    """The served model's own defaults, for a model without an in-tree preset.
+
+    /props reports them for the server's default thinking mode; the suite
+    expects the same values with thinking on and off.
+    """
+    root = base_url.rstrip("/").removesuffix("/v1")
+    with httpx.Client(trust_env=False, timeout=30) as http:
+        response = http.get(root + "/props")
+    response.raise_for_status()
+    params = response.json()["default_generation_settings"]["params"]
+    return {key: params[key] for key in PROVIDER_SAMPLING}
+
+
 def check_sampling_defaults(client, model, checks, preset, overrides, vision=False,
-                            server_thinking=None):
-    """Omission and explicit presets must replay within each execution mode."""
+                            server_thinking=None, provider=None):
+    """Omission and explicit presets must replay within each execution mode.
+
+    With the provider preset, `provider` holds the defaults the server reports
+    (see provider_sampling); the in-tree presets keep independent values.
+    """
+    if (preset == "provider") != (provider is not None):
+        raise ValueError("pass the reported defaults with, and only with, the provider preset")
+    if provider is not None:
+        checks["provider_sampling_defaults"] = provider
     def signature(value):
         return value["text"].strip(), value["reasoning"].strip(), value["finish"]
 
@@ -332,7 +360,12 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             "extra_body": {"cache_prompt": False},
         }
         default = chat_result(client, request)
-        explicit = chat_result(client, {**request, "reasoning_effort": effort}, True)
+        # No preset names another model's default effort; its thinking mode
+        # is still explicit.
+        written = ({"extra_body": {**request["extra_body"],
+                                   "chat_template_kwargs": {"enable_thinking": thinking}}}
+                   if provider is not None else {"reasoning_effort": effort})
+        explicit = chat_result(client, {**request, **written}, True)
         assert bool(default["reasoning"]) == thinking, default
         assert signature(default) == signature(explicit), (default, explicit)
         record("default_thinking_effort", default)
@@ -354,8 +387,13 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
                   "min_p": 0., "min_keep": 0, "repeat_penalty": 1.,
                   "repeat_last_n": 64}
         assert overrides.keys() <= (expected.keys() | native.keys()), overrides
+        if provider is not None:
+            # /props omits min_keep; it is left unwritten unless overridden.
+            expected.update({key: provider[key] for key in expected if key in provider})
+            native = {key: provider[key] for key in native if key in provider}
         expected.update({key: value for key, value in overrides.items() if key in expected})
-        native.update({key: value for key, value in overrides.items() if key in native})
+        native.update({key: value for key, value in overrides.items()
+                       if key in native or key == "min_keep"})
         # A server seeded from entropy has no replay contract until a request
         # supplies a seed. Still test that explicit request seed overrides -1.
         inherited_seed = "seed" in overrides and overrides["seed"] >= 0
@@ -2796,8 +2834,9 @@ def main():
     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
-                        help="Expected text defaults; required for all/sampling-defaults")
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "provider"),
+                        help="Expected text defaults; required for all/sampling-defaults. "
+                             "provider reads the served model's own from /props")
     parser.add_argument("--sampling-overrides", type=json.loads, default={},
                         help="JSON object of explicit server sampling CLI values")
     parser.add_argument("--server-thinking", choices=("on", "off"),
@@ -2930,7 +2969,8 @@ def main():
                 client, args.model, checks, args.speculative, args.vision, args.server_log),
             "sampling-defaults": lambda: check_sampling_defaults(
                 client, args.model, checks, args.sampling_preset, args.sampling_overrides,
-                args.vision, args.server_thinking),
+                args.vision, args.server_thinking,
+                provider_sampling(args.base_url) if args.sampling_preset == "provider" else None),
             "logprobs": lambda: check_logprobs(client, args.model, checks, CompletionStreamFrame),
             "responses-logprobs": lambda: check_responses_logprobs(client, args.model, checks),
             "sampling-ranges": lambda: check_sampling_ranges(client, args.model, checks),

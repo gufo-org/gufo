@@ -455,9 +455,26 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
 correctness matrix on main. A baseline must match the revision, harness,
 toolchain, weights, settings and preceding cache history.
 
-Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
+Use `deepseek4` for DeepSeek. For another model, such as one an extension
+serves, use `provider`: `sampling-defaults` then expects the defaults the
+server reports in `/props`, in both thinking modes, and writes the thinking
+mode instead of a preset's default effort. Qwen-only assertions, such as the
+literal marker `tool-edges` requires before a call, are recorded rather than
+required. Pass the model's normal speculative options for
 DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 `--mmproj` enables image cases. Keep informational server logging enabled.
+
+Without `--context`, the runner starts the server with 8192 tokens, or with
+the most a selected suite needs: 65536 for `cache-stalls`, 32768 for
+`cache-depth` (so for `all`), `cache-transforms` and `cache-pressure`, and 16384 for
+`cache-shared-prefix`, `cache-compaction`, `cache-messages-loop` and
+`prefill-scheduling`. A smaller explicit `--context` is refused before the
+server starts, as is `cache-bridge` or `cache-pressure` without
+`--cache-ram-bytes`. When their background requests cannot fill that budget,
+their unqualified result suggests a smaller one from the bytes they published;
+checkpoints can shrink under a smaller budget, so it may take another step.
+LFM3 1.7B fills 268435456 bytes for `cache-bridge` and 134217728 for
+`cache-pressure`.
 
 Each invocation tests **one model and one mode**. Model-specific changes need
 only the affected target/modes. For shared text changes, run the affected suites

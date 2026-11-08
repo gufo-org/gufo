@@ -30,6 +30,7 @@ from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
 from cache_bridge import check_cache_bridge
+from cache_workloads import check_cache_pressure
 from cache_compaction import check_cache_compaction, ARCHIVE_LINE
 from cache_disk_spacing import check_disk_spacing
 import cache_persist
@@ -1814,6 +1815,100 @@ p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests":
                 self.assertEqual(functional.main(), 0)
             report = json.loads((root / "out" / "report.json").read_text())
             self.assertEqual(list(report["suites"]), ["tools", "tool-native-schemas"])
+
+    def test_runner_sizes_the_default_context_for_the_selected_suites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "openai_sdk.py").write_text('''import json,sys
+from pathlib import Path
+p = Path(sys.argv[sys.argv.index("--output") + 1])
+p.write_text(json.dumps({"status": "passed"}))
+p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests": [{
+    "index": 0, "case": "reply", "status": "complete", "endpoint": "/v1/chat/completions",
+    "wall_ms": 1, "request_sha256": "same", "output_sha256": "same"}]}))
+''')
+            for suites, server_options, context in (
+                    (["responses"], [], "8192"),
+                    (["responses", "cache-shared-prefix"], [], "16384"),
+                    (["cache-shared-prefix", "cache-depth"], [], "32768"),
+                    (["cache-depth"], ["--context", "65536"], "65536")):
+                args = ["run.py", "--output", str(root / context / str(len(server_options))),
+                        "--sampling-preset", "provider", "--record-baseline"]
+                for suite in suites:
+                    args += ["--suite", suite]
+                args += ["--", sys.executable, "serve", "llm", "--model", "fixture.gguf",
+                         *server_options]
+                with self.subTest(suites=suites, server_options=server_options), \
+                     patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
+                     patch.object(functional, "server",
+                                  return_value=contextlib.nullcontext()) as start, \
+                     patch.object(functional, "provenance", return_value={}), \
+                     patch.object(functional, "join_server_timings"), \
+                     patch.object(functional, "execution_coverage", return_value={}), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(functional.main(), 0)
+                    command = start.call_args.args[0]
+                    self.assertEqual(command.count("--context"), 1)
+                    self.assertEqual(command[command.index("--context") + 1], context)
+
+    def test_runner_refuses_suite_settings_that_cannot_qualify_before_starting(self):
+        for suites, server_options, message in (
+                (["cache-depth"], ["--context", "8192"], "cache-depth needs --context 32768"),
+                (["responses", "cache-shared-prefix"], ["--context=8192"],
+                 "cache-shared-prefix needs --context 16384"),
+                (["cache-bridge"], [], "cache-bridge require --cache-ram-bytes"),
+                (["cache-bridge", "cache-pressure"], ["--context", "32768"],
+                 "cache-bridge and cache-pressure require --cache-ram-bytes")):
+            args = ["run.py", "--output", "/unused", "--sampling-preset", "provider",
+                    "--record-baseline"]
+            for suite in suites:
+                args += ["--suite", suite]
+            args += ["--", "gufo", "serve", "llm", "--model", "fixture.gguf", *server_options]
+            stderr = io.StringIO()
+            with self.subTest(suites=suites), patch.object(sys, "argv", args), \
+                 patch.object(functional, "server") as start, \
+                 contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                functional.main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn(message, stderr.getvalue())
+            start.assert_not_called()
+
+    def test_cache_fill_failures_name_a_budget_the_requests_would_fill(self):
+        result = {"text": "OK", "reasoning": "", "tools": [], "finish": "stop",
+                  "usage": {"prompt_tokens": 10, "cached_tokens": 0,
+                            "gufo": {"prefill_tokens": 10, "cache_snapshot_bytes": 1000}}}
+        with contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaisesRegex(AssertionError, r"try --cache-ram-bytes 42666 or less"):
+            check_cache_bridge(None, "fixture", {}, lambda client, body: deepcopy(result),
+                               10**9)
+        result["text"] = "ALPHA"
+        with contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaisesRegex(AssertionError, r"try --cache-ram-bytes 24000 or less"):
+            check_cache_pressure(None, "fixture", {}, lambda client, body, *rest: deepcopy(result),
+                                 10**9)
+
+    def test_cancel_fixture_reports_a_model_that_finished_first(self):
+        import continuation
+
+        class Response:
+            status = 200
+
+            def getheader(self, name):
+                return "fixture"
+
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n'
+                yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
+                yield b"data: [DONE]\n"
+
+        connection = unittest.mock.MagicMock()
+        connection.getresponse.return_value = Response()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(continuation, "TRACE", Recorder(Path(directory) / "r.json")), \
+             patch.object(continuation.http.client, "HTTPConnection", return_value=connection), \
+             self.assertRaisesRegex(RuntimeError, r"fixture never cancelled: the model "
+                                    r"finished after 1 of the eight content deltas"):
+            continuation.call("http://127.0.0.1:1", {"stream": True}, "content")
 
     def test_failed_or_incomplete_child_is_not_reported_as_a_pass(self):
         hung = 'import time; time.sleep(10)'

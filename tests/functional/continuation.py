@@ -80,8 +80,15 @@ def call(url, body, stop_field=None):
             return message, time.monotonic() - started
     connection.close()
     measurement.ended = True
-    measurement.finish()
-    raise RuntimeError(f"fixture never reached eight {stop_field} deltas")
+    # The model finished before the fixture could cancel it. Say so even when
+    # the completed stream's own checks fail too: that is the first cause.
+    problem = (f"fixture never cancelled: the model finished after {pieces} of the "
+               f"eight {stop_field} deltas it needed")
+    try:
+        measurement.finish()
+    except ValueError as error:
+        raise RuntimeError(f"{problem} ({error})") from error
+    raise RuntimeError(problem)
 
 
 def digest(result):
