@@ -1,27 +1,10 @@
 [package]
 name = "gufo-png-decode"
-version = "0.0.0"
-edition = "2024"
-rust-version = "1.88"
-publish = false
-license = "MIT"
-
-[lib]
-crate-type = ["staticlib"]
-
-[profile.release]
-debug = 1
-
-# CMake RelWithDebInfo, the shipped configuration.
-[profile.relwithdebinfo]
-inherits = "release"
-debug = 2
-
-# Optimized test builds (BUILD_TESTING=ON), which keep C++ assertions on too.
-[profile.checked]
-inherits = "relwithdebinfo"
-debug-assertions = true
-overflow-checks = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
 
 [dependencies]
 png = "=0.18.1"

@@ -290,7 +290,7 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_subdirectory(src/core/platform)
-add_subdirectory(src/core/png_decode)
+add_subdirectory(src/core/rust)
 
 add_library(gufo_core STATIC
   src/core/image.cpp
@@ -308,7 +308,7 @@ add_library(gufo_core STATIC
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
-  Threads::Threads gufo_png_decode JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_rust JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
 # Family libraries come before the model that needs them; they may depend on

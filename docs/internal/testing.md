@@ -40,16 +40,19 @@ Selection by preset: `gpu-fast` excludes `slow` and `external-model` tests,
 their documented local artifacts. A skip due to an absent model or device is
 not a quality pass.
 
-## PNG decoding
+## Rust components
 
-The Rust decoder uses the toolchain pinned in `rust-toolchain.toml`.
+Each Rust component is a crate in the Cargo workspace of the root
+`Cargo.toml`, with a small C ABI. The `gufo-rust` crate in `src/core/rust`
+links them into the one static library C++ links, so the standard library is
+linked once. The workspace uses the toolchain pinned in `rust-toolchain.toml`.
 `nix build .#checks.x86_64-linux.rust` checks rustfmt and clippy offline, and
 `nix flake check` includes it; the CMake `check-pr` target does not lint Rust.
 Outside Nix, run:
 
 ```sh
-cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
-cargo clippy --manifest-path src/core/png_decode/Cargo.toml --locked --all-targets -- -D warnings
+cargo fmt --all --check
+cargo clippy --workspace --locked --all-targets -- -D warnings
 ```
 
 CMake Debug builds use Cargo's development profile. RelWithDebInfo uses an

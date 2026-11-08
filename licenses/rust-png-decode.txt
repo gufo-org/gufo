@@ -1,8 +1,8 @@
-Rust code statically linked into gufo's PNG decoder (src/core/png_decode).
+Rust code statically linked into gufo's Rust library (src/core/rust).
 Each crate is used under the MIT license where its SPDX expression offers it.
 The standard library of rustc 1.88.0 (rust-toolchain.toml) bundles the crates
-listed after it; libc is linked on Linux only. The decoder's own crates from
-src/core/png_decode/Cargo.lock follow.
+listed after it; libc is linked on Linux only. The third-party crates from
+Cargo.lock follow.
 
 ==============================================================================
 Rust standard library (MIT OR Apache-2.0), https://github.com/rust-lang/rust

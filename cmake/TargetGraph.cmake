@@ -20,7 +20,7 @@ set(GUFO_LINK_GRAPH_PROTECTED
 set(GUFO_LINK_GRAPH_FORBIDDEN gufo_serving gufo_http)
 
 # Link items that name a system library rather than a project target. The
-# platform leaf's and the Rust PNG decoder's own lists join it, so a new OS
+# platform leaf's and the Rust library's own lists join it, so a new OS
 # library stays classified.
 set(GUFO_LINK_GRAPH_SYSTEM_LIBS
   dl m pthread rt atomic stdc++ gcc_s
@@ -28,8 +28,8 @@ set(GUFO_LINK_GRAPH_SYSTEM_LIBS
 if (DEFINED GUFO_PLATFORM_LIBS)
   list(APPEND GUFO_LINK_GRAPH_SYSTEM_LIBS ${GUFO_PLATFORM_LIBS})
 endif()
-if (DEFINED GUFO_PNG_DECODE_LIBS)
-  list(APPEND GUFO_LINK_GRAPH_SYSTEM_LIBS ${GUFO_PNG_DECODE_LIBS})
+if (DEFINED GUFO_RUST_LIBS)
+  list(APPEND GUFO_LINK_GRAPH_SYSTEM_LIBS ${GUFO_RUST_LIBS})
 endif()
 list(REMOVE_DUPLICATES GUFO_LINK_GRAPH_SYSTEM_LIBS)
 
