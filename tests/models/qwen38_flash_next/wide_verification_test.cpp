@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/core/platform/fs.hpp"
@@ -259,6 +260,10 @@ struct ExecutorTestAccess {
     return session.graphs_.size();
   }
   static bool Capturing(const Executor& exec) { return exec.capturing_; }
+  /// Forces a decode layout; returns the one Create calibrated.
+  static bool SetDecodeOverlap(const Executor& exec, bool overlap) {
+    return std::exchange(const_cast<Executor&>(exec).decode_overlap_, overlap);
+  }
   static void RequireIdle(const Executor& exec) {
     for (const auto stream : {exec.stream_, exec.side_stream_}) {
       hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
@@ -300,8 +305,9 @@ struct ExecutorTestAccess {
       if (exec.capturing_) {
         hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
         if (hipStreamIsCapturing(exec.side_stream_, &status) != hipSuccess ||
-            status != (rows <= 8 ? hipStreamCaptureStatusActive
-                                 : hipStreamCaptureStatusNone))
+            status != (rows <= 8 && exec.decode_overlap_
+                           ? hipStreamCaptureStatusActive
+                           : hipStreamCaptureStatusNone))
           throw std::runtime_error("unexpected MoE overlap shape");
         checked = true;
         if (throw_in_capture)
@@ -439,59 +445,68 @@ void DecodeGraphChecks(const Executor& exec) {
   using Access = rocm::ExecutorTestAccess;
   const auto& c = exec.config();
   std::string error;
-  for (const auto prompt_size : {4U, c.indexer_top_k + 8}) {
-    for (std::uint32_t width = 1; width <= 8; ++width) {
-      auto eager = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
-                                      128, &error);
-      auto replay = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
-                                       128, &error);
-      if (!eager || !replay)
-        Throw("graph sessions", error);
-      std::vector<std::int32_t> prompt(prompt_size);
-      for (std::uint32_t i = 0; i < prompt_size; ++i)
-        prompt[i] = static_cast<std::int32_t>((i * 17 + 3) % c.vocab_size);
-      for (auto* session : {eager.get(), replay.get()}) {
-        if (!exec.Forward(*session, prompt, 0, nullptr,
-                          Executor::ForwardMode::kPrefill, &error))
-          Throw("graph prefill", error);
+  // Both decode layouts must replay exactly, whichever one Create picked.
+  const bool calibrated = Access::SetDecodeOverlap(exec, false);
+  std::cout << "calibrated decode overlap=" << calibrated << '\n';
+  for (const bool overlap : {false, true}) {
+    Access::SetDecodeOverlap(exec, overlap);
+    for (const auto prompt_size : {4U, c.indexer_top_k + 8}) {
+      for (std::uint32_t width = 1; width <= 8; ++width) {
+        auto eager = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
+                                        128, &error);
+        auto replay = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
+                                         128, &error);
+        if (!eager || !replay)
+          Throw("graph sessions", error);
+        std::vector<std::int32_t> prompt(prompt_size);
+        for (std::uint32_t i = 0; i < prompt_size; ++i)
+          prompt[i] = static_cast<std::int32_t>((i * 17 + 3) % c.vocab_size);
+        for (auto* session : {eager.get(), replay.get()}) {
+          if (!exec.Forward(*session, prompt, 0, nullptr,
+                            Executor::ForwardMode::kPrefill, &error))
+            Throw("graph prefill", error);
+        }
+        std::size_t graphs = 0;
+        for (std::uint32_t pass = 0; pass < 4; ++pass) {
+          std::vector<std::int32_t> tokens(width);
+          for (std::uint32_t i = 0; i < width; ++i)
+            tokens[i] = static_cast<std::int32_t>(
+                (pass * 53 + i * 23 + prompt_size) % c.vocab_size);
+          std::vector<float> expected(std::size_t{width} * c.vocab_size);
+          std::vector<float> actual(expected.size());
+          const auto mode = width == 1 ? Executor::ForwardMode::kDecode
+                                       : Executor::ForwardMode::kVerify;
+          Access::EagerNext(*eager);
+          if (!exec.Forward(*eager, tokens, width, expected.data(), mode,
+                            &error))
+            Throw("eager graph oracle", error);
+          Access::PoisonShared(exec, width);
+          if (!exec.Forward(*replay, tokens, width, actual.data(), mode,
+                            &error))
+            Throw("graph candidate", error);
+          RequireExact(
+              expected, actual,
+              "eager/replay logits differ: width=" + std::to_string(width) +
+                  " pass=" + std::to_string(pass));
+          const auto count = Access::Graphs(*replay);
+          if ((pass == 0 && count != 0) || (pass == 1 && count == 0) ||
+              (pass > 1 && count != graphs))
+            throw std::runtime_error("fixture did not warm/capture/replay");
+          graphs = count;
+        }
+        std::cout << "decode graph width=" << width
+                  << " sparse=" << (prompt_size > c.indexer_top_k)
+                  << " overlap=" << overlap << " eager/replay logits exact\n";
       }
-      std::size_t graphs = 0;
-      for (std::uint32_t pass = 0; pass < 4; ++pass) {
-        std::vector<std::int32_t> tokens(width);
-        for (std::uint32_t i = 0; i < width; ++i)
-          tokens[i] = static_cast<std::int32_t>(
-              (pass * 53 + i * 23 + prompt_size) % c.vocab_size);
-        std::vector<float> expected(std::size_t{width} * c.vocab_size);
-        std::vector<float> actual(expected.size());
-        const auto mode = width == 1 ? Executor::ForwardMode::kDecode
-                                     : Executor::ForwardMode::kVerify;
-        Access::EagerNext(*eager);
-        if (!exec.Forward(*eager, tokens, width, expected.data(), mode, &error))
-          Throw("eager graph oracle", error);
-        Access::PoisonShared(exec, width);
-        if (!exec.Forward(*replay, tokens, width, actual.data(), mode, &error))
-          Throw("graph candidate", error);
-        RequireExact(
-            expected, actual,
-            "eager/replay logits differ: width=" + std::to_string(width) +
-                " pass=" + std::to_string(pass));
-        const auto count = Access::Graphs(*replay);
-        if ((pass == 0 && count != 0) || (pass == 1 && count == 0) ||
-            (pass > 1 && count != graphs))
-          throw std::runtime_error("fixture did not warm/capture/replay");
-        graphs = count;
-      }
-      std::cout << "decode graph width=" << width
-                << " sparse=" << (prompt_size > c.indexer_top_k)
-                << " eager/replay logits exact\n";
     }
+    for (const auto rows : {1U, 8U, 9U, 32U})
+      Access::CheckMoeCapture(exec, rows);
+    Access::CheckMoeCapture(exec, 1, true);
   }
-  for (const auto rows : {1U, 8U, 9U, 32U})
-    Access::CheckMoeCapture(exec, rows);
-  Access::CheckMoeCapture(exec, 1, true);
 
   // Cancel the suffix capture after at least one layer has recorded MoE side
-  // work. Prefix capture and eager-before-capture execution stay enabled.
+  // work (the overlapped layout is still forced). Prefix capture and
+  // eager-before-capture execution stay enabled.
   auto failed =
       exec.CreateSession(gufo::core::SessionMode::kAutoregressive, 128, &error);
   auto peer =
@@ -528,6 +543,7 @@ void DecodeGraphChecks(const Executor& exec) {
     Throw("post-cancellation decode", error);
   RequireExact(expected, actual, "cancelled capture changed reused executor");
   Access::RequireIdle(exec);
+  Access::SetDecodeOverlap(exec, calibrated);
   std::cout << "capture exception/cancellation recovery exact\n";
 }
 
