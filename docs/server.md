@@ -148,11 +148,8 @@ Request fields and limits are on the [MiniMax H3](models/minimax-h3.md) page.
 | `gufo serve image` | `POST /v1/images/generations`, `POST /v1/images/edits` | [Qwen-Image-2.1](models/qwen-image-2.1.md) |
 | `gufo serve decision` | `POST /v1/systemone` | Defined by the model |
 
-Image extensions can add startup options to `gufo serve image`; its `--help`
-lists them with their providers. Unsupported edits and transparent backgrounds
-return HTTP 400 before inference when the provider declares its capabilities.
-`background: "opaque"` composites alpha over white; `"auto"` returns the model's
-pixels as produced.
+Run `gufo serve image --help` to see startup options supplied by your image
+extensions.
 
 ## Model names
 

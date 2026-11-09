@@ -101,19 +101,9 @@ well as the server runner. The [extension API](extension-api.md) covers the
 cache adapter, sampling defaults, reasoning markers, tool dialects and
 options.
 
-**Image models** declare startup options for `serve image` in their manifest
-and receive explicitly supplied values through
-`ImageProvider::create_with_options(const ImageRunnerOptions&, std::string*)`.
-The host checks option types, selected-provider ownership and existing `path`
-values before calling the factory. Keep defaults in your provider.
-
-Override `ImageRunner::Capabilities()` with `ImageCapabilities` to declare
-edit and transparent-background support. An explicit empty declaration accepts
-neither; unsupported requests return HTTP 400 before inference. With an explicit
-declaration, `ImageRequest::background` carries the caller's intent and the
-prompt reaches you unchanged. Apply model-specific conditioning in your runner,
-and use `ValidateRequest` for narrower limits. Omitting the declaration retains
-legacy edit acceptance and host RGBA prompt framing for transparent requests.
+**Image models** declare startup options for `serve image` in their manifest.
+Declare which request features you support and apply background conditioning
+in your runner. See [`image.hpp`](../include/gufo/ext/image.hpp) for the contract.
 
 ## Build and test
 
