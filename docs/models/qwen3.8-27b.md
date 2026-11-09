@@ -43,8 +43,7 @@ gufo serve llm --model "$MODEL" --speculative dflash2 \
 | AR | none | The target produces one token per step. |
 | DFlash2 | `--speculative dflash2 --dflash-model PATH` | The draft proposes several tokens; the target checks them in one pass and keeps the ones it agrees with. |
 
-DFlash2 adapts how many tokens it proposes. `--draft-tokens` caps the number,
-and `--draft-policy fixed` always proposes that many, for comparisons.
+DFlash2 adapts how many tokens it proposes, up to seven.
 
 When a request decodes alone, Gufo also proposes copies of earlier text from
 the same conversation and checks up to 64 of them in one pass. Copies help

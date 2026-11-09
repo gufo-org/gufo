@@ -356,15 +356,21 @@ let
             "--speculative"
             speculative
           ]
-          ++ lib.optionals (draftTokens != null) [
+          ++ lib.optionals (lib.warnIf (draftTokens != null)
+            "gufo serve: draftTokens is deprecated and ignored; each model sets its draft length"
+            (draftTokens != null)) [
             "--draft-tokens"
             (toString draftTokens)
           ]
-          ++ lib.optionals (draftPolicy != null) [
+          ++ lib.optionals (lib.warnIf (draftPolicy != null)
+            "gufo serve: draftPolicy is deprecated and ignored; each model sets its draft length"
+            (draftPolicy != null)) [
             "--draft-policy"
             draftPolicy
           ]
-          ++ lib.optionals (minDraftTokens != null) [
+          ++ lib.optionals (lib.warnIf (minDraftTokens != null)
+            "gufo serve: minDraftTokens is deprecated and ignored; each model sets its draft length"
+            (minDraftTokens != null)) [
             "--min-draft-tokens"
             (toString minDraftTokens)
           ]

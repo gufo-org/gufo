@@ -76,8 +76,8 @@ def check_options(binary):
             result = subprocess.run(
                 [binary, *command, "--speculative", "dflash2", "--dflash-model",
                  "/dev/null", flag, value], text=True, capture_output=True, timeout=30)
-            if result.returncode != 2:
-                raise AssertionError(f"invalid DFlash2 config not rejected: {command} {flag}")
+            if "deprecated" not in result.stdout + result.stderr:
+                raise AssertionError(f"deprecated draft flag not reported: {command} {flag}")
     invalid_sampling = (
         ("--temperature", "-0.1"), ("--top-k", "-1"), ("--top-p", "-0.01"),
         ("--min-p", "1.1"), ("--min-keep", "-1"), ("--seed", "-2"),
