@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -18,6 +19,13 @@ struct ComponentCacheHooks {
   std::function<std::size_t()> host_ceiling;
   std::function<void(std::string_view)> warn;
   std::function<void(std::string_view)> info;
+  // Transfer streams, created up front for captures, restores and idle spill.
+  // HIP queues consume resident memory. Each serving session holds one stream
+  // for preservation; leave additional streams for captures, restores and idle
+  // spill. Batches lease up to 16 and drain their own work before retrying an
+  // exhausted pool. Acquisition does not wait for other users and can fail.
+  // Must be nonzero.
+  std::size_t transfer_streams{64};
 };
 
 // HIP component-cache backing for any adapter: pinned committed pages, a
