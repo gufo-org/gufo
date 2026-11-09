@@ -437,11 +437,6 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
     rms_norm_plain_kernel<<<rows, 256>>>((float *)out->ptr, (const float *)x->ptr, n, rows, eps);
     return hip_ok(hipGetLastError(), "rms_norm_plain launch");
 }
-extern "C" int ds4_gpu_rms_norm_plain_tensor(ds4_gpu_tensor* out,
-                                             const ds4_gpu_tensor* x,
-                                             uint32_t n, float eps) {
-  return ds4_gpu_rms_norm_plain_rows_tensor(out, x, n, 1u, eps);
-}
 extern "C" int ds4_gpu_rms_norm_weight_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n, float eps) {
     uint64_t weight_bytes = 0;
     if (!model_map || !hip_u64_mul_checked(n, sizeof(float), &weight_bytes) ||

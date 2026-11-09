@@ -174,6 +174,36 @@ extern "C" int ds4_gpu_hc_norm_mix_split_weighted_sum_tensor(
     return hip_ok(hipGetLastError(), "hc norm mix split weighted sum launch");
 }
 
+extern "C" int ds4_gpu_hc_mix_decode_tensor(
+        ds4_gpu_tensor       *mix,
+        const ds4_gpu_tensor *residual_hc,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint32_t                n_embd,
+        uint32_t                n_hc,
+        uint32_t                mix_rows,
+        float                   norm_eps) {
+    if (!mix || !residual_hc || !model_map || n_embd != 16u * 256u || n_hc != 4u ||
+        mix_rows == 0u) {
+        return 0;
+    }
+    const uint32_t hc_dim = n_hc * n_embd;
+    uint64_t weight_bytes = 0;
+    hip_f16_matrix m;
+    if (!hip_u64_mul3_checked(mix_rows, hc_dim, sizeof(uint16_t), &weight_bytes) ||
+        weight_offset > model_size || weight_bytes > model_size - weight_offset ||
+        !hip_tensor_has_elems2(mix, mix_rows, 1u, sizeof(float)) ||
+        !hip_tensor_has_elems2(residual_hc, hc_dim, 1u, sizeof(float)) ||
+        ((uintptr_t)residual_hc->ptr & 15u) != 0u ||
+        !hip_f16_matrix_get(model_map, weight_offset, hc_dim, mix_rows, "hc_mix", &m)) {
+        return 0;
+    }
+    hc_mix_decode_kernel<<<mix_rows, 256>>>((float *)mix->ptr, (const float *)residual_hc->ptr,
+                                            m.w, m.row_stride, n_embd, hc_dim, norm_eps);
+    return hip_ok(hipGetLastError(), "hc mix decode launch");
+}
+
 extern "C" int ds4_gpu_hc_split_weighted_sum_norm_tensor(
         ds4_gpu_tensor       *out,
         ds4_gpu_tensor       *norm_out,
