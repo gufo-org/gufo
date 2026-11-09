@@ -1,6 +1,7 @@
 #include "gufo/ext/generated/alpha_constants.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
+#include <gufo/ext/experimental/admission_query.hpp>
 #include <gufo/ext/experimental/dispatch_telemetry.hpp>
 #include <gufo/ext/experimental/gemv_dispatcher.hpp>
 #include <gufo/ext/experimental/ggml_dequant.hpp>
