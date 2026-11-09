@@ -674,6 +674,28 @@ void RecordSourceReplacement() {
 void FullOptionalExactReplacement() {
   for (const auto purpose :
        {RetentionPurpose::kRetry, RetentionPurpose::kHistory}) {
+    Fixture f(4);
+    const std::vector<Token> root{1, 2};
+    const auto id = f.Add(root);
+    f.Add({1, 2, 3});
+    f.Add({1, 2, 4});
+    f.Add({9, 9});
+    for (int i = 0; i < 4; ++i)
+      f.policy.Touch(id);
+    assert(f.policy.Rank(id) == 3);
+    // The stale unrelated conversation permits optional admission, but an
+    // exact replacement must preserve this freshly used inferred fork.
+    assert(f.policy.Admit({root, {1}, {}, purpose, 0, id},
+                          [&] { return IndexCheckpoint(f.ledger, root); }));
+    const auto replacement = f.log.events.back().checkpoint;
+    assert(f.log.events.back().purpose == RetentionPurpose::kBranchPoint);
+    assert(f.policy.Rank(replacement) == 3);
+    assert(f.policy.Size() == 4 && f.Cached({9, 9, 1}) == 2);
+    f.Add({8, 8});
+    assert(f.Cached({1, 2, 5}) == 2);
+  }
+  for (const auto purpose :
+       {RetentionPurpose::kRetry, RetentionPurpose::kHistory}) {
     for (const std::size_t limit : {1U, 2U}) {
       Fixture f(limit);
       const std::vector<Token> root{1, 2};
@@ -1199,6 +1221,39 @@ void WindowPeersAlignByRow() {
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }
+void RecordTurnoverAdmitsOptionalCopies() {
+  // Small checkpoints fill every record before byte pressure. A conversation
+  // unused for one record-table turnover then gives way to an optional copy;
+  // a retained descendant's use keeps its ancestors.
+  for (const auto purpose :
+       {RetentionPurpose::kRetry, RetentionPurpose::kHistory}) {
+    Fixture f(4);
+    f.Add({1, 2});
+    const auto child = f.Add({1, 2, 3});
+    f.Add({7, 7});
+    const auto last = f.Add({8, 8});
+    const auto admit = [&](std::vector<Token> tokens,
+                           RetentionPurpose purpose) {
+      return f.policy.Admit({tokens, {1}, {}, purpose},
+                            [&] { return IndexCheckpoint(f.ledger, tokens); });
+    };
+    assert(!admit({9, 9, 9}, purpose));
+    assert(f.log.events.back().reason == RetentionReason::kRecordCapacity);
+    for (int i = 0; i < 2; ++i) {
+      f.policy.Touch(child);
+      f.policy.Touch(last);
+    }
+    assert(admit({9, 9, 9}, purpose));
+    assert(f.Cached({7, 7, 1}) == 0 && f.Cached({1, 2, 5}) == 2);
+    assert(f.Cached({1, 2, 3, 4}) == 3 && f.Cached({8, 8, 1}) == 2);
+    const auto removed = f.log.events[f.log.events.size() - 2];
+    assert(removed.action == RetentionAction::kRemoved &&
+           removed.reason == RetentionReason::kRecordCapacity);
+    // Every remaining conversation was used within the last turnover.
+    assert(!admit({6, 6, 6}, RetentionPurpose::kHistory));
+    assert(f.policy.Size() == 4);
+  }
+}
 int main() {
   Planning();
   Branches();
@@ -1227,4 +1282,5 @@ int main() {
   InvalidInventoriesPreserveReplacement();
   WindowPeersAlignByRow();
   ShortWindowCheckpointsAreCheap();
+  RecordTurnoverAdmitsOptionalCopies();
 }

@@ -462,13 +462,32 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
     if (tail != limit_)
       return tail;
   }
+  // Record capacity is not byte capacity: a model with small checkpoints can
+  // fill every record long before byte pressure applies its turnover rule.
+  // An optional copy may then displace a conversation that it and its
+  // retained descendants have not used within one turnover of the record
+  // table, after every rank-eligible record. Otherwise the table freezes and
+  // refuses every later retry copy and grid point.
+  const auto stale = [&](std::size_t i) {
+    if (!record_pressure || Continuation(r.purpose) || eligible(i) ||
+        !records_[i].checkpoint || Persisting(i) ||
+        std::ranges::find(r.protected_checkpoints,
+                          records_[i].checkpoint->Id()) !=
+            r.protected_checkpoints.end())
+      return false;
+    auto recency = records_[i].last_used;
+    for (std::size_t j = 0; j < limit_; ++j)
+      if (records_[i].below[j])
+        recency = std::max(recency, records_[j].last_used);
+    return clock_ - recency >= limit_;
+  };
   std::size_t target = limit_;
   std::array<std::uint64_t, 4> order{};
   // Byte pressure may select a last copy while covered records remain. The
   // redundant source still advances only when every candidate is a last copy.
   std::uint32_t lowest = 3;
   for (std::size_t i = 0; i < limit_; ++i) {
-    if (!eligible(i) || i == source)
+    if ((!eligible(i) && !stale(i)) || i == source)
       continue;
     if (!record_pressure) {
       lowest = std::min(lowest, priority(i));
@@ -567,11 +586,12 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       r.new_payload_bytes > limits.ram_bytes)
     return refuse(RetentionReason::kByteCapacity);
   // ReserveSnapshot's optional-role record guard precedes its exact-match
-  // search. Republishing an exact boundary cannot bypass that guard and
-  // downgrade an inferred continuation branch to history/retry.
+  // search. Republishing an exact boundary still needs an eligible victim.
   if (size_ == limit_ && !Continuation(r.purpose) && Victim(r, true) == limit_)
     return refuse(RetentionReason::kRecordCapacity);
-  // Exact replacement keeps learned status even if capture later needs space.
+  // Exact replacement keeps explicit and inferred branch status even if
+  // capture later needs space. A stale unrelated victim can permit optional
+  // admission without making the exact match safe to downgrade.
   std::size_t exact = limit_;
   for (std::size_t i = 0; i < limit_; ++i) {
     const auto& e = records_[i];
@@ -579,7 +599,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
         e.checkpoint->Input() == r.input &&
         std::ranges::equal(e.checkpoint->Tokens(), r.tokens)) {
       exact = i;
-      if (e.purpose == RetentionPurpose::kBranchPoint)
+      if (e.purpose == RetentionPurpose::kBranchPoint || Branch(i))
         purpose = RetentionPurpose::kBranchPoint;
       break;
     }
