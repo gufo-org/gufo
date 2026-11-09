@@ -52,6 +52,25 @@ std::size_t ContiguousAlias(const unsigned char* host,
   }
   return bad * page - base;
 }
+// Bytes from `host` inside the registration that holds it. hipMemcpyAsync
+// rejects a host range spanning two registrations even when their aliases are
+// adjacent, as on Linux, where each alias equals its host address.
+std::size_t RegisteredBytes(const unsigned char* host, std::size_t bytes) {
+  void* start{};
+  std::size_t size{};
+  auto* pointer = const_cast<unsigned char*>(host);
+  if (hipPointerGetAttribute(&start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+                             pointer) != hipSuccess ||
+      hipPointerGetAttribute(&size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
+                             pointer) != hipSuccess) {
+    (void)hipGetLastError();
+    return bytes;
+  }
+  const auto* first = static_cast<const unsigned char*>(start);
+  return host >= first && host < first + size
+             ? std::min<std::size_t>(bytes, first + size - host)
+             : bytes;
+}
 hipError_t CopySnapshot(void* destination, const void* source,
                         std::size_t bytes, hipStream_t stream, bool download) {
   if (bytes && destination && source) {
@@ -63,8 +82,9 @@ hipError_t CopySnapshot(void* destination, const void* source,
     // Restore joins host-adjacent chunks, which may come from separate
     // registrations. Neither the alias kernel nor hipMemcpyAsync may cross one.
     if (status == hipSuccess && mapped) {
-      const auto first = ContiguousAlias(
-          host, static_cast<const unsigned char*>(mapped), bytes);
+      const auto first =
+          ContiguousAlias(host, static_cast<const unsigned char*>(mapped),
+                          RegisteredBytes(host, bytes));
       if (first < bytes) {
         auto* d = static_cast<unsigned char*>(destination);
         auto* s = static_cast<const unsigned char*>(source);
