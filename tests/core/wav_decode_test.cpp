@@ -198,7 +198,7 @@ struct Fmt {
   std::uint32_t bits{16};
   // Zero derives block_align from channels and bits.
   std::uint32_t block_align{0};
-  Bytes extension;
+  Bytes extension{};
 };
 
 Bytes FmtChunk(const Fmt& fmt) {
