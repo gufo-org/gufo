@@ -312,7 +312,9 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
   }
   std::vector<speculative::DraftProposal> proposals(requests.size());
   // Keep the single-user path and uncommon topology handling unchanged.
+  // DSpine drafts each session alone: its bridge has no batched path.
   if (requests.size() == 1 || config.head_dim > 256 ||
+      coordinator.model_->IsDSpine() ||
       std::ranges::find(std::span(counts).first(requests.size()), 0U) !=
           std::span(counts).first(requests.size()).end()) {
     for (std::size_t index = 0; index < requests.size(); ++index) {

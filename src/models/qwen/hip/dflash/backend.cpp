@@ -352,7 +352,9 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeEach(
 
 std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
     std::span<const speculative::DraftProposalRequest> requests) {
-  if (requests.size() < 2 || requests.size() > 8)
+  // DSpine drafts each session alone: its bridge has no batched path.
+  if (requests.size() < 2 || requests.size() > 8 ||
+      executor_->GetModel().IsDSpine())
     return ProposeEach(requests);
   std::array<QwenDFlashGpuDraftBackend*, 8> backends{};
   for (std::size_t index = 0; index < requests.size(); ++index) {
