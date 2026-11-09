@@ -32,8 +32,6 @@ def make_args(backend):
         draft_model="/models/draft.gguf",
         backend=backend,
         max_tokens=128,
-        draft_tokens=7,
-        min_draft_tokens=1,
         prompt_mode="auto",
         system_prompt=None,
     )
@@ -50,9 +48,6 @@ check(
     "DSpark auto mode must use the reference system prompt",
 )
 check("--dspark-model" in dspark_command, "DSpark model argument")
-check(dspark_command[dspark_command.index("--draft-tokens") + 1] == "7",
-      "DSpark benchmark retains the requested draft budget")
-check("--draft-policy" not in dspark_command, "removed policy is never emitted")
 
 custom_args = make_args("dspark")
 custom_args.system_prompt = "Custom system prompt"
@@ -71,16 +66,15 @@ dflash_command = speculative_corpus.build_prompt_command(
 check("--raw" not in dflash_command, "DFlash2 auto mode uses production chat framing")
 check("--system" not in dflash_command, "Qwen keeps its normal system prompt")
 check("--dflash-model" in dflash_command, "DFlash2 model argument")
-controller_args = make_args("dflash2")
-controller_args.draft_policy = "adaptive"
-controller_command = speculative_corpus.build_prompt_command(
-    controller_args, "Continue this text.", speculative=True
-)
-check(controller_command[controller_command.index("--draft-policy") + 1] ==
-      "adaptive", "DFlash2 corpus runs the requested controller")
-check("--draft-policy" not in speculative_corpus.build_prompt_command(
-    controller_args, "Continue this text.", speculative=False
-), "controller choice never changes the autoregressive reference command")
+for backend in ("dspark", "dflash2", "mtp"):
+    for speculative in (False, True):
+        command = speculative_corpus.build_prompt_command(
+            make_args(backend), "Continue this text.", speculative=speculative
+        )
+        for flag in ("--draft-tokens", "--min-draft-tokens", "--draft-policy"):
+            check(flag not in command,
+                  f"{backend} uses model defaults without deprecated {flag}")
+
 
 dspark_stats = speculative_corpus.parse_speculative_stats(
     "[Speculative]: acceptance=0.511111 drafted=45 accepted=23 "
