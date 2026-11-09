@@ -83,7 +83,8 @@ A shape is listed where the first sweep's best candidate saves at least
 `--min-gain` percent over `generic`, summed over target and draft weighted by
 their layer counts, and saves that much in the second sweep too. `--skip`
 leaves out a candidate that spills with your compiler. The Windows table was
-generated this way.
+generated this way, less IQ4_XS joined ffn_gate+ffn_up (34816x5120) at four
+rows, which saved under 1% in a later sweep.
 
 ## Limits
 
