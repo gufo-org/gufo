@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
       continue;
     }
     common_chat_parser_params pp(p);
-    pp.parser.load(p.parser);
+    pp.parser = p.parser;
     auto grammar_accepts = [&](const std::string& text) {
       llama_grammar* g = llama_grammar_init_impl(
           nullptr, p.grammar.c_str(), "root", false, nullptr, 0, nullptr, 0);
@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
       std::string text = nlohmann::json::parse(cols[i]).get<std::string>();
       try {
         // common_chat_parse adds pp.generation_prompt itself.
-        auto m = common_chat_parse(text, false, pp);
+        auto m = common_chat_parse(common_chat_input(text), false, pp);
         std::string args =
             m.tool_calls.empty() ? "-" : m.tool_calls[0].arguments;
         printf("%s\tcand%zu\tcalls=%zu\targs=%s\tgrammar=%s\n", cols[0].c_str(),
