@@ -1,91 +1,10 @@
 # Qwen3.8 Flash-Next benchmarks
 
-## CPU serving paths, November 9, 2026
-
-Main `6a021263` versus the issue #716 adaptation, Strix Halo, pinned Nix
-GCC 16.2.0, `-O2`, baseline x86-64 ISA with runtime AVX-512 dispatch.
-Medians of three isolated measurements; these exclude disk reads, scheduling
-and GPU inference. The small row buffers rotate over 4,096 rows; the
-180 MiB control traverses 2,097,152 compressed rows in a permuted order.
-
-| Operation | Main | Candidate | Speedup |
-| --- | ---: | ---: | ---: |
-| Block maxima over 248,320 logits | 26.455 µs | 11.041 µs | 2.40× |
-| IQ4_NL row, 160 values, small buffer | 208.697 ns | 8.279 ns | 25.21× |
-| IQ4_NL row, 160 values, 180 MiB buffer | 370.770 ns | 98.047 ns | 3.78× |
-| N-gram hash, one token | 22.394 ns | 19.170 ns | 1.17× |
-| N-gram hash, 2,048 tokens | 60.570 µs | 30.368 µs | 1.99× |
-| BF16 row conversion, 160 values | 40.751 ns | 3.706 ns | 11.00× |
-
-Raw samples, compiler/build identities, harness sources, request histories
-and production controls are retained in
-`/home/fbozzo/projects/validation/issue716-20261109/`.
-These CPU speedups do not establish an end-to-end inference speedup.
-
-
-Production controls use `gufo bench -p 2048 -n 128 -d 0,4096 -r 2`,
-UD-Q4_K_XL revision `d96201` and the shared-Q8_0 MTP sidecar. Rates are the
-standard benchmark's two-repeat observations, not an HTTP timing qualification.
-
-| Mode | Depth | Main pp (tok/s) | Candidate pp (tok/s) | Main tg (tok/s) | Candidate tg (tok/s) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| AR | 0 | 1,948.15 | 1,945.50 | 30.43 | 30.46 |
-| AR | 4,096 | 1,883.25 | 1,886.34 | 29.69 | 29.73 |
-| MTP | 0 | 1,848.43 | 1,886.01 | 62.98 | 62.98 |
-| MTP | 4,096 | 1,772.28 | 1,805.25 | 51.82 | 51.89 |
-| AR sampled | 0 | 1,949.23 | 1,945.87 | 30.29 | 30.34 |
-| MTP sampled | 0 | 1,887.67 | 1,886.35 | 50.45 | 50.44 |
-
-Sampled controls use temperature 0.7, top-k 20, top-p 0.8 and seed 73.
-The greedy MTP prefill difference is about 2%; the matched decode rates are
-essentially unchanged. This does not establish a general inference speedup.
-
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target
 with shared-Q8_0 MTP; adaptive drafting. HTTP, greedy, thinking off.
 Gufo `fec4759d` (October 18, 2026); llama.cpp `b11069` AR and `6fcaa16f` MTP
 (September 22–23). Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
-
-## PR #877 controls, November 4, 2026
-
-Pinned main `1c75887b` versus runtime candidate `e6b2a4c1`, Nix production
-builds, ROCm 10.1 on the same Strix Halo. `gufo bench -p 2048 -n 128
--d 0,4096 -r 2`, same UD-Q4_K_XL and shared Q8_0 MTP sidecar. Values are
-reported tok/s from two repetitions; these are regression controls, not a
-refresh of the historical llama.cpp comparisons below.
-
-| Mode | Depth | Main pp | Candidate pp | Main tg | Candidate tg |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| AR | 0 | 1,932.39 | 1,938.25 | 30.05 | 30.05 |
-| AR | 4,096 | 1,872.58 | 1,874.96 | 29.38 | 29.36 |
-| MTP | 0 | 1,870.13 | 1,870.21 | 62.70 | 62.65 |
-| MTP | 4,096 | 1,787.34 | 1,789.39 | 51.44 | 51.53 |
-
-The canonical HTTP serving tool also ran a fixed 619-token prompt (the
-pangram question repeated 32 times), homogeneous C1/C2/C4/C6/C8 cohorts,
-128 output tokens, greedy, thinking off, context 8,192, eight sessions,
-queue limit 16 and a 4 GiB RAM cache. Prompt reuse was disabled; one warmup
-and two measured rounds ran per concurrency. Each cell below is the median
-of two sums of individual request decode rates, not whole-request aggregate
-throughput. All output hashes and prompt/prefill/completion counts match.
-
-| Concurrency | Main AR | Candidate AR | Main MTP | Candidate MTP |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 30.23 | 30.22 | 53.24 | 53.25 |
-| 2 | 48.21 | 48.17 | 72.96 | 72.97 |
-| 4 | 74.72 | 74.68 | 109.52 | 109.60 |
-| 6 | 93.73 | 93.67 | 125.09 | 125.36 |
-| 8 | 106.78 | 106.79 | 143.64 | 143.82 |
-
-The simultaneous clients enter the scheduler in a different index order.
-Raw per-index latency flags remain retained (56 AR, 51 MTP); matching the
-identical histories by admission rank has no phase outside 5% and 10 ms,
-but is diagnostic, not a strict per-client timing pass. No request was
-rejected and MTP drafts executed at every concurrency. Separate continuation
-controls retain inconclusive disk timings; the rates above do not qualify
-those observations. Peak driver GTT is identical: AR 84,774.46 MiB and
-MTP 88,931.12 MiB. Host RSS peaks are AR 3,117 → 3,085 MiB and
-MTP 3,125 → 3,147 MiB (about 22 MiB variation).
 
 ## Single user, autoregressive
 
