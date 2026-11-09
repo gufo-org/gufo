@@ -52,9 +52,13 @@ void Registry::AddProvider(ProviderInfo provider) {
     for (const auto& existing : providers_) {
       for (const auto& other : existing.options) {
         for (const auto& command : option.commands) {
+          // Compare through OptionApplies so bare `serve` overlaps every
+          // `serve <modality>` declaration in either direction.
           if (option.name == other.name && option.type != other.type &&
-              std::ranges::find(other.commands, command) !=
-                  other.commands.end()) {
+              (OptionApplies(other, command) ||
+               std::ranges::any_of(other.commands, [&](const auto& theirs) {
+                 return OptionApplies(option, theirs);
+               }))) {
             throw std::invalid_argument("conflicting option types: " +
                                         option.name);
           }
