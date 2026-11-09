@@ -148,9 +148,6 @@ Request fields and limits are on the [MiniMax H3](models/minimax-h3.md) page.
 | `gufo serve image` | `POST /v1/images/generations`, `POST /v1/images/edits` | [Qwen-Image-2.1](models/qwen-image-2.1.md) |
 | `gufo serve decision` | `POST /v1/systemone` | Defined by the model |
 
-Run `gufo serve image --help` to see startup options supplied by your image
-extensions.
-
 ## Model names
 
 `GET /v1/models` lists the IDs the server answers to. Repeat
