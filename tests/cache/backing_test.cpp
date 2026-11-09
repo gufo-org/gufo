@@ -1150,27 +1150,32 @@ void LargeBacking() {
   fail_alloc = false;
   assert(ledger.Snapshot().total_bytes == 0);
 }
-}  // namespace
 // The hooks' transfer_streams sets how many streams the resources lease, and
 // the default keeps the previous 64.
 void ConfiguredTransferStreams() {
-  const auto leased = [](std::size_t count) {
+  const auto leased = [](std::optional<std::size_t> count) {
     cache::ResourceLedger ledger{{1ULL << 30, 1ULL << 30, 0, 1ULL << 30}};
     hip::ComponentCacheHooks hooks{[] { return std::size_t{1} << 30; },
                                    [](std::string_view) {},
                                    [](std::string_view) {}};
     if (count)
-      hooks.transfer_streams = count;
+      hooks.transfer_streams = *count;
     auto resources = hip::CreateHipComponentCacheResources(
         std::make_unique<cache::testing::FakeAdapter>(), ledger, hooks);
     std::vector<std::unique_ptr<cache::Stream>> streams;
     while (auto stream = resources->stream())
       streams.push_back(std::move(stream));
-    return streams.size();
+    const auto size = streams.size();
+    streams.clear();
+    assert(resources->stream());
+    return size;
   };
+  assert(leased(1) == 1);
   assert(leased(3) == 3);
-  assert(leased(0) == 64);
+  assert(leased(std::nullopt) == 64);
+  Throws<std::invalid_argument>([&] { (void)leased(0); });
 }
+}  // namespace
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--deny-long-term-pins") == 0) {

@@ -20,9 +20,11 @@ struct ComponentCacheHooks {
   std::function<void(std::string_view)> warn;
   std::function<void(std::string_view)> info;
   // Transfer streams, created up front for captures, restores and idle spill.
-  // Each keeps HIP queue memory resident (about 9 MiB on gfx1151). A capture
-  // or restore batch leases up to 16 at once; with fewer free, concurrent
-  // batches run narrower or wait. Must be nonzero.
+  // HIP queues consume resident memory. Each serving session holds one stream
+  // for preservation; leave additional streams for captures, restores and idle
+  // spill. Batches lease up to 16 and drain their own work before retrying an
+  // exhausted pool. Acquisition does not wait for other users and can fail.
+  // Must be nonzero.
   std::size_t transfer_streams{64};
 };
 
