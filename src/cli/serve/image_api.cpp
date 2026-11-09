@@ -12,7 +12,10 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
+#include <variant>
 
+#include "gufo/ext/registry.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/image.hpp"
@@ -230,7 +233,7 @@ void ValidateRequest(const ext::ImageRequest& request) {
     throw std::invalid_argument("image steps must be between 2 and 100");
   if (request.images.size() > 10)
     throw std::invalid_argument(
-        "Qwen-Image supports at most 10 reference images");
+        "image edits accept at most 10 reference images");
   std::size_t pixels = 0;
   for (const auto& image : request.images) {
     CheckImage(image);
@@ -377,40 +380,94 @@ std::string String(const json::Value& fields, const char* name,
 
 }  // namespace
 
-ImageService::ImageService(const std::filesystem::path& root,
-                           std::string model_id, Runner runner,
+const ext::ImageProvider& SelectImageProvider(
+    const ext::Registry& registry, const std::filesystem::path& root,
+    const ext::ParsedOptions& options) {
+  const auto* provider = ext::ProbeImageProvider(root.string());
+  if (!provider) {
+    provider = ext::FindImageProvider("qwen-image-21");
+  }
+  if (!provider) {
+    provider = ext::FindImageProvider("qwen-image-2.1");
+  }
+  if (!provider) {
+    throw std::runtime_error("extension 'qwen_image_21' is not registered");
+  }
+  if (options.empty())
+    return *provider;
+  // Explicit options must belong to the provider that claims the model; the
+  // parser accepted the union of every available provider's declarations.
+  const auto& info = registry.Provider(provider->id);
+  ext::ValidateSelectedOptions(registry, ext::kImageServeCommand, info,
+                               options);
+  for (const auto& [name, value] : options) {
+    const auto spec =
+        std::ranges::find_if(info.options, [&](const ext::OptionSpec& option) {
+          return option.name == name &&
+                 ext::OptionApplies(option, ext::kImageServeCommand);
+        });
+    if (spec == info.options.end() || spec->type != ext::OptionType::kPath)
+      continue;
+    const auto& path = std::get<std::string>(value);
+    std::error_code error;
+    if (path.empty() || !std::filesystem::exists(path, error))
+      throw std::invalid_argument(name + " does not exist: " + path);
+  }
+  return *provider;
+}
+
+std::shared_ptr<ext::ImageRunner> CreateImageRunner(
+    const ext::ImageProvider& provider, const std::filesystem::path& root,
+    const ext::ParsedOptions& options) {
+  std::string error;
+  std::unique_ptr<ext::ImageRunner> runner;
+  if (provider.create_with_options) {
+    runner = provider.create_with_options(
+        {.model_root = root.string(), .options = options}, &error);
+  } else if (!options.empty()) {
+    throw std::runtime_error("image provider " + provider.id +
+                             " declares startup options but has no "
+                             "options-aware factory");
+  } else if (provider.create) {
+    runner = provider.create(root.string(), &error);
+  } else {
+    throw std::runtime_error("image provider " + provider.id +
+                             " cannot run in this build");
+  }
+  if (!runner) {
+    throw std::runtime_error("failed to create runner for " + root.string() +
+                             (error.empty() ? "" : ": " + error));
+  }
+  return runner;
+}
+
+ImageService::ImageService(std::shared_ptr<ext::ImageRunner> runner,
+                           std::string model_id,
                            std::vector<std::string> model_aliases)
     : model_id_(std::move(model_id)),
       model_aliases_(std::move(model_aliases)),
-      runner_(std::move(runner)) {
+      model_(std::move(runner)) {
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
-  if (!runner_) {
-    const auto* provider = ext::ProbeImageProvider(root.string());
-    if (!provider) {
-      provider = ext::FindImageProvider("qwen-image-21");
-    }
-    if (!provider) {
-      provider = ext::FindImageProvider("qwen-image-2.1");
-    }
-    if (!provider) {
-      throw std::runtime_error("extension 'qwen_image_21' is not registered");
-    }
-    std::string create_error;
-    model_ = provider->create(root.string(), &create_error);
-    if (!model_) {
-      throw std::runtime_error(
-          "failed to create runner for " + root.string() +
-          (create_error.empty() ? "" : ": " + create_error));
-    }
-    runner_ = [this](const Request& request,
-                     const CancellationCheck& cancelled) {
-      return model_->Generate(request, cancelled);
-    };
-  }
+  if (!model_)
+    throw std::invalid_argument("image service requires a runner");
+  capabilities_ = model_->Capabilities();
 }
 
 ImageService::~ImageService() = default;
+
+void ImageService::Validate(const Request& request) const {
+  if (!request.images.empty() && !capabilities().edits)
+    throw std::invalid_argument("model " + model_id_ +
+                                " does not support image edits");
+  if (request.background == ext::ImageBackground::kTransparent &&
+      !capabilities().transparent_background)
+    throw std::invalid_argument(
+        "model " + model_id_ +
+        " does not support transparent backgrounds; use background auto or "
+        "opaque");
+  model_->ValidateRequest(request);
+}
 
 ImageService::Result ImageService::Generate(
     const Request& request, const CancellationCheck& cancelled) {
@@ -420,7 +477,15 @@ ImageService::Result ImageService::Generate(
       throw std::runtime_error("image request cancelled");
   if (cancelled && cancelled())
     throw std::runtime_error("image request cancelled");
-  return runner_(request, cancelled);
+  if (!capabilities_ &&
+      request.background == ext::ImageBackground::kTransparent) {
+    auto legacy = request;
+    legacy.prompt =
+        "This is an RGBA image with transparency. " + request.prompt +
+        " The image has alpha channel and the background is transparent.";
+    return model_->Generate(legacy, cancelled);
+  }
+  return model_->Generate(request, cancelled);
 }
 
 HttpResponse HandleImageApiRequest(const HttpRequest& request,
@@ -430,6 +495,10 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
   try {
     Parsed parsed;
     const bool edit = request.path == "/v1/images/edits";
+    // Reject before decoding uploads when the model cannot edit at all.
+    if (edit && !service.capabilities().edits)
+      throw std::invalid_argument("model " + service.model_id() +
+                                  " does not support image edits");
     if (edit)
       parsed = Multipart(request);
     else {
@@ -462,15 +531,19 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
       throw std::invalid_argument("streaming image responses are unsupported");
     (void)String(fields, "user", "");
     const auto background = String(fields, "background", "auto");
-    if (background != "auto" && background != "transparent" &&
-        background != "opaque")
-      throw std::invalid_argument("invalid image background");
     ext::ImageRequest generation;
+    if (background == "auto")
+      generation.background = ext::ImageBackground::kAuto;
+    else if (background == "opaque")
+      generation.background = ext::ImageBackground::kOpaque;
+    else if (background == "transparent")
+      generation.background = ext::ImageBackground::kTransparent;
+    else
+      throw std::invalid_argument(
+          "background must be auto, opaque or transparent");
+    // The prompt reaches the provider unchanged; model-specific conditioning
+    // for the requested background belongs to the provider.
     generation.prompt = String(fields, "prompt", "");
-    if (background == "transparent")
-      generation.prompt =
-          "This is an RGBA image with transparency. " + generation.prompt +
-          " The image has alpha channel and the background is transparent.";
     generation.images = std::move(parsed.images);
     const auto size = String(fields, "size", "auto");
     if (size == "auto") {
@@ -505,12 +578,13 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
                (1ULL << 53) - 1);
     const auto count = Number(fields, "n", 1, 1, 10);
     ValidateRequest(generation);
+    service.Validate(generation);
     auto body = json::Value::object();
     body["created"] = static_cast<double>(std::time(nullptr));
     auto data = json::Value::array();
     for (std::uint64_t i = 0; i < count; ++i) {
       auto result = service.Generate(generation, request.is_cancelled);
-      if (background == "opaque") {
+      if (generation.background == ext::ImageBackground::kOpaque) {
         for (std::size_t p = 0; p < result.image.rgba.size(); p += 4) {
           const int a = result.image.rgba[p + 3];
           for (int c = 0; c < 3; ++c)

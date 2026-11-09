@@ -7,10 +7,6 @@
 namespace gufo::cli {
 namespace {
 
-bool Applies(const ext::OptionSpec& option, std::string_view command) {
-  return std::ranges::find(option.commands, command) != option.commands.end();
-}
-
 std::string_view ValueHint(ext::OptionType type) {
   switch (type) {
     case ext::OptionType::kInteger:
@@ -27,17 +23,16 @@ std::string_view ValueHint(ext::OptionType type) {
 }  // namespace
 
 ProviderOptions::ProviderOptions(const ext::Registry& registry,
-                                 std::string command)
+                                 std::string command,
+                                 ext::Capability capability)
     : registry_(registry), command_(std::move(command)) {
-  // Only text runners and drivers receive these values; another capability's
-  // options (an embedding model's serve settings, ...) belong to its own path.
+  // Options for another capability belong to its own command path.
   for (const auto& provider : registry_.Providers()) {
-    if (!provider.available ||
-        provider.capability != ext::Capability::kTextGeneration) {
+    if (!provider.available || provider.capability != capability) {
       continue;
     }
     for (const auto& option : provider.options) {
-      if (!Applies(option, command_)) {
+      if (!ext::OptionApplies(option, command_)) {
         continue;
       }
       auto& declared = declared_[option.name];
@@ -80,9 +75,10 @@ void ProviderOptions::Register(ArgParser& parser) {
   }
 }
 
-void ProviderOptions::Parse() {
+const ext::ParsedOptions& ProviderOptions::Parse() {
   const std::vector<std::string_view> tokens(tokens_.begin(), tokens_.end());
   values_ = ext::ParseOptions(registry_, command_, tokens);
+  return values_;
 }
 
 ext::ParsedOptions ProviderOptions::Select(std::string_view provider_id) const {

@@ -31,6 +31,10 @@ const T* FindOption(const ParsedOptions& options, std::string_view name) {
 }
 
 bool IsCoreOption(std::string_view name);
+// True when the option is declared for the command. A declaration for the bare
+// `serve` command applies to every `serve <modality>` command, matching the Nix
+// serving helper; a modality-specific spelling applies only to that modality.
+bool OptionApplies(const OptionSpec& option, std::string_view command);
 // Parse only explicit values: provider defaults/validation run after selection.
 // Boolean flags accept --flag, --flag=true and --flag=false. Other types accept
 // --name=value or --name value. Duplicate options and positional tokens fail.

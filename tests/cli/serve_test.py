@@ -51,6 +51,14 @@ def main():
                "--served-model-name", "dup", "--model", "missing.gguf"], 2,
               "duplicate --served-model-name")
     check(["serve", "image"], 2, "--model <DIR> is required")
+    # Image provider options come from manifests of built, available providers
+    # (#974). Undeclared spellings stay usage errors before any model loads,
+    # and a host option keeps a value that looks like a provider option.
+    check(["serve", "image", "--help"], 0, "Image model directory")
+    check(["serve", "image", "--model", "/missing", "--not-declared", "x"], 2,
+          "Unknown option: --not-declared")
+    check(["serve", "image", "--served-model-name", "--not-declared"], 2,
+          "--model <DIR> is required")
     check(["serve", "embedding"], 2, "--model <DIR> is required")
     text = check(["serve", "embedding", "--help"], 0, "--served-model-name")
     assert "--context" not in text and "--sessions" not in text
