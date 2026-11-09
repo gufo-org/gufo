@@ -4,6 +4,39 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/internal/releasing.md).
 
+## [0.33.0](https://github.com/gufo-org/gufo/compare/v0.32.0...v0.33.0) (2026-11-09)
+
+
+### Features
+
+* **ext:** add image provider startup options and request capability validation ([#1050](https://github.com/gufo-org/gufo/issues/1050)) ([00d7ccb](https://github.com/gufo-org/gufo/commit/00d7ccb0939f415df151418cc03f7667e9ee5c7e))
+* **ext:** let component caches set their transfer stream count ([#1108](https://github.com/gufo-org/gufo/issues/1108)) ([2fd9e46](https://github.com/gufo-org/gufo/commit/2fd9e460973399befa7da01eeba9ce3db7ededbf))
+
+
+### Bug Fixes
+
+* **cache:** keep snapshot copies inside one host registration ([#1117](https://github.com/gufo-org/gufo/issues/1117)) ([3016d65](https://github.com/gufo-org/gufo/commit/3016d6520585027916f844292aa1d019f9a04cc2))
+* **cache:** let optional copies displace conversations unused for one record turnover ([#1104](https://github.com/gufo-org/gufo/issues/1104)) ([fe2694b](https://github.com/gufo-org/gufo/commit/fe2694bce83008910fe135d6f800846b5d5673cb))
+* **ds4:** keep DSpark greedy output equal to plain decoding ([#1105](https://github.com/gufo-org/gufo/issues/1105)) ([8c332a0](https://github.com/gufo-org/gufo/commit/8c332a023d522f9c8ad9ad75717d66259deabdd7))
+* **functional:** let the text suites run models without a Qwen or DeepSeek preset ([#1103](https://github.com/gufo-org/gufo/issues/1103)) ([718a388](https://github.com/gufo-org/gufo/commit/718a388d031364e5707f11fc21890b6b4f54c24a))
+* **qwen38-flash-next:** measure the decode shared-expert overlap before using it ([#1107](https://github.com/gufo-org/gufo/issues/1107)) ([#1112](https://github.com/gufo-org/gufo/issues/1112)) ([365cc5a](https://github.com/gufo-org/gufo/commit/365cc5a5f8f16f8c83d585d7d794a5b2983be900))
+* **serve:** read the DXGI budget for state capacity on Windows iGPUs ([#910](https://github.com/gufo-org/gufo/issues/910)) ([3a89a05](https://github.com/gufo-org/gufo/commit/3a89a056ba660aee54413443aa8e78b80b5992c6))
+
+
+### Performance
+
+* **ds4:** faster DeepSeek V4 Flash decode from two HC kernel changes ([#1106](https://github.com/gufo-org/gufo/issues/1106)) ([5f9612c](https://github.com/gufo-org/gufo/commit/5f9612c3b19ab6676b842095bc88bb9b32da5cf0))
+
+
+### Documentation
+
+* rewrite the README as a short front page ([#1115](https://github.com/gufo-org/gufo/issues/1115)) ([2dac5ee](https://github.com/gufo-org/gufo/commit/2dac5eeb470f5939243375674efab2ae70ec4b85))
+
+
+### Code Refactoring
+
+* **audio:** decode WAV with one Rust decoder for serve, Qwen3-ASR and Qwen3-TTS ([#1110](https://github.com/gufo-org/gufo/issues/1110)) ([768a482](https://github.com/gufo-org/gufo/commit/768a482f780bc17c08a740855d35de2de5846e09))
+
 ## [0.32.0](https://github.com/gufo-org/gufo/compare/v0.31.0...v0.32.0) (2026-11-08)
 
 
