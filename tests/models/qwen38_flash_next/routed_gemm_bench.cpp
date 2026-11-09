@@ -213,9 +213,9 @@ Result RunLayer(const std::vector<std::uint32_t>& counts, int reps,
     }
   }
   // The executor's maps: one of 128-token tiles for the paired gate/up and
-  // the down projections; below 1,024 tokens one 16- or 48-token map serves
-  // separate gate, up and down projections.
-  const bool wide = tokens >= 1024;
+  // the down projections of a prefill pass; a batch of up to eight tokens
+  // takes one 16- or 48-token map for separate gate, up and down projections.
+  const bool wide = tokens > 8;
   const std::uint32_t narrow_rows = slots >= 16 * kExperts ? 48 : 16;
   std::vector<std::int32_t> tiles;
   const auto append = [&](std::uint32_t rows) {

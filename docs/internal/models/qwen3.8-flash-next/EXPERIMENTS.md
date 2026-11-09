@@ -1,5 +1,42 @@
 # Qwen3.8 Flash-Next experiments
 
+## Prefill bounds on ROCm 10.1 (November 9, 2026)
+
+Main `017e9249`, ROCm 10.1, UD-Q4_K_XL (`d96201`), autoregressive,
+`gufo bench -n 0 -r 3`: pp512 1,350, pp2048 1,945, pp4096 2,020, pp16384
+1,965 tok/s; with the MTP sidecar 1,312 / 1,883 / 1,952. Every change below
+is exact (identical output hashes) and none is retained.
+`tools/bench/gfx1151_peak.hip` on this host: F16 WMMA 54.8 TFLOPS, DRAM read
+241 GB/s.
+
+`routed_gemm_bench` replaying the per-layer expert counts of a real pass
+(ms per pass over 48 layers, gate/up + down):
+
+| Pass rows | Tiles per layer | Rows per tile | Production | One cache-resident expert | Cache-resident activations |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 260 | 19 | 112 + 78 | 73 + 42 | 107 + 76 |
+| 2,048 | 408 | 49 | 212 + 145 | 190 + 106 | 203 + 141 |
+| 4,096 | 567 | 71 | 353 + 225 | 338 + 186 | 342 + 219 |
+
+The routed experts are DRAM-bound only at 512 rows (about 200 GB/s). From
+2,048 rows they are bound by WMMA time and weight decode: without any weight
+traffic they keep 83 % of their time. Buckets padded to 16 tokens execute
+1.54 / 1.18 / 1.08 times the useful WMMA work at 512 / 2,048 / 4,096 rows.
+The earlier "DRAM floor" for a pp2048 pass does not hold.
+
+| Experiment | Outcome |
+| --- | --- |
+| Both side streams off beside the fused DeltaNet | Rejected: without the shared-expert overlap pp512/2048/4096/16384 1,350/1,949/2,021/1,969 → 1,320/1,930/1,995/1,939; without the Z overlap 1,343/1,947/2,021/1,968. The measurement the fused DeltaNet section left open. |
+| 16 KiB of LDS for the routed kernels (no padding slot per activation plane or output row) | Rejected: occupancy is VGPR-bound (9 waves per SIMD), so nothing is gained, and the power-of-two strides cost 30–40 % at 2,048 rows (gate/up 212 → 296 ms, down 145 → 186 ms). |
+| Next superblock's weights fetched two stages ahead, after the stage's activations so the commit does not wait for them | Rejected: 212.1 → 212.2 ms. Load latency is not what the gate/up kernel waits for. |
+| Tile-major block order (one block of every tile before the next row block) | Rejected: the down projection re-reads its activations, 145 → 296 ms at 2,048 rows. |
+| Expert tiles launched largest and smallest alternately | Rejected: in the bench the down projection gains 3.4 % at 2,048 and 6.3 % at 4,096 rows (sorted orders lose 6–8 % on gate/up), but beside the shared expert a pass is unchanged: 1,349/1,954/2,036/1,974 → 1,341/1,953/2,036/1,976, repeated 1,349/1,945/2,016/1,962 → 1,338/1,954/2,026/1,967. |
+| A residual-sized device copy (84 MB read and written) per SSM layer, as a stand-in for running the HC combines beside the dense GEMMs | Rejected before building it: queued on the main stream it costs pp2048 28 ms per pass, on a side stream beside the SSM projection 21 ms, and at 4,096 rows the same as serial. The dense GEMMs are not free of memory traffic, so splitting the pass to overlap the combines cannot pay. |
+
+`routed_gemm_bench` took the narrow 16/48-token route below 1,024 tokens,
+which prefill left in the mid-size pass change; it now takes the 128-token
+map for every pass above eight tokens.
+
 ## Raw completion fallback (November 4, 2026)
 
 Retained: capture the aligned prompt tail in-pass before retaining the exact
