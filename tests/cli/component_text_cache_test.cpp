@@ -2678,6 +2678,54 @@ void RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers() {
     assert((runner->captures != 0) == enabled);
   }
 }
+// Disk metadata admission is independent of the RAM and disk budgets.
+// Account for a fully committed disk-capture pool without allocating its bytes.
+void RamCacheOffAllowsLargeDiskIndexMetadata() {
+  class AccountingRunner final : public Runner {
+  public:
+    mutable cache::ResourceLedger* ledger{};
+    mutable cache::ResourceCharge backing;
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& resources, std::size_t ram) const override {
+      ledger = &resources;
+      auto result = Runner::CreateComponentCacheResources(resources, ram);
+      result->commit_backing = [this](std::size_t bytes) {
+        backing = ledger->Reserve(cache::ResourceCategory::kBackingFree, bytes)
+                      .Convert();
+      };
+      return result;
+    }
+  };
+  for (const std::size_t ram : {std::size_t{1}, std::size_t{2} << 30}) {
+    const TemporaryDirectory temp("gufo-component-off-disk-metadata-test");
+    const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                          .capacity_bytes = 1 << 20};
+    auto runner = std::make_shared<AccountingRunner>();
+    ComponentTextCache cache(runner, 1, ram, disk, false, 0, false);
+    assert(runner->backing.Info().bytes == 512ULL << 20);
+    assert(runner->ledger->Limits().staging_bytes ==
+           cache::kDefaultDiskStagingBytes);
+    const auto before = runner->ledger->Snapshot().ram_bytes;
+    auto metadata = runner->ledger->Reserve(cache::ResourceCategory::kMetadata,
+                                            128ULL << 20);
+    assert(runner->ledger->Snapshot().ram_bytes == before + (128ULL << 20));
+    auto payload =
+        runner->backing.ReserveBacking(cache::ResourceCategory::kPrivateState)
+            .Convert();
+    auto pin = payload.PinPersistence();
+    assert(runner->ledger->Snapshot().persistence_pinned_bytes == 512ULL << 20);
+    auto extra =
+        runner->ledger->Reserve(cache::ResourceCategory::kPrivateState, 1)
+            .Convert();
+    bool rejected = false;
+    try {
+      auto excess_pin = extra.PinPersistence();
+    } catch (const std::bad_alloc&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
 // With a disk cache the off RAM cache keeps no checkpoint in RAM and commits
 // only the backing disk captures copy through.
 void RamCacheOffWithDiskCommitsOnlyStagingBacking() {
@@ -2720,7 +2768,7 @@ void RamCacheOffWithDiskCommitsOnlyStagingBacking() {
     (void)lease->Commit(prompt, {}, prompt);
   }
   auto runner = std::make_shared<CountingRunner>();
-  ComponentTextCache cache(runner, 1, 1 << 24, disk, false, 0, false);
+  ComponentTextCache cache(runner, 1, 1, disk, false, 0, false);
   auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
   assert(lease->restored_from_disk() &&
          lease->cached_tokens() == prompt.size());
@@ -3075,6 +3123,7 @@ void IndivisibleInputsAreNotSplit() {
   }
 }
 int main() {
+  RamCacheOffAllowsLargeDiskIndexMetadata();
   IndivisibleInputsAreNotSplit();
   PromptReuseCanBeDisabledPerRequest();
   StableChatPrefixSurvivesInterruptedFraming();

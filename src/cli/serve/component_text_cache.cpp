@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
@@ -241,9 +242,17 @@ struct ComponentTextCache::Impl {
         // Disk transfers lease one fixed pinned staging buffer. Its size does
         // not change restore or write speed (#562), and a larger one only
         // takes pinned RAM and device heap from the cache and the sessions.
-        ledger({slot_ceiling + (options ? cache::kDefaultDiskStagingBytes : 0),
-                slot_ceiling, options ? cache::kDefaultDiskStagingBytes : 0,
-                slot_ceiling}),
+        // Off disables checkpoint retention, not metadata accounting. Disk
+        // recovery and publication must admit their bookkeeping from startup.
+        // Persistence pins remain bounded by the disk-capture backing pool.
+        ledger([&]() -> cache::ResourceLimits {
+          const auto staging = options ? cache::kDefaultDiskStagingBytes : 0;
+          if (ram_on)
+            return {slot_ceiling + staging, slot_ceiling, staging,
+                    slot_ceiling};
+          const auto unlimited = std::numeric_limits<std::size_t>::max();
+          return {unlimited, unlimited, staging, kDiskOnlyBackingBytes};
+        }()),
         resources(this->runner->CreateComponentCacheResources(ledger, ram)),
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
@@ -339,17 +348,11 @@ struct ComponentTextCache::Impl {
     }
     if (!ram_enabled) {
       // Only disk captures copy through backing, so without a disk cache no
-      // pool exists. The ledger admits what the slots already charged, that
-      // backing, and request metadata.
+      // pool exists.
       ram = options ? kDiskOnlyBackingBytes : 0;
       disk_backing = ram;
       slot_pinned_bytes =
           resources->pinned_bytes ? resources->pinned_bytes() : 0;
-      const auto staging = ledger.Limits().staging_bytes;
-      const auto limit =
-          std::min(ledger.Limits().ram_bytes,
-                   ledger.Snapshot().ram_bytes + ram + kOffMetadataBytes);
-      ledger.ConstrainLimits({limit + staging, limit, staging, limit});
       if (resources->commit_backing) {
         if (ram) {
           resources->commit_backing(ram);
