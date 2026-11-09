@@ -27,8 +27,8 @@ namespace {
 void Check(hipError_t result) {
   assert(result == hipSuccess);
 }
-// Ordinary committed pages, as the RAM cache backs its segments with; `at`
-// places them at that address or fails.
+// Ordinary committed pages, like the RAM cache's backing segments. A non-null
+// `at` places them exactly there.
 std::byte* MapPages(std::size_t bytes, std::byte* at = nullptr) {
 #ifdef _WIN32
   auto* pages = static_cast<std::byte*>(
