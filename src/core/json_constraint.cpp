@@ -1706,11 +1706,14 @@ private:
     if (!properties)
       properties = &empty_properties;
     const auto* additional = schema.find("additionalProperties");
-    // As in llama.cpp common/json-schema.cpp at 23b0202a1, a response object
-    // that declares properties without additionalProperties stays closed.
-    const bool closed = ClosedProperties(schema, ignore_unknown_keys_) ||
-                        (open_response_objects_ && !additional &&
-                         schema.contains("properties"));
+    // As in llama.cpp common/json-schema.cpp, an object declaring properties
+    // without additionalProperties stays closed, including nested tool values.
+    // Otherwise a misspelled key can become an unbounded string (#1126).
+    const bool closed =
+        ClosedProperties(schema, ignore_unknown_keys_) ||
+        ((open_objects_ || open_response_objects_) && !additional &&
+         schema.contains("properties") &&
+         !(ignore_unknown_keys_ && AdmitsExtraProperties(schema)));
     if (!properties->is_object() ||
         (additional && !additional->is_bool() && !additional->is_object()))
       Invalid("invalid object properties or additionalProperties");
@@ -1836,9 +1839,8 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
-  // Unlike open_objects_, this admits undeclared keys only when
-  // additionalProperties is true or a schema, or the object declares no
-  // properties. Untyped leaves and unsupported keywords remain errors.
+  // Response schemas permit open objects while keeping untyped leaves and
+  // unsupported keywords as errors.
   bool open_response_objects_;
   bool ignore_unknown_keys_{false};
   JsonConstraint::ValueSyntax values_;
@@ -1996,8 +1998,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     const json::Value& schema, bool strict, ToolFormat format) {
   if (format != ToolFormat::kJson)
     return ToolParameters(schema, strict, Syntax(format));
-  // Ordinary agent tools leave nested objects open. Preserve their declared
-  // requirements/types without relaxing strict output schemas.
+  // Ordinary agent tools may explicitly allow extra nested properties. Keep
+  // their requirements/types without relaxing strict output schemas.
   using Key = std::tuple<std::string, bool>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
