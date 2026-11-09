@@ -1,2 +1,0 @@
-Extension API changed paths: cmake/GufoExtension.cmake, cmake/GufoExtensionVersion.cmake, schemas/extension.schema.json
-PASS: extension API 0.1.14; surface (122 paths)

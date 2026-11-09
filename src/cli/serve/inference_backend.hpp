@@ -61,10 +61,18 @@ public:
   InferenceBackend(InferenceBackend&&) = delete;
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
+  /// Completes `options` for the selected text provider before its runner is
+  /// created (command-line settings that depend on the provider); false, with
+  /// `error` set, rejects the load.
+  using PrepareRunnerOptions = std::function<bool(
+      const ext::TextProvider& provider, const core::GgufReader& reader,
+      ext::TextRunnerOptions* options, std::string* error)>;
+
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   /// `enable_yarn` opts Flash-Next into YaRN, required for (and only accepted
   /// with) a `max_context` above its native context; each session scales only
-  /// past the native context.
+  /// past the native context. `prepare_runner_options` runs after the
+  /// provider is selected.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
@@ -73,7 +81,8 @@ public:
             const TextDiskCacheConfig& disk_cache_config = {},
             const std::string& vision_model_path = {},
             TextRunnerRamCacheOptions ram_cache_config = {},
-            bool enable_yarn = false);
+            bool enable_yarn = false,
+            const PrepareRunnerOptions& prepare_runner_options = {});
 
   /// Installs a previously prepared runner with request-owned sessions.
   bool load(std::shared_ptr<ext::TextModelRunner> runner, std::string* error,
@@ -151,6 +160,10 @@ public:
   /// Prompt text of a chat request as generation would render it.
   [[nodiscard]] std::optional<std::string> render_chat_prompt(
       const ChatRequest& request) const override;
+
+  /// Token ids of raw text, as complete() tokenizes a prompt.
+  [[nodiscard]] std::optional<std::vector<std::uint32_t>> tokenize(
+      std::string_view text) const override;
 
 private:
   struct Impl;

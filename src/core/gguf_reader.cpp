@@ -40,6 +40,11 @@ bool ReadPod(const std::uint8_t* data, std::size_t size, std::size_t& offset,
   return true;
 }
 
+std::string UnsizedError(std::string_view name) {
+  return "Invalid GGUF tensor shape or unsupported storage type: " +
+         std::string(name);
+}
+
 bool ReadString(const std::uint8_t* data, std::size_t size, std::size_t& offset,
                 std::string_view& out) {
   std::uint64_t len = 0;
@@ -99,8 +104,9 @@ GgufReader& GgufReader::operator=(GgufReader&& other) noexcept {
 }
 
 std::unique_ptr<GgufReader> GgufReader::OpenFile(
-    const std::filesystem::path& path, std::string* error_msg) {
-  auto first = OpenSingleFile(path, error_msg);
+    const std::filesystem::path& path, std::string* error_msg,
+    GgufOpenOptions options) {
+  auto first = OpenSingleFile(path, error_msg, options);
   if (!first) {
     return nullptr;
   }
@@ -116,11 +122,12 @@ std::unique_ptr<GgufReader> GgufReader::OpenFile(
   if (split_count <= 1) {
     return first;
   }
-  return OpenSplitFileSet(path, std::move(first), error_msg);
+  return OpenSplitFileSet(path, std::move(first), error_msg, options);
 }
 
 std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
-    const std::filesystem::path& path, std::string* error_msg) {
+    const std::filesystem::path& path, std::string* error_msg,
+    GgufOpenOptions options) {
   std::string open_error;
   auto mapping = platform::ReadOnlyMappedFile::Open(path, &open_error);
   if (!mapping.valid()) {
@@ -138,7 +145,7 @@ std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
   reader->mapping_ = std::move(mapping);
 
   try {
-    if (!reader->ParseHeaders(error_msg)) {
+    if (!reader->ParseHeaders(error_msg, options)) {
       if (error_msg && error_msg->empty())
         *error_msg = "Malformed or truncated GGUF";
       return nullptr;
@@ -156,7 +163,7 @@ std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
 
 std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
     const std::filesystem::path& path, std::unique_ptr<GgufReader> first,
-    std::string* error_msg) {
+    std::string* error_msg, GgufOpenOptions options) {
   const auto split_count = first->GetMetadataUint32("split.count").value_or(1U);
   const auto split_no = first->GetMetadataUint32("split.no");
   const auto total_tensor_count =
@@ -200,7 +207,7 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
       continue;
     }
     const auto shard_path = build_path(i);
-    shards[i] = OpenSingleFile(shard_path, error_msg);
+    shards[i] = OpenSingleFile(shard_path, error_msg, options);
     if (!shards[i]) {
       if (error_msg != nullptr && error_msg->empty()) {
         *error_msg = "Failed to open split GGUF shard: " + shard_path.string();
@@ -285,7 +292,8 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
 
 std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
                                                    std::size_t size,
-                                                   std::string* error_msg) {
+                                                   std::string* error_msg,
+                                                   GgufOpenOptions options) {
   if (data == nullptr || size < 24) {
     if (error_msg != nullptr) {
       *error_msg = "Invalid memory buffer for GGUF";
@@ -298,7 +306,7 @@ std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
   reader->size_ = size;
 
   try {
-    if (!reader->ParseHeaders(error_msg)) {
+    if (!reader->ParseHeaders(error_msg, options)) {
       if (error_msg && error_msg->empty())
         *error_msg = "Malformed or truncated GGUF";
       return nullptr;
@@ -313,7 +321,7 @@ std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
   return reader;
 }
 
-bool GgufReader::ParseHeaders(std::string* error_msg) {
+bool GgufReader::ParseHeaders(std::string* error_msg, GgufOpenOptions options) {
   if (size_ < 24) {
     if (error_msg != nullptr) {
       *error_msg = "File too small for GGUF header";
@@ -687,10 +695,16 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     const auto block = quant::QuantizedBlockElements(info.type);
     info.size_bytes = quant::EncodedSizeBytes(info.type, elements);
     if (!info.size_bytes || (block && info.dimensions.front() % block != 0)) {
-      if (error_msg)
-        *error_msg = "Invalid GGUF tensor shape or unsupported storage type: " +
-                     std::string(info.name);
-      return false;
+      // An extension may own this layout; its extent follows from the next
+      // tensor's offset once every offset is known.
+      if (options.allow_unsized_tensors && elements != 0) {
+        info.sized = false;
+        info.size_bytes = 0;
+      } else {
+        if (error_msg)
+          *error_msg = UnsizedError(info.name);
+        return false;
+      }
     }
 
     if (!ReadPod(data_, size_, offset, info.offset)) {
@@ -716,9 +730,23 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     return false;
   }
   const std::size_t data_base = offset + padding;
+  const std::size_t data_size = size_ - data_base;
+  std::vector<std::uint64_t> offsets;
+  if (FirstUnsizedTensor() != nullptr) {
+    offsets.reserve(tensors_.size());
+    for (const auto& tensor : tensors_)
+      offsets.push_back(tensor.offset);
+    std::ranges::sort(offsets);
+  }
   for (auto& tensor : tensors_) {
-    if (tensor.offset % alignment_ != 0 || tensor.offset > size_ - data_base ||
-        tensor.size_bytes > size_ - data_base - tensor.offset) {
+    if (!tensor.sized && tensor.offset < data_size) {
+      const auto next = std::ranges::upper_bound(offsets, tensor.offset);
+      tensor.size_bytes = static_cast<std::size_t>(
+          (next == offsets.end() ? data_size : *next) - tensor.offset);
+    }
+    if (tensor.offset % alignment_ != 0 || tensor.offset > data_size ||
+        (!tensor.sized && tensor.size_bytes == 0) ||
+        tensor.size_bytes > data_size - tensor.offset) {
       if (error_msg != nullptr) {
         *error_msg = "Tensor extent or alignment is invalid: " +
                      std::string(tensor.name);
@@ -729,6 +757,11 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
   }
 
   return true;
+}
+
+std::string GgufReader::UnsizedTensorError() const {
+  const auto* tensor = FirstUnsizedTensor();
+  return tensor != nullptr ? UnsizedError(tensor->name) : std::string{};
 }
 
 const GgufMetadataValue* GgufReader::FindMetadata(

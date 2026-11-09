@@ -21,15 +21,15 @@ All model documentation lives under [docs/models](docs/models/README.md):
 
 | Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
 | --- | --- | --- | --- | --- |
-| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
-| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/d96201194f103c906994f283f504209dc8d2a10c/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/d96201194f103c906994f283f504209dc8d2a10c/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
-| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **474.87 tok/s pp**; up to **29.57 tok/s tg** single user with DSpark and **77.12 aggregated tok/s** on 8 concurrent requests with AR · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
-| [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/models/qwen3-asr/QUALITY.md) |
-| [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Text and image embeddings | [BF16](https://huggingface.co/google/embeddinggemma-2/tree/914f7f89142e33e77833254d9c9b90c3cef7303b) | Up to **41.5k tokens/s** over HTTP; **13.0 ms** for a 404-token request · [Benchmarks](docs/models/embeddinggemma-2/BENCHMARKS.md) | [Quality](docs/models/embeddinggemma-2/QUALITY.md) |
-| [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/models/qwen3-tts/QUALITY.md) |
-| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/models/qwen-image-2.1/QUALITY.md) |
-| [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1/README.md#qwen-image-21-turbo) | BF16 eight-step image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | **18.6 s** per 1024² image, **4.8×** faster than the 40-step base model · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md#qwen-image-21-turbo) | [Quality](docs/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo) |
-| [MiniMax H3](docs/models/minimax-h3/README.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | In progress · [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) | [Quality](docs/models/minimax-h3/QUALITY.md) |
+| [Qwen3.8 27B](docs/models/qwen3.8-27b.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/internal/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3.8-27b/QUALITY.md) |
+| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/d96201194f103c906994f283f504209dc8d2a10c/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/d96201194f103c906994f283f504209dc8d2a10c/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/internal/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3.8-flash-next/QUALITY.md) |
+| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **474.87 tok/s pp**; up to **29.57 tok/s tg** single user with DSpark and **77.12 aggregated tok/s** on 8 concurrent requests with AR · [Benchmarks](docs/internal/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/internal/models/deepseek-v4-flash/QUALITY.md) |
+| [Qwen3-ASR 1.7B](docs/models/qwen3-asr.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/internal/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3-asr/QUALITY.md) |
+| [EmbeddingGemma 2](docs/models/embeddinggemma-2.md) | Text and image embeddings | [BF16](https://huggingface.co/google/embeddinggemma-2/tree/914f7f89142e33e77833254d9c9b90c3cef7303b) | Up to **41.5k tokens/s** over HTTP; **13.0 ms** for a 404-token request · [Benchmarks](docs/internal/models/embeddinggemma-2/BENCHMARKS.md) | [Quality](docs/internal/models/embeddinggemma-2/QUALITY.md) |
+| [Qwen3-TTS 1.7B](docs/models/qwen3-tts.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/internal/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3-tts/QUALITY.md) |
+| [Qwen-Image-2.1](docs/models/qwen-image-2.1.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/internal/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/internal/models/qwen-image-2.1/QUALITY.md) |
+| [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1.md#qwen-image-21-turbo) | BF16 eight-step image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | **18.6 s** per 1024² image, **4.8×** faster than the 40-step base model · [Benchmarks](docs/internal/models/qwen-image-2.1/BENCHMARKS.md#qwen-image-21-turbo) | [Quality](docs/internal/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo) |
+| [MiniMax H3](docs/models/minimax-h3.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | In progress · [Benchmarks](docs/internal/models/minimax-h3/BENCHMARKS.md) | [Quality](docs/internal/models/minimax-h3/QUALITY.md) |
 
 Peak measured workloads; text pp is autoregressive (AR), while tg uses the
 named speculative mode. Peaks include repetitive output; aggregate tg sums
@@ -37,7 +37,7 @@ individual request decode rates. Qwen27B's single-user peak uses the short-promp
 C1 workload. Audio excludes loading.
 Each model guide lists the required files and complete benchmark settings.
 
-To add or maintain a model, start with the [source extension guide](docs/extensions.md).
+To add or maintain a model, start with the [source extension guide](docs/writing-extensions.md).
 
 ## Philosophy
 
@@ -71,6 +71,7 @@ podman run --rm \
   --ulimit memlock=-1 \
   -p 8080:8080 \
   -v ./models:/models:ro \
+  -v gufo-extensions:/home/gufo/.local/share/gufo/extensions \
   ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
   gufo serve --host 0.0.0.0 --port 8080 llm \
   --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
@@ -119,7 +120,7 @@ curl http://localhost:8080/v1/chat/completions \
 For Open WebUI, VS Code, OpenAI SDK and Responses-API clients (for example
 Codex), set the API base URL to `http://localhost:8080/v1`. Chat Completions and
 Responses support text, images, function tools, structured output and streaming.
-See the [API contract](docs/SERVER.md).
+See the [API contract](docs/server.md).
 
 The text server uses the model's native context by default and generates until
 EOS or the context is full. `--context N` sets context capacity per session;
@@ -132,7 +133,7 @@ Reasoning tokens count toward that response limit.
   compaction or a settings change. Qwen's template accepts only one leading
   system turn, so Gufo moves them there. The request that introduces one is
   prefilled again; later requests reuse the cache. See the
-  [API contract](docs/SERVER.md).
+  [API contract](docs/server.md).
 - **Qwen with Claude Code:** not supported. Claude Code adds a system message
   to `messages` on every turn, so Gufo moves a new one to the leading system
   turn each time and every request prefills the whole history again (#522).
@@ -158,8 +159,8 @@ nix build
 model-download and independent evaluation tools; these are not runtime
 requirements. Optional benchmark baselines are selected separately with
 `nix shell .#ds4-reference`, `.#llama-cpp-reference` or
-`.#llama-cpp-mtp-reference`; see [benchmarking](docs/BENCHMARKS.md).
-See [testing](docs/TESTING.md) for the small hosted CI suite and
+`.#llama-cpp-mtp-reference`; see [benchmarking](docs/internal/benchmarks.md).
+See [testing](docs/internal/testing.md) for the small hosted CI suite and
 explicit local quality checks.
 
 Prebuilt store paths are published to the `gufo` Cachix cache. The flake
@@ -200,13 +201,17 @@ limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
 | ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
 | hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
-| FFmpeg development libraries | Video embedding decoding and RGB conversion |
-| libsndfile, libsoxr | Audio decoding and reference-compatible resampling |
+| Rust 1.88 or newer (`cargo`, `rustc`), from [rustup](https://rustup.rs) if your distribution's is older | PNG decoding; rustup uses `rust-toolchain.toml`, and cargo fetches the crates in `src/core/png_decode/Cargo.lock` |
+| FFmpeg development libraries (EmbeddingGemma 2 only) | Video embedding decoding and RGB conversion |
+| libsndfile, libsoxr (EmbeddingGemma 2 only) | Audio decoding and reference-compatible resampling |
 | FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
 
 Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
 Use the development packages for the libraries above. ROCm normally installs
-under `/opt/rocm`.
+under `/opt/rocm`. Libraries marked for one extension are required only when
+that extension is built. The default build includes every extension; leave one
+out with `-DGUFO_EXTENSIONS=<list>` to drop its libraries (see `packages` in
+its `extension.json`).
 
 For example, on Debian/Ubuntu the ordinary system libraries are:
 

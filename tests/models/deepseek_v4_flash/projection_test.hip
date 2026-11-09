@@ -429,9 +429,9 @@ void f16_ordered(unsigned dim, unsigned rows, std::mt19937& random) {
   check(hipMemcpy(x.data, input.data(), input.size() * sizeof(float),
                   hipMemcpyHostToDevice));
   matmul_f16_ordered_chunks_kernel<<<dim3(rows, Tokens), 32>>>(
-      reference.data, w.data, x.data, dim, rows, Tokens);
+      reference.data, w.data, dim, x.data, dim, rows, Tokens);
   matmul_f16_ordered_batch_reuse_kernel<Tokens>
-      <<<rows, 32>>>(output.data, w.data, x.data, dim, rows);
+      <<<rows, 32>>>(output.data, w.data, dim, x.data, dim, rows);
   check(hipGetLastError());
   check(hipMemcpy(expected.data(), reference.data,
                   expected.size() * sizeof(float), hipMemcpyDeviceToHost));
@@ -439,6 +439,31 @@ void f16_ordered(unsigned dim, unsigned rows, std::mt19937& random) {
                   hipMemcpyDeviceToHost));
   equal("ordered F16 projection", expected.data(), actual.data(),
         actual.size());
+  constexpr unsigned kRowPadHalves = 256;
+  const unsigned stride = dim + kRowPadHalves;
+  __half_raw padding_nan{};
+  padding_nan.x = 0x7e00;
+  std::vector<__half> padded(size_t(rows) * stride, __half(padding_nan));
+  for (unsigned row = 0; row < rows; ++row)
+    std::copy_n(weights.begin() + size_t(row) * dim, dim,
+                padded.begin() + size_t(row) * stride);
+  Device<__half> wp(padded.size());
+  check(hipMemcpy(wp.data, padded.data(), padded.size() * sizeof(__half),
+                  hipMemcpyHostToDevice));
+  for (const bool reuse : {false, true}) {
+    check(hipMemset(output.data, 0xff, actual.size() * sizeof(float)));
+    if (reuse)
+      matmul_f16_ordered_batch_reuse_kernel<Tokens>
+          <<<rows, 32>>>(output.data, wp.data, stride, x.data, dim, rows);
+    else
+      matmul_f16_ordered_chunks_kernel<<<dim3(rows, Tokens), 32>>>(
+          output.data, wp.data, stride, x.data, dim, rows, Tokens);
+    check(hipGetLastError());
+    check(hipMemcpy(actual.data(), output.data, actual.size() * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("padded-row F16 projection", expected.data(), actual.data(),
+          actual.size());
+  }
   for (unsigned token = 0; token < Tokens; ++token) {
     double sum = 0;
     for (unsigned i = 0; i < dim; ++i)
@@ -448,8 +473,10 @@ void f16_ordered(unsigned dim, unsigned rows, std::mt19937& random) {
       std::exit(4);
     }
   }
-  std::printf("F16 dim=%u tokens=%u: exact scalar/batch projection\n", dim,
-              Tokens);
+  std::printf(
+      "F16 dim=%u tokens=%u: exact scalar/batch projection, packed and "
+      "padded rows\n",
+      dim, Tokens);
 }
 
 void plain_norm(unsigned rows, std::mt19937& random) {
@@ -505,6 +532,124 @@ void plain_norm(unsigned rows, std::mt19937& random) {
       rows);
 }
 
+void hc_mix_decode(unsigned rows, bool padded, std::mt19937& random) {
+  constexpr unsigned width = 16384, embd = 4096;
+  constexpr float eps = 1e-6F;
+  const unsigned stride = padded ? width + 256 : width;
+  std::uniform_real_distribution<float> values(-4.F, 4.F);
+  __half_raw padding_nan{};
+  padding_nan.x = 0x7e00;
+  std::vector<__half> weights(size_t(rows) * stride, __half(padding_nan));
+  for (unsigned row = 0; row < rows; ++row)
+    for (unsigned i = 0; i < width; ++i)
+      weights[size_t(row) * stride + i] = __float2half(values(random) * .01F);
+  std::vector<float> input(width), expected(rows), actual(rows);
+  Device<__half> w(weights.size());
+  Device<float> x(width), flat(width), reference(rows), output(rows);
+  check(hipMemcpy(w.data, weights.data(), weights.size() * sizeof(__half),
+                  hipMemcpyHostToDevice));
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    for (size_t i = 0; i < input.size(); ++i) {
+      input[i] = values(random);
+      if (mode == 1)
+        input[i] = 0.F;
+      if (mode == 2)
+        input[i] *= 1e-20F;
+      if (mode == 3)
+        input[i] *= (i % 2) ? 1e12F : 1e-12F;
+    }
+    check(hipMemcpy(x.data, input.data(), input.size() * sizeof(float),
+                    hipMemcpyHostToDevice));
+    rms_norm_plain_regs_kernel<64>
+        <<<1, 256>>>(flat.data, x.data, width, 1, eps);
+    matmul_f16_ordered_batch_reuse_kernel<1>
+        <<<rows, 32>>>(reference.data, w.data, stride, flat.data, width, rows);
+    hc_mix_decode_kernel<<<rows, 256>>>(output.data, x.data, w.data, stride,
+                                        embd, width, eps);
+    check(hipGetLastError());
+    check(hipMemcpy(expected.data(), reference.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    check(hipMemcpy(actual.data(), output.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("decode HC mix", expected.data(), actual.data(), rows);
+  }
+  std::printf("HC mix decode rows=%u %s: 4 cases exact to norm + projection\n",
+              rows, padded ? "padded" : "packed");
+}
+
+void q8_hc_expand(const char* name, unsigned in_dim, unsigned rows, bool add,
+                  std::mt19937& random) {
+  const unsigned blocks = (in_dim + 31) / 32;
+  std::uniform_real_distribution<float> scales(.0001F, .03F), values(-4.F, 4.F),
+      unit(0.F, 1.F);
+  std::vector<unsigned char> weights(size_t(rows) * blocks * 34);
+  for (size_t b = 0; b < size_t(rows) * blocks; ++b) {
+    const auto scale = __float2half(scales(random));
+    std::memcpy(weights.data() + b * 34, &scale, 2);
+    for (unsigned i = 0; i < 32; ++i)
+      weights[b * 34 + 2 + i] =
+          static_cast<unsigned char>(static_cast<int>(random() % 255) - 127);
+  }
+  std::vector<int8_t> input(blocks * 32);
+  for (auto& value : input)
+    value = static_cast<int8_t>(static_cast<int>(random() % 255) - 127);
+  std::vector<float> input_scale(blocks), residual(4 * rows), block_add(rows),
+      split(24);
+  for (auto& value : input_scale)
+    value = scales(random);
+  Device<unsigned char> w(weights.size());
+  Device<int8_t> x(input.size());
+  Device<float> s(blocks), r(residual.size()), a(rows), sp(split.size()),
+      reference_block(rows), reference_hc(residual.size()), block(rows),
+      hc(residual.size());
+  check(
+      hipMemcpy(w.data, weights.data(), weights.size(), hipMemcpyHostToDevice));
+  check(hipMemcpy(x.data, input.data(), input.size(), hipMemcpyHostToDevice));
+  check(hipMemcpy(s.data, input_scale.data(), blocks * sizeof(float),
+                  hipMemcpyHostToDevice));
+  std::vector<float> expected(residual.size()), actual(residual.size());
+  for (float magnitude : {1.F, 1e-4F}) {
+    for (auto& value : residual)
+      value = values(random) * magnitude;
+    for (auto& value : block_add)
+      value = values(random) * magnitude;
+    for (auto& value : split)
+      value = unit(random) * 2.F;
+    check(hipMemcpy(r.data, residual.data(), residual.size() * sizeof(float),
+                    hipMemcpyHostToDevice));
+    check(hipMemcpy(a.data, block_add.data(), rows * sizeof(float),
+                    hipMemcpyHostToDevice));
+    check(hipMemcpy(sp.data, split.data(), split.size() * sizeof(float),
+                    hipMemcpyHostToDevice));
+    matmul_q8_0_preq_rows_w32_kernel<<<rows, 32>>>(reference_block.data, w.data,
+                                                   x.data, s.data, in_dim, rows,
+                                                   blocks, 1, 1);
+    if (add)
+      hc_expand4_add_kernel<<<(rows + 255) / 256, 256>>>(
+          reference_hc.data, reference_block.data, a.data, r.data, sp.data,
+          rows, 1);
+    else
+      hc_expand4_kernel<<<(rows + 255) / 256, 256>>>(
+          reference_hc.data, reference_block.data, r.data, sp.data, rows, 1);
+    matmul_q8_0_hc_expand_preq_rows_w32_kernel<<<(rows + 15) / 16, 512>>>(
+        hc.data, block.data, a.data, r.data, sp.data, w.data, x.data, s.data,
+        in_dim, rows, rows, blocks, 16, add);
+    check(hipGetLastError());
+    check(hipMemcpy(expected.data(), reference_block.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    check(hipMemcpy(actual.data(), block.data, rows * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("Q8 HC expand projection", expected.data(), actual.data(), rows);
+    check(hipMemcpy(expected.data(), reference_hc.data,
+                    expected.size() * sizeof(float), hipMemcpyDeviceToHost));
+    check(hipMemcpy(actual.data(), hc.data, actual.size() * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("Q8 HC expand streams", expected.data(), actual.data(),
+          actual.size());
+  }
+  std::printf("Q8 HC expand %s: exact to projection + HC expand\n", name);
+}
+
 void hc_prefill_fp32(unsigned tokens) {
   constexpr unsigned embedding = 4096, width = 4 * embedding, mixes = 24;
   std::vector<__half> weights(mixes * width, __float2half(0.0F));
@@ -534,8 +679,8 @@ void hc_prefill_fp32(unsigned tokens) {
                   hipMemcpyHostToDevice));
   hc4_norm_mix_split_weighted_sum_kernel<4, 256, 16>
       <<<(tokens + 3) / 4, 1024>>>(output.data, mix.data, split.data, x.data,
-                                   w.data, s.data, b.data, embedding, tokens,
-                                   20, 1e-6F, 1e-6F);
+                                   w.data, width, s.data, b.data, embedding,
+                                   tokens, 20, 1e-6F, 1e-6F);
   check(hipGetLastError());
   std::vector<float> actual(tokens * mixes);
   check(hipMemcpy(actual.data(), mix.data, actual.size() * sizeof(float),
@@ -597,8 +742,8 @@ void hc_complete_formula(unsigned tokens, float epsilon, std::mt19937& random) {
                   hipMemcpyHostToDevice));
   hc4_norm_mix_split_weighted_sum_kernel<4, 256, 16>
       <<<(tokens + 3) / 4, 1024>>>(output.data, mix.data, split.data, x.data,
-                                   w.data, s.data, b.data, embedding, tokens,
-                                   20, epsilon, 1e-6F);
+                                   w.data, width, s.data, b.data, embedding,
+                                   tokens, 20, epsilon, 1e-6F);
   hc_expand4_vec4_kernel<<<(block.size() / 4 + 255) / 256, 256>>>(
       expanded.data, y.data, x.data, split.data, embedding, tokens);
   check(hipGetLastError());
@@ -751,6 +896,13 @@ int main() {
   f16_ordered<1>(16384, 4, random);
   for (unsigned rows : {1U, 2U, 6U, 8U})
     plain_norm(rows, random);
+  for (unsigned rows : {24U, 4U})
+    for (bool padded : {false, true})
+      hc_mix_decode(rows, padded, random);
+  q8_hc_expand("attn_output_b", 8192, 4096, false, random);
+  q8_hc_expand("ffn_down_shexp", 2048, 4096, true, random);
+  q8_hc_expand("partial last block", 2056, 1000, true, random);
+  q8_hc_expand("partial workgroup", 2080, 36, false, random);
   hc_prefill_fp32(128);
   hc_prefill_fp32(129);
   hc_complete_formula(128, 1e-6F, random);

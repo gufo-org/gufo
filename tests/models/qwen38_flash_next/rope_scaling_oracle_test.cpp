@@ -1,9 +1,9 @@
 // YaRN in the scalar CPU oracle (cpu::Rope): bit-identical to the pre-YaRN
 // loop when disabled, and matching the HF golden table (shared with
 // rope_scaling_test.cpp via rope_scaling_golden.hpp) when enabled. This test
-// links the model oracle library, so per docs/DEVELOPMENT.md it stays out of
-// the hosted `check-pr` set; it is still a "cpu"-labeled CTest target run by
-// the cpu-test preset and any explicit validation run.
+// links the model oracle library, so per docs/internal/development.md it stays
+// out of the hosted `check-pr` set; it is still a "cpu"-labeled CTest target
+// run by the cpu-test preset and any explicit validation run.
 #include <cmath>
 #include <cstdint>
 #include <iostream>

@@ -81,13 +81,11 @@ void WriteScoreJson(const json::Value& value, std::ostream& output) {
     output << value.dump();
   }
 }
-}  // namespace
 
 // Uses external continuations from the matching hosted checkpoint. This is
 // deliberately separate from comparing two routes through our own decoder.
-void ScoreOfficialReference(
-    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
-    const std::string& output_path) {
+json::Value ScoreOfficialContinuations(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model) {
   Require(!model->HasDspark(), "official scoring requires ordinary decoding");
   std::ifstream input(GUFO_DS4_OFFICIAL_FIXTURE, std::ios::binary);
   Require(input.good(), "cannot open official continuation fixture");
@@ -206,13 +204,36 @@ void ScoreOfficialReference(
     summary["greedy_matches"] = total.matches;
     report["summary"][name] = std::move(summary);
   }
+  WriteScoreJson(Field(report, "summary"), std::cout);
+  std::cout << '\n';
+  return report;
+}
+}  // namespace
+
+void ScoreOfficialReference(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
+    const std::string& output_path) {
+  const auto report = ScoreOfficialContinuations(model);
   std::ofstream output(output_path);
   Require(output.good(), "cannot open official score output");
   WriteScoreJson(report, output);
   output << '\n';
   Require(output.good(), "cannot write official score output");
-  WriteScoreJson(Field(report, "summary"), std::cout);
-  std::cout << '\n';
+}
+
+void CheckOfficialContinuations(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model) {
+  constexpr double kMaxNll = 0.407;
+  constexpr std::size_t kMinFirstMatches = 53;
+  const auto report = ScoreOfficialContinuations(model);
+  const auto& summary = Field(Field(report, "summary"), "continuation-100");
+  const double nll = Field(summary, "nll").as_double();
+  const std::size_t first_matches = Field(summary, "first_matches").as_size();
+  Require(nll <= kMaxNll, "official continuation NLL " + std::to_string(nll) +
+                              " exceeds " + std::to_string(kMaxNll));
+  Require(first_matches >= kMinFirstMatches,
+          "official first-token matches " + std::to_string(first_matches) +
+              "/100 are below " + std::to_string(kMinFirstMatches));
 }
 
 void DumpReferenceFrontiers(

@@ -457,6 +457,55 @@ void TestIntegerRoutingTensor() {
          "integer routing extent overflow is rejected");
 }
 
+// A layout core cannot size opens only on request, with each such tensor
+// spanning the bytes the file reserves for it.
+void TestUnsizedTensors() {
+  using gufo::core::GgmlType;
+  GgufBuilder builder;
+  builder.AddMetadataString("general.architecture", "custom");
+  // Q4_K rows must be whole 256-element blocks; 100 columns are not.
+  builder.AddTensor("odd_shape.weight", {100, 2}, GgmlType::kQ4_K, 0);
+  builder.AddTensor("plain.weight", {8}, GgmlType::kF32, 256);
+  builder.AddTensor("unknown_type.weight", {64}, static_cast<GgmlType>(200),
+                    288);
+  const auto bytes = builder.Build(288 + 96);
+  std::string error;
+  Expect(
+      !gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), &error) &&
+          error ==
+              "Invalid GGUF tensor shape or unsupported storage type: "
+              "odd_shape.weight",
+      "unsized tensors are rejected by default");
+  auto reader = gufo::core::GgufReader::OpenMemory(
+      bytes.data(), bytes.size(), &error, {.allow_unsized_tensors = true});
+  Expect(reader != nullptr, "unsized tensors open on request: " + error);
+  const auto* odd = reader->FindTensor("odd_shape.weight");
+  const auto* plain = reader->FindTensor("plain.weight");
+  const auto* unknown = reader->FindTensor("unknown_type.weight");
+  Expect(odd && !odd->sized && odd->size_bytes == 256 && odd->data != nullptr,
+         "an unsized tensor reaches the next tensor's offset");
+  Expect(plain && plain->sized && plain->size_bytes == 8 * sizeof(float),
+         "sized tensors keep their exact extent");
+  Expect(unknown && !unknown->sized && unknown->size_bytes == 96,
+         "the last unsized tensor reaches the end of the data");
+  Expect(reader->FirstUnsizedTensor() == odd &&
+             reader->UnsizedTensorError() ==
+                 "Invalid GGUF tensor shape or unsupported storage type: "
+                 "odd_shape.weight",
+         "the reader names the first unsized tensor");
+
+  GgufBuilder sized;
+  sized.AddMetadataString("general.architecture", "custom");
+  sized.AddTensor("plain.weight", {8}, GgmlType::kF32, 0);
+  const auto sized_bytes = sized.Build(32);
+  const auto plain_reader = gufo::core::GgufReader::OpenMemory(
+      sized_bytes.data(), sized_bytes.size(), &error,
+      {.allow_unsized_tensors = true});
+  Expect(plain_reader && plain_reader->FirstUnsizedTensor() == nullptr &&
+             plain_reader->UnsizedTensorError().empty(),
+         "a fully sized file reports no unsized tensor");
+}
+
 void TestMappedPrefetch() {
   char path[] = "/tmp/gufo-prefetch-XXXXXX";
   const int fd = mkstemp(path);
@@ -490,6 +539,7 @@ void TestMappedPrefetch() {
 int main() {
   TestMappedPrefetch();
   TestIntegerRoutingTensor();
+  TestUnsizedTensors();
   TestVisionMetadataArrays();
   TestNarrowIntegerArrays();
   std::cout << "Running GgufReader unit tests...\n";

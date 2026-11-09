@@ -31,6 +31,16 @@ constexpr std::size_t kMaxWork = 2000000;
   throw std::invalid_argument("JSON Schema: " + std::string(message));
 }
 
+// Keywords that describe a schema without constraining its values (JSON
+// Schema 2020-12 core 8.1.1/8.3 and meta-data vocabulary 9), accepted even in
+// strict mode. The Vercel AI SDK always sends "$schema" (#1057).
+bool Annotation(std::string_view key) {
+  static constexpr std::array<std::string_view, 9> keys{
+      "title",    "description", "$schema",  "$comment", "default",
+      "examples", "deprecated",  "readOnly", "writeOnly"};
+  return std::ranges::find(keys, key) != keys.end();
+}
+
 // Some unsupported applicators admit fields outside "properties". Ignoring
 // them must not turn a best-effort tool into a closed, empty object.
 bool HasPropertySchemas(const json::Value& schema) {
@@ -751,14 +761,11 @@ private:
       if (!seen.insert(schema).second)
         return nullptr;
       for (const auto& [key, value] : schema->members()) {
-        if (key == "$ref" || key == "$defs" || key == "title" ||
-            key == "description")
+        if (key == "$ref" || key == "$defs" || Annotation(key))
           continue;
         if (strict_)
           return nullptr;
-        if (key == "$schema" || key == "$id" || key == "$comment" ||
-            key == "definitions" || key == "examples" || key == "default" ||
-            key == "deprecated" || key == "readOnly" || key == "writeOnly")
+        if (key == "$id" || key == "definitions")
           continue;
         if (key != "type" || (type && !EqualValue(*type, value)))
           return nullptr;
@@ -922,6 +929,13 @@ private:
         result.append_member(key, value);
     return result;
   }
+  static json::Value Constraints(const json::Value& schema) {
+    auto result = json::Value::object();
+    for (const auto& [key, value] : schema.members())
+      if (!Annotation(key))
+        result.append_member(key, value);
+    return result;
+  }
   json::Value Conjoin(const json::Value& left, const json::Value& right,
                       unsigned depth = 0) {
     if (depth > 64)
@@ -968,7 +982,7 @@ private:
     auto result = left;
     for (const auto& [key, value] : right.members()) {
       const auto* previous = left.find(key);
-      if (key == "title" || key == "description" || !previous) {
+      if (Annotation(key) || !previous) {
         result[key] = value;
         continue;
       }
@@ -1014,13 +1028,19 @@ private:
           return t.is_array() ? t.items() : json::Value::Array{t};
         };
         auto common = json::Value::array();
+        const auto add = [&](const json::Value& name) {
+          if (!std::ranges::any_of(common.items(), [&](const auto& existing) {
+                return EqualValue(existing, name);
+              }))
+            common.push_back(name);
+        };
         for (const auto& a : types(*previous))
           for (const auto& b : types(value))
             if (EqualValue(a, b))
-              common.push_back(a);
+              add(a);
             else if ((a.str() == "number" && b.str() == "integer") ||
                      (a.str() == "integer" && b.str() == "number"))
-              common.push_back("integer");
+              add("integer");
         if (common.empty())
           throw JsonSchemaEmpty(
               "JSON Schema: schema constraints have no common type");
@@ -1471,8 +1491,6 @@ private:
                                                     "anyOf",
                                                     "$defs",
                                                     "$ref",
-                                                    "title",
-                                                    "description",
                                                     "minimum",
                                                     "maximum",
                                                     "exclusiveMinimum",
@@ -1483,9 +1501,11 @@ private:
                                                     "minLength",
                                                     "maxLength"};
     for (const auto& [key, value] : schema.members()) {
-      if (!allowed.contains(key) && !ignore_unknown_keys_)
+      if (!allowed.contains(key) && !Annotation(key) && !ignore_unknown_keys_)
         Invalid("unsupported keyword: " + key);
-      if ((key == "title" || key == "description") && !value.is_string())
+      if ((key == "title" || key == "description" || key == "$schema" ||
+           key == "$comment") &&
+          !value.is_string())
         Invalid(key + " must be a string");
       if (key == "anyOf" && (!value.is_array() || value.empty()))
         Invalid("anyOf needs at least one branch");
@@ -1539,8 +1559,7 @@ private:
       }
     }
     if (const auto* ref = schema.find("$ref")) {
-      const auto siblings =
-          Without(schema, {"$ref", "$defs", "title", "description"});
+      const auto siblings = Constraints(Without(schema, {"$ref", "$defs"}));
       return siblings.empty()
                  ? Visit(*Reference(*ref), depth)
                  : Visit(Store(Conjoin(*Reference(*ref), siblings)), depth);
@@ -1548,8 +1567,7 @@ private:
     if (const auto* any = schema.find("anyOf")) {
       if (!any->is_array() || any->size() == 0)
         Invalid("anyOf needs at least one branch");
-      const auto siblings =
-          Without(schema, {"anyOf", "$defs", "title", "description"});
+      const auto siblings = Constraints(Without(schema, {"anyOf", "$defs"}));
       Sequence branches;
       for (const auto& value : any->items()) {
         try {
@@ -1564,25 +1582,27 @@ private:
     const auto* type = schema.find("type");
     // An unconstrained leaf is a valid JSON Schema, not a reason to discard
     // the requirements on its containing array/object.
-    if (!type && open_objects_ &&
-        Without(schema, {"title", "description", "default", "examples"})
-            .empty())
+    if (!type && open_objects_ && Constraints(schema).empty())
       return GenericValue(kMaxDepth - depth);
     std::vector<std::string> types;
     if (type && type->is_string())
       types.push_back(type->str());
-    else if (type && type->is_array() && type->size() > 0 &&
-             type->size() <= 2) {
+    else if (type && type->is_array() && !type->empty()) {
+      // Like llama.cpp, each listed type contributes an alternative. Validate
+      // names here so malformed arrays cannot grow the union beyond 7 types.
+      static constexpr std::array<std::string_view, 7> names{
+          "object", "array", "string", "integer", "number", "boolean", "null"};
       for (const auto& value : type->items()) {
         if (!value.is_string())
           Invalid("type members must be strings");
+        if (std::ranges::find(names, value.str()) == names.end())
+          Invalid("unsupported or missing type");
+        if (std::ranges::find(types, value.str()) != types.end())
+          Invalid("type members must be unique");
         types.push_back(value.str());
       }
-      if (types.size() == 2 &&
-          std::count(types.begin(), types.end(), "null") != 1)
-        Invalid("type unions must be nullable; use anyOf otherwise");
     } else
-      Invalid("type must be a string or nullable type array");
+      Invalid("type must be a string or nonempty type array");
     const bool object = std::ranges::find(types, "object") != types.end();
     const bool array = std::ranges::find(types, "array") != types.end();
     for (const auto& [key, value] : schema.members()) {
@@ -1650,26 +1670,30 @@ private:
     }
     Sequence alternatives;
     for (const auto& name : types) {
-      if (name == "object")
-        alternatives.push_back(Object(schema, depth));
-      else if (name == "array")
-        alternatives.push_back(Array(schema, depth));
-      else if ((name == "integer" && schema.contains("multipleOf")) ||
-               (name == "number" &&
-                (schema.contains("minimum") || schema.contains("maximum") ||
-                 schema.contains("exclusiveMinimum") ||
-                 schema.contains("exclusiveMaximum") ||
-                 schema.contains("multipleOf"))))
-        alternatives.push_back(
-            Lexeme(JsonSchemaLexeme::Number(schema, name == "integer")));
-      else if (name == "string" &&
-               (schema.contains("pattern") || schema.contains("format") ||
-                schema.contains("minLength") || schema.contains("maxLength")))
-        alternatives.push_back(StringValue(StringPredicate(schema)));
-      else if (name == "integer")
-        alternatives.push_back(Integer(schema));
-      else
-        alternatives.push_back(Primitive(name));
+      try {
+        if (name == "object")
+          alternatives.push_back(Object(schema, depth));
+        else if (name == "array")
+          alternatives.push_back(Array(schema, depth));
+        else if ((name == "integer" && schema.contains("multipleOf")) ||
+                 (name == "number" &&
+                  (schema.contains("minimum") || schema.contains("maximum") ||
+                   schema.contains("exclusiveMinimum") ||
+                   schema.contains("exclusiveMaximum") ||
+                   schema.contains("multipleOf"))))
+          alternatives.push_back(
+              Lexeme(JsonSchemaLexeme::Number(schema, name == "integer")));
+        else if (name == "string" &&
+                 (schema.contains("pattern") || schema.contains("format") ||
+                  schema.contains("minLength") || schema.contains("maxLength")))
+          alternatives.push_back(StringValue(StringPredicate(schema)));
+        else if (name == "integer")
+          alternatives.push_back(Integer(schema));
+        else
+          alternatives.push_back(Primitive(name));
+      } catch (const JsonSchemaEmpty&) {
+        // An impossible type branch must not discard the other alternatives.
+      }
     }
     return Alt(alternatives);
   }
@@ -2143,6 +2167,9 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
       return found->second;
   }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
+  grammar->reasoning_rules_ = static_cast<std::uint32_t>(answer->rules_.size());
+  grammar->reasoning_lexemes_ =
+      static_cast<std::uint32_t>(answer->lexemes_.size());
   if (!answer->reasoning_tool_prefix_.empty()) {
     using End = JsonSchemaLexeme::ReasoningEnd;
     const auto lexeme = [&](End end) {
@@ -2561,6 +2588,18 @@ JsonConstraint::State JsonConstraint::Advance(const State& state,
 bool JsonConstraint::Complete(const State& state) const {
   return std::ranges::any_of(
       state, [](const auto& stack) { return stack.symbols.empty(); });
+}
+
+bool JsonConstraint::InReasoning(const State& state) const {
+  // Until the close or a call header completes, some stack still holds a
+  // reasoning rule or lexeme, even where another reads the close's last byte.
+  return std::ranges::any_of(state, [&](const auto& stack) {
+    return std::ranges::any_of(stack.symbols, [&](std::uint32_t symbol) {
+      if (symbol & kLexeme)
+        return (symbol & ~kLexeme) >= reasoning_lexemes_;
+      return !(symbol & (kTerminal | kArguments)) && symbol >= reasoning_rules_;
+    });
+  });
 }
 
 JsonConstraint::State JsonConstraint::CanonicalMaskState(

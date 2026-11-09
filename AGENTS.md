@@ -53,7 +53,7 @@ The same CMake/CTest commands work outside Nix. `cmake --build --preset pr`
 runs the focused contract subset after configuring `cpu-test`; `nix flake check`
 runs the canonical CPU/repository gate. Full CPU checks,
 sanitisers, GPU/operator/model checks and H3 quality tools remain available
-locally; see [docs/TESTING.md](docs/TESTING.md). Do not run full model sweeps,
+locally; see [docs/internal/testing.md](docs/internal/testing.md). Do not run full model sweeps,
 video generation or duplicate suites for routine edits. A missing-model skip
 is not a quality pass. Broaden checks when shared behavior changes or failures
 expose risk.
@@ -91,6 +91,7 @@ quality; successful optimizations become the default, without extra switches.
 ## Development
 
 - Keep model code, tests, tools and numerical contracts with their model.
+- Follow [docs/AGENTS.md](docs/AGENTS.md) when writing or changing documentation.
 - Use the shared Qwen control-token constants for framing; see
   [src/families/qwen/AGENTS.md](src/families/qwen/AGENTS.md). Inspect their definitions
   when reviewing or changing behavior, and keep reference fixtures independent.
@@ -104,7 +105,7 @@ quality; successful optimizations become the default, without extra switches.
 - Use one canonical long option and backend name per behavior; avoid aliases.
 - Use `gh` for GitHub operations after checking `gh auth status`.
 - Follow Conventional Commits with a single-line message. Title pull requests
-  according to [the release policy](docs/RELEASING.md); squash merging retains
+  according to [the release policy](docs/internal/releasing.md); squash merging retains
   that title on `main`. Mark breaking changes with `!` in the title, and leave
   version and changelog updates to the release workflow.
 - Prefer `jj` when available (`jj version`); otherwise use Git.
@@ -125,5 +126,5 @@ quality; successful optimizations become the default, without extra switches.
   and add a record in the new series, retaining all historical records. Extension
   API and the future experimental flake `extensions` argument are excluded from Gufo's
   release compatibility surface; CLI/HTTP/public existing flake breaks still
-  require `!`. See [the release policy](docs/RELEASING.md).
+  require `!`. See [the release policy](docs/internal/releasing.md).
 - Follow the user's remote workflow and preserve unrelated work.

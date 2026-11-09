@@ -243,8 +243,9 @@ void TestContentTrace() {
 }
 
 // The threshold covers the lifecycle lines too: `--log-level=warn|error` boots
-// and stops without a word, which docs/SERVER.md states, while an escalation
-// keeps its own tier and a filtered INFO receipt line never reaches the log.
+// and stops without a word, which docs/internal/server.md states, while an
+// escalation keeps its own tier and a filtered INFO receipt line never reaches
+// the log.
 void TestQuietTiersSuppressLifecycle() {
   const CapturedLogs warn = CaptureTraffic(LogLevel::kWarn);
   assert(warn.text.find("event=listening") == std::string::npos);
@@ -590,6 +591,58 @@ void TestApplyTemplate() {
   assert(server.backend->calls == calls);
   server.backend->rendered_prompt.reset();
   server.backend->reasoning = {};
+}
+
+void TestLlamaTokenize() {
+  RunningServer server;
+  const int calls = server.backend->calls;
+
+  // A backend that cannot tokenize says so.
+  ExpectStatus(server.Post("/tokenize", R"({"content":"hi"})"), 501);
+
+  // The ids are the backend's for the content, unchanged; the control-token
+  // spelling reaches it as text, for the tokenizer to parse.
+  server.backend->token_ids = std::vector<std::uint32_t>{151644, 872, 7};
+  const auto response =
+      server.Post("/tokenize", R"({"content":"<|im_start|>user hi"})");
+  ExpectStatus(response, 200);
+  const auto body =
+      gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  const auto* tokens = body.find("tokens");
+  assert(tokens != nullptr && tokens->is_array() && tokens->size() == 3);
+  assert(tokens->items()[0].as_size() == 151644 &&
+         tokens->items()[2].as_size() == 7);
+  assert(server.backend->tokenized_text == "<|im_start|>user hi");
+
+  // llama-server's defaults are accepted when sent; other values change the
+  // tokens and are refused rather than ignored.
+  ExpectStatus(server.Post("/tokenize", R"({"content":"hi","add_special":false,
+                                            "parse_special":true,
+                                            "with_pieces":false})"),
+               200);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","add_special":true})"), 400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","parse_special":false})"),
+      400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","with_pieces":true})"), 400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","add_special":"no"})"), 400);
+  ExpectStatus(server.Post("/tokenize", R"({"content":["hi"]})"), 400);
+  ExpectStatus(server.Post("/tokenize", R"({})"), 400);
+  ExpectStatus(server.Post("/tokenize", "not json"), 400);
+
+  // Empty content is no tokens, as in llama-server.
+  server.backend->token_ids = std::vector<std::uint32_t>{};
+  const auto empty = server.Post("/tokenize", R"({"content":""})");
+  ExpectStatus(empty, 200);
+  const auto none = gufo::json::parse(empty.substr(empty.find("\r\n\r\n") + 4));
+  assert(none.find("tokens") != nullptr && none.find("tokens")->is_array() &&
+         none.find("tokens")->empty());
+  // Tokenizing never generates.
+  assert(server.backend->calls == calls);
+  server.backend->token_ids.reset();
 }
 
 void TestOpenAiInputTokens() {
@@ -3518,6 +3571,7 @@ int main() {
   TestFallbackBackendMetrics();
   TestLlamaProps();
   TestApplyTemplate();
+  TestLlamaTokenize();
   TestOpenAiInputTokens();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();

@@ -1,0 +1,697 @@
+# Cache reference
+
+How the cross-request cache works inside: components, checkpoints, retention,
+budgets, the disk tier, invariants and log lines. The user-facing summary is
+[cache](../cache.md).
+
+## What "KV cache" means here
+
+Two different things share the name. Keeping them apart avoids most of the
+confusion.
+
+**Within one request.** The standard transformer mechanism. Prefill computes
+key and value tensors for every prompt token once; decode then appends one K/V
+pair per generated token and attends over the stored set. Without it, each new
+token would re-run attention across the whole sequence. This is intrinsic to
+inference and is not configurable.
+
+**Across requests.** Keeping that state alive after a response finishes, so
+the next turn of the same conversation does not recompute the prefix it shares
+with the previous one. This is what the rest of this document is about: the
+component cache, and its optional on-disk tier behind `--cache-disk`.
+
+The second is where the important subtlety lives. What Gufo retains is **not**
+only K/V tensors. Each model's adapter describes its state as components:
+append rows that are final once written, which checkpoints share, and private
+state such as recurrent or sliding-window state, which each checkpoint copies.
+The cache moves those bytes without interpreting them.
+
+That choice buys one retention, admission, eviction and persistence mechanism
+that is correct for every model, including hybrid-recurrent ones. It costs the
+ability to trim a checkpoint: private state exists only at its exact boundary,
+so a checkpoint is reused only when its tokens are an exact prefix of the new
+prompt.
+
+Every text model serves through the component cache of the
+[cache redesign](design/cache-redesign/RFC.md). Its backing
+and disk options are described under [component-cache budgets](#component-cache-budgets).
+Qwen27B retains target KV, convolution and recurrent state, image identity,
+sampled frontier and pending output tokens. DFlash2 adds private ring KV with
+its own injected frontier, pending target features and draft controller state.
+Borrowed target KV rows are preserved before mutation or rollback; private
+frontiers are captured into committed host backing. Disk transfers use fixed
+1 MiB staging regardless of checkpoint size.
+
+DeepSeek shares its compressed attention and indexer rows, which are final once
+emitted, one row per `ratio` tokens. Each layer's sliding window and compressor
+frontiers are private, as are logits and the DSpark windows, so a checkpoint
+carries a fixed private cost whatever its depth. Rows are copied at capture
+rather than borrowed, because compressed caches grow by reallocation.
+
+## Why it exists
+
+Prefill cost scales with prompt length. Decode cost scales with tokens
+generated. Agent conversations have a large prompt and a small output, and
+turn *N*'s prompt is nearly all of turn *N−1*'s prompt. Without cross-request
+reuse, every turn pays for the whole conversation again and total cost grows
+quadratically with conversation length.
+
+What reuse is worth, same conversation, second turn against a cold start
+**(measured)**:
+
+| Model | Prompt | Cold | Reused |
+| --- | ---: | ---: | ---: |
+| Qwen3.8-27B | 101,545 | 280.4 s | 2.4 s |
+| Qwen3.8-Flash-Next | 203,047 | 184.4 s | 0.7 s |
+
+A recorded 28-turn `pi` coding session reused 95.9% of its prompt tokens. The
+same session replayed with reuse broken reprocessed 9.3x the tokens and took
+2.5x the wall time, at only 15k tokens **(measured)**.
+
+## The shape of the system
+
+```mermaid
+flowchart LR
+  REQ[Request] --> MEM{In-memory cache}
+  MEM -->|exact prefix hit| USE[Reuse live state<br/>or restore a snapshot]
+  MEM -->|miss| DISK{Disk store<br/>optional}
+  DISK -->|hit| USE
+  DISK -->|miss| COLD[No reuse]
+  USE --> SUF[Prefill only the new suffix]
+  COLD --> ALL[Prefill the whole prompt]
+```
+
+The in-memory tier is always on. The disk tier is opt-in, adds restart safety,
+and can additionally *learn* boundaries between conversations that merely share
+a prefix.
+
+## Finding reuse
+
+A request arrives with a token sequence. The cache looks for the longest
+retained prefix of it, in two different forms.
+
+```mermaid
+flowchart TD
+  A[New prompt] --> B{Is a live frontier<br/>a prefix of it?}
+  B -->|yes| C[Reuse that session in place<br/>no restore, no copy]
+  B -->|no| D{Is a retained snapshot<br/>a prefix of it?}
+  D -->|yes| E[Restore the snapshot<br/>into a free session]
+  D -->|no| F[Miss<br/>report reason and common prefix]
+  C --> G[Prefill the suffix only]
+  E --> G
+  F --> H[Prefill everything]
+```
+
+A **live frontier** is where a session's state actually ended up after its last
+request, including the tokens it generated. It is preferred even when a
+snapshot matches the same length, because the state is already sitting there:
+no restore and no device copy. This is why continuing the previous turn of a
+conversation is nearly free, and why reuse can cover generated tokens and not
+just prompt tokens. A request that continues no live frontier takes the least
+recently used idle session (Flash-Next prefers one without a frontier), so
+it does not replace the frontier of a conversation that has just replied.
+
+A **snapshot** is an immutable retained checkpoint. Reusing one means restoring
+it into a session, which costs a copy.
+
+Both require an **exact prefix match**. The cache still computes the longest
+common prefix on a miss and reports it, which is why a miss can say "we agreed
+on 7,094 of your 7,103 tokens" and still re-prefill everything: it had no
+checkpoint at that position to resume from.
+
+### Worked example
+
+A conversation with a 5,000-token system prompt, thinking off, client replaying
+the assistant turn verbatim:
+
+| Turn | Prompt | Reused | Prefilled | Why |
+| --- | ---: | ---: | ---: | --- |
+| 1 | 5,020 | 0 | 5,020 | nothing retained yet |
+| 2 | 5,320 | 5,020 | 300 | live frontier from turn 1 |
+| 3 | 5,620 | 5,320 | 300 | live frontier from turn 2 |
+
+Now change one thing: edit the *last user message* of turn 3 and resend. The
+first 5,320 tokens are byte-identical. The longest usable retained checkpoint
+wins, which can be the previous turn's frontier. If the longest usable
+checkpoint is instead the intermediate position at 4,096 tokens, that prefix
+can be restored and only the suffix is prefilled. If earlier checkpoints have
+been evicted or refused by the byte budget,
+and all remaining checkpoints fall after the edit, reuse is impossible:
+
+| Turn | Prompt | Reused | Prefilled | Common prefix |
+| --- | ---: | ---: | ---: | ---: |
+| 3', intermediate checkpoint retained | 5,620 | 4,096 | 1,524 | 5,599 |
+| 3', no usable earlier checkpoint | 5,620 | 0 | 5,620 | 5,599 |
+
+That gap between "common prefix" and "reused" is the signature of the
+exact-prefix limitation.
+
+## Concurrent requests sharing a prefix
+
+Checkpoints help a request only once they exist. When several requests that
+share a prefix arrive together, such as subagents started from one system
+prompt or a retry sent before the first attempt returns, none of them finds a
+checkpoint, and each would prefill the shared tokens again. Prefill runs one
+request at a time, so the copies cost the sum of all prefills, and all
+requests finish together at the end.
+
+Instead, a cold request that shares a long prefix with a request already
+prefilling it waits for that one:
+
+```mermaid
+sequenceDiagram
+  participant L as Leader (resident)
+  participant S as Scheduler
+  participant F as Follower (arrives later)
+  F->>S: arrives, shares N tokens with L
+  S->>L: publish a checkpoint at N
+  Note over F: parked, holds no session
+  L->>L: prefill to N, capture
+  S->>F: admit
+  F->>F: restore N, prefill its own tail
+```
+
+1. On admission, the scheduler compares the new prompt with every resident
+   request still prefilling and takes the longest exact token prefix with
+   matching input identity.
+2. It waits only when the shared prefix is at least 512 tokens longer than
+   what the request could already restore, the resident request has not yet
+   prefilled past that point, and the runner supports snapshots. A
+   conversation continuing from its own retained turn therefore never waits
+   for a newcomer that shares only its system prompt.
+3. The resident request stops its prefill at the shared position and
+   publishes a RAM checkpoint there, as for intermediate checkpoints. A
+   checkpoint it already plans within 64 tokens is used instead. Identical
+   prompts share up to the leader's last prompt token or its stable boundary.
+4. The waiting request holds no session. Once the checkpoint is retained, or
+   the leader passes the position, finishes or is cancelled, it is admitted
+   ahead of newer requests and acquires its cache as usual.
+
+Because requests are waiting for it, that checkpoint is retained with the
+priority of a conversation's stable boundary: on a full cache it replaces the
+least recently used checkpoint rather than being refused as an optional copy.
+Waiting is still advisory, like admission: if the checkpoint does not fit at
+all or the leader is cancelled, the request prefills by itself. A request
+waits at most once, and at most `--sessions - 1` requests wait at a time. With
+`--sessions 1` nothing waits, because a second request is never admitted
+while the first prefills.
+
+Measured on Flash-Next with `--sessions 4` and a 3.8k-token shared system
+prompt, four concurrent requests took 13.4 s with each prefilling 3.9k tokens.
+Prefilling the shared prefix once and restoring it took 4.6 s, each request
+then prefilling 115 tokens **(measured)**. With a 242-token shared prefix the
+gain was about 1 s of 9 s, which is why short prefixes do not wait.
+
+## What gets retained
+
+The unit of retention is a **checkpoint**, not a conversation. A single request
+can retain up to four intermediate checkpoints in addition to its branching
+fallback and complete prompt. Prefill stops at those positions and captures the
+whole model state before advancing. Positions lie on a 2,048-token grid spread
+across the prompt; the final grid point is within 2,048 tokens of its end.
+Warm continuations skip grid positions less than 2,048 tokens beyond the reused
+frontier, and every request skips grid positions within 128 tokens of its end:
+such a point would split the final prefill pass for a checkpoint next to the
+complete prompt. Capture runs asynchronously while that session is frozen, so other
+requests can continue; a single execution slot skips the extra worker. A
+request whose first token is already published decodes as soon as its capture
+finishes, before the next bounded prefill chunk of a peer.
+Coincident RAM and disk boundaries share one copy. Admission
+remains subject to the existing byte budget, and intermediate copies preserve
+the original branching fallback. These intermediate checkpoints live in RAM;
+the disk tier continues to retain prompt and learned shared-prefix boundaries.
+
+### Learned divergence points
+
+Grid checkpoints sit at fixed positions, not where conversations actually
+diverge. Agents start many conversations with the same system prompt and tool
+definitions, then a different task:
+
+```text
+Conversation 1:  [ shared 4,500 tokens ][ task A, 10,000 tokens ]
+grid checkpoints:       ^2,048    ^6,144    ^10,240    ^14,336
+```
+
+Only the 2,048 checkpoint lies inside the shared part, so a second
+conversation would restore 2,048 tokens and prefill the other 2,450 shared
+tokens again. The longer the tasks, the further the grid spreads.
+
+The point that matters, token 4,500, is unknown until a second prompt shows
+where the two differ. When a request arrives, the cache compares it with the
+tokens of every retained checkpoint and live frontier of the same input
+identity. If the longest common prefix adds at least 512 tokens to what the
+request can already restore, the request stops its prefill there and retains
+an extra checkpoint. Other conversations depend on it, so it is retained like a
+stable boundary, not as an optional copy, and the branch-point rule below keeps
+it while it is shared. From the third conversation on, every new one restores
+the whole shared prefix and prefills only its own task. A divergence within
+the request's last 64 tokens, such as an edited final message, is covered by
+its own stable checkpoint and takes no extra copy. The same position from the same prefix family is captured
+once; records whose images differ from the prompt are not used to find it.
+Without disk, this needs no configuration.
+
+Execution and retention have separate limits. `--sessions N` allocates N
+mutable execution states and controls active request concurrency. A separate
+pool holds **128 immutable checkpoint records**, regardless of session count.
+These records allocate no extra execution states: with `--sessions 1`, several
+inactive conversations can still be remembered.
+
+This is a checkpoint limit, not a guaranteed conversation count. One history
+can occupy several records, and the byte budget may bind before all 128 are
+used. The server identifies related checkpoints by exact token prefixes and
+matching input identities, not a client-supplied conversation ID.
+
+When space is needed, RAM retention prefers removing:
+
+1. A full-prompt retry copy with a stable fallback still retained.
+2. An intermediate copy with a related stable continuation retained.
+3. An older stable boundary covered by a newer one. A checkpoint that two
+   retained conversations extend and then diverge after is the prefix they
+   share, not an older turn, and never counts as covered.
+4. Remaining checkpoints, oldest-used first within each priority.
+
+Under entry pressure, an edited branch can first replace its incompatible
+tail, preserving earlier shared checkpoints. Optional history/retry copies
+are skipped rather than removing another prefix family's last useful copy.
+Retry copies cannot displace earlier history or stable boundaries either.
+An unchanged retry then restores the stable boundary and prefills only the
+assistant opening, such as `<|im_start|>assistant\n<think>\n`, again. If
+the prompt ends with a text-only user turn after a tool result or another user
+turn, Qwen templates place the stable boundary before that turn, so the retry
+prefills it too. The server logs `event=snapshot action=skipped` with that
+prompt's length.
+A new stable boundary can replace its own older boundary when that avoids
+removing another family's last copy. Sources are rechecked before replacement
+because another request may have changed the record.
+
+The original resume point stays protected during intermediate/retry admission.
+Earlier checkpoints remain best-effort: under pressure, edits and rewind may
+need more prefill. Rotation beyond the actual memory or record capacity can
+still lose reuse; this is not unlimited retention.
+
+The actual selected limits are reported at startup:
+
+```text
+schema=component-cache-v1 event=configured sessions=1 snapshot_entries=128 capacity_bytes=8589934592 automatic_bytes=8589934592 max_bytes=13958643712
+```
+
+## Invariants
+
+These constraints are why several design choices are not preferences. Change
+them deliberately or not at all.
+
+**A checkpoint must contain the state at its exact token boundary.** Most
+runners stop prefill at that boundary before capturing it. Flash-Next can
+capture a text prompt's stable boundary within the final prefill pass: its
+recurrent kernels retain the boundary state, convolution and PLE retain their
+history, and a one-row head computes the boundary logits. Attention queries
+on either side keep the grouping of separate passes. The final batch can
+include up to 128 tokens beyond the normal 2,048-token chunk, so a prompt that
+ends just past a chunk needs no separate tail pass; the stable boundary must be
+within eleven tokens of that batch's end (an eight-token assistant suffix plus
+the up to three tokens a four-token-aligned boundary falls back).
+The cache reserves the full payload before enabling this capture. Disk,
+image, intermediate and learned-prefix checkpoints still stop prefill at
+their boundary.
+
+**A checkpoint never splits an indivisible input.** A model whose prompt
+context declares spans through `TextPromptContext::PrefillStop`, such as image
+rows that must share one forward, never has a prefill step, planned checkpoint,
+stable snapshot or shared-prefix boundary end inside one, and never restores a
+checkpoint inside one. Such a position moves to the span's first row, and a step
+that starts at a span takes it whole even beyond its token budget. Contexts that
+declare no spans change no position.
+
+**A checkpoint may hold less than a cold request would.** Each prefill step's
+prompt ends at its own frontier, and `TextRunnerState::prefill_prompt_end()`
+gives the whole prompt's end. A model that runs some work only near that end
+can skip it in steps ending at earlier cache boundaries, so their checkpoints
+lack those rows. Its `TextModelRunner::CanContinue` then refuses prompts that
+would need them, and the cache serves those from a shallower boundary. By
+default every state continues every prompt.
+
+**The reused frontier must be frozen before prefill.** Prefill mutates the
+leased state in place, so a frontier another request might branch from has to
+be captured first.
+
+Flash-Next copies its mutable recurrent, convolution and PLE state into
+private device storage at capture; the small indexer-ring, draft-residual and
+kept-row regions go directly into the host payload. Committed K/V and pooled
+rows remain in the live session while it appends, without a K/V copy.
+A same-session rewind allocates backing blocks for only the rows it would
+overwrite and copies them once for checkpoints sharing those rows. Appending
+allocates no K/V backing blocks. Restore keeps the still-live prefix without
+a K/V upload.
+
+A model with a sliding attention window declares that attention as a
+window-rows component (`ComponentKind::kWindowRows` with `window_rows`) instead
+of private state. A checkpoint at row n keeps only the chunks from the one
+containing row n - `window_rows` to n and shares them with neighbouring
+checkpoints. Restore loads just those chunks, and the disk manifest records the
+window size (format version 3, written only when a window component is
+present; version 2 manifests remain readable). Retention counts the window as
+a fixed cost per checkpoint, like private state, and frees a chunk once no
+checkpoint's window reaches it.
+
+Reset leaves append-only rows intact; the first write that would overwrite
+them preserves pending checkpoints. Session destruction preserves remaining
+rows before releasing device buffers. Byte readers assemble a complete
+payload before export. Forks copy the live prefix directly between device
+buffers, including detached rows in the shared backing blocks. When both
+sessions branch from a shared checkpoint, restore retains their proven shared
+rows and copies only the different suffix. Equal token histories alone do not
+prove identical K/V, since prefill shapes can change rounding.
+A private HIP pool shared by the executor's sessions allocates and releases
+snapshot storage without synchronizing peer inference streams. Each fresh
+allocation commits device pages, about 4.5 ms per 111 MB on gfx1151, so a
+restore into a slot whose rows other checkpoints still borrow pays that cost
+for the rows it protects. A retained
+Flash-Next snapshot prefers its source execution slot when
+that slot is available, avoiding a full-prefix copy for a rewritten turn.
+A busy source never blocks a branch into another slot; other choices use LRU.
+RAM admission continues to charge the complete payload size, and the disk
+byte format is unchanged. Captures intended for disk complete all device
+copies before prefill resumes, so disk serialization does not introduce a
+background K/V transfer during inference.
+
+**Admission is advisory, never fatal.** A refused reservation or a failed
+capture is a skipped optimisation. The request must still complete.
+
+**Eviction cannot skip a victim.** If removing an entry fails, the eviction
+loop stops rather than trying the next candidate, in both tiers **(source)**.
+
+## Limits
+
+Independent limits can each bind first. Payload memory is allocated only when
+captured; RAM-retained snapshots and their captures in progress share the RAM budget.
+
+| Limit | Default | Set by |
+| --- | --- | --- |
+| Retained snapshot bytes, RAM | smaller of 32 GiB and half the available host RAM; an explicit value up to the available host RAM minus 4 GiB; 27B also checks HIP free memory | `--cache-ram-bytes` |
+| RAM checkpoint records | 128, independent of `--sessions` | internal safety limit |
+| Disk bytes | 8 GiB | `--cache-disk-bytes` |
+
+`--cache-ram-bytes off` turns the RAM cache off. The server then keeps no
+checkpoint in RAM, commits no cache backing, and computes no budget. Without
+`--cache-disk` it also grows no backing before prefill. Each session still reuses its own live state, `--cache-disk`
+still works, and the per-response `gufo.component_cache` block stays present
+with zero captures. Off drops every RAM checkpoint, so there is no restore from
+RAM, no shared-prefix or branch checkpoint, and no retained history. With
+`--cache-disk`, Qwen and Flash-Next still copy each disk capture through a
+bounded 512 MiB backing, so `backing_prepared` appears in that case only. The
+startup line reports `ram_cache=off capacity_bytes=0`.
+
+When the sessions leave no RAM for the cache above the 4 GiB host reserve,
+the server refuses to load with that reason and the remedies: fewer
+`--sessions`, a smaller `--context`, or `--cache-ram-bytes off`. `off` loads
+even when the host is already below its reserve before the sessions allocate.
+When an explicit value is only partly available, the server loads with what
+the host allows and logs `event=ram_cache_trimmed` with the requested and the
+granted bytes; the same remedies restore the full budget.
+
+`--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
+A positive value replaces the automatic budget and may exceed it: it trades the
+free half of host RAM for retention, but always leaves 4 GiB to the OS and other
+processes. For an 8 GiB cap, use `--cache-ram-bytes 8589934592`. The startup
+line reports the selected `capacity_bytes`, the `automatic_bytes` budget and
+the `max_bytes` an explicit value may claim. With a DFlash2 draft, each
+Qwen3.8-27B session also pins about 400 MiB of prompt capture at startup,
+reported as `slot_pinned_bytes`. It is charged on top of `capacity_bytes`: an
+explicit value may claim at most `max_bytes` minus `slot_pinned_bytes`, or the
+startup ceiling minus `slot_pinned_bytes` when that ceiling binds.
+`automatic_bytes` is half the available RAM measured before the pins. The
+`global_ram_bytes` gauge and the metadata category include the pins, so live
+usage can exceed `capacity_bytes`.
+
+Both are sampled after weights and execution states are allocated, then fixed
+for the server run. Flash-Next and Qwen3.8-27B use half the available
+host RAM, respecting container/cgroup limits. Inactive page cache, such as
+recently read model files, counts as available because the kernel reclaims it
+before failing an allocation. Dirty and writeback pages do not. 27B also clamps this to HIP's free
+device memory. CPU and GPU allocations compete for the same physical RAM on
+Strix Halo, so HIP's free-memory estimate alone is not enough.
+For example, 44 GiB available at load gives a 22 GiB automatic RAM cache and
+allows an explicit limit of up to 40 GiB, even when HIP reports more free
+memory.
+Memory that another process claims after startup is not subtracted. When
+other GPU servers share the machine, such as an image or speech server, set an
+explicit `--cache-ram-bytes` that leaves room for their peak use; starting
+them first only accounts for what they hold at that moment.
+The RAM payload budget excludes weights, execution states, token metadata,
+disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB
+of retained encoded/RGB vectors plus bounded metadata). It also excludes temporary
+host buffers used to save checkpoints to disk; this is not a limit on total
+server memory.
+
+The 32 GiB automatic cap limits default growth on a lightly loaded machine.
+It leaves room for several 27B histories: two 3.7 GB checkpoints per history
+would consume about 30 GB for four conversations, before optional copies.
+The 128-record safety limit bounds metadata and lookup work without requiring
+more execution sessions. Neither guarantees a conversation count: roughly,
+divide the byte budget by the retained checkpoint bytes per conversation.
+For example, 8 GiB holds at most eight sets of two 512 MiB checkpoints, or
+two sets of two 2 GiB checkpoints, before extra copies and in-flight captures.
+
+Increasing context or sessions reduces the memory left after loading, and
+with it both budgets, exactly when snapshots grow. On Flash-Next with
+`--sessions 2` at 262144 context, 14.8 GB remained after loading: a 7.76 GB
+automatic budget against 5.70 GB snapshots at 200k tokens, so only one deep
+conversation stays retained **(measured)**. A newer conversation's stable
+boundary then replaces the older one's checkpoint; only optional intermediate
+and retry copies are refused. This is a hardware ratio, not a cache policy:
+weights, execution states and the OS leave no more memory. To keep more deep
+conversations:
+
+- Raise `--cache-ram-bytes` towards the reported `max_bytes` (less
+  `slot_pinned_bytes` on Qwen3.8-27B): about 10.5 GB
+  here, enough for a 200k-token checkpoint plus a 50k one instead of only the
+  first.
+- Run fewer `--sessions`: each Flash-Next session at 262144 context holds about
+  6.3 GB of state that the cache can use instead.
+- Add `--cache-disk` so checkpoints that leave RAM can still be restored from
+  disk. Checkpoints of any size stream through the internal buffer.
+
+Snapshot size scales with retained tokens and differs sharply between models:
+roughly 0.5 GB at 5k tokens on Flash-Next, and 3.7 GB at 24k tokens on
+Qwen3.8-27B **(measured)**.
+
+RAM eviction follows the checkpoint priorities above. Disk eviction remains
+global least-recently-used, without conversation or rebuild-cost awareness.
+
+### Component-cache budgets
+
+Qwen27B and Flash-Next use the same options with these meanings:
+
+| Option | Meaning |
+| --- | --- |
+| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
+| `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints by creation order: use history does not survive a restart. |
+| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed, and a larger value only took pinned RAM and device heap. |
+| `--cache-disk DIR` | Owned by one server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory.  model's server sharing it. |
+
+The 128-record limit stays internal. The following measured sizes and timings
+are Flash-Next evidence; Qwen27B qualification is recorded in its model card.
+Each Flash-Next checkpoint holds about 132 MB of
+private state, so below a budget of about 19 GB that state caps the checkpoint
+count under 128; only larger explicit budgets can reach the record limit. The startup line
+`schema=component-cache-v1 event=configured` reports `capacity_bytes`,
+`automatic_bytes`, `max_bytes`, `staging_capacity_bytes`,
+`disk_capacity_bytes` and `slot_pinned_bytes` (host memory the sessions pinned
+at startup, charged on top of `capacity_bytes`).
+
+Flash-Next prepares a bounded two-segment reserve before readiness and can
+prepare the next segment before a prefill with at least 512 tokens remaining
+or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
+growth; a capture still commits any backing it needs.
+
+Backing excludes transparent huge pages before population and attempts a Linux
+long-term page pin before GPU registration. GPU registration alone leaves
+anonymous pages movable: ordinary memory compaction can invalidate their GPU
+mappings and pause the process's queues. Registered `io_uring` buffers supply
+the extra pin without submitting I/O or running polling threads. Their
+lifetime follows the backing, including blocks that outlive the pool facade;
+cleanup unregisters the GPU mapping and releases the pin before unmapping.
+If `io_uring` or the process's memory-lock limit refuses the pin, the existing
+registered base-page path remains available with the same cache capacity.
+`event=backing_prepared` and `event=backing_grown` report
+`long_term_pinned_bytes` alongside committed bytes, making that fallback visible.
+
+Container seccomp profiles may block `io_uring_setup` and `io_uring_register`.
+An unlimited `memlock` setting alone does not enable them. Check the pin-byte
+counter inside the running container: zero means the extra migration protection
+is unavailable. Enabling it requires allowing these two calls in the
+operator-managed syscall policy; `io_uring_enter` is not used. The registered
+base-page fallback remains compatible with restrictive container policies.
+
+A step of about 1 GiB took 56–58 ms on the capturing thread while the host had
+free pages **(measured)**. Captures run on the scheduler thread, so concurrent
+requests pause for that long too; an 8 GiB budget fills in eight steps. When the
+kernel must first reclaim page cache, such as the model files read at load, a
+step takes longer: a 157K-token turn that retained 4.8 GB right after a restart
+spent about 3.5 s growing in 256 MiB steps. Committing pages on demand keeps
+that reclaim out of model load: committing a 17 GiB budget up front took
+29–39 s at load, against 16 s without it **(measured)**. Segments
+cannot be joined, so a payload stays within one, and each edge strands space
+that a ~140 MB private state cannot use; equal segments of about 1 GiB keep that
+small. A step is skipped while the host would keep less than 4 GiB available
+(`schema=component-cache-v1 event=backing_limited`); the cache then works within
+what it has committed, evicting as at a full budget, and tries again a second
+later. Until the cache fills, the host keeps the remaining memory, including the
+page cache that holds recent disk checkpoints, so a restore soon after a
+restart reads them from memory. A cache that has filled keeps its footprint; the advice above on explicit budgets for co-resident servers
+still applies.
+
+## The disk tier
+
+`--cache-disk DIR` adds a second tier that survives restarts. A checkpoint
+written before a restart restored a 24,866-token prompt in 1.8 s against about
+50 s for a cold prefill **(measured)**.
+
+A Flash-Next checkpoint is thousands of files: 157K tokens are 4.45 GB in
+18,672 files, mostly 256 KiB. Four helper threads hint the files ahead of the
+restore, which still reads, checks and copies them in order. That restore took
+1.3–1.4 s with the files on disk and 0.85 s from the page cache, against
+8.7–9.9 s when one thread hinted each file in turn **(measured, NVMe under
+dm-crypt)**.
+
+Learned divergence points (see above) are ordinary checkpoints, so they reach
+disk like any other and survive restarts.
+
+**Disk checkpoints are spaced at least 2048 tokens apart.** A conversation
+advances a few hundred tokens per turn, so writing every turn serialises, fsyncs
+and retains a nearly identical snapshot. A checkpoint less than 2048 tokens past
+the longest stored entry that is still a prefix of it is skipped and logged as
+`min_step`; the RAM tier still retains it. When RAM does not retain it either,
+the device state is not copied at all, so a skipped checkpoint costs no capture
+time on the request path. Learned shared-prefix boundaries are
+exempt, because they sit close to a deeper entry by construction. On a
+Qwen3.8-27B functional run this cut disk writes from 31 to 5 and written bytes
+from 6.97 GiB to 1.37 GiB **(measured)**.
+
+The trade-off is what a disk-only restore resumes from. After a restart, or
+once RAM evicted the conversation, a request restores the nearest stored entry
+and re-prefills up to 2048 tokens plus its own turn, instead of resuming
+exactly at the previous frontier. Greedy output is unchanged. Sampled output can
+differ from the pre-restart response, because the re-prefilled gap follows
+different chunk shapes, as with any partial hit. Plain continuation from RAM is
+unaffected.
+
+Disk entries are evicted by global LRU on last access, so one active run whose
+checkpoints are all recent will displace every other conversation in age order
+**(measured)**.
+
+## What invalidates reuse
+
+Anything that changes the token prefix. In practice:
+
+- **Tool definitions** — adding, removing or reordering changes the prompt head
+  and invalidates everything after it.
+- **System prompt** — including anything volatile inside it, such as a
+  timestamp or a working directory.
+- **Response schema** — `response_format` is rendered into the prompt.
+- **Images** — changing, removing or moving an earlier image invalidates
+  checkpoints after it. Appending a new one does not.
+- **Reasoning the client cannot replay** — thinking is on by default for Qwen
+  and `reasoning_content` is not part of the OpenAI schema, so an ordinary
+  client omits it when sending the conversation back. Gufo retains each turn's
+  boundary before the assistant opening, so the next turn can reuse the prior
+  history and process the rewritten assistant plus new input. That boundary
+  must be saved on warm hits too; retaining only the old resume point caused
+  cache reuse to stop advancing for the rest of the session.
+
+These do **not** invalidate reuse **(measured)**: changing `temperature`,
+`top_p`, `seed`, `max_tokens`, penalties or `stop` between turns; streaming
+versus not, which reuse identically and interoperate within one conversation.
+
+`cache_prompt: false` on `/v1/chat/completions`, `/v1/responses`,
+`/v1/completions` or `/completion` bypasses lookup for a single request. The
+result can still populate the cache. `null` keeps the default, `true`.
+
+`cache_persist: false` on the same endpoints keeps one request's checkpoints
+in RAM only: nothing it captures is written or staged for the disk tier, so
+they are lost on eviction or restart. It still reads disk checkpoints, and it
+does not stop a later request without the flag from persisting the same
+prefix. `null` keeps the default, `true`. Responses echo the applied value as
+a top-level `cache_persist`; see [the server guide](../server.md).
+
+## Observing it
+
+| Log line | Meaning |
+| --- | --- |
+| `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim; `ram_cache=on` or `ram_cache=off` at the end of the line, and `disk_backing_bytes` for the backing an off cache keeps for disk captures |
+| `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
+| `schema=component-cache-v1 event=ram_cache_trimmed` | Qwen3.8-27B, Flash-Next and DeepSeek V4: an explicit `--cache-ram-bytes` exceeds what the host keeps above its 4 GiB reserve after the sessions allocated; reports `requested_bytes` and the granted `capacity_bytes` |
+| `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
+| `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory. Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration |
+| `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
+| `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints (creation order) to fit a lowered `--cache-disk-bytes` |
+| `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
+| `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
+| `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
+| `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
+| `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
+| `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |
+| `event=disk_cache action=removed reason=lru` | a disk entry was evicted to stay inside `--cache-disk-bytes` |
+| `event=disk_cache action=skipped reason=staging_capacity` | a checkpoint exceeded `--cache-disk-staging-bytes` and was never written |
+| `event=disk_cache action=skipped reason=min_step` | a checkpoint was less than 2048 tokens past a stored prefix; RAM still retains it |
+
+Per-request outcomes appear in the completion log and in `usage.gufo`:
+`cache_hit`, `cache_miss_reason`, `cache_common_prefix_tokens`,
+`cache_checkpoint_tokens`, `cache_restore_bytes`, `cache_restore_ms` (bytes and
+milliseconds restored on a hit), `cache_disk_hit` (the restored prefix came
+from disk), `cache_snapshot_bytes`, `cache_snapshot_ms` (the KV snapshot this
+request's retained prefix occupies and the time to snapshot it, also reported
+when a stop or cancel path retains the prefix), `cache_disk_queued_bytes`,
+`cache_disk_enqueue_ms` (snapshot bytes handed to disk publication and their
+enqueue time),
+`shared_prefix_wait_ms` (time spent waiting for a concurrent request, part of
+`queue_ms`), plus
+`prompt_n` (newly processed) and `cache_n` (reused) in the llama.cpp-compatible
+`timings` object. Miss reasons are `no_checkpoint`, `prefix_changed`,
+`input_changed`, `no_compatible_boundary` and `disabled`. Flash-Next reports
+`no_checkpoint` when no
+stored prompt shares a token with the request and `no_compatible_boundary`
+when one does but no restorable boundary covers it;
+`cache_common_prefix_tokens` is then the longest agreement and
+`cache_checkpoint_tokens` the deepest compatible boundary.
+
+Flash-Next also reports `usage.gufo.component_cache.captured_checkpoint_ids`.
+Match these request-local IDs to `checkpoint_id` in publication/refusal logs:
+an earlier request's asynchronous write may finish after the current response.
+IDs belong to one server lifetime; correlate each restart separately.
+
+Reading them:
+
+- `cache_n` growing turn over turn while `prompt_n` stays flat is healthy
+  reuse.
+- Concurrent requests with a shared prefix: one has `shared_prefix_wait_ms`
+  zero and prefills the prefix; the others wait, then report the prefix in
+  `cache_n` and only their own tail in `prompt_n`. With `--log-level debug`,
+  `event=shared_prefix_wait` and `event=shared_prefix_ready` name the leader
+  and position.
+- `cache_n` **pinned** at the same value while `prompt_n` grows every turn is a
+  checkpoint that stopped advancing.
+- A large `cache_common_prefix_tokens` on a miss means a long prefix agreed and
+  could not be resumed from: a mid-history edit, or an evicted checkpoint.
+
+## Verifying changes
+
+- `tests/functional/` covers rotation through independent conversations, a long
+  history interrupted by tiny side requests, edits/rewind, advancing boundaries,
+  cancellation and disk restart. Uncached controls check the answers; CPU tests
+  exercise byte and record pressure without loading models.
+- `tests/functional/continuation.py` covers cancellation, reasoning replay,
+  images and restart persistence against a live server. After a restart,
+  greedy and exact restores must reproduce their output; sampled restores may
+  re-prefill less than one disk step.
+- `tests/functional/cache_disk_spacing.py`, part of the `cache` suite, checks
+  disk checkpoint spacing for a growing conversation, the restore after
+  restart, and that a learned branch boundary is still written.
+- `tests/functional/cache_concurrency.py` (`cache-concurrency`) sends
+  identical prompts, shared-system fan-out with short and long tasks, short or
+  no shared prefixes, a retained conversation beside a newcomer and a
+  cancelled leader at once, checking waits, prefill work and uncached answers.
+  `tests/cli/text_generation_scheduler_test.cpp` covers the same cases, plus
+  runners without snapshots, without loading a model.
+- `tests/cli/component_text_cache_test.cpp` and `tests/cache/` cover
+  retention, admission, eviction and persistence without loading a model.

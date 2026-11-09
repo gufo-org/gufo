@@ -85,6 +85,11 @@ if (ENGINE_ENABLE_HIP)
   add_qwen_hip_test(qwen_prompt_hidden_buffer_test
     tests/models/qwen/hip/prompt_hidden_buffer_test.cpp
     "hip;gpu;qwen")
+  # TextModelRunner::EncodeHiddenStates on GUFO_QWEN_HIDDEN_MODEL, optionally
+  # against tools/qwen27b/hidden_state_reference.py output.
+  add_qwen_hip_test(qwen_text_hidden_states_test
+    tests/models/qwen/hip/text_hidden_states_test.cpp
+    "hip;gpu;qwen;external-model")
 
   add_qwen_hip_test(qwen_gpu_ops_test
     tests/models/qwen/hip/basic/blas_ops_test.cpp

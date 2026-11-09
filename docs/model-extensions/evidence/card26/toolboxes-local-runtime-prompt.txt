@@ -1,2 +1,0 @@
-Error creating Qwen GPU executor: Model config failed Qwen structural validation (head_dim=128, layers=5)
-[Model Load]: 0.0306974 s (failed)

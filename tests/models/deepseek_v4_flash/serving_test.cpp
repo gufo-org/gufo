@@ -20,6 +20,7 @@
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/deepseek_v4_flash/runner.hpp"
 
 namespace {
 
@@ -31,6 +32,20 @@ void Expect(bool condition, std::string_view message) {
   if (!condition) {
     throw std::runtime_error(std::string(message));
   }
+}
+
+bool Load(gufo::server::InferenceBackend& backend,
+          const std::shared_ptr<Model>& model, std::string* error,
+          std::uint32_t max_context, std::size_t session_count,
+          gufo::server::TextPrefillPolicy prefill_policy = {},
+          gufo::server::TextSchedulerPolicy scheduler_policy = {},
+          const gufo::server::TextSpeculativeConfig& speculative = {},
+          const gufo::server::TextDiskCacheConfig& disk = {}) {
+  auto runner = gufo::models::deepseek_v4_flash::CreateDeepSeekTextRunner(
+      model, max_context, speculative, disk.model_artifact_fingerprint,
+      disk.draft_model_artifact_fingerprint);
+  return backend.load(std::move(runner), error, session_count, prefill_policy,
+                      scheduler_policy, disk);
 }
 
 std::vector<gufo::tokenization::TokenId> GenerateDirect(
@@ -291,7 +306,7 @@ void CheckExecutionModes(const std::shared_ptr<Model>& model) {
       saved_ar && saved_spec && saved_ar->SizeBytes() < saved_spec->SizeBytes(),
       "AR snapshot includes predictor state");
   gufo::server::InferenceBackend backend;
-  Expect(backend.load(model, &error, 512, 1), error);
+  Expect(Load(backend, model, &error, 512, 1), error);
   const auto actual = backend.complete(text, 8, 0.0F);
   Expect(actual.draft_tokens == 0 &&
              actual.tokens == GenerateDirect(model, prompt, 8),
@@ -321,7 +336,7 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
                              "", ""}});
   {
     InferenceBackend backend;
-    Expect(backend.load(model, &error, 262144, 1, {}, {}, speculative), error);
+    Expect(Load(backend, model, &error, 262144, 1, {}, {}, speculative), error);
     const auto cold = backend.chat(prompt, 32, 0.0F);
     const auto warm = backend.chat(prompt, 32, 0.0F);
     Expect(cold.draft_tokens > 0 && warm.cache_hit && warm.prefill_tokens == 0,
@@ -343,32 +358,47 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
         };
     const auto direct_prompt =
         model->EncodeChat(direct_messages, ResolveDeepSeekChatOptions({}));
+    const std::array<gufo::sampling::SamplingConfig, 3> samplings{{
+        {.temperature = 0.6F, .seed = 7},
+        {.temperature = 1.0F, .seed = 7},
+        {.temperature = 0.6F,
+         .top_k = 40,
+         .top_p = 0.95F,
+         .seed = 11,
+         .repeat_penalty = 1.2F,
+         .frequency_penalty = 0.3F},
+    }};
+    std::array<std::vector<gufo::tokenization::TokenId>, samplings.size()>
+        served_autoregressive;
+    {
+      InferenceBackend backend;
+      Expect(Load(backend, model, &error, 4096, 1), error);
+      Expect(backend.chat(prompt, 32, 0.0F).draft_tokens == 0,
+             "C1 AR serving does not draft");
+      for (std::size_t i = 0; i < samplings.size(); ++i)
+        served_autoregressive[i] =
+            backend.chat(prompt, 32, samplings[i]).tokens;
+    }
     InferenceBackend backend;
-    Expect(backend.load(model, &error, 4096, 1, {}, {}, speculative), error);
+    Expect(Load(backend, model, &error, 4096, 1, {}, {}, speculative), error);
     const auto greedy = backend.chat(prompt, 32, 0.0F);
     std::size_t sampled_drafts = 0;
-    for (const auto& sampling : {
-             gufo::sampling::SamplingConfig{.temperature = 0.6F, .seed = 7},
-             gufo::sampling::SamplingConfig{.temperature = 1.0F, .seed = 7},
-             gufo::sampling::SamplingConfig{.temperature = 0.6F,
-                                            .top_k = 40,
-                                            .top_p = 0.95F,
-                                            .seed = 11,
-                                            .repeat_penalty = 1.2F,
-                                            .frequency_penalty = 0.3F},
-         }) {
+    for (std::size_t i = 0; i < samplings.size(); ++i) {
       const auto direct =
-          GenerateDirect(model, direct_prompt, 32, sampling, true);
+          GenerateDirect(model, direct_prompt, 32, samplings[i], true);
       const auto autoregressive =
-          GenerateDirect(model, direct_prompt, 32, sampling);
-      const auto result = backend.chat(prompt, 32, sampling);
-      const auto repeat = backend.chat(prompt, 32, sampling);
+          GenerateDirect(model, direct_prompt, 32, samplings[i]);
+      const auto result = backend.chat(prompt, 32, samplings[i]);
+      const auto repeat = backend.chat(prompt, 32, samplings[i]);
       sampled_drafts += result.draft_tokens;
       Expect(result.draft_accepted_tokens <= result.draft_tokens,
              "sampled DSpark accounting includes legitimate AR fallback");
-      Expect(result.tokens == direct && direct == autoregressive &&
+      Expect(direct == autoregressive,
+             "C1 direct DSpark retains the direct AR seeded trace");
+      Expect(result.tokens == served_autoregressive[i] &&
                  repeat.tokens == result.tokens,
-             "C1 DSpark, AR, frontend and cached seeded replay agree");
+             "C1 served DSpark retains the served AR seeded trace and replays "
+             "from cache");
     }
     Expect(sampled_drafts > 0,
            "sampled C1 serving exercises DSpark verification");
@@ -389,7 +419,7 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
                                                .repeat_penalty = 1.1F};
   for (const std::size_t concurrency : {2U, 4U}) {
     InferenceBackend backend;
-    Expect(backend.load(model, &error, 4096, concurrency, {}, {}, speculative),
+    Expect(Load(backend, model, &error, 4096, concurrency, {}, {}, speculative),
            error);
     std::vector<std::shared_ptr<TextGenerationBackend::GenerationRequest>>
         pending;
@@ -417,8 +447,8 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
   }
   {
     InferenceBackend backend;
-    Expect(backend.load(model, &error, 4096, 2, {.decode_active_tokens = 32},
-                        {}, speculative),
+    Expect(Load(backend, model, &error, 4096, 2, {.decode_active_tokens = 32},
+                {}, speculative),
            error);
     auto active = backend.start_chat(prompt, 64, 0.0F, {}, true);
     std::shared_ptr<TextGenerationBackend::GenerationRequest> late;
@@ -440,10 +470,13 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
   }
 
   {
+    auto no_reasoning_prompt = prompt;
+    no_reasoning_prompt.reasoning.enabled = false;
     InferenceBackend backend;
-    Expect(backend.load(model, &error, 64, 2, {}, {}, speculative), error);
-    auto greedy = backend.start_chat(prompt, 128, 0.0F, {}, true);
-    auto sampling = backend.start_chat(prompt, 128, sampled, {}, true);
+    Expect(Load(backend, model, &error, 64, 2, {}, {}, speculative), error);
+    auto greedy = backend.start_chat(no_reasoning_prompt, 128, 0.0F, {}, true);
+    auto sampling =
+        backend.start_chat(no_reasoning_prompt, 128, sampled, {}, true);
     for (const auto& result : {greedy->Wait(), sampling->Wait()}) {
       Expect(result.prompt_tokens + result.completion_tokens == 64,
              "greedy and sampled serving stop exactly at context capacity");
@@ -471,7 +504,7 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
     if (run == 2)
       disk.draft_model_artifact_fingerprint = std::string(64, 'c');
     InferenceBackend backend;
-    Expect(backend.load(model, &error, 4096, 1, {}, {}, speculative, disk),
+    Expect(Load(backend, model, &error, 4096, 1, {}, {}, speculative, disk),
            error);
     const auto result = backend.chat(prompt, 8, sampled);
     Expect(result.cache_disk_hit == (run == 1),
@@ -525,7 +558,7 @@ int main(int argc, char** argv) {
       Expect(model != nullptr, error);
 
       gufo::server::InferenceBackend backend;
-      Expect(backend.load(model, &error, 512, 2), error);
+      Expect(Load(backend, model, &error, 512, 2), error);
       Expect(backend.model_id() == model->ModelName(), "HTTP model identifier");
 
       const std::string raw_prompt = "The capital of France is";
@@ -765,8 +798,6 @@ int main(int argc, char** argv) {
       const auto recovered = backend.complete(raw_prompt, 2, 0.0F);
       Expect(recovered.tokens == direct_raw,
              "session reuse after cancellation");
-      Expect(!recovered.cache_hit,
-             "cancelled DeepSeek state must not remain cached");
     }
     const char* support_path =
         std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL");

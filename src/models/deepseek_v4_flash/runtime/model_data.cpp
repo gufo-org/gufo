@@ -621,12 +621,30 @@ static uint64_t accelerator_rocm_preload_span_bytes(void) {
     return 1024ull * 1048576ull;
 }
 
-static bool accelerator_cache_model_tensor_spans(const ds4_model *m, uint64_t *cached_out) {
+static std::vector<const ds4_tensor *> accelerator_f16_rows_tensors(const ds4_weights *w) {
+    std::vector<const ds4_tensor *> tensors;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const ds4_layer_weights &l = w->layer[il];
+        for (const ds4_tensor *t : {l.hc_attn_fn, l.hc_ffn_fn,
+                                    l.attn_compressor_kv, l.attn_compressor_gate,
+                                    l.indexer_compressor_kv, l.indexer_compressor_gate,
+                                    l.indexer_attn_q_b, l.indexer_proj}) {
+            if (t) tensors.push_back(t);
+        }
+    }
+    return tensors;
+}
+
+static bool accelerator_cache_model_tensor_spans(
+        const ds4_model *m,
+        const std::vector<const ds4_tensor *> &f16_rows,
+        uint64_t *cached_out) {
     std::vector<accelerator_tensor_span> spans;
     spans.reserve(static_cast<size_t>(m->n_tensors));
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         const ds4_tensor *t = &m->tensors[i];
         if (t->bytes == 0) continue;
+        if (std::find(f16_rows.begin(), f16_rows.end(), t) != f16_rows.end()) continue;
         if (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset) {
             return false;
         }
@@ -667,16 +685,27 @@ static bool accelerator_cache_model_tensor_spans(const ds4_model *m, uint64_t *c
             off = chunk_end;
         }
     }
+    for (const ds4_tensor *t : f16_rows) {
+        if (ds4_gpu_cache_model_f16_rows(m->map, m->size, t->abs_offset, t->dim[0],
+                                         t->dim[1], "f16-rows") == 0) {
+            fprintf(stderr,
+                    "ds4: accelerator failed to cache F16 tensor %.*s with padded rows\n",
+                    (int)t->name.len, t->name.ptr);
+            return false;
+        }
+        cached += t->bytes;
+    }
     if (cached_out) *cached_out = cached;
     return true;
 }
 
-static bool accelerator_cache_model_tensors(const ds4_model *m) {
+static bool accelerator_cache_model_tensors(const ds4_model *m, const ds4_weights *w) {
     if (!m || !m->map || m->size == 0) return false;
 
     const double t0 = ds4_now_seconds();
     uint64_t cached = 0;
-    const bool cache_ok = accelerator_cache_model_tensor_spans(m, &cached);
+    const bool cache_ok =
+        accelerator_cache_model_tensor_spans(m, accelerator_f16_rows_tensors(w), &cached);
     const bool upload_ok = ds4_gpu_release_model_staging() != 0;
     if (!cache_ok || !upload_ok) return false;
     if (cached != 0) {
@@ -1110,8 +1139,7 @@ static void config_expect_u32(const char *name, uint32_t got, uint32_t expected)
 }
 
 static void config_expect_f32(const char *name, float got, float expected) {
-    const float scale = fabsf(expected) > 1.0f ? fabsf(expected) : 1.0f;
-    if (fabsf(got - expected) <= scale * 1.0e-6f) return;
+    if (ds4_config_f32_matches(got, expected)) return;
     fprintf(stderr, "ds4: expected %s=%.9g for %s, got %.9g\n",
             name, (double)expected, DS4_MODEL_SHAPE_NAME, (double)got);
     throw std::runtime_error("incompatible or invalid DeepSeek artifact");
@@ -1734,7 +1762,7 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
         *out = NULL;
         return 1;
     }
-    if (!accelerator_cache_model_tensors(e->model)) {
+    if (!accelerator_cache_model_tensors(e->model, e->weights)) {
         fprintf(stderr, "ds4: ROCm failed to prepare startup model cache\n");
         ds4_engine_close(e);
         *out = NULL;
@@ -1796,6 +1824,8 @@ void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
     ds4_rocm_graph_destroy(e->batch_workspace);
     e->batch_workspace = NULL;
+    ds4_rocm_graph_destroy(e->decode_workspace);
+    e->decode_workspace = NULL;
     ds4_dspark_close(e->dspark);
     e->dspark = NULL;
     weights_free(e->weights);

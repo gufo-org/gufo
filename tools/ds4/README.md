@@ -1,7 +1,7 @@
 # DS4 development tools
 
 Run from the repository root inside `nix develop`. Build, correctness, and benchmark requirements
-are in [the DS4 benchmark README](../../docs/models/deepseek-v4-flash/BENCHMARKS.md).
+are in [the DS4 benchmark README](../../docs/internal/models/deepseek-v4-flash/BENCHMARKS.md).
 
 | Tool | Purpose |
 | --- | --- |
@@ -62,4 +62,4 @@ variant. The ordinary `--prompt` benchmark inserts a random nonce into the
 prompt; separate invocations therefore cannot establish identical-input output
 or acceptance comparisons. Report cache hits explicitly. Sampling contracts
 and the retained confidence/proposal controls are in the
-[DSpark sampling report](../../docs/models/deepseek-v4-flash/QUALITY.md).
+[DSpark sampling report](../../docs/internal/models/deepseek-v4-flash/QUALITY.md).

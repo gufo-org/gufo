@@ -3,6 +3,7 @@
 add_library(gufo_platform STATIC
   env.cpp
   library.cpp
+  module.cpp
   mapped_file.cpp
   net.cpp
   shutdown_signal.cpp

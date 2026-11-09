@@ -141,6 +141,7 @@ public:
 
 private:
   friend class Executor;
+  friend struct ExecutorTestAccess;  // eager/replay checks in GPU tests
   friend struct PrefillCheckpoint;
   friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
   Session() = default;
@@ -331,6 +332,22 @@ public:
       std::span<PrefillCheckpoint* const> checkpoints = {},
       std::span<const std::int32_t> next = {}) const;
 
+  /// Layer boundaries for splitting a prefill pass into at most `groups`
+  /// groups of about equal depth, never before the PLE layer has read its
+  /// n-gram rows: its table read uses buffers a decode would reuse.
+  [[nodiscard]] std::vector<std::uint32_t> LayerHookBoundaries(
+      std::size_t groups) const;
+  /// During kPrefill passes, after each layer in `after_layers` (ascending,
+  /// from LayerHookBoundaries), call `between` with the pass's cross-layer
+  /// rows parked and its deferred work set aside. `between` may decode other
+  /// sessions; every layer of the pass keeps its unsplit arithmetic. An
+  /// empty hook disables the split.
+  void SetLayerHook(std::vector<std::uint32_t> after_layers,
+                    std::function<void()> between) const {
+    hook_layers_ = std::move(after_layers);
+    hook_ = std::move(between);
+  }
+
   struct BatchItem {
     Session* session;
     std::span<const std::int32_t> tokens;
@@ -347,6 +364,10 @@ public:
   /// Rows a single session may verify at once when every proposal after the
   /// anchor is copied from its history (ForwardWide), or 0 without MTP.
   static constexpr std::uint32_t kWideRows = 64;
+  /// Every decode route, wide copy verification and batched MTP chains
+  /// included, stays below this row of the shared scratch; a layer hook
+  /// parks these rows of the prefill pass it interrupts.
+  static constexpr std::uint32_t kHookParkedRows = kWideRows;
   [[nodiscard]] std::uint32_t max_copy_rows() const noexcept {
     return has_mtp() ? std::min({kWideRows, options_.max_batch, copy_rows_cap_})
                      : 0;
@@ -506,6 +527,7 @@ public:
   [[nodiscard]] bool has_mtp() const noexcept { return model_->has_mtp(); }
 
 private:
+  friend struct ExecutorTestAccess;  // capture failure injection in GPU tests
   Executor() = default;
 
   /// Visits every device region of a snapshot in payload order with
@@ -682,6 +704,10 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// True only while Run records a graph. Overlapped launches check capture
+  /// membership at the fork; eager/replay tests separately check the results.
+  /// False on replay, which executes no host dispatch or membership queries.
+  mutable bool capturing_{false};
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;
@@ -945,6 +971,15 @@ private:
     std::uint32_t n{0};
   };
   mutable PendingCombine pending_combine_;
+  mutable std::vector<std::uint32_t> hook_layers_;
+  mutable std::function<void()> hook_;
+  mutable void* hook_park_{nullptr};  ///< parked rows; allocated on first use
+  /// This pass reads its n-gram rows at its start rather than from a
+  /// previous pass's prefetch.
+  mutable bool ple_cold_{false};
+  /// The next chunk's n-gram prefetch waits for this pass's first yield.
+  mutable bool prefetch_deferred_{false};
+  bool RunLayerHook(Session& session, std::string* error_msg) const;
   void* hc_fused_state_{nullptr};  ///< HcMixQ8Fused's counters (zeroed)
 };
 

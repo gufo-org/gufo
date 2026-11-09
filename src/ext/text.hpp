@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -24,8 +25,10 @@
 #include "gufo/ext/gguf_reader.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/ledger.hpp"
+#include "gufo/ext/options.hpp"
 #include "gufo/ext/reasoning.hpp"
 #include "gufo/ext/sampling.hpp"
+#include "gufo/ext/scheduling.hpp"
 #include "gufo/ext/text_contracts.hpp"
 #include "src/cache/component_resources.hpp"
 #include "src/core/text_sampling_defaults.hpp"
@@ -33,6 +36,8 @@
 namespace gufo::ext {
 
 using ComponentCacheResources = cache::ComponentCacheResources;
+using TextSchedulingProfile = sched::TextSchedulingProfile;
+using PrefillYield = sched::PrefillYield;
 using TextRunnerToken = ContinuationToken;
 
 /// Immutable model-owned input which travels with one scheduled request.
@@ -69,6 +74,52 @@ struct TextPreparedPrompt {
   std::shared_ptr<const TextPromptContext> context;
   /// Snapshot before mutable assistant framing. Zero uses the complete prompt.
   std::size_t cache_prefix_tokens{0};
+};
+
+/// Optional hidden-state encoding, which lets another model use a text
+/// runner's backbone as a frozen encoder (for example, an image model's text
+/// conditioning). Discovered through `TextModelRunner::HiddenStateEncoding()`.
+struct TextHiddenStateEncoding {
+  /// Scalars per row: the model's hidden size.
+  std::size_t width{0};
+  /// Most tokens one `EncodeHiddenStates` call accepts.
+  std::size_t max_tokens{0};
+};
+
+/// One complete prompt, framed and tokenized by the caller.
+struct TextHiddenStateRequest {
+  /// Encoded as a whole from position zero with the model's causal attention.
+  std::span<const TextRunnerToken> tokens;
+  /// Polled during execution; returning true stops the call with
+  /// `TextHiddenStateStatus::kCancelled`.
+  std::function<bool()> is_cancelled;
+};
+
+/// Hidden states of one request. `values` holds `rows * width` FP32 scalars
+/// in row-major order; row `i` belongs to request token `i`, so rows follow
+/// token order and `rows` equals the request's token count.
+///
+/// Each row is the residual stream after the last decoder layer, before the
+/// model's final output norm. Runners apply no normalization: a consumer that
+/// conditions on normalized states applies that final norm exactly once.
+///
+/// The result owns its storage; it never aliases runner memory and remains
+/// valid after the runner is destroyed.
+struct TextHiddenStates {
+  std::size_t rows{0};
+  std::size_t width{0};
+  std::vector<float> values;
+};
+
+enum class TextHiddenStateStatus : std::uint8_t {
+  kOk,
+  /// `is_cancelled` returned true; no states are returned.
+  kCancelled,
+  /// Empty prompt, more than `max_tokens` tokens, or a token outside the
+  /// model's vocabulary. Nothing was executed.
+  kInvalidInput,
+  /// Execution failed. A later call may succeed.
+  kFailed,
 };
 
 struct TextRunnerRamCacheOptions {
@@ -135,6 +186,9 @@ struct TextRunnerDescriptor {
   /// Core preset kept for existing extensions.
   sampling::TextModelPreset sampling_preset{
       sampling::TextModelPreset::kUnspecified};
+  /// Prompt scheduling beside other sessions' decoding. Empty keeps passes
+  /// bounded by the host's decode-active budget.
+  std::optional<TextSchedulingProfile> scheduling{};
 };
 
 struct TextRunnerResourceClaim {
@@ -200,8 +254,39 @@ public:
       const noexcept {
     return prefill_lookahead_;
   }
+  /// The whole prompt's token count during a prefill step, 0 outside one. A
+  /// step's prompt ends at its own frontier, which may be a cache boundary
+  /// short of this. A caller driving the runner outside the serve cache
+  /// leaves it 0; treat 0 as the step's own prompt end.
+  void SetPrefillPromptEnd(std::size_t tokens) noexcept {
+    prefill_prompt_end_ = tokens;
+  }
+  [[nodiscard]] std::size_t prefill_prompt_end() const noexcept {
+    return prefill_prompt_end_;
+  }
 
   virtual void SetCancellationCheck(const CancellationCheck&) {}
+
+  /// Set by the host for the next Prefill or PrefillThrough call only. A
+  /// runner whose descriptor has a scheduling profile splits each pass into
+  /// about `groups` layer groups of similar duration and calls YieldPrefill()
+  /// between them; it may add a boundary where the pass would otherwise
+  /// stall, such as a wait for input rows. Every layer keeps the arithmetic
+  /// of an unsplit pass. A runner may ignore it and run unsplit passes.
+  /// While yielding, it must hold no lock or scratch its decode paths take.
+  void SetPrefillYield(std::size_t groups, PrefillYield yield) {
+    prefill_yield_groups_ = yield ? std::max<std::size_t>(groups, 1) : 1;
+    prefill_yield_ = std::move(yield);
+  }
+  /// One when the host asked for unsplit passes.
+  [[nodiscard]] std::size_t prefill_yield_groups() const noexcept {
+    return prefill_yield_groups_;
+  }
+  /// Runs the host's decode round between two layer groups.
+  void YieldPrefill() const {
+    if (prefill_yield_)
+      prefill_yield_();
+  }
 
   [[nodiscard]] virtual TextRunnerMeasuredResources MeasuredResources()
       const noexcept {
@@ -211,6 +296,9 @@ public:
 private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
+  std::size_t prefill_prompt_end_{};
+  std::size_t prefill_yield_groups_{1};
+  PrefillYield prefill_yield_;
 };
 
 struct TextRunnerAdvance {
@@ -427,6 +515,31 @@ public:
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
 
+  /// The runner's hidden-state encoder, or std::nullopt when it offers none.
+  [[nodiscard]] virtual std::optional<TextHiddenStateEncoding>
+  HiddenStateEncoding() const {
+    return std::nullopt;
+  }
+  /// Encodes `request.tokens` as one complete prompt (see `TextHiddenStates`
+  /// for the returned layout and normalization). Every call starts from an
+  /// empty context and is independent of all `TextRunnerState`s: it neither
+  /// reads nor changes sessions, prefix caches or snapshots, so repeating a
+  /// request returns the same states. Concurrent calls on one runner
+  /// serialize. Any working memory belongs to the runner and is released with
+  /// it. `states` must not be null. On `kOk`, `*states` holds the result;
+  /// otherwise it is empty and `*error` (when not null) explains why. Throws
+  /// std::logic_error when
+  /// `HiddenStateEncoding()` is std::nullopt, so an unsupported capability is
+  /// never reported as an execution failure.
+  [[nodiscard]] virtual TextHiddenStateStatus EncodeHiddenStates(
+      const TextHiddenStateRequest& request, TextHiddenStates* states,
+      std::string* error) const {
+    (void)request;
+    (void)states;
+    (void)error;
+    throw std::logic_error("runner does not support hidden-state encoding");
+  }
+
   /// Continuation contract. The cache owns every execution slot: it creates
   /// the resources once, binds a state to each slot, and reconciles a state
   /// after restoring rows into its slot at the given position.
@@ -436,6 +549,14 @@ public:
       cache::Adapter&, cache::Slot&) const = 0;
   virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const = 0;
   [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
+    return true;
+  }
+  /// Whether the state, live or restored, continues a prompt of
+  /// `prompt_tokens`. A model that skips work on rows far from the prompt's
+  /// end may keep only what longer prompts need; the cache serves a refused
+  /// prompt from a shallower boundary.
+  [[nodiscard]] virtual bool CanContinue(const TextRunnerState&,
+                                         std::size_t /*prompt_tokens*/) const {
     return true;
   }
 
@@ -563,6 +684,9 @@ struct TextSpeculativeConfig {
   std::uint32_t max_draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
   TextDFlashDraftPolicy dflash_policy{TextDFlashDraftPolicy::kAdaptive};
+  /// The resolved `--draft-policy` (see `TextSpeculativeDefaults`); empty when
+  /// the backend has no policy.
+  std::string draft_policy{};
 };
 
 struct TextDiskCacheConfig {
@@ -586,6 +710,10 @@ struct TextRunnerOptions {
   TextDiskCacheConfig disk_cache{};
   TextRunnerRamCacheOptions ram_cache{};
   bool enable_yarn{false};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 };
 
 struct TextBenchOptions {
@@ -610,6 +738,10 @@ struct TextBenchOptions {
   }()};
   bool enable_yarn{false};
   bool verbose{false};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 };
 
 struct TextPromptOptions {
@@ -637,6 +769,10 @@ struct TextPromptOptions {
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 
   /// Thinking mode these options select; a reasoning effort implies enabled.
   [[nodiscard]] std::optional<bool> thinking_mode() const {
@@ -746,6 +882,23 @@ using TextChatDriver =
     int (*)(const TextPromptOptions& options, const core::GgufReader& reader,
             std::chrono::steady_clock::time_point load_start);
 
+/// A provider's draft settings for one speculative backend. The commands
+/// resolve each setting as the explicit flag, else this default, else the
+/// host's (7 draft tokens, minimum 1, no policy; DFlash2 accepts `fixed` and
+/// `adaptive`) when the provider declares nothing for the backend.
+struct TextSpeculativeDefaults {
+  /// The `--speculative` value: `mtp`, `dflash2` or `dspark`.
+  std::string backend;
+  /// `--draft-tokens` when it is not given.
+  std::uint32_t max_draft_tokens{7};
+  /// `--min-draft-tokens` when it is not given.
+  std::uint32_t min_draft_tokens{1};
+  /// `--draft-policy` when it is not given; may be empty.
+  std::string draft_policy;
+  /// The `--draft-policy` values this backend accepts; empty accepts none.
+  std::vector<std::string> draft_policies;
+};
+
 struct TextProvider {
   std::string id;
   TextProbe probe = nullptr;
@@ -755,11 +908,21 @@ struct TextProvider {
   TextPromptDriver prompt_driver = nullptr;
   TextChatDriver chat_driver = nullptr;
   TextSamplingDefaultsProbe sampling_defaults = nullptr;
+  /// Whether `probe_gguf` may see a GGUF with tensors core cannot size
+  /// (`core::GgufTensorInfo::sized`), such as an extension's own
+  /// quantization. A provider that sets it loads those tensors itself from
+  /// their `data` and reserved `size_bytes`; the others never probe such a
+  /// file.
+  bool accepts_unsized_tensors = false;
+  /// Draft settings per speculative backend the provider supports.
+  std::vector<TextSpeculativeDefaults> speculative_defaults{};
 };
 
 void RegisterTextProvider(TextProvider provider);
 const TextProvider* FindTextProvider(std::string_view id);
 const TextProvider* ProbeTextProvider(std::string_view model_root);
+/// The first provider whose `probe_gguf` accepts `reader`, skipping providers
+/// without `accepts_unsized_tensors` when the file has unsized tensors.
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader);
 
 void RegisterToolDialect(ToolDialect dialect);

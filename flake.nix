@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # ROCm 10.1.0 / HIP Clang 24, with gfx1151 binaries on gufo.cachix.org.
     nixpkgs-rocm10.url = "github:gufo-org/nixpkgs/1a6ba8bc6f744f7a843d025e46bc9911b4b6c37d";
     # Reference ASR/TTS runtime for benchmark comparisons; exposes a
@@ -23,7 +27,7 @@
   };
 
   outputs =
-    { self, nixpkgs, nixpkgs-rocm10, audio-cpp }:
+    { self, nixpkgs, nixpkgs-rocm10, audio-cpp, rust-overlay }:
     let
       # Strix Halo is a Linux x86-64-only target (see README non-goals).
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" ];
@@ -42,15 +46,20 @@
       rocmPkgs = forAllSystems (system: import nixpkgs-rocm10 { inherit system; });
       pkgs = forAllSystems (system: import nixpkgs {
         inherit system;
-        overlays = [ (_final: _prev: {
+        overlays = [ rust-overlay.overlays.default (_final: _prev: {
           rocmPackages = rocmPkgs.${system}.rocmPackages_10;
         }) ];
       });
+
+      rustToolchains = forAllSystems (system:
+        pkgs.${system}.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
+      );
 
       gufoPackages = forAllSystems (
         system:
         pkgs.${system}.callPackage ./.devops/nix/scope.nix {
           inherit revision;
+          rustToolchain = rustToolchains.${system};
           rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
         }
       );
@@ -124,6 +133,7 @@
         system:
         let
           pkgsSys = pkgs.${system};
+          rustToolchain = rustToolchains.${system};
           root = toString ./.;
           mkFilteredSource =
             {
@@ -173,6 +183,7 @@
               ".clang-format"
               ".clang-tidy"
               "CMakeLists.txt"
+              "rust-toolchain.toml"
               "extensions.lock"
             ];
           };
@@ -190,9 +201,10 @@
             files = [
               ".clang-format"
               "CMakeLists.txt"
+              "rust-toolchain.toml"
               "extensions.lock"
               "AGENTS.md"
-              "docs/RELEASING.md"
+              "docs/internal/releasing.md"
               "docs/models/README.md"
               "tools/prof/prof.py"
               "tools/bench/speculative-corpus.py"
@@ -239,6 +251,28 @@
             ];
           };
 
+          cargoSetup = import ./.devops/nix/png-decode-cargo.nix {
+            inherit (pkgsSys) lib rustPlatform;
+          };
+
+          rustCheck = pkgsSys.runCommand "check-rust" {
+            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc ];
+            src = mkFilteredSource {
+              directories = [ "src/core/png_decode" ];
+              files = [ "rust-toolchain.toml" ];
+            };
+          } (cargoSetup + ''
+            export HOME=$TMPDIR
+            cp -r "$src" source
+            chmod -R u+w source
+            cd source
+            cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
+            cargo clippy --manifest-path src/core/png_decode/Cargo.toml \
+              --locked --offline --all-targets -- -D warnings
+            mkdir -p $out
+            echo "PASS: Rust formatting and clippy clean" > $out/result.txt
+          '');
+
           formatCheck = pkgsSys.runCommand "check-format" {
             nativeBuildInputs = [ pkgsSys.clang-tools pkgsSys.python3 ];
             src = formatSource;
@@ -263,13 +297,14 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              rustToolchain
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
             src = staticAnalysisSource;
-          } ''
+          } (cargoSetup + ''
             export HOME=$TMPDIR
             mkdir -p build && cd build
             cmake "$src" -GNinja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF
@@ -307,7 +342,7 @@
 
             mkdir -p $out
             echo "PASS: clang-tidy static analysis clean" > $out/result.txt
-          '';
+          '');
 
           dependencyInventoryCheck = pkgsSys.runCommand "check-dependency-inventory" {
             nativeBuildInputs = [ pkgsSys.python3 ];
@@ -377,19 +412,22 @@
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
+              # Registry installs in the extension module CLI test.
+              pkgsSys.git
               (pkgsSys.python3.withPackages (ps: [ ps.jsonschema ps.numpy ]))
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              rustToolchain
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
             src = testSource;
-          } ''
+          } (cargoSetup + ''
             export HOME=$TMPDIR
             set -euo pipefail
 
@@ -435,7 +473,7 @@
 
             mkdir -p $out
             echo "PASS: CPU suite passed" > $out/result.txt
-          '';
+          '');
 
 
           mkServeCheck =
@@ -592,10 +630,10 @@
               echo "PASS: default/release mkServe NixOS service evaluation" > $out/result.txt
             '';
 
-
         in
         {
           format = formatCheck;
+          rust = rustCheck;
           static-analysis = staticAnalysisCheck;
           dependency-inventory = dependencyInventoryCheck;
           docs = docsCheck;
@@ -628,6 +666,12 @@
           mkServeFn fnArgs;
         mkServe = self.lib.mkGufoServe;
       } // forAllSystems (system: {
+        # gufo loading `extensions` (pinned sources) as modules built against
+        # its SDK; `gufo` defaults to the development package.
+        withExtensionModules =
+          args:
+          gufoPackages.${system}.extensionModules.withExtensions
+            ({ gufo = self.packages.${system}.default; } // args);
         mkGufoServe =
           args:
           self.lib.mkGufoServe (args // { inherit system; });
@@ -653,6 +697,10 @@
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
           release = base.override { inherit releaseVersion; extensionsFromLock = true; };
+          # gufo with its extension SDK, for `gufo extension install`.
+          sdk = gufoPackages.${system}.extensionModules.withSdk base;
+          release-sdk = gufoPackages.${system}.extensionModules.withSdk
+            self.packages.${system}.release;
           # Windows test binaries of the platform leaves and the CPU cache,
           # cross-built here and run on a Windows CI host.
           windows-platform-tests =

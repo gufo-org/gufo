@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,7 +14,9 @@
 #include "gufo/ext/registry.hpp"
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/sampling_options.hpp"
+#include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
 
@@ -206,11 +209,20 @@ void PrintBenchHelp(std::string_view program_name) {
       "Benchmark prompt processing (pp) and token generation (tg) throughput.");
   RegisterBenchOptions(parser, dummy_opt, explicit_p, explicit_n,
                        speculative_explicit);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, "bench");
+  provider.Register(parser);
   parser.PrintHelp();
 }
 
+namespace {
+
 std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
-                                              std::string* error_msg) {
+                                              std::string* error_msg,
+                                              const ext::Registry& registry,
+                                              ProviderOptions& provider,
+                                              SpeculativeFlags& speculative) {
   BenchOptions opt;
   bool explicit_p = false;
   bool explicit_n = false;
@@ -220,6 +232,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       "Benchmark prompt processing (pp) and token generation (tg) throughput.");
   RegisterBenchOptions(parser, opt, explicit_p, explicit_n,
                        speculative_explicit);
+  provider.Register(parser);
 
   if (!parser.Parse(args, error_msg)) {
     return std::nullopt;
@@ -242,15 +255,15 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     return std::nullopt;
   }
 
-  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
-      opt.min_draft_tokens > opt.draft_tokens) {
+  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0) {
     if (error_msg != nullptr) {
-      *error_msg = "min-draft-tokens cannot exceed draft-tokens";
+      *error_msg = "draft-tokens and min-draft-tokens must be positive";
     }
     return std::nullopt;
   }
 
   try {
+    provider.Parse();
     opt.sampling.Validate();
     if (opt.sampling.seed < 0) {
       throw std::invalid_argument("benchmark seed must be non-negative");
@@ -265,11 +278,14 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     opt.speculative_backend = "dspark";
   }
 
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
+  // Unset draft settings take the selected provider's defaults later.
+  speculative = SpeculativeFlags::Given(parser, opt.draft_tokens,
+                                        opt.min_draft_tokens, opt.draft_policy);
+  try {
+    CheckSpeculativeFlags(registry, opt.speculative_backend, speculative);
+  } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+      *error_msg = exception.what();
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
@@ -283,9 +299,25 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   return opt;
 }
 
+}  // namespace
+
+std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
+                                              std::string* error_msg) {
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, "bench");
+  SpeculativeFlags speculative;
+  return ParseBenchOptions(args, error_msg, registry, provider, speculative);
+}
+
 int RunBench(std::span<const char* const> args) {
   std::string parse_err;
-  const auto opt_res = ParseBenchOptions(args, &parse_err);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "bench");
+  SpeculativeFlags speculative;
+  auto opt_res = ParseBenchOptions(args, &parse_err, registry, provider_options,
+                                   speculative);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -296,7 +328,7 @@ int RunBench(std::span<const char* const> args) {
     return 0;
   }
 
-  const auto& opt = *opt_res;
+  auto& opt = *opt_res;
   if (opt.model_path.empty()) {
     std::cerr << "Error: --model <PATH> is required\n";
     return 2;
@@ -304,7 +336,8 @@ int RunBench(std::span<const char* const> args) {
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  auto reader_owner = gufo::core::GgufReader::OpenFile(
+      opt.model_path, &err, {.allow_unsized_tensors = true});
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
@@ -314,13 +347,29 @@ int RunBench(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+    std::cerr << "Error loading GGUF model '" << opt.model_path
+              << "': " << reader->UnsizedTensorError() << "\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   if (provider == nullptr || provider->bench_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for benchmark\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
+  }
+  try {
+    opt.provider_options = provider_options.Select(provider->id);
+    const auto settings = ResolveSpeculativeSettings(
+        *provider, opt.speculative_backend, speculative);
+    opt.draft_tokens = settings.max_draft_tokens;
+    opt.min_draft_tokens = settings.min_draft_tokens;
+    opt.draft_policy = settings.draft_policy;
+  } catch (const std::invalid_argument& exception) {
+    std::cerr << "Error: " << exception.what() << "\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 2;
   }
   return provider->bench_driver(opt, reader, model_load_start);
 }

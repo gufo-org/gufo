@@ -7,6 +7,7 @@
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -158,8 +159,23 @@ public:
     }
   }
 };
-}  // namespace
 
+std::string HostReserveMessage(std::size_t sessions, std::size_t requested,
+                               std::size_t available) {
+  constexpr std::size_t kMiB = std::size_t{1} << 20;
+  return std::to_string(sessions) +
+         (sessions == 1 ? " session leaves " : " sessions leave ") +
+         std::to_string(available / kMiB) +
+         " MiB for the RAM cache above the " +
+         std::to_string(kHostSnapshotHeadroomBytes / kMiB) +
+         " MiB host reserve" +
+         (requested
+              ? " (" + std::to_string(requested / kMiB) + " MiB requested)"
+              : std::string()) +
+         ". Use fewer --sessions, a smaller --context, or --cache-ram-bytes "
+         "off to serve without RAM checkpoints";
+}
+}  // namespace
 struct ComponentTextCache::Impl {
   struct Entry {
     // Guard fallbacks outlive their slots. Idle pieces and capture/load work
@@ -202,9 +218,6 @@ struct ComponentTextCache::Impl {
   // equals the small explicit budget used before off existed, and it retains
   // nothing.
   static constexpr std::size_t kDiskOnlyBackingBytes = std::size_t{512} << 20;
-  // Ledger room for index and request metadata when the RAM cache is off. It
-  // caps accounting only; the memory is not reserved.
-  static constexpr std::size_t kOffMetadataBytes = std::size_t{64} << 20;
   // Queue ownership plus transient submissions before superseded callbacks
   // release their serving handles. No callback runs under the serving mutex.
   std::array<std::shared_ptr<const cache::Checkpoint>, 2 * kPersistenceDepth>
@@ -280,6 +293,50 @@ struct ComponentTextCache::Impl {
       entries.push_back(std::move(entry));
     }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
+    // RAM cache limit for a runner that pins its slots; computed before the
+    // branch below so a short host refuses the load before anything commits.
+    std::size_t pinned{}, limit{};
+    if (ram_enabled && resources->commit_backing) {
+      const auto claim = this->runner->ResourceClaim();
+      // The claim measures the host after the slots allocated, so bytes they
+      // pinned are missing from it. Add them back: in full to the ceiling,
+      // and half to the automatic budget, which is half the available RAM.
+      // The ledger charges them on top of the cache's own budget.
+      pinned = resources->pinned_bytes ? resources->pinned_bytes() : 0;
+      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
+      const auto automatic = measured + pinned / 2;
+      const auto ceiling =
+          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
+      automatic_bytes =
+          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
+      // Staging is pinned host memory too, so the host keeps its reserve
+      // only if both fit under the ceiling.
+      const auto staging = ledger.Limits().staging_bytes;
+      const auto requested = ram;
+      max_bytes = ceiling > staging ? ceiling - staging : 0;
+      ram = std::min(ram, max_bytes);
+      if (automatic_ram)
+        ram = std::min(ram, automatic);
+      // Within the host ceiling and the limit the slots allocated under. Other
+      // charges above the budget are refused here, as without pins.
+      limit = std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
+      const auto charged = ledger.Snapshot().ram_bytes;
+      const auto granted = std::min(ram, limit > pinned ? limit - pinned : 0);
+      // The ceiling is measured after the slots allocated. When they leave
+      // no RAM for the cache above the host reserve, refuse the load with
+      // the remedies instead of serving without the cache the user expects
+      // (#1053). An explicit budget below the other charges is the
+      // operator's setting, not the host's state.
+      const bool host_bound = automatic_ram || ram < requested;
+      if (max_bytes < charged || !granted || (limit < charged && host_bound))
+        throw std::runtime_error(HostReserveMessage(
+            count, requested, max_bytes > pinned ? max_bytes - pinned : 0));
+      if (limit < charged)
+        throw std::runtime_error(
+            "--cache-ram-bytes " + std::to_string(requested) +
+            " is below the " + std::to_string(charged) +
+            " bytes the cache already holds for its sessions and metadata");
+    }
     if (!ram_enabled) {
       // Only disk captures copy through backing, so without a disk cache no
       // pool exists. The ledger admits what the slots already charged, that
@@ -307,30 +364,7 @@ struct ComponentTextCache::Impl {
         }
       }
     } else if (resources->commit_backing) {
-      const auto claim = this->runner->ResourceClaim();
-      // The claim measures the host after the slots allocated, so bytes they
-      // pinned are missing from it. Add them back: in full to the ceiling,
-      // and half to the automatic budget, which is half the available RAM.
-      // The ledger charges them on top of the cache's own budget.
-      const auto pinned =
-          resources->pinned_bytes ? resources->pinned_bytes() : 0;
-      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
-      const auto automatic = measured + pinned / 2;
-      const auto ceiling =
-          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
-      automatic_bytes =
-          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
-      // Staging is pinned host memory too, so the host keeps its reserve
-      // only if both fit under the ceiling.
       const auto staging = ledger.Limits().staging_bytes;
-      max_bytes = ceiling > staging ? ceiling - staging : 0;
-      ram = std::min(ram, max_bytes);
-      if (automatic_ram)
-        ram = std::min(ram, automatic);
-      // Within the host ceiling and the limit the slots allocated under. Other
-      // charges above the budget are refused here, as without pins.
-      const auto limit =
-          std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
       ledger.ConstrainLimits({limit + staging, limit, staging, limit});
       ram = std::min(ram, limit > pinned ? limit - pinned : 0);
       resources->commit_backing(ram);
@@ -985,6 +1019,9 @@ ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();
 }
+std::size_t ComponentTextCache::ram_budget() const noexcept {
+  return impl_->budget;
+}
 
 std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
@@ -1135,10 +1172,12 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     // an unusable live frontier) can require another reset before cold use.
     bool clean = !live;
     // A frontier captured between prefill passes cannot select the next token
-    // of a prompt that ends there; serve that prompt from a shallower boundary.
+    // of a prompt that ends there, and a runner may refuse other prompts; serve
+    // those from a shallower boundary.
     const auto decodable = [&](std::size_t boundary) {
-      return boundary < prompt.size() ||
-             impl_->runner->HasDecodeFrontier(*request.state);
+      return (boundary < prompt.size() ||
+              impl_->runner->HasDecodeFrontier(*request.state)) &&
+             impl_->runner->CanContinue(*request.state, prompt.size());
     };
     // Prefill must not resume inside an indivisible input of this prompt,
     // which a checkpoint from another prompt with the same tokens can do.

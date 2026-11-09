@@ -75,9 +75,8 @@ if (WIN32)
 endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
-pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
-pkg_check_modules(SOXR REQUIRED IMPORTED_TARGET soxr)
-pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
+# Extension-only libraries come from each selected extension's manifest
+# `packages` (gufo_build_discovered_extensions).
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
@@ -291,6 +290,7 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_subdirectory(src/core/platform)
+add_subdirectory(src/core/png_decode)
 
 add_library(gufo_core STATIC
   src/core/image.cpp
@@ -308,7 +308,7 @@ add_library(gufo_core STATIC
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
-  Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_png_decode JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
 # Family libraries come before the model that needs them; they may depend on
@@ -356,8 +356,9 @@ if (ENGINE_ENABLE_HIP)
   target_include_directories(gufo_ext_hip SYSTEM INTERFACE
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR})
+  # `hip_utils.hpp` in the public surface includes hipBLAS.
   target_link_libraries(gufo_ext_hip INTERFACE $<LINK_ONLY:gufo_hip_host>
-    hip::host)
+    hip::host roc::hipblas)
 else()
   target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
 endif()
@@ -371,7 +372,9 @@ add_subdirectory(src/eval)
 
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
-  src/cli/prompt/prompt.cpp)
+  src/cli/prompt/prompt.cpp
+  src/cli/provider_options.cpp
+  src/cli/speculative_settings.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_ext_runtime)
 
 add_subdirectory(src/ext)
@@ -422,7 +425,7 @@ add_library(gufo_http STATIC
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text PNG::PNG)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -443,7 +446,24 @@ target_link_libraries(gufo PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_ev
 include(CTest)
 gufo_build_discovered_extensions()
 get_property(gufo_selected_extensions GLOBAL PROPERTY GUFO_SELECTED_EXTENSIONS)
-gufo_target_extensions(gufo EXTENSIONS ${gufo_selected_extensions})
+if (GUFO_EXTENSION_MODULES)
+  list(REMOVE_ITEM gufo_selected_extensions ${GUFO_EXTENSION_MODULES})
+endif()
+gufo_target_extensions(gufo LOAD_MODULES EXTENSIONS ${gufo_selected_extensions})
+set(GUFO_EXTENSION_MODULE_HOST gufo)
+gufo_extension_modules(EXTENSIONS ${GUFO_EXTENSION_MODULES})
+gufo_extension_build_id(gufo_extension_build_id)
+include(cmake/GufoExtensionSdk.cmake)
+gufo_extension_sdk(gufo)
+target_sources(gufo PRIVATE src/cli/extension/modules.cpp
+  src/cli/extension/store.cpp src/cli/extension/extension.cpp
+  src/cli/extension/registry.cpp)
+set_property(SOURCE src/cli/extension/modules.cpp
+  src/cli/extension/store.cpp APPEND PROPERTY
+  COMPILE_DEFINITIONS GUFO_EXTENSION_BUILD_ID="${gufo_extension_build_id}"
+  GUFO_EXECUTABLE_FILE_NAME="$<TARGET_FILE_NAME:gufo>")
+include(cmake/GufoExtensionHost.cmake)
+gufo_extension_host(gufo)
 gufo_stage_hip_runtime(gufo)
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
@@ -531,7 +551,8 @@ if (BUILD_TESTING)
   # In-tree test support for model API tests (RFC Step 7b, Card 12).
   # Wraps HTTP and serving fixtures so tests stop reaching src/cli/ directly.
   # Excluded from production, external extensions, and installation.
-  add_library(gufo_test_support STATIC tests/support/test_support.cpp)
+  add_library(gufo_test_support STATIC tests/support/test_support.cpp
+    tests/support/layered_prefill_conformance.cpp)
   target_include_directories(gufo_test_support PUBLIC ${CMAKE_SOURCE_DIR})
   target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
 
@@ -761,6 +782,15 @@ endfunction()
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
 
+  # The test writes its PNG cases with zlib directly.
+  find_package(ZLIB REQUIRED)
+  add_executable(png_decode_test
+    tests/core/png_decode_test.cpp
+    tests/core/png_reference.cpp)
+  target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
+  add_test(NAME png_decode_test COMMAND png_decode_test)
+  set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
+
   add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)
   add_test(NAME heap_placement_test COMMAND heap_placement_test)
@@ -955,6 +985,15 @@ endfunction()
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
 
+  add_executable(layered_prefill_conformance_test
+    tests/cli/layered_prefill_conformance_test.cpp)
+  target_link_libraries(layered_prefill_conformance_test PRIVATE
+    gufo_cache_fake gufo_test_support)
+  add_test(NAME layered_prefill_conformance_test
+    COMMAND layered_prefill_conformance_test)
+  set_tests_properties(layered_prefill_conformance_test PROPERTIES
+    LABELS "cpu;server;scheduler;runner" TIMEOUT 30)
+
   # the disk-store suite exercises permission faults with chmod and lstat
   if (NOT WIN32)
   endif()
@@ -969,6 +1008,18 @@ endfunction()
     tests/cli/text_generation_scheduler_test.cpp)
   target_link_libraries(text_generation_scheduler_test PRIVATE gufo_cache_fake
     gufo_serving)
+  # Text models load only in HIP builds; the CPU build rejects every load.
+  if (ENGINE_ENABLE_HIP)
+    add_executable(serve_provider_options_test
+      tests/cli/serve_provider_options_test.cpp)
+    target_link_libraries(serve_provider_options_test PRIVATE gufo_serving
+      gufo_llm_cli)
+    add_test(NAME serve_provider_options_test
+      COMMAND serve_provider_options_test)
+    set_tests_properties(serve_provider_options_test PROPERTIES
+      LABELS "gpu;server;cli;extensions")
+  endif()
+
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <numeric>
 #include <vector>
 
@@ -58,6 +59,32 @@ void run(unsigned rows) {
                             weights.size() * sizeof(float)));
   check(ds4_gpu_tensor_read(s.data, 0, choices.data(),
                             choices.size() * sizeof(int)));
+  const auto check_decode_row_matches_batch = [&](unsigned row) {
+    Tensor p1(experts * sizeof(float)), w1(selected * sizeof(float)),
+        s1(selected * sizeof(int));
+    ds4_gpu_tensor* row_logits = ds4_gpu_tensor_view(
+        x.data, row * experts * sizeof(float), experts * sizeof(float));
+    check(row_logits != nullptr);
+    const bool routed = ds4_gpu_router_select_tensor(
+        s1.data, w1.data, p1.data, &unused_model, 1, 0, 0, 0, 0, experts,
+        selected, 1.5F, 0, 0, false, false, row_logits);
+    ds4_gpu_tensor_free(row_logits);
+    check(routed);
+    std::array<float, experts> p_row{};
+    std::array<float, selected> w_row{};
+    std::array<int, selected> s_row{};
+    check(ds4_gpu_tensor_read(p1.data, 0, p_row.data(), sizeof(p_row)));
+    check(ds4_gpu_tensor_read(w1.data, 0, w_row.data(), sizeof(w_row)));
+    check(ds4_gpu_tensor_read(s1.data, 0, s_row.data(), sizeof(s_row)));
+    check(std::memcmp(p_row.data(), &probabilities[row * experts],
+                      sizeof(p_row)) == 0 &&
+          std::memcmp(w_row.data(), &weights[row * selected], sizeof(w_row)) ==
+              0 &&
+          std::memcmp(s_row.data(), &choices[row * selected], sizeof(s_row)) ==
+              0);
+  };
+  for (unsigned row = 0; row < rows; ++row)
+    check_decode_row_matches_batch(row);
   for (unsigned row = 0; row < rows; ++row) {
     std::array<float, experts> expected{};
     std::array<int, experts> order{};

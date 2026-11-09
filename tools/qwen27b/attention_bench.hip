@@ -1,5 +1,5 @@
 // Exact scalar/batched verification attention ablation.
-// Build/run commands: docs/PERFORMANCE.md.
+// Build/run commands: docs/internal/performance.md.
 // Timings are component costs; use release model A/B for throughput decisions.
 #define ENGINE_ENABLE_HIP 1
 #include <cstdio>

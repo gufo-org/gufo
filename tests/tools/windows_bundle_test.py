@@ -70,6 +70,14 @@ class WindowsBundleTest(unittest.TestCase):
                 (root / "avcodec-63.dll").touch()
                 self.assertEqual(bundle.check_bundle(root), [])
 
+    def test_rust_standard_library_imports_are_system_dlls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gufo.exe").touch()
+            imports = {"gufo.exe": {"bcryptprimitives.dll", "USERENV.dll", "kernel32.dll"}}
+            with patch.object(bundle, "imported_dlls", side_effect=lambda p: imports[p.name]):
+                self.assertEqual(bundle.check_bundle(root), [])
+
     def test_lazy_video_libraries_are_required_without_pe_imports(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

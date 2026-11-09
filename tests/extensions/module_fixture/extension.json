@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "name": "module_fixture",
+  "version": "0.1.0",
+  "api_version": ">= 0.2.0",
+  "entry": "module_fixture_register",
+  "registration_target": "module_fixture_registration",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "module-fixture",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:module_fixture"
+      ],
+      "model_ids": [
+        "module-fixture"
+      ],
+      "target": "module_fixture_provider",
+      "entry": "module_fixture_provider_register"
+    }
+  ],
+  "targets": {
+    "module_fixture_registration": {
+      "requires": []
+    },
+    "module_fixture_provider": {
+      "requires": []
+    }
+  }
+}

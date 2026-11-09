@@ -195,7 +195,7 @@ nix develop -c python3 tests/functional/generation_quality.py \
 The reports contain `code` and `code-think` entries from `chat_result`, including
 text and finish reason. This executes the reviewed generated Python on the
 development host. The requests and measurement scope are recorded in the
-[Qwen27B quality notes](../../docs/models/qwen3.8-27b/QUALITY.md#october-21-coding-and-prose-follow-up).
+[Qwen27B quality notes](../../docs/internal/models/qwen3.8-27b/QUALITY.md#october-21-coding-and-prose-follow-up).
 
 `prompt_lookup_workflows.py` checks extraction, generated URI tests and edits
 after a long source archive against an already running Flash-Next MTP server:
@@ -295,16 +295,19 @@ Selections from separate paths are combined:
 | --- | --- |
 | Shared LLM behavior, cache, sampling or Qwen framing/vision | Flash-Next Q4/MTP |
 | Private Qwen27 implementation | Qwen27 Q4/DFlash2 |
-| Private DeepSeek implementation | DeepSeek V4/DSpark (disabled, see below) |
-| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek (disabled, see below) |
+| Private DeepSeek implementation | DeepSeek V4/DSpark |
+| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek |
 | Embedding, ASR or TTS code | That category's representative |
 | Shared infrastructure or unmapped paths | One representative per supported category |
 | Documentation, image generation or H3-only paths | No GPU job in this workflow |
 
-Models listed under `disabled` in `devlab.json`, with a reason, are left out of
-the plan and named in the report. DeepSeek V4 is disabled for now: its 81 GiB
-of weights and its suite set make the run too long to finish within a PR.
-Remove its entry to restore it.
+Models listed under `disabled` in `devlab.core.json`, with a reason, are left
+out of the plan and named in the report. Remove the entry to restore the model.
+
+A model's `suites` list in its `functional/devlab.json` limits Devlab to those
+suites at every tier; the report counts the others as out of scope. DeepSeek V4
+uses it to run the PR-tier set that passes on the runner. Its other full-tier
+suites still assume Flash-Next checkpoint sizes and Qwen token counts.
 
 The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
 uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
@@ -452,9 +455,26 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
 correctness matrix on main. A baseline must match the revision, harness,
 toolchain, weights, settings and preceding cache history.
 
-Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
+Use `deepseek4` for DeepSeek. For another model, such as one an extension
+serves, use `provider`: `sampling-defaults` then expects the defaults the
+server reports in `/props`, in both thinking modes, and writes the thinking
+mode instead of a preset's default effort. Qwen-only assertions, such as the
+literal marker `tool-edges` requires before a call, are recorded rather than
+required. Pass the model's normal speculative options for
 DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
 `--mmproj` enables image cases. Keep informational server logging enabled.
+
+Without `--context`, the runner starts the server with 8192 tokens, or with
+the most a selected suite needs: 65536 for `cache-stalls`, 32768 for
+`cache-depth` (so for `all`), `cache-transforms` and `cache-pressure`, and 16384 for
+`cache-shared-prefix`, `cache-compaction`, `cache-messages-loop` and
+`prefill-scheduling`. A smaller explicit `--context` is refused before the
+server starts, as is `cache-bridge` or `cache-pressure` without
+`--cache-ram-bytes`. When their background requests cannot fill that budget,
+their unqualified result suggests a smaller one from the bytes they published;
+checkpoints can shrink under a smaller budget, so it may take another step.
+LFM3 1.7B fills 268435456 bytes for `cache-bridge` and 134217728 for
+`cache-pressure`.
 
 Each invocation tests **one model and one mode**. Model-specific changes need
 only the affected target/modes. For shared text changes, run the affected suites
@@ -516,6 +536,7 @@ The disk lifecycle runner is standalone and is never invoked by `all`.
 | `tool-choice-cache` | Required/auto/omitted transitions preserve the complete generated call, unchanged-choice controls, prompt-token equality and zero-prefill retries |
 | `tool-parameter-order` | Wide native schemas retain intended arguments across declaration orders, all three APIs, streaming, sampling and thinking; includes the 10/11/12-field controls from #641 |
 | `tool-native-types` | Focused subset: enum/const/inferred string types, literal delimiters and exact continuation reuse after new literal tool markers; Chat/Responses, text/images |
+| `tool-type-unions` | Grist SQL argument unions preserve mixed JSON types in strict and non-strict native calls, Chat/Responses and streaming; malformed strict unions remain HTTP 400 |
 | `tool-schema-edges` | Wildcard JSON types, conditional fields, impossible schemas, nested metadata and required-call timing; both APIs, cache, stops and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
@@ -558,7 +579,7 @@ model must not qualify the image suite by skipping its assertions.
 
 `image-detail` also requires `--mmproj`. Each of its two requests leaves a new
 stable boundary in the RAM cache. Retry copies cannot displace stable
-boundaries, as [KV-CACHE.md](../../docs/KV-CACHE.md) describes, so in a full
+boundaries, as the [cache reference](../../docs/internal/cache.md) describes, so in a full
 cache these two boundaries can make a later unchanged retry prefill its
 assistant opening again. Select `image-detail` after `image-count`, whose
 unchanged retries expect full reuse.
@@ -746,7 +767,7 @@ and continues the compacted conversation. Cold controls run after every warm
 request. The seed is a genuine model reply; tool calls/results and the summary
 are deterministic client-authored fixtures. This covers compaction mechanics,
 not a real client's summary generation or retention under RAM/disk pressure.
-The [card 01 results](../../docs/cache-redesign/cards/01-functional-coverage.md#results)
+The [card 01 results](https://github.com/gufo-org/gufo/blob/0fb50ce436044a9687c78635e7afbc2bb65fc6f4/docs/cache-redesign/cards/01-functional-coverage.md#results)
 record all scenario families.
 
 Run `cache-transforms` with a roomy RAM budget in its own invocation. Its
@@ -906,7 +927,7 @@ Reports and logs survive failures. These checks complement the standard speed
 benchmark and numerical quality tests; they do not establish upstream model
 parity. Sampled DSpark may differ across concurrency levels; fixed-path replay
 and greedy equality remain checked. API behavior and references are in
-[SERVER.md](../../docs/SERVER.md).
+[server reference](../../docs/internal/server.md).
 
 `embedding_images.py` checks typed text/image `/v1/embeddings` requests against
 the official float32 image fixtures, including mixed batches, multiple images,

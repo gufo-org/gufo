@@ -7,10 +7,10 @@ metadata:
 
 # Benchmark a model
 
-Fill or refresh `docs/models/<model>/BENCHMARKS.md` for one model. Which
+Fill or refresh `docs/internal/models/<model>/BENCHMARKS.md` for one model. Which
 tables exist and which external project is the comparison baseline depend on
 the model category below. Read the model's `README.md`, `BENCHMARKS.md` and
-`QUALITY.md` first, then [docs/BENCHMARKS.md](../../../docs/BENCHMARKS.md)
+`QUALITY.md` first, then [docs/internal/benchmarks.md](../../../docs/internal/benchmarks.md)
 for methodology. Follow the user's machine, time and Git instructions.
 
 ## Start
@@ -46,12 +46,12 @@ Match prompt tokens, prefill interval, decode accounting and cache frontier firs
 label the native timing scope. Never silently compare it with whole-request HTTP
 wall time. `ds4-bench` does not implement C>1.
 
-The driver is `tools/bench/model-bench.py`. `docs/models/<model>/artifacts/bench.json`
+The driver is `tools/bench/model-bench.py`. `docs/internal/models/<model>/artifacts/bench.json`
 declares the category, variant ids, sweep grid, workloads and reference server
 flags; model file paths are passed on the command line. The driver launches
 the right server itself on a private port, runs one target at a time, writes
 one JSON per table (and per mode for concurrency tables) into
-`docs/models/<model>/artifacts/`, and renders the Markdown tables between
+`docs/internal/models/<model>/artifacts/`, and renders the Markdown tables between
 `<!-- bench:<table> -->` markers in `BENCHMARKS.md`:
 
 ```sh
@@ -91,14 +91,16 @@ in a refresh, blank those cells to `TODO` by hand rather than leave an old
 number next to a fresh reference. Reference cells always come from
 artifacts. It draws one SVG chart per
 table with data into
-`docs/models/<model>/artifacts/charts/` (matplotlib, deterministic output),
+`docs/internal/models/<model>/artifacts/charts/` (matplotlib, deterministic output),
 placed as an image line right after the table. Tables stay the source of
 truth for agents; charts are an addition for readers. `--no-charts` skips them.
 
 Starting a new model: copy `assets/llm-bench-template.json` to
-`docs/models/<model>/artifacts/bench.json` and
+`docs/internal/models/<model>/artifacts/bench.json` and
 `assets/llm-benchmarks-template.md` to the card, replace the placeholders,
-delete the tables the model does not have, and render. The template mirrors
+delete the tables the model does not have (and the `speculative` block for a
+model without a speculative mode; its loading table then loads AR), and render.
+The template mirrors
 the Qwen3.8-Flash-Next card, including which prose belongs next to each
 table.
 
@@ -171,7 +173,7 @@ and the table says so.
 5. A supported cell without a current qualified measurement is `TODO`, never a
    stale number; an unsupported comparison is `N/A`. Keep measurement dates;
    do not sum stage medians into a headline.
-6. Retained JSON goes to `docs/models/<model>/artifacts/`; raw samples,
+6. Retained JSON goes to `docs/internal/models/<model>/artifacts/`; raw samples,
    traces, audio, images and videos stay in the ignored top-level `artifacts/`.
 
 ## Results-card format
@@ -221,7 +223,7 @@ Every headline table carries the reference project next to Gufo:
 - A reference cell the host cannot produce for hardware reasons — the
   reference is OOM-killed at the required context, the model does not fit —
   is `N/A`. Missing reference features that prevent a close comparison are also
-  `N/A`, with a concise reason. `TODO` means a supported measurement is pending. Declare `N/A` cells in `docs/models/<model>/artifacts/unavailable.json`
+  `N/A`, with a concise reason. `TODO` means a supported measurement is pending. Declare `N/A` cells in `docs/internal/models/<model>/artifacts/unavailable.json`
   (`{"<table id>": {"<row label>" | "*": "<reason>"}}`; the suffix
   `-speculative` on a concurrency table id targets only its speculative
   reference column) and state the reason under the table. `render` prints

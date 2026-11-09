@@ -78,9 +78,15 @@
   "docs": {
     "title": "Qwen3.8 Flash-Next",
     "inputs": "Sharded Q4 GGUF; text/images",
-    "guide": "docs/models/qwen3.8-flash-next/README.md"
+    "guide": "docs/models/qwen3.8-flash-next.md"
   },
   "tests": [
+    {
+      "target": "qwen38_flash_next_probe_test",
+      "ctest": "qwen38_flash_next\\.probe",
+      "check_pr": true,
+      "windows_build": true
+    },
     {
       "target": "qwen38_flash_next_runner_options_test",
       "ctest": "qwen38_flash_next\\.runner_options",

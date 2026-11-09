@@ -342,6 +342,36 @@ std::filesystem::path PartialMediaPath(
   return destination.parent_path() / name;
 }
 
+std::filesystem::path FindExecutable(std::string_view name) {
+  const std::wstring wide = Widen(name);
+  std::wstring found(MAX_PATH, L'\0');
+  const DWORD length =
+      SearchPathW(nullptr, wide.c_str(), L".exe",
+                  static_cast<DWORD>(found.size()), found.data(), nullptr);
+  if (length == 0 || length >= found.size())
+    return {};
+  found.resize(length);
+  return std::filesystem::path(found);
+}
+
+int RunInherited(const char* program, std::span<const std::string> arguments_in,
+                 std::string* error) {
+  std::vector<std::wstring> arguments;
+  arguments.reserve(arguments_in.size());
+  for (const std::string& arg : arguments_in) {
+    arguments.push_back(Widen(arg));
+  }
+  Handle child;
+  if (!Spawn(program, program, arguments, nullptr, &child, error)) {
+    return -1;
+  }
+  int status = 0;
+  if (!WaitForChild(child.get(), &status, error)) {
+    return -1;
+  }
+  return status;
+}
+
 bool RunCapture(const char* program, std::span<const std::string> arguments_in,
                 std::string* output, std::string* error) {
   SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};

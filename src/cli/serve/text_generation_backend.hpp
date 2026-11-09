@@ -191,6 +191,11 @@ public:
     std::size_t active_decode_prefill_chunks{0};
     std::size_t max_prefill_chunk_tokens{0};
     std::size_t max_consecutive_active_prefill_chunks{0};
+    /// Most layer groups the host asked one of this request's passes to be
+    /// split into; a runner may add a boundary where a pass would stall.
+    std::size_t max_prefill_layer_groups{1};
+    /// Decode rounds other sessions ran between those groups.
+    std::size_t prefill_yield_rounds{0};
     std::size_t configured_active_prefill_tokens{0};
     std::size_t queue_depth_at_submit{0};
     std::size_t client_queue_depth_at_submit{0};
@@ -388,6 +393,14 @@ public:
   /// template, before tokenization. Empty when the backend cannot tell.
   [[nodiscard]] virtual std::optional<std::string> render_chat_prompt(
       const ChatRequest&) const {
+    return std::nullopt;
+  }
+
+  /// Token ids of raw text as a raw prompt tokenizes: control-token spellings
+  /// become their special tokens and nothing is prepended. Empty when the
+  /// backend cannot tell.
+  [[nodiscard]] virtual std::optional<std::vector<std::uint32_t>> tokenize(
+      std::string_view) const {
     return std::nullopt;
   }
 };
