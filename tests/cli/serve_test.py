@@ -249,7 +249,8 @@ def main():
 
     for command in ("prompt", "chat", "bench"):
         check([command, "--help"], 0, "--draft-policy")
-        check([command, "--draft-tokens", "0"], 2, "draft-tokens")
+        check([command, "--draft-tokens", "0"], 2 if command == "bench" else 0,
+              "--draft-tokens is deprecated")
     check(["chat", "unexpected"], 2, "Unexpected argument")
     check(["chat", "--prompt", "unused"], 2, "Unknown option")
     print("Serving and text CLI checks passed.")

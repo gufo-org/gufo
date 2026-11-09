@@ -40,7 +40,7 @@ gufo serve llm --model "$MODEL" --speculative mtp \
 | AR | none | The model produces one token per step. |
 | MTP | `--speculative mtp --mtp-model PATH` | The MTP head proposes up to seven tokens; the model checks them in one pass and keeps the ones it agrees with. |
 
-MTP adapts how many tokens it proposes; `--draft-tokens` caps the number. When
+MTP adapts how many tokens it proposes, up to seven. When
 proposals keep failing, a request falls back to AR for a while.
 
 MTP also proposes copies of earlier text from the same conversation, which

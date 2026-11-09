@@ -753,10 +753,9 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--dflash-model", "PATH",
                      "Path to Qwen DFlash2 GGUF file", "Speculative",
                      &dflash_model_path);
-    parser.AddOption(
-        "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
-        "Speculative", &draft_policy);
+    parser.AddOption("", "--draft-policy", "POLICY",
+                     "Deprecated and ignored: each model sets its draft length",
+                     "Speculative", &draft_policy);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -764,14 +763,13 @@ void PrintServeHelp(std::string_view program_name,
                      "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
                      "mtp-...-shared-*.gguf sidecar)",
                      "Speculative", &mtp_model_path);
-    parser.AddOption(
-        "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
-        "Speculative", &draft_tokens);
+    parser.AddOption("-d", "--draft-tokens", "N",
+                     "Deprecated and ignored: each model sets its draft length",
+                     "Speculative", &draft_tokens);
 
     parser.AddOption("", "--min-draft-tokens", "N",
-                     "Adaptive draft floor (default: 1)", "Speculative",
-                     &min_draft_tokens);
+                     "Deprecated and ignored: each model sets its draft length",
+                     "Speculative", &min_draft_tokens);
     parser.AddOption(
         "", "--prefill-chunk", "N",
         "Deprecated and ignored: prompts beside decoders are split by layers",
@@ -1461,7 +1459,7 @@ int RunServe(std::span<const char* const> args) {
                          &dflash_model_path);
     llm_parser.AddOption(
         "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Deprecated and ignored: each model sets its draft length",
         "Speculative", &draft_policy);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
@@ -1473,12 +1471,13 @@ int RunServe(std::span<const char* const> args) {
         "Speculative", &mtp_model_path);
     llm_parser.AddOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
+        "Deprecated and ignored: each model sets its draft length",
         "Speculative", &draft_tokens);
 
-    llm_parser.AddOption("", "--min-draft-tokens", "N",
-                         "Adaptive draft floor (default: 1)", "Speculative",
-                         &min_draft_tokens);
+    llm_parser.AddOption(
+        "", "--min-draft-tokens", "N",
+        "Deprecated and ignored: each model sets its draft length",
+        "Speculative", &min_draft_tokens);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Deprecated and ignored: prompts beside decoders are split by layers",
@@ -1561,6 +1560,15 @@ int RunServe(std::span<const char* const> args) {
           "event=deprecated_option option=--prefill-chunk action=ignored "
           "reason=layered_prefill");
     }
+    // Each model sets its draft settings (TextSpeculativeDefaults).
+    for (const char* option :
+         {"--draft-tokens", "--min-draft-tokens", "--draft-policy"}) {
+      if (llm_parser.WasSupplied(option)) {
+        server::Logger::Warn("speculative",
+                             std::string("event=deprecated_option option=") +
+                                 option + " action=ignored reason=model_owned");
+      }
+    }
     // Progress lines are INFO-tier. Under a quieter threshold `--log-progress`
     // would be accepted and then silently discarded, so reject the combination
     // instead of ignoring an option the caller asked for.
@@ -1600,12 +1608,6 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
       return 2;
     }
-    if (draft_tokens == 0 || min_draft_tokens == 0 ||
-        draft_tokens > std::numeric_limits<std::uint32_t>::max() ||
-        min_draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
-      std::cerr << "Error: speculative draft limits are invalid\n";
-      return 2;
-    }
     auto reasoning_defaults = ResolveReasoningDefaults(
         reasoning_mode, reasoning_effort, preserve_thinking, &parse_err);
     if (!reasoning_defaults.has_value()) {
@@ -1637,21 +1639,15 @@ int RunServe(std::span<const char* const> args) {
                 << "' is not supported by the HTTP server\n";
       return 2;
     }
-    // Unset draft settings take the selected provider's defaults during load.
-    const auto speculative_flags = SpeculativeFlags::Given(
-        llm_parser, static_cast<std::uint32_t>(draft_tokens),
-        static_cast<std::uint32_t>(min_draft_tokens), draft_policy);
     try {
       provider_options.Parse();
-      CheckSpeculativeFlags(registry, speculative_backend, speculative_flags);
     } catch (const std::invalid_argument& exception) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
     if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
-        (dflash_model_path.empty() || min_draft_tokens != 1)) {
-      std::cerr << "Error: DFlash2 requires --dflash-model and "
-                   "--min-draft-tokens 1; bound blocks with --draft-tokens\n";
+        dflash_model_path.empty()) {
+      std::cerr << "Error: DFlash2 requires --dflash-model\n";
       return 2;
     }
     speculative_config.draft_model_path =
@@ -1703,8 +1699,7 @@ int RunServe(std::span<const char* const> args) {
           try {
             options->provider_options = provider_options.Select(provider.id);
             ApplySpeculativeSettings(
-                ResolveSpeculativeSettings(provider, speculative_backend,
-                                           speculative_flags),
+                ResolveSpeculativeSettings(provider, speculative_backend, {}),
                 &options->speculative);
             loaded_speculative = options->speculative;
             return true;

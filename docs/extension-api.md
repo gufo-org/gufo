@@ -158,9 +158,8 @@ Gufo parses itself, such as `--mtp-model`, never appear here.
                           .draft_policies = {"calibrated", "fixed"}}},
 ```
 
-An explicit `--draft-tokens`, `--min-draft-tokens` or `--draft-policy` wins;
-otherwise your value applies, else 7, 1 and no policy. `--draft-policy` must be
-one of your `draft_policies`.
+Your values apply, else 7, 1 and no policy. `--draft-tokens`,
+`--min-draft-tokens` and `--draft-policy` are deprecated and ignored.
 
 ## Files Gufo can't size
 

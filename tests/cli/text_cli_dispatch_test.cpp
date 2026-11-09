@@ -261,8 +261,8 @@ bool CheckProviderOptions(std::string_view command, const std::string& model,
   return true;
 }
 
-// Draft settings: the explicit flag, else the provider's default for the
-// backend, else the host's 7, 1 and no policy.
+// Draft settings: the provider's default for the backend, else the host's 7,
+// 1 and no policy. The deprecated draft flags are ignored.
 bool CheckSpeculativeDefaults(std::string_view command,
                               const std::string& model,
                               const std::string& other) {
@@ -283,17 +283,17 @@ bool CheckSpeculativeDefaults(std::string_view command,
        "the defaults"},
       {&model,
        {"--speculative", "mtp", "--mtp-model", "x", "--draft-tokens", "9"},
-       9,
+       15,
        2,
        "calibrated",
-       "an explicit limit"},
+       "an ignored limit"},
       {&model,
        {"--speculative", "mtp", "--mtp-model", "x", "--min-draft-tokens", "1",
         "--draft-policy", "fixed"},
        15,
-       1,
-       "fixed",
-       "an explicit minimum and policy"},
+       2,
+       "calibrated",
+       "an ignored minimum and policy"},
       {&model, {}, 7, 1, "", "no backend"},
       {&model,
        {"--speculative", "dspark", "--dspark-model", "x"},
@@ -312,8 +312,8 @@ bool CheckSpeculativeDefaults(std::string_view command,
         "fixed"},
        7,
        1,
-       "fixed",
-       "the host's DFlash2 policies"},
+       "",
+       "an ignored DFlash2 policy"},
   };
   for (const auto& entry : cases) {
     if (Run(command, *entry.model, entry.flags) != 42 ||
@@ -325,8 +325,7 @@ bool CheckSpeculativeDefaults(std::string_view command,
     }
   }
   const std::vector<std::pair<const std::string*, std::vector<const char*>>>
-      rejected = {
-          // No provider accepts these; rejected without a probe.
+      ignored = {
           {&model, {"--draft-policy", "fixed"}},
           {&model,
            {"--speculative", "mtp", "--mtp-model", "x", "--draft-policy",
@@ -334,7 +333,6 @@ bool CheckSpeculativeDefaults(std::string_view command,
           {&model,
            {"--speculative", "mtp", "--mtp-model", "x", "--draft-tokens", "2",
             "--min-draft-tokens", "3"}},
-          // Accepted by another provider or above the resolved limit.
           {&other,
            {"--speculative", "mtp", "--mtp-model", "x", "--draft-policy",
             "fixed"}},
@@ -344,9 +342,9 @@ bool CheckSpeculativeDefaults(std::string_view command,
           {&model,
            {"--speculative", "mtp", "--mtp-model", "x", "--draft-tokens", "1"}},
       };
-  for (const auto& [selected, flags] : rejected) {
-    if (Run(command, *selected, flags) != 2 || !dispatched.empty()) {
-      return Fail(command, "must reject impossible draft settings");
+  for (const auto& [selected, flags] : ignored) {
+    if (Run(command, *selected, flags) != 42) {
+      return Fail(command, "must ignore deprecated draft flags");
     }
   }
   return true;
