@@ -5,7 +5,7 @@
 Production packages target Linux x86-64 AMD Strix Halo (`gfx1151`); Windows
 is a supported native build target for development. CMake owns
 compiler flags, dependencies and installation; Nix supplies the pinned toolchain.
-Linux source-build prerequisites are in [README.md](README.md#build-from-source).
+Linux source-build prerequisites are in [docs/install.md](docs/install.md#build-from-source).
 
 ```sh
 nix build                              # development package, all discovered extensions

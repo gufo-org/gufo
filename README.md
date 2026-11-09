@@ -1,262 +1,146 @@
-# Gufo: The ***Open Source*** Strix Halo AI engine 
+# Gufo: The ***Open Source*** Strix Halo AI engine
 
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
-Gufo is a vertical local inference engine for Linux and Windows, specifically built and optimized for AMD Strix Halo hardware:
-Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
+<p align="center">
+  <a href="https://github.com/gufo-org/gufo/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/gufo-org/gufo?label=release&amp;logo=github&amp;style=flat&amp;labelColor=141714&amp;color=2f5d3a"></a>
+  <a href="https://gufo.blog/docs"><img alt="Documentation" src="https://img.shields.io/badge/docs-gufo.blog-2f5d3a?logo=readthedocs&amp;logoColor=white&amp;style=flat&amp;labelColor=141714&amp;color=2f5d3a"></a>
+  <a href="docs/extension-api.md#versions"><img alt="Extension API series" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgufo-org%2Fgufo%2Fmain%2Finclude%2Fgufo%2Fext%2Fapi-series.json&amp;query=%24.minor&amp;prefix=0.&amp;label=extension%20API&amp;logo=cplusplus&amp;style=flat&amp;labelColor=141714&amp;color=2f5d3a"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/gufo-org/gufo?logo=opensourceinitiative&amp;logoColor=white&amp;style=flat&amp;labelColor=141714&amp;color=2f5d3a"></a>
+</p>
 
-**Contributions are welcome!**
+Gufo is an open-source inference engine for one machine: AMD Strix Halo, the
+Ryzen AI MAX+ 395 with its Radeon 8060S (`gfx1151`) and up to 128 GiB of
+unified memory. It serves text, embedding, speech, image and video models over
+OpenAI-compatible APIs, from a single binary with kernels tuned for that chip.
+It runs on Linux, where releases are built and tested, and natively on
+Windows.
 
-See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)
-for user-facing changes and release history.
+Gufo supports one model per use case, the best that fits, and checks each one
+against the original before optimizing it. Its cache is built for coding agents
+that resend long conversations, and extensions let you bring your own model.
 
-> [!TIP]
-> Check out **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)**, a Gufo variant that has not been merged yet!
+## Models
 
-## Models and benchmarks
+| Model | What it does | Weights license |
+| --- | --- | --- |
+| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next.md) | Text and images | [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) |
+| [Qwen3.8 27B](docs/models/qwen3.8-27b.md) | Text and images | Apache 2.0 |
+| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash.md) | Text | MIT |
+| [EmbeddingGemma 2](docs/models/embeddinggemma-2.md) | Embeddings for text, images, audio and video | Apache 2.0 |
+| [Qwen3-ASR 1.7B](docs/models/qwen3-asr.md) | Speech to text | Apache 2.0 |
+| [Qwen3-TTS 1.7B](docs/models/qwen3-tts.md) | Text to speech and voice cloning | Apache 2.0 |
+| [Qwen-Image-2.1](docs/models/qwen-image-2.1.md) | Image generation and editing | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE), non-commercial |
+| [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1.md#qwen-image-21-turbo) | Eight-step image generation and editing | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE), non-commercial |
+| [MiniMax H3](docs/models/minimax-h3.md) | Video with sound | [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) |
 
-All model documentation lives under [docs/models](docs/models/README.md):
+Each model page lists the files to download, the modes and the measured speed.
+Gufo's own code is MIT; the weights keep their publishers' terms.
 
-| Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
-| --- | --- | --- | --- | --- |
-| [Qwen3.8 27B](docs/models/qwen3.8-27b.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/internal/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3.8-27b/QUALITY.md) |
-| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/d96201194f103c906994f283f504209dc8d2a10c/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/d96201194f103c906994f283f504209dc8d2a10c/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/internal/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3.8-flash-next/QUALITY.md) |
-| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **474.87 tok/s pp**; up to **29.57 tok/s tg** single user with DSpark and **77.12 aggregated tok/s** on 8 concurrent requests with AR · [Benchmarks](docs/internal/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/internal/models/deepseek-v4-flash/QUALITY.md) |
-| [Qwen3-ASR 1.7B](docs/models/qwen3-asr.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/internal/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3-asr/QUALITY.md) |
-| [EmbeddingGemma 2](docs/models/embeddinggemma-2.md) | Text and image embeddings | [BF16](https://huggingface.co/google/embeddinggemma-2/tree/914f7f89142e33e77833254d9c9b90c3cef7303b) | Up to **41.5k tokens/s** over HTTP; **13.0 ms** for a 404-token request · [Benchmarks](docs/internal/models/embeddinggemma-2/BENCHMARKS.md) | [Quality](docs/internal/models/embeddinggemma-2/QUALITY.md) |
-| [Qwen3-TTS 1.7B](docs/models/qwen3-tts.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/internal/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/internal/models/qwen3-tts/QUALITY.md) |
-| [Qwen-Image-2.1](docs/models/qwen-image-2.1.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/internal/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/internal/models/qwen-image-2.1/QUALITY.md) |
-| [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1.md#qwen-image-21-turbo) | BF16 eight-step image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | **18.6 s** per 1024² image, **4.8×** faster than the 40-step base model · [Benchmarks](docs/internal/models/qwen-image-2.1/BENCHMARKS.md#qwen-image-21-turbo) | [Quality](docs/internal/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo) |
-| [MiniMax H3](docs/models/minimax-h3.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | In progress · [Benchmarks](docs/internal/models/minimax-h3/BENCHMARKS.md) | [Quality](docs/internal/models/minimax-h3/QUALITY.md) |
+Extensions add more models without changing Gufo. With `gufo` set up as in the
+[quickstart](#quickstart), install a reviewed one from the
+[extension registry](https://github.com/gufo-org/gufo-extension):
 
-Peak measured workloads; text pp is autoregressive (AR), while tg uses the
-named speculative mode. Peaks include repetitive output; aggregate tg sums
-individual request decode rates. Qwen27B's single-user peak uses the short-prompt
-C1 workload. Audio excludes loading.
-Each model guide lists the required files and complete benchmark settings.
+```sh
+gufo extension install lfm3
+```
 
-To add or maintain a model, start with the [source extension guide](docs/writing-extensions.md).
-
-## Philosophy
-
-- Contributions are welcome! We need the help of Strix Halo community to keep improving gufo!
-- We would like this to be the one-stop shop for Strix Halo Local AI enthusiasts: batteries included for text, audio, image, and video models.
-- Build and optimize specifically for the Strix Halo 128 GiB hardware. Smaller memory configurations should still work and preserve the speed benefits for models that can fit on memory.
-- Support only the best available models for their size that can run on this hardware: less code to maintain, more focused optimization and testing work.
-- Preserve quality when optimizing. Each model's quality report records independent numerical checks, execution consistency and unresolved gaps. Don't reuse kernels across different models to limit blast radius of a code change.
-- Treat concurrent requests, cancellation and conversation caching as first-class workloads.
-- Keep production dependencies small and development tools separate.
+[Extensions](docs/extensions.md) explains what that runs and how to trust it;
+the [catalogue](https://gufo.blog/extensions) lists the official and community
+extensions.
 
 ## Quickstart
 
-```sh
-hf download unsloth/Qwen3.8-27B-GGUF \
-  Qwen3.8-27B-UD-Q8_K_XL.gguf \
-  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
-  --repo-type model \
-  --local-dir models/Qwen3.8-27B-GGUF
-hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
-  Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
-  --revision 2d9571f8ce46e151f61c6499c99dee6079e1d610 \
-  --repo-type model \
-  --local-dir models/Qwen3.8-27B-DFlash2-GGUF
-podman pull ghcr.io/gufo-org/toolboxes/gufo-runtime:latest
-podman run --rm \
-  --userns=keep-id:uid=1000,gid=1000 \
-  --device /dev/kfd \
-  --device /dev/dri \
-  --group-add keep-groups \
-  --ulimit memlock=-1 \
-  -p 8080:8080 \
-  -v ./models:/models:ro \
-  -v gufo-extensions:/home/gufo/.local/share/gufo/extensions \
-  ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
-  gufo serve --host 0.0.0.0 --port 8080 llm \
-  --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
-  --speculative dflash2 \
-  --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
-```
-
-Rootless Podman needs `crun` for `--group-add keep-groups`. Your host user must
-have read/write access to `/dev/kfd` and `/dev/dri/renderD*`, usually through the
-`render` and `video` groups; log out and back in after changing membership.
-Container groups named `video`/`render` do not preserve host supplementary
-groups. Check `id`, `ls -l /dev/kfd /dev/dri/renderD*`, and
-`podman info --format '{{.Host.OCIRuntime.Name}}'` if ROCm reports no device.
-See [Podman's rootless group-access guidance](https://github.com/containers/podman/blob/main/troubleshooting.md#20-passed-in-devices-or-files-cant-be-accessed-in-rootless-container).
-
-On Fedora or another SELinux-enforcing host, GPU enumeration can succeed while
-SELinux blocks mapping `/dev/kfd`, causing ROCr to report a misleading
-“Memory critical” error. Check the **host** audit log:
+Download Qwen3.8 Flash-Next and its MTP head:
 
 ```sh
-sudo ausearch -m avc -ts recent | grep -E '/dev/kfd|hsa_device_t'
+hf download unsloth/Qwen3.8-Flash-Next-GGUF \
+  --revision d96201194f103c906994f283f504209dc8d2a10c \
+  --include "UD-Q4_K_XL/*" \
+  --include "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" \
+  --local-dir models/flash-next
 ```
 
-If it shows a denied `map` for the container, Podman documents this fix:
+Define `gufo` to run in the container, with the GPU and the models folder:
 
 ```sh
-sudo setsebool -P container_use_devices true
+gufo() {
+  podman run --rm -it --network host \
+    --userns=keep-id:uid=1000,gid=1000 --group-add keep-groups \
+    --device /dev/kfd --device /dev/dri --ulimit memlock=-1 \
+    -v ./models:/models:ro \
+    -v gufo-extensions:/home/gufo/.local/share/gufo/extensions \
+    ghcr.io/gufo-org/toolboxes/gufo-runtime:latest gufo "$@"
+}
 ```
 
-This persistently allows containers to access device labels for devices passed
-into them; it affects all containers on that host. Review that policy scope
-before enabling it. See [Podman's device documentation](https://docs.podman.io/en/latest/markdown/podman-run.1.html#device-host-device-container-device-permissions)
-and the [SELinux container policy](https://github.com/containers/container-selinux/blob/main/container.te).
-
-Then, from another terminal, ask it something through the OpenAI-compatible API:
+Serve the model, then ask it something from another terminal:
 
 ```sh
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen3.8-27B-UD-Q8_K_XL",
-    "messages": [{"role": "user", "content": "Say something"}]
-  }'
+gufo serve llm --served-model-name flash-next \
+  --model /models/flash-next/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
+  --speculative mtp --mtp-model /models/flash-next/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
+
+curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "flash-next", "messages": [{"role": "user", "content": "Say something"}]}'
 ```
 
-For Open WebUI, VS Code, OpenAI SDK and Responses-API clients (for example
-Codex), set the API base URL to `http://localhost:8080/v1`. Chat Completions and
-Responses support text, images, function tools, structured output and streaming.
-See the [API contract](docs/server.md).
+Any OpenAI client works with the base URL `http://localhost:8080/v1`: Open
+WebUI, the OpenAI SDKs, Codex and other agents. If the GPU isn't found, see
+[troubleshooting](docs/troubleshooting.md#the-gpu-isnt-found). For the Debian
+package, Nix, a source build or Windows, see [install](docs/install.md).
 
-The text server uses the model's native context by default and generates until
-EOS or the context is full. `--context N` sets context capacity per session;
-`--max-tokens N` sets a default response limit that clients can override.
-Reasoning tokens count toward that response limit.
+## Documentation
 
-## Harness notes
+The documentation is on [gufo.blog/docs](https://gufo.blog/docs), one version
+per release, and in [`docs/`](docs/README.md) for the development version.
 
-- **Qwen with Codex:** Codex sends developer messages mid-conversation, after
-  compaction or a settings change. Qwen's template accepts only one leading
-  system turn, so Gufo moves them there. The request that introduces one is
-  prefilled again; later requests reuse the cache. See the
-  [API contract](docs/server.md).
-- **Qwen with Claude Code:** not supported. Claude Code adds a system message
-  to `messages` on every turn, so Gufo moves a new one to the leading system
-  turn each time and every request prefills the whole history again (#522).
+- **Get started:** [install](docs/install.md), [models](docs/models/README.md),
+  [command line](docs/cli.md), [server API](docs/server.md).
+- **Run it well:** [cache](docs/cache.md),
+  [troubleshooting](docs/troubleshooting.md), [benchmarks](docs/benchmarks.md),
+  [versions](docs/versions.md).
+- **Extend it:** [extensions](docs/extensions.md),
+  [writing an extension](docs/writing-extensions.md),
+  [extension API](docs/extension-api.md).
 
-## Build from source
+The [changelog](CHANGELOG.md) and [releases](https://github.com/gufo-org/gufo/releases)
+list what changed.
 
-Production packages target Linux x86-64 on AMD Strix Halo (`gfx1151`).
-Windows x86-64 is a supported native build target for development; see
-[BUILD-WINDOWS.md](BUILD-WINDOWS.md). CMake owns
-one production configuration for both Nix and ordinary Linux builds. Tests,
-profilers, tuning executables and Python reference runners are not installed
-with the production package. No `build.sh` wrapper is needed.
+## Principles
 
-### With Nix
+- **One machine.** Every kernel is tuned for Strix Halo with 128 GiB. Smaller
+  memory configurations work for the models that fit.
+- **The best model per use case.** Fewer models means less code to maintain and
+  more time to optimize and test each one. Each model keeps its own kernels, so
+  a change to one can't break another.
+- **Quality before speed.** Every model has a quality report that compares it
+  with an independent reference; an optimization that changes the output isn't
+  one.
+- **Real workloads.** Concurrent requests, cancellation and long conversations
+  are first-class, not afterthoughts.
+- **Small production footprint.** Few runtime dependencies; development and
+  reference tools stay out of the package.
 
-```sh
-nix build
-./result/bin/gufo diagnose
-./result/bin/gufo serve llm --model /path/to/model.gguf
-```
+## Contributing
 
-[flake.lock](flake.lock) pins the dependencies. `nix develop` adds profiling,
-model-download and independent evaluation tools; these are not runtime
-requirements. Optional benchmark baselines are selected separately with
-`nix shell .#ds4-reference`, `.#llama-cpp-reference` or
-`.#llama-cpp-mtp-reference`; see [benchmarking](docs/internal/benchmarks.md).
-See [testing](docs/internal/testing.md) for the small hosted CI suite and
-explicit local quality checks.
+Contributions are welcome: Gufo needs the Strix Halo community to keep
+improving. Start with [development](docs/internal/development.md) and
+[testing](docs/internal/testing.md); [AGENTS.md](AGENTS.md) holds the rules
+that people and coding agents follow. To add a model without changing Gufo,
+[write an extension](docs/writing-extensions.md).
 
-Prebuilt store paths are published to the `gufo` Cachix cache. The flake
-declares it in `nixConfig`: users listed in `trusted-users` are asked to accept
-it, or pass `--accept-flake-config`. Nix ignores it for other users; add it
-system-wide with `cachix use gufo` or in `/etc/nix/nix.conf`:
-
-```
-extra-substituters = https://gufo.cachix.org
-extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
-```
-
-The Nix package and development shell use ROCm 10.1.0 (HIP Clang 24)
-from the pinned [nixpkgs ROCm 10.1 update](https://github.com/NixOS/nixpkgs/pull/573885).
-Python, Python packages and general build dependencies come from the pinned
-`nixos-unstable` input. The ROCm package set comes from the separate fork,
-retaining its compiler/runtime dependencies to reuse the gfx1151 binaries on
-`gufo.cachix.org`. All Nix workflows configure this cache explicitly.
-Both include a [queue-memory patch](.devops/nix/patches/rocr-fixed-cwsr-rocm10.patch)
-for Strix Halo. It keeps queue save/restore buffers, launch/copy arenas and
-code-loading staging resident during host memory compaction, while retaining
-managed-memory support and the ordinary fine-grained host-allocation policy.
-
-### Without Nix
-
-Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
-following development libraries. The pinned Nix toolchain uses GCC
-16.2 and ROCm 10.1.0 (HIP Clang 24). Attention and audio convolution kernels are compiled
-directly from HIP. Python, Triton/AOTriton, Composable Kernel and MIOpen are
-not production build or runtime requirements.
-For the same protection against queue evictions as the Nix build, apply the
-ROCr patch above when building your runtime. Flash-Next's host buffers also use
-Linux long-term pins, with ordinary HIP registration retained when system
-limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
-
-| Dependency | Used for |
-| --- | --- |
-| ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
-| hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
-| ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
-| Rust 1.88 or newer (`cargo`, `rustc`), from [rustup](https://rustup.rs) if your distribution's is older | PNG decoding; rustup uses `rust-toolchain.toml`, and cargo fetches the crates in `src/core/png_decode/Cargo.lock` |
-| FFmpeg development libraries (EmbeddingGemma 2 only) | Video embedding decoding and RGB conversion |
-| libsndfile, libsoxr (EmbeddingGemma 2 only) | Audio decoding and reference-compatible resampling |
-| FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
-
-Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
-Use the development packages for the libraries above. ROCm normally installs
-under `/opt/rocm`. Libraries marked for one extension are required only when
-that extension is built. The default build includes every extension; leave one
-out with `-DGUFO_EXTENSIONS=<list>` to drop its libraries (see `packages` in
-its `extension.json`).
-
-For example, on Debian/Ubuntu the ordinary system libraries are:
-
-```sh
-sudo apt install build-essential cmake ninja-build pkg-config \
-  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev libsndfile1-dev libsoxr-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev ffmpeg
-
-# ROCm libraries from the table, named as AMD's repository ships them.
-sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
-  hipcub-dev rocprim-dev rocwmma-dev
-
-cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-cmake --build --preset release --parallel 4
-./build/release/gufo diagnose
-./build/release/gufo serve llm --model /path/to/model.gguf
-```
-
-Configuring fails at `find_package(hipblas)` when those ROCm packages are
-missing. Other distributions name them `-devel` instead of `-dev`.
-For nonstandard installations, pass ordinary CMake paths, for example
-`cmake --preset release -DCMAKE_PREFIX_PATH="/opt/rocm"`.
-If compiler discovery picks a system Clang, also pass
-`-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++`.
-Use `cmake --install build/release` to install Gufo,
-its runtime data and license notices. The GPU driver must allow your user to
-access `/dev/kfd` and `/dev/dri`; model weights are acquired separately.
-
-The same source, compiler flags and install rules serve both builds. Nix pins
-the complete toolchain for reproducible comparisons; changing the compiler or
-math libraries requires the affected model's quality checks.
+Community projects built on Gufo include
+[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo), which runs
+models across two machines and isn't merged yet.
 
 ## License
 
-Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies
-retain their own notices in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-and `licenses/`, installed under `share/licenses/gufo`. Model weights are not
-bundled and retain their publishers' terms.
-
-## Reference Projects
-
-The initial design is informed by the following open source projects:
-
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) for compact model serving, GGUF, and CPU/GPU correctness paths.
-- [LaurentZuijdwijk/llama.cpp](https://github.com/LaurentZuijdwijk/llama.cpp), [Nathanw1014/strix-halo-llamacpp](https://github.com/Nathanw1014/strix-halo-llamacpp), and [gaetan-puleo/llama-cpp-strix-halo](https://github.com/gaetan-puleo/llama-cpp-strix-halo) for Strix Halo optimization inspiration.
-- [vLLM](https://github.com/vllm-project/vllm) for continuous batching and paged request scheduling.
-- [hipEngine](https://github.com/shisa-ai/hipEngine) for torch-free HIP execution, and native speculative-cycle work.
-- [ds4](https://github.com/antirez/ds4) for DeepSeek V4 Flash, MoE scheduling, and DSpark.
-- [audio.cpp](https://github.com/0xShug0/audio.cpp) for audio models for tts and asr tasks.
+Gufo's original code is [MIT licensed](LICENSE). Its design builds on other
+open-source engines, listed in [reference projects](docs/reference-projects.md). Adapted code and dependencies
+keep their own notices in [NOTICE](NOTICE),
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and `licenses/`, installed
+under `share/licenses/gufo`. Model weights aren't bundled and keep their
+publishers' terms.
