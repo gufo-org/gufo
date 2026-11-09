@@ -400,6 +400,25 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
 #endif
 }
 
+std::optional<InferenceBackend::PromptAdmissionBudget>
+InferenceBackend::prompt_admission_budget() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr)
+    return std::nullopt;
+  auto budget = state->scheduler->PromptAdmissionBudgetSnapshot();
+  if (!budget.has_value())
+    return std::nullopt;
+  return PromptAdmissionBudget{
+      .budget_bytes = budget->budget_bytes,
+      .used_bytes = budget->used_bytes,
+      .available_bytes = budget->available_bytes,
+  };
+#else
+  return std::nullopt;
+#endif
+}
+
 InferenceBackend::SamplingDefaults InferenceBackend::sampling_defaults() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();

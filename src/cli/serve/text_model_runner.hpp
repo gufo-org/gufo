@@ -161,6 +161,8 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  /// Validated resource claim, including host prompt-state admission inputs.
+  [[nodiscard]] const TextRunnerResourceClaim& resource_claim() const noexcept;
   [[nodiscard]] TextExecutionPlan SelectDecodePlan(
       std::size_t ready_requests) const;
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(

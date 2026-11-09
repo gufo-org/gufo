@@ -262,11 +262,23 @@ void CheckScaledContext() {
           "keys today)");
 }
 
+void CheckPromptKvBytesPerToken() {
+  const auto parsed = Parse(ValidMetadata());
+  Require(parsed.has_value(), "valid metadata must parse");
+  // 12 full-attention layers x 2 (K and V) x 512 kv dim x 2 bytes.
+  Require(parsed->PromptKvBytesPerToken(false) == 24576,
+          "target prompt K/V growth changed");
+  // MTP adds one draft row; it does not duplicate the target rows.
+  Require(parsed->PromptKvBytesPerToken(true) == 26624,
+          "speculative prompt K/V growth must add exactly one draft row");
+}
+
 }  // namespace
 
 int main() {
   CheckSidecarCompatibility();
   CheckMalformedMetadata();
   CheckScaledContext();
+  CheckPromptKvBytesPerToken();
   std::cout << "Flash-Next metadata checks passed.\n";
 }
