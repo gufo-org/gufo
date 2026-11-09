@@ -1,5 +1,45 @@
 # Qwen3.8 Flash-Next benchmarks
 
+## CPU serving paths, November 9, 2026
+
+Main `6a021263` versus the issue #716 adaptation, Strix Halo, pinned Nix
+GCC 16.2.0, `-O2`, baseline x86-64 ISA with runtime AVX-512 dispatch.
+Medians of three isolated measurements; these exclude disk reads, scheduling
+and GPU inference. The small row buffers rotate over 4,096 rows; the
+180 MiB control traverses 2,097,152 compressed rows in a permuted order.
+
+| Operation | Main | Candidate | Speedup |
+| --- | ---: | ---: | ---: |
+| Block maxima over 248,320 logits | 26.455 µs | 11.041 µs | 2.40× |
+| IQ4_NL row, 160 values, small buffer | 208.697 ns | 8.279 ns | 25.21× |
+| IQ4_NL row, 160 values, 180 MiB buffer | 370.770 ns | 98.047 ns | 3.78× |
+| N-gram hash, one token | 22.394 ns | 19.170 ns | 1.17× |
+| N-gram hash, 2,048 tokens | 60.570 µs | 30.368 µs | 1.99× |
+| BF16 row conversion, 160 values | 40.751 ns | 3.706 ns | 11.00× |
+
+Raw samples, compiler/build identities, harness sources, request histories
+and production controls are retained in
+`/home/fbozzo/projects/validation/issue716-20261109/`.
+These CPU speedups do not establish an end-to-end inference speedup.
+
+
+Production controls use `gufo bench -p 2048 -n 128 -d 0,4096 -r 2`,
+UD-Q4_K_XL revision `d96201` and the shared-Q8_0 MTP sidecar. Rates are the
+standard benchmark's two-repeat observations, not an HTTP timing qualification.
+
+| Mode | Depth | Main pp (tok/s) | Candidate pp (tok/s) | Main tg (tok/s) | Candidate tg (tok/s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 1,948.15 | 1,945.50 | 30.43 | 30.46 |
+| AR | 4,096 | 1,883.25 | 1,886.34 | 29.69 | 29.73 |
+| MTP | 0 | 1,848.43 | 1,886.01 | 62.98 | 62.98 |
+| MTP | 4,096 | 1,772.28 | 1,805.25 | 51.82 | 51.89 |
+| AR sampled | 0 | 1,949.23 | 1,945.87 | 30.29 | 30.34 |
+| MTP sampled | 0 | 1,887.67 | 1,886.35 | 50.45 | 50.44 |
+
+Sampled controls use temperature 0.7, top-k 20, top-p 0.8 and seed 73.
+The greedy MTP prefill difference is about 2%; the matched decode rates are
+essentially unchanged. This does not establish a general inference speedup.
+
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target
 with shared-Q8_0 MTP; adaptive drafting. HTTP, greedy, thinking off.
 Gufo `fec4759d` (October 18, 2026); llama.cpp `b11069` AR and `6fcaa16f` MTP

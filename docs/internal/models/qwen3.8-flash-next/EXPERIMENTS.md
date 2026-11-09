@@ -1,5 +1,24 @@
 # Qwen3.8 Flash-Next experiments
 
+## Host CPU paths (November 9, 2026)
+
+Retained the ideas from [Youry Metlitsky's issue #716 patches](https://github.com/gufo-org/gufo/issues/716):
+runtime AVX-512 block maxima, IQ4_NL codebook lookups and BF16 widening,
+plus division-free n-gram hashing. The current sampler shares its block scan
+through `sampling_logit_row.hpp`; the existing Q8_0 table path is preserved.
+
+The adaptation caches reciprocals by divisor value, avoiding stale results
+when a Config changes or its address is reused. A rounded-up 64-bit
+reciprocal and one wrap correction suffice for the actual nonzero 32-bit
+head vocabularies. GNU x86 compiler guards retain the scalar SIMD fallbacks;
+compilers without 128-bit integers retain the original hash loop. BF16 uses
+an explicitly unaligned load and needs only AVX-512F, not AVX-512BW.
+
+[CPU measurements](BENCHMARKS.md#cpu-serving-paths-november-9-2026) improve all
+four isolated operations. [Exact operator checks and real API replay](QUALITY.md#cpu-serving-paths-november-9-2026)
+retain the arithmetic and outputs. Concurrent Qwen 27B snapshot timing is
+variable on unchanged main too; no end-to-end speedup is claimed.
+
 ## Prefill bounds on ROCm 10.1 (November 9, 2026)
 
 Main `017e9249`, ROCm 10.1, UD-Q4_K_XL (`d96201`), autoregressive,

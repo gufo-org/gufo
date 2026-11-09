@@ -1,5 +1,42 @@
 # Qwen3.8 Flash-Next quality
 
+## CPU serving paths, November 9, 2026
+
+The issue #716 adaptation preserves the host arithmetic and keeps portable
+fallbacks. Focused `sampling_test`, `ggml_dequant_test` and
+`qwen38_flash_next.ngram` pass in 0.59 seconds total:
+
+- Block maxima match the scalar definition for lengths 0–129, every winning
+  lane, unaligned inputs, negative values, NaNs, infinities and signed zero.
+- IQ4_NL exhausts all 65,536 half scales and all codebook entries, comparing
+  output bits, including NaN payloads, and checking output guards.
+- BF16 exhausts all 65,536 bit patterns through unaligned cold and cached
+  table reads with a 17-value row, including the scalar tail.
+- Reciprocal remainders match `%` over about 5.75 million cases: random
+  dividends, multiples and their neighbors, powers of two and their
+  neighboring divisors, one and `UINT32_MAX`. Mutating a Config at the same
+  address must immediately use its new divisors; existing independent hash
+  goldens and incremental-history checks also pass.
+
+Nix production builds compare main `6a021263` with the candidate using
+`sampling-defaults` on Flash-Next AR/MTP and Qwen 27B Q4 AR/DFlash2.
+All 384 candidate requests pass functional assertions and match main's output
+and work counts. Loaded speculative modes and actual drafts are verified.
+Flash-Next passes all 2,704 request/phase timing observations at the unchanged
+5% and 10 ms margins. Focused replays through the last affected case, with unchanged-main controls,
+leave Qwen 27B AR at 1,322 passed/30 inconclusive timing measurements and
+DFlash2 at 1,331 passed/21 inconclusive. The same concurrent snapshot and
+inter-token delays occur on unchanged main. There are no confirmed timing
+failures, but these observations remain unqualified; this is not a global
+timing pass. The standard pp2048/tg128 production controls also complete
+in AR/MTP, greedy and sampled modes; [rates and scope](BENCHMARKS.md#cpu-serving-paths-november-9-2026)
+remain separate from HTTP timing qualification.
+
+Build identities, every raw request, reports, follow-ups and microbenchmark
+sources are retained in `/home/fbozzo/projects/validation/issue716-20261109/`.
+The shared formatting check and extension API surface check pass; the API
+remains 0.2.23. Windows and CPUs without AVX-512 were not executed here.
+
 ## Raw-completion follow-up, November 4, 2026
 
 GitHub exposed a case missing from the first qualification: a raw completion
