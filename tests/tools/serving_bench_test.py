@@ -994,6 +994,33 @@ with tempfile.TemporaryDirectory() as directory:
           "loading records its actual speculative execution mode")
     session.reference_version.assert_called_once_with("mtp")
 
+# A model without a speculative mode omits the block: its loading table
+# loads autoregressively and its cards still render.
+with tempfile.TemporaryDirectory() as directory:
+    config = load_config(ROOT, "qwen3.8-flash-next")
+    del config.data["speculative"]
+    config.artifacts_override = Path(directory)
+    config.files = {"gguf": {"default": Path(__file__)}}
+    session = Session(
+        config, "gufo", gufo_binary=Path("gufo"), reference_binary="llama-server",
+        source={"revision": "a" * 40, "dirty": False}, fingerprint={},
+        log_dir=Path(directory), document="", todo_only=False,
+    )
+    server = MagicMock(ready_seconds=0.25)
+    server.command = ["gufo"]
+    session.server = MagicMock(return_value=server)
+    session.reference_version = MagicMock(return_value=None)
+    session.store = MagicMock()
+    with patch("gufo.model_bench.llm.drop_file_cache"), \
+            patch("gufo.model_bench.llm.wait_process_exit"), \
+            patch("sys.stdout", new=io.StringIO()):
+        run_loading(session, config.table("loading"))
+    check(session.server.call_args.kwargs["mode"] == "ar"
+          and session.store.call_args.args[1]["mode"] == "ar",
+          "loading without a speculative block runs autoregressively")
+    for table_id in ("single-ar", "multi-ar", "loading", "memory"):
+        layout_for(config, config.table(table_id))
+
 # Single-user d0 and concurrency C1 must send the same pp2048 prompt.
 with tempfile.TemporaryDirectory() as directory:
     config = load_config(ROOT, "qwen3.8-flash-next")

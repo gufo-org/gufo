@@ -98,7 +98,9 @@ truth for agents; charts are an addition for readers. `--no-charts` skips them.
 Starting a new model: copy `assets/llm-bench-template.json` to
 `docs/internal/models/<model>/artifacts/bench.json` and
 `assets/llm-benchmarks-template.md` to the card, replace the placeholders,
-delete the tables the model does not have, and render. The template mirrors
+delete the tables the model does not have (and the `speculative` block for a
+model without a speculative mode; its loading table then loads AR), and render.
+The template mirrors
 the Qwen3.8-Flash-Next card, including which prose belongs next to each
 table.
 

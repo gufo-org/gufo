@@ -103,13 +103,14 @@ the same distribution.
   ([Qwen3.8 Flash-Next](models/qwen3.8-flash-next.md)), `dspark`
   ([DeepSeek V4 Flash](models/deepseek-v4-flash.md)).
 - `--dflash-model`, `--mtp-model`, `--dspark-model`: the draft file.
-- `--draft-tokens`: most tokens proposed per step.
+- `--draft-tokens`, `--min-draft-tokens`, `--draft-policy`: deprecated and
+  ignored; they will be removed. Each model sets how many tokens it proposes.
 
 **Server scheduling and limits**
 
 | Option | Default | Use |
 | --- | --- | --- |
-| `--prefill-chunk` | 512 | Prompt tokens processed between decode steps of other requests. |
+| `--prefill-chunk` | ignored | Deprecated and ignored; it will be removed. A prompt beside decoding requests is split by layers, so they keep decoding. |
 | `--max-pending` | 16 | Requests waiting for a session. |
 | `--max-pending-per-client` | `--max-pending` | Waiting requests per client IP. |
 | `--request-timeout-ms` | off | Cancel a request after this long, waiting included. |

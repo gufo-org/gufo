@@ -14,31 +14,32 @@ else()
 endif()
 set(cargo_profile "$<IF:$<CONFIG:Debug>,dev,$<IF:$<CONFIG:RelWithDebInfo>,${cargo_optimized_profile},release>>")
 set(cargo_profile_dir "$<IF:$<CONFIG:Debug>,debug,$<IF:$<CONFIG:RelWithDebInfo>,${cargo_optimized_profile},release>>")
-set(png_decode_filename "${CMAKE_STATIC_LIBRARY_PREFIX}gufo_png_decode${CMAKE_STATIC_LIBRARY_SUFFIX}")
-set(png_decode_library "${cargo_target_dir}/${cargo_profile_dir}/${png_decode_filename}")
+set(rust_filename "${CMAKE_STATIC_LIBRARY_PREFIX}gufo_rust${CMAKE_STATIC_LIBRARY_SUFFIX}")
+set(rust_library "${cargo_target_dir}/${cargo_profile_dir}/${rust_filename}")
 
 # A custom target runs on every build, so Cargo, not CMake, decides what to
 # rebuild from sources, manifests and the toolchain. Unchanged builds stay cheap.
-add_custom_target(gufo_png_decode_cargo
+add_custom_target(gufo_rust_cargo
   COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${cargo_target_dir}"
     "RUSTC=${RUSTC_EXECUTABLE}"
     "${CARGO_EXECUTABLE}" build --profile "${cargo_profile}" --locked
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-  BYPRODUCTS "${png_decode_library}"
-  COMMENT "Building the Rust PNG decoder (${cargo_profile})"
+  BYPRODUCTS "${rust_library}"
+  COMMENT "Building the Rust components (${cargo_profile})"
   VERBATIM)
 
-add_library(gufo_png_decode STATIC IMPORTED GLOBAL)
-set_target_properties(gufo_png_decode PROPERTIES
-  IMPORTED_LOCATION "${cargo_target_dir}/release/${png_decode_filename}"
-  IMPORTED_LOCATION_DEBUG "${cargo_target_dir}/debug/${png_decode_filename}"
-  IMPORTED_LOCATION_RELWITHDEBINFO "${cargo_target_dir}/${cargo_optimized_profile}/${png_decode_filename}"
-  INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/include")
-add_dependencies(gufo_png_decode gufo_png_decode_cargo)
+add_library(gufo_rust STATIC IMPORTED GLOBAL)
+set_target_properties(gufo_rust PROPERTIES
+  IMPORTED_LOCATION "${cargo_target_dir}/release/${rust_filename}"
+  IMPORTED_LOCATION_DEBUG "${cargo_target_dir}/debug/${rust_filename}"
+  IMPORTED_LOCATION_RELWITHDEBINFO "${cargo_target_dir}/${cargo_optimized_profile}/${rust_filename}"
+  INTERFACE_INCLUDE_DIRECTORIES
+    "${PROJECT_SOURCE_DIR}/src/core/png_decode/include;${PROJECT_SOURCE_DIR}/src/core/wav_decode/include")
+add_dependencies(gufo_rust gufo_rust_cargo)
 
 # A tiny std-using staticlib reports the same standard-library requirements as
-# the decoder. Probe from the source directory so rustup uses our toolchain
-# file, with the same rustc that Cargo builds the decoder with.
+# the components. Probe from the source directory so rustup uses our toolchain
+# file, with the same rustc that Cargo builds the components with.
 set(native_probe "${CMAKE_CURRENT_BINARY_DIR}/native-libs")
 file(WRITE "${native_probe}.rs" "pub fn probe() { let _ = std::env::args(); }\n")
 execute_process(
@@ -59,7 +60,7 @@ if(NOT native_probe_match)
   message(FATAL_ERROR "rustc did not report native-static-libs")
 endif()
 separate_arguments(native_probe_libs NATIVE_COMMAND "${CMAKE_MATCH_1}")
-set(png_decode_native_libs "")
+set(rust_native_libs "")
 foreach(lib IN LISTS native_probe_libs)
   # Linker directives such as /defaultlib:msvcrt are embedded in Rust's
   # objects; MSVC supplies the dynamic CRT they name.
@@ -68,12 +69,12 @@ foreach(lib IN LISTS native_probe_libs)
   endif()
   string(REGEX REPLACE "^-l" "" lib "${lib}")
   string(REGEX REPLACE "\\.lib$" "" lib "${lib}")
-  list(APPEND png_decode_native_libs "${lib}")
+  list(APPEND rust_native_libs "${lib}")
 endforeach()
-list(REMOVE_DUPLICATES png_decode_native_libs)
-if(NOT png_decode_native_libs)
+list(REMOVE_DUPLICATES rust_native_libs)
+if(NOT rust_native_libs)
   message(FATAL_ERROR "rustc reported no native-static-libs")
 endif()
 # cmake/TargetGraph.cmake classifies these as system libraries.
-set(GUFO_PNG_DECODE_LIBS ${png_decode_native_libs} PARENT_SCOPE)
-target_link_libraries(gufo_png_decode INTERFACE ${png_decode_native_libs})
+set(GUFO_RUST_LIBS ${rust_native_libs} PARENT_SCOPE)
+target_link_libraries(gufo_rust INTERFACE ${rust_native_libs})

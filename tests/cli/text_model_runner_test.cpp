@@ -1293,7 +1293,25 @@ void TestProviderToolDialectSelection() {
   TextRunnerPool pool(std::make_shared<DialectRunner>("ledger-runner"), 1);
 }
 
+void LegacyResourceClaimAggregateKeepsItsFields() {
+  // Public pre-admission aggregate order: adding optional claims must not
+  // reinterpret snapshot capacities or the device-lock requirement.
+  const gufo::ext::TextRunnerResourceClaim claim{1, 2, 3, 4, 5, 6, true};
+  Expect(claim.resident_weights_bytes == 1 && claim.state_capacity_bytes == 2 &&
+             claim.per_request_state_bytes == 3 &&
+             claim.temporary_scratch_bytes == 4 &&
+             claim.retained_snapshot_capacity_bytes == 5 &&
+             claim.retained_snapshot_ceiling_bytes == 6 &&
+             claim.requires_device_runtime_lock,
+         "legacy aggregate values retain their original fields");
+  Expect(!claim.prompt_state_bytes_per_token &&
+             !claim.prompt_admission_budget_bytes &&
+             !claim.prompt_admission_available_bytes,
+         "legacy aggregate initializers leave prompt admission disabled");
+}
+
 int main() {
+  LegacyResourceClaimAggregateKeepsItsFields();
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
   TestReasoningDelimitersFollowTheRunner();

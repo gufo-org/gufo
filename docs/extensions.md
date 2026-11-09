@@ -77,7 +77,7 @@ once:
 
 | Gufo from | Toolchain |
 | --- | --- |
-| The `gufo-runtime` container | Included; mount a volume for the store. |
+| The `gufo-runtime` container | Included; mount a volume at `/home/gufo/.local/share/gufo/extensions` to keep the store, as in [install](install.md#container). |
 | Nix | `nix profile install github:gufo-org/gufo#sdk` (or `#release-sdk`) installs Gufo with its build toolchain. |
 | A source build | The build tree's `sdk`, or `<prefix>/lib/gufo/sdk` after installing, with the same system toolchain. |
 

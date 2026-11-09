@@ -1,0 +1,27 @@
+# The Rust components. Each one is a crate with a small C ABI; the gufo-rust
+# crate in src/core/rust links them into the single static library that C++
+# links, so the standard library and shared crates are built once.
+[workspace]
+resolver = "3"
+members = ["src/core/rust", "src/core/png_decode", "src/core/wav_decode"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license = "MIT"
+
+[profile.release]
+debug = 1
+
+# CMake RelWithDebInfo, the shipped configuration.
+[profile.relwithdebinfo]
+inherits = "release"
+debug = 2
+
+# Optimized test builds (BUILD_TESTING=ON), which keep C++ assertions on too.
+[profile.checked]
+inherits = "relwithdebinfo"
+debug-assertions = true
+overflow-checks = true

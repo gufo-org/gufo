@@ -158,8 +158,7 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "Speculative", &opt.dflash_model_path);
 
   parser.AddOption("", "--draft-policy", "POLICY",
-                   "DFlash2 draft length policy: fixed or adaptive "
-                   "(default: adaptive)",
+                   "Deprecated and ignored: each model sets its draft length",
                    "Speculative", &opt.draft_policy);
 
   parser.AddOption("", "--dspark-model", "PATH",
@@ -167,11 +166,11 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "Speculative", &opt.dspark_model_path);
 
   parser.AddOption("", "--draft-tokens", "N",
-                   "Maximum draft tokens per speculative step (default: 7)",
+                   "Deprecated and ignored: each model sets its draft length",
                    "Speculative", &opt.draft_tokens);
 
   parser.AddOption("", "--min-draft-tokens", "N",
-                   "Minimum draft tokens per speculative step (default: 1)",
+                   "Deprecated and ignored: each model sets its draft length",
                    "Speculative", &opt.min_draft_tokens);
 
   // Execution
@@ -188,9 +187,7 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
 std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
                                               std::string* error_msg,
                                               std::string_view command,
-                                              const ext::Registry& registry,
-                                              ProviderOptions& provider,
-                                              SpeculativeFlags& speculative) {
+                                              ProviderOptions& provider) {
   ArgParser parser("gufo " + std::string(command),
                    command == "chat" ? "Interactive conversation."
                                      : "Execute one prompt request and exit.");
@@ -243,28 +240,11 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
       *error_msg = "DSpark requires --dspark-model";
     return std::nullopt;
   }
-  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0) {
-    if (error_msg != nullptr) {
-      *error_msg = "draft-tokens and min-draft-tokens must be positive";
-    }
-    return std::nullopt;
-  }
-  // Unset draft settings take the selected provider's defaults later.
-  speculative = SpeculativeFlags::Given(parser, opt.draft_tokens,
-                                        opt.min_draft_tokens, opt.draft_policy);
-  try {
-    CheckSpeculativeFlags(registry, opt.speculative_backend, speculative);
-  } catch (const std::invalid_argument& exception) {
-    if (error_msg != nullptr)
-      *error_msg = exception.what();
-    return std::nullopt;
-  }
-  if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
-    if (error_msg != nullptr)
-      *error_msg =
-          "DFlash2 requires --min-draft-tokens 1; bound blocks with "
-          "--draft-tokens";
-    return std::nullopt;
+  // Each model sets its draft settings (TextSpeculativeDefaults).
+  for (const char* option :
+       {"--draft-tokens", "--min-draft-tokens", "--draft-policy"}) {
+    if (parser.WasSupplied(option))
+      std::cerr << "Warning: " << option << " is deprecated and ignored\n";
   }
 
   if (opt.reasoning_mode != "on" && opt.reasoning_mode != "off" &&
@@ -303,12 +283,11 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
 // Delivers the selected provider's options and resolves its draft settings;
 // false after reporting an error.
 bool PrepareForProvider(const ProviderOptions& provider,
-                        const SpeculativeFlags& speculative,
                         const ext::TextProvider& selected, PromptOptions* opt) {
   try {
     opt->provider_options = provider.Select(selected.id);
-    const auto settings = ResolveSpeculativeSettings(
-        selected, opt->speculative_backend, speculative);
+    const auto settings =
+        ResolveSpeculativeSettings(selected, opt->speculative_backend, {});
     opt->draft_tokens = settings.max_draft_tokens;
     opt->min_draft_tokens = settings.min_draft_tokens;
     opt->draft_policy = settings.draft_policy;
@@ -369,9 +348,7 @@ std::optional<PromptOptions> ParsePromptOptions(
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider(registry, "prompt");
-  SpeculativeFlags speculative;
-  return ParseTextOptions(args, error_msg, "prompt", registry, provider,
-                          speculative);
+  return ParseTextOptions(args, error_msg, "prompt", provider);
 }
 
 int RunPrompt(std::span<const char* const> args) {
@@ -379,9 +356,8 @@ int RunPrompt(std::span<const char* const> args) {
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider_options(registry, "prompt");
-  SpeculativeFlags speculative;
-  const auto opt_res = ParseTextOptions(args, &parse_err, "prompt", registry,
-                                        provider_options, speculative);
+  const auto opt_res =
+      ParseTextOptions(args, &parse_err, "prompt", provider_options);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -447,7 +423,7 @@ int RunPrompt(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!PrepareForProvider(provider_options, speculative, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, *provider, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }
@@ -463,9 +439,8 @@ int RunChat(std::span<const char* const> args) {
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
   ProviderOptions provider_options(registry, "chat");
-  SpeculativeFlags speculative;
-  const auto opt_res = ParseTextOptions(args, &parse_err, "chat", registry,
-                                        provider_options, speculative);
+  const auto opt_res =
+      ParseTextOptions(args, &parse_err, "chat", provider_options);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -508,7 +483,7 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!PrepareForProvider(provider_options, speculative, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, *provider, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }

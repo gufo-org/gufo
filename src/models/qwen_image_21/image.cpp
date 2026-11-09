@@ -260,6 +260,16 @@ void ValidateRequest(const Request& request) {
         "reference images exceed 32 megapixels combined");
 }
 
+std::string ConditionPrompt(std::string_view prompt,
+                            ext::ImageBackground background) {
+  if (background != ext::ImageBackground::kTransparent)
+    return std::string(prompt);
+  // Qwen-Image-2.1 produces RGBA output when the prompt names the alpha
+  // channel; the framing is model-specific, so it lives in this provider.
+  return "This is an RGBA image with transparency. " + std::string(prompt) +
+         " The image has alpha channel and the background is transparent.";
+}
+
 std::vector<float> FlowSigmas(int steps, int image_tokens) {
   if (steps < 2 || steps > 100 || image_tokens < 1)
     throw std::invalid_argument("invalid image flow schedule");

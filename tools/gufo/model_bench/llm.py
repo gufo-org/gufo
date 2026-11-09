@@ -340,7 +340,7 @@ def run_loading(session: Session, table: TableSpec) -> None:
                 print(f"{table.id}: skipped; {reason}")
                 return
             # Load with the speculative support files on both sides when the reference has the mode.
-            mode = cfg.speculative["mode"] if (session.target == "gufo" or cfg.reference_speculative) else None
+            mode = cfg.speculative.get("mode", "ar") if (session.target == "gufo" or cfg.reference_speculative) else None
             if session.modes and mode not in session.modes:
                 mode = "ar"
             sessions = int(spec.get("sessions", 1))

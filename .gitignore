@@ -44,6 +44,9 @@ build/
 Build/
 build-*/
 
+# Cargo output when the Rust workspace is built outside CMake
+/target/
+
 # CMake generated files
 CMakeFiles/
 CMakeCache.txt

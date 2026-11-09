@@ -426,8 +426,15 @@ QwenToolCallScan ScanQwenToolCall(std::string_view text) {
       canonical_parameters &= framed_value;
       if (framed_value) {
         // The canonical Qwen delimiter includes the following newline. A line
-        // such as "</parameter> is literal" is argument data.
-        auto framed = body.find("\n</parameter>");
+        // such as "</parameter> is literal" is argument data. After a
+        // canonical header, the opening frame newline cannot also begin the
+        // closer: as in llama.cpp's tool grammar and parser, the value runs
+        // to the first "\n</parameter>\n" after it. Reading
+        // "<parameter=v>\n</parameter>\n" as an empty value would split one
+        // constrained call into several (#1096).
+        const std::size_t frame =
+            canonical_parameters ? (body.starts_with("\r\n") ? 2 : 1) : 0;
+        auto framed = body.find("\n</parameter>", frame);
         while (framed != std::string_view::npos) {
           const auto tail =
               body.substr(framed + std::string_view("\n</parameter>").size());

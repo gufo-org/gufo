@@ -11,6 +11,7 @@ include/gufo/ext/decision.hpp
 include/gufo/ext/device_probe.hpp
 include/gufo/ext/draft_backend.hpp
 include/gufo/ext/embeddings.hpp
+include/gufo/ext/experimental/admission_query.hpp
 include/gufo/ext/experimental/dispatch_telemetry.hpp
 include/gufo/ext/experimental/gemv_dispatcher.hpp
 include/gufo/ext/experimental/ggml_dequant.hpp
@@ -58,6 +59,7 @@ include/gufo/ext/types.hpp
 include/gufo/ext/utf8.hpp
 include/gufo/ext/version.hpp
 include/gufo/ext/video.hpp
+include/gufo/ext/wav.hpp
 src/cache/adapter.hpp
 src/cache/checkpoint.hpp
 src/cache/completion.hpp
@@ -73,6 +75,8 @@ src/core/cancellable_gate.hpp
 src/core/crypto/sha256.hpp
 src/core/gguf_identity.hpp
 src/core/gguf_reader.hpp
+src/core/hip/admission_memory.hpp
+src/core/hip/admission_query.hpp
 src/core/hip/component_cache_resources.hpp
 src/core/hip/detail/dispatch_telemetry.hpp
 src/core/hip/detail/gemv_dispatcher.hpp
@@ -94,6 +98,7 @@ src/core/logging/logging.hpp
 src/core/mapped_prefetch.hpp
 src/core/model_config.hpp
 src/core/platform/fs.hpp
+src/core/platform/gpu_budget.hpp
 src/core/platform/library.hpp
 src/core/platform/mapped_file.hpp
 src/core/platform/os_info.hpp
@@ -111,6 +116,7 @@ src/core/speculative/prompt_lookup.hpp
 src/core/speculative/speculative_verifier.hpp
 src/core/text_sampling_defaults.hpp
 src/core/utf8.hpp
+src/core/wav.hpp
 src/ext/asr.hpp
 src/ext/continuation.hpp
 src/ext/decision.hpp

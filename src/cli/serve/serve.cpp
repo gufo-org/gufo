@@ -585,12 +585,20 @@ void PrintServeHelp(std::string_view program_name,
     std::filesystem::path model;
     std::vector<std::string> names;
     ArgParser parser(std::string(program_name) + " serve image",
-                     "Serve Qwen-Image-2.1 generation and editing.");
+                     "Serve image generation and editing (Qwen-Image-2.1 or "
+                     "an image extension provider).");
     parser.AddOption("-m", "--model", "DIR",
-                     "Qwen-Image-2.1 safetensors directory", "Model", &model);
+                     "Image model directory (Diffusers layout)", "Model",
+                     &model);
     AddServedModelNamesOption(parser, &names);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
+    ProviderOptions provider_options(registry,
+                                     std::string(ext::kImageServeCommand),
+                                     ext::Capability::kImageGeneration);
+    provider_options.Register(parser);
     parser.PrintHelp();
     return;
   }
@@ -747,10 +755,9 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--dflash-model", "PATH",
                      "Path to Qwen DFlash2 GGUF file", "Speculative",
                      &dflash_model_path);
-    parser.AddOption(
-        "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
-        "Speculative", &draft_policy);
+    parser.AddOption("", "--draft-policy", "POLICY",
+                     "Deprecated and ignored: each model sets its draft length",
+                     "Speculative", &draft_policy);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -767,17 +774,17 @@ void PrintServeHelp(std::string_view program_name,
                      "Steered layer range for --projection-vector (default: "
                      "every layer the vector carries)",
                      "Model", &projection_layers);
-    parser.AddOption(
-        "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
-        "Speculative", &draft_tokens);
+
+    parser.AddOption("-d", "--draft-tokens", "N",
+                     "Deprecated and ignored: each model sets its draft length",
+                     "Speculative", &draft_tokens);
 
     parser.AddOption("", "--min-draft-tokens", "N",
-                     "Adaptive draft floor (default: 1)", "Speculative",
-                     &min_draft_tokens);
+                     "Deprecated and ignored: each model sets its draft length",
+                     "Speculative", &min_draft_tokens);
     parser.AddOption(
         "", "--prefill-chunk", "N",
-        "Maximum prompt tokens between active decode rounds (default: 512)",
+        "Deprecated and ignored: prompts beside decoders are split by layers",
         "Scheduling", &prefill_chunk_tokens);
     parser.AddOption("", "--max-pending", "N",
                      "Maximum queued generation requests (default: 16)",
@@ -1137,11 +1144,17 @@ int RunServe(std::span<const char* const> args) {
     std::filesystem::path model;
     std::vector<std::string> names;
     ArgParser parser("gufo serve image",
-                     "Serve Qwen-Image-2.1 generation and editing.");
+                     "Serve image generation and editing (Qwen-Image-2.1 or "
+                     "an image extension provider).");
     parser.AddOption("-m", "--model", "DIR",
-                     "Qwen-Image-2.1 safetensors directory", "Model", &model);
+                     "Image model directory (Diffusers layout)", "Model",
+                     &model);
     AddServedModelNamesOption(parser, &names);
     add_server_options(parser, false);
+    ProviderOptions declared_options(registry,
+                                     std::string(ext::kImageServeCommand),
+                                     ext::Capability::kImageGeneration);
+    declared_options.Register(parser);
     if (!parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
@@ -1150,23 +1163,51 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "image");
       return 0;
     }
+    ext::ParsedOptions provider_options;
+    try {
+      provider_options = declared_options.Parse();
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
+    }
     if (!prepare_server_options())
       return 2;
     if (model.empty()) {
       std::cerr << "Error: --model <DIR> is required for image server\n";
       return 2;
     }
-    ModelLoadLog load_log("qwen_image_21", model);
+    // Selection reads only the probe's metadata, so option errors (another
+    // provider's option, a missing sidecar path) stop before any weights load.
+    const ext::ImageProvider* provider = nullptr;
     try {
-      images = std::make_shared<server::ImageService>(
-          model, names.empty() ? "Qwen-Image-2.1" : names.front(),
-          server::ImageService::Runner{}, ModelAliases(names));
+      provider =
+          &server::SelectImageProvider(registry, model, provider_options);
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
     } catch (const std::exception& error) {
-      std::cerr << "Error loading Qwen-Image-2.1: " << error.what() << '\n';
+      std::cerr << "Error loading image model: " << error.what() << '\n';
       return 1;
     }
-    load_log.Complete("model=" + images->model_id() +
-                      " weights=mapped upload=on_demand");
+    std::string kind = provider->id;
+    std::ranges::replace(kind, '-', '_');
+    ModelLoadLog load_log(kind, model);
+    try {
+      images = std::make_shared<server::ImageService>(
+          server::CreateImageRunner(*provider, model, provider_options),
+          names.empty() ? (provider->id == "qwen-image-21" ||
+                                   provider->id == "qwen-image-2.1"
+                               ? "Qwen-Image-2.1"
+                               : provider->id)
+                        : names.front(),
+          ModelAliases(names));
+    } catch (const std::exception& error) {
+      std::cerr << "Error loading image model " << provider->id << ": "
+                << error.what() << '\n';
+      return 1;
+    }
+    load_log.Complete("model=" + images->model_id() + " provider=" +
+                      provider->id + " weights=mapped upload=on_demand");
   } else if (subcommand == "video") {
     std::filesystem::path video_model;
     std::filesystem::path video_root = "video-jobs";
@@ -1432,7 +1473,7 @@ int RunServe(std::span<const char* const> args) {
                          &dflash_model_path);
     llm_parser.AddOption(
         "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Deprecated and ignored: each model sets its draft length",
         "Speculative", &draft_policy);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
@@ -1453,15 +1494,16 @@ int RunServe(std::span<const char* const> args) {
                          "Model", &projection_layers);
     llm_parser.AddOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
+        "Deprecated and ignored: each model sets its draft length",
         "Speculative", &draft_tokens);
 
-    llm_parser.AddOption("", "--min-draft-tokens", "N",
-                         "Adaptive draft floor (default: 1)", "Speculative",
-                         &min_draft_tokens);
+    llm_parser.AddOption(
+        "", "--min-draft-tokens", "N",
+        "Deprecated and ignored: each model sets its draft length",
+        "Speculative", &min_draft_tokens);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
-        "Maximum prompt tokens between active decode rounds (default: 512)",
+        "Deprecated and ignored: prompts beside decoders are split by layers",
         "Scheduling", &prefill_chunk_tokens);
     llm_parser.AddOption("", "--max-pending", "N",
                          "Maximum queued generation requests (default: 16)",
@@ -1532,6 +1574,24 @@ int RunServe(std::span<const char* const> args) {
     if (!prepare_server_options()) {
       return 2;
     }
+    // Every in-tree text runner splits prompt passes by layers beside
+    // decoders; runners without a scheduling profile keep the fixed legacy
+    // budget. Removed with the legacy path (#1028 phase 4).
+    if (llm_parser.WasSupplied("--prefill-chunk")) {
+      server::Logger::Warn(
+          "scheduling",
+          "event=deprecated_option option=--prefill-chunk action=ignored "
+          "reason=layered_prefill");
+    }
+    // Each model sets its draft settings (TextSpeculativeDefaults).
+    for (const char* option :
+         {"--draft-tokens", "--min-draft-tokens", "--draft-policy"}) {
+      if (llm_parser.WasSupplied(option)) {
+        server::Logger::Warn("speculative",
+                             std::string("event=deprecated_option option=") +
+                                 option + " action=ignored reason=model_owned");
+      }
+    }
     // Progress lines are INFO-tier. Under a quieter threshold `--log-progress`
     // would be accepted and then silently discarded, so reject the combination
     // instead of ignoring an option the caller asked for.
@@ -1557,8 +1617,7 @@ int RunServe(std::span<const char* const> args) {
         json::Value::object(), sampling_config, &validated_sampling);
     if (max_tokens < -1 || max_tokens == 0 ||
         max_tokens > std::numeric_limits<std::uint32_t>::max() ||
-        prefill_chunk_tokens == 0 || max_pending_requests == 0 ||
-        max_pending_requests_per_client == 0 ||
+        max_pending_requests == 0 || max_pending_requests_per_client == 0 ||
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
         max_buffered_output_bytes_total == 0 ||
@@ -1570,12 +1629,6 @@ int RunServe(std::span<const char* const> args) {
         (stall_timeout_ms != 0 && stall_timeout_ms < kMinStallTimeoutMs) ||
         !sampling_valid) {
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
-      return 2;
-    }
-    if (draft_tokens == 0 || min_draft_tokens == 0 ||
-        draft_tokens > std::numeric_limits<std::uint32_t>::max() ||
-        min_draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
-      std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
     }
     auto reasoning_defaults = ResolveReasoningDefaults(
@@ -1609,21 +1662,15 @@ int RunServe(std::span<const char* const> args) {
                 << "' is not supported by the HTTP server\n";
       return 2;
     }
-    // Unset draft settings take the selected provider's defaults during load.
-    const auto speculative_flags = SpeculativeFlags::Given(
-        llm_parser, static_cast<std::uint32_t>(draft_tokens),
-        static_cast<std::uint32_t>(min_draft_tokens), draft_policy);
     try {
       provider_options.Parse();
-      CheckSpeculativeFlags(registry, speculative_backend, speculative_flags);
     } catch (const std::invalid_argument& exception) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
     if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
-        (dflash_model_path.empty() || min_draft_tokens != 1)) {
-      std::cerr << "Error: DFlash2 requires --dflash-model and "
-                   "--min-draft-tokens 1; bound blocks with --draft-tokens\n";
+        dflash_model_path.empty()) {
+      std::cerr << "Error: DFlash2 requires --dflash-model\n";
       return 2;
     }
     speculative_config.draft_model_path =
@@ -1649,10 +1696,7 @@ int RunServe(std::span<const char* const> args) {
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
     const bool load_ok = backend->load(
-        model, &err, max_context, session_count,
-        server::TextPrefillPolicy{
-            .decode_active_tokens = prefill_chunk_tokens,
-        },
+        model, &err, max_context, session_count, server::TextPrefillPolicy{},
         server::TextSchedulerPolicy{
             .max_pending_requests = max_pending_requests,
             .max_pending_requests_per_client = max_pending_requests_per_client,
@@ -1682,8 +1726,7 @@ int RunServe(std::span<const char* const> args) {
           try {
             options->provider_options = provider_options.Select(provider.id);
             ApplySpeculativeSettings(
-                ResolveSpeculativeSettings(provider, speculative_backend,
-                                           speculative_flags),
+                ResolveSpeculativeSettings(provider, speculative_backend, {}),
                 &options->speculative);
             loaded_speculative = options->speculative;
             return true;

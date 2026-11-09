@@ -593,6 +593,58 @@ void TestApplyTemplate() {
   server.backend->reasoning = {};
 }
 
+void TestLlamaTokenize() {
+  RunningServer server;
+  const int calls = server.backend->calls;
+
+  // A backend that cannot tokenize says so.
+  ExpectStatus(server.Post("/tokenize", R"({"content":"hi"})"), 501);
+
+  // The ids are the backend's for the content, unchanged; the control-token
+  // spelling reaches it as text, for the tokenizer to parse.
+  server.backend->token_ids = std::vector<std::uint32_t>{151644, 872, 7};
+  const auto response =
+      server.Post("/tokenize", R"({"content":"<|im_start|>user hi"})");
+  ExpectStatus(response, 200);
+  const auto body =
+      gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  const auto* tokens = body.find("tokens");
+  assert(tokens != nullptr && tokens->is_array() && tokens->size() == 3);
+  assert(tokens->items()[0].as_size() == 151644 &&
+         tokens->items()[2].as_size() == 7);
+  assert(server.backend->tokenized_text == "<|im_start|>user hi");
+
+  // llama-server's defaults are accepted when sent; other values change the
+  // tokens and are refused rather than ignored.
+  ExpectStatus(server.Post("/tokenize", R"({"content":"hi","add_special":false,
+                                            "parse_special":true,
+                                            "with_pieces":false})"),
+               200);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","add_special":true})"), 400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","parse_special":false})"),
+      400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","with_pieces":true})"), 400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","add_special":"no"})"), 400);
+  ExpectStatus(server.Post("/tokenize", R"({"content":["hi"]})"), 400);
+  ExpectStatus(server.Post("/tokenize", R"({})"), 400);
+  ExpectStatus(server.Post("/tokenize", "not json"), 400);
+
+  // Empty content is no tokens, as in llama-server.
+  server.backend->token_ids = std::vector<std::uint32_t>{};
+  const auto empty = server.Post("/tokenize", R"({"content":""})");
+  ExpectStatus(empty, 200);
+  const auto none = gufo::json::parse(empty.substr(empty.find("\r\n\r\n") + 4));
+  assert(none.find("tokens") != nullptr && none.find("tokens")->is_array() &&
+         none.find("tokens")->empty());
+  // Tokenizing never generates.
+  assert(server.backend->calls == calls);
+  server.backend->token_ids.reset();
+}
+
 void TestOpenAiInputTokens() {
   RunningServer server;
   const auto body_of = [](const std::string& wire) {
@@ -849,6 +901,23 @@ void TestLlamaSlotsAndMetrics() {
            std::string::npos);
   }
   assert(metrics.find("# TYPE llamacpp:kv_cache_usage_ratio gauge\n") !=
+         std::string::npos);
+  // A backend that publishes its prompt-state admission budget exposes it
+  // beside the KV ratio; a backend without one emits no budget gauges.
+  server.backend->prompt_budget =
+      gufo::server::TextGenerationBackend::PromptAdmissionBudget{
+          .budget_bytes = 4096,
+          .used_bytes = 1024,
+          .available_bytes = 3072,
+      };
+  const auto budget_metrics = get("/metrics");
+  assert(budget_metrics.find("gufo_prompt_state_budget_bytes 4096\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("gufo_prompt_state_reserved_bytes 1024\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("gufo_prompt_state_available_bytes 3072\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("# TYPE gufo_prompt_state_budget_bytes gauge\n") !=
          std::string::npos);
 }
 
@@ -2166,6 +2235,44 @@ void TestGenerationFailureLogsCause() {
   assert(count("event=server_exception reason=context exceeded") == 3);
   // After streaming starts, each endpoint logs it once beside its stable code.
   assert(count("[ERROR] [chat] context exceeded") == 3);
+}
+
+void TestPromptMemoryRefusalDetails() {
+  RunningServer server;
+  server.backend->reject_memory = true;
+  for (const bool stream : {false, true}) {
+    for (const auto* path : {"/v1/completions", "/v1/chat/completions",
+                             "/v1/responses", "/v1/messages"}) {
+      auto request = gufo::json::parse(R"({"model":"test"})");
+      const std::string_view endpoint(path);
+      if (endpoint == "/v1/completions") {
+        request["prompt"] = "hello";
+        request["max_tokens"] = 8;
+      } else if (endpoint == "/v1/responses") {
+        request["input"] = "hello";
+        request["max_output_tokens"] = 8;
+      } else {
+        request["messages"] =
+            gufo::json::parse(R"([{"role":"user","content":"hi"}])");
+        request[endpoint == "/v1/messages" ? "max_tokens"
+                                           : "max_completion_tokens"] = 8;
+      }
+      request["stream"] = stream;
+      const auto response = server.Post(path, request.dump());
+      ExpectStatus(response, 503);
+      assert(response.find("Retry-After: 1") != std::string::npos);
+      const auto body =
+          gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+      const auto* error = body.find("error");
+      assert(error && error->member_str("code") == "insufficient_memory" &&
+             error->member_size("required_bytes") == 4096 &&
+             error->member_size("remaining_bytes") == 512);
+      const auto* usage = body.find("usage");
+      const auto* details = usage ? usage->find("gufo") : nullptr;
+      assert(details && details->member_size("required_bytes") == 4096 &&
+             details->member_size("remaining_bytes") == 512);
+    }
+  }
 }
 
 void TestDeviceLoss() {
@@ -3519,6 +3626,7 @@ int main() {
   TestFallbackBackendMetrics();
   TestLlamaProps();
   TestApplyTemplate();
+  TestLlamaTokenize();
   TestOpenAiInputTokens();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
@@ -3528,6 +3636,7 @@ int main() {
   TestServedModelNames();
   TestRawCompletionStreaming();
   TestGenerationFailureLogsCause();
+  TestPromptMemoryRefusalDetails();
   TestDeviceLoss();
   TestDeviceLossWhileWriterBlocked();
   TestRawCompletionLogprobs();

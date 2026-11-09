@@ -203,6 +203,16 @@ struct TextRunnerResourceClaim {
   std::optional<std::size_t> retained_snapshot_capacity_bytes;
   std::optional<std::size_t> retained_snapshot_ceiling_bytes;
   bool requires_device_runtime_lock{false};
+  /// Host bytes a prompt token writes into model state, currently the KV row.
+  /// Missing means the runner has no prompt-length state to charge.
+  std::optional<std::size_t> prompt_state_bytes_per_token;
+  /// Host bytes prompt state may claim before admission refuses. Missing
+  /// disables prompt-state admission for this runner.
+  std::optional<std::size_t> prompt_admission_budget_bytes;
+  /// Optional live host headroom, sampled before each prompt reservation.
+  /// The server subtracts outstanding reservations conservatively, including
+  /// those released during the sample. Empty keeps the fixed budget.
+  std::function<std::size_t()> prompt_admission_available_bytes;
 };
 
 struct TextRunnerMeasuredResources {
@@ -699,7 +709,7 @@ struct TextSpeculativeConfig {
   std::uint32_t max_draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
   TextDFlashDraftPolicy dflash_policy{TextDFlashDraftPolicy::kAdaptive};
-  /// The resolved `--draft-policy` (see `TextSpeculativeDefaults`); empty when
+  /// The provider's draft policy (see `TextSpeculativeDefaults`); empty when
   /// the backend has no policy.
   std::string draft_policy{};
 };
@@ -903,20 +913,19 @@ using TextChatDriver =
     int (*)(const TextPromptOptions& options, const core::GgufReader& reader,
             std::chrono::steady_clock::time_point load_start);
 
-/// A provider's draft settings for one speculative backend. The commands
-/// resolve each setting as the explicit flag, else this default, else the
-/// host's (7 draft tokens, minimum 1, no policy; DFlash2 accepts `fixed` and
-/// `adaptive`) when the provider declares nothing for the backend.
+/// A provider's draft settings for one speculative backend. The commands use
+/// them, or the host's (7 draft tokens, minimum 1, no policy) when the provider
+/// declares nothing for the backend. The draft flags are ignored.
 struct TextSpeculativeDefaults {
   /// The `--speculative` value: `mtp`, `dflash2` or `dspark`.
   std::string backend;
-  /// `--draft-tokens` when it is not given.
+  /// Most tokens proposed per step.
   std::uint32_t max_draft_tokens{7};
-  /// `--min-draft-tokens` when it is not given.
+  /// Fewest tokens proposed per step.
   std::uint32_t min_draft_tokens{1};
-  /// `--draft-policy` when it is not given; may be empty.
+  /// The draft policy; may be empty.
   std::string draft_policy;
-  /// The `--draft-policy` values this backend accepts; empty accepts none.
+  /// No longer read.
   std::vector<std::string> draft_policies;
 };
 

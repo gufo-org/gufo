@@ -1397,6 +1397,46 @@ HttpResponse AnthropicCountTokens(const HttpRequest& req,
              "invalid_prompt");
 }
 
+// llama-server's /tokenize at its defaults: raw text, control-token spellings
+// parsed and nothing prepended, as /completion tokenizes a prompt. The options
+// that would change that are refused rather than ignored.
+HttpResponse LlamaTokenize(const HttpRequest& req, TextGenerationBackend& b) {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  const auto* content = body.find("content");
+  if (content == nullptr || !content->is_string()) {
+    return InvalidCompatibilityRequest("'content' must be a string");
+  }
+  for (const auto& [field, supported] :
+       {std::pair{"add_special", false}, std::pair{"parse_special", true},
+        std::pair{"with_pieces", false}}) {
+    const auto* value = body.find(field);
+    if (value == nullptr || value->is_null())
+      continue;
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'" + std::string(field) +
+                                         "' must be a boolean");
+    if (value->as_bool() != supported)
+      return InvalidCompatibilityRequest("'" + std::string(field) +
+                                         "' is supported only as " +
+                                         (supported ? "true" : "false"));
+  }
+  const auto tokens = b.tokenize(content->str());
+  if (!tokens)
+    return NotImplemented(req, b);
+  json::Value ids = json::Value::array();
+  for (const auto token : *tokens)
+    ids.push_back(static_cast<std::size_t>(token));
+  json::Value resp = json::Value::object();
+  resp["tokens"] = std::move(ids);
+  return Ok(resp);
+}
+
 HttpResponse LlamaCompletion(const HttpRequest& req,
                              TextGenerationBackend& b) try {
   json::Value body;
@@ -1666,6 +1706,21 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
          "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
       << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
+  if (const auto budget = b.prompt_admission_budget()) {
+    out << "# HELP gufo_prompt_state_budget_bytes Host RAM prompt state may "
+           "claim before admission refuses\n"
+        << "# TYPE gufo_prompt_state_budget_bytes gauge\n"
+        << "gufo_prompt_state_budget_bytes " << budget->budget_bytes << "\n"
+        << "# HELP gufo_prompt_state_reserved_bytes Host prompt state charged "
+           "to in-flight requests\n"
+        << "# TYPE gufo_prompt_state_reserved_bytes gauge\n"
+        << "gufo_prompt_state_reserved_bytes " << budget->used_bytes << "\n"
+        << "# HELP gufo_prompt_state_available_bytes Remaining host prompt "
+           "state budget\n"
+        << "# TYPE gufo_prompt_state_available_bytes gauge\n"
+        << "gufo_prompt_state_available_bytes " << budget->available_bytes
+        << "\n";
+  }
   return {.status = 200,
           .reason = "OK",
           .body = out.str(),
@@ -1963,6 +2018,7 @@ void HttpServer::register_routes() {
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);
   add("POST", "/apply-template", HandleApplyTemplate);
+  add("POST", "/tokenize", LlamaTokenize);
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);
@@ -2653,18 +2709,8 @@ void HttpServer::handle_connection(int client_fd,
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
-    const char* reason = "Service Unavailable";
-    if (exception.http_status() == 408) {
-      reason = "Request Timeout";
-    } else if (exception.http_status() == 429) {
-      reason = "Too Many Requests";
-    }
-    HttpResponse resp = Err(exception.http_status(), reason, exception.what(),
-                            "server_error", exception.stable_code());
+    HttpResponse resp = TextGenerationErrorResponse(exception);
     resp.headers.emplace_back("X-Request-ID", req.request_id);
-    if (exception.retryable()) {
-      resp.headers.emplace_back("Retry-After", "1");
-    }
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
                        duration_ms,

@@ -290,7 +290,7 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_subdirectory(src/core/platform)
-add_subdirectory(src/core/png_decode)
+add_subdirectory(src/core/rust)
 
 add_library(gufo_core STATIC
   src/core/image.cpp
@@ -305,10 +305,11 @@ add_library(gufo_core STATIC
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
+  src/core/wav.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
-  Threads::Threads gufo_png_decode JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_rust JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
 # Family libraries come before the model that needs them; they may depend on
@@ -495,22 +496,33 @@ if (BUILD_TESTING OR GUFO_BUILD_TOOLS)
 endif()
 
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
-  find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h REQUIRED)
-  find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx REQUIRED)
-  add_executable(gufo-kernel-bench
-    src/cli/bench/kernel_bench_main.cpp
-  )
-  target_compile_definitions(gufo-kernel-bench PRIVATE
-    GUFO_REVISION="${GUFO_REVISION}")
-  target_include_directories(gufo-kernel-bench SYSTEM PRIVATE
-    ${ROCTX_INCLUDE_DIR})
-  target_link_libraries(gufo-kernel-bench PRIVATE
-    gufo_kernel_bench_support
-    gufo_diagnostics
-    gufo_core
-    ${GUFO_QWEN_LIBRARIES}
-    gufo_qwen_kernels
-    ${ROCTX_LIBRARY})
+  # TheRock for Windows ships no roctx; skip only gufo-kernel-bench there so
+  # the other tools (e.g. qwen27b_verify_sweep) still build.
+  if (WIN32)
+    find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h)
+    find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx)
+  else()
+    find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h REQUIRED)
+    find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx REQUIRED)
+  endif()
+  if (ROCTX_INCLUDE_DIR AND ROCTX_LIBRARY)
+    add_executable(gufo-kernel-bench
+      src/cli/bench/kernel_bench_main.cpp
+    )
+    target_compile_definitions(gufo-kernel-bench PRIVATE
+      GUFO_REVISION="${GUFO_REVISION}")
+    target_include_directories(gufo-kernel-bench SYSTEM PRIVATE
+      ${ROCTX_INCLUDE_DIR})
+    target_link_libraries(gufo-kernel-bench PRIVATE
+      gufo_kernel_bench_support
+      gufo_diagnostics
+      gufo_core
+      ${GUFO_QWEN_LIBRARIES}
+      gufo_qwen_kernels
+      ${ROCTX_LIBRARY})
+  else()
+    message(STATUS "gufo: roctx not found, skipping gufo-kernel-bench")
+  endif()
 
   add_executable(tune_hipblaslt tools/bench/tune_hipblaslt.cpp)
   target_link_libraries(tune_hipblaslt PRIVATE gufo_core gufo_qwen_kernels
@@ -532,8 +544,10 @@ else()
   install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server.exe\")")
 endif()
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
-  install(TARGETS gufo-kernel-bench tune_hipblaslt
-    DESTINATION bin)
+  install(TARGETS tune_hipblaslt DESTINATION bin)
+  if (TARGET gufo-kernel-bench)
+    install(TARGETS gufo-kernel-bench DESTINATION bin)
+  endif()
 endif()
 
 # CTest integration
@@ -791,10 +805,22 @@ endfunction()
   add_test(NAME png_decode_test COMMAND png_decode_test)
   set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
 
+  add_executable(wav_decode_test
+    tests/core/wav_decode_test.cpp
+    tests/core/wav_reference.cpp)
+  target_link_libraries(wav_decode_test PRIVATE gufo_core)
+  add_test(NAME wav_decode_test COMMAND wav_decode_test)
+  set_tests_properties(wav_decode_test PROPERTIES LABELS "cpu;audio;correctness")
+
   add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)
   add_test(NAME heap_placement_test COMMAND heap_placement_test)
   set_tests_properties(heap_placement_test PROPERTIES LABELS "cpu;hip;core")
+
+  add_executable(admission_memory_test tests/core/admission_memory_test.cpp)
+  target_link_libraries(admission_memory_test PRIVATE gufo_core)
+  add_test(NAME admission_memory_test COMMAND admission_memory_test)
+  set_tests_properties(admission_memory_test PROPERTIES LABELS "cpu;hip;core")
 
   add_executable(sampling_test tests/core/sampling_test.cpp)
   target_link_libraries(sampling_test PRIVATE gufo_core)
@@ -822,6 +848,13 @@ endfunction()
   target_link_libraries(quote_tracker_test PRIVATE gufo_core)
   add_test(NAME quote_tracker_test COMMAND quote_tracker_test)
   set_tests_properties(quote_tracker_test PROPERTIES LABELS "cpu;server;api")
+
+  # Image provider startup options and request capabilities with fake
+  # providers; no sockets, so it runs on every host.
+  add_executable(image_api_test tests/cli/image_api_test.cpp)
+  target_link_libraries(image_api_test PRIVATE gufo_http gufo_llm_cli)
+  add_test(NAME image_api_test COMMAND image_api_test)
+  set_tests_properties(image_api_test PROPERTIES LABELS "cpu;server;api;image")
 
   # the trace suite simulates RLIMIT_FSIZE
   if (NOT WIN32)
@@ -1377,13 +1410,11 @@ endfunction()
   set_tests_properties(platform_publish_test PROPERTIES LABELS "cpu;platform")
   endif()
 
-  # the prefault fixture maps pages with mmap
-  if (NOT WIN32)
+  # POSIX checks with mmap, Windows with a file view and QueryWorkingSetEx
   add_executable(platform_prefault_test tests/core/platform_prefault_test.cpp)
   target_link_libraries(platform_prefault_test PRIVATE Threads::Threads)
   add_test(NAME platform_prefault_test COMMAND platform_prefault_test)
   set_tests_properties(platform_prefault_test PROPERTIES LABELS "cpu;platform")
-  endif()
 
   include(cmake/PlatformTests.cmake)
 

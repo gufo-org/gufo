@@ -15,6 +15,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -713,6 +714,26 @@ private:
   bool Run(Session& session, std::uint64_t key, bool graph,
            const std::function<bool()>& body, std::string* error_msg,
            bool synchronize = true) const;
+  /// The host-side dispatch state a pass advances. A pass that is executed
+  /// and then recorded again must restore it first (Run).
+  [[nodiscard]] auto DispatchState() const {
+    return std::tie(moe_pending_, defer_residual_, res_deferred_,
+                    shexp_half_ready_, q8t_src_, q8t_rows_, q8t_cols_,
+                    half_src_, half_rows_, half_cols_, half_bf16_, xn_half_,
+                    inject_parts_, inject_fused_, q8_slot_, xn_q8_ready_,
+                    mixed_q8_ready_, pending_combine_);
+  }
+  /// A copy of the DispatchState values, to assign back to it.
+  [[nodiscard]] auto SavedDispatch() const {
+    return std::apply(
+        [](const auto&... fields) { return std::make_tuple(fields...); },
+        DispatchState());
+  }
+  /// Times every layer's one-row MoE with and without the shared-expert
+  /// overlap and keeps the faster layout in decode_overlap_. Create calls it
+  /// once, after allocating scratch (about 120 ms). Touches only scratch and
+  /// restores DispatchState: no session or model state.
+  bool CalibrateDecodeOverlap(std::string* error_msg);
 
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
@@ -731,6 +752,14 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// Whether 1-8-row decode passes run the shared expert on side_stream_.
+  /// Their graphs then fork and join once per MoE layer, and what those two
+  /// cross-stream dependencies cost depends on the runtime. On Linux/ROCm
+  /// 10.1 they are cheap and the overlap speeds decode up about 1.5%. On
+  /// Windows/TheRock 10.0 they cost about 50 us per layer, more than the
+  /// whole shared expert takes (issue #1107). Create measures both layouts
+  /// (CalibrateDecodeOverlap). Wide and prefill passes always overlap.
+  bool decode_overlap_{false};
   /// True only while Run records a graph. Overlapped launches check capture
   /// membership at the fork; eager/replay tests separately check the results.
   /// False on replay, which executes no host dispatch or membership queries.

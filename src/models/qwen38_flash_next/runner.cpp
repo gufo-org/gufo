@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "gufo/ext/component_cache_resources.hpp"
+#include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
@@ -356,28 +357,36 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
+    const auto session_bytes = model_->SessionBytes(
+        use_mtp_ ? gufo::core::SessionMode::kSpeculative
+                 : gufo::core::SessionMode::kAutoregressive,
+        max_context_);
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
       const auto deferred = model_->DeferredScratchBytes();
-      capacity = free_bytes > deferred ? free_bytes - deferred : 0;
+      capacity =
+          memory->free_bytes > deferred ? memory->free_bytes - deferred : 0;
+      gufo::hip::LogStateCapacity(*memory, *capacity, session_bytes, deferred);
     }
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.
+    // Charge the prompt's deterministic KV footprint at admission. This is
+    // conservative: session allocation may already back some or all rows.
+    const std::size_t prompt_bytes_per_token =
+        model_->config().PromptKvBytesPerToken(use_mtp_);
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
-        .per_request_state_bytes = model_->SessionBytes(
-            use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                     : gufo::core::SessionMode::kAutoregressive,
-            max_context_),
+        .per_request_state_bytes = session_bytes,
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
         .temporary_scratch_bytes = 0,
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
+        .prompt_state_bytes_per_token = prompt_bytes_per_token,
+        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
+        .prompt_admission_available_bytes = HostSnapshotCeilingBytes,
     };
   }
 

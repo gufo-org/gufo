@@ -1,5 +1,3 @@
-// DS4 ROCm Q8_0 matmul / grouped-output / HC-expand kernels.
-//
 // Included from ds4_rocm.hip.cpp in the same translation unit so kernel helpers stay
 // private/static while we gradually split the custom ROCm backend into modules.
 
@@ -226,48 +224,6 @@ __global__ static void matmul_q8_0_f32_batch_wmma_4w_kernel(
 }
 
 #endif
-
-__global__ static void matmul_q8_0_hc_expand_preq_rows_w32_kernel(
-    float* out_hc, float* block_out, const float* block_add,
-    const float* residual_hc, const float* split, const unsigned char* w,
-    const int8_t* xq, const float* xscale, uint64_t in_dim, uint64_t out_dim,
-    uint32_t n_embd, uint32_t n_hc, uint64_t blocks, uint32_t rows_per_block,
-    int has_add, int use_dp4a) {
-  const uint64_t row =
-      (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
-  const uint32_t lane = threadIdx.x & 31u;
-  if (row >= out_dim)
-    return;
-  const unsigned char* wr = w + row * blocks * 34u;
-  float acc = 0.0f;
-  for (uint64_t b = lane; b < blocks; b += 32u) {
-    const uint64_t i0 = b * 32u;
-    const uint64_t bn = in_dim - i0 < 32u ? in_dim - i0 : 32u;
-    const __half* scale_h = (const __half*)(wr + b * 34u);
-    const int8_t* qs = (const int8_t*)(wr + b * 34u + 2u);
-    const int8_t* xqb = xq + b * 32u;
-    const int dot = dot_i8_block(qs, xqb, bn, use_dp4a);
-    acc += __half2float(*scale_h) * xscale[b] * (float)dot;
-  }
-  acc = warp_sum_f32(acc);
-  if (lane == 0u) {
-    const uint32_t d = (uint32_t)row;
-    block_out[d] = acc;
-    float block_v = acc;
-    if (has_add)
-      block_v += block_add[d];
-    const float* post = split + n_hc;
-    const float* comb = split + 2u * n_hc;
-    for (uint32_t dst_hc = 0; dst_hc < n_hc; dst_hc++) {
-      float hc_acc = block_v * post[dst_hc];
-      for (uint32_t src_hc = 0; src_hc < n_hc; src_hc++) {
-        hc_acc += residual_hc[(uint64_t)src_hc * n_embd + d] *
-                  comb[(uint64_t)src_hc * n_hc + dst_hc];
-      }
-      out_hc[(uint64_t)dst_hc * n_embd + d] = hc_acc;
-    }
-  }
-}
 
 __global__ static void grouped_q8_0_a_f32_batch_warp8_kernel(
     float* low, const unsigned char* w, const float* heads, uint64_t group_dim,

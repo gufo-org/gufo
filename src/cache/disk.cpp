@@ -697,7 +697,7 @@ struct DiskStore::Impl {
       node = {};
     }
   }
-  void ValidateReferences(bool reject = true) {
+  void ValidateReferences() {
     if (entries.empty())
       return;
     // Shared files must describe the same immutable lineage/range/layout.
@@ -761,9 +761,6 @@ struct DiskStore::Impl {
       if (owners.size() > 1)
         for (auto i : owners)
           rejected[i] = true;
-    if (!reject &&
-        std::find(rejected.begin(), rejected.end(), true) != rejected.end())
-      Invalid();
     std::size_t i{};
     std::erase_if(entries, [&](const auto&) {
       const bool remove = rejected[i++];
@@ -771,6 +768,63 @@ struct DiskStore::Impl {
         ++stats.rejected_manifests;
       return remove;
     });
+  }
+  // Applies ValidateReferences' rules to the publication candidate, the last
+  // entry. Indexed entries were already validated against each other, so only
+  // pairs involving the candidate can conflict. Its catalog is sized by the
+  // candidate rather than by every reference on disk: a full catalog grows
+  // with the tier and, charged while the RAM cache fills its share of the
+  // ledger, would refuse every later publication (#1030).
+  void ValidateCandidate() {
+    const auto& candidate = entries.back().manifest_;
+    using Geometry = std::array<std::uint64_t, 9>;
+    const auto each_reference = [](const DiskManifest& m, auto&& visit) {
+      for (const auto& c : m.components) {
+        const auto& d = c.descriptor;
+        Rows first = FirstChunkRow(d, c.position.valid_rows);
+        const auto geometry = [&](const DiskPayload& p) {
+          return Geometry{m.lineage.value, d.id.value,       d.layout_version,
+                          d.row_bytes,     d.rows_per_chunk, first,
+                          p.bytes,         p.checksum,       d.window_rows};
+        };
+        for (const auto& p : c.chunks) {
+          visit(false, p.file, geometry(p));
+          first = Add(first, d.rows_per_chunk);
+        }
+        for (auto p : {c.tail, c.private_state})
+          if (p)
+            visit(true, p->file, geometry(*p));
+      }
+    };
+    std::size_t references{};
+    for (const auto& c : candidate.components)
+      references = Add(references,
+                       c.chunks.size() + bool(c.tail) + bool(c.private_state));
+    using Claims = std::map<std::pair<bool, DiskFileId>, Geometry>;
+    // Map records plus tree links and allocator overhead per reference.
+    auto working =
+        ledger->Reserve(ResourceCategory::kMetadata,
+                        Multiply(references, sizeof(Claims::value_type) + 64));
+    Claims claims;
+    each_reference(candidate, [&](bool is_private, const DiskFileId& file,
+                                  const Geometry& geometry) {
+      auto [it, inserted] = claims.try_emplace({is_private, file}, geometry);
+      if (!inserted && (is_private || it->second != geometry))
+        Invalid();
+    });
+    for (std::size_t i = 0; i + 1 < entries.size(); ++i) {
+      const auto& m = entries[i].manifest_;
+      if (m.checkpoint == candidate.checkpoint)
+        Invalid();
+      const bool compatible = m.compatibility == candidate.compatibility;
+      each_reference(m, [&](bool is_private, const DiskFileId& file,
+                            const Geometry& geometry) {
+        auto it = claims.find({is_private, file});
+        if (it != claims.end() &&
+            (is_private || !compatible || it->second != geometry))
+          Invalid();
+      });
+    }
   }
   void Sync(platform::PlatformFile file) {
     auto begin = std::chrono::steady_clock::now();
@@ -1249,7 +1303,7 @@ struct DiskStore::Impl {
     entries.push_back(std::move(candidate));
     bool manifest_attempted{};
     try {
-      ValidateReferences(false);
+      ValidateCandidate();
       index_guard.unlock();
       // Candidate is invisible to pinned snapshots until committed. Reuse from
       // filesystem existence after validating claims, never from this

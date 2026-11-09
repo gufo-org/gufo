@@ -87,7 +87,8 @@ DeepSeek maps `minimal`/`low` to `low`, `medium`/`high`/`xhigh` to `high`,
 and `max` to `max`.
 The [functional suite](../../tests/functional/README.md) with
 `--suite sampling-defaults --sampling-preset qwen38` (or
-`deepseek4`) compares omitted and explicit settings, including C2 replay.
+`deepseek4`, or `provider` for a model with its own defaults) compares omitted
+and explicit settings, including C2 replay.
 
 Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
 [Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices),
@@ -161,8 +162,13 @@ the
 and [Qwen3.8 Flash-Next](../models/qwen3.8-flash-next.md) for the memory
 cost.
 
-Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
-between active decode rounds without changing a lone request's kernel policy.
+Each model chooses its prefill chunk. Beside decoders, a runner with a
+scheduling profile (every in-tree text model) keeps that width and splits each
+pass by layers, with a decode round between groups; a runner without one gets
+fixed 512-token passes. A lone request keeps the model's own pass width.
+`--prefill-chunk` is deprecated: it is accepted, ignored with a
+`event=deprecated_option` warning, and will be removed together with the
+512-token legacy path (#1028).
 
 Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
 hash and exact encoded-byte comparison under the preprocessing version and
@@ -1217,7 +1223,10 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable, or GPU context lost (`device_lost`)
+- `503` model or backend unavailable, GPU context lost (`device_lost`), or a
+  prompt whose host prompt-state bytes do not fit the admission budget
+  (`insufficient_memory`, with `error.required_bytes` and
+  `error.remaining_bytes` and the same values under `usage.gufo`)
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
@@ -1443,6 +1452,16 @@ even if the client disconnects before reading it; requests that fail in the
 scheduler, such as on a deadline or a runner error, add none of these.
 `llamacpp:kv_cache_usage_ratio` is the in-flight prompt and generated tokens
 over sessions times context; retained cache entries are not counted.
+`gufo_prompt_state_budget_bytes` is the host RAM prompt state may claim before
+admission refuses, `gufo_prompt_state_reserved_bytes` the bytes charged to
+in-flight requests, and `gufo_prompt_state_available_bytes` the remainder.
+The charge covers the deterministic KV rows a prompt writes. Qwen and
+Flash-Next also sample host headroom at each submission, after the 4 GiB reserve
+and cgroup limits, and use the smaller of this sample and the startup budget.
+Outstanding requests are subtracted conservatively, even if their rows have
+already committed. This can refuse a prompt that would reuse existing pages.
+The check does not reserve output-token growth, evict caches or recheck during
+generation; other allocations can still exhaust memory after admission.
 `Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`
 provide request-level measurements.
 
@@ -1480,6 +1499,19 @@ same text they add before generation. Nothing is tokenized, prefilled or
 cached. An image renders as its single placeholder, not its expanded visual
 tokens. `stream` is ignored, as in llama-server; template errors return 400
 as in Chat, and backends that cannot render a template as text return 501.
+
+`POST /tokenize` takes `{"content": "..."}` and returns `{"tokens": [...]}`,
+the loaded model's token IDs for raw text. Control-token spellings become their
+special tokens and nothing is prepended, as in `/completion` and llama-server's
+defaults (`add_special` false, `parse_special` true). Those two fields and
+`with_pieces` are accepted only at their defaults; other values return 400.
+Nothing is prefilled or cached. Backends that cannot tokenize return 501.
+
+Tokenizing an `/apply-template` result counts the rendered text as a raw
+prompt. It may differ from the Chat request's token count: literal control-token
+spellings in message content are preserved as text by Chat, and images expand
+to visual tokens. For the Chat count, send the original request to
+`/v1/chat/completions/input_tokens`.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed

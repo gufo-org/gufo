@@ -424,6 +424,25 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
 #endif
 }
 
+std::optional<InferenceBackend::PromptAdmissionBudget>
+InferenceBackend::prompt_admission_budget() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr)
+    return std::nullopt;
+  auto budget = state->scheduler->PromptAdmissionBudgetSnapshot();
+  if (!budget.has_value())
+    return std::nullopt;
+  return PromptAdmissionBudget{
+      .budget_bytes = budget->budget_bytes,
+      .used_bytes = budget->used_bytes,
+      .available_bytes = budget->available_bytes,
+  };
+#else
+  return std::nullopt;
+#endif
+}
+
 InferenceBackend::SamplingDefaults InferenceBackend::sampling_defaults() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
@@ -778,6 +797,20 @@ std::optional<std::string> InferenceBackend::render_chat_prompt(
   return state->scheduler->runner().RenderPrompt(effective_request);
 #else
   (void)request;
+  return std::nullopt;
+#endif
+}
+
+std::optional<std::vector<std::uint32_t>> InferenceBackend::tokenize(
+    std::string_view text) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  return state->scheduler->runner().Tokenize(text);
+#else
+  (void)text;
   return std::nullopt;
 #endif
 }

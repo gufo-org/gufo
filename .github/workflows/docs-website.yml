@@ -1,0 +1,47 @@
+name: Website docs
+
+# Ask the website to refresh its development docs from main whenever the public
+# pages change. Releases are synced separately by the release workflow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/*.md'
+      - 'docs/models/*.md'
+      - 'docs/figures/**'
+      - '!docs/AGENTS.md'
+      - '!docs/CLAUDE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-website
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    name: Request website development docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create website token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: website
+          permission-contents: write
+
+      - name: Send the pushed revision
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REVISION: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n --arg ref "$REVISION" \
+            '{event_type: "gufo-docs", client_payload: {ref: $ref}}' \
+            | gh api --method POST repos/gufo-org/website/dispatches --input -

@@ -111,6 +111,14 @@ if(ENGINE_ENABLE_HIP)
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
+  add_executable(ds4_dspark_verify_test dspark_verify_test.cpp)
+  target_link_libraries(ds4_dspark_verify_test PRIVATE gufo_deepseek_v4_flash_hip)
+  add_test(NAME ds4.dspark_verify COMMAND ds4_dspark_verify_test)
+  set_tests_properties(ds4.dspark_verify PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality;external-model"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_continuation_adapter_test continuation_adapter_test.cpp)
   target_link_libraries(ds4_continuation_adapter_test PRIVATE
     gufo_deepseek_v4_flash_hip gufo_cache_hip hip::host)

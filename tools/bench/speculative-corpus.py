@@ -113,16 +113,6 @@ def build_prompt_command(
 
     if speculative:
         command.extend(["--speculative", args.backend])
-        command.extend(["--draft-tokens", str(args.draft_tokens)])
-        if getattr(args, "draft_policy", None) is not None:
-            command.extend(["--draft-policy", args.draft_policy])
-        if args.backend != "dspark":
-            command.extend(
-                [
-                    "--min-draft-tokens",
-                    str(args.min_draft_tokens),
-                ]
-            )
         if args.backend == "dspark":
             option = "--dspark-model"
         elif args.backend == "dflash2":
@@ -370,10 +360,6 @@ def main() -> int:
         "--system-prompt",
         help="chat-mode system prompt; DSpark auto mode uses the upstream default",
     )
-    parser.add_argument("--draft-tokens", type=int, default=7)
-    parser.add_argument("--draft-policy", choices=("fixed", "adaptive"),
-                        help="DFlash2 controller; omitted uses the binary default")
-    parser.add_argument("--min-draft-tokens", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--quick", action="store_true")
@@ -404,16 +390,11 @@ def main() -> int:
         help="Free-form tag recorded in the JSON report",
     )
     args = parser.parse_args()
-    if args.draft_policy is not None and args.backend != "dflash2":
-        parser.error("--draft-policy requires a DFlash2 backend")
     if args.llama_binary and args.backend != "dflash2":
         parser.error("--llama-binary currently supports Qwen DFlash2 only")
 
     if (
         args.max_tokens <= 0
-        or args.draft_tokens <= 0
-        or args.min_draft_tokens <= 0
-        or args.min_draft_tokens > args.draft_tokens
         or args.repetitions <= 0
         or args.min_verification_steps < 0
     ):
@@ -689,7 +670,7 @@ def main() -> int:
                     "suite": str(args.suite),
                     "suite_hash": suite_hash,
                     "max_tokens": args.max_tokens,
-                    "draft_tokens": args.draft_tokens,
+                    "draft_settings_source": "model",
                     "cases": rows,
                     "aggregate": {
                         "prompts": len(prompts),

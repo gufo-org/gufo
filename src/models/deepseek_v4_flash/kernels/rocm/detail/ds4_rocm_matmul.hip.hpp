@@ -1251,7 +1251,7 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
         uint32_t                n_hc,
         const char             *label) {
   if (!out_hc || !block_out || !x || !residual_hc || !split || !model_map ||
-      in_dim == 0 || out_dim == 0 || n_embd == 0 || n_hc == 0 ||
+      in_dim == 0 || out_dim == 0 || n_embd == 0 || n_hc != 4u ||
       out_dim != (uint64_t)n_embd) {
     return 0;
   }
@@ -1274,7 +1274,6 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
 
     int8_t *xq = NULL;
     float *xscale = NULL;
-    const int use_dp4a = 1;
     if (x_q8) {
         if (!hip_q8_0_act(x_q8, 1u, blocks, &xq, &xscale)) return 0;
     } else if (!hip_quantize_q8_0_prequant(x, in_dim, blocks, 1u, &xq, &xscale)) {
@@ -1295,11 +1294,9 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
             in_dim,
             out_dim,
             n_embd,
-            n_hc,
             blocks,
             rows_per_block,
-            block_add ? 1 : 0,
-            use_dp4a);
+            block_add ? 1 : 0);
     return hip_ok(hipGetLastError(), "matmul_q8_0_hc_expand rows launch");
 }
 
@@ -1662,6 +1659,37 @@ static int hip_matmul_f16_f16_input_tensor(
     return st == HIPBLAS_STATUS_SUCCESS;
 }
 
+static int hip_matmul_f16_pair_each_row_as_decode(
+        ds4_gpu_tensor *out0,
+        ds4_gpu_tensor *out1,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight0_offset,
+        uint64_t weight1_offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t n_tok) {
+    for (uint64_t t = 0; t < n_tok; t++) {
+        ds4_gpu_tensor x_row = {
+            (void *)((char *)x->ptr + t * in_dim * sizeof(float)),
+            in_dim * sizeof(float), 0};
+        ds4_gpu_tensor out0_row = {
+            (void *)((char *)out0->ptr + t * out_dim * sizeof(float)),
+            out_dim * sizeof(float), 0};
+        ds4_gpu_tensor out1_row = {
+            (void *)((char *)out1->ptr + t * out_dim * sizeof(float)),
+            out_dim * sizeof(float), 0};
+        if (!ds4_gpu_matmul_f16_pair_tensor(&out0_row, &out1_row, model_map,
+                                            model_size, weight0_offset,
+                                            weight1_offset, in_dim, out_dim,
+                                            &x_row, 1u)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 extern "C" int ds4_gpu_matmul_f16_pair_tensor(
         ds4_gpu_tensor *out0,
         ds4_gpu_tensor *out1,
@@ -1678,29 +1706,10 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
       n_tok > UINT32_MAX) {
     return 0;
   }
-    if (n_tok >= 128u && g_hipblas_ready) {
-        /* One activation conversion for both weights. */
-        uint64_t x_bytes = 0, xh_bytes = 0;
-        if (hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) &&
-            hip_u64_mul3_checked(n_tok, in_dim, sizeof(__half), &xh_bytes) &&
-            x->bytes >= x_bytes) {
-          __half* xh =
-              (__half*)hip_tmp_alloc(xh_bytes, "f16 pair gemm activations");
-          if (xh) {
-            const uint64_t xh_count = n_tok * in_dim;
-            hip_launch_f32_to_f16(xh, (const float*)x->ptr, xh_count);
-            if (hip_ok(hipGetLastError(),
-                       "f16 pair activation convert launch") &&
-                hip_matmul_f16_f16_input_tensor(out0, model_map, model_size,
-                                                weight0_offset, in_dim, out_dim,
-                                                xh, xh_bytes, n_tok) &&
-                hip_matmul_f16_f16_input_tensor(out1, model_map, model_size,
-                                                weight1_offset, in_dim, out_dim,
-                                                xh, xh_bytes, n_tok)) {
-              return 1;
-            }
-          }
-        }
+    if (n_tok > 1u && n_tok <= ds4_rocm_dense_small_batch_rows()) {
+        return hip_matmul_f16_pair_each_row_as_decode(out0, out1, model_map, model_size,
+                                                      weight0_offset, weight1_offset,
+                                                      in_dim, out_dim, x, n_tok);
     }
     if (n_tok != 1) {
         return ds4_gpu_matmul_f16_tensor(out0, model_map, model_size, weight0_offset,

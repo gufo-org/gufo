@@ -40,16 +40,19 @@ Selection by preset: `gpu-fast` excludes `slow` and `external-model` tests,
 their documented local artifacts. A skip due to an absent model or device is
 not a quality pass.
 
-## PNG decoding
+## Rust components
 
-The Rust decoder uses the toolchain pinned in `rust-toolchain.toml`.
+Each Rust component is a crate in the Cargo workspace of the root
+`Cargo.toml`, with a small C ABI. The `gufo-rust` crate in `src/core/rust`
+links them into the one static library C++ links, so the standard library is
+linked once. The workspace uses the toolchain pinned in `rust-toolchain.toml`.
 `nix build .#checks.x86_64-linux.rust` checks rustfmt and clippy offline, and
 `nix flake check` includes it; the CMake `check-pr` target does not lint Rust.
 Outside Nix, run:
 
 ```sh
-cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
-cargo clippy --manifest-path src/core/png_decode/Cargo.toml --locked --all-targets -- -D warnings
+cargo fmt --all --check
+cargo clippy --workspace --locked --all-targets -- -D warnings
 ```
 
 CMake Debug builds use Cargo's development profile. RelWithDebInfo uses an
@@ -70,6 +73,16 @@ must match unless the case is in `kKnownDeviations`. It runs in `check-pr`.
 `png_decode_test --corpus DIR... [--repeat N]` runs the same comparison over
 the `.png` files under each directory and prints the median decode time of both
 decoders per file. CTest does not run this mode.
+
+`wav_decode_test` decodes generated WAVs with `core::DecodeWav`, under the
+limits and messages of each caller (server, Qwen3-ASR, Qwen3-TTS), and with
+frozen copies of the three C++ decoders from 0.32.0 in
+`tests/core/wav_reference.cpp`. The cases cover a grid of formats, sample
+widths, channel counts and sample rates, extreme sample values, chunk layouts,
+the length limits and 8,000 random mutations. The samples must match bit for
+bit, or the exception type and message must match. It runs in `check-pr`.
+`wav_decode_test --time [--repeat N]` prints the median decode time of both
+decoders for long inputs; CTest does not run this mode.
 
 ## Hosted versus local checks
 
