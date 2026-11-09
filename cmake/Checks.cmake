@@ -77,7 +77,7 @@ if (WIN32)
   # per-file fsync stress in component_text_cache_test.
   set(gufo_pr_linux_only
     gguf_reader_test gguf_identity_test platform_publish_test
-    platform_prefault_test trace_test http_server_signals_test
+    trace_test http_server_signals_test
     http_server_test audio_websocket_test
     component_text_cache_test eval_http_client_test cache_disk_faults_test
     cache_boundary_test sched_boundary_test cache_adapter_test cache_slot_test
