@@ -125,6 +125,11 @@ void CheckReleaseMappedPages(std::size_t page_size) {
   REQUIRE(ResidentPages(memory, bytes, page_size) == bytes / page_size);
   gufo::platform::ReleaseMappedPages(memory + 2 * page_size, page_size);
   REQUIRE(ResidentPages(memory, bytes, page_size) == bytes / page_size - 1);
+  // A range starting before the view: only its part inside the view.
+  const auto* before = reinterpret_cast<const void*>(
+      reinterpret_cast<std::uintptr_t>(memory) - page_size);
+  gufo::platform::ReleaseMappedRange(memory, bytes, before, 2 * page_size);
+  REQUIRE(ResidentPages(memory, bytes, page_size) == bytes / page_size - 2);
   REQUIRE(UnmapViewOfFile(memory));
   REQUIRE(CloseHandle(section));
   REQUIRE(CloseHandle(file));

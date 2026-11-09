@@ -152,7 +152,8 @@ inline void PrefaultMappedRange(const void* data, std::size_t bytes) {
 /// Windows keeps every touched page of a file view in the working set until
 /// memory runs out (#829). VirtualUnlock on pages that are not locked removes
 /// them from the working set; they stay in the standby list, so a later read
-/// is a soft fault. The range must lie within one view.
+/// is a soft fault. Pages locked with VirtualLock are unlocked instead. The
+/// range must lie within one view.
 inline void ReleaseMappedPages(const void* data, std::size_t bytes) noexcept {
 #if !defined(__HIP_DEVICE_COMPILE__) && !defined(_WIN32)
   const long page_size = ::sysconf(_SC_PAGESIZE);
@@ -188,10 +189,14 @@ inline void ReleaseMappedRange(const void* view, std::size_t view_bytes,
     return;
   const auto base = reinterpret_cast<std::uintptr_t>(view);
   const auto address = reinterpret_cast<std::uintptr_t>(data);
-  if (address < base || address - base >= view_bytes)
+  const std::size_t skip = address < base ? base - address : 0;
+  if (skip >= bytes)
     return;
-  const std::size_t offset = address - base;
-  ReleaseMappedPages(data, std::min(bytes, view_bytes - offset));
+  const std::size_t offset = address + skip - base;
+  if (offset >= view_bytes)
+    return;
+  ReleaseMappedPages(reinterpret_cast<const void*>(address + skip),
+                     std::min(bytes - skip, view_bytes - offset));
 }
 
 }  // namespace gufo::platform
