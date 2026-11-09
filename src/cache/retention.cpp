@@ -586,11 +586,12 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       r.new_payload_bytes > limits.ram_bytes)
     return refuse(RetentionReason::kByteCapacity);
   // ReserveSnapshot's optional-role record guard precedes its exact-match
-  // search. Republishing an exact boundary cannot bypass that guard and
-  // downgrade an inferred continuation branch to history/retry.
+  // search. Republishing an exact boundary still needs an eligible victim.
   if (size_ == limit_ && !Continuation(r.purpose) && Victim(r, true) == limit_)
     return refuse(RetentionReason::kRecordCapacity);
-  // Exact replacement keeps learned status even if capture later needs space.
+  // Exact replacement keeps explicit and inferred branch status even if
+  // capture later needs space. A stale unrelated victim can permit optional
+  // admission without making the exact match safe to downgrade.
   std::size_t exact = limit_;
   for (std::size_t i = 0; i < limit_; ++i) {
     const auto& e = records_[i];
@@ -598,7 +599,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
         e.checkpoint->Input() == r.input &&
         std::ranges::equal(e.checkpoint->Tokens(), r.tokens)) {
       exact = i;
-      if (e.purpose == RetentionPurpose::kBranchPoint)
+      if (e.purpose == RetentionPurpose::kBranchPoint || Branch(i))
         purpose = RetentionPurpose::kBranchPoint;
       break;
     }
