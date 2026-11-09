@@ -138,6 +138,71 @@ SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
   return {scratch.ssm.alpha.data(), scratch.ssm.beta.data(), time_step_rank};
 }
 
+// MALL weight preload. Each layer has windows where the main stream runs only
+// small kernels that read no weights: the SSM controls, convolution and
+// recurrence of a GDN layer; the head norms, RoPE, KV write and reader of an
+// attention layer; the residual add and RMSNorm before the FFN and before the
+// next layer. DRAM idles there. At a window start, a side stream reads the
+// head of the weight whose GEMV ends the window, so those lines are in the
+// 32 MB MALL when the GEMV starts. The side stream is never joined and writes
+// only a private sink, so the main stream runs the same kernels on the same
+// inputs in the same order: the output is bitwise unchanged.
+constexpr std::size_t kMiB = std::size_t{1} << 20;
+// ssm_out / attn_output: the long windows. Measured best of 12 and 24 MiB.
+constexpr std::size_t kWindowPreloadBytes = 12 * kMiB;
+// attn_output in the token batch: the attention reader of up to eight
+// sessions streams its KV cache through the MALL beside the preload.
+constexpr std::size_t kTokenBatchAttnOutputPreloadBytes = 9 * kMiB;
+// ffn_gate and the next layer's input GEMV: the short add + norm windows.
+// Measured best of 2, 4 and 6 MiB.
+constexpr std::size_t kShortWindowPreloadBytes = 4 * kMiB;
+
+struct MallPreloadStream {
+  hipStream_t stream{};
+  hipEvent_t fork{};
+};
+
+// One side stream and one fork event per process, kept for its
+// lifetime. Threads forking at once can only move when a preload starts,
+// never what the model computes.
+const MallPreloadStream& GetMallPreloadStream() {
+  static const MallPreloadStream side = [] {
+    MallPreloadStream made;
+    int least = 0;
+    int greatest = 0;
+    HIP_CHECK(hipDeviceGetStreamPriorityRange(&least, &greatest));
+    // On the main stream's hardware queue the preload would run in order with
+    // the GEMVs instead of beside them. The runtime gives a new stream the
+    // least-used of the GPU_MAX_HW_QUEUES queues, and the main stream's queue
+    // already carries the streams made at load. A runtime that pools queues
+    // per priority gives the least priority a queue of its own; ROCm 10.1
+    // picks from the shared pool and adds no hardware queue.
+    HIP_CHECK(
+        hipStreamCreateWithPriority(&made.stream, hipStreamNonBlocking, least));
+    // The side stream reads only immutable weights, so its fork needs no
+    // system-scope release.
+    HIP_CHECK(hipEventCreateWithFlags(
+        &made.fork, hipEventDisableTiming | hipEventDisableSystemFence));
+    return made;
+  }();
+  return side;
+}
+
+// Starts the preload of the first `cap` bytes of `weight` once `main` has
+// reached this point.
+void PreloadWeightHead(const models::QwenTensorRef& weight, std::size_t cap,
+                       hipStream_t main) {
+  const std::size_t bytes =
+      std::min({cap, weight.EncodedSizeBytes(), weight.available_bytes}) &
+      ~std::size_t{15};
+  if (bytes == 0 || reinterpret_cast<std::uintptr_t>(weight.data) % 16 != 0)
+    return;
+  const auto& side = GetMallPreloadStream();
+  HIP_CHECK(hipEventRecord(side.fork, main));
+  HIP_CHECK(hipStreamWaitEvent(side.stream, side.fork, 0));
+  LaunchMallPreload(weight.data, bytes, side.stream);
+}
+
 }  // namespace
 
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
@@ -271,6 +336,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       LaunchProjection(layer.attn_v, scratch.decode.normed.data(),
                        scratch.attention.v.data(), batch_size, kv_size,
                        hidden_size, arena.stream);
+      PreloadWeightHead(layer.attn_output, kTokenBatchAttnOutputPreloadBytes,
+                        arena.stream);
       LaunchBatchedUnpackQG(scratch.ssm.qkv.data(), scratch.attention.q.data(),
                             scratch.ssm.gate.data(), batch_size,
                             config.num_attention_heads, config.head_dim,
@@ -332,6 +399,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
                        hidden_size, arena.stream);
+      PreloadWeightHead(layer.ssm_out, kWindowPreloadBytes, arena.stream);
       const auto controls =
           LaunchSsmControls(layer, scratch, batch_size, time_step_rank,
                             hidden_size, arena.stream);
@@ -355,6 +423,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                        ssm_inner_size, arena.stream);
     }
 
+    PreloadWeightHead(layer.ffn_gate, kShortWindowPreloadBytes, arena.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.attention.output.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
@@ -368,6 +437,11 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena.stream);
+    if (layer_index + 1 < config.num_layers) {
+      const auto& next = weights.layers[layer_index + 1];
+      PreloadWeightHead(next.is_full_attention ? next.attn_q : next.attn_qkv,
+                        kShortWindowPreloadBytes, arena.stream);
+    }
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
@@ -606,6 +680,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
       LaunchProjection(layer.attn_v, scratch.decode.normed.data(),
                        scratch.attention.v.data(), batch_size, kv_size,
                        hidden_size, arena_.stream);
+      PreloadWeightHead(layer.attn_output, kWindowPreloadBytes, arena_.stream);
       LaunchBatchedUnpackQG(scratch.ssm.qkv.data(), scratch.attention.q.data(),
                             scratch.ssm.gate.data(), batch_size,
                             config.num_attention_heads, config.head_dim,
@@ -738,6 +813,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
                        hidden_size, arena_.stream);
+      PreloadWeightHead(layer.ssm_out, kWindowPreloadBytes, arena_.stream);
       const auto controls =
           LaunchSsmControls(layer, scratch, batch_size, time_step_rank,
                             hidden_size, arena_.stream);
@@ -760,6 +836,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
                        ssm_inner_size, arena_.stream);
     }
 
+    PreloadWeightHead(layer.ffn_gate, kShortWindowPreloadBytes, arena_.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.attention.output.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
@@ -773,6 +850,11 @@ QwenGpuExecutor::ForwardVerificationBatch(
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena_.stream);
+    if (layer_index + 1 < config.num_layers) {
+      const auto& next = weights_.layers[layer_index + 1];
+      PreloadWeightHead(next.is_full_attention ? next.attn_q : next.attn_qkv,
+                        kShortWindowPreloadBytes, arena_.stream);
+    }
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
