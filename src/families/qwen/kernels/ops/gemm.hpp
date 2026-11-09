@@ -304,6 +304,13 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
                                        std::size_t K,
                                        hipStream_t stream = nullptr);
 
+/// Reads the first `bytes` of `weight` (16-byte aligned, `bytes` a multiple of
+/// 16) with ordinary loads so the lines allocate in the MALL, and writes
+/// nothing a caller reads. Meant for a side stream: a GEMV that later reads
+/// the same weight on another stream finds those lines in the MALL.
+void LaunchMallPreload(const void* weight, std::size_t bytes,
+                       hipStream_t stream);
+
 /// Converts float buffer to bfloat16 buffer on GPU
 void LaunchFloatToBfloat16(const float* in, void* out, std::size_t num_elements,
                            hipStream_t stream = nullptr);

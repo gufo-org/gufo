@@ -16,6 +16,7 @@ add_library(gufo_qwen_kernels STATIC
   gemv_quant.hip
   hipblas_gemm.hip
   hipblaslt_gemm.hip
+  mall_preload.hip
   norm.hip
   prefill_embed.hip
   prefill_fp16.hip
