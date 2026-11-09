@@ -1343,11 +1343,12 @@ bool Executor::CalibrateDecodeOverlap(std::string* error_msg) {
                        hipMemcpyHostToDevice),
              "overlap calibration input", error_msg))
     return false;
-  // Eager passes keep the joins' cost (Windows/TheRock 10.0: 9.8 ms serial,
-  // 12.7 ms overlapped; graph replays 8.9 and 12.9 ms). Capturing a graph
-  // this early instead left that process's decode about 0.7% slower.
-  // Alternate the layouts and keep each one's fastest pass; the first round
-  // grows the GEMM tier's arena and is not timed.
+  // Time eager passes, not graph replays. The fork/join cost shows up in eager
+  // passes too, so they rank the layouts the same way (Windows/TheRock 10.0:
+  // eager 9.8 ms serial vs 12.7 ms overlapped, replays 8.9 vs 12.9 ms).
+  // Capturing a graph this early instead left that process's decode about
+  // 0.7% slower. Alternate the layouts and keep each one's fastest pass; the
+  // first round grows the GEMM tier's arena and is not timed.
   const auto dispatch = SavedDispatch();
   double best[2] = {std::numeric_limits<double>::infinity(),
                     std::numeric_limits<double>::infinity()};
@@ -1356,6 +1357,10 @@ bool Executor::CalibrateDecodeOverlap(std::string* error_msg) {
       decode_overlap_ = layout == 1;
       const auto start = std::chrono::steady_clock::now();
       for (const auto& l : layers) {
+        // In decode the HC mixer rewrites each layer's MoE input, which
+        // invalidates the converted-input caches. Clear them here too, so
+        // every layer converts its input instead of reusing the previous
+        // layer's copy of the same s_.mixed.
         DropReadyQ8();
         q8t_src_ = nullptr;
         half_src_ = nullptr;
@@ -1372,6 +1377,8 @@ bool Executor::CalibrateDecodeOverlap(std::string* error_msg) {
     }
   }
   DispatchState() = dispatch;
+  // A tie keeps the serial layout. The layouts' outputs are identical, so
+  // either choice changes only speed.
   decode_overlap_ = best[1] < best[0];
   return true;
 }
