@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 #include "src/families/qwen/hip_common/quant_ops.hpp"
 #include "src/families/qwen/kernels/dflash_kernels.hpp"
@@ -1488,6 +1489,304 @@ void LaunchDSpineChain(const float* table, const std::uint32_t* ids,
   dspine_chain_kernel<<<1, 32, 0, stream>>>(
       table, ids, rows, top_k, temperature, uniforms, tokens, confidences,
       candidate_ids, candidate_probabilities);
+}
+
+// DSpine draft attention in three phases (commit 3). The wave kernel above
+// gives every (block row, head pair) its own CTA, and each CTA reads its KV
+// head's whole window: at 16 rows and a 4k context that is 256 CTAs x 4 MB.
+// Here the scores are split over KEYS (each K row is read once per KV head
+// and held in registers while all rows x heads of that KV head reuse it), the
+// softmax runs one 256-thread CTA per four score rows on a global score array,
+// and PV is split over DIM. Ported from our gufo fork's GUFO_DEV_DRAFTK=2
+// route (0a1521c1) with the causal block mask and partial PV groups added.
+// Every float chain stays in one thread in the wave kernel's order (the
+// per-lane K float4 dot and xor butterfly, the strided 256-thread softmax
+// partials and LDS tree, the ascending-key PV sum with the same 32-key
+// prefetch), so the output equals the causal wave route bitwise.
+// Scores are laid out [block row * num_q_heads + head][total_k].
+
+/// `KRegs` = ceil(head_dim / 4 / 32), the K float4s one lane keeps; a
+/// template parameter because a runtime-indexed local array is promoted to LDS.
+template<uint32_t KRegs>
+__global__ __launch_bounds__(256) void dspine_attention_scores_kernel(
+    const float* __restrict__ q, const float* __restrict__ injected_k,
+    const float* __restrict__ block_k, float* __restrict__ scores,
+    uint32_t current_pos, uint32_t history_start, uint32_t history_count,
+    uint32_t block_count, uint32_t sliding_window, uint32_t num_q_heads,
+    uint32_t num_kv_heads, uint32_t head_dim, float scale,
+    uint32_t history_capacity, uint32_t keys_per_block) {
+  const uint32_t kv_h = blockIdx.y;
+  const uint32_t heads_per_kv = num_q_heads / num_kv_heads;
+  const uint32_t q_dim = num_q_heads * head_dim,
+                 kv_dim = num_kv_heads * head_dim;
+  const uint32_t total_k = history_count + block_count;
+  const uint32_t num_vec = head_dim / 4U, lane = threadIdx.x & 31U,
+                 wave = threadIdx.x >> 5U, waves = blockDim.x >> 5U;
+  const uint32_t key_begin = blockIdx.x * keys_per_block;
+  const uint32_t key_limit = key_begin + keys_per_block;
+  const uint32_t key_end = key_limit < total_k ? key_limit : total_k;
+
+  for (uint32_t key = key_begin + wave; key < key_end; key += waves) {
+    const bool in_block = key >= history_count;
+    const uint32_t block_index = in_block ? key - history_count : 0U;
+    const uint32_t key_position =
+        in_block ? current_pos + block_index : history_start + key;
+    const float4* source =
+        in_block ? reinterpret_cast<const float4*>(
+                       block_k + uint64_t(block_index) * kv_dim +
+                       uint64_t(kv_h) * head_dim)
+                 : reinterpret_cast<const float4*>(
+                       injected_k +
+                       uint64_t(key_position % history_capacity) * kv_dim +
+                       uint64_t(kv_h) * head_dim);
+    float4 held[KRegs];
+#pragma unroll
+    for (uint32_t i = 0; i < KRegs; ++i) {
+      const uint32_t d = lane + (i * 32U);
+      if (d < num_vec)
+        held[i] = source[d];
+    }
+    for (uint32_t row = 0; row < block_count; ++row) {
+      const uint32_t query_position = current_pos + row;
+      bool visible;
+      if (in_block) {
+        const uint32_t distance = query_position > key_position
+                                      ? query_position - key_position
+                                      : key_position - query_position;
+        visible = distance < sliding_window && block_index <= row;
+      } else {
+        visible = query_position - key_position < sliding_window;
+      }
+      const float4* q_vec = reinterpret_cast<const float4*>(
+          q + uint64_t(row) * q_dim + uint64_t(kv_h * heads_per_kv) * head_dim);
+      float* out_row =
+          scores +
+          (uint64_t(row) * num_q_heads + (kv_h * heads_per_kv)) * total_k + key;
+      for (uint32_t r = 0; r < heads_per_kv; ++r) {
+        float dot = 0.f;
+#pragma unroll
+        for (uint32_t i = 0; i < KRegs; ++i) {
+          const uint32_t d = lane + (i * 32U);
+          if (d >= num_vec)
+            break;
+          const float4 kv = held[i];
+          const float4 qv = q_vec[d];
+          dot += (qv.x * kv.x) + (qv.y * kv.y) + (qv.z * kv.z) + (qv.w * kv.w);
+        }
+        for (int offset = 16; offset > 0; offset >>= 1)
+          dot += __shfl_xor(dot, offset);
+        if (lane == 0)
+          *out_row = visible ? dot * scale : -1e20F;
+        q_vec += num_vec;
+        out_row += total_k;
+      }
+    }
+  }
+}
+
+/// The wave kernel's exact softmax, on `Combos` score rows per CTA. The
+/// strided partials and the LDS tree pin blockDim.x at 256.
+template<uint32_t Combos>
+__global__ __launch_bounds__(256) void dspine_attention_softmax_kernel(
+    float* __restrict__ scores, uint32_t total_k, uint32_t num_q_heads) {
+  __shared__ float reduce[Combos][256];
+  float* row[Combos];
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    row[c] = scores +
+             (uint64_t(blockIdx.x) * num_q_heads + (blockIdx.y * Combos) + c) *
+                 total_k;
+  float maxima[Combos];
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    maxima[c] = -1e20F;
+  for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
+#pragma unroll
+    for (unsigned c = 0; c < Combos; ++c)
+      maxima[c] = fmaxf(maxima[c], row[c][p]);
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    reduce[c][threadIdx.x] = maxima[c];
+  __syncthreads();
+  for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
+    if (threadIdx.x < stride) {
+#pragma unroll
+      for (unsigned c = 0; c < Combos; ++c)
+        reduce[c][threadIdx.x] =
+            fmaxf(reduce[c][threadIdx.x], reduce[c][threadIdx.x + stride]);
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    maxima[c] = reduce[c][0];
+  __syncthreads();
+  float sums[Combos] = {};
+  for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
+#pragma unroll
+    for (unsigned c = 0; c < Combos; ++c) {
+      const float e = expf(row[c][p] - maxima[c]);
+      row[c][p] = e;
+      sums[c] += e;
+    }
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    reduce[c][threadIdx.x] = sums[c];
+  __syncthreads();
+  for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
+    if (threadIdx.x < stride) {
+#pragma unroll
+      for (unsigned c = 0; c < Combos; ++c)
+        reduce[c][threadIdx.x] += reduce[c][threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    sums[c] = 1.f / (reduce[c][0] + 1e-9F);
+  __syncthreads();
+  for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
+#pragma unroll
+    for (unsigned c = 0; c < Combos; ++c)
+      row[c][p] *= sums[c];
+  }
+}
+
+/// PV over one KV head: grid (combo groups, dim tiles, kv heads). A wave owns
+/// one 32-wide dim tile and `Accumulators` combos (block row x head of this KV
+/// head); combos past the end of the last group compute nothing they store.
+template<uint32_t Accumulators>
+__global__ __launch_bounds__(256) void dspine_attention_pv_kernel(
+    const float* __restrict__ injected_v, const float* __restrict__ block_v,
+    const float* __restrict__ scores, float* __restrict__ out,
+    uint32_t history_start, uint32_t history_count, uint32_t block_count,
+    uint32_t num_q_heads, uint32_t num_kv_heads, uint32_t head_dim,
+    uint32_t history_capacity) {
+  constexpr uint32_t kPrefetch = 32;
+  constexpr uint32_t kDimTile = 32;
+  const uint32_t kv_h = blockIdx.z;
+  const uint32_t heads_per_kv = num_q_heads / num_kv_heads;
+  const uint32_t q_dim = num_q_heads * head_dim,
+                 kv_dim = num_kv_heads * head_dim;
+  const uint32_t total_k = history_count + block_count;
+  const uint32_t combos = block_count * heads_per_kv;
+  const uint32_t lane = threadIdx.x & 31U, wave = threadIdx.x >> 5U,
+                 waves = blockDim.x >> 5U;
+  const uint32_t d = (blockIdx.y * kDimTile) + lane;
+  const uint32_t combo_base = (blockIdx.x * waves * Accumulators) + wave;
+
+  const float* srow[Accumulators];
+#pragma unroll
+  for (unsigned j = 0; j < Accumulators; ++j) {
+    const uint32_t combo = min(combo_base + (j * waves), combos - 1U);
+    const uint32_t row = combo / heads_per_kv;
+    const uint32_t head = (kv_h * heads_per_kv) + (combo % heads_per_kv);
+    srow[j] = scores + (uint64_t(row) * num_q_heads + head) * total_k;
+  }
+  float acc[Accumulators] = {};
+  uint32_t slot = history_count > 0 ? history_start % history_capacity : 0;
+  const float* vbase = injected_v + (uint64_t(kv_h) * head_dim) + d;
+  uint32_t local = 0;
+  for (; history_count - local >= kPrefetch; local += kPrefetch) {
+    float values[kPrefetch];
+#pragma unroll
+    for (unsigned i = 0; i < kPrefetch; ++i) {
+      values[i] = vbase[uint64_t(slot) * kv_dim];
+      slot = slot + 1 == history_capacity ? 0 : slot + 1;
+    }
+#pragma unroll
+    for (unsigned i = 0; i < kPrefetch; ++i) {
+#pragma unroll
+      for (unsigned j = 0; j < Accumulators; ++j)
+        acc[j] += srow[j][local + i] * values[i];
+    }
+  }
+  for (; local < history_count; ++local) {
+    const float value = vbase[uint64_t(slot) * kv_dim];
+#pragma unroll
+    for (unsigned j = 0; j < Accumulators; ++j)
+      acc[j] += srow[j][local] * value;
+    slot = slot + 1 == history_capacity ? 0 : slot + 1;
+  }
+  for (uint32_t p = 0; p < block_count; ++p) {
+    const float value =
+        block_v[uint64_t(p) * kv_dim + uint64_t(kv_h) * head_dim + d];
+#pragma unroll
+    for (unsigned j = 0; j < Accumulators; ++j)
+      acc[j] += srow[j][history_count + p] * value;
+  }
+#pragma unroll
+  for (unsigned j = 0; j < Accumulators; ++j) {
+    const uint32_t combo = combo_base + (j * waves);
+    if (combo >= combos)
+      continue;
+    const uint32_t row = combo / heads_per_kv;
+    const uint32_t head = (kv_h * heads_per_kv) + (combo % heads_per_kv);
+    out[(uint64_t(row) * q_dim) + (uint64_t(head) * head_dim) + d] = acc[j];
+  }
+}
+
+std::size_t DSpineAttentionScoreElements(std::uint32_t block_count,
+                                         std::uint32_t num_q_heads,
+                                         std::uint32_t history_capacity) {
+  return static_cast<std::size_t>(block_count) * num_q_heads *
+         (static_cast<std::size_t>(history_capacity) + block_count);
+}
+
+bool LaunchDSpineAttention(
+    const float* q, const float* injected_k, const float* injected_v,
+    const float* block_k, const float* block_v, float* out,
+    std::uint32_t current_pos, std::uint32_t history_length,
+    std::uint32_t block_count, std::uint32_t sliding_window,
+    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity, float* scores) {
+  // The softmax tree pins 256 threads; a wave reads one 32-float V line.
+  constexpr std::uint32_t kThreads = 256, kWaves = kThreads / 32U;
+  constexpr std::uint32_t kDimTile = 32, kCombos = 4, kAccumulators = 2;
+  constexpr std::uint32_t kTargetCtas = 160;  // 40 CUs, a little over 4x
+  if (scores == nullptr || block_count == 0 || num_kv_heads == 0 ||
+      num_q_heads % num_kv_heads != 0 || num_q_heads % kCombos != 0 ||
+      head_dim % kDimTile != 0 || head_dim / 4U > 32U * 4U)
+    return false;
+  const std::uint32_t history_start = current_pos + 1U > sliding_window
+                                          ? current_pos + 1U - sliding_window
+                                          : 0U;
+  const std::uint32_t history_count =
+      history_length > history_start ? history_length - history_start : 0U;
+  if (history_count > history_capacity)
+    return false;
+  const std::uint32_t total_k = history_count + block_count;
+  const std::uint32_t splits = (kTargetCtas + num_kv_heads - 1U) / num_kv_heads;
+  std::uint32_t keys_per_block = (total_k + splits - 1U) / splits;
+  keys_per_block = (keys_per_block + kWaves - 1U) / kWaves * kWaves;
+  const std::uint32_t score_blocks =
+      (total_k + keys_per_block - 1U) / keys_per_block;
+  const auto launch_scores = [&](auto regs) {
+    dspine_attention_scores_kernel<decltype(regs)::value>
+        <<<dim3(score_blocks, num_kv_heads), kThreads, 0, stream>>>(
+            q, injected_k, block_k, scores, current_pos, history_start,
+            history_count, block_count, sliding_window, num_q_heads,
+            num_kv_heads, head_dim, scale, history_capacity, keys_per_block);
+  };
+  if (head_dim / 4U <= 32U)
+    launch_scores(std::integral_constant<std::uint32_t, 1U>{});
+  else
+    launch_scores(std::integral_constant<std::uint32_t, 4U>{});
+  dspine_attention_softmax_kernel<kCombos>
+      <<<dim3(block_count, num_q_heads / kCombos), kThreads, 0, stream>>>(
+          scores, total_k, num_q_heads);
+  const std::uint32_t combos = block_count * (num_q_heads / num_kv_heads);
+  const std::uint32_t per_group = kWaves * kAccumulators;
+  dspine_attention_pv_kernel<kAccumulators>
+      <<<dim3((combos + per_group - 1U) / per_group, head_dim / kDimTile,
+              num_kv_heads),
+         kThreads, 0, stream>>>(injected_v, block_v, scores, out, history_start,
+                                history_count, block_count, num_q_heads,
+                                num_kv_heads, head_dim, history_capacity);
+  return true;
 }
 
 }  // namespace gufo::hip::kernels

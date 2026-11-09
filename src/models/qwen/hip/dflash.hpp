@@ -328,6 +328,8 @@ private:
   float* d_dspine_delta_{nullptr};
   float* d_dspine_heads_{nullptr};
   float* d_dspine_table_{nullptr};
+  /// Split draft attention scores, [block row x head][history + block].
+  float* d_dspine_scores_{nullptr};
   std::size_t scratch_bytes_{0};
   void* d_batch_scratch_{nullptr};
   std::size_t batch_scratch_bytes_{0};

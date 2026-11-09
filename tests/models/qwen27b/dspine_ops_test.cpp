@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <numeric>
 #include <random>
 #include <vector>
@@ -455,6 +456,29 @@ void TestCausalAttention(std::mt19937& rng) {
     const auto prefix = Download(d_out, 8 * heads * dim);
     const bool same = std::equal(prefix.begin(), prefix.end(), full.begin());
     Expect(same, "causal rows 0..7: 8-row block == 16-row block", same ? 0 : 1);
+    // The split route (commit 3) must give the wave route's bits, also for a
+    // block whose last PV group is partial (6 rows x 4 heads = 24 combos).
+    auto* d_scores = Upload(std::vector<float>(
+        DSpineAttentionScoreElements(kRows, heads, capacity), 0.0F));
+    for (const std::uint32_t rows : {kRows, 6U}) {
+      LaunchDFlashNonCausalAttention(
+          d_q, d_hk, d_hv, d_bk, d_bv, d_out, position, position, rows, window,
+          heads, kv_heads, dim, scale, nullptr, capacity, true);
+      const auto wave = Download(d_out, std::size_t{rows} * heads * dim);
+      HIP_OK(hipMemset(d_out, 0, q.size() * sizeof(float)));
+      const bool launched = LaunchDSpineAttention(
+          d_q, d_hk, d_hv, d_bk, d_bv, d_out, position, position, rows, window,
+          heads, kv_heads, dim, scale, nullptr, capacity, d_scores);
+      const auto split = Download(d_out, std::size_t{rows} * heads * dim);
+      std::size_t differ = 0;
+      for (std::size_t i = 0; i < split.size(); ++i)
+        differ += std::memcmp(&split[i], &wave[i], sizeof(float)) != 0;
+      Expect(launched && differ == 0,
+             rows == kRows ? "split attention == wave route, bitwise, 16 rows"
+                           : "split attention == wave route, bitwise, 6 rows",
+             double(differ));
+    }
+    HIP_OK(hipFree(d_scores));
     for (auto* pointer : {d_q, d_bk, d_bv, d_hk, d_hv, d_out})
       HIP_OK(hipFree(pointer));
   }

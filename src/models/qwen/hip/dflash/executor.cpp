@@ -93,6 +93,10 @@ std::size_t DraftTableBytes(const QwenDFlashGpuModel& model) {
 
 /// Matches Tencent's eps (dspine.py) and gufo's RMSNorm eps.
 constexpr float kDSpineEps = 1e-6F;
+/// Context length from which DSpine's draft attention takes the split route
+/// (LaunchDSpineAttention); both routes give the same bits. On gfx1151 the
+/// split route is faster from 2048 at 4 to 16 rows, the wave kernel at 1024.
+constexpr std::uint32_t kDSpineSplitAttentionContext = 2048;
 
 /// Elements of each DSpine scratch buffer, in the order of dflash.hpp's
 /// d_dspine_* members; all zero for DFlash-2.
@@ -375,6 +379,10 @@ void QwenDFlashGpuExecutor::Allocate() {
     take(d_dspine_delta_);
     take(d_dspine_heads_);
     take(d_dspine_table_);
+    allocate_scratch(d_dspine_scores_,
+                     kernels::DSpineAttentionScoreElements(
+                         static_cast<std::uint32_t>(block_size),
+                         cfg.num_attention_heads, history_capacity_));
   }
   if (model_->DraftPrefixRows() != 0) {
     allocate_scratch(d_draft_rows_, kDraftRows * model_->DraftRowBytes());
@@ -673,6 +681,8 @@ void QwenDFlashGpuExecutor::Free() noexcept {
     (void)hipFree(d_draft_logits_);
   if (d_dspine_scratch_ != nullptr)
     (void)hipFree(d_dspine_scratch_);
+  if (d_dspine_scores_ != nullptr)
+    (void)hipFree(d_dspine_scores_);
   if (d_batch_scratch_ != nullptr)
     (void)hipFree(d_batch_scratch_);
   hipblaslt_gemm_.reset();
@@ -739,6 +749,12 @@ QwenGpuMemoryUsage QwenDFlashGpuExecutor::EstimateMemoryUsage(
   const auto dspine = DSpineScratchElements(model);
   usage.temporary_scratch_bytes +=
       std::reduce(dspine.begin(), dspine.end()) * sizeof(float);
+  if (model.IsDSpine())
+    usage.temporary_scratch_bytes +=
+        kernels::DSpineAttentionScoreElements(
+            draft.block_size, config.num_attention_heads,
+            std::min(max_context, draft.sliding_window)) *
+        sizeof(float);
   // DSpine drafts each session alone (ProposeEach): no batch workspace.
   if (max_batch_width > 1 && config.head_dim <= 256 && !model.IsDSpine())
     usage.temporary_scratch_bytes += BatchScratchBytes(
@@ -1321,14 +1337,24 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     emit("k", d_k_block_, kv_dim);
     emit("v", d_v_block_, kv_dim);
 
-    kernels::LaunchDFlashNonCausalAttention(
-        d_q_, d_injected_k_[i], d_injected_v_[i], d_k_block_, d_v_block_,
-        d_attn_out_, current_pos, std::min(current_pos, injected_context_len_),
-        block_count, df_cfg.sliding_window,
-        static_cast<std::uint32_t>(num_q_heads),
-        static_cast<std::uint32_t>(num_kv_heads),
-        static_cast<std::uint32_t>(head_dim), scale, stream_, history_capacity_,
-        df_cfg.causal);
+    // A long context reads the K/V window once per KV head instead of once
+    // per (row, head pair): same bits, fewer bytes.
+    const std::uint32_t history = std::min(current_pos, injected_context_len_);
+    if (!dspine || current_pos < kDSpineSplitAttentionContext ||
+        !kernels::LaunchDSpineAttention(
+            d_q_, d_injected_k_[i], d_injected_v_[i], d_k_block_, d_v_block_,
+            d_attn_out_, current_pos, history, block_count,
+            df_cfg.sliding_window, static_cast<std::uint32_t>(num_q_heads),
+            static_cast<std::uint32_t>(num_kv_heads),
+            static_cast<std::uint32_t>(head_dim), scale, stream_,
+            history_capacity_, d_dspine_scores_))
+      kernels::LaunchDFlashNonCausalAttention(
+          d_q_, d_injected_k_[i], d_injected_v_[i], d_k_block_, d_v_block_,
+          d_attn_out_, current_pos, history, block_count, df_cfg.sliding_window,
+          static_cast<std::uint32_t>(num_q_heads),
+          static_cast<std::uint32_t>(num_kv_heads),
+          static_cast<std::uint32_t>(head_dim), scale, stream_,
+          history_capacity_, df_cfg.causal);
     emit("attention", d_attn_out_, q_dim);
 
     RunBlockGemm(layer.attn_output, d_attn_out_, d_fused_features_, block_count,

@@ -181,6 +181,23 @@ void LaunchDSpineChain(const float* table, const std::uint32_t* ids,
                        std::uint32_t* candidate_ids,
                        float* candidate_probabilities, hipStream_t stream);
 
+/// DSpine's split draft attention: scores over keys (each K row read once per
+/// KV head), softmax on a global score array, PV over dim. Bitwise equal to
+/// LaunchDFlashNonCausalAttention(..., causal = true). `scores` holds
+/// DSpineAttentionScoreElements(block_count, num_q_heads, history_capacity)
+/// floats. Returns false (nothing launched) for an unsupported shape.
+std::size_t DSpineAttentionScoreElements(std::uint32_t block_count,
+                                         std::uint32_t num_q_heads,
+                                         std::uint32_t history_capacity);
+bool LaunchDSpineAttention(
+    const float* q, const float* injected_k, const float* injected_v,
+    const float* block_k, const float* block_v, float* out,
+    std::uint32_t current_pos, std::uint32_t history_length,
+    std::uint32_t block_count, std::uint32_t sliding_window,
+    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity, float* scores);
+
 }  // namespace gufo::hip::kernels
 #endif  // defined(ENGINE_ENABLE_HIP)
 
