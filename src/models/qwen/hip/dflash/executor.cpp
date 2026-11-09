@@ -528,6 +528,13 @@ void QwenDFlashGpuExecutor::RunBlockGemm(const models::QwenTensorRef& weight,
                                  batch_size, output_size, input_size, stream_);
       return;
     }
+    // DSpine's 9-16 row blocks: the FP32 route groups up to sixteen rows per
+    // weight read, where the BF16 route below reads every weight once per row.
+    if (batch_size <= 2U * kDFlashMaxSharedBatch) {
+      LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
+                                 batch_size, output_size, input_size, stream_);
+      return;
+    }
     LaunchFloatToBfloat16(input, d_bf16_input_, batch_size * input_size,
                           stream_);
     LaunchBatchedQuantGEMMBf16(weight.type, weight.data, d_bf16_input_, output,
