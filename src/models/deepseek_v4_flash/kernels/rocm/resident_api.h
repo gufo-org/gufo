@@ -119,6 +119,10 @@ int ds4_gpu_hc_expand_split_tensor(ds4_gpu_tensor* out_hc,
                                    const ds4_gpu_tensor* residual_hc,
                                    const ds4_gpu_tensor* split, uint32_t n_embd,
                                    uint32_t n_hc);
+/* Plain RMS norm of one 4 x 4096 HC row, then its F16 mix projection, without
+ * writing the normalized row; bit-identical to ds4_gpu_rms_norm_plain_rows_tensor
+ * followed by ds4_gpu_matmul_f16_tensor. */
+int ds4_gpu_hc_mix_decode_tensor(ds4_gpu_tensor *mix, const ds4_gpu_tensor *residual_hc, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_embd, uint32_t n_hc, uint32_t mix_rows, float norm_eps);
 /* norm_q8 may be NULL; when set it also receives norm_out's Q8_0 form
  * (ds4_gpu_q8_0_act_bytes per row), and norm_q8k, if also set, its Q8_K form
  * (ds4_gpu_q8_K_act_bytes per row). Every form needs n_embd == 4096. */
@@ -171,7 +175,6 @@ int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor
  * ds4_gpu_matmul_f16_f16_input_tensor so the separate conversion pass over the
  * 16,384-wide row disappears. Returns 0 when the shape is unsupported. */
 int ds4_gpu_matmul_f16_f16_input_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x_h, uint64_t n_tok);
-int ds4_gpu_rms_norm_plain_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, uint32_t n, float eps);
 int ds4_gpu_rms_norm_weight_rows_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n, uint32_t rows, float eps);
 int ds4_gpu_rms_norm_weight_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n, float eps);
 /* One row of n_head heads: RoPE tail, then the row's Q8_0 form into xq8

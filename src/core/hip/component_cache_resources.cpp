@@ -25,13 +25,14 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                                  cache::ResourceLedger& ledger,
                                  ComponentCacheHooks hooks) {
   struct Backing {
-    hip::TransferPool streams{64};
+    explicit Backing(std::size_t streams) : streams(streams) {}
+    hip::TransferPool streams;
     std::unique_ptr<hip::CommittedBackingPool> pool;
     std::map<std::uint32_t, std::size_t> component_classes;
   };
   auto result = std::make_unique<cache::ComponentCacheResources>();
   result->adapter = std::move(adapter);
-  auto backing = std::make_shared<Backing>();
+  auto backing = std::make_shared<Backing>(hooks.transfer_streams);
   result->transfer_batch_size = 16;
   const auto rounded = [](std::size_t bytes) {
     return (bytes + 4095) / 4096 * 4096;

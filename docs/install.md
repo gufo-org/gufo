@@ -84,7 +84,7 @@ toolchain: GCC 16.2 and ROCm 10.1.0. Without Nix, install these first:
 | C++20 compiler, CMake 3.21+, Ninja, pkg-config | Building |
 | ROCm HIP, hipBLAS, hipBLASLt, rocBLAS, hipCUB, rocPRIM, rocWMMA | GPU execution |
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing, images |
-| Rust 1.88 or newer | PNG decoding |
+| Rust 1.88 or newer | PNG and WAV decoding |
 | FFmpeg libraries, libsndfile, libsoxr | EmbeddingGemma 2 only |
 | `ffmpeg` and `ffprobe` | Video and audio output |
 

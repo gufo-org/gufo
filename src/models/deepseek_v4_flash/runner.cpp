@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "gufo/ext/component_cache_resources.hpp"
+#include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/text.hpp"
@@ -229,11 +230,10 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      capacity = free_bytes;
+    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
+      capacity = memory->free_bytes;
+      gufo::hip::LogStateCapacity(*memory, *capacity, 0, 0);
     }
     return {
         .resident_weights_bytes = std::nullopt,

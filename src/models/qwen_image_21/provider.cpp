@@ -17,11 +17,12 @@ public:
       const ext::ImageRequest& request,
       const ext::CancellationCheck& is_cancelled) override {
     Request req{
-        .prompt = request.prompt,
+        .prompt = ConditionPrompt(request.prompt, request.background),
         .width = request.width,
         .height = request.height,
         .steps = request.steps,
         .seed = request.seed,
+        .background = request.background,
     };
     req.images.reserve(request.images.size());
     for (const auto& img : request.images) {
@@ -45,6 +46,10 @@ public:
                 .steps = result.metrics.steps,
             },
     };
+  }
+
+  std::optional<ext::ImageCapabilities> Capabilities() const override {
+    return kCapabilities;
   }
 
 private:

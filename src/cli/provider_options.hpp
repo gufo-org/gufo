@@ -12,7 +12,7 @@
 
 namespace gufo::cli {
 
-/// The options text providers declare in their manifests for one command, from
+/// The options providers declare in their manifests for one command, from
 /// parsing to delivery to the selected provider.
 ///
 /// Options no core parser owns are registered on the command's parser, listed
@@ -22,15 +22,18 @@ namespace gufo::cli {
 /// not delivered.
 class ProviderOptions {
 public:
-  ProviderOptions(const ext::Registry& registry, std::string command);
+  ProviderOptions(
+      const ext::Registry& registry, std::string command,
+      ext::Capability capability = ext::Capability::kTextGeneration);
   ProviderOptions(const ProviderOptions&) = delete;
   ProviderOptions& operator=(const ProviderOptions&) = delete;
 
   /// Registers the declared options on `parser`; call after the core options.
   void Register(ArgParser& parser);
   /// Parses the captured values after `parser.Parse`. Throws
-  /// std::invalid_argument for type errors and repeated options.
-  void Parse();
+  /// std::invalid_argument for type errors and repeated options. Returns only
+  /// explicit provider values, for commands that select a provider separately.
+  const ext::ParsedOptions& Parse();
   /// The explicit values for `provider_id`. Throws std::invalid_argument when
   /// a given option belongs to another provider or another command.
   [[nodiscard]] ext::ParsedOptions Select(std::string_view provider_id) const;

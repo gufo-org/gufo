@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "gufo/ext/component_cache_resources.hpp"
+#include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/speculative_verifier.hpp"
@@ -755,20 +756,23 @@ public:
             hip::QwenGpuArena::SsmReplayLogBytes(model_->GetConfig(),
                                                  hip::kSsmReplayCapacity);
     }
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      capacity = free_bytes;
-    }
     // Snapshot buffers are device allocations, but on a unified-memory APU
     // they are carved from the same RAM as every host allocation, and HIP's
     // free figure does not see host pressure. Cap them by the host budget too.
+    // They keep HIP's own free figure: only the state capacity check reads the
+    // OS video-memory budget.
     std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
     std::size_t snapshot_ceiling = HostSnapshotCeilingBytes();
-    if (capacity.has_value()) {
-      snapshot_capacity = std::min(snapshot_capacity, *capacity);
-      snapshot_ceiling = std::min(snapshot_ceiling, *capacity);
+    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
+      capacity = memory->free_bytes;
+      snapshot_capacity =
+          std::min<std::size_t>(snapshot_capacity, memory->hip_free_bytes);
+      snapshot_ceiling =
+          std::min<std::size_t>(snapshot_ceiling, memory->hip_free_bytes);
+      gufo::hip::LogStateCapacity(
+          *memory, *capacity,
+          usage.request_state_bytes + usage.temporary_scratch_bytes, 0);
     }
     return {
         .resident_weights_bytes = resident_weights,
