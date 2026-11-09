@@ -496,22 +496,33 @@ if (BUILD_TESTING OR GUFO_BUILD_TOOLS)
 endif()
 
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
-  find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h REQUIRED)
-  find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx REQUIRED)
-  add_executable(gufo-kernel-bench
-    src/cli/bench/kernel_bench_main.cpp
-  )
-  target_compile_definitions(gufo-kernel-bench PRIVATE
-    GUFO_REVISION="${GUFO_REVISION}")
-  target_include_directories(gufo-kernel-bench SYSTEM PRIVATE
-    ${ROCTX_INCLUDE_DIR})
-  target_link_libraries(gufo-kernel-bench PRIVATE
-    gufo_kernel_bench_support
-    gufo_diagnostics
-    gufo_core
-    ${GUFO_QWEN_LIBRARIES}
-    gufo_qwen_kernels
-    ${ROCTX_LIBRARY})
+  # TheRock for Windows ships no roctx; skip only gufo-kernel-bench there so
+  # the other tools (e.g. qwen27b_verify_sweep) still build.
+  if (WIN32)
+    find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h)
+    find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx)
+  else()
+    find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h REQUIRED)
+    find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx REQUIRED)
+  endif()
+  if (ROCTX_INCLUDE_DIR AND ROCTX_LIBRARY)
+    add_executable(gufo-kernel-bench
+      src/cli/bench/kernel_bench_main.cpp
+    )
+    target_compile_definitions(gufo-kernel-bench PRIVATE
+      GUFO_REVISION="${GUFO_REVISION}")
+    target_include_directories(gufo-kernel-bench SYSTEM PRIVATE
+      ${ROCTX_INCLUDE_DIR})
+    target_link_libraries(gufo-kernel-bench PRIVATE
+      gufo_kernel_bench_support
+      gufo_diagnostics
+      gufo_core
+      ${GUFO_QWEN_LIBRARIES}
+      gufo_qwen_kernels
+      ${ROCTX_LIBRARY})
+  else()
+    message(STATUS "gufo: roctx not found, skipping gufo-kernel-bench")
+  endif()
 
   add_executable(tune_hipblaslt tools/bench/tune_hipblaslt.cpp)
   target_link_libraries(tune_hipblaslt PRIVATE gufo_core gufo_qwen_kernels
@@ -533,8 +544,10 @@ else()
   install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo.exe\" \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server.exe\")")
 endif()
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
-  install(TARGETS gufo-kernel-bench tune_hipblaslt
-    DESTINATION bin)
+  install(TARGETS tune_hipblaslt DESTINATION bin)
+  if (TARGET gufo-kernel-bench)
+    install(TARGETS gufo-kernel-bench DESTINATION bin)
+  endif()
 endif()
 
 # CTest integration
