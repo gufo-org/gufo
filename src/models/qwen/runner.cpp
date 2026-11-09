@@ -774,9 +774,8 @@ public:
           *memory, *capacity,
           usage.request_state_bytes + usage.temporary_scratch_bytes, 0);
     }
-    // KV rows are allocated eagerly for the whole context, but on a unified
-    // memory part the host pages behind them are only committed as prefill
-    // writes them. Charge that deterministic growth at admission.
+    // Charge the prompt's deterministic KV footprint at admission. This is
+    // conservative: session allocation may already back some or all rows.
     const auto& config = model_->GetConfig();
     const std::size_t kv_element_bytes = execution_policy_.UsesFp16AttentionKv()
                                              ? sizeof(std::uint16_t)

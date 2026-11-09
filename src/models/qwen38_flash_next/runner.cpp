@@ -346,9 +346,8 @@ public:
     }
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.
-    // KV rows are allocated eagerly for the whole context, but on a unified
-    // memory part the host pages behind them are only committed as prefill
-    // writes them. Charge that deterministic growth at admission.
+    // Charge the prompt's deterministic KV footprint at admission. This is
+    // conservative: session allocation may already back some or all rows.
     const std::size_t prompt_bytes_per_token =
         model_->config().PromptKvBytesPerToken(use_mtp_);
     return {
