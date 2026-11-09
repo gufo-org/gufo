@@ -59,6 +59,7 @@ include/gufo/ext/types.hpp
 include/gufo/ext/utf8.hpp
 include/gufo/ext/version.hpp
 include/gufo/ext/video.hpp
+include/gufo/ext/wav.hpp
 src/cache/adapter.hpp
 src/cache/checkpoint.hpp
 src/cache/completion.hpp
@@ -115,6 +116,7 @@ src/core/speculative/prompt_lookup.hpp
 src/core/speculative/speculative_verifier.hpp
 src/core/text_sampling_defaults.hpp
 src/core/utf8.hpp
+src/core/wav.hpp
 src/ext/asr.hpp
 src/ext/continuation.hpp
 src/ext/decision.hpp

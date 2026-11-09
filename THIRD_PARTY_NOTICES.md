@@ -26,8 +26,8 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | libpng | Linked; Qwen-Image PNG input decoding and output encoding | `libpng-2.0` | 1.6.58; flake.lock | [pnggroup/libpng](https://github.com/pnggroup/libpng) |
 | libjpeg-turbo | Linked; JPEG decoding | `IJG AND BSD-3-Clause AND Zlib` | 3.1.4.1; flake.lock | [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) |
 | libwebp | Linked; WebP decoding | `BSD-3-Clause` | 1.6.0; flake.lock | [webmproject/libwebp](https://chromium.googlesource.com/webm/libwebp) |
-| png (Rust crate) | Statically linked; PNG decoding | `MIT OR Apache-2.0` | 0.18.1; src/core/png_decode/Cargo.lock | [image-rs/image-png](https://github.com/image-rs/image-png) |
-| Rust standard library and crates | Statically linked into the PNG decoder; [license texts](licenses/rust-png-decode.txt) | `MIT OR Apache-2.0` and per-crate terms | rustc in rust-toolchain.toml, with the crates its standard library bundles; crates in src/core/png_decode/Cargo.lock | [rust-lang/rust](https://github.com/rust-lang/rust) |
+| png (Rust crate) | Statically linked; PNG decoding | `MIT OR Apache-2.0` | 0.18.1; Cargo.lock | [image-rs/image-png](https://github.com/image-rs/image-png) |
+| Rust standard library and crates | Statically linked into the Rust library; [license texts](licenses/rust.txt) | `MIT OR Apache-2.0` and per-crate terms | rustc in rust-toolchain.toml, with the crates its standard library bundles; crates in Cargo.lock | [rust-lang/rust](https://github.com/rust-lang/rust) |
 | libsndfile | Linked; audio decoding | `LGPL-2.1-or-later` | 1.2.2; flake.lock | [libsndfile](https://github.com/libsndfile/libsndfile) |
 | libsoxr | Linked; audio resampling | `LGPL-2.1-or-later` | 0.1.3; flake.lock | [SoX Resampler](https://sourceforge.net/projects/soxr/) |
 | FFmpeg | Linked libavformat/libavcodec/libavutil/libswscale for video embeddings; ffmpeg/ffprobe executables for media | `GPL-3.0-or-later` (Nix build with GPL/version3 components) | 9.0.2; flake.lock | [FFmpeg](https://github.com/FFmpeg/FFmpeg) |

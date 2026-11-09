@@ -184,6 +184,8 @@
               ".clang-tidy"
               "CMakeLists.txt"
               "rust-toolchain.toml"
+              "Cargo.toml"
+              "Cargo.lock"
               "extensions.lock"
             ];
           };
@@ -202,6 +204,8 @@
               ".clang-format"
               "CMakeLists.txt"
               "rust-toolchain.toml"
+              "Cargo.toml"
+              "Cargo.lock"
               "extensions.lock"
               "AGENTS.md"
               "docs/internal/releasing.md"
@@ -251,24 +255,31 @@
             ];
           };
 
-          cargoSetup = import ./.devops/nix/png-decode-cargo.nix {
+          cargoSetup = import ./.devops/nix/rust-cargo.nix {
             inherit (pkgsSys) lib rustPlatform;
           };
 
           rustCheck = pkgsSys.runCommand "check-rust" {
             nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc ];
             src = mkFilteredSource {
-              directories = [ "src/core/png_decode" ];
-              files = [ "rust-toolchain.toml" ];
+              directories = [
+                "src/core/rust"
+                "src/core/png_decode"
+                "src/core/wav_decode"
+              ];
+              files = [
+                "rust-toolchain.toml"
+                "Cargo.toml"
+                "Cargo.lock"
+              ];
             };
           } (cargoSetup + ''
             export HOME=$TMPDIR
             cp -r "$src" source
             chmod -R u+w source
             cd source
-            cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
-            cargo clippy --manifest-path src/core/png_decode/Cargo.toml \
-              --locked --offline --all-targets -- -D warnings
+            cargo fmt --all --check
+            cargo clippy --workspace --locked --offline --all-targets -- -D warnings
             mkdir -p $out
             echo "PASS: Rust formatting and clippy clean" > $out/result.txt
           '');

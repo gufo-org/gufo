@@ -32,9 +32,15 @@ let
   rocmRuntime = rocmPackages.rocm-runtime.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [ ./patches/rocr-fixed-cwsr-rocm10.patch ];
   });
-  cargoSetup = import ./png-decode-cargo.nix {
+  # The CI timing baseline builds an older revision with this definition; before
+  # the Cargo workspace, the lockfile sat next to the PNG decoder.
+  cargoSetup = import ./rust-cargo.nix {
     inherit lib rustPlatform;
-    lockFile = sourceRoot + "/src/core/png_decode/Cargo.lock";
+    lockFile =
+      if builtins.pathExists (sourceRoot + "/Cargo.lock") then
+        sourceRoot + "/Cargo.lock"
+      else
+        sourceRoot + "/src/core/png_decode/Cargo.lock";
   };
   versionLabel = if releaseVersion == null then "development" else releaseVersion;
   packageVersion =
@@ -60,7 +66,7 @@ let
         relativePath = lib.removePrefix "${root}/" pathString;
       in
       pathString == root
-      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" "extensions.lock" "rust-toolchain.toml" ]
+      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" "extensions.lock" "rust-toolchain.toml" "Cargo.toml" "Cargo.lock" ]
       || relativePath == "licenses"
       || lib.hasPrefix "licenses/" relativePath
       || relativePath == "cmake"

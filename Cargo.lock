@@ -57,6 +57,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gufo-rust"
+version = "0.0.0"
+dependencies = [
+ "gufo-png-decode",
+ "gufo-wav-decode",
+]
+
+[[package]]
+name = "gufo-wav-decode"
+version = "0.0.0"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
