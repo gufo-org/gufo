@@ -1,6 +1,16 @@
 #include "src/core/hip/snapshot_copy.hpp"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <sys/mman.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -16,6 +26,32 @@ namespace gpu = gufo::hip;
 namespace {
 void Check(hipError_t result) {
   assert(result == hipSuccess);
+}
+// Ordinary committed pages, like the RAM cache's backing segments. A non-null
+// `at` places them exactly there.
+std::byte* MapPages(std::size_t bytes, std::byte* at = nullptr) {
+#ifdef _WIN32
+  auto* pages = static_cast<std::byte*>(
+      VirtualAlloc(at, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+  assert(pages && (!at || pages == at));
+#else
+  auto* mapping =
+      mmap(at, bytes, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_ANONYMOUS | (at ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+  assert(mapping != MAP_FAILED && (!at || mapping == at));
+  auto* pages = static_cast<std::byte*>(mapping);
+  assert(madvise(pages, bytes, MADV_NOHUGEPAGE) == 0);
+  assert(madvise(pages, bytes, MADV_POPULATE_WRITE) == 0);
+#endif
+  return pages;
+}
+void UnmapPages(std::byte* pages, std::size_t bytes) {
+#ifdef _WIN32
+  (void)bytes;
+  assert(VirtualFree(pages, 0, MEM_RELEASE));
+#else
+  assert(munmap(pages, bytes) == 0);
+#endif
 }
 void Copies(std::span<std::byte> host, void* device, hipStream_t stream,
             const std::vector<std::byte>& expected) {
@@ -140,11 +176,7 @@ int main() {
   // Production registration, including interior device aliases and copies
   // ending at the allocation boundary. Every untouched destination byte is
   // independently checked, as are odd/unaligned fallback ranges.
-  auto* mapping = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  assert(mapping != MAP_FAILED);
-  assert(madvise(mapping, bytes, MADV_NOHUGEPAGE) == 0);
-  assert(madvise(mapping, bytes, MADV_POPULATE_WRITE) == 0);
+  auto* mapping = MapPages(bytes);
   Check(hipHostRegister(mapping, bytes, hipHostRegisterDefault));
   Copies({static_cast<std::byte*>(mapping), bytes}, device, stream, expected);
   Uploads({static_cast<std::byte*>(mapping), bytes}, device, stream, expected);
@@ -158,7 +190,36 @@ int main() {
   // The same address must fall back once its registration is removed.
   Copies({static_cast<std::byte*>(mapping), bytes}, device, stream, expected);
   Uploads({static_cast<std::byte*>(mapping), bytes}, device, stream, expected);
-  assert(munmap(mapping, bytes) == 0);
+  UnmapPages(mapping, bytes);
+
+  // RAM-cache segments are separate allocations and registrations that can be
+  // adjacent on the host, and restore joins host-adjacent chunks into one
+  // copy. Their device aliases need not be adjacent: Windows maps each
+  // registration on its own, so registering the higher half first puts its
+  // alias below the lower half's. The 3 MiB copies cross the halves.
+  {
+    const auto half = bytes / 2;
+    auto* probe = MapPages(bytes);
+    UnmapPages(probe, bytes);
+    auto* low = MapPages(half, probe);
+    auto* high = MapPages(half, probe + half);
+    Check(hipHostRegister(high, half, hipHostRegisterDefault));
+    Check(hipHostRegister(low, half, hipHostRegisterDefault));
+    void *low_alias{}, *high_alias{};
+    Check(hipHostGetDevicePointer(&low_alias, low, 0));
+    Check(hipHostGetDevicePointer(&high_alias, high, 0));
+    std::cout << "adjacent registrations: device aliases "
+              << (static_cast<std::byte*>(low_alias) + half == high_alias
+                      ? "adjacent"
+                      : "not adjacent")
+              << (low_alias == low ? ", equal to host addresses\n" : "\n");
+    Copies({low, bytes}, device, stream, expected);
+    Uploads({low, bytes}, device, stream, expected);
+    Check(hipHostUnregister(low));
+    Check(hipHostUnregister(high));
+    UnmapPages(high, half);
+    UnmapPages(low, half);
+  }
 
   std::vector<std::byte> pageable(bytes);
   Copies(pageable, device, stream, expected);
@@ -173,6 +234,6 @@ int main() {
   Check(hipStreamDestroy(stream));
   Check(hipFree(device));
   std::cout << "PASS: registered/pageable copies, exact bytes, all guards, "
-               "aligned/unaligned offsets, registration removal and peer graph "
-               "capture/replay\n";
+               "aligned/unaligned offsets, registration removal, copies across "
+               "adjacent registrations and peer graph capture/replay\n";
 }
