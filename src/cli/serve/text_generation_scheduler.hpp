@@ -146,7 +146,7 @@ public:
   };
   /// Null when the runner does not publish prompt-state admission inputs.
   [[nodiscard]] std::optional<PromptAdmissionBudget>
-  PromptAdmissionBudgetSnapshot() const noexcept;
+  PromptAdmissionBudgetSnapshot() const;
 
   [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
                                std::size_t max_tokens,

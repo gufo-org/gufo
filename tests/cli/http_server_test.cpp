@@ -2237,6 +2237,44 @@ void TestGenerationFailureLogsCause() {
   assert(count("[ERROR] [chat] context exceeded") == 3);
 }
 
+void TestPromptMemoryRefusalDetails() {
+  RunningServer server;
+  server.backend->reject_memory = true;
+  for (const bool stream : {false, true}) {
+    for (const auto* path : {"/v1/completions", "/v1/chat/completions",
+                             "/v1/responses", "/v1/messages"}) {
+      auto request = gufo::json::parse(R"({"model":"test"})");
+      const std::string_view endpoint(path);
+      if (endpoint == "/v1/completions") {
+        request["prompt"] = "hello";
+        request["max_tokens"] = 8;
+      } else if (endpoint == "/v1/responses") {
+        request["input"] = "hello";
+        request["max_output_tokens"] = 8;
+      } else {
+        request["messages"] =
+            gufo::json::parse(R"([{"role":"user","content":"hi"}])");
+        request[endpoint == "/v1/messages" ? "max_tokens"
+                                           : "max_completion_tokens"] = 8;
+      }
+      request["stream"] = stream;
+      const auto response = server.Post(path, request.dump());
+      ExpectStatus(response, 503);
+      assert(response.find("Retry-After: 1") != std::string::npos);
+      const auto body =
+          gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+      const auto* error = body.find("error");
+      assert(error && error->member_str("code") == "insufficient_memory" &&
+             error->member_size("required_bytes") == 4096 &&
+             error->member_size("remaining_bytes") == 512);
+      const auto* usage = body.find("usage");
+      const auto* details = usage ? usage->find("gufo") : nullptr;
+      assert(details && details->member_size("required_bytes") == 4096 &&
+             details->member_size("remaining_bytes") == 512);
+    }
+  }
+}
+
 void TestDeviceLoss() {
   std::atomic<int> hook_calls{0};
   RunningServer server({.on_device_lost = [&] { ++hook_calls; }});
@@ -3598,6 +3636,7 @@ int main() {
   TestServedModelNames();
   TestRawCompletionStreaming();
   TestGenerationFailureLogsCause();
+  TestPromptMemoryRefusalDetails();
   TestDeviceLoss();
   TestDeviceLossWhileWriterBlocked();
   TestRawCompletionLogprobs();

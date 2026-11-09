@@ -80,17 +80,21 @@ struct PromptBudget {
       reserved_bytes.fetch_sub(bytes, std::memory_order_acq_rel);
   }
 
-  [[nodiscard]] bool TryReserve(std::size_t bytes,
-                                std::size_t budget) noexcept {
+  [[nodiscard]] bool TryReserve(std::size_t bytes, std::size_t budget,
+                                std::size_t& remaining,
+                                std::size_t minimum_reserved = 0) noexcept {
     std::size_t current = reserved_bytes.load(std::memory_order_relaxed);
-    while (bytes <= budget && current <= budget - bytes) {
+    while (true) {
+      const auto charged = std::max(current, minimum_reserved);
+      remaining = charged < budget ? budget - charged : 0;
+      if (bytes > remaining)
+        return false;
       const std::size_t updated = current + bytes;
       if (reserved_bytes.compare_exchange_weak(current, updated,
                                                std::memory_order_acq_rel,
                                                std::memory_order_relaxed))
         return true;
     }
-    return false;
   }
 
   std::atomic<std::size_t> reserved_bytes{0};
@@ -263,8 +267,8 @@ void PublishTerminal(const std::shared_ptr<ScheduledRequest>& request,
     }
     request->failure = std::move(failure);
     request->terminal = true;
-    // Execution is over, so the prompt-state pages are no longer claimed even
-    // if a streaming client keeps the result handle alive.
+    // Return the in-flight promise even if a streaming client keeps its handle.
+    // Retained session pages remain visible to live host-headroom samples.
     if (request->prompt_budget != nullptr &&
         !std::exchange(request->prompt_released, true))
       request->prompt_budget->Release(request->prompt_state_bytes);
@@ -2449,13 +2453,16 @@ std::size_t TextGenerationScheduler::max_buffered_output_bytes()
 }
 
 std::optional<TextGenerationScheduler::PromptAdmissionBudget>
-TextGenerationScheduler::PromptAdmissionBudgetSnapshot() const noexcept {
+TextGenerationScheduler::PromptAdmissionBudgetSnapshot() const {
   const auto& claim = impl_->runner_pool->resource_claim();
   if (!claim.prompt_admission_budget_bytes.has_value() ||
       !claim.prompt_state_bytes_per_token.has_value() ||
       *claim.prompt_state_bytes_per_token == 0)
     return std::nullopt;
-  const auto budget = *claim.prompt_admission_budget_bytes;
+  const auto budget = claim.prompt_admission_available_bytes
+                          ? std::min(*claim.prompt_admission_budget_bytes,
+                                     claim.prompt_admission_available_bytes())
+                          : *claim.prompt_admission_budget_bytes;
   const auto used =
       impl_->prompt_budget->reserved_bytes.load(std::memory_order_relaxed);
   return PromptAdmissionBudget{
@@ -2578,6 +2585,30 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   // scheduler thread owns the request and moves `prompt` out of it, so any
   // later read of the vector would race even though the shared_ptr survives.
   std::size_t admitted_prompt_tokens = 0;
+  const auto reserve_prompt = [&] {
+    // Sample outstanding promises before host headroom: a request can commit
+    // its rows and release its charge during the sample without freeing them.
+    const auto outstanding =
+        impl_->prompt_budget->reserved_bytes.load(std::memory_order_acquire);
+    const auto budget =
+        admission_claim.prompt_admission_available_bytes
+            ? std::min(*prompt_budget_bytes,
+                       admission_claim.prompt_admission_available_bytes())
+            : *prompt_budget_bytes;
+    std::size_t remaining = 0;
+    if (!impl_->prompt_budget->TryReserve(
+            *prompt_state_bytes, budget, remaining,
+            admission_claim.prompt_admission_available_bytes ? outstanding
+                                                             : 0)) {
+      refusal_remaining_bytes = remaining;
+      return false;
+    }
+    // Own the reservation before queue creation or any other allocation can
+    // throw. The request destructor rolls back every failed enqueue.
+    request->prompt_state_bytes = *prompt_state_bytes;
+    request->prompt_budget = impl_->prompt_budget;
+    return true;
+  };
   {
     const std::lock_guard<std::mutex> lock(impl_->queue_mutex);
     if (impl_->stopping) {
@@ -2609,28 +2640,19 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
         refusal_reason = "client_quota";
         decision_queued = impl_->queued_count;
         decision_client_queued = client->requests.size();
-      } else if (prompt_state_bytes.has_value() &&
-                 !impl_->prompt_budget->TryReserve(*prompt_state_bytes,
-                                                   *prompt_budget_bytes)) {
-        const auto reserved = impl_->prompt_budget->reserved_bytes.load(
-            std::memory_order_relaxed);
+      } else if (prompt_state_bytes.has_value() && !reserve_prompt()) {
         refused = true;
         refusal_code = TextGenerationErrorCode::kInsufficientMemory;
         refusal_message = "prompt state requires " +
                           std::to_string(*prompt_state_bytes) +
                           " host bytes but only " +
-                          std::to_string(*prompt_budget_bytes > reserved
-                                             ? *prompt_budget_bytes - reserved
-                                             : 0) +
-                          " remain";
+                          std::to_string(*refusal_remaining_bytes) + " remain";
         refusal_reason = "insufficient_memory";
         refusal_required_bytes = *prompt_state_bytes;
-        refusal_remaining_bytes = *prompt_budget_bytes > reserved
-                                      ? *prompt_budget_bytes - reserved
-                                      : 0;
         decision_queued = impl_->queued_count;
       } else {
-        if (client == impl_->queued_clients.end()) {
+        const bool new_client = client == impl_->queued_clients.end();
+        if (new_client) {
           impl_->queued_clients.push_back({
               .client_id = request->client_id,
               .requests = {},
@@ -2645,13 +2667,10 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
         try {
           client->requests.push_back(request);
         } catch (...) {
-          impl_->prompt_budget->Release(prompt_state_bytes.value_or(0));
+          if (new_client)
+            impl_->queued_clients.erase(client);
           throw;
         }
-        // Assigned only after the request is queued: the catch above returns
-        // the reservation and the destructor must not return it again.
-        request->prompt_state_bytes = prompt_state_bytes.value_or(0);
-        request->prompt_budget = impl_->prompt_budget;
         impl_->SetQueuedCountLocked(impl_->queued_count + 1);
       }
     }

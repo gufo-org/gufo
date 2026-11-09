@@ -40,7 +40,8 @@ from cache_rotation import check_cache_rotation, check_snapshot_budget, host_ava
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
                             CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS,
                             GENERATED_SECONDS, KV_USAGE, assert_slots,
-                            parse_metrics, assert_accounting, validate_metrics_report)
+                            parse_metrics, assert_accounting, validate_metrics_report,
+                            PROMPT_BUDGET, PROMPT_RESERVED, PROMPT_AVAILABLE)
 
 
 class FunctionalRunnerTest(unittest.TestCase):
@@ -1107,6 +1108,21 @@ class FunctionalRunnerTest(unittest.TestCase):
         ):
             with self.subTest(text=bad), self.assertRaises(ValueError):
                 parse_metrics(bad)
+
+    def test_prompt_budget_gauges_are_optional_complete_and_consistent(self):
+        base = "".join(f"# HELP {name} Description\n# TYPE {name} {kind}\n{name} 0\n"
+                       for name, kind in TYPES.items())
+        def gauges(budget, reserved, available):
+            return "".join(f"# HELP {name} Description\n# TYPE {name} gauge\n{name} {value}\n"
+                           for name, value in ((PROMPT_BUDGET, budget),
+                                               (PROMPT_RESERVED, reserved),
+                                               (PROMPT_AVAILABLE, available)))
+        self.assertEqual(parse_metrics(base + gauges(64, 48, 16))[PROMPT_RESERVED], 48)
+        self.assertEqual(parse_metrics(base + gauges(16, 48, 0))[PROMPT_AVAILABLE], 0)
+        for bad in (gauges(64, 48, 32), gauges(64, 0.5, 63.5),
+                    gauges(64, 48, 16).replace(f"{PROMPT_AVAILABLE} 16\n", "")):
+            with self.subTest(text=bad), self.assertRaises(ValueError):
+                parse_metrics(base + bad)
 
     def test_prometheus_accounting_uses_uncached_work_once(self):
         before = dict.fromkeys(COUNTERS, 10)

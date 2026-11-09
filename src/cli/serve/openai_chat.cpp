@@ -269,42 +269,6 @@ const char* StatusReason(int status) noexcept {
   }
 }
 
-HttpResponse GenerationError(const TextGenerationError& exception) {
-  json::Value response = json::Value::object();
-  json::Value error = json::Value::object();
-  error["message"] = exception.what();
-  error["type"] = "server_error";
-  error["code"] = exception.stable_code();
-  if (exception.required_bytes().has_value())
-    error["required_bytes"] = *exception.required_bytes();
-  if (exception.remaining_bytes().has_value())
-    error["remaining_bytes"] = *exception.remaining_bytes();
-  response["error"] = std::move(error);
-  if (exception.required_bytes().has_value() ||
-      exception.remaining_bytes().has_value()) {
-    json::Value gufo = json::Value::object();
-    gufo["code"] = exception.stable_code();
-    if (exception.required_bytes().has_value())
-      gufo["required_bytes"] = *exception.required_bytes();
-    if (exception.remaining_bytes().has_value())
-      gufo["remaining_bytes"] = *exception.remaining_bytes();
-    json::Value usage = json::Value::object();
-    usage["gufo"] = std::move(gufo);
-    response["usage"] = std::move(usage);
-  }
-  HttpResponse output{
-      .status = exception.http_status(),
-      .reason = StatusReason(exception.http_status()),
-      .body = response.dump(),
-      .headers = {},
-      .streaming_body = {},
-  };
-  if (exception.retryable()) {
-    output.headers.emplace_back("Retry-After", "1");
-  }
-  return output;
-}
-
 bool IsKnownRole(std::string_view role) {
   return role == "system" || role == "developer" || role == "user" ||
          role == "assistant" || role == "tool";
@@ -4103,6 +4067,42 @@ HttpResponse CreateCompatibilityResponse(
 
 }  // namespace
 
+HttpResponse TextGenerationErrorResponse(const TextGenerationError& exception) {
+  json::Value response = json::Value::object();
+  json::Value error = json::Value::object();
+  error["message"] = exception.what();
+  error["type"] = "server_error";
+  error["code"] = exception.stable_code();
+  if (exception.required_bytes().has_value())
+    error["required_bytes"] = *exception.required_bytes();
+  if (exception.remaining_bytes().has_value())
+    error["remaining_bytes"] = *exception.remaining_bytes();
+  response["error"] = std::move(error);
+  if (exception.required_bytes().has_value() ||
+      exception.remaining_bytes().has_value()) {
+    json::Value gufo = json::Value::object();
+    gufo["code"] = exception.stable_code();
+    if (exception.required_bytes().has_value())
+      gufo["required_bytes"] = *exception.required_bytes();
+    if (exception.remaining_bytes().has_value())
+      gufo["remaining_bytes"] = *exception.remaining_bytes();
+    json::Value usage = json::Value::object();
+    usage["gufo"] = std::move(gufo);
+    response["usage"] = std::move(usage);
+  }
+  HttpResponse output{
+      .status = exception.http_status(),
+      .reason = StatusReason(exception.http_status()),
+      .body = response.dump(),
+      .headers = {},
+      .streaming_body = {},
+  };
+  if (exception.retryable()) {
+    output.headers.emplace_back("Retry-After", "1");
+  }
+  return output;
+}
+
 HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                   TextGenerationBackend& backend,
                                   const ChatRequest& chat,
@@ -4144,7 +4144,7 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
     return NonStreamingResponse(parsed, backend, generation,
                                 initial_output_state);
   } catch (const TextGenerationError& exception) {
-    return GenerationError(exception);
+    return TextGenerationErrorResponse(exception);
   } catch (const std::invalid_argument& exception) {
     return Error(400, "Bad Request", exception.what(), "invalid_prompt");
   } catch (const std::length_error& exception) {
@@ -4174,7 +4174,7 @@ HttpResponse CountOpenAiInputTokens(const ChatRequest& chat,
     counted.body = response.dump();
     return counted;
   } catch (const TextGenerationError& exception) {
-    return GenerationError(exception);
+    return TextGenerationErrorResponse(exception);
   } catch (const std::invalid_argument& exception) {
     return Error(400, "Bad Request", exception.what(), "invalid_prompt");
   } catch (const std::length_error& exception) {

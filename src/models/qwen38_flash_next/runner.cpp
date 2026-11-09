@@ -358,11 +358,12 @@ public:
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
         .temporary_scratch_bytes = 0,
-        .prompt_state_bytes_per_token = prompt_bytes_per_token,
-        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
+        .prompt_state_bytes_per_token = prompt_bytes_per_token,
+        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
+        .prompt_admission_available_bytes = HostSnapshotCeilingBytes,
     };
   }
 

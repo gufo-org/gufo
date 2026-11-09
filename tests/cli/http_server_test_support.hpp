@@ -109,6 +109,10 @@ public:
       std::string_view client_id,
       const std::vector<std::string>& stop_sequences, bool return_progress,
       bool cache_prompt, bool cache_persist) override {
+    if (reject_memory)
+      throw gufo::server::TextGenerationError(
+          gufo::server::TextGenerationErrorCode::kInsufficientMemory,
+          "prompt exceeds host headroom", 4096, 512);
     last_ignore_eos = ignore_eos;
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_complete(
@@ -121,6 +125,10 @@ public:
       const gufo::server::ChatRequest& request, std::size_t max_tokens,
       const gufo::sampling::SamplingConfig& sampling,
       const CancellationCheck& cancellation, bool stream) override {
+    if (reject_memory)
+      throw gufo::server::TextGenerationError(
+          gufo::server::TextGenerationErrorCode::kInsufficientMemory,
+          "prompt exceeds host headroom", 4096, 512);
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                           cancellation, stream),
@@ -128,6 +136,7 @@ public:
   }
   SamplingDefaults sampling_defaults() const override { return defaults; }
   SamplingDefaults defaults;
+  bool reject_memory{false};
   gufo::ReasoningOptions reasoning_defaults() const override {
     return reasoning;
   }

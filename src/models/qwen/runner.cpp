@@ -797,11 +797,12 @@ public:
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = usage.request_state_bytes,
         .temporary_scratch_bytes = usage.temporary_scratch_bytes,
-        .prompt_state_bytes_per_token = prompt_bytes_per_token,
-        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
         .retained_snapshot_capacity_bytes = snapshot_capacity,
         .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,
+        .prompt_state_bytes_per_token = prompt_bytes_per_token,
+        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
+        .prompt_admission_available_bytes = HostSnapshotCeilingBytes,
     };
   }
 

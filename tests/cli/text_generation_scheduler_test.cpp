@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <numeric>
 #include <optional>
 #include <semaphore>
@@ -37,6 +38,25 @@
 #include "src/core/platform/os_info.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
+
+namespace {
+thread_local bool fail_prompt_enqueue_allocation{};
+}
+// Arm only the submitting thread, after its live-headroom sample. Worker
+// allocations remain unaffected and the next queue allocation fails once.
+void* operator new(std::size_t bytes) {
+  if (std::exchange(fail_prompt_enqueue_allocation, false))
+    throw std::bad_alloc();
+  if (void* memory = std::malloc(bytes ? bytes : 1))
+    return memory;
+  throw std::bad_alloc();
+}
+void operator delete(void* memory) noexcept {
+  std::free(memory);
+}
+void operator delete(void* memory, std::size_t) noexcept {
+  std::free(memory);
+}
 
 namespace {
 
@@ -210,6 +230,7 @@ struct FakeControl {
   std::atomic<std::size_t> decode_calls{0};
   std::optional<std::size_t> prompt_state_bytes_per_token;
   std::optional<std::size_t> prompt_admission_budget_bytes;
+  std::function<std::size_t()> prompt_admission_available_bytes;
   std::atomic<std::size_t> batch_preparations{0};
   std::atomic<std::int64_t> first_request_advance_ns{0};
   bool incremental_prefill{true};
@@ -346,11 +367,13 @@ public:
         .state_capacity_bytes = 8 * 64,
         .per_request_state_bytes = 64,
         .temporary_scratch_bytes = 0,
+        .retained_snapshot_capacity_bytes = 1U << 25,
+        .requires_device_runtime_lock = true,
         .prompt_state_bytes_per_token = control_->prompt_state_bytes_per_token,
         .prompt_admission_budget_bytes =
             control_->prompt_admission_budget_bytes,
-        .retained_snapshot_capacity_bytes = 1U << 25,
-        .requires_device_runtime_lock = true,
+        .prompt_admission_available_bytes =
+            control_->prompt_admission_available_bytes,
     };
   }
 
@@ -3559,6 +3582,88 @@ void TestPromptStateAdmissionBudget() {
   Expect(!second.cancelled, "a prompt that fits after release completes");
 }
 
+void TestPromptAdmissionTracksLiveHeadroom() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 256;
+  control->prompt_state_bytes_per_token = 16;
+  control->prompt_admission_budget_bytes = 128;
+  std::size_t headroom = 128;
+  std::function<void()> during_sample;
+  control->prompt_admission_available_bytes = [&] {
+    const auto sampled = headroom;
+    if (during_sample)
+      during_sample();
+    return sampled;
+  };
+  auto scheduler = MakeScheduler(control, 1);
+  const auto expect_refusal = [&](std::size_t remaining) {
+    bool refused = false;
+    try {
+      (void)scheduler->Submit({8, 9}, 1, 0.0F);
+    } catch (const TextGenerationError& error) {
+      refused = error.code() == TextGenerationErrorCode::kInsufficientMemory &&
+                error.required_bytes() == 32 &&
+                error.remaining_bytes() == remaining;
+    }
+    Expect(refused, "live headroom bounds admission with stable byte details");
+  };
+
+  // Cache/session allocations after the initial claim must reduce headroom.
+  headroom = 16;
+  expect_refusal(16);
+  Expect(scheduler->PromptAdmissionBudgetSnapshot()->used_bytes == 0,
+         "a live-memory refusal does not reserve bytes");
+  headroom = 128;
+  control->block_advance_label = 5;
+  auto first = scheduler->Submit({5, 6, 7}, 1, 0.0F);
+  control->WaitForAdvance(5);
+  headroom = 64;
+  expect_refusal(16);  // 64 live bytes minus 48 outstanding bytes.
+
+  // Terminal release during a sample must not make already committed pages
+  // available again. The host sample can precede those final writes.
+  during_sample = [&] {
+    control->ReleaseAdvance();
+    (void)first.Wait();
+    headroom = 16;
+  };
+  expect_refusal(16);
+  during_sample = {};
+  Expect(scheduler->PromptAdmissionBudgetSnapshot()->available_bytes == 16,
+         "retained session pages remain reflected after terminal release");
+  expect_refusal(16);
+
+  headroom = 128;
+  Expect(!scheduler->Submit({8, 9}, 1, 0.0F).Wait().cancelled,
+         "new headroom permits readmission");
+}
+
+void TestPromptAdmissionRollsBackFailedEnqueue() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 256;
+  control->prompt_state_bytes_per_token = 16;
+  control->prompt_admission_budget_bytes = 32;
+  bool fail_enqueue = true;
+  control->prompt_admission_available_bytes = [&] {
+    fail_prompt_enqueue_allocation = std::exchange(fail_enqueue, false);
+    return 32;
+  };
+  auto scheduler = MakeScheduler(control, 1);
+  bool failed = false;
+  try {
+    (void)scheduler->Submit({8, 9}, 1, 0.0F);
+  } catch (const std::bad_alloc&) {
+    failed = true;
+  }
+  Expect(failed && !fail_prompt_enqueue_allocation,
+         "the allocation after reservation fails deterministically");
+  const auto budget = scheduler->PromptAdmissionBudgetSnapshot();
+  Expect(budget && budget->used_bytes == 0 && budget->available_bytes == 32,
+         "failed new-client creation rolls back its prompt reservation");
+  Expect(!scheduler->Submit({8, 9}, 1, 0.0F).Wait().cancelled,
+         "a failed enqueue does not poison the remaining prompt budget");
+}
+
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   TestBackendPreservesModelSamplingPreset();
@@ -3671,6 +3776,8 @@ int main() {
   TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();
   TestPromptStateAdmissionBudget();
+  TestPromptAdmissionTracksLiveHeadroom();
+  TestPromptAdmissionRollsBackFailedEnqueue();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
   TestExpiredQueuedRequestNeverConsumesState();
   TestSlowConsumerOutputIsBoundedAndReclaimed();

@@ -2628,11 +2628,16 @@ def check_prompt_progress(client, model, checks, width, vision, allow_missing, s
 def check_server_metrics(client, model, checks, width, context, speculative, server_log=None):
     from server_metrics import (ServerMetrics, assert_accounting, PROMPT, GENERATED,
                                 PROCESSING, DEFERRED, PROMPT_SPEED, GENERATED_SPEED,
-                                KV_USAGE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, assert_slots)
+                                KV_USAGE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, assert_slots,
+                                PROMPT_BUDGET, PROMPT_AVAILABLE)
 
     metrics = ServerMetrics(client.base_url)
     initial = metrics.idle()
-    assert metrics.read("/v1/metrics") == initial
+    alias = metrics.read("/v1/metrics")
+    # Live host headroom may change between otherwise idle scrapes.
+    volatile = {PROMPT_BUDGET, PROMPT_AVAILABLE}
+    assert {k: v for k, v in alias.items() if k not in volatile} == {
+        k: v for k, v in initial.items() if k not in volatile}
     def slots(path="/slots", *, idle=False):
         snapshot = metrics.slots(path)
         assert_slots(snapshot, width, model, context, speculative != "off")
