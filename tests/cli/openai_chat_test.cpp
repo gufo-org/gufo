@@ -611,6 +611,11 @@ void TestCachedPrefillMetrics() {
          "twice");
   Expect(usage && usage->member_size("prompt_tokens") == 7,
          "Token usage includes cached tokens");
+  const auto* compatibility_metrics = usage ? usage->find("gufo") : nullptr;
+  Expect(compatibility_metrics &&
+             compatibility_metrics->find("cache_shared_bytes") &&
+             compatibility_metrics->member_size("cache_shared_bytes") == 0,
+         "Deprecated shared-byte metric remains present and zero");
   Expect(timings && timings->member_size("prompt_n") == 2 &&
              timings->member_double("prompt_per_second") == 800 &&
              timings->member_double("prompt_per_token_ms") == 1.25,

@@ -2204,7 +2204,9 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   metrics["cache_restore_bytes"] = result.cache_restore_bytes;
   metrics["cache_snapshot_bytes"] = result.cache_snapshot_bytes;
   metrics["cache_disk_queued_bytes"] = result.cache_disk_queued_bytes;
-  metrics["cache_shared_bytes"] = result.cache_shared_bytes;
+  // Deprecated compatibility key; remove at the next breaking release.
+  // See src/deprecated-items-to-remove-at-breaking-release.md.
+  metrics["cache_shared_bytes"] = std::size_t{0};
   metrics["cache_restore_ms"] = result.cache_restore_ms;
   metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
   metrics["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;
