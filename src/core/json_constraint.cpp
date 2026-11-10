@@ -1706,11 +1706,14 @@ private:
     if (!properties)
       properties = &empty_properties;
     const auto* additional = schema.find("additionalProperties");
-    // As in llama.cpp common/json-schema.cpp at 23b0202a1, a response object
-    // that declares properties without additionalProperties stays closed.
-    const bool closed = ClosedProperties(schema, ignore_unknown_keys_) ||
-                        (open_response_objects_ && !additional &&
-                         schema.contains("properties"));
+    // As in llama.cpp common/json-schema.cpp, an object declaring properties
+    // without additionalProperties stays closed, including nested tool values.
+    // Otherwise a misspelled key can become an unbounded string (#1126).
+    const bool closed =
+        ClosedProperties(schema, ignore_unknown_keys_) ||
+        ((open_objects_ || open_response_objects_) && !additional &&
+         schema.contains("properties") &&
+         !(ignore_unknown_keys_ && AdmitsExtraProperties(schema)));
     if (!properties->is_object() ||
         (additional && !additional->is_bool() && !additional->is_object()))
       Invalid("invalid object properties or additionalProperties");
@@ -1775,26 +1778,90 @@ private:
       const auto tail = Repeat(Seq({ws_, Byte(','), ws_, member}));
       suffix = {Optional(Seq({member, tail})), tail};
     }
-    const auto members = Members(*properties);
-    for (auto it = members.rbegin(); it != members.rend(); ++it) {
-      const auto& [key, value] = *it;
+    std::vector<std::uint32_t> members;
+    std::vector<std::size_t> required_at;
+    for (const auto& [key, value] : Members(*properties)) {
       CountStrings(key);
-      const auto member =
-          Seq({KeyLiteral(key), ws_, Byte(':'), ws_, Visit(*value, depth + 1)});
-      std::array<std::uint32_t, 2> next;
+      if (required.contains(key))
+        required_at.push_back(members.size());
+      members.push_back(Seq(
+          {KeyLiteral(key), ws_, Byte(':'), ws_, Visit(*value, depth + 1)}));
+    }
+    // Index 0 starts the object; index 1 follows a member and needs a comma.
+    using Next = std::array<std::uint32_t, 2>;
+    const auto step = [&](unsigned comma, std::uint32_t member,
+                          std::uint32_t next) {
+      Sequence sequence;
+      if (comma)
+        sequence = {ws_, Byte(','), ws_};
+      sequence.insert(sequence.end(), {member, next});
+      return sequence;
+    };
+    // after[p]: members from p onwards in schema order, then extra keys.
+    std::vector<Next> after(members.size() + 1);
+    after.back() = suffix;
+    for (std::size_t p = members.size(); p-- > 0;)
       for (unsigned comma = 0; comma < 2; ++comma) {
-        Sequence sequence;
-        if (comma)
-          sequence = {ws_, Byte(','), ws_};
-        sequence.insert(sequence.end(), {member, suffix[1]});
-        Rule rule{std::move(sequence)};
-        if (!required.contains(key))
-          rule.push_back({suffix[comma]});
+        Rule rule{step(comma, members[p], after[p + 1][1])};
+        if (!std::ranges::binary_search(required_at, p))
+          rule.push_back(Sequence{after[p + 1][comma]});
+        after[p][comma] = New(std::move(rule));
+      }
+    // llama.cpp common/json-schema-to-grammar.cpp _build_object_rule writes
+    // required properties first, then optional ones in schema order. Accept
+    // both orders. They differ only when optional "early" members precede the
+    // last required one: after every required member, one of those selects
+    // llama.cpp's order. Each choice depends on the next key, so a value is
+    // never matched twice and the rules stay linear in the member count.
+    const std::size_t last = required_at.empty() ? 0 : required_at.back();
+    if (required_at.empty() || last + 1 == required_at.size())
+      return Seq({Byte('{'), ws_, after[0][0], ws_, Byte('}')});
+    std::vector<std::size_t> early;
+    for (std::size_t p = 0; p < last; ++p)
+      if (!std::ranges::binary_search(required_at, p))
+        early.push_back(p);
+    // any_early[j]: early members from j onwards in order, then the members
+    // after `last`; some_early[j] reads at least one early member.
+    std::vector<Next> any_early(early.size() + 1), some_early(early.size());
+    any_early.back() = after[last + 1];
+    for (std::size_t j = early.size(); j-- > 0;)
+      for (unsigned comma = 0; comma < 2; ++comma) {
+        const auto read = step(comma, members[early[j]], any_early[j + 1][1]);
+        any_early[j][comma] =
+            New(Rule{read, Sequence{any_early[j + 1][comma]}});
+        Rule rule{read};
+        if (j + 1 < early.size())
+          rule.push_back({some_early[j + 1][comma]});
+        some_early[j][comma] = New(std::move(rule));
+      }
+    // spine: the required members read so far, with no optional member yet.
+    Next spine;
+    for (unsigned comma = 0; comma < 2; ++comma)
+      spine[comma] = New(Rule{Sequence{after[last + 1][comma]},
+                              Sequence{some_early[0][comma]}});
+    for (std::size_t i = required_at.size(); i-- > 0;) {
+      // Optional members between the previous required member and this one
+      // continue in schema order once at least one of them is read.
+      const std::size_t begin = i ? required_at[i - 1] + 1 : 0;
+      const std::size_t end = required_at[i];
+      std::vector<Next> block(end - begin);
+      for (std::size_t q = end; q-- > begin;)
+        for (unsigned comma = 0; comma < 2; ++comma) {
+          Rule rule{step(comma, members[q], after[q + 1][1])};
+          if (q + 1 < end)
+            rule.push_back({block[q + 1 - begin][comma]});
+          block[q - begin][comma] = New(std::move(rule));
+        }
+      Next next;
+      for (unsigned comma = 0; comma < 2; ++comma) {
+        Rule rule{step(comma, members[end], spine[1])};
+        if (begin < end)
+          rule.push_back({block[0][comma]});
         next[comma] = New(std::move(rule));
       }
-      suffix = next;
+      spine = next;
     }
-    return Seq({Byte('{'), ws_, suffix[0], ws_, Byte('}')});
+    return Seq({Byte('{'), ws_, spine[0], ws_, Byte('}')});
   }
   std::uint32_t Array(const json::Value& schema, std::size_t depth) {
     // Best effort reads a missing items schema as any value, like `items: {}`:
@@ -1836,9 +1903,8 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
-  // Unlike open_objects_, this admits undeclared keys only when
-  // additionalProperties is true or a schema, or the object declares no
-  // properties. Untyped leaves and unsupported keywords remain errors.
+  // Response schemas permit open objects while keeping untyped leaves and
+  // unsupported keywords as errors.
   bool open_response_objects_;
   bool ignore_unknown_keys_{false};
   JsonConstraint::ValueSyntax values_;
@@ -1996,8 +2062,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     const json::Value& schema, bool strict, ToolFormat format) {
   if (format != ToolFormat::kJson)
     return ToolParameters(schema, strict, Syntax(format));
-  // Ordinary agent tools leave nested objects open. Preserve their declared
-  // requirements/types without relaxing strict output schemas.
+  // Ordinary agent tools may explicitly allow extra nested properties. Keep
+  // their requirements/types without relaxing strict output schemas.
   using Key = std::tuple<std::string, bool>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
