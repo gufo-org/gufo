@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "qwen38_flash_next",
   "version": "0.1.0",
-  "api_version": ">= 0.2.0",
+  "api_version": ">= 0.3.0",
   "entry": "qwen38_flash_next_register",
   "registration_target": "gufo_qwen38_flash_next",
   "depends": [],

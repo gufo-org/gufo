@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "module_fixture",
   "version": "0.1.0",
-  "api_version": ">= 0.2.0",
+  "api_version": ">= 0.3.0",
   "entry": "module_fixture_register",
   "registration_target": "module_fixture_registration",
   "depends": [],

@@ -1,0 +1,26 @@
+[package]
+name = "gufo-audio-decode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gufo-resample = { path = "../resample" }
+gufo-wav-decode = { path = "../wav_decode" }
+# The containers and codecs libsndfile decoded for EmbeddingGemma 2, except
+# GSM 6.10 and G.72x, which symphonia does not decode. Ogg Opus packets go to
+# libopus (src/opus.rs).
+symphonia = { version = "=0.6.1", default-features = false, features = [
+  "adpcm",
+  "flac",
+  "id3v2",
+  "mp1",
+  "mp2",
+  "mp3",
+  "ogg",
+  "pcm",
+  "vorbis",
+  "wav",
+] }

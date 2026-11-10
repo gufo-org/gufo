@@ -128,7 +128,7 @@ with tempfile.TemporaryDirectory() as temp:
     host = report["extensionApiVersion"]
     platform = "windows" if os.name == "nt" else "linux"
 
-    def release(version, revision, digest, api=">= 0.2.0"):
+    def release(version, revision, digest, api=">= 0.3.0"):
         return {"version": version, "revision": revision, "digest": digest,
                 "api_version": api, "platforms": [platform]}
 

@@ -74,15 +74,24 @@ must match unless the case is in `kKnownDeviations`. It runs in `check-pr`.
 the `.png` files under each directory and prints the median decode time of both
 decoders per file. CTest does not run this mode.
 
-`wav_decode_test` decodes generated WAVs with `core::DecodeWav`, under the
-limits and messages of each caller (server, Qwen3-ASR, Qwen3-TTS), and with
-frozen copies of the three C++ decoders from 0.32.0 in
-`tests/core/wav_reference.cpp`. The cases cover a grid of formats, sample
-widths, channel counts and sample rates, extreme sample values, chunk layouts,
-the length limits and 8,000 random mutations. The samples must match bit for
-bit, or the exception type and message must match. It runs in `check-pr`.
+`wav_decode_test` decodes generated WAVs with `core::DecodeAudio`'s strict
+PCM WAV path, under the limits and status messages of each caller (server,
+Qwen3-ASR, Qwen3-TTS), and with frozen copies of the three C++ decoders from
+0.32.0 in `tests/core/wav_reference.cpp`. The cases cover a grid of formats,
+sample widths, channel counts and sample rates, extreme sample values, chunk
+layouts, the length limits and 8,000 random mutations. The samples must match
+bit for bit, or the messages must match. It runs in `check-pr`.
 `wav_decode_test --time [--repeat N]` prints the median decode time of both
 decoders for long inputs; CTest does not run this mode.
+
+`audio_decode_test` tests `core::DecodeAudio`, `DownmixMono` and `Resample`
+on generated audio: the float value of each WAV encoding (8- to 32-bit PCM,
+32- and 64-bit float, A-law, mu-law) on both paths, the strict path's float
+clamping, the channel mean, sines through the resampler from 8 to 192 kHz to
+16 and 48 kHz (passband error below 1e-4, stopband rms below 1e-5, soxr's
+output length), small Ogg Opus and MP3 fixtures, and the status of each
+rejection. It runs in `check-pr`. The resampler crate also has Rust
+unit tests (`cargo test -p gufo-resample`), which CI does not run.
 
 `base64_test` compares base64 through each caller with frozen copies of the
 0.33.0 code in `tests/core/base64_reference.cpp`: media data URLs

@@ -10,6 +10,7 @@
   libpng,
   libjpeg,
   libwebp,
+  libopus,
   libsndfile,
   soxr,
   openssl,
@@ -119,6 +120,7 @@ stdenv.mkDerivation {
     libpng
     libjpeg
     libwebp
+    libopus
     libsndfile
     soxr
     openssl
