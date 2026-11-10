@@ -33,6 +33,9 @@ add_qwen_cpu_test(qwen_forward_test
 add_qwen_cpu_test(qwen_generator_test
   tests/models/qwen/cpu/generator_test.cpp
   "cpu;models;qwen;generator")
+add_qwen_cpu_test(qwen_probe_test
+  tests/models/qwen/cpu/probe_test.cpp
+  "cpu;models;qwen;probe")
 add_qwen_cpu_test(qwen_ssm_test
   tests/models/qwen/cpu/ssm_test.cpp
   "cpu;models;qwen;ssm;reference")

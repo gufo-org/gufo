@@ -21,5 +21,8 @@ Gufo doesn't ship weights; download them from Hugging Face as each page shows.
 Every speed on these pages was measured on Strix Halo with 128 GB of memory,
 on the date given next to it.
 
+The Qwen extension also runs [Qwen3.5 4B](qwen3.5-4b.md) on its shared hybrid
+runtime.
+
 Community extensions add other models and variants; see
 [extensions](../extensions.md).

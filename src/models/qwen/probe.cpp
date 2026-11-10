@@ -39,6 +39,37 @@ std::optional<sampling::TextSamplingDefaults> QwenSamplingDefaults(
   return QwenSamplingDefaults(*config);
 }
 
+bool ProbeQwen35_4BGguf(const core::GgufReader& reader) {
+  if (reader.GetMetadataString("general.architecture").value_or("") !=
+      "qwen35") {
+    return false;
+  }
+  if (reader.GetMetadataUint64("qwen35.embedding_length").value_or(0) != 2560) {
+    return false;
+  }
+  // An embedded MTP layer belongs to a larger Qwen artifact; the shared
+  // trunk kernels for this shape have no validated draft path there.
+  return reader.GetMetadataUint32("qwen35.nextn_predict_layers").value_or(0) ==
+         0;
+}
+
+bool ProbeQwen35_4B(std::string_view model_root) {
+  try {
+    std::filesystem::path p(model_root);
+    if (!std::filesystem::is_regular_file(p)) {
+      return false;
+    }
+    std::string err;
+    auto reader = core::GgufReader::OpenFile(p.string(), &err);
+    if (!reader) {
+      return false;
+    }
+    return ProbeQwen35_4BGguf(*reader);
+  } catch (...) {
+    return false;
+  }
+}
+
 bool ProbeQwen(std::string_view model_root) {
   try {
     std::filesystem::path p(model_root);

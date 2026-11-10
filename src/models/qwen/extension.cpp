@@ -58,6 +58,16 @@ void qwen_register(gufo::ext::Registry& registry) {
       .chat_driver = nullptr,
       .sampling_defaults = &gufo::models::qwen::QwenSamplingDefaults,
   });
+  registry.AddTextProvider({
+      .id = "qwen35-4b",
+      .probe = &gufo::models::qwen::ProbeQwen35_4B,
+      .probe_gguf = &gufo::models::qwen::ProbeQwen35_4BGguf,
+      .create = nullptr,
+      .bench_driver = nullptr,
+      .prompt_driver = &gufo::models::qwen::RunQwenPromptCpu,
+      .chat_driver = nullptr,
+      .sampling_defaults = &gufo::models::qwen::QwenSamplingDefaults,
+  });
 }
 #else
 namespace gufo::models::qwen {}  // namespace gufo::models::qwen

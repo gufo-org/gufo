@@ -1,6 +1,8 @@
 # Qwen implementation
 
 The dense Qwen3.8 27B runtime owns target inference, native MTP and DFlash2.
+The same runtime also serves the text-only Qwen3.5-4B artifact (qwen35, 32
+layers, hidden 2560, no MTP) through the `qwen35-4b` provider.
 Shared Qwen tokenization, chat templates, configuration extraction, HIP
 operators and vision live in [`src/families/qwen/`](../../families/qwen/README.md),
 which Flash-Next, Qwen3-TTS, Qwen-Image-2.1 and MiniMax H3 also use. Audio

@@ -30,6 +30,18 @@
           "dflash2": "--dflash-model"
         }
       }
+    },
+    {
+      "id": "qwen35-4b",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:qwen35"
+      ],
+      "model_ids": [
+        "qwen35-4b"
+      ],
+      "target": "gufo_qwen_hip",
+      "entry": "qwen35_4b_provider_register"
     }
   ],
   "options": [
@@ -87,6 +99,12 @@
     {
       "target": "qwen_chat_template_test",
       "ctest": "qwen_chat_template_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen_probe_test",
+      "ctest": "qwen_probe_test",
       "check_pr": true,
       "windows_build": true
     },

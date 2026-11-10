@@ -44,3 +44,22 @@ void qwen_provider_register(gufo::ext::Registry& registry) {
   });
 #endif
 }
+
+void qwen35_4b_provider_register(gufo::ext::Registry& registry) {
+  registry.AddProvider(
+      gufo::ext::generated::extension_qwen::kProvider_qwen35_4b);
+#if defined(ENGINE_ENABLE_HIP)
+  // The Qwen3.5-4B artifact carries no native MTP layer and has no DFlash2
+  // draft, so no speculative defaults are declared for this provider.
+  registry.AddTextProvider({
+      .id = "qwen35-4b",
+      .probe = &gufo::models::qwen::ProbeQwen35_4B,
+      .probe_gguf = &gufo::models::qwen::ProbeQwen35_4BGguf,
+      .create = &gufo::models::qwen::CreateQwenTextRunner,
+      .bench_driver = &gufo::models::qwen::RunQwenBenchmark,
+      .prompt_driver = &gufo::models::qwen::RunQwenPrompt,
+      .chat_driver = &gufo::models::qwen::RunQwenChat,
+      .sampling_defaults = &gufo::models::qwen::QwenSamplingDefaults,
+  });
+#endif
+}
