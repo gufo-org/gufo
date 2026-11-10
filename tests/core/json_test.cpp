@@ -59,6 +59,27 @@ void TestNumbers() {
   }
   assert(Value(100000).dump() == "100000");
   assert(parse(R"({"limit":100000})").tojson() == R"({"limit": 100000})");
+  // kAsParsed writes the token parse() read; a double would change it.
+  constexpr auto kAsParsed = Value::Numbers::kAsParsed;
+  for (const auto* input :
+       {"9007199254740993", "1.0", "1e5", "1E+05", "-0.0", "-0", "2.50", "1e-7",
+        "0.1234567", "18446744073709551615", "100000"}) {
+    assert(parse(input).dump(kAsParsed) == input);
+    assert(parse(input).tojson(kAsParsed) == input);
+  }
+  assert(parse(R"({"a":[1.0, {"b":1e5}],"c":-0.0})").dump(kAsParsed) ==
+         R"({"a":[1.0,{"b":1e5}],"c":-0.0})");
+  assert(parse(R"({"a":[1.0,{"b":1e5}]})").tojson(kAsParsed) ==
+         R"({"a": [1.0, {"b": 1e5}]})");
+  assert(parse("9007199254740993").as_double() == 9007199254740992.0);
+  // Numbers built from C++ values, or replacing a parsed one, are canonical.
+  assert(Value(1.0).dump(kAsParsed) == "1");
+  auto edited = parse(R"({"n":1.0})");
+  edited["n"] = 2.0;
+  assert(edited.dump(kAsParsed) == R"({"n":2})");
+  auto renamed = parse(R"({"n":"text"})");
+  renamed["n"] = 1.0;
+  assert(renamed.dump(kAsParsed) == R"({"n":1})");
   assert(Value(0).as_size(777) == 0);
   assert(Value(4096).as_size(777) == 4096);
   const double largest = std::nextafter(std::ldexp(1.0, 64), 0.0);
