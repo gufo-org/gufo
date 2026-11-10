@@ -24,5 +24,9 @@ add_subdirectory(models/nemotron_h_moe)
 # attention, QK norms and attention sinks. Metadata loader first.
 add_subdirectory(models/flint)
 
+# GLM-5.3-Flash (glm5-next) — hybrid KDA/mHC + absorbed DSA + group-limited
+# MoE with a nextn draft block. Metadata loader first.
+add_subdirectory(models/glm5_next)
+
 # Serve- and CLI-seam glue consumed by gufo_llm_cli and gufo_serving.
 add_subdirectory(integration)

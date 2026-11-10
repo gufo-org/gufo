@@ -9,6 +9,8 @@
 #include "staging/models/flint/serve_runner.hpp"
 #include "staging/models/gemma4/engine.hpp"
 #include "staging/models/gemma4/serve_runner.hpp"
+#include "staging/models/glm5_next/engine.hpp"
+#include "staging/models/glm5_next/serve_runner.hpp"
 #include "staging/models/ling3_0/engine.hpp"
 #include "staging/models/ling3_0/serve_runner.hpp"
 #include "staging/models/nemotron_h_moe/engine.hpp"
@@ -39,7 +41,7 @@ std::optional<StagingLoadedModel> StagingLoadModel(
       reader.GetMetadataString("general.architecture").value_or("");
   if (architecture != "qwen35moe" && architecture != "gemma4" &&
       architecture != "bailingmoe3" && architecture != "nemotron_h_moe" &&
-      architecture != "flint") {
+      architecture != "glm5-next" && architecture != "flint") {
     return std::nullopt;
   }
   if (max_context == 0) {
@@ -115,6 +117,21 @@ std::optional<StagingLoadedModel> StagingLoadModel(
         return std::nullopt;
       }
       auto runner = models::nemotron_h_moe::CreateTextRunner(
+          std::move(model), max_context, session_count, speculative_config,
+          disk_cache_config, error);
+      if (runner == nullptr) {
+        return std::nullopt;
+      }
+      return StagingLoadedModel{.runner = std::move(runner)};
+    }
+    if (architecture == "glm5-next") {
+      auto model = models::glm5_next::LoadServeModel(
+          model_path, reader, max_context, speculative_config, &load_error);
+      if (model == nullptr) {
+        SetError(error, load_error);
+        return std::nullopt;
+      }
+      auto runner = models::glm5_next::CreateTextRunner(
           std::move(model), max_context, session_count, speculative_config,
           disk_cache_config, error);
       if (runner == nullptr) {

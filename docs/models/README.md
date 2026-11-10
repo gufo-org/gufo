@@ -17,6 +17,7 @@ are downloaded separately and are not part of the runtime package.
 | Qwen3.8 Flash-Next | Sharded Q4 GGUF; text/images | [Usage and modes](qwen3.8-flash-next/README.md) |
 <!-- END GENERATED MODEL TABLE -->
 | Flint Preview 40B-A2B | Q8_0 GGUF; text | [Usage and status](flint/README.md) |
+| GLM 5.3 Flash (`glm5-next`) | UD IQ1_M GGUF (staging, not yet loadable); text/vision | [Plan and design](glm-5.3-flash/README.md) |
 
 Each model folder contains:
 
