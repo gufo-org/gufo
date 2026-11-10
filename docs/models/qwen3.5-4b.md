@@ -43,6 +43,9 @@ controls work as described in the [server guide](../server.md#reasoning-controls
 ## Implementation notes
 
 The 4B shape (32 layers, 2560 hidden size, 9216 intermediate size, SSM time-
-step rank 32) shares the Qwen HIP kernels with the 27B target. The 27B-tuned
-fast routes are selected by shape, so the 4B file decodes through the general
-routes; the [Qwen3.8 27B page](qwen3.8-27b.md) covers the tuned routes.
+step rank 32) shares the Qwen HIP kernels with the 27B target. Its 16-query-
+head attention (vs. the 27B's 24) gets its own WMMA and tiled attention
+variants (`attention_wmma_16.hip`, `attention_tile_16.hip`), so long-context
+prefill uses the same flash-attention-style path as the 27B instead of the
+baseline O(n²) kernel. Measured prefill: ~3140 tok/s at 12k context on Strix
+Halo (release build).
