@@ -29,6 +29,13 @@ struct ExtensionInfo {
   std::string name;
   std::string version;
   std::string source;
+  /// Where an external extension's source came from: the commit of its Git
+  /// work tree, else the revision the build declared for its directory, else
+  /// "unknown". Empty for an in-tree extension and for a module.
+  std::string revision = {};
+  /// Whether that work tree had uncommitted changes when the build was
+  /// configured.
+  bool dirty = false;
 };
 struct ExcludedExtension {
   ExtensionInfo extension;

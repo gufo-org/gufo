@@ -7,6 +7,22 @@
 #include "src/core/json.hpp"
 
 namespace gufo::cli {
+namespace {
+// Empty for an extension that records no revision.
+std::string RevisionText(const ext::ExtensionInfo& extension) {
+  if (extension.revision.empty())
+    return "";
+  return " revision " + extension.revision +
+         (extension.dirty ? " with uncommitted changes" : "");
+}
+void AddRevision(json::Value& entry, const ext::ExtensionInfo& extension) {
+  if (extension.revision.empty())
+    return;
+  entry["revision"] = extension.revision;
+  entry["dirty"] = extension.dirty;
+}
+}  // namespace
+
 std::string ExtensionDiagnostics(bool json_mode) {
   ext::Registry registry;
   ext::RegisterBuiltExtensions(registry);
@@ -20,7 +36,7 @@ std::string ExtensionDiagnostics(bool json_mode) {
     out << "\n";
     for (const auto& extension : registry.Extensions()) {
       out << "  " << extension.name << " " << extension.version << " ("
-          << extension.source << ")\n";
+          << extension.source << ")" << RevisionText(extension) << "\n";
     }
     for (const auto& provider : registry.Providers()) {
       out << "  provider " << provider.id << ": "
@@ -30,7 +46,8 @@ std::string ExtensionDiagnostics(bool json_mode) {
     for (const auto& excluded : registry.Excluded()) {
       out << "  excluded " << excluded.extension.name << " "
           << excluded.extension.version << " (" << excluded.extension.source
-          << "): " << excluded.reason << "\n";
+          << ")" << RevisionText(excluded.extension) << ": " << excluded.reason
+          << "\n";
     }
     return out.str();
   }
@@ -43,6 +60,7 @@ std::string ExtensionDiagnostics(bool json_mode) {
     entry["name"] = extension.name;
     entry["version"] = extension.version;
     entry["source"] = extension.source;
+    AddRevision(entry, extension);
     built.push_back(std::move(entry));
   }
   report["builtExtensions"] = std::move(built);
@@ -52,6 +70,7 @@ std::string ExtensionDiagnostics(bool json_mode) {
     entry["name"] = extension.extension.name;
     entry["version"] = extension.extension.version;
     entry["source"] = extension.extension.source;
+    AddRevision(entry, extension.extension);
     entry["reason"] = extension.reason;
     auto keys = json::Value::array();
     for (const auto& key : extension.keys)
