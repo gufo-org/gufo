@@ -67,10 +67,15 @@ dependencies = [
  "gufo-base64",
  "gufo-png-decode",
  "gufo-wav-decode",
+ "gufo-websocket",
 ]
 
 [[package]]
 name = "gufo-wav-decode"
+version = "0.0.0"
+
+[[package]]
+name = "gufo-websocket"
 version = "0.0.0"
 
 [[package]]

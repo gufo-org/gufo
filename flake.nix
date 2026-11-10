@@ -267,6 +267,7 @@
                 "src/core/base64"
                 "src/core/png_decode"
                 "src/core/wav_decode"
+                "src/core/websocket"
               ];
               files = [
                 "rust-toolchain.toml"

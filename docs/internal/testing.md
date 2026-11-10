@@ -95,6 +95,17 @@ runs in `check-pr`. `base64_test --time [--repeat N]` prints the median time of
 both implementations for a 20 MiB payload; CTest does not run this mode. The
 codec's own Rust unit tests (`cargo test -p gufo-base64`) do not run in CI.
 
+`websocket_frame_test` compares the Rust WebSocket frame reader, driven as
+`WebSocket::ReadLoop` drives it, with a frozen copy of the 0.33.0 `ReadLoop` in
+`tests/cli/websocket_frame_reference.cpp`, which reads from a byte stream
+instead of a socket. The cases cover every length encoding and the message
+limit, a grid of opcode, FIN, RSV and mask bits, every close code from 0 to
+5100, UTF-8 within and across fragments, the message queue's limits, a stream
+cut at every byte and 4,000 random streams and mutations. The frames sent back
+and the messages queued must match. It runs in `check-pr`;
+`audio_websocket_test` covers the socket side. The reader's Rust unit tests
+(`cargo test -p gufo-websocket`) do not run in CI.
+
 ## Hosted versus local checks
 
 GitHub runs `nix flake check`: formatting, documentation, dependency inventory,

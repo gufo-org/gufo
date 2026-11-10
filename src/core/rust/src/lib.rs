@@ -9,3 +9,4 @@
 extern crate gufo_base64;
 extern crate gufo_png_decode;
 extern crate gufo_wav_decode;
+extern crate gufo_websocket;

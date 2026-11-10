@@ -872,6 +872,14 @@ endfunction()
   add_test(NAME base64_test COMMAND base64_test)
   set_tests_properties(base64_test PROPERTIES LABELS "cpu;server;correctness")
 
+  add_executable(websocket_frame_test
+    tests/cli/websocket_frame_test.cpp
+    tests/cli/websocket_frame_reference.cpp)
+  target_link_libraries(websocket_frame_test PRIVATE gufo_core)
+  add_test(NAME websocket_frame_test COMMAND websocket_frame_test)
+  set_tests_properties(websocket_frame_test PROPERTIES
+    LABELS "cpu;server;correctness")
+
   # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
   if (NOT WIN32)
   add_executable(http_server_test tests/cli/http_server_test.cpp)
