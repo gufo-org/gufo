@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "src/core/base64.hpp"
 #include "src/core/platform/socket.hpp"
 
 namespace gufo::core {
@@ -255,49 +256,28 @@ Image Orient(Image image, unsigned orientation) {
   return result;
 }
 
-constexpr std::string_view kBase64 =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 std::vector<std::uint8_t> DecodeBase64(std::string_view input) {
   if (input.empty() || input.size() % 4 != 0 ||
       input.size() > ((kMaxEncodedImageBytes + 2) / 3) * 4) {
     throw std::invalid_argument("invalid or oversized base64 image");
   }
   std::vector<std::uint8_t> output;
-  output.reserve(input.size() / 4 * 3);
-  for (std::size_t i = 0; i < input.size(); i += 4) {
-    std::uint32_t bits = 0;
-    unsigned padding = 0;
-    for (unsigned j = 0; j < 4; ++j) {
-      const char c = input[i + j];
-      if (c == '=') {
-        if (j < 2 || i + 4 != input.size()) {
-          throw std::invalid_argument("invalid base64 image padding");
-        }
-        ++padding;
-        bits <<= 6;
-      } else {
-        const auto digit = kBase64.find(c);
-        if (digit == std::string_view::npos || padding != 0) {
-          throw std::invalid_argument("invalid base64 image character");
-        }
-        bits = (bits << 6) | static_cast<std::uint32_t>(digit);
-      }
-    }
-    if ((padding == 1 && (bits & 0xff) != 0) ||
-        (padding == 2 && (bits & 0xffff) != 0)) {
+  switch (core::DecodeBase64(input, {.max_decoded = kMaxEncodedImageBytes},
+                             output)) {
+    case core::Base64Status::kOk:
+      return output;
+    case core::Base64Status::kPadding:
+      throw std::invalid_argument("invalid base64 image padding");
+    case core::Base64Status::kNonCanonical:
       throw std::invalid_argument("noncanonical base64 image");
-    }
-    output.push_back(static_cast<std::uint8_t>(bits >> 16));
-    if (padding < 2)
-      output.push_back(static_cast<std::uint8_t>(bits >> 8));
-    if (padding == 0)
-      output.push_back(static_cast<std::uint8_t>(bits));
+    case core::Base64Status::kTooLong:
+      throw std::invalid_argument("image exceeds encoded byte limit");
+    case core::Base64Status::kLength:
+    case core::Base64Status::kAfterPadding:
+    case core::Base64Status::kCharacter:
+      break;
   }
-  if (output.size() > kMaxEncodedImageBytes) {
-    throw std::invalid_argument("image exceeds encoded byte limit");
-  }
-  return output;
+  throw std::invalid_argument("invalid base64 image character");
 }
 
 // WebP, lossy or lossless; like PNG, alpha is dropped rather than blended.

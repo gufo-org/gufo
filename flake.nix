@@ -264,6 +264,7 @@
             src = mkFilteredSource {
               directories = [
                 "src/core/rust"
+                "src/core/base64"
                 "src/core/png_decode"
                 "src/core/wav_decode"
               ];

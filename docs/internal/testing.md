@@ -84,6 +84,17 @@ bit, or the exception type and message must match. It runs in `check-pr`.
 `wav_decode_test --time [--repeat N]` prints the median decode time of both
 decoders for long inputs; CTest does not run this mode.
 
+`base64_test` compares base64 through each caller with frozen copies of the
+0.33.0 code in `tests/core/base64_reference.cpp`: media data URLs
+(`core::ReadImageUrl`), TTS reference audio (`server::DecodeBase64Wav`), audio
+streams and the WebSocket key (`server::DecodeAudioBase64`), and the encoders.
+The cases cover every quad over a set of digits, padding and other bytes, round
+trips of every length up to 300 bytes with mutations, decoded-size limits and a
+1 MiB payload. The decoded bytes, or the result and message, must match. It
+runs in `check-pr`. `base64_test --time [--repeat N]` prints the median time of
+both implementations for a 20 MiB payload; CTest does not run this mode. The
+codec's own Rust unit tests (`cargo test -p gufo-base64`) do not run in CI.
+
 ## Hosted versus local checks
 
 GitHub runs `nix flake check`: formatting, documentation, dependency inventory,
