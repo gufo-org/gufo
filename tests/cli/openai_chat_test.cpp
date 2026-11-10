@@ -1216,6 +1216,74 @@ void TestHistoricalTypedArgumentsUseTojson() {
              replayed.tool_calls[0].arguments[0].value == "100000" &&
              replayed.tool_calls[0].arguments[1].value == "[1000000]",
          "Typed historical integers render in decimal");
+  // Numbers replay as the client sent them back: the spelling this server
+  // returned from the model's tokens, not a double's (#1141).
+  const auto spelled = gufo::json::parse(
+      R"({"type":"function_call","call_id":"call_1","name":"read",
+          "arguments":"{\"id\":9007199254740993,\"ratio\":1.0,\"scale\":1e5,\"zero\":-0.0,\"pair\":[1.0,{\"x\":2.50}]}"})");
+  gufo::tokenization::ChatMessage numbers;
+  Expect(
+      gufo::server::ParseOpenAiResponseMessage(spelled, &numbers, budget,
+                                               &error) &&
+          numbers.tool_calls.size() == 1 &&
+          numbers.tool_calls[0].arguments.size() == 5 &&
+          numbers.tool_calls[0].arguments[0].value == "9007199254740993" &&
+          numbers.tool_calls[0].arguments[1].value == "1.0" &&
+          numbers.tool_calls[0].arguments[2].value == "1e5" &&
+          numbers.tool_calls[0].arguments[3].value == "-0.0" &&
+          numbers.tool_calls[0].arguments[4].value == R"([1.0, {"x": 2.50}])",
+      "Typed historical numbers keep their spelling");
+}
+
+// The legacy schema check after an unfinished reasoning quote reads the
+// canonical spelling, which the native number grammar accepts. The client
+// still receives the model's spelling (#1141).
+void TestSchemaCheckedNumbersKeepSpelling() {
+  const std::string call =
+      "<tool_call><function=f><parameter=count>1.0</parameter>"
+      "<parameter=id>9007199254740993</parameter><parameter=ratio>1e5"
+      "</parameter></function></tool_call>";
+  for (const auto* prefix : {"", "Check `foo then\n"})
+    for (const bool stream : {false, true}) {
+      gufo::server::ChatRequest chat;
+      chat.reasoning.enabled = true;
+      Expect(
+          !gufo::server::ParseOpenAiResponseControls(
+              gufo::json::parse(
+                  R"({"tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"count":{"type":"integer"},"id":{"type":"integer"},"ratio":{"type":"number"}},"required":["count","id","ratio"],"additionalProperties":false}}]})"),
+              &chat),
+          "schema-checked number fixture has valid controls");
+      chat.constrained_tools = false;
+      FakeBackend backend;
+      backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+      backend.pieces = {std::string(prefix) + (*prefix ? "" : "</think>") +
+                        call};
+      const auto response = gufo::server::CreateOpenAiResponse(
+          Request("{}"), backend, chat, 512, {}, stream);
+      gufo::json::Value output;
+      if (!stream)
+        output = gufo::json::parse(response.body);
+      else
+        response.streaming_body([&](std::string_view chunk) {
+          const auto event =
+              gufo::json::parse(chunk.substr(chunk.find("data: ") + 6));
+          if (event.member_str("type") == "response.completed")
+            output = *event.find("response");
+          return true;
+        });
+      std::vector<std::string> arguments;
+      for (const auto& part : output.find("output")->items())
+        if (part.member_str("type") == "function_call")
+          arguments.push_back(part.member_str("arguments"));
+      if (arguments.size() != 1)
+        std::cerr << "Schema-checked numbers: prefix=" << prefix
+                  << " stream=" << stream << " calls=" << arguments.size()
+                  << '\n';
+      Expect(arguments.size() == 1 &&
+                 arguments[0] ==
+                     R"({"count":1.0,"id":9007199254740993,"ratio":1e5})",
+             "schema-checked calls keep the model's number spelling");
+    }
 }
 
 void TestMalformedHistoricalFunctions() {
@@ -1264,7 +1332,8 @@ void TestQwenToolBoundariesAndSchema() {
     "tools":[{"type":"function","function":{"name":"f","parameters":{
       "type":"object","properties":{"text":{"type":"string"},
       "count":{"type":"integer"},"flag":{"type":"boolean"},
-      "limit":{"type":["integer","null"]},"tags":{"type":"array"}}}}}]
+      "limit":{"type":["integer","null"]},"tags":{"type":"array"},
+      "ratio":{"type":"number"}}}}}]
   })");
   const std::string good =
       "<tool_call><function=f><parameter=text>42</parameter>"
@@ -1357,7 +1426,19 @@ void TestQwenToolBoundariesAndSchema() {
              1, R"({"count":100000,"tags":[1000000,-100000]})"},
         Case{"<tool_call>{\"name\":\"f\",\"arguments\":{\"count\":"
              "100000}}</tool_call>",
-             1, R"({"count":100000})"}}) {
+             1, R"({"count":100000})"},
+        // Every number keeps the model's spelling, as in llama.cpp: a double
+        // would change 2^53 + 1, 1.0, 1e5 and -0.0 (#1141).
+        Case{"<tool_call><function=f><parameter=count>9007199254740993"
+             "</parameter><parameter=ratio>1.0</parameter><parameter=limit>"
+             "1e5</parameter><parameter=tags>[-0.0, 1E-7, 2.50]</parameter>"
+             "</function></tool_call>",
+             1,
+             R"({"count":9007199254740993,"ratio":1.0,"limit":1e5,)"
+             R"("tags":[-0.0,1E-7,2.50]})"},
+        Case{"<tool_call>{\"name\":\"f\",\"arguments\":{\"count\":"
+             "9007199254740993,\"ratio\":1.0,\"tags\":[1e5]}}</tool_call>",
+             1, R"({"count":9007199254740993,"ratio":1.0,"tags":[1e5]})"}}) {
     for (bool reasoning : {false, true}) {
       for (bool stream : {false, true}) {
         auto body = schema;
@@ -7763,6 +7844,7 @@ int main() {
   TestStreamingQuotedAndMalformedTools();
   TestIncrementalToolArguments();
   TestHistoricalTypedArgumentsUseTojson();
+  TestSchemaCheckedNumbersKeepSpelling();
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
   TestToolMarkersInsideConstrainedReasoning();

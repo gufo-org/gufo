@@ -350,6 +350,7 @@ def check_finite_argument_types(client, model, checks, chat_result, image=None):
             print(f"CHECK {label}", file=sys.stderr, flush=True)
     check_literal_history(client, model, checks, chat_result, image)
     check_integer_history(client, model, checks, chat_result)
+    check_number_spelling_history(client, model, checks, chat_result)
 
 
 def check_integer_history(client, model, checks, chat_result):
@@ -387,6 +388,45 @@ def check_integer_history(client, model, checks, chat_result):
             assert details.get("cached_tokens", 0) >= first["usage"]["total_tokens"], (
                 label, "replayed integer arguments invalidated the generated call", first, done)
             print(f"CHECK {label}", file=sys.stderr, flush=True)
+
+
+def check_number_spelling_history(client, model, checks, chat_result):
+    """Numbers keep the model's spelling, as in llama.cpp (#1141).
+
+    A double changes integers above 2^53 and writes 1.0 as 1, so the client
+    receives other arguments and the replayed call misses its checkpoint.
+    """
+    function = {"name": "tag", "description": "Tag a record.",
+                "parameters": {"type": "object", "properties": {
+                    "id": {"type": "integer"}, "weight": {"type": "number"}},
+                    "required": ["id", "weight"], "additionalProperties": False}}
+    record = 9007199254740993  # 2^53 + 1 has no double
+    for stream in (False, True):
+        label = f"number_spelling_history_{stream}"
+        messages = [{"role": "user", "content":
+                     f"Call tag once with id {record} and weight 1.0. "
+                     "Write the weight exactly as 1.0."}]
+        request = dict(model=model, messages=messages, temperature=0,
+                       reasoning_effort="none", max_completion_tokens=96,
+                       tools=[{"type": "function", "function": function}],
+                       tool_choice="required", parallel_tool_calls=False)
+        first = chat_result(client, request, stream)
+        checks[label + "_call"] = first
+        assert len(first["tools"]) == 1, (label, first)
+        call = first["tools"][0]
+        arguments = call["function"]["arguments"]
+        assert f'"id":{record}' in arguments, (label, arguments)
+        assert json.loads(arguments)["id"] == record, (label, arguments)
+        request["messages"] = [*messages, {
+            "role": "assistant", "content": first["text"] or None,
+            "reasoning_content": first["reasoning"], "tool_calls": [call]}, {
+            "role": "tool", "tool_call_id": call["id"], "content": "tagged"}]
+        done = chat_result(client, request, True)
+        checks[label + "_continued"] = done
+        details = done["usage"].get("prompt_tokens_details") or {}
+        assert details.get("cached_tokens", 0) >= first["usage"]["total_tokens"], (
+            label, "replayed numbers invalidated the generated call", first, done)
+        print(f"CHECK {label}", file=sys.stderr, flush=True)
 
 
 def check_read_arguments(client, model, checks, chat_result):
