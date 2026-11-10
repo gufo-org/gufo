@@ -61,6 +61,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gufo-resample"
+version = "0.0.0"
+
+[[package]]
 name = "gufo-rust"
 version = "0.0.0"
 dependencies = [

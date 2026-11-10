@@ -266,6 +266,7 @@
                 "src/core/rust"
                 "src/core/base64"
                 "src/core/png_decode"
+                "src/core/resample"
                 "src/core/wav_decode"
                 "src/core/websocket"
               ];
