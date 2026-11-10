@@ -24,7 +24,7 @@ enum class AudioFormats : std::uint8_t {
   kAll,
 };
 
-// What a caller accepts.
+// What a caller accepts, and whether it wants one channel.
 struct AudioLimits {
   AudioFormats formats{AudioFormats::kPcmWav};
   std::uint32_t max_channels{8};
@@ -33,6 +33,9 @@ struct AudioLimits {
   std::uint64_t max_seconds{30};
   // kPcmWav only: the widest integer PCM accepted, 16, 24 or 32 bits.
   std::uint32_t max_pcm_bits{16};
+  // Mix the channels down while decoding, block by block, to the samples
+  // DownmixMono returns, without holding every channel of the stream.
+  bool downmix_mono{false};
 };
 
 // Why DecodeAudio rejected an input.
@@ -74,6 +77,7 @@ private:
 
 struct DecodedAudio {
   std::uint32_t sample_rate{0};
+  // The stream's channels, or 1 with downmix_mono.
   std::uint32_t channels{0};
   // Interleaved float samples: frames * channels.
   std::vector<float> samples;

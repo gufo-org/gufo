@@ -1,8 +1,9 @@
 // Tests core::DecodeAudio, DownmixMono and Resample on generated audio:
 // libsndfile's float values for each WAV encoding, the strict PCM WAV path,
-// the channel mean, the resampler's response and output length, and the
-// status of each rejection. The Ogg Opus and MP3 fixtures were made with
-// FFmpeg 8 (libopus, LAME 3.101) and -fflags +bitexact.
+// the channel mean, also while decoding, the resampler's response and output
+// length, and the status of each rejection. The Ogg Opus
+// and MP3 fixtures were made with FFmpeg 8 (libopus, LAME 3.101) and -fflags
+// +bitexact.
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "src/core/audio.hpp"
@@ -158,6 +160,55 @@ constexpr std::uint16_t kALaw = 6;
 constexpr std::uint16_t kMuLaw = 7;
 constexpr std::uint16_t kGsm = 0x31;
 
+// A WAVE_FORMAT_EXTENSIBLE WAV whose samples have `valid` of `bits` bits.
+Bytes WavExtensible(std::uint16_t subformat, std::uint16_t channels,
+                    std::uint16_t bits, std::uint16_t valid,
+                    const Bytes& data) {
+  const std::uint32_t rate = 16000;
+  const std::uint16_t align = static_cast<std::uint16_t>(channels * bits / 8);
+  Bytes wav = {'R', 'I', 'F', 'F'};
+  Put(wav, 4 + 8 + 40 + 8 + data.size(), 4);
+  wav.insert(wav.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+  Put(wav, 40, 4);
+  Put(wav, 0xfffe, 2);
+  Put(wav, channels, 2);
+  Put(wav, rate, 4);
+  Put(wav, static_cast<std::uint64_t>(rate) * align, 4);
+  Put(wav, align, 2);
+  Put(wav, bits, 2);
+  Put(wav, 22, 2);
+  Put(wav, valid, 2);
+  Put(wav, 0, 4);  // channel mask
+  Put(wav, subformat, 2);
+  wav.insert(wav.end(), {0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00,
+                         0xaa, 0x00, 0x38, 0x9b, 0x71});
+  wav.insert(wav.end(), {'d', 'a', 't', 'a'});
+  Put(wav, data.size(), 4);
+  wav.insert(wav.end(), data.begin(), data.end());
+  return wav;
+}
+
+// G.711 to 16-bit linear PCM, as libsndfile's tables hold it.
+std::int16_t ALaw(std::uint8_t byte) {
+  const int value = byte ^ 0x55;
+  const int exponent = (value >> 4) & 7;
+  const int mantissa = value & 0x0f;
+  const int magnitude = exponent == 0
+                            ? mantissa * 16 + 8
+                            : (mantissa * 16 + 0x108) << (exponent - 1);
+  return static_cast<std::int16_t>((value & 0x80) != 0 ? magnitude
+                                                       : -magnitude);
+}
+
+std::int16_t MuLaw(std::uint8_t byte) {
+  const int value = ~byte & 0xff;
+  const int exponent = (value >> 4) & 7;
+  const int mantissa = value & 0x0f;
+  const int magnitude = ((mantissa * 8 + 0x84) << exponent) - 0x84;
+  return static_cast<std::int16_t>((value & 0x80) != 0 ? -magnitude
+                                                       : magnitude);
+}
+
 Bytes Float32(const std::vector<float>& samples) {
   Bytes data;
   for (const float sample : samples) {
@@ -264,6 +315,37 @@ void TestEncodings() {
       "A-law", Wav(kALaw, 1, 16000, 8, {0x55, 0xd5, 0x2a, 0xaa}),
       {-8 / 32768.0f, 8 / 32768.0f, -32256 / 32768.0f, 32256 / 32768.0f});
 
+  // Every 16-bit, A-law and mu-law value, over several packets.
+  Bytes every_pcm16;
+  std::vector<float> every_pcm16_expected;
+  for (int v = -32768; v <= 32767; ++v) {
+    Put(every_pcm16, static_cast<std::uint16_t>(v), 2);
+    every_pcm16_expected.push_back(static_cast<float>(v) / 32768.0f);
+  }
+  ExpectSamples("every PCM16 value", Wav(kPcm, 1, 16000, 16, every_pcm16),
+                every_pcm16_expected);
+  Bytes every_byte;
+  std::vector<float> alaw_expected;
+  std::vector<float> mulaw_expected;
+  for (int byte = 0; byte < 256; ++byte) {
+    every_byte.push_back(static_cast<std::uint8_t>(byte));
+    alaw_expected.push_back(ALaw(static_cast<std::uint8_t>(byte)) / 32768.0f);
+    mulaw_expected.push_back(MuLaw(static_cast<std::uint8_t>(byte)) / 32768.0f);
+  }
+  ExpectSamples("every A-law value", Wav(kALaw, 1, 16000, 8, every_byte),
+                alaw_expected);
+  ExpectSamples("every mu-law value", Wav(kMuLaw, 1, 16000, 8, every_byte),
+                mulaw_expected);
+
+  // WAVE_FORMAT_EXTENSIBLE scales by the written width, whatever the valid
+  // bits say, and leaves floats unclamped.
+  ExpectSamples("extensible PCM24, 20 valid bits",
+                WavExtensible(kPcm, 1, 24, 20, pcm24), pcm24_expected);
+  ExpectSamples("extensible PCM16, 12 valid bits",
+                WavExtensible(kPcm, 1, 16, 12, pcm16), pcm16_expected);
+  ExpectSamples("extensible float32", WavExtensible(kFloat, 1, 32, 32, floats),
+                {0.5f, -0.25f, 1.5f});
+
   // The strict path decodes the same integers, clamps floats to [-1, 1] and
   // takes PCM24 only when max_pcm_bits allows it.
   const core::AudioLimits pcm_wav{};
@@ -301,6 +383,38 @@ void TestChannels() {
   ExpectError<std::invalid_argument>("partial frame", [] {
     (void)core::DownmixMono(std::vector<float>{0.1f, 0.2f, 0.3f}, 2);
   });
+}
+
+// downmix_mono gives DownmixMono's samples, block by block while decoding,
+// on both paths.
+void TestDownmixWhileDecoding() {
+  Bytes data;
+  for (int n = 0; n < 3000 * 3; ++n) {
+    Put(data, static_cast<std::uint16_t>(n * 37), 2);
+  }
+  // 3,000 frames span packets of symphonia's 1,152 frames; the strict path
+  // reads blocks of 16,384 frames.
+  const Bytes three = Wav(kPcm, 3, 16000, 16, data);
+  Bytes long_data;
+  for (int n = 0; n < 40000 * 2; ++n) {
+    Put(long_data, static_cast<std::uint16_t>(n * 101), 2);
+  }
+  const Bytes long_stereo = Wav(kPcm, 2, 16000, 16, long_data);
+  const core::AudioLimits pcm_wav{};
+  for (const auto& [name, bytes, limits] :
+       {std::tuple{"three channels", three, kAll},
+        std::tuple{"MP3", kMp3, kAll},
+        std::tuple{"strict three channels", three, pcm_wav},
+        std::tuple{"strict long stereo", long_stereo, pcm_wav}}) {
+    const auto whole = Decode(bytes, limits);
+    auto mono_limits = limits;
+    mono_limits.downmix_mono = true;
+    const auto mono = Decode(bytes, mono_limits);
+    Check(mono.sample_rate == whole.sample_rate && mono.channels == 1,
+          std::string(name) + ": mono info");
+    ExpectEqual(std::string(name) + ": mono", mono.samples,
+                core::DownmixMono(whole.samples, whole.channels));
+  }
 }
 
 std::vector<float> Sine(std::uint32_t rate, double frequency, double seconds) {
@@ -537,6 +651,7 @@ int main() {
   try {
     TestEncodings();
     TestChannels();
+    TestDownmixWhileDecoding();
     TestResampler();
     TestMp3();
     TestOpus();

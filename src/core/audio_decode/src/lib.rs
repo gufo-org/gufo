@@ -6,6 +6,7 @@ compile_error!("guarded() catches panics at the C boundary, so build with panic 
 
 mod decode;
 mod opus;
+mod pcm;
 
 use std::ffi::{c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};

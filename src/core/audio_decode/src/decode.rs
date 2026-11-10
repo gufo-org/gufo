@@ -3,7 +3,8 @@
 //! float, A-law, µ-law, IMA and Microsoft ADPCM), FLAC, MPEG audio layers I
 //! to III and Ogg Vorbis through symphonia, which converts integer samples to
 //! floats with the same power-of-two scale as libsndfile, and Ogg Opus through
-//! symphonia's demuxer and libopus.
+//! symphonia's demuxer and libopus. WAV integer PCM, float, A-law and mu-law
+//! packets are converted to symphonia's floats here, without its PCM decoder.
 
 use std::io::Cursor;
 
@@ -18,6 +19,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::packet::Packet;
 
 use crate::opus;
+use crate::pcm::Pcm;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
@@ -94,8 +96,17 @@ pub fn decode(
     }
     match limits.formats {
         Formats::PcmWav => decode_pcm_wav(bytes, limits, stop, sink),
-        Formats::All => decode_all(bytes, limits, stop, sink),
+        Formats::All => decode_all(bytes, limits, stop, sink, PcmPath::Direct),
     }
+}
+
+/// How `decode_all` turns the packets of a codec `Pcm` handles into floats.
+/// The tests compare the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PcmPath {
+    Direct,
+    #[cfg_attr(not(test), allow(dead_code))]
+    Symphonia,
 }
 
 fn decode_pcm_wav(
@@ -154,6 +165,7 @@ fn decode_all(
     limits: &Limits,
     stop: &mut dyn FnMut() -> bool,
     sink: &mut dyn FnMut(&Info, &[f32]) -> bool,
+    path: PcmPath,
 ) -> Result<Info, Error> {
     let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
     let mut format = symphonia::default::get_probe()
@@ -177,9 +189,15 @@ fn decode_all(
         let head = params.extra_data.as_deref().and_then(opus::Head::parse);
         return decode_opus(&mut *format, id, head, declared, limits, stop, sink);
     }
+    // Made for every codec, so that a codec `Pcm` converts is rejected as
+    // symphonia rejects it.
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())
         .map_err(|_| Error::UnsupportedCodec)?;
+    let pcm = match path {
+        PcmPath::Direct => Pcm::of(params),
+        PcmPath::Symphonia => None,
+    };
     let channels = params
         .channels
         .as_ref()
@@ -216,34 +234,43 @@ fn decode_all(
         let Some(packet) = next_packet(&mut *format, id)? else {
             break;
         };
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
-            // An MPEG decoder resynchronises at the next frame, as mpg123
-            // does under libsndfile.
-            Err(SymphoniaError::DecodeError(_)) if estimated => continue,
-            Err(_) => return Err(Error::Truncated),
+        let (decoded, float) = match pcm {
+            Some(pcm) => (
+                pcm.convert(&packet.data, channels, &mut block) as u64,
+                pcm == Pcm::F32,
+            ),
+            None => {
+                let decoded = match decoder.decode(&packet) {
+                    Ok(decoded) => decoded,
+                    // An MPEG decoder resynchronises at the next frame, as
+                    // mpg123 does under libsndfile.
+                    Err(SymphoniaError::DecodeError(_)) if estimated => continue,
+                    Err(_) => return Err(Error::Truncated),
+                };
+                let spec = decoded.spec();
+                if spec.rate() != rate || spec.channels().count() != channels {
+                    return Err(Error::Truncated);
+                }
+                block.resize(decoded.samples_interleaved(), 0.0f32);
+                decoded.copy_to_slice_interleaved(&mut block[..]);
+                let float = matches!(
+                    decoded,
+                    GenericAudioBufferRef::F32(_) | GenericAudioBufferRef::F64(_)
+                );
+                (decoded.frames() as u64, float)
+            }
         };
-        let spec = decoded.spec();
-        if spec.rate() != rate || spec.channels().count() != channels {
-            return Err(Error::Truncated);
-        }
-        if frames + decoded.frames() as u64 > max_frames {
+        if frames + decoded > max_frames {
             return Err(Error::TooLong);
         }
-        block.resize(decoded.samples_interleaved(), 0.0f32);
-        decoded.copy_to_slice_interleaved(&mut block[..]);
         // Integer samples convert to finite floats.
-        let float = matches!(
-            decoded,
-            GenericAudioBufferRef::F32(_) | GenericAudioBufferRef::F64(_)
-        );
         if float && !block.iter().all(|value| value.is_finite()) {
             return Err(Error::NonFinite);
         }
         if !block.is_empty() && !sink(&info, &block) {
             return Err(Error::Stopped);
         }
-        frames += decoded.frames() as u64;
+        frames += decoded;
     }
     if frames == 0 {
         return Err(Error::NoAudio);
@@ -347,4 +374,240 @@ fn decode_opus(
     }
     info.frames = frames;
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIMITS: Limits = Limits {
+        formats: Formats::All,
+        max_channels: 8,
+        min_sample_rate: 1,
+        max_sample_rate: 192_000,
+        max_seconds: 30,
+        max_pcm_bits: 32,
+    };
+
+    const PCM: u16 = 1;
+    const FLOAT: u16 = 3;
+    const ALAW: u16 = 6;
+    const MULAW: u16 = 7;
+    const EXTENSIBLE: u16 = 0xfffe;
+
+    /// A `fmt ` chunk body at 16 kHz, with `cbSize` for tags other than PCM.
+    fn fmt(tag: u16, channels: u16, bits: u16) -> Vec<u8> {
+        let align = channels * bits.div_ceil(8);
+        let mut fmt = Vec::new();
+        fmt.extend(tag.to_le_bytes());
+        fmt.extend(channels.to_le_bytes());
+        fmt.extend(16_000u32.to_le_bytes());
+        fmt.extend((16_000 * u32::from(align)).to_le_bytes());
+        fmt.extend(align.to_le_bytes());
+        fmt.extend(bits.to_le_bytes());
+        if tag != PCM {
+            fmt.extend(0u16.to_le_bytes());
+        }
+        fmt
+    }
+
+    /// A `WAVE_FORMAT_EXTENSIBLE` chunk body with `valid` of `bits` bits.
+    fn extensible(subformat: u16, channels: u16, bits: u16, valid: u16) -> Vec<u8> {
+        let mut fmt = fmt(EXTENSIBLE, channels, bits);
+        fmt.truncate(16);
+        fmt.extend(22u16.to_le_bytes());
+        fmt.extend(valid.to_le_bytes());
+        fmt.extend(0u32.to_le_bytes());
+        fmt.extend(subformat.to_le_bytes());
+        fmt.extend([0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
+        fmt
+    }
+
+    /// A RIFF WAV of one `fmt ` chunk and one `data` chunk declaring `size`.
+    fn wav_sized(fmt: &[u8], data: &[u8], size: usize) -> Vec<u8> {
+        let mut wav = b"RIFF".to_vec();
+        wav.extend(((4 + 8 + fmt.len() + 8 + size) as u32).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend((fmt.len() as u32).to_le_bytes());
+        wav.extend(fmt);
+        wav.extend(b"data");
+        wav.extend((size as u32).to_le_bytes());
+        wav.extend(data);
+        wav
+    }
+
+    fn wav(fmt: &[u8], data: &[u8]) -> Vec<u8> {
+        wav_sized(fmt, data, data.len())
+    }
+
+    /// `len` bytes from a fixed linear congruential generator.
+    fn noise(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 56) as u8
+            })
+            .collect()
+    }
+
+    fn floats(values: &[f32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn decode_with(bytes: &[u8], path: PcmPath) -> Result<(Info, Vec<f32>), Error> {
+        let mut samples = Vec::new();
+        let info = decode_all(
+            bytes,
+            &LIMITS,
+            &mut || false,
+            &mut |_, block| {
+                samples.extend_from_slice(block);
+                true
+            },
+            path,
+        )?;
+        Ok((info, samples))
+    }
+
+    /// The codec the direct path converts in `bytes`, if any.
+    fn direct_codec(bytes: &[u8]) -> Option<Pcm> {
+        let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let format = symphonia::default::get_probe()
+            .probe(
+                &Hint::new(),
+                source,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
+            .ok()?;
+        let track = format.default_track(TrackType::Audio)?;
+        Pcm::of(track.codec_params.as_ref()?.audio()?)
+    }
+
+    /// The direct path takes `codec` and gives symphonia's decoder's result:
+    /// the same info and bit-identical samples, or the same error.
+    fn assert_same(name: &str, bytes: &[u8], codec: Option<Pcm>) {
+        assert_eq!(direct_codec(bytes), codec, "{name}: codec");
+        let direct = decode_with(bytes, PcmPath::Direct);
+        let symphonia = decode_with(bytes, PcmPath::Symphonia);
+        match (&direct, &symphonia) {
+            (Ok((info, samples)), Ok((expected_info, expected))) => {
+                assert_eq!(info, expected_info, "{name}: info");
+                assert_eq!(samples.len(), expected.len(), "{name}: length");
+                let same = samples
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| a.to_bits() == b.to_bits());
+                assert!(same, "{name}: samples differ");
+            }
+            _ => assert_eq!(
+                direct.as_ref().err(),
+                symphonia.as_ref().err(),
+                "{name}: status"
+            ),
+        }
+    }
+
+    #[test]
+    fn direct_pcm_matches_symphonia() {
+        // Every 16-bit value, every A-law and mu-law byte; 3,000 frames span
+        // packets of symphonia's 1,152 frames.
+        let every_pcm16: Vec<u8> = (0..=u16::MAX).flat_map(u16::to_le_bytes).collect();
+        let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+        let s = Some;
+        assert_same(
+            "PCM16 every value",
+            &wav(&fmt(PCM, 1, 16), &every_pcm16),
+            s(Pcm::S16),
+        );
+        assert_same("A-law", &wav(&fmt(ALAW, 1, 8), &every_byte), s(Pcm::ALaw));
+        assert_same(
+            "mu-law",
+            &wav(&fmt(MULAW, 1, 8), &every_byte),
+            s(Pcm::MuLaw),
+        );
+        for channels in [1, 2, 3, 8] {
+            let frames = 3_000;
+            for (bits, codec) in [(16, Pcm::S16), (24, Pcm::S24), (32, Pcm::S32)] {
+                let data = noise(frames * usize::from(channels * bits / 8));
+                let name = format!("PCM{bits}, {channels} channels");
+                assert_same(&name, &wav(&fmt(PCM, channels, bits), &data), s(codec));
+            }
+            let values: Vec<f32> = noise(frames * usize::from(channels))
+                .iter()
+                .map(|&b| (f32::from(b) - 128.0) / 37.0)
+                .collect();
+            let name = format!("float32, {channels} channels");
+            assert_same(
+                &name,
+                &wav(&fmt(FLOAT, channels, 32), &floats(&values)),
+                s(Pcm::F32),
+            );
+        }
+        let special = floats(&[0.0, -0.0, f32::MIN_POSITIVE / 2.0, f32::MAX, -1e-30]);
+        assert_same(
+            "float32 extremes",
+            &wav(&fmt(FLOAT, 1, 32), &special),
+            s(Pcm::F32),
+        );
+        for bad in [f32::NAN, f32::INFINITY] {
+            let data = floats(&[0.5, bad]);
+            assert_same(
+                "float32 non-finite",
+                &wav(&fmt(FLOAT, 1, 32), &data),
+                s(Pcm::F32),
+            );
+        }
+
+        // WAVE_FORMAT_EXTENSIBLE, also with fewer valid bits than written.
+        let stereo24 = noise(3_000 * 6);
+        for (bits, valid, codec) in [
+            (16, 16, Pcm::S16),
+            (16, 12, Pcm::S16),
+            (24, 24, Pcm::S24),
+            (24, 20, Pcm::S24),
+            (32, 24, Pcm::S32),
+        ] {
+            let data = noise(3_000 * 2 * usize::from(bits / 8));
+            let name = format!("extensible PCM{bits}, {valid} valid bits");
+            assert_same(
+                &name,
+                &wav(&extensible(PCM, 2, bits, valid), &data),
+                s(codec),
+            );
+        }
+        let data = floats(&[0.25, -3.0, 1.5, 0.0]);
+        assert_same(
+            "extensible float32",
+            &wav(&extensible(FLOAT, 2, 32, 32), &data),
+            s(Pcm::F32),
+        );
+
+        // A partial last frame, and a data chunk that ends early.
+        assert_same(
+            "partial frame",
+            &wav(&fmt(PCM, 2, 24), &stereo24[..6 * 100 + 4]),
+            s(Pcm::S24),
+        );
+        let cut = wav_sized(&fmt(PCM, 2, 24), &stereo24[..600], 1_200);
+        assert_same("cut data chunk", &cut, s(Pcm::S24));
+
+        // Codecs left to symphonia's decoder.
+        assert_same("PCM8", &wav(&fmt(PCM, 1, 8), &every_byte), None);
+        let float64: Vec<u8> = (0..100)
+            .flat_map(|i| (f64::from(i) / 37.0).to_le_bytes())
+            .collect();
+        assert_same("float64", &wav(&fmt(FLOAT, 1, 64), &float64), None);
+        assert_same(
+            "extensible PCM8",
+            &wav(&extensible(PCM, 1, 8, 8), &every_byte),
+            None,
+        );
+    }
 }

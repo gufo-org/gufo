@@ -15,9 +15,11 @@ Audio decoding has one public surface, `gufo/ext/audio.hpp`
   `should_stop` is polled between packets.
 - Every rejected input throws `core::AudioError`. Its `status()` is a
   `core::AudioStatus`, which callers map to their own messages.
-- `core::DownmixMono` averages interleaved channels. `core::Resample`
-  resamples one channel with the response of soxr's HQ preset and returns
-  `soxr_oneshot`'s rounded length.
+- `core::DownmixMono` averages interleaved channels. With
+  `AudioLimits::downmix_mono`, `DecodeAudio` returns the same mean, mixed
+  block by block while decoding, without holding every channel of the
+  stream. `core::Resample` resamples one channel with the response of soxr's
+  HQ preset and returns `soxr_oneshot`'s rounded length.
 
 Removed: `gufo/ext/wav.hpp` with `core::DecodeWav`, `core::WavLimits`,
 `core::WavMessages` and `core::WavAudio`. A caller of `DecodeWav` passes

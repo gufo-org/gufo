@@ -34,9 +34,22 @@ const char* Describe(AudioStatus status) {
   return "audio decoding failed";
 }
 
+// The mean of each frame's channels into `mono`, one value per frame.
+void Mix(std::span<const float> interleaved, std::uint32_t channels,
+         std::span<float> mono) {
+  for (std::size_t frame = 0; frame < mono.size(); ++frame) {
+    float sum = 0;
+    for (std::uint32_t channel = 0; channel < channels; ++channel) {
+      sum += interleaved[frame * channels + channel];
+    }
+    mono[frame] = sum / static_cast<float>(channels);
+  }
+}
+
 struct Context {
   const std::function<bool()>* should_stop;
   DecodedAudio* output;
+  bool downmix_mono;
   // An exception from should_stop or the copy, rethrown once Rust returns.
   std::exception_ptr failure;
 };
@@ -58,13 +71,21 @@ int Append(void* opaque, const GufoAudioInfo* info, const float* samples,
     DecodedAudio& output = *context.output;
     if (output.samples.empty()) {
       output.sample_rate = info->sample_rate;
-      output.channels = info->channels;
+      output.channels = context.downmix_mono ? 1 : info->channels;
       // The declared length, within the caller's limits: a forged header
       // reserves address space that stays untouched.
       output.samples.reserve(
-          static_cast<std::size_t>(info->frames * info->channels));
+          static_cast<std::size_t>(info->frames * output.channels));
     }
-    output.samples.insert(output.samples.end(), samples, samples + len);
+    if (!context.downmix_mono) {
+      output.samples.insert(output.samples.end(), samples, samples + len);
+      return 0;
+    }
+    // Rust hands over whole frames.
+    const std::size_t frames = output.samples.size();
+    output.samples.resize(frames + len / info->channels);
+    Mix(std::span(samples, len), info->channels,
+        std::span(output.samples).subspan(frames));
     return 0;
   } catch (...) {
     context.failure = std::current_exception();
@@ -120,7 +141,7 @@ DecodedAudio DecodeAudio(std::span<const std::byte> bytes,
       .max_pcm_bits = limits.max_pcm_bits,
   };
   DecodedAudio output;
-  Context context{&should_stop, &output, nullptr};
+  Context context{&should_stop, &output, limits.downmix_mono, nullptr};
   const GufoAudioStatus status =
       gufo_audio_decode(reinterpret_cast<const std::uint8_t*>(bytes.data()),
                         bytes.size(), &rust_limits, Stop, Append, &context);
@@ -140,13 +161,7 @@ std::vector<float> DownmixMono(std::span<const float> interleaved,
         "DownmixMono: channels must divide the sample count");
   }
   std::vector<float> mono(interleaved.size() / channels);
-  for (std::size_t frame = 0; frame < mono.size(); ++frame) {
-    float sum = 0;
-    for (std::uint32_t channel = 0; channel < channels; ++channel) {
-      sum += interleaved[frame * channels + channel];
-    }
-    mono[frame] = sum / static_cast<float>(channels);
-  }
+  Mix(interleaved, channels, mono);
   return mono;
 }
 
@@ -154,7 +169,7 @@ std::vector<float> Resample(std::span<const float> samples,
                             std::uint32_t from_rate, std::uint32_t to_rate) {
   DecodedAudio output;
   const std::function<bool()> never;
-  Context context{&never, &output, nullptr};
+  Context context{&never, &output, false, nullptr};
   const GufoAudioStatus status = gufo_audio_resample(
       samples.data(), samples.size(), from_rate, to_rate, Append, &context);
   if (context.failure) {

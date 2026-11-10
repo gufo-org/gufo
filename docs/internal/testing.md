@@ -86,12 +86,15 @@ decoders for long inputs; CTest does not run this mode.
 
 `audio_decode_test` tests `core::DecodeAudio`, `DownmixMono` and `Resample`
 on generated audio: the float value of each WAV encoding (8- to 32-bit PCM,
-32- and 64-bit float, A-law, mu-law) on both paths, the strict path's float
-clamping, the channel mean, sines through the resampler from 8 to 192 kHz to
-16 and 48 kHz (passband error below 1e-4, stopband rms below 1e-5, soxr's
-output length), small Ogg Opus and MP3 fixtures, and the status of each
-rejection. It runs in `check-pr`. The resampler crate also has Rust
-unit tests (`cargo test -p gufo-resample`), which CI does not run.
+32- and 64-bit float, A-law, mu-law) on both paths, every 16-bit, A-law and
+mu-law value and `WAVE_FORMAT_EXTENSIBLE` on `kAll`, the strict path's float
+clamping, the channel mean, also while decoding (`downmix_mono`), sines through the resampler from 8 to 192 kHz to 16 and 48 kHz
+(passband error below 1e-4, stopband rms below 1e-5, soxr's output length),
+small Ogg Opus and MP3 fixtures, and the status of each rejection. It runs in
+`check-pr`. The resampler and audio decoder crates also have Rust unit tests
+(`cargo test -p gufo-resample -p gufo-audio-decode`), which CI does not run.
+The decoder's tests compare its direct WAV sample conversion with symphonia's
+PCM decoder bit for bit.
 `embedding_gemma2_audio_decoder_test` compares EmbeddingGemma 2's decoder with
 waveforms from the official librosa backend: 16 kHz probes within 2e-6;
 resampled probes within 0.02 at the first sample, where soxr starts a

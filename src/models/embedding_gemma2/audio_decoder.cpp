@@ -17,6 +17,8 @@ constexpr core::AudioLimits kLimits{
     .min_sample_rate = 8000,
     .max_sample_rate = 192000,
     .max_seconds = 30,
+    // Mixed down block by block: no buffer holds every channel.
+    .downmix_mono = true,
 };
 
 constexpr std::string_view kStopped =
@@ -66,9 +68,7 @@ std::vector<float> DecodeAudio(std::span<const std::uint8_t> bytes,
       throw std::runtime_error(message);
     throw std::invalid_argument(message);
   }
-  const std::vector<float> mono =
-      core::DownmixMono(audio.samples, audio.channels);
-  std::vector<float>().swap(audio.samples);
+  const std::vector<float>& mono = audio.samples;
   std::vector<float> output = core::Resample(
       mono, audio.sample_rate, static_cast<std::uint32_t>(kAudioSampleRate));
   if (stop())

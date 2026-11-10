@@ -91,8 +91,9 @@ and 8–192 kHz; decoding also has a 15-second deadline. The HTTP body limit app
 
 The decoder follows the official processor's `librosa` backend: libsndfile
 float32, arithmetic channel mean, SOXR HQ resampling to 16 kHz, then zero
-padding to the ceil sample length. Gufo decodes in Rust (`core::DecodeAudio`,
-`DownmixMono` and `Resample`): symphonia with libsndfile's float scale, libopus
+padding to the ceil sample length. Gufo decodes in Rust (`core::DecodeAudio`
+with `downmix_mono`, which mixes each block as it arrives, and `Resample`):
+symphonia with libsndfile's float scale, libopus
 for Ogg Opus at the rate and gain libsndfile chooses, and its own resampler
 with SOXR HQ's response (linear phase, flat to 0.913 of the lower Nyquist
 frequency, stopband from it, 130 dB). As of November 2026, decoded samples match libsndfile 1.2.2
