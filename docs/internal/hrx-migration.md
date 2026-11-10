@@ -168,12 +168,14 @@ Bounded microbenchmarks, run one at a time after the GPU was recovered:
 
 ## Experimental Nix packages
 
-Two flake outputs run Gufo on HRX. Neither is built by hosted checks or
-releases.
+Three flake outputs run Gufo and Loom on HRX. None is built by hosted checks
+or releases.
 
 ```sh
 nix build .#hrx        # HRX dd9572875f: lib/libamdhip64.so.7, hrx-info, iree-profile
 nix build .#gufo-hrx   # the default Gufo binaries wrapped to load HRX
+nix build .#hrx-loom   # .#hrx plus loom-serve, loom-compile, loom-import-cxx,
+                       # loom-format, loom-benchmark, loom-test and loom-fetch
 ./result/bin/gufo diagnose
 ```
 
@@ -186,15 +188,27 @@ nix build .#gufo-hrx   # the default Gufo binaries wrapped to load HRX
   checks and dependency patches still run. After an HRX update, set the
   dependency `outputHash` to `lib.fakeHash`, build `.#hrx.passthru.deps` and
   copy the reported hash.
-- Two patches apply: `hrx-dt-runpath.patch` (needed to load Gufo's code
-  objects) and `hrx-stream-queues.patch` (one hardware queue per created
-  stream). The probe switches in `hrx-probe.patch` are not included.
+- `withLoom = true` (`.#hrx-loom`) adds Loom's AMD GPU and XDNA NPU targets
+  (`-DLOOM_TARGET_ALL_AMD=ON -DLOOM_ARCH_AMDGPU_TARGETS=gfx1151
+  -DLOOM_IMPORT_CXX=ON`); it needs no further dependencies. At `dd9572875f`
+  Loom's NPU programs can exceed tile memory after `a62c887489` (experiment log
+  in #1145); its GPU output loads in Gufo through `hipModuleLoad`.
+- Four patches apply. `hrx-dt-runpath.patch` is needed to load Gufo's code
+  objects. `hrx-stream-queues.patch` spreads streams over a pool of four
+  hardware queues so independent streams overlap; a queue per stream kept the
+  GPU 100% busy at idle once dozens existed. `hrx-debug-capture.patch`
+  (`HRX_DEBUG_CAPTURE=1`) prints where a graph capture is invalidated, and
+  `hrx-profile-open-session.patch` (`IREE_PROFILE_ALLOW_OPEN_SESSION=1`) lets
+  `iree-profile` read traces from processes that exit without ending the
+  session; both do nothing unless their variable is set. The probe switches in
+  `hrx-probe.patch` are not included.
 - [`gufo.nix`](../../.devops/nix/hrx/gufo.nix) wraps `gufo` and `gufo-server`
   with HRX first on `LD_LIBRARY_PATH`; the Gufo binaries are unchanged.
 
 As of November 2026, `gufo-hrx` passes `gufo diagnose`, gives the same
-Flash-Next prefill validation as HIP and measures pp512 1318, pp2048 1884 and
-tg128 30.52 tok/s (one `-r 3` run).
+Flash-Next prefill validation as HIP and measures pp512 1309-1317, pp2048
+1876-1890 and tg128 30.52-30.58 tok/s (two `-r 3` runs); an idle LFM3 server
+draws 13 W at 0% GPU busy.
 
 ## Profiling HRX
 

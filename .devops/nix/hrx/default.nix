@@ -14,6 +14,9 @@
   ninja,
   python3,
   rocmPackages,
+  # Also build Loom's compiler and serving tools with AMD GPU (gfx1151) and
+  # XDNA NPU targets, plus `loom-fetch`.
+  withLoom ? false,
 }:
 
 let
@@ -47,9 +50,10 @@ let
   };
 
   llvm = rocmPackages.llvm;
+  loomTools = [ "loom-serve" "loom-compile" "loom-import-cxx" "loom-format" "loom-benchmark" "loom-test" ];
 in
 llvm.rocmClangStdenv.mkDerivation {
-  pname = "hrx-system";
+  pname = if withLoom then "hrx-system-loom" else "hrx-system";
   version = "0-unstable-2026-11-09";
   inherit src;
 
@@ -57,9 +61,16 @@ llvm.rocmClangStdenv.mkDerivation {
     # The Nix toolchain adds DT_RUNPATH to device code objects, which the
     # native loader rejects (hrx-system#2983).
     ../patches/hrx-dt-runpath.patch
-    # One hardware queue per created stream, so independent streams run
-    # concurrently (hrx-system#2968).
+    # Streams round-robin over a pool of four hardware queues, so independent
+    # streams run concurrently (hrx-system#2968). A queue per stream kept the
+    # GPU 100% busy at idle once dozens were mapped.
     ../patches/hrx-stream-queues.patch
+    # HRX_DEBUG_CAPTURE=1 prints a backtrace where a graph capture is
+    # invalidated, naming the HIP call that broke it.
+    ../patches/hrx-debug-capture.patch
+    # IREE_PROFILE_ALLOW_OPEN_SESSION=1 lets iree-profile read a trace whose
+    # process exited without ending the profiling session, as Gufo does.
+    ../patches/hrx-profile-open-session.patch
   ];
 
   postPatch = ''
@@ -80,9 +91,14 @@ llvm.rocmClangStdenv.mkDerivation {
     "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld"
     "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld"
     "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld"
+  ] ++ lib.optionals withLoom [
+    "-DLOOM_TARGET_ALL_AMD=ON"
+    "-DLOOM_ARCH_AMDGPU_TARGETS=gfx1151"
+    "-DLOOM_IMPORT_CXX=ON"
   ];
 
-  ninjaFlags = [ "libhrx/src/binding/hip/libamdhip64.so" "hrx-info" "iree-profile" ];
+  ninjaFlags = [ "libhrx/src/binding/hip/libamdhip64.so" "hrx-info" "iree-profile" ]
+    ++ lib.optionals withLoom (map (tool: "loom/src/loom/tools/${tool}/${tool}") loomTools);
 
   installPhase = ''
     runHook preInstall
@@ -93,13 +109,29 @@ llvm.rocmClangStdenv.mkDerivation {
     install -Dm755 libhrx/tools/hrx-info $out/bin/hrx-info
     install -Dm755 runtime/src/iree/tools/iree-profile/iree-profile \
       $out/bin/iree-profile
+  '' + lib.optionalString withLoom ''
+    for tool in ${lib.concatStringsSep " " loomTools}; do
+      install -Dm755 loom/src/loom/tools/$tool/$tool $out/bin/$tool
+    done
+    # loom-fetch is the pure-Python model acquisition tool.
+    mkdir -p $out/share/loom
+    cp -r $src/loom/py $out/share/loom/py
+    cat > $out/bin/loom-fetch <<EOF
+    #!${python3}/bin/python3
+    import sys
+    sys.path.insert(0, "$out/share/loom/py")
+    from loom.model.fetch_main import main
+    sys.exit(main())
+    EOF
+    chmod +x $out/bin/loom-fetch
+  '' + ''
     runHook postInstall
   '';
 
   passthru = { inherit deps revision; };
 
   meta = {
-    description = "HRX HIP runtime (experimental Gufo integration)";
+    description = "HRX HIP runtime${lib.optionalString withLoom " and Loom tools"} (experimental Gufo integration)";
     homepage = "https://github.com/ROCm/hrx-system";
     license = with lib.licenses; [ asl20 llvm-exception ];
     platforms = [ "x86_64-linux" ];

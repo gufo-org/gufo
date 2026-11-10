@@ -1,0 +1,22 @@
+diff --git a/runtime/src/iree/tooling/profile/reader.c b/runtime/src/iree/tooling/profile/reader.c
+index 853296546d..d08ff89a94 100644
+--- a/runtime/src/iree/tooling/profile/reader.c
++++ b/runtime/src/iree/tooling/profile/reader.c
+@@ -4,6 +4,7 @@
+ // See https://llvm.org/LICENSE.txt for license information.
+ // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+ 
++#include <stdlib.h>
+ #include "iree/tooling/profile/reader.h"
+ 
+ #include <inttypes.h>
+@@ -345,7 +346,8 @@ iree_status_t iree_profile_file_for_each_record(
+       ++record_index;
+     }
+   }
+-  if (iree_status_is_ok(status) && validate_session_lifecycle) {
++  if (iree_status_is_ok(status) && validate_session_lifecycle &&
++      !getenv("IREE_PROFILE_ALLOW_OPEN_SESSION")) {
+     for (iree_host_size_t i = 0; i < session_count; ++i) {
+       if (sessions[i].is_active) {
+         status = iree_make_status(
