@@ -1,0 +1,35 @@
+// out = silu(gate) * up as F16, four elements per work item: the same
+// contract as Gufo's SwigluHalfKernel for counts divisible by four.
+kernel.def export("swiglu_f16") @swiglu_f16(%count: index) {
+  %c1 = index.constant 1 : index
+  %c4 = index.constant 4 : index
+  %workgroup_size = index.constant 256 : index
+  %quads = index.div %count, %c4 : index
+  %rounding = index.sub %workgroup_size, %c1 : index
+  %rounded = index.add %quads, %rounding : index
+  %workgroups = index.div %rounded, %workgroup_size : index
+  kernel.launch.config workgroups(%workgroups, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
+} launch(%count: index, %gate: buffer, %up: buffer, %output: buffer) {
+  %workgroup = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %workgroup_size = kernel.workgroup.size<x> : index
+  %quad = index.madd %workgroup, %workgroup_size, %lane : index
+  %c4 = index.constant 4 : index
+  %quads = index.div %count, %c4 : index
+  %in_bounds = index.cmp ult, %quad, %quads : index
+  %gate_noalias, %up_noalias, %output_noalias = buffer.assume.noalias %gate, %up, %output : buffer, buffer, buffer
+  %base = index.constant 0 : offset
+  %gate_view = buffer.view %gate_noalias[%base] : buffer -> view<[%count]xf32>
+  %up_view = buffer.view %up_noalias[%base] : buffer -> view<[%count]xf32>
+  %output_view = buffer.view %output_noalias[%base] : buffer -> view<[%count]xf16>
+  scf.if %in_bounds {
+    %element = index.mul %quad, %c4 : index
+    %g = vector.load %gate_view[%element] : view<[%count]xf32> -> vector<4xf32>
+    %u = vector.load %up_view[%element] : view<[%count]xf32> -> vector<4xf32>
+    %activated = vector.siluf<afn> %g : vector<4xf32>
+    %product = vector.mulf<nnan|ninf|nsz> %activated, %u : vector<4xf32>
+    %packed = vector.fptrunc %product : vector<4xf32> to vector<4xf16>
+    vector.store %packed, %output_view[%element] : vector<4xf16>, view<[%count]xf16>
+  }
+  kernel.return
+}
