@@ -1,0 +1,59 @@
+diff --git a/libhrx/src/binding/hip/api.c b/libhrx/src/binding/hip/api.c
+index e0e2c836b5..355b5838bb 100644
+--- a/libhrx/src/binding/hip/api.c
++++ b/libhrx/src/binding/hip/api.c
+@@ -12465,6 +12465,30 @@ HIPAPI hipError_t hipMemsetD32Async(hipDeviceptr_t dstDevice, int i, size_t N,
+ //
+ // See also: hipStreamCreateWithFlags, hipStreamCreateWithPriority,
+ //           hipStreamDestroy, hipStreamSynchronize.
++// Creates a normal-priority stream on its own hardware queue so that
++// independent streams can execute concurrently.
++static iree_status_t iree_hip_stream_create_on_dedicated_queue(
++    iree_hal_streaming_context_t* context, unsigned int flags,
++    hipStream_t* stream) {
++  iree_hal_queue_params_t queue_params;
++  iree_hal_queue_params_initialize(&queue_params);
++  queue_params.placement = iree_hal_queue_placement(context->queue);
++  queue_params.priority = iree_hal_queue_priority(context->queue);
++  queue_params.features = iree_hal_queue_features(context->queue);
++  queue_params.execution_resources =
++      iree_hal_queue_execution_resources(context->queue);
++  iree_hal_queue_t* acquired_queue = NULL;
++  iree_status_t status = iree_hal_queue_acquire(
++      iree_hal_queue_family(context->queue), &queue_params, &acquired_queue);
++  if (iree_status_is_ok(status)) {
++    status = iree_hip_stream_create(context, acquired_queue, flags,
++                                    /*priority=*/0,
++                                    iree_hal_semaphore_list_empty(), stream);
++  }
++  iree_hal_queue_release(acquired_queue);
++  return status;
++}
++
+ HIPAPI hipError_t hipStreamCreate(hipStream_t* stream) {
+   HIP_API_BEGIN();
+   HIP_DEBUG_LOG("[HIP_API] hipStreamCreate(stream=%p)\n", (void*)stream);
+@@ -12482,9 +12506,8 @@ HIPAPI hipError_t hipStreamCreate(hipStream_t* stream) {
+     HIP_RETURN_ERROR(init_result);
+   }
+ 
+-  iree_status_t status = iree_hip_stream_create(
+-      context, context->queue, hipStreamDefault,
+-      /*priority=*/0, iree_hal_semaphore_list_empty(), stream);
++  iree_status_t status = iree_hip_stream_create_on_dedicated_queue(
++      context, hipStreamDefault, stream);
+ 
+   hipError_t result = iree_status_to_hip_result(status);
+   IREE_TRACE_ZONE_END(z0);
+@@ -12551,9 +12574,8 @@ HIPAPI hipError_t hipStreamCreateWithFlags(hipStream_t* stream,
+     HIP_RETURN_ERROR(init_result);
+   }
+ 
+-  iree_status_t status = iree_hip_stream_create(
+-      context, context->queue, flags,
+-      /*priority=*/0, iree_hal_semaphore_list_empty(), stream);
++  iree_status_t status =
++      iree_hip_stream_create_on_dedicated_queue(context, flags, stream);
+ 
+   hipError_t result = iree_status_to_hip_result(status);
+   IREE_TRACE_ZONE_END(z0);

@@ -166,6 +166,36 @@ Bounded microbenchmarks, run one at a time after the GPU was recovered:
 > recovery. Use bounded fixed-iteration probe kernels, run one GPU process at a
 > time and check `journalctl -k` after any timeout.
 
+## Experimental Nix packages
+
+Two flake outputs run Gufo on HRX. Neither is built by hosted checks or
+releases.
+
+```sh
+nix build .#hrx        # HRX dd9572875f: lib/libamdhip64.so.7, hrx-info, iree-profile
+nix build .#gufo-hrx   # the default Gufo binaries wrapped to load HRX
+./result/bin/gufo diagnose
+```
+
+- [`.devops/nix/hrx/default.nix`](../../.devops/nix/hrx/default.nix) builds HRX
+  for gfx1151 with the flake's ROCm 10.1 clang. HRX downloads its
+  dependencies at configure time, so a fixed-output derivation runs
+  [`hrx-deps.py`](../../.devops/nix/hrx/hrx-deps.py) `fetch` over every URL
+  pinned in `MODULE.cmake.lock` and Loom's ISA XML descriptor, and the build
+  rewrites those URLs to `file://` paths in that store path. HRX's own hash
+  checks and dependency patches still run. After an HRX update, set the
+  dependency `outputHash` to `lib.fakeHash`, build `.#hrx.passthru.deps` and
+  copy the reported hash.
+- Two patches apply: `hrx-dt-runpath.patch` (needed to load Gufo's code
+  objects) and `hrx-stream-queues.patch` (one hardware queue per created
+  stream). The probe switches in `hrx-probe.patch` are not included.
+- [`gufo.nix`](../../.devops/nix/hrx/gufo.nix) wraps `gufo` and `gufo-server`
+  with HRX first on `LD_LIBRARY_PATH`; the Gufo binaries are unchanged.
+
+As of November 2026, `gufo-hrx` passes `gufo diagnose`, gives the same
+Flash-Next prefill validation as HIP and measures pp512 1318, pp2048 1884 and
+tg128 30.52 tok/s (one `-r 3` run).
+
 ## Profiling HRX
 
 ```sh
@@ -203,5 +233,5 @@ down gaps, queues and kernel families. Set `CXXFILT` to a `c++filt` binary.
    Any route that calls hipBLASLt (DeepSeek V4 Flash, Qwen, EmbeddingGemma 2,
    Qwen3-ASR, MiniMax H3, Qwen-Image and some Flash-Next shapes) is blocked
    until the code-object fix from item 1 lands.
-4. Then add HRX to the flake as a pinned input, select it with one CMake
-   option, and keep the stock-HIP build as the comparison control.
+4. Then promote `.#gufo-hrx` from an experimental wrapper to a supported
+   build, and keep the stock-HIP build as the comparison control.
