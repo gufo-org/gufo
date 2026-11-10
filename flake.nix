@@ -728,6 +728,15 @@
           };
           llama-cpp-reference = llamaReferences.${system}.release;
           llama-cpp-mtp-reference = llamaReferences.${system}.mtp;
+          # Experimental HRX HIP runtime and Gufo wrapped to run on it; not
+          # part of releases or hosted checks (docs/internal/hrx-migration.md).
+          hrx = pkgs.${system}.callPackage ./.devops/nix/hrx {
+            rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
+          };
+          gufo-hrx = pkgs.${system}.callPackage ./.devops/nix/hrx/gufo.nix {
+            gufo = base;
+            hrx = self.packages.${system}.hrx;
+          };
         }
       );
 
