@@ -83,7 +83,8 @@ struct AttentionSupportParams {
 [[nodiscard]] constexpr bool IsTiledAttentionSupported(
     const AttentionSupportParams& params) noexcept {
   return params.batch_size != 0 &&
-         params.num_heads == kTiledAttentionQueryHeads &&
+         (params.num_heads == kTiledAttentionQueryHeads ||
+          params.num_heads == 16) &&
          params.num_kv_heads == kTiledAttentionKvHeads &&
          params.head_dim == kTiledAttentionHeadDim &&
          static_cast<std::size_t>(params.start_pos) + params.batch_size <=

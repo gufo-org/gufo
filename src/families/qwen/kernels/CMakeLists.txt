@@ -8,7 +8,9 @@ add_library(gufo_qwen_kernels STATIC
   attention_decode.hip
   attention_decode_verify_wave64.hip
   attention_tile.hip
+  attention_tile_16.hip
   attention_wmma.hip
+  attention_wmma_16.hip
   dflash_kernels.hip
   embed.hip
   fused.hip

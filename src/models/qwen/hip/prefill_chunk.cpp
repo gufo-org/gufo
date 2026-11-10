@@ -326,18 +326,38 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // below only applies RoPE in place and never touches the cache, so it
       // still needs the pack.
       const bool kv_already_written = fused_qknorm_rope_kv;
-      const bool wmma_attention = LaunchQwenWmmaAttention(
-          arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
-          arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
-          arena_.d_attention_kv_f16,
-          OffsetIfPresent(
-              static_cast<std::uint16_t*>(arena_.d_attention_kv_f16), total_k),
-          arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
-          arena_.GetMaxContext(), config.num_attention_heads,
-          config.num_key_value_heads, config.head_dim, arena_.stream,
-          /*lse_out=*/nullptr, /*key_begin=*/0,
-          /*skip_kv_write=*/kv_already_written, attention_workspace.gate,
-          attention_workspace.up, output_first_row);
+      const bool wmma_attention =
+          (config.num_attention_heads == 16)
+              ? LaunchQwenWmmaAttention16(
+                    arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                    arena_.d_kv_cache,
+                    OffsetIfPresent(arena_.d_kv_cache, total_k),
+                    arena_.d_attention_kv_f16,
+                    OffsetIfPresent(
+                        static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                        total_k),
+                    arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
+                    arena_.GetMaxContext(), config.num_attention_heads,
+                    config.num_key_value_heads, config.head_dim, arena_.stream,
+                    /*lse_out=*/nullptr, /*key_begin=*/0,
+                    /*skip_kv_write=*/kv_already_written,
+                    attention_workspace.gate, attention_workspace.up,
+                    output_first_row)
+              : LaunchQwenWmmaAttention(
+                    arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                    arena_.d_kv_cache,
+                    OffsetIfPresent(arena_.d_kv_cache, total_k),
+                    arena_.d_attention_kv_f16,
+                    OffsetIfPresent(
+                        static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                        total_k),
+                    arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
+                    arena_.GetMaxContext(), config.num_attention_heads,
+                    config.num_key_value_heads, config.head_dim, arena_.stream,
+                    /*lse_out=*/nullptr, /*key_begin=*/0,
+                    /*skip_kv_write=*/kv_already_written,
+                    attention_workspace.gate, attention_workspace.up,
+                    output_first_row);
       if (wmma_attention) {
         detail::EmitAttentionDispatch("prefill_wmma", "");
       }
@@ -347,17 +367,31 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         detail::DispatchPrefillAttention(
             visible_context,
             [&] {
-              tiled_attention = LaunchBatchedAttentionTile(
-                  arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
-                  arena_.d_kv_cache,
-                  OffsetIfPresent(arena_.d_kv_cache, total_k),
-                  arena_.d_attention_kv_f16,
-                  OffsetIfPresent(
-                      static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
-                      total_k),
-                  arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
-                  arena_.GetMaxContext(), config.num_attention_heads,
-                  config.num_key_value_heads, config.head_dim, arena_.stream);
+              if (config.num_attention_heads == 16) {
+                tiled_attention = LaunchBatchedAttentionTile16(
+                    arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                    arena_.d_kv_cache,
+                    OffsetIfPresent(arena_.d_kv_cache, total_k),
+                    arena_.d_attention_kv_f16,
+                    OffsetIfPresent(
+                        static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                        total_k),
+                    arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
+                    arena_.GetMaxContext(), config.num_attention_heads,
+                    config.num_key_value_heads, config.head_dim, arena_.stream);
+              } else {
+                tiled_attention = LaunchBatchedAttentionTile(
+                    arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
+                    arena_.d_kv_cache,
+                    OffsetIfPresent(arena_.d_kv_cache, total_k),
+                    arena_.d_attention_kv_f16,
+                    OffsetIfPresent(
+                        static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                        total_k),
+                    arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
+                    arena_.GetMaxContext(), config.num_attention_heads,
+                    config.num_key_value_heads, config.head_dim, arena_.stream);
+              }
               return tiled_attention;
             },
             [&] {

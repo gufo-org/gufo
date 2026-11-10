@@ -124,6 +124,17 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     hipStream_t stream = nullptr, float* lse_out = nullptr,
     std::uint32_t key_begin = 0, bool skip_kv_write = false);
 
+/// 16-query-head variant of the tiled prefill attention. Specialized for the
+/// Qwen3.5-4B shape (16 q / 4 kv heads, 256 dim). Same contract.
+[[nodiscard]] bool LaunchBatchedAttentionTile16(
+    const float* q, const float* k, const float* v, const float* gate,
+    float* k_cache, float* v_cache, void* k_cache_f16, void* v_cache_f16,
+    float* out_context, std::uint32_t layer_idx, std::uint32_t start_pos,
+    std::size_t batch_size, std::uint32_t max_context, std::uint32_t num_heads,
+    std::uint32_t num_kv_heads, std::uint32_t head_dim,
+    hipStream_t stream = nullptr, float* lse_out = nullptr,
+    std::uint32_t key_begin = 0, bool skip_kv_write = false);
+
 /// Masked prefill attention on the WMMA matrix cores.
 /// Same contract as LaunchBatchedAttentionTile: it
 /// packs the FP16 K/V cache unless `skip_kv_write`, masks keys in
@@ -137,6 +148,20 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
 /// untouched, and retained rows use the full call's original arithmetic.
 /// Returns false when the shape is unsupported, so the caller can fall back.
 [[nodiscard]] bool LaunchQwenWmmaAttention(
+    const float* q, const float* k, const float* v, const float* gate,
+    float* k_cache, float* v_cache, void* k_cache_f16, void* v_cache_f16,
+    float* out_context, std::uint32_t layer_idx, std::uint32_t start_pos,
+    std::size_t batch_size, std::uint32_t max_context, std::uint32_t num_heads,
+    std::uint32_t num_kv_heads, std::uint32_t head_dim,
+    hipStream_t stream = nullptr, float* lse_out = nullptr,
+    std::uint32_t key_begin = 0, bool skip_kv_write = false,
+    std::span<float> packed_k_workspace = {},
+    std::span<float> packed_v_workspace = {}, std::size_t first_query = 0);
+
+/// 16-query-head variant of the masked prefill attention on the WMMA matrix
+/// cores. Specialized for the Qwen3.5-4B shape (16 q / 4 kv heads, 256 dim).
+/// Same contract as LaunchQwenWmmaAttention.
+[[nodiscard]] bool LaunchQwenWmmaAttention16(
     const float* q, const float* k, const float* v, const float* gate,
     float* k_cache, float* v_cache, void* k_cache_f16, void* v_cache_f16,
     float* out_context, std::uint32_t layer_idx, std::uint32_t start_pos,
