@@ -50,16 +50,6 @@
   },
   "packages": [
     {
-      "pkg_config": "sndfile",
-      "nix": "libsndfile",
-      "windows": "libsndfile"
-    },
-    {
-      "pkg_config": "soxr",
-      "nix": "soxr",
-      "windows": "soxr"
-    },
-    {
       "pkg_config": "libavformat",
       "nix": "ffmpeg-headless",
       "windows": "ffmpeg[avformat]"

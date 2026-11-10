@@ -6,9 +6,11 @@
 #include <span>
 #include <vector>
 namespace gufo::models::embedding_gemma2 {
-// Pin transformers' librosa decoder backend: libsndfile float32, arithmetic
-// channel mean, then SOXR_HQ resampling and ceil-length zero padding.
-// Bounded to 30 seconds, 8 channels, 192 kHz and 20 MiB encoded bytes.
+// Follow transformers' librosa decoder backend: libsndfile's float32
+// conversion (core::DecodeAudio), arithmetic channel mean (core::DownmixMono)
+// and resampling with SOXR_HQ's response (core::Resample), then zero padding
+// to ceil(frames * 16000 / rate) samples. Bounded to 30 seconds, 8 channels,
+// 8–192 kHz and 20 MiB encoded bytes.
 [[nodiscard]] std::vector<float> DecodeAudio(
     std::span<const std::uint8_t> bytes,
     const std::function<bool()>& is_cancelled = {});

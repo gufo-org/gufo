@@ -85,7 +85,7 @@ toolchain: GCC 16.2 and ROCm 10.1.0. Without Nix, install these first:
 | ROCm HIP, hipBLAS, hipBLASLt, rocBLAS, hipCUB, rocPRIM, rocWMMA | GPU execution |
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing, images |
 | Rust 1.88 or newer, libopus | PNG, WAV and audio decoding |
-| FFmpeg libraries, libsndfile, libsoxr | EmbeddingGemma 2 only |
+| FFmpeg libraries | EmbeddingGemma 2 only |
 | `ffmpeg` and `ffprobe` | Video and audio output |
 
 On Debian or Ubuntu, with
@@ -95,7 +95,7 @@ set up:
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
   libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev \
-  libopus-dev libsndfile1-dev libsoxr-dev \
+  libopus-dev \
   libavformat-dev libavcodec-dev libavutil-dev libswscale-dev ffmpeg \
   hipblas-dev hipblaslt-dev rocblas-dev \
   hipcub-dev rocprim-dev rocwmma-dev

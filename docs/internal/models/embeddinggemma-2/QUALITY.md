@@ -120,7 +120,7 @@ and the official float32 model. Its decoder explicitly selects the official
 
 | Check | Result |
 | --- | --- |
-| Eight WAV/FLAC/MP3/Ogg decoder probes, mono/stereo and 8/16/24/44.1/48 kHz | Exact decoded/resampled float32 waveforms |
+| Eight WAV/FLAC/MP3/Ogg decoder probes, mono/stereo and 8/16/24/44.1/48 kHz | 16 kHz waveforms within 2.7e-7; resampled waveforms within 5.5e-4 and -57 dB of error energy after the first sample, which differs by up to 0.012 where soxr starts a two-stage stream on an abrupt onset |
 | Fifteen frontend probes, including 1/160/161 samples, odd lengths, partial frames and longer batch padding | Maximum absolute feature error 4.77e-7; every frame mask and valid-token count exact |
 | Audio encoder and projector versus independent float32 states | Pass relative L2 < 5e-4; projector maximum observed relative L2 3.75e-6 |
 | Ten final-vector probes: short clips, tone, silence, synthetic music/environmental bursts, packaged English speech, audio/text, two clips and audio/image/text | Worst cosine 0.9999687, above the retained 0.999 threshold |

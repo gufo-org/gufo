@@ -9,8 +9,6 @@
     "libpng",
     "libjpeg-turbo",
     "libwebp",
-    "libsndfile",
-    "soxr",
     "opus",
     {"name": "ffmpeg", "default-features": false, "features": ["avcodec", "avformat", "swscale"]},
     "pkgconf"

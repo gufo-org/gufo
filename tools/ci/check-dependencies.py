@@ -32,8 +32,6 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "libopus",
     "png (Rust crate)",
     "Rust standard library and crates",
-    "libsndfile",
-    "libsoxr",
     "symphonia (Rust crates)",
     "DS4",
     "h3.c",

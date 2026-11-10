@@ -314,8 +314,6 @@
               pkgsSys.libwebp
               pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
@@ -438,8 +436,6 @@
               pkgsSys.libwebp
               pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];

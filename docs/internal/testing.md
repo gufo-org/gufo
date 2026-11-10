@@ -92,6 +92,11 @@ clamping, the channel mean, sines through the resampler from 8 to 192 kHz to
 output length), small Ogg Opus and MP3 fixtures, and the status of each
 rejection. It runs in `check-pr`. The resampler crate also has Rust
 unit tests (`cargo test -p gufo-resample`), which CI does not run.
+`embedding_gemma2_audio_decoder_test` compares EmbeddingGemma 2's decoder with
+waveforms from the official librosa backend: 16 kHz probes within 2e-6;
+resampled probes within 0.02 at the first sample, where soxr starts a
+two-stage stream differently, and within 1e-3 and -55 dB of error energy
+after it.
 
 `base64_test` compares base64 through each caller with frozen copies of the
 0.33.0 code in `tests/core/base64_reference.cpp`: media data URLs
