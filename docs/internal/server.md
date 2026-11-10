@@ -19,7 +19,14 @@ Reference protocols:
 
 The C++20 runtime serves bounded HTTP/1.1 requests with one connection worker
 per request and a separate inference scheduler. Connections close after each
-response. Chat Completions, Responses and Messages stream with Server-Sent
+response. Request heads are parsed in Rust by httparse as RFC 9112 defines
+them: a token method, single spaces in the request line, an origin-form target
+without control bytes in UTF-8, HTTP/1.0 or HTTP/1.1, and header fields without
+control bytes. A bare LF ends a line, and one empty line before the request line
+is ignored. Other heads, `Transfer-Encoding` (chunked bodies are not
+implemented), and `Content-Length` values that are not decimal digits or
+disagree get 400; more than 100 header fields, llama-server's limit too, get
+431. Chat Completions, Responses and Messages stream with Server-Sent
 Events; closing the socket cancels the request in the scheduler. JSON parsing
 rejects duplicate keys, invalid numbers and nesting beyond 128 containers.
 Python may serve development tools and conformance tests, never requests.

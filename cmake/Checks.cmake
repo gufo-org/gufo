@@ -18,6 +18,7 @@ set(gufo_pr_targets
   arg_parser_test transcribe_cli_test json_test json_constraint_test gguf_reader_test qwen_config_test qwen_draft_vocab_test
   gguf_identity_test
   png_decode_test wav_decode_test audio_decode_test base64_test websocket_frame_test
+  http_request_test
   heap_placement_test
   admission_memory_test
   platform_publish_test platform_prefault_test platform_mapped_file_test
