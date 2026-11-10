@@ -186,8 +186,6 @@ public:
     std::size_t cache_snapshot_bytes{0};
     /// Bytes admitted to background persistence; completion is logged by cache.
     std::size_t cache_disk_queued_bytes{0};
-    std::size_t cache_shared_bytes{0};
-    /// Shared-prefix snapshots queued while prefilling this request.
     std::size_t completion_tokens{0};
     /// Generated reasoning tokens, excluding the closing template delimiter.
     std::size_t reasoning_tokens{0};
