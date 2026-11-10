@@ -733,6 +733,8 @@
           hrx = pkgs.${system}.callPackage ./.devops/nix/hrx {
             rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
           };
+          # HRX with Loom's compiler and serving tools for GPU and NPU.
+          hrx-loom = self.packages.${system}.hrx.override { withLoom = true; };
           gufo-hrx = pkgs.${system}.callPackage ./.devops/nix/hrx/gufo.nix {
             gufo = base;
             hrx = self.packages.${system}.hrx;
