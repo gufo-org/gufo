@@ -29,6 +29,7 @@ set(gufo_pr_targets
   text_generation_scheduler_test layered_prefill_conformance_test
   component_text_cache_test text_model_runner_test
   bench_cli_test prompt_cli_test text_cli_dispatch_test eval_http_client_test
+  extension_diagnostics_test
   # BEGIN GENERATED MODEL PR TARGETS
   deepseek_v4_flash_continuation_identity_test ds4_chat_template_test ds4_cli_test
   ds4_sampling_test embedding_gemma2_batch_scheduler_test embedding_gemma2_config_test

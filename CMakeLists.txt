@@ -1102,6 +1102,13 @@ endfunction()
     set_tests_properties(text_cli_dispatch_${command} PROPERTIES LABELS "cpu;cli;extensions")
   endforeach()
 
+  add_executable(extension_diagnostics_test
+    tests/cli/extension_diagnostics_test.cpp
+    src/cli/extension_diagnostics.cpp)
+  target_link_libraries(extension_diagnostics_test PRIVATE gufo_ext_runtime)
+  add_test(NAME extension_diagnostics_test COMMAND extension_diagnostics_test)
+  set_tests_properties(extension_diagnostics_test PROPERTIES LABELS "cpu;cli;extensions")
+
   # H3 host contracts share an object with generation. In HIP builds that
   # object references the backend implementations, so tests need both tiers.
   set(gufo_minimax_h3_test_libraries gufo_minimax_h3)

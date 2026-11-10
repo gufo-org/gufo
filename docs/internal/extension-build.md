@@ -120,6 +120,13 @@ the work tree's `HEAD`, branch, `packed-refs` and index, so a commit, checkout
 or `git add` is recorded by the next build. An edit that touches none of them is
 seen at the next configure. In-tree extensions and modules report neither field.
 
+`sharedKeys` (text: `shared key`) lists every artifact key that two or more
+providers of one capability declare, with those providers in registration
+order. A key selects nothing: Gufo asks each registered probe of the capability
+in that order and the first to accept a file serves it. An unavailable provider
+is listed with its reason. Text providers also report `acceptsUnsizedTensors`,
+because only those that set it are asked about a GGUF with tensors core can't
+size.
 ## Tests
 
 `tests/extensions/` builds synthetic extensions in a separate CMake project, so
