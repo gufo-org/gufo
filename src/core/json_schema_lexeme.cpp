@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/json_number_limits.hpp"
 #include "src/core/json_schema_regex.hpp"
 
 namespace gufo::sampling {
@@ -395,7 +396,8 @@ private:
   bool integer_;
   std::optional<Bound> lower_, upper_;
   std::optional<Decimal> multiple_;
-  int integral_digits_{kMaxNumberDigits}, fraction_digits_{kMaxNumberDigits};
+  int integral_digits_{kMaxJsonNumberDigits},
+      fraction_digits_{kMaxJsonNumberDigits};
 };
 
 // Formats follow JSON Schema's RFC-backed string formats. The grammar validates

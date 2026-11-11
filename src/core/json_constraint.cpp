@@ -14,6 +14,8 @@
 #include <string_view>
 #include <tuple>
 
+#include "src/core/json_number_limits.hpp"
+
 namespace gufo::sampling {
 namespace {
 constexpr std::uint32_t kTerminal = 1U << 31;
@@ -179,7 +181,7 @@ public:
     });
     string_ = Seq({Byte('"'), Repeat(character), Byte('"')});
     // As in llama.cpp, the exponent is also an integral part.
-    constexpr auto kDigits = JsonSchemaLexeme::kMaxNumberDigits;
+    constexpr auto kDigits = kMaxJsonNumberDigits;
     const auto positive =
         Alt({Byte('0'), Seq({Range('1', '9'), AtMost(digits, kDigits - 1)})});
     integer_ = Seq({Optional(Byte('-')), positive});
@@ -1353,8 +1355,7 @@ private:
                                  const std::optional<std::string>& high) {
     // An open end stops at llama.cpp's 16 digits, or at the bound's length.
     const auto top = high.value_or(std::string(
-        std::max<std::size_t>(JsonSchemaLexeme::kMaxNumberDigits, low.size()),
-        '9'));
+        std::max<std::size_t>(kMaxJsonNumberDigits, low.size()), '9'));
     Sequence choices;
     for (std::size_t length = low.size(); length <= top.size(); ++length) {
       const auto first =
