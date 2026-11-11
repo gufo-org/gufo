@@ -293,6 +293,7 @@ add_subdirectory(src/core/platform)
 add_subdirectory(src/core/rust)
 
 add_library(gufo_core STATIC
+  src/core/base64.cpp
   src/core/image.cpp
   src/core/crypto/sha256.cpp
   src/core/gguf_reader.cpp
@@ -863,6 +864,21 @@ endfunction()
   add_test(NAME trace_test COMMAND trace_test)
   set_tests_properties(trace_test PROPERTIES LABELS "cpu;server;trace")
   endif()
+
+  add_executable(base64_test
+    tests/core/base64_test.cpp
+    tests/core/base64_reference.cpp)
+  target_link_libraries(base64_test PRIVATE gufo_http)
+  add_test(NAME base64_test COMMAND base64_test)
+  set_tests_properties(base64_test PROPERTIES LABELS "cpu;server;correctness")
+
+  add_executable(websocket_frame_test
+    tests/cli/websocket_frame_test.cpp
+    tests/cli/websocket_frame_reference.cpp)
+  target_link_libraries(websocket_frame_test PRIVATE gufo_core)
+  add_test(NAME websocket_frame_test COMMAND websocket_frame_test)
+  set_tests_properties(websocket_frame_test PROPERTIES
+    LABELS "cpu;server;correctness")
 
   # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
   if (NOT WIN32)

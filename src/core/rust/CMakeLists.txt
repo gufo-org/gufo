@@ -34,7 +34,7 @@ set_target_properties(gufo_rust PROPERTIES
   IMPORTED_LOCATION_DEBUG "${cargo_target_dir}/debug/${rust_filename}"
   IMPORTED_LOCATION_RELWITHDEBINFO "${cargo_target_dir}/${cargo_optimized_profile}/${rust_filename}"
   INTERFACE_INCLUDE_DIRECTORIES
-    "${PROJECT_SOURCE_DIR}/src/core/png_decode/include;${PROJECT_SOURCE_DIR}/src/core/wav_decode/include")
+    "${PROJECT_SOURCE_DIR}/src/core/base64/include;${PROJECT_SOURCE_DIR}/src/core/png_decode/include;${PROJECT_SOURCE_DIR}/src/core/wav_decode/include;${PROJECT_SOURCE_DIR}/src/core/websocket/include")
 add_dependencies(gufo_rust gufo_rust_cargo)
 
 # A tiny std-using staticlib reports the same standard-library requirements as
