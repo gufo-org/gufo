@@ -53,6 +53,8 @@ public:
                 .mux = request.parameters.mux,
                 .selected_frames = request.parameters.selected_frames,
             },
+        .first_frame_path = request.first_frame_path,
+        .last_frame_path = request.last_frame_path,
     };
     gufo::minimax_h3::CancellationToken token;
     std::jthread watcher;

@@ -3,8 +3,8 @@
 MiniMax H3 generates short videos with sound from a text prompt. Gufo runs its
 text-to-video-and-audio path, FL2VA, from BF16 weights and writes an MP4.
 
-Starting from an image, first or last frames, reference videos (Ref2VA) and
-2K regeneration aren't supported.
+It can also start from a first frame, end on a last frame, or both. Image
+references, reference videos (Ref2VA) and 2K regeneration aren't supported.
 
 ## Files
 
@@ -76,6 +76,20 @@ gufo serve --host 127.0.0.1 --port 8080 video \
   "gufo": {"seed": 42}
 }
 ```
+
+## First and last frames
+
+Pass `--first-frame FILE`, `--last-frame FILE` or both to `gufo video`, or
+`first_frame` and `last_frame` to `POST /v1/videos` as multipart file parts or
+base64 `data:` URLs. The server never fetches remote URLs. PNG, JPEG and WebP
+work.
+
+The first frame (or a lone last frame) sets the video's aspect ratio, between
+1:4 and 4:1; the preset sets its size. A 1664 × 928 frame gives a 1376 × 768
+video with `exact-1344x768` and 672 × 384 with `exact`. A last frame next to a
+first one is cropped to fit. With `dev`, keyframes far from square are refused
+because the video would be too small. `fast` and `aggressive` follow the frames less
+closely than `exact`.
 
 ## Limits
 
