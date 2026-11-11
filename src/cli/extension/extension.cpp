@@ -176,8 +176,10 @@ void Build(const store::Sdk& sdk, const Tools& tools, const fs::path& source,
 std::string TreeDigest(const fs::path& root) {
   std::vector<fs::path> files;
   for (const auto& entry : fs::recursive_directory_iterator(root)) {
+    // Name a symlink by its own path, as the registry's digest does;
+    // fs::relative would name it by its target's.
     if (entry.is_regular_file())
-      files.push_back(fs::relative(entry.path(), root));
+      files.push_back(entry.path().lexically_relative(root));
   }
   std::ranges::sort(files);
   crypto::Sha256Hasher hasher;
@@ -201,7 +203,9 @@ void CopySource(const fs::path& from, const fs::path& to) {
   fs::create_directories(to);
   for (auto it = fs::recursive_directory_iterator(from);
        it != fs::recursive_directory_iterator(); ++it) {
-    const auto relative = fs::relative(it->path(), from);
+    // fs::relative resolves symlinks, which would copy a file symlink over
+    // its target.
+    const auto relative = it->path().lexically_relative(from);
     if (relative.begin()->string() == ".git") {
       it.disable_recursion_pending();
       continue;
