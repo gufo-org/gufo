@@ -69,7 +69,6 @@ using gufo::server::TextGenerationError;
 using gufo::server::TextGenerationErrorCode;
 using gufo::server::TextGenerationScheduler;
 using gufo::server::TextModelRunner;
-using gufo::server::TextPrefillPolicy;
 using gufo::server::TextPrefillStep;
 using gufo::server::TextRequestMetadata;
 using gufo::server::TextRequestPhase;
@@ -244,6 +243,9 @@ struct FakeControl {
   bool prefix_reuse{true};
   bool preview_first_token{false};
   std::optional<gufo::ext::TextSchedulingProfile> scheduling;
+  // Without `scheduling`, an unsplit profile of this many pass tokens, the
+  // scheduler's prompt unit: passes beside decoders take one unit.
+  std::size_t unit_tokens{gufo::sched::kPrefillUnitTokens};
   // Runs on the scheduler thread before each yield of a layered pass.
   std::function<void()> before_yield;
   // Each decode advance inside a yield takes this long.
@@ -357,7 +359,9 @@ public:
             },
         .sampling_defaults = control_->sampling_defaults,
         .sampling_preset = control_->sampling_preset,
-        .scheduling = control_->scheduling,
+        .scheduling =
+            control_->scheduling.value_or(gufo::ext::TextSchedulingProfile{
+                .pass_tokens = control_->unit_tokens}),
     };
   }
 
@@ -697,12 +701,15 @@ private:
 
 std::unique_ptr<TextGenerationScheduler> MakeScheduler(
     const std::shared_ptr<FakeControl>& control, std::size_t capacity,
-    TextPrefillPolicy prefill_policy = {},
-    TextSchedulerPolicy scheduler_policy = {}) {
+    std::size_t unit_tokens = 0, TextSchedulerPolicy scheduler_policy = {}) {
+  if (unit_tokens != 0) {
+    scheduler_policy.prefill_unit_tokens = unit_tokens;
+    control->unit_tokens = unit_tokens;
+  }
   auto runner = std::make_shared<FakeRunner>(control);
   auto pool = std::make_shared<TextRunnerPool>(std::move(runner), capacity);
-  return std::make_unique<TextGenerationScheduler>(
-      std::move(pool), prefill_policy, scheduler_policy);
+  return std::make_unique<TextGenerationScheduler>(std::move(pool),
+                                                   scheduler_policy);
 }
 
 std::size_t EventIndex(std::span<const Event> events, EventKind kind,
@@ -984,7 +991,7 @@ void TestAwaitedCheckpointSurvivesCachePressure() {
 
 void TestIdlePrefillUsesBulkWorkUnit() {
   auto control = std::make_shared<FakeControl>();
-  auto scheduler = MakeScheduler(control, 1, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 1, 2);
 
   const auto result = scheduler->Submit({7, 70, 71, 72, 73}, 2, 0.0F).Wait();
 
@@ -1313,8 +1320,7 @@ void TestMultiResidentPrefillUsesBoundedWorkUnits() {
   for (const auto capacity : {1U, 2U}) {
     auto control = std::make_shared<FakeControl>();
     control->prefill_capacity = 3;
-    auto scheduler =
-        MakeScheduler(control, capacity, {.decode_active_tokens = 2});
+    auto scheduler = MakeScheduler(control, capacity, 2);
     const auto result =
         scheduler->Submit({7, 70, 71, 72, 73, 74, 75}, 2, 0.0F).Wait();
     std::vector<std::size_t> chunks;
@@ -1338,7 +1344,7 @@ void TestArrivalDoesNotWaitForAnotherLongChunk() {
     control->supports_batched_advance = speculative;
     control->prefill_capacity = 4;
     control->block_prefill_label = 1;
-    auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+    auto scheduler = MakeScheduler(control, 2, 2);
     auto long_request = scheduler->Submit(
         {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 4, 0.0F);
     control->WaitForPrefill(1);
@@ -1361,7 +1367,7 @@ void TestLongPrefillsKeepWideFairTurns() {
   auto control = std::make_shared<FakeControl>();
   control->prefill_capacity = 4;
   control->block_prefill_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, 2);
   auto first = scheduler->Submit(
       {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 2, 0.0F);
   control->WaitForPrefill(1);
@@ -1386,7 +1392,7 @@ void TestShortArrivalBehindWaitingPrefill() {
   auto control = std::make_shared<FakeControl>();
   control->prefill_capacity = 4;
   control->block_prefill_label = 1;
-  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 3, 2);
   auto first = scheduler->Submit(
       {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 2, 0.0F);
   control->WaitForPrefill(1);
@@ -1413,7 +1419,7 @@ void TestDecodeActivePrefillIsBounded(bool multi_token, bool batched) {
   control->batched_multi_token_decode = batched;
   control->supports_batched_advance = multi_token;
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, 2);
 
   const std::size_t output_tokens = multi_token ? 30 : 10;
   auto request_a = scheduler->Submit({1}, output_tokens, 0.0F);
@@ -1465,7 +1471,7 @@ void TestPrefillYieldsToEveryDueDecoder(bool multi_token, bool batched) {
   control->batched_multi_token_decode = batched;
   control->supports_batched_advance = multi_token;
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 3, 2);
 
   const std::size_t output_tokens = multi_token ? 30 : 10;
   auto request_a = scheduler->Submit({1}, output_tokens, 0.0F);
@@ -1514,7 +1520,7 @@ void TestNonIncrementalRunnerFallsBackSafely() {
   auto control = std::make_shared<FakeControl>();
   control->incremental_prefill = false;
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, 2);
 
   auto request_a = scheduler->Submit({1}, 8, 0.0F);
   control->WaitForAdvance(1);
@@ -1551,12 +1557,38 @@ std::vector<std::vector<TextRunnerToken>> AdvancesPerYield(
   return rounds;
 }
 
+void TestRunnerWithoutProfileIsRejected() {
+  auto control = std::make_shared<FakeControl>();
+  control->scheduling = gufo::ext::TextSchedulingProfile{};
+  bool rejected = false;
+  try {
+    (void)MakeScheduler(control, 2);
+  } catch (const std::invalid_argument& error) {
+    rejected = std::string_view(error.what()).find("scheduling profile") !=
+               std::string_view::npos;
+  }
+  Expect(rejected, "a runner without a scheduling profile is rejected");
+  for (auto profile : {gufo::ext::TextSchedulingProfile{.pass_tokens = 4,
+                                                        .max_layer_groups = 0},
+                       gufo::ext::TextSchedulingProfile{
+                           .pass_tokens = 4, .max_yield_decode_width = 0}}) {
+    control->scheduling = profile;
+    rejected = false;
+    try {
+      (void)MakeScheduler(control, 2);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    Expect(rejected, "an incomplete scheduling profile is rejected");
+  }
+}
+
 void TestLayeredPrefillDecodesBetweenGroups() {
   auto control = std::make_shared<FakeControl>();
   control->scheduling =
       gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 1});
+  auto scheduler = MakeScheduler(control, 2, 1);
 
   auto request_a = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);
@@ -1600,7 +1632,7 @@ void TestOnePassPromptPrefillsBeforeLongerPeer() {
   control->scheduling =
       gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 3, 2);
 
   auto decoder = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);
@@ -1630,7 +1662,7 @@ void TestLayeredPrefillTimeExcludesYieldRounds() {
       gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
   control->yield_advance_delay = std::chrono::milliseconds(25);
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 1});
+  auto scheduler = MakeScheduler(control, 2, 1);
 
   auto request_a = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);
@@ -1649,7 +1681,7 @@ void TestLayeredPrefillAloneRunsUnsplit() {
   auto control = std::make_shared<FakeControl>();
   control->scheduling =
       gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, 2);
   const auto result =
       scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F).Wait();
   Expect(result.tokens == ExpectedTokens(2, 2) && result.prefill_chunks == 1 &&
@@ -1664,7 +1696,7 @@ void TestDecoderFinishesInsideYield() {
   control->scheduling =
       gufo::ext::TextSchedulingProfile{.pass_tokens = 8, .max_layer_groups = 4};
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, 2);
 
   auto request_a = scheduler->Submit({1}, 2, 0.0F);
   control->WaitForAdvance(1);
@@ -1692,7 +1724,7 @@ void TestLayeredPrefillBatchesDecodersPerRound(std::size_t width) {
       .pass_tokens = 8, .max_layer_groups = 3, .max_yield_decode_width = width};
   control->supports_batched_advance = true;
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 4, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 4, 2);
 
   auto request_a = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);
@@ -1722,7 +1754,7 @@ void TestPromptCancelledInsideYield() {
   control->scheduling =
       gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
   control->block_advance_label = 1;
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, 2);
 
   auto decoder = scheduler->Submit({1}, 30, 0.0F);
   control->WaitForAdvance(1);
@@ -1762,7 +1794,7 @@ void TestFinishedCaptureRejoinsYields() {
       finished.release();
     }
   };
-  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 3, 2);
 
   auto a = scheduler->Submit({1, 10}, 30, 0.0F);
   control->WaitForAdvance(1);
@@ -1791,18 +1823,31 @@ void TestFinishedCaptureRejoinsYields() {
   }
 }
 
-void TestSchedulingProfileRequiresIncrementalPrefill() {
+void TestWholePromptRunnerIgnoresLayerGroups() {
+  // A runner that cannot resume a prompt mid-way prefills it whole beside a
+  // decoder, unsplit, whatever its profile allows.
   auto control = std::make_shared<FakeControl>();
   control->incremental_prefill = false;
   control->scheduling =
-      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 2};
-  bool rejected = false;
-  try {
-    (void)MakeScheduler(control, 2);
-  } catch (const std::invalid_argument&) {
-    rejected = true;
-  }
-  Expect(rejected, "a profile without incremental prefill is rejected");
+      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, 1);
+
+  auto request_a = scheduler->Submit({1}, 30, 0.0F);
+  control->WaitForAdvance(1);
+  auto request_b = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
+  control->ReleaseAdvance();
+
+  const auto result_a = request_a.Wait();
+  const auto result_b = request_b.Wait();
+  Expect(result_a.tokens == ExpectedTokens(1, 30) &&
+             result_b.tokens == ExpectedTokens(2, 2),
+         "whole-prompt prefill preserves both trajectories");
+  Expect(AdvancesPerYield(control->Events(), 2).empty() &&
+             result_b.prefill_chunks == 1 &&
+             result_b.max_prefill_chunk_tokens == 7 &&
+             result_b.max_prefill_layer_groups == 1,
+         "a whole-prompt runner prefills in one unsplit pass");
 }
 
 void TestPendingLimitsRejectBeforeStateAdmission() {
@@ -2363,7 +2408,7 @@ void TestQueuedAndPrefillCancellation() {
     auto control = std::make_shared<FakeControl>();
     control->block_advance_label = 1;
     control->block_prefill_label = 4;
-    auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+    auto scheduler = MakeScheduler(control, 2, 2);
 
     auto active = scheduler->Submit({1}, 4, 0.0F);
     control->WaitForAdvance(1);
@@ -2866,7 +2911,7 @@ void TestSnapshotDoesNotBlockOtherRequests() {
         release.acquire();
       }
     };
-    auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+    auto scheduler = MakeScheduler(control, 2, 2);
     const std::vector<TextRunnerToken> prompt =
         history ? std::vector<TextRunnerToken>(2200, 1)
                 : std::vector<TextRunnerToken>{1, 10};
@@ -2912,7 +2957,7 @@ void TestCapturedDecoderResumesBeforeMorePrefill() {
       finished.release();
     }
   };
-  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto scheduler = MakeScheduler(control, 2, 2);
   auto first = scheduler->Submit({1, 10}, 3, 0.0F);
   Expect(entered.try_acquire_for(kTestTimeout), "first capture starts");
   auto second = scheduler->Submit({2, 20, 21, 22, 23, 24, 25, 26, 27}, 1, 0.0F);
@@ -3764,6 +3809,7 @@ int main() {
     }
   }
   TestNonIncrementalRunnerFallsBackSafely();
+  TestRunnerWithoutProfileIsRejected();
   TestLayeredPrefillDecodesBetweenGroups();
   TestOnePassPromptPrefillsBeforeLongerPeer();
   TestLayeredPrefillTimeExcludesYieldRounds();
@@ -3771,7 +3817,7 @@ int main() {
   TestDecoderFinishesInsideYield();
   TestLayeredPrefillBatchesDecodersPerRound(1);
   TestLayeredPrefillBatchesDecodersPerRound(2);
-  TestSchedulingProfileRequiresIncrementalPrefill();
+  TestWholePromptRunnerIgnoresLayerGroups();
   TestPromptCancelledInsideYield();
   TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();

@@ -722,8 +722,8 @@ void PrintServeHelp(std::string_view program_name,
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
-    std::size_t prefill_chunk_tokens =
-        server::kDefaultDecodeActivePrefillTokens;
+    // Parsed for the deprecated --prefill-chunk only; never used.
+    std::size_t prefill_chunk_tokens = 0;
     std::size_t max_pending_requests = 16;
     std::size_t max_pending_requests_per_client = 0;
     std::uint64_t request_timeout_ms = 0;
@@ -1428,8 +1428,8 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
-    std::size_t prefill_chunk_tokens =
-        server::kDefaultDecodeActivePrefillTokens;
+    // Parsed for the deprecated --prefill-chunk only; never used.
+    std::size_t prefill_chunk_tokens = 0;
     std::size_t max_pending_requests = 16;
     // Defaults to --max-pending after parsing unless supplied.
     std::size_t max_pending_requests_per_client = 0;
@@ -1605,9 +1605,8 @@ int RunServe(std::span<const char* const> args) {
     if (!prepare_server_options()) {
       return 2;
     }
-    // Every in-tree text runner splits prompt passes by layers beside
-    // decoders; runners without a scheduling profile keep the fixed legacy
-    // budget. Removed with the legacy path (#1028 phase 4).
+    // Every text runner declares a scheduling profile and the host splits
+    // prompt passes beside decoders by layers.
     if (llm_parser.WasSupplied("--prefill-chunk")) {
       server::Logger::Warn(
           "scheduling",
@@ -1723,7 +1722,7 @@ int RunServe(std::span<const char* const> args) {
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
     const bool load_ok = backend->load(
-        model, &err, max_context, session_count, server::TextPrefillPolicy{},
+        model, &err, max_context, session_count,
         server::TextSchedulerPolicy{
             .max_pending_requests = max_pending_requests,
             .max_pending_requests_per_client = max_pending_requests_per_client,

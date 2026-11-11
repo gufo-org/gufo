@@ -99,7 +99,7 @@ bool Load(const gufo::ext::Registry& registry, const std::string& model,
   received.clear();
   gufo::server::InferenceBackend backend;
   return backend.load(
-      model, error, 0, 1, {}, {},
+      model, error, 0, 1, {},
       {.backend = gufo::ext::TextSpeculativeBackend::kDFlash}, {}, {}, {},
       false,
       [&](const gufo::ext::TextProvider& provider,

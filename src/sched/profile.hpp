@@ -7,8 +7,8 @@
 namespace gufo::sched {
 
 /// How a text runner wants its prompts scheduled while other sessions
-/// decode. A runner without one gets passes bounded by the host's
-/// decode-active budget instead.
+/// decode. Every text runner declares one; the host rejects a runner whose
+/// fields are not all at least one.
 struct TextSchedulingProfile {
   /// Prompt tokens one pass covers beside decoders: the model's efficient
   /// width, normally its full prefill pass.

@@ -75,7 +75,6 @@ public:
   /// provider is selected.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             const TextSpeculativeConfig& speculative_config = {},
             const TextDiskCacheConfig& disk_cache_config = {},
@@ -87,7 +86,6 @@ public:
   /// Installs a previously prepared runner with request-owned sessions.
   bool load(std::shared_ptr<ext::TextModelRunner> runner, std::string* error,
             std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             const TextDiskCacheConfig& disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
