@@ -36,6 +36,8 @@ for fmt in ("qwen", "deepseek"):
                 cls = "valid"  # these candidates repeat a schema-valid value
             if label.startswith("nested/") and cls == "invalid_value":
                 cls = "valid"  # the same object in llama.cpp's property order
+            if label.startswith("digits/") and cls == "invalid_value":
+                cls = "beyond_16_digits"  # past llama.cpp's integral/decimal part
             if label in ("nested/addl_true", "nested/addl_schema", "nested/pattern_props",
                          "nested/unevaluated_true") and cls == "undeclared":
                 cls = "valid"  # the schema admits this extra nested key
