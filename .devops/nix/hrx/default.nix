@@ -20,22 +20,28 @@
 }:
 
 let
-  revision = "dd9572875f360812ad152822c6f728979afdfd4a";
+  # Exact commit of gufo-org/hrx-system's gufo-staging branch. Individual
+  # fixes remain on independent branches for upstream review; see README.md.
+  revision = "d8345774e34e0b0824f11661d331a323e8771dd9";
 
   src = fetchFromGitHub {
-    owner = "ROCm";
+    owner = "gufo-org";
     repo = "hrx-system";
     rev = revision;
-    hash = "sha256-+QC9HLvsoyBbAMEZbktPA5UrQhvsz2IBX404v/ERbRs=";
+    hash = "sha256-6wUuiJ67fpOHEiXCJvIi6XfCiffZOFgXK6RyZi6iDeY=";
   };
 
   # Every download pinned in MODULE.cmake.lock and Loom's ISA XML descriptor,
   # fetched once so the configure step can run without network access.
   deps = stdenvNoCC.mkDerivation {
     pname = "hrx-system-deps";
-    version = "0-unstable-2026-11-09";
+    version = "0-unstable-2026-11-11";
     inherit src;
-    nativeBuildInputs = [ cacert curl python3 ];
+    nativeBuildInputs = [
+      cacert
+      curl
+      python3
+    ];
     dontConfigure = true;
     buildPhase = ''
       runHook preBuild
@@ -46,25 +52,25 @@ let
     dontFixup = true;
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-ETfryRgmcgX6lwo9O4KS5NCSOfdY8JhVKJ+ikT3ALSo=";
+    outputHash = "sha256-yIMgpPVc9lnSaGnkGgOIeUUiweN04uj+sHVm49WWAH8=";
   };
 
   llvm = rocmPackages.llvm;
-  loomTools = [ "loom-serve" "loom-compile" "loom-import-cxx" "loom-format" "loom-benchmark" "loom-test" ];
+  loomTools = [
+    "loom-serve"
+    "loom-compile"
+    "loom-import-cxx"
+    "loom-format"
+    "loom-benchmark"
+    "loom-test"
+  ];
 in
 llvm.rocmClangStdenv.mkDerivation {
   pname = if withLoom then "hrx-system-loom" else "hrx-system";
-  version = "0-unstable-2026-11-09";
+  version = "0-unstable-2026-11-11";
   inherit src;
 
   patches = [
-    # The Nix toolchain adds DT_RUNPATH to device code objects, which the
-    # native loader rejects (hrx-system#2983).
-    ../patches/hrx-dt-runpath.patch
-    # Streams round-robin over a pool of four hardware queues, so independent
-    # streams run concurrently (hrx-system#2968). A queue per stream kept the
-    # GPU 100% busy at idle once dozens were mapped.
-    ../patches/hrx-stream-queues.patch
     # HRX_DEBUG_CAPTURE=1 prints a backtrace where a graph capture is
     # invalidated, naming the HIP call that broke it.
     ../patches/hrx-debug-capture.patch
@@ -77,7 +83,15 @@ llvm.rocmClangStdenv.mkDerivation {
     python3 ${./hrx-deps.py} rewrite . ${deps}
   '';
 
-  nativeBuildInputs = [ cmake ninja git python3 llvm.lld ];
+  # The pinned ROCm toolchain already includes lld. Depending on the separate
+  # llvm.lld derivation needlessly rebuilds LLVM instead of using that linker.
+  nativeBuildInputs = [
+    cmake
+    ninja
+    git
+    python3
+    llvm.clang
+  ];
 
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=Release"
@@ -91,14 +105,19 @@ llvm.rocmClangStdenv.mkDerivation {
     "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld"
     "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld"
     "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld"
-  ] ++ lib.optionals withLoom [
+  ]
+  ++ lib.optionals withLoom [
     "-DLOOM_TARGET_ALL_AMD=ON"
     "-DLOOM_ARCH_AMDGPU_TARGETS=gfx1151"
     "-DLOOM_IMPORT_CXX=ON"
   ];
 
-  ninjaFlags = [ "libhrx/src/binding/hip/libamdhip64.so" "hrx-info" "iree-profile" ]
-    ++ lib.optionals withLoom (map (tool: "loom/src/loom/tools/${tool}/${tool}") loomTools);
+  ninjaFlags = [
+    "libhrx/src/binding/hip/libamdhip64.so"
+    "hrx-info"
+    "iree-profile"
+  ]
+  ++ lib.optionals withLoom (map (tool: "loom/src/loom/tools/${tool}/${tool}") loomTools);
 
   installPhase = ''
     runHook preInstall
@@ -109,7 +128,8 @@ llvm.rocmClangStdenv.mkDerivation {
     install -Dm755 libhrx/tools/hrx-info $out/bin/hrx-info
     install -Dm755 runtime/src/iree/tools/iree-profile/iree-profile \
       $out/bin/iree-profile
-  '' + lib.optionalString withLoom ''
+  ''
+  + lib.optionalString withLoom ''
     for tool in ${lib.concatStringsSep " " loomTools}; do
       install -Dm755 loom/src/loom/tools/$tool/$tool $out/bin/$tool
     done
@@ -124,7 +144,8 @@ llvm.rocmClangStdenv.mkDerivation {
     sys.exit(main())
     EOF
     chmod +x $out/bin/loom-fetch
-  '' + ''
+  ''
+  + ''
     runHook postInstall
   '';
 
@@ -133,7 +154,10 @@ llvm.rocmClangStdenv.mkDerivation {
   meta = {
     description = "HRX HIP runtime${lib.optionalString withLoom " and Loom tools"} (experimental Gufo integration)";
     homepage = "https://github.com/ROCm/hrx-system";
-    license = with lib.licenses; [ asl20 llvm-exception ];
+    license = with lib.licenses; [
+      asl20
+      llvm-exception
+    ];
     platforms = [ "x86_64-linux" ];
   };
 }

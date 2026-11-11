@@ -1,9 +1,123 @@
 # HRX migration
 
 What it takes to run Gufo on [HRX](https://github.com/ROCm/hrx-system) instead
-of stock ROCm HIP, measured on Qwen3.8-Flash-Next as of November 2026. HRX is
-not a drop-in win yet: prefill is 2-3% slower than HIP even with a local
-queue-policy patch, and the cause of the rest is open.
+of stock ROCm HIP. The November 9 baseline below measured Flash-Next prefill
+2-3% slower even with a local queue-policy patch; those measurements do not
+qualify the newer staging runtime.
+
+## Current staging integration (November 11, 2026)
+
+The experimental packages pin `gufo-org/hrx-system`'s `gufo-staging` branch
+at `d8345774e34e0b0824f11661d331a323e8771dd9`, based on upstream
+`af0c940f77b37dcdfbb6371a0434c6c268edb108`. Each upstream candidate has an
+independent fix branch; staging collects them for Gufo. See the
+[branch and update workflow](../../.devops/nix/hrx/README.md).
+
+The first candidate, `fix/cached-kernel-arguments`, proposed in
+[hrx-system#3035](https://github.com/ROCm/hrx-system/pull/3035), selects GPU-cached
+host-coherent backing for PM4 argument generations, including deferred growth.
+Native queue control and signals retain their existing profile. The current
+argument arena also holds transfer payloads and profiling samples; existing
+publication, cache barriers and retirement remain in place. Devices with no
+admitted cached profile retain the previous argument policy.
+
+On gfx1151, the isolated LFM3 SwiGLU reproducer with nonzero activations and
+an independent FP64 dot-product oracle passes on both runtimes. Preliminary
+four-wave timings change from 236 us on upstream HRX to 82 us with the fix
+(ROCm: 81 us); eight-wave timings change from 169 us to 96 us (ROCm: 92 us).
+These are isolated-kernel observations, not a model-throughput claim. A stress
+check validates 1,536 changing 4 KiB by-value tables across argument reuse.
+The focused backing/growth/queue unit tests and HIP module, graph-memory,
+event-timing, profiling and stream-progress suites pass.
+
+The staging base includes upstream's `DT_RUNPATH` and queue-policy changes;
+their Gufo patches are removed. Optional capture-diagnostic and unfinished
+profile-session patches remain local.
+
+First-fix-only measurements (`5c6b7c20`), before adding the upload candidate:
+matched LFM3-1.7B Q8_0 `gufo bench -p 2048 -n 128 -r 3`, Gufo `7c9328dc`
+with lfm3-gufo-extension `a658a64f` (PR #24), ROCm 10.1 device compiler:
+
+| Runtime / process | pp2048 repetitions (tok/s) | tg128 repetitions (tok/s) | Start / end GPU temperature |
+| --- | --- | --- | --- |
+| Upstream HRX A | 8665.30, 8842.43, 8817.71 | 95.4783, 95.5715, 95.6705 | 35 / 46 C |
+| HRX fix A | 8629.56, 8735.33, 8744.99 | 105.022, 105.058, 105.050 | 35 / 45 C |
+| Upstream HRX B | 8664.40, 8717.08, 8688.47 | 95.2688, 95.6037, 95.3762 | 36 / 45 C |
+| HRX fix B | 8698.33, 8718.54, 8714.80 | 105.050, 105.067, 105.082 | 36 / 45 C |
+| Stock ROCm HIP | 8781.25, 8796.77, 9283.00 | 112.076, 112.023, 112.063 | 36 / 45 C |
+
+Each process starts after cooling to at most 38 C and 60 seconds idle, with
+no competing model or compiler. Both HRX libraries use the same Release GCC
+16.2 host build, differing only by the fix; GPU binaries are identical.
+Pairwise median decode gains are 9.9% and 10.2%. Prefill is close between
+HRX variants; HIP's third prefill repetition is faster and remains in the
+record. The fix still trails HIP decode by about 6.2%, so it resolves much of
+the reported regression without establishing full runtime parity. Earlier
+candidate runs overlapping compilation are inconclusive and excluded from
+this controlled table, with their raw logs retained separately.
+
+`lfm3_prefix_probe` on an 864-token text checks prefixes 128 through 768,
+with four teacher-forced decode steps after each prefix. All 30 rows of
+128,000 logits are bitwise identical between upstream HRX, the fix build,
+and the Nix staging runtime (output SHA-256
+`5277c59367d54ddc7c7aa65b8bc719ff647fcfe4fa0ea698741f811ebc6bdb40`).
+The separate short-prompt `lfm3_probe` comparison against the independent
+FP32 CPU reference has KL `1.25114e-7`, maximum logit error `0.006833`, finite
+outputs and identical top-1. `nix build .#hrx` and `.#gufo-hrx` pass; the latter
+passes `diagnose`, with the dynamic-loader trace confirming the staging HIP
+library is loaded. Loom/NPU execution is not qualified by these GPU checks.
+
+## Synchronous device-upload candidate (November 11, 2026)
+
+Independent branch `fix/upload-cache-state` (`7fb8819a`), proposed in
+[hrx-system#3036](https://github.com/ROCm/hrx-system/pull/3036), starts from the
+same upstream base. Synchronous pageable H2D copies into host-mapped device
+allocations previously selected CPU `memcpy`. Routing device allocations
+through the existing native transfer path avoids the subsequent GPU read
+slowdown reported in [hrx-system#2984](https://github.com/ROCm/hrx-system/issues/2984).
+Host and managed allocations keep their existing direct-copy policy. Both
+ordinary and cross-context device uploads use the new route.
+
+Two alternating baseline/candidate pairs use the original allocation-size
+reproducer, extended to record input preparation plus synchronous upload and
+the median of seven reads. Each read processes 256 MiB for allocations through
+32 MiB; larger allocations use two passes. These are synthetic workload
+measurements, not model throughput.
+The host compiler, device binary and hardware match the first-fix measurements.
+Each pair starts below 38 C, with no competing GPU workload or compiler.
+
+| Allocation | Baseline read bandwidth (GB/s), A / B | Candidate read bandwidth (GB/s), A / B | Preparation + upload + read (ms), baseline A / B | Candidate (ms), A / B |
+| --- | --- | --- | --- | --- |
+| 2 MiB | 3977.5 / 4139.8 | 5975.1 / 5969.8 | 0.575 / 0.621 | 0.784 / 0.713 |
+| 4 MiB | 2705.2 / 2703.0 | 6793.2 / 6759.0 | 1.246 / 1.078 | 1.426 / 1.345 |
+| 8 MiB | 177.6 / 176.6 | 1703.1 / 1692.7 | 3.574 / 3.459 | 3.096 / 2.611 |
+| 16 MiB | 87.7 / 76.3 | 784.9 / 798.3 | 7.381 / 7.435 | 6.019 / 5.628 |
+| 256 MiB | 241.2 / 240.5 | 241.2 / 240.2 | 86.126 / 81.920 | 71.158 / 67.045 |
+
+The 16 MiB reads improve about 9–10 times; preparation plus upload and one
+measured read improves 18–24%. Smaller cases expose a tradeoff: staging and
+submission overhead can outweigh faster reads. The first native upload also
+pays staging allocation cost. This candidate is experimental and does not
+establish a general upload-latency improvement.
+
+LFM3 normally uploads mapped model weights asynchronously. With this fix alone,
+its standard pp2048 repetitions are 8633.22, 8654.25, 8611.27 tok/s, and tg128
+is 95.5708, 95.0649, 95.2954 tok/s, consistent with the upstream baseline.
+No additional steady-state decode gain is established. A combined Nix runtime
+smoke run after cooling and 60 seconds idle records pp2048 at 8563.76,
+8540.36, 8567.63 tok/s and tg128 at 105.265, 105.216, 105.229 tok/s.
+This retains the first fix's observed decode throughput, but its ROCm host
+compiler differs from the GCC baseline; it is not another matched comparison.
+
+All 30 common-memory unit tests pass, including the new native-routing
+regression. Five selected native HIP suites pass, as do full byte roundtrips
+and GPU checksums across seven allocation sizes, unaligned destinations and
+cross-context uploads. The upstream precommit suite passes. The 30-row LFM3
+prefix probe is bitwise identical to baseline with either this candidate alone
+or both staged fixes, including the combined Nix runtime. Both Nix packages
+build, and the wrapper passes `diagnose`; eight selected suites pass with both
+fixes. Raw sources, timings and validation output are retained
+in `/tmp/hrx-next-evidence`; first-fix evidence is in `/tmp/hrx-swiglu-evidence`.
 
 ## Setup
 
@@ -172,7 +286,7 @@ Three flake outputs run Gufo and Loom on HRX. None is built by hosted checks
 or releases.
 
 ```sh
-nix build .#hrx        # HRX dd9572875f: lib/libamdhip64.so.7, hrx-info, iree-profile
+nix build .#hrx        # pinned staging: lib/libamdhip64.so.7, hrx-info, iree-profile
 nix build .#gufo-hrx   # the default Gufo binaries wrapped to load HRX
 nix build .#hrx-loom   # .#hrx plus loom-serve, loom-compile, loom-import-cxx,
                        # loom-format, loom-benchmark, loom-test and loom-fetch
@@ -193,10 +307,7 @@ nix build .#hrx-loom   # .#hrx plus loom-serve, loom-compile, loom-import-cxx,
   -DLOOM_IMPORT_CXX=ON`); it needs no further dependencies. At `dd9572875f`
   Loom's NPU programs can exceed tile memory after `a62c887489` (experiment log
   in #1145); its GPU output loads in Gufo through `hipModuleLoad`.
-- Four patches apply. `hrx-dt-runpath.patch` is needed to load Gufo's code
-  objects. `hrx-stream-queues.patch` spreads streams over a pool of four
-  hardware queues so independent streams overlap; a queue per stream kept the
-  GPU 100% busy at idle once dozens existed. `hrx-debug-capture.patch`
+- Two optional diagnostic patches apply. `hrx-debug-capture.patch`
   (`HRX_DEBUG_CAPTURE=1`) prints where a graph capture is invalidated, and
   `hrx-profile-open-session.patch` (`IREE_PROFILE_ALLOW_OPEN_SESSION=1`) lets
   `iree-profile` read traces from processes that exit without ending the
