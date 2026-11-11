@@ -420,6 +420,7 @@ add_library(gufo_http STATIC
   src/cli/serve/video_api.cpp
   src/cli/serve/video_jobs.cpp
   src/cli/serve/http_server.cpp
+  src/cli/serve/multipart.cpp
   src/cli/serve/websocket.cpp
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/voice_websocket.cpp
@@ -901,6 +902,16 @@ endfunction()
   set_tests_properties(http_request_test PROPERTIES
     LABELS "cpu;server;http;correctness")
 
+  add_executable(multipart_test
+    tests/cli/multipart_test.cpp
+    tests/cli/multipart_reference.cpp)
+  target_link_libraries(multipart_test PRIVATE gufo_http)
+  target_compile_definitions(multipart_test PRIVATE
+    GUFO_MULTIPART_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/multipart")
+  add_test(NAME multipart_test COMMAND multipart_test)
+  set_tests_properties(multipart_test PROPERTIES
+    LABELS "cpu;server;http;correctness")
+
   # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
   if (NOT WIN32)
   add_executable(http_server_test tests/cli/http_server_test.cpp)
@@ -1153,6 +1164,7 @@ endfunction()
 
     add_executable(video_api_test
       tests/cli/video_api_test.cpp
+      src/cli/serve/multipart.cpp
       src/cli/serve/video_api.cpp
       src/cli/serve/video_jobs.cpp
     )

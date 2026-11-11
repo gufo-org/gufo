@@ -106,6 +106,19 @@ no control bytes in targets or values, a 100-field limit, bare LF line ends
 and one leading empty line. Rust tests also check query parameters, header
 lists and caller errors. `http_server_test` checks parsing over a socket.
 
+`multipart_test` compares the Rust multipart parser, with each API's limits,
+with frozen copies of the three 0.33.0 parsers in
+`tests/cli/multipart_reference.cpp`. Forms as clients encode them must give
+every API the same fields, also when the API stops after one of the first
+fields; error messages may differ, and other forms, which RFC 7578 may read
+differently, are counted, not compared. The forms cover client-style
+boundaries, names, filenames and contents, up to 34 fields, forms with what
+clients do not send, and random mutations; the forms captured from curl,
+Python requests, Node.js and Go in `tests/fixtures/multipart` must be among
+the canonical ones and parse completely. Every rejection the parser has must be
+reached. It runs in `check-pr`; the parser's Rust unit tests check the RFC
+rules for the other forms.
+
 `websocket_frame_test` checks expected queued messages and reply frames through
 the C ABI: fragments, pings, close codes, UTF-8, length encodings, truncation
 and queue limits. Rust tests cover protocol rejections and buffer reuse;
@@ -130,6 +143,7 @@ Every run saves a fresh Actions cache key. Test executables still run on every
 rebuilt check; an unchanged successful derivation reuses Nix's result cache.
 [Validation and timings](rust-ci-validation/README.md) record the cold, warm
 and deliberately broken-test checks.
+
 
 ## Hosted versus local checks
 

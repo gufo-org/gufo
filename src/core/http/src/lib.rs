@@ -1,11 +1,13 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+mod multipart;
 mod request;
 
 use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
 
+use multipart::{Failure, Limits};
 use request::{Lookup, Parsed};
 
 #[repr(C)]
@@ -190,6 +192,103 @@ pub unsafe extern "C" fn gufo_http_has_token(
             return -1;
         };
         c_int::from(request::has_token(value, token))
+    })
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GufoMultipartParse {
+    Complete = 0,
+    NotFormData = 1,
+    BadBoundary = 2,
+    Malformed = 3,
+    TooManyFields = 4,
+    DuplicateField = 5,
+    Stopped = 6,
+    Internal = 7,
+}
+
+/// One field of a form; its slices live during the call only.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GufoMultipartField {
+    pub name: GufoHttpSlice,
+    pub has_filename: c_int,
+    pub content: GufoHttpSlice,
+}
+
+/// Takes one field, in order; returns nonzero to stop.
+pub type GufoMultipartFieldFn =
+    unsafe extern "C" fn(context: *mut c_void, field: *const GufoMultipartField) -> c_int;
+
+/// Reads the `multipart/form-data` body, calling `field` for each field in
+/// order. More than `max_fields` fields, or with `unique_names` a repeated
+/// name, ends it. On `Malformed`, `error` got the message; on
+/// `DuplicateField`, the repeated name.
+///
+/// # Safety
+/// `content_type` and `body` point to their lengths of readable bytes, or the
+/// length is 0; `field` and `error` may be called with `context` until this
+/// returns.
+#[allow(unsafe_code, clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gufo_multipart_parse(
+    content_type: *const u8,
+    content_type_len: usize,
+    body: *const u8,
+    body_len: usize,
+    max_fields: usize,
+    unique_names: c_int,
+    field: Option<GufoMultipartFieldFn>,
+    error: Option<GufoHttpBytesFn>,
+    context: *mut c_void,
+) -> GufoMultipartParse {
+    guard(GufoMultipartParse::Internal, || {
+        // SAFETY: the caller guarantees `content_type_len` readable bytes.
+        let Some(content_type) = (unsafe { gufo_ffi::input(content_type, content_type_len) })
+        else {
+            return GufoMultipartParse::Internal;
+        };
+        // SAFETY: the caller guarantees `body_len` readable bytes.
+        let (Some(body), Some(field), Some(error)) =
+            (unsafe { gufo_ffi::input(body, body_len) }, field, error)
+        else {
+            return GufoMultipartParse::Internal;
+        };
+        let limits = Limits {
+            max_fields,
+            unique_names: unique_names != 0,
+        };
+        let result = multipart::parse(content_type, body, limits, &mut |parsed| {
+            let out = GufoMultipartField {
+                name: GufoHttpSlice::of(parsed.name),
+                has_filename: c_int::from(parsed.has_filename),
+                content: GufoHttpSlice::of(parsed.content),
+            };
+            // SAFETY: the caller allows calling `field` with `context` here;
+            // `out` and its slices live during the call.
+            unsafe { field(context, &out) == 0 }
+        });
+        let report = |bytes: &[u8]| {
+            // SAFETY: the caller allows calling `error` with `context`;
+            // `bytes` live during the call.
+            unsafe { error(context, bytes.as_ptr(), bytes.len()) };
+        };
+        match result {
+            Ok(()) => GufoMultipartParse::Complete,
+            Err(Failure::NotFormData) => GufoMultipartParse::NotFormData,
+            Err(Failure::Boundary) => GufoMultipartParse::BadBoundary,
+            Err(Failure::TooManyFields) => GufoMultipartParse::TooManyFields,
+            Err(Failure::Stopped) => GufoMultipartParse::Stopped,
+            Err(Failure::Malformed(message)) => {
+                report(message.as_bytes());
+                GufoMultipartParse::Malformed
+            }
+            Err(Failure::Duplicate(name)) => {
+                report(&name);
+                GufoMultipartParse::DuplicateField
+            }
+        }
     })
 }
 
