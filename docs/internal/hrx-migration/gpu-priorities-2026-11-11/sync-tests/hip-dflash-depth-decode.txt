@@ -1,0 +1,16 @@
+HIP: found 1 ROCm devices (Total VRAM: 126976 MiB):
+  Device 0: AMD Radeon 8060S Graphics, gfx1151, Wave Size: 32, VRAM: 126976 MiB
+Model loaded in 1181 ms (success).
+| model                          |       size |     params | backend    |            test |                   t/s |
+| ------------------------------ | ---------- | ---------- | ---------- | --------------- | --------------------- |
+| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |            pp32 |        168.56 ± 0.00 |
+[QwenBenchTrace]: depth=0 count=8 sha256=d45348b6977d61c871101682219d500dc6c059047eb3afdc31c23e459a45432f
+| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |     tg8-dflash2 |         12.08 ± 0.00 |
+tg8-dflash2 acceptance=0.095 +/- 0.000
+Preparing context depth 32...
+Prepared 32 new tokens in 0.189 s; cached depth 32 in 7.46 ms
+| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |      pp32 @ d32 |        169.08 ± 0.00 |
+[QwenBenchTrace]: depth=32 count=8 sha256=0f9e2dd9cef333e00b3cd47be035fa0fd133eb698846a9fc852e0adba32c5138
+| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) | tg8 @ d32-dflash2 |         11.48 ± 0.00 |
+tg8 @ d32-dflash2 acceptance=0.042 +/- 0.000
+

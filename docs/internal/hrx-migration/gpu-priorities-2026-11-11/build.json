@@ -1,0 +1,8 @@
+{
+  "base_gufo_revision": "558d611eaeef69ec2d30d9abb3b226aa7227b90c",
+  "baseline_gufo_revision": "9612db2e5",
+  "candidate_package": "/nix/store/r1w7di4nw9l25dwfk3y16vhz83wg0q7x-gufo-0-unstable-558d611-dirty",
+  "candidate_executable_sha256": "4e1db53a070cf78ebe667387a2e6984408b409af8231f370630b609cf49339c2",
+  "hrx_revision": "8ebcdb6b70c3301185d9a648c5b226180323e3e2",
+  "scope": "Only Qwen benchmark status handling changes; no kernel or inference arithmetic changes. Fault-injection timings are not performance evidence."
+}
