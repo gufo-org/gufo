@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/audio.hpp"
 #include "src/core/base64.hpp"
-#include "src/core/wav.hpp"
 
 namespace gufo::server {
 namespace {
@@ -76,23 +76,41 @@ std::vector<std::byte> DecodeBase64(std::string_view encoded) {
   throw std::invalid_argument("reference audio base64 is invalid");
 }
 
-constexpr core::WavMessages kWavMessages{
-    .not_riff = "reference audio must be a RIFF WAV",
-    .truncated = "reference WAV is truncated",
-    .invalid_fmt = "reference WAV fmt is invalid",
-    .unsupported_format = "reference WAV format is unsupported",
-    .unsupported_layout = "supports PCM16 or float32 interleaved WAV",
-    .too_long = "reference WAV must be at most 30 seconds",
-    .non_finite = "reference WAV contains non-finite samples",
-};
+std::string_view WavMessage(core::AudioStatus status) {
+  switch (status) {
+    case core::AudioStatus::kUnrecognized:
+      return "reference audio must be a RIFF WAV";
+    case core::AudioStatus::kMalformedHeader:
+      return "reference WAV fmt is invalid";
+    case core::AudioStatus::kUnsupportedCodec:
+    case core::AudioStatus::kOutOfBounds:
+    case core::AudioStatus::kNoAudio:
+      return "reference WAV format is unsupported";
+    case core::AudioStatus::kUnsupportedLayout:
+      return "supports PCM16 or float32 interleaved WAV";
+    case core::AudioStatus::kTooLong:
+      return "reference WAV must be at most 30 seconds";
+    case core::AudioStatus::kTruncated:
+      return "reference WAV is truncated";
+    case core::AudioStatus::kNonFinite:
+      return "reference WAV contains non-finite samples";
+    case core::AudioStatus::kStopped:
+      break;
+  }
+  return "reference WAV could not be decoded";
+}
 
 AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
-  core::WavAudio wav = core::DecodeWav(bytes, core::WavLimits{}, kWavMessages);
-  return AudioBuffer{
-      .sample_rate = wav.sample_rate,
-      .channels = wav.channels,
-      .samples = std::move(wav.samples),
-  };
+  try {
+    core::DecodedAudio wav = core::DecodeAudio(bytes, core::AudioLimits{});
+    return AudioBuffer{
+        .sample_rate = wav.sample_rate,
+        .channels = wav.channels,
+        .samples = std::move(wav.samples),
+    };
+  } catch (const core::AudioError& error) {
+    throw std::invalid_argument(std::string(WavMessage(error.status())));
+  }
 }
 
 }  // namespace

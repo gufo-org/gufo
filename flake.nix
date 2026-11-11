@@ -264,8 +264,10 @@
             src = mkFilteredSource {
               directories = [
                 "src/core/rust"
+                "src/core/audio_decode"
                 "src/core/base64"
                 "src/core/png_decode"
+                "src/core/resample"
                 "src/core/wav_decode"
                 "src/core/websocket"
               ];
@@ -310,9 +312,8 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
@@ -433,9 +434,8 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];

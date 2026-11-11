@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "qwen3_tts",
   "version": "0.1.0",
-  "api_version": ">= 0.2.0",
+  "api_version": ">= 0.3.0",
   "entry": "qwen3_tts_register",
   "registration_target": "gufo_qwen3_tts",
   "depends": [],

@@ -1,6 +1,7 @@
-// Compares the Rust WAV decoder behind core::DecodeWav with frozen copies of
-// the three C++ decoders it replaced (tests/core/wav_reference.cpp): the same
-// samples bit for bit, or the same exception type and message.
+// Compares core::DecodeAudio's strict WAV path, under each caller's limits
+// and status messages, with frozen copies of the three C++ decoders it
+// replaced (tests/core/wav_reference.cpp): the same samples bit for bit, or
+// the same message. The callers report only the message.
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -19,17 +20,17 @@
 #include <string_view>
 #include <vector>
 
-#include "src/core/wav.hpp"
+#include "src/core/audio.hpp"
 
 namespace gufo::core::wav_reference {
 namespace serve {
-WavAudio DecodeWavBytes(std::span<const std::byte> bytes);
+DecodedAudio DecodeWavBytes(std::span<const std::byte> bytes);
 }
 namespace asr {
-WavAudio DecodeWavBytes(std::span<const std::byte> bytes);
+DecodedAudio DecodeWavBytes(std::span<const std::byte> bytes);
 }
 namespace tts {
-WavAudio DecodeWavBytes(std::span<const std::byte> bytes);
+DecodedAudio DecodeWavBytes(std::span<const std::byte> bytes);
 }
 }  // namespace gufo::core::wav_reference
 
@@ -38,18 +39,54 @@ namespace {
 namespace core = gufo::core;
 using Bytes = std::vector<std::uint8_t>;
 
+// The messages each caller reports.
+struct Messages {
+  std::string_view not_riff;
+  std::string_view truncated;
+  std::string_view invalid_fmt;
+  std::string_view unsupported_format;
+  std::string_view unsupported_layout;
+  std::string_view too_long;
+  std::string_view non_finite;
+};
+
+// The status-to-message switch of every caller.
+std::string_view Message(const Messages& messages, core::AudioStatus status) {
+  switch (status) {
+    case core::AudioStatus::kUnrecognized:
+      return messages.not_riff;
+    case core::AudioStatus::kMalformedHeader:
+      return messages.invalid_fmt;
+    case core::AudioStatus::kUnsupportedCodec:
+    case core::AudioStatus::kOutOfBounds:
+    case core::AudioStatus::kNoAudio:
+      return messages.unsupported_format;
+    case core::AudioStatus::kUnsupportedLayout:
+      return messages.unsupported_layout;
+    case core::AudioStatus::kTooLong:
+      return messages.too_long;
+    case core::AudioStatus::kTruncated:
+      return messages.truncated;
+    case core::AudioStatus::kNonFinite:
+      return messages.non_finite;
+    case core::AudioStatus::kStopped:
+      break;
+  }
+  return "unexpected status";
+}
+
 // The limits and messages of each caller, as in src/cli/serve/audio_buffer.cpp,
 // src/models/qwen3_asr/audio.cpp and src/models/qwen3_tts/audio.cpp.
 struct Caller {
   std::string_view name;
-  core::WavLimits limits;
-  core::WavMessages messages;
-  core::WavAudio (*reference)(std::span<const std::byte>);
+  core::AudioLimits limits;
+  Messages messages;
+  core::DecodedAudio (*reference)(std::span<const std::byte>);
 };
 
 const Caller kCallers[] = {
     {"serve",
-     core::WavLimits{},
+     core::AudioLimits{},
      {
          .not_riff = "reference audio must be a RIFF WAV",
          .truncated = "reference WAV is truncated",
@@ -79,7 +116,7 @@ const Caller kCallers[] = {
      },
      &core::wav_reference::asr::DecodeWavBytes},
     {"qwen3_tts",
-     core::WavLimits{},
+     core::AudioLimits{},
      {
          .not_riff = "Qwen3-TTS reference audio must be a RIFF WAV",
          .truncated = "Qwen3-TTS reference WAV is truncated",
@@ -94,23 +131,38 @@ const Caller kCallers[] = {
 };
 
 struct Outcome {
-  enum class Kind { kOk, kInvalidArgument, kLengthError, kOther };
+  enum class Kind { kOk, kRejected, kOther };
   Kind kind{Kind::kOther};
   std::string message;
-  core::WavAudio audio;
+  core::DecodedAudio audio;
 };
 
-Outcome Capture(const std::function<core::WavAudio()>& decode) {
+// A frozen decoder rejects with std::invalid_argument or std::length_error.
+Outcome Reference(const Caller& caller, std::span<const std::byte> bytes) {
   Outcome outcome;
   try {
-    outcome.audio = decode();
+    outcome.audio = caller.reference(bytes);
     outcome.kind = Outcome::Kind::kOk;
   } catch (const std::length_error& error) {
-    outcome.kind = Outcome::Kind::kLengthError;
+    outcome.kind = Outcome::Kind::kRejected;
     outcome.message = error.what();
   } catch (const std::invalid_argument& error) {
-    outcome.kind = Outcome::Kind::kInvalidArgument;
+    outcome.kind = Outcome::Kind::kRejected;
     outcome.message = error.what();
+  } catch (const std::exception& error) {
+    outcome.message = error.what();
+  }
+  return outcome;
+}
+
+Outcome Decode(const Caller& caller, std::span<const std::byte> bytes) {
+  Outcome outcome;
+  try {
+    outcome.audio = core::DecodeAudio(bytes, caller.limits);
+    outcome.kind = Outcome::Kind::kOk;
+  } catch (const core::AudioError& error) {
+    outcome.kind = Outcome::Kind::kRejected;
+    outcome.message = Message(caller.messages, error.status());
   } catch (const std::exception& error) {
     outcome.message = error.what();
   }
@@ -128,10 +180,8 @@ std::string Describe(const Outcome& outcome) {
       return "ok " + std::to_string(outcome.audio.sample_rate) + " Hz, " +
              std::to_string(outcome.audio.channels) + " channels, " +
              std::to_string(outcome.audio.samples.size()) + " samples";
-    case Outcome::Kind::kInvalidArgument:
-      return "invalid_argument: " + outcome.message;
-    case Outcome::Kind::kLengthError:
-      return "length_error: " + outcome.message;
+    case Outcome::Kind::kRejected:
+      return "rejected: " + outcome.message;
     case Outcome::Kind::kOther:
       break;
   }
@@ -458,12 +508,8 @@ int RunCases() {
   std::size_t accepted = 0;
   for (const Case& test : cases) {
     for (const Caller& caller : kCallers) {
-      const Outcome expected =
-          Capture([&] { return caller.reference(AsBytes(test.bytes)); });
-      const Outcome actual = Capture([&] {
-        return core::DecodeWav(AsBytes(test.bytes), caller.limits,
-                               caller.messages);
-      });
+      const Outcome expected = Reference(caller, AsBytes(test.bytes));
+      const Outcome actual = Decode(caller, AsBytes(test.bytes));
       accepted += expected.kind == Outcome::Kind::kOk ? 1 : 0;
       if (!Same(expected, actual)) {
         if (++failures <= 20) {
@@ -534,11 +580,7 @@ int RunTiming(int repeat) {
     const double reference =
         MedianMilliseconds([&] { (void)input.caller.reference(span); }, repeat);
     const double rust = MedianMilliseconds(
-        [&] {
-          (void)core::DecodeWav(span, input.caller.limits,
-                                input.caller.messages);
-        },
-        repeat);
+        [&] { (void)core::DecodeAudio(span, input.caller.limits); }, repeat);
     std::cout << input.name << ": C++ " << reference << " ms, Rust " << rust
               << " ms (" << rust / reference << "x)\n";
   }

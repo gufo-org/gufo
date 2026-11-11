@@ -134,7 +134,7 @@ set_tests_properties(embedding_gemma2_audio_processor_test PROPERTIES
 if (ENGINE_ENABLE_HIP AND TARGET gufo_embedding_gemma2_hip)
   add_executable(embedding_gemma2_audio_golden_hip_test audio_golden_hip_test.cpp)
   target_link_libraries(embedding_gemma2_audio_golden_hip_test PRIVATE
-    gufo_embedding_gemma2_hip hip::host)
+    gufo_embedding_gemma2_hip gufo_core hip::host)
   target_compile_definitions(embedding_gemma2_audio_golden_hip_test PRIVATE
     GUFO_EMBEDDING_GEMMA2_SPEECH_WAV="${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav"
     GUFO_EMBEDDING_GEMMA2_AUDIO_EMBEDDING_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/audio_embedding_golden.json")
@@ -146,7 +146,7 @@ if (ENGINE_ENABLE_HIP AND TARGET gufo_embedding_gemma2_hip)
 endif()
 
 add_executable(embedding_gemma2_audio_decoder_test audio_decoder_test.cpp)
-target_link_libraries(embedding_gemma2_audio_decoder_test PRIVATE gufo_embedding_gemma2)
+target_link_libraries(embedding_gemma2_audio_decoder_test PRIVATE gufo_embedding_gemma2 gufo_core)
 target_compile_definitions(embedding_gemma2_audio_decoder_test PRIVATE
   GUFO_EMBEDDING_GEMMA2_AUDIO_DECODER_GOLDEN="${PROJECT_SOURCE_DIR}/tests/fixtures/embedding_gemma2/audio_decoder_golden.json")
 add_test(NAME embedding_gemma2_audio_decoder_test COMMAND embedding_gemma2_audio_decoder_test)

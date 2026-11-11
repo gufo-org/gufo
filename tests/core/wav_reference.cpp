@@ -10,12 +10,12 @@
 #include <span>
 #include <stdexcept>
 
-#include "src/core/wav.hpp"
+#include "src/core/audio.hpp"
 
 namespace gufo::core::wav_reference {
 namespace serve {
 
-using AudioBuffer = WavAudio;
+using AudioBuffer = DecodedAudio;
 
 constexpr std::uint32_t kMaximumChannels = 8;
 constexpr std::uint32_t kMaximumSampleRate = 192000;
@@ -118,7 +118,7 @@ AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
 
 namespace asr {
 
-using AudioBuffer = WavAudio;
+using AudioBuffer = DecodedAudio;
 
 constexpr std::uint32_t kMaximumChannels = 8;
 constexpr std::uint32_t kMaximumSampleRate = 192000;
@@ -247,7 +247,7 @@ AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
 
 namespace tts {
 
-using AudioBuffer = WavAudio;
+using AudioBuffer = DecodedAudio;
 
 constexpr std::uint32_t kMaximumChannels = 8;
 constexpr std::uint32_t kMaximumSampleRate = 192000;

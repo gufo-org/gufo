@@ -306,7 +306,7 @@ add_library(gufo_core STATIC
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
-  src/core/wav.cpp
+  src/core/audio.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
@@ -805,6 +805,13 @@ endfunction()
   target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
   add_test(NAME png_decode_test COMMAND png_decode_test)
   set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
+
+  add_executable(audio_decode_test tests/core/audio_decode_test.cpp)
+  target_link_libraries(audio_decode_test PRIVATE gufo_core)
+  target_compile_definitions(audio_decode_test PRIVATE
+    GUFO_AUDIO_DECODE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/audio")
+  add_test(NAME audio_decode_test COMMAND audio_decode_test)
+  set_tests_properties(audio_decode_test PROPERTIES LABELS "cpu;audio;correctness")
 
   add_executable(wav_decode_test
     tests/core/wav_decode_test.cpp
