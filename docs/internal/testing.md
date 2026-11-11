@@ -112,6 +112,20 @@ runs in `check-pr`. `base64_test --time [--repeat N]` prints the median time of
 both implementations for a 20 MiB payload; CTest does not run this mode. The
 codec's own Rust unit tests (`cargo test -p gufo-base64`) do not run in CI.
 
+`http_request_test` compares the Rust HTTP request parser with frozen copies of
+the 0.33.0 parsing in `tests/cli/http_request_reference.cpp`. Request heads
+that follow RFC 9112 strictly must parse identically: fields, body length,
+`Expect` and head length. Every other difference must be a documented one:
+loose whitespace in the request line, non-token methods, control bytes or
+ill-formed UTF-8 in the target, control bytes in field values and more than
+100 fields are rejected, and bare LF line ends and one empty line before the
+request line are accepted. The heads cover a grid of request lines, fields and
+framing values, 99 to 1,000 fields and 6,000 random mutations; each is also fed
+one byte at a time. Query parameters and header token lists must decode
+identically. It runs in `check-pr`; `http_server_test` checks the same rules
+over a socket. The parser's Rust unit tests (`cargo test -p gufo-http`),
+including its C functions' answers to caller errors, do not run in CI.
+
 `websocket_frame_test` compares the Rust WebSocket frame reader, driven as
 `WebSocket::ReadLoop` drives it, with a frozen copy of the 0.33.0 `ReadLoop` in
 `tests/cli/websocket_frame_reference.cpp`, which reads from a byte stream

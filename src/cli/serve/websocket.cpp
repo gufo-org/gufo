@@ -1,10 +1,10 @@
 #include "src/cli/serve/websocket.hpp"
 
+#include <gufo/http.h>
 #include <gufo/websocket.h>
 #include <openssl/evp.h>
 
 #include <array>
-#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -21,23 +21,14 @@ namespace {
 constexpr std::size_t kMaximumMessage = 4U << 20;
 constexpr std::size_t kMaximumQueue = 8U << 20;
 
-bool HasToken(std::string value, std::string_view token) {
-  for (char& c : value)
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  for (std::size_t begin = 0; begin < value.size();) {
-    auto end = value.find(',', begin);
-    if (end == std::string::npos)
-      end = value.size();
-    auto item = std::string_view(value).substr(begin, end - begin);
-    while (!item.empty() && (item.front() == ' ' || item.front() == '\t'))
-      item.remove_prefix(1);
-    while (!item.empty() && (item.back() == ' ' || item.back() == '\t'))
-      item.remove_suffix(1);
-    if (item == token)
-      return true;
-    begin = end + 1;
-  }
-  return false;
+// Whether the comma-separated header value lists the lowercase token.
+bool HasToken(std::string_view value, std::string_view token) {
+  const int found = gufo_http_has_token(
+      reinterpret_cast<const std::uint8_t*>(value.data()), value.size(),
+      reinterpret_cast<const std::uint8_t*>(token.data()), token.size());
+  if (found < 0)
+    throw std::logic_error("Rust HTTP token check failed internally");
+  return found != 0;
 }
 }  // namespace
 

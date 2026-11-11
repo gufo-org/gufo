@@ -19,7 +19,14 @@ Reference protocols:
 
 The C++20 runtime serves bounded HTTP/1.1 requests with one connection worker
 per request and a separate inference scheduler. Connections close after each
-response. Chat Completions, Responses and Messages stream with Server-Sent
+response. Request heads are parsed in Rust by httparse as RFC 9112 defines
+them: a token method, single spaces in the request line, an origin-form target
+without control bytes in UTF-8, HTTP/1.0 or HTTP/1.1, and header fields without
+control bytes. A bare LF ends a line, and one empty line before the request line
+is ignored. Other heads, `Transfer-Encoding` (chunked bodies are not
+implemented), and `Content-Length` values that are not decimal digits or
+disagree get 400; more than 100 header fields, llama-server's limit too, get
+431. Chat Completions, Responses and Messages stream with Server-Sent
 Events; closing the socket cancels the request in the scheduler. JSON parsing
 rejects duplicate keys, invalid numbers and nesting beyond 128 containers.
 Python may serve development tools and conformance tests, never requests.
@@ -162,13 +169,12 @@ the
 and [Qwen3.8 Flash-Next](../models/qwen3.8-flash-next.md) for the memory
 cost.
 
-Each model chooses its prefill chunk. Beside decoders, a runner with a
-scheduling profile (every in-tree text model) keeps that width and splits each
-pass by layers, with a decode round between groups; a runner without one gets
-fixed 512-token passes. A lone request keeps the model's own pass width.
-`--prefill-chunk` is deprecated: it is accepted, ignored with a
-`event=deprecated_option` warning, and will be removed together with the
-512-token legacy path (#1028).
+Each model chooses its prefill chunk. Every text runner declares a scheduling
+profile: beside decoders, the host keeps the profile's pass width and splits
+each pass by layers, with a decode round between groups (one group runs it
+unsplit). A lone request keeps the model's own pass width. `--prefill-chunk`
+is deprecated: it is accepted, ignored with a `event=deprecated_option`
+warning, and will be removed at the next breaking release.
 
 Qwen image requests reuse decoded and resized RGB pixels using a fast lookup
 hash and exact encoded-byte comparison under the preprocessing version and
@@ -477,6 +483,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/systemone` | A decision model is configured with `gufo serve decision` |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
+| `GET` | `/sdapi/v1/loras` | Qwen-Image-2.1 image serving is configured; lists `--lora` adapters. A text server answers 501 |
 | `POST` | `/v1/videos` | A validated operator-supplied MiniMax H3 checkpoint is configured |
 | `GET` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
@@ -490,7 +497,9 @@ reference-image conditioning, are refused with 400 rather than dropped.
 Use `gufo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](../models/qwen-image-2.1.md). Generation accepts JSON;
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
-and work through llama-swap's image routes.
+and work through llama-swap's image routes. LoRA adapters registered with
+`--lora NAME=PATH` are selected per request with the `loras` field; see
+[LoRA adapters](../models/qwen-image-2.1.md#lora-adapters).
 
 Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 1.7B variants are supported; the variant is detected from the checkpoint's
@@ -1466,13 +1475,15 @@ over sessions times context; retained cache entries are not counted.
 `gufo_prompt_state_budget_bytes` is the host RAM prompt state may claim before
 admission refuses, `gufo_prompt_state_reserved_bytes` the bytes charged to
 in-flight requests, and `gufo_prompt_state_available_bytes` the remainder.
-The charge covers the deterministic KV rows a prompt writes. Qwen and
-Flash-Next also sample host headroom at each submission, after the 4 GiB reserve
-and cgroup limits, and use the smaller of this sample and the startup budget.
-Outstanding requests are subtracted conservatively, even if their rows have
-already committed. This can refuse a prompt that would reuse existing pages.
-The check does not reserve output-token growth, evict caches or recheck during
-generation; other allocations can still exhaust memory after admission.
+These gauges appear only for runners that claim prompt state, whose prompts
+allocate host KV rows as they grow. Qwen and Flash-Next allocate full-context
+KV when a session is created and admit it at startup through
+`per_request_state_bytes`, so they claim no prompt state and omit the gauges.
+A claimed charge covers the deterministic KV rows a prompt writes; outstanding
+requests are subtracted conservatively, even if their rows have already
+committed. The check does not reserve output-token growth, evict caches or
+recheck during generation; other allocations can still exhaust memory after
+admission.
 `Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`
 provide request-level measurements.
 

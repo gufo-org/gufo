@@ -12,10 +12,15 @@ assert version.splitlines()[0].startswith("gufo version "), version
 report = json.loads(subprocess.check_output([binary, "diagnose", "--section", "extensions", "--json"], text=True))
 assert f'Extension API: {report["extensionApiVersion"]}' in version
 assert f'Extension selection: {report["selectionMode"]}' in version
+def revision(extension):
+    # Only an external extension reports where its source came from.
+    if "revision" not in extension:
+        return ""
+    return f' revision {extension["revision"]}' + (" with uncommitted changes" if extension["dirty"] else "")
 for extension in report["builtExtensions"]:
-    assert f'{extension["name"]} {extension["version"]} ({extension["source"]})' in version
+    assert f'{extension["name"]} {extension["version"]} ({extension["source"]}){revision(extension)}\n' in version
 for extension in report["excludedExtensions"]:
-    assert f'excluded {extension["name"]} {extension["version"]} ({extension["source"]}): {extension["reason"]}' in version
+    assert f'excluded {extension["name"]} {extension["version"]} ({extension["source"]}){revision(extension)}: {extension["reason"]}' in version
 assert subprocess.check_output([binary, "--version"], text=True) == version
 assert subprocess.check_output([binary, "diagnose", "--section", "extensions"], text=True) == "\n".join(version.splitlines()[1:]) + "\n"
 with tempfile.TemporaryDirectory() as temp:

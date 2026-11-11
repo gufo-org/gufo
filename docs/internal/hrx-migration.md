@@ -8,8 +8,8 @@ qualify the newer staging runtime.
 ## Current staging integration (November 11, 2026)
 
 The experimental packages pin `gufo-org/hrx-system`'s `gufo-staging` branch
-at `e74f5d7829faca49abdc442241d108a931079635`, based on upstream
-`af0c940f77b37dcdfbb6371a0434c6c268edb108`. Each upstream candidate has an
+at `2ebcaaece8fa731cf2e14e978c9f6242540c3341`, based on upstream
+`d9cdd48346e6b4e90eb8ccb11e826535ee63bf89`. Each upstream candidate has an
 independent fix branch; staging collects them for Gufo. See the
 [branch and update workflow](../../.devops/nix/hrx/README.md).
 
@@ -329,6 +329,12 @@ As of November 2026, `gufo-hrx` passes `gufo diagnose`, gives the same
 Flash-Next prefill validation as HIP and measures pp512 1309-1317, pp2048
 1876-1890 and tg128 30.52-30.58 tok/s (two `-r 3` runs); an idle LFM3 server
 draws 13 W at 0% GPU busy.
+
+## Experiments
+
+Experiments with HRX, Loom and libamdf, and how to rerun them, are in
+[`hrx-migration/EXPERIMENTS.md`](hrx-migration/EXPERIMENTS.md). Upstream fix
+status is tracked in #1144.
 
 ## Profiling HRX
 

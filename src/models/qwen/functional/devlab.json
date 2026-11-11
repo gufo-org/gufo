@@ -2,7 +2,7 @@
   "assets": {
     "qwen27": {
       "repo": "unsloth/Qwen3.8-27B-GGUF",
-      "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b",
       "patterns": [
         "Qwen3.8-27B-UD-Q4_K_XL.gguf",
         "mmproj-BF16.gguf"

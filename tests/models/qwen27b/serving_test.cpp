@@ -42,7 +42,8 @@ bool LoadBackend(
     gufo::server::InferenceBackend& backend,
     std::shared_ptr<const gufo::hip::QwenGpuModel> model, std::string* error,
     std::uint32_t max_context = 0, std::size_t session_count = 1,
-    gufo::server::TextPrefillPolicy prefill_policy = {},
+    // Zero keeps the scheduler's prompt unit.
+    std::size_t prefill_unit_tokens = 0,
     gufo::server::TextSchedulerPolicy scheduler_policy = {},
     gufo::server::TextSpeculativeConfig speculative_config = {},
     gufo::server::TextDiskCacheConfig disk_cache_config = {},
@@ -92,8 +93,10 @@ bool LoadBackend(
       speculative_config.dflash_policy,
       disk_cache_config.model_artifact_fingerprint,
       disk_cache_config.draft_model_artifact_fingerprint);
-  return backend.load(std::move(runner), error, session_count, prefill_policy,
-                      scheduler_policy, disk_cache_config, ram_cache_config);
+  if (prefill_unit_tokens != 0)
+    scheduler_policy.prefill_unit_tokens = prefill_unit_tokens;
+  return backend.load(std::move(runner), error, session_count, scheduler_policy,
+                      disk_cache_config, ram_cache_config);
 }
 
 std::vector<TokenId> GenerateDirect(gufo::hip::QwenGpuExecutor& executor,
@@ -128,11 +131,10 @@ void CheckLogprobs(const std::shared_ptr<const gufo::hip::QwenGpuModel>& model,
       mode.draft_model_path = draft_path;
     }
     gufo::server::InferenceBackend backend;
-    Expect(
-        LoadBackend(backend, model, &error, 256, 2, {.decode_active_tokens = 8},
-                    {.max_pending_requests_per_client = 2}, mode, {},
-                    {.capacity_bytes = std::size_t{1} << 30}),
-        error);
+    Expect(LoadBackend(backend, model, &error, 256, 2, 8,
+                       {.max_pending_requests_per_client = 2}, mode, {},
+                       {.capacity_bytes = std::size_t{1} << 30}),
+           error);
     for (const float temperature : {0.F, 0.7F}) {
       gufo::sampling::SamplingConfig config;
       config.temperature = temperature;
@@ -384,7 +386,7 @@ void CheckGeneratedFrontierReuse(
   for (const std::size_t count : {1U, 8U}) {
     Backend ar, spec;
     Expect(ar.load(model, &error, 256, 1), error);
-    Expect(spec.load(model, &error, 256, 1, {}, {}, draft), error);
+    Expect(spec.load(model, &error, 256, 1, {}, draft), error);
     const std::vector<gufo::tokenization::ChatMessage> messages{
         {Role::kUser,
          "Explain why careful reasoning and clear examples make technical "
@@ -438,14 +440,14 @@ void CheckGeneratedFrontierReuse(
             speculative ? draft : gufo::server::TextSpeculativeConfig{};
         {
           Backend writer;
-          Expect(writer.load(model, &error, 256, 1, {}, {}, mode, disk), error);
+          Expect(writer.load(model, &error, 256, 1, {}, mode, disk), error);
           const auto root = writer.chat(request(messages), 1, {});
           Expect(
               root.tokens == root_ar.tokens && root.cache_disk_queued_bytes > 0,
               "published-frontier checkpoint was not persisted");
         }
         Backend restored;
-        Expect(restored.load(model, &error, 256, 1, {}, {}, mode, disk), error);
+        Expect(restored.load(model, &error, 256, 1, {}, mode, disk), error);
         const auto replay = restored.chat(request(continuation), 24, {});
         Expect(replay.cache_disk_hit && replay.tokens == continued_ar.tokens,
                "disk restore changed pending-token continuation");
@@ -459,8 +461,8 @@ void CheckGeneratedFrontierReuse(
     Backend oracle, forks;
     const auto mode =
         speculative ? draft : gufo::server::TextSpeculativeConfig{};
-    Expect(oracle.load(model, &error, 256, 1, {}, {}, mode), error);
-    Expect(forks.load(model, &error, 256, 4, {}, {}, mode), error);
+    Expect(oracle.load(model, &error, 256, 1, {}, mode), error);
+    Expect(forks.load(model, &error, 256, 4, {}, mode), error);
     const std::vector<gufo::tokenization::ChatMessage> messages{
         {Role::kUser,
          "Explain why careful reasoning and clear examples make technical "
@@ -511,7 +513,7 @@ void CheckGeneratedFrontierReuse(
     Backend interrupted, reference;
     const auto mode =
         speculative ? draft : gufo::server::TextSpeculativeConfig{};
-    Expect(interrupted.load(model, &error, 256, 1, {}, {}, mode), error);
+    Expect(interrupted.load(model, &error, 256, 1, {}, mode), error);
     Expect(reference.load(model, &error, 256, 1), error);
     const std::vector<gufo::tokenization::ChatMessage> messages{
         {Role::kUser, "Describe a quiet mountain village in detail."}};
@@ -564,9 +566,7 @@ void CheckCompletedPrefillRetention(
         .draft_model_path = draft_path == nullptr ? "" : draft_path,
     };
     Backend backend;
-    Expect(LoadBackend(backend, model, &error, 256, 2,
-                       {.decode_active_tokens = 8}, {}, draft),
-           error);
+    Expect(LoadBackend(backend, model, &error, 256, 2, 8, {}, draft), error);
     std::string prompt = "Cancelled prefill retention: ";
     while (backend.count_tokens(prompt) < 160)
       prompt += "red blue green orange violet. ";
@@ -728,8 +728,7 @@ int main(int argc, const char* const* argv) {
       } else {
         gufo::server::InferenceBackend speculative_backend;
         Expect(LoadBackend(
-                   speculative_backend, model, &error, context, state_count,
-                   {.decode_active_tokens = 8},
+                   speculative_backend, model, &error, context, state_count, 8,
                    {.max_pending_requests_per_client = 8},
                    {.backend = gufo::server::TextSpeculativeBackend::kDFlash,
                     .draft_model_path = draft_model_path,
@@ -790,8 +789,7 @@ int main(int argc, const char* const* argv) {
     if (draft_model_path != nullptr) {
       gufo::server::InferenceBackend speculative_backend;
       Expect(LoadBackend(
-                 speculative_backend, model, &error, context, state_count,
-                 {.decode_active_tokens = 8},
+                 speculative_backend, model, &error, context, state_count, 8,
                  {.max_pending_requests_per_client = 8},
                  gufo::server::TextSpeculativeConfig{
                      .backend = gufo::server::TextSpeculativeBackend::kDFlash,
@@ -1109,7 +1107,7 @@ int main(int argc, const char* const* argv) {
       };
       {
         gufo::server::InferenceBackend writer;
-        Expect(writer.load(model, &error, context, 1, {}, {}, {}, disk_cache),
+        Expect(writer.load(model, &error, context, 1, {}, {}, disk_cache),
                error);
         const auto persistent_root =
             writer.chat(cache_request(messages), 2, {});
@@ -1123,9 +1121,8 @@ int main(int argc, const char* const* argv) {
 
       {
         gufo::server::InferenceBackend restarted;
-        Expect(
-            restarted.load(model, &error, context, 1, {}, {}, {}, disk_cache),
-            error);
+        Expect(restarted.load(model, &error, context, 1, {}, {}, disk_cache),
+               error);
         const auto restored_continuation =
             restarted.chat(cache_request(continued_messages), 2, {});
         Expect(restored_continuation.cache_hit &&
@@ -1146,7 +1143,7 @@ int main(int argc, const char* const* argv) {
       incompatible_cache.model_artifact_fingerprint = std::string(64, 'b');
       {
         gufo::server::InferenceBackend incompatible;
-        Expect(incompatible.load(model, &error, context, 1, {}, {}, {},
+        Expect(incompatible.load(model, &error, context, 1, {}, {},
                                  incompatible_cache),
                error);
         const auto incompatible_result =
@@ -1172,9 +1169,8 @@ int main(int argc, const char* const* argv) {
             GenerateDirect(*direct, continuation_prompt, 8);
 
         gufo::server::InferenceBackend warm_dflash;
-        Expect(
-            warm_dflash.load(model, &error, context, 1, {}, {}, dflash_config),
-            error);
+        Expect(warm_dflash.load(model, &error, context, 1, {}, dflash_config),
+               error);
         const auto warm_dflash_root =
             warm_dflash.chat(cache_request(messages), 2, {});
         const auto warm_dflash_continuation =
@@ -1189,7 +1185,7 @@ int main(int argc, const char* const* argv) {
 
         {
           gufo::server::InferenceBackend dflash_writer;
-          Expect(dflash_writer.load(model, &error, context, 1, {}, {},
+          Expect(dflash_writer.load(model, &error, context, 1, {},
                                     dflash_config, dflash_disk_cache),
                  error);
           const auto persistent_dflash_root =
@@ -1202,7 +1198,7 @@ int main(int argc, const char* const* argv) {
 
         {
           gufo::server::InferenceBackend restarted_dflash;
-          Expect(restarted_dflash.load(model, &error, context, 1, {}, {},
+          Expect(restarted_dflash.load(model, &error, context, 1, {},
                                        dflash_config, dflash_disk_cache),
                  error);
           const auto restored_dflash_continuation =
@@ -1232,7 +1228,7 @@ int main(int argc, const char* const* argv) {
             std::string(64, 'd');
         gufo::server::InferenceBackend incompatible_dflash;
         Expect(
-            incompatible_dflash.load(model, &error, context, 1, {}, {},
+            incompatible_dflash.load(model, &error, context, 1, {},
                                      dflash_config, incompatible_dflash_cache),
             error);
         const auto incompatible_dflash_result =
@@ -1289,9 +1285,7 @@ int main(int argc, const char* const* argv) {
     // completes. Eight outputs can finish before that peer reaches decode.
     // Small chunks also cover bounded prefill before the concurrent decode.
     constexpr std::uint32_t concurrent_output_tokens = 32;
-    Expect(LoadBackend(backend, model, &error, context, 2,
-                       {.decode_active_tokens = 8}),
-           error);
+    Expect(LoadBackend(backend, model, &error, context, 2, 8), error);
     gufo::server::ChatRequest concurrent_a({
         {gufo::tokenization::ChatRole::kUser,
          "The quick brown fox jumps over the lazy dog. Explain why this "

@@ -1,0 +1,77 @@
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+index c6214b1eb4..74eb56a926 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+@@ -19,6 +19,7 @@
+ #include <thread>
+ #include <tuple>
+ #include <type_traits>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include "qfn_mmq.h"
+@@ -3456,6 +3457,13 @@
+   return true;
+ }
+ 
++// PROBE (not for landing): batch shapes that ran eagerly once in this
++// process, across sessions, so a later prefill pass may be captured.
++static std::unordered_set<std::uint64_t>& probe_warmed_keys() {
++  static std::unordered_set<std::uint64_t> keys;
++  return keys;
++}
++
+ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
+                    const std::function<bool()>& body, std::string* error_msg,
+                    bool synchronize) const {
+@@ -3532,11 +3540,50 @@
+         !Check(hipGraphLaunch(exec, stream_), "graph launch", error_msg)) {
+       return false;
+     }
++  } else if (static const bool probe_prefill_graph =
++                 std::getenv("GUFO_PROBE_PREFILL_GRAPH") != nullptr;
++             probe_prefill_graph && probe_warmed_keys().contains(key)) {
++    // PROBE (not for landing): capture this warmed eager pass, launch the
++    // graph once and destroy it, so per-kernel launch cost moves to graph
++    // replay (cheap on HRX) while arguments stay pass-specific. Executables
++    // are retired and destroyed once the stream has drained.
++    static std::vector<hipGraphExec_t> retired;
++    if (!retired.empty() && hipStreamQuery(stream_) == hipSuccess) {
++      for (auto old : retired)
++        (void)hipGraphExecDestroy(old);
++      retired.clear();
++    }
++    hipGraph_t captured = nullptr;
++    if (!Check(hipStreamBeginCapture(stream_, hipStreamCaptureModeThreadLocal),
++               "probe graph capture", error_msg))
++      return false;
++    capturing_ = true;
++    const bool ok = body();
++    capturing_ = false;
++    const auto end_status = hipStreamEndCapture(stream_, &captured);
++    if (!Check(end_status, "probe graph capture end", error_msg) || !ok) {
++      if (captured != nullptr)
++        (void)hipGraphDestroy(captured);
++      return false;
++    }
++    hipGraphExec_t exec = nullptr;
++    const bool instantiated =
++        Check(hipGraphInstantiate(&exec, captured, nullptr, nullptr, 0),
++              "probe graph instantiate", error_msg);
++    (void)hipGraphDestroy(captured);
++    if (!instantiated)
++      return false;
++    const bool launched =
++        Check(hipGraphLaunch(exec, stream_), "probe graph launch", error_msg);
++    retired.push_back(exec);
++    if (!launched)
++      return false;
+   } else {
+     if (!body()) {
+       return false;
+     }
+     session.warmed_.insert(key);
++    probe_warmed_keys().insert(key);
+   }
+   return !synchronize ||
+          Check(hipStreamSynchronize(stream_), "forward", error_msg);

@@ -7,6 +7,8 @@
   "consumers": [],
   "checks": [
     "qwen_image_21_kernel_test",
+    "qwen_image_21_lora_dump",
+    "qwen_image_21_lora_test",
     "qwen_image_21_probe",
     "qwen_image_21_test",
     "qwen_image_21_weight_upload_test",

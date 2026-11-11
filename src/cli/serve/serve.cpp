@@ -539,6 +539,56 @@ void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
       });
 }
 
+struct ImageOptions {
+  std::filesystem::path model;
+  std::vector<std::string> names;
+  server::ImageLoraOptions loras;
+};
+
+void AddImageOptions(ArgParser& parser, ImageOptions* options) {
+  parser.AddOption("-m", "--model", "DIR",
+                   "Image model directory (Diffusers layout)", "Model",
+                   &options->model);
+  AddServedModelNamesOption(parser, &options->names);
+  parser.AddCustomOption(
+      "", "--lora", "NAME=PATH",
+      "Register a LoRA adapter for the Qwen-Image-2.1 transformer; requests "
+      "select it by name (repeatable)",
+      "Model",
+      [options](std::string_view, std::string_view value, std::string* err) {
+        std::string name;
+        std::string path;
+        if (!SplitNameValue(value, "--lora", &name, &path, err)) {
+          return false;
+        }
+        options->loras.files.emplace_back(std::move(name), std::move(path));
+        return true;
+      });
+  parser.AddCustomOption(
+      "", "--lora-default", "NAME:SCALE",
+      "Apply a registered --lora to requests that omit 'loras' (repeatable)",
+      "Model",
+      [options](std::string_view, std::string_view value, std::string* err) {
+        const std::size_t separator = value.rfind(':');
+        float scale = 0;
+        if (separator == std::string_view::npos || separator == 0) {
+          *err = "--lora-default expects NAME:SCALE";
+          return false;
+        }
+        const auto text = value.substr(separator + 1);
+        const auto [end, ec] =
+            std::from_chars(text.data(), text.data() + text.size(), scale);
+        if (text.empty() || ec != std::errc{} ||
+            end != text.data() + text.size()) {
+          *err = "--lora-default expects NAME:SCALE";
+          return false;
+        }
+        options->loras.defaults.push_back(
+            {std::string(value.substr(0, separator)), scale});
+        return true;
+      });
+}
+
 void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
                          std::vector<std::string>* served_model_names,
                          std::string* default_prompt_name) {
@@ -582,15 +632,11 @@ void PrintServeHelp(std::string_view program_name,
     return;
   }
   if (subcommand == "image") {
-    std::filesystem::path model;
-    std::vector<std::string> names;
+    ImageOptions options;
     ArgParser parser(std::string(program_name) + " serve image",
                      "Serve image generation and editing (Qwen-Image-2.1 or "
                      "an image extension provider).");
-    parser.AddOption("-m", "--model", "DIR",
-                     "Image model directory (Diffusers layout)", "Model",
-                     &model);
-    AddServedModelNamesOption(parser, &names);
+    AddImageOptions(parser, &options);
     ext::Registry registry;
     ext::RegisterBuiltExtensions(registry);
     ServerOptionHelpTargets server_help;
@@ -678,8 +724,8 @@ void PrintServeHelp(std::string_view program_name,
     std::string projection_layers;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
-    std::size_t prefill_chunk_tokens =
-        server::kDefaultDecodeActivePrefillTokens;
+    // Parsed for the deprecated --prefill-chunk only; never used.
+    std::size_t prefill_chunk_tokens = 0;
     std::size_t max_pending_requests = 16;
     std::size_t max_pending_requests_per_client = 0;
     std::uint64_t request_timeout_ms = 0;
@@ -1141,15 +1187,11 @@ int RunServe(std::span<const char* const> args) {
         "model=" + embeddings->model_id() + " context_tokens=" +
         std::to_string(server::EmbeddingService::kMaxInputTokens));
   } else if (subcommand == "image") {
-    std::filesystem::path model;
-    std::vector<std::string> names;
+    ImageOptions options;
     ArgParser parser("gufo serve image",
                      "Serve image generation and editing (Qwen-Image-2.1 or "
                      "an image extension provider).");
-    parser.AddOption("-m", "--model", "DIR",
-                     "Image model directory (Diffusers layout)", "Model",
-                     &model);
-    AddServedModelNamesOption(parser, &names);
+    AddImageOptions(parser, &options);
     add_server_options(parser, false);
     ProviderOptions declared_options(registry,
                                      std::string(ext::kImageServeCommand),
@@ -1172,16 +1214,24 @@ int RunServe(std::span<const char* const> args) {
     }
     if (!prepare_server_options())
       return 2;
-    if (model.empty()) {
+    if (options.model.empty()) {
       std::cerr << "Error: --model <DIR> is required for image server\n";
+      return 2;
+    }
+    // Adapter names and defaults are usage errors: report them before the
+    // runner loads any weights.
+    try {
+      server::ValidateLoraOptions(options.loras);
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
       return 2;
     }
     // Selection reads only the probe's metadata, so option errors (another
     // provider's option, a missing sidecar path) stop before any weights load.
     const ext::ImageProvider* provider = nullptr;
     try {
-      provider =
-          &server::SelectImageProvider(registry, model, provider_options);
+      provider = &server::SelectImageProvider(registry, options.model,
+                                              provider_options);
     } catch (const std::invalid_argument& error) {
       std::cerr << "Error: " << error.what() << '\n';
       return 2;
@@ -1191,23 +1241,27 @@ int RunServe(std::span<const char* const> args) {
     }
     std::string kind = provider->id;
     std::ranges::replace(kind, '-', '_');
-    ModelLoadLog load_log(kind, model);
+    ModelLoadLog load_log(kind, options.model);
     try {
       images = std::make_shared<server::ImageService>(
-          server::CreateImageRunner(*provider, model, provider_options),
-          names.empty() ? (provider->id == "qwen-image-21" ||
-                                   provider->id == "qwen-image-2.1"
-                               ? "Qwen-Image-2.1"
-                               : provider->id)
-                        : names.front(),
-          ModelAliases(names));
+          server::CreateImageRunner(*provider, options.model, provider_options),
+          options.names.empty() ? (provider->id == "qwen-image-21" ||
+                                           provider->id == "qwen-image-2.1"
+                                       ? "Qwen-Image-2.1"
+                                       : provider->id)
+                                : options.names.front(),
+          ModelAliases(options.names), options.loras);
     } catch (const std::exception& error) {
       std::cerr << "Error loading image model " << provider->id << ": "
                 << error.what() << '\n';
       return 1;
     }
-    load_log.Complete("model=" + images->model_id() + " provider=" +
-                      provider->id + " weights=mapped upload=on_demand");
+    std::string loaded = "model=" + images->model_id() +
+                         " provider=" + provider->id +
+                         " weights=mapped upload=on_demand";
+    if (!options.loras.files.empty())
+      loaded += " loras=" + std::to_string(options.loras.files.size());
+    load_log.Complete(loaded);
   } else if (subcommand == "video") {
     std::filesystem::path video_model;
     std::filesystem::path video_root = "video-jobs";
@@ -1388,8 +1442,8 @@ int RunServe(std::span<const char* const> args) {
     std::string projection_layers;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
-    std::size_t prefill_chunk_tokens =
-        server::kDefaultDecodeActivePrefillTokens;
+    // Parsed for the deprecated --prefill-chunk only; never used.
+    std::size_t prefill_chunk_tokens = 0;
     std::size_t max_pending_requests = 16;
     // Defaults to --max-pending after parsing unless supplied.
     std::size_t max_pending_requests_per_client = 0;
@@ -1574,9 +1628,8 @@ int RunServe(std::span<const char* const> args) {
     if (!prepare_server_options()) {
       return 2;
     }
-    // Every in-tree text runner splits prompt passes by layers beside
-    // decoders; runners without a scheduling profile keep the fixed legacy
-    // budget. Removed with the legacy path (#1028 phase 4).
+    // Every text runner declares a scheduling profile and the host splits
+    // prompt passes beside decoders by layers.
     if (llm_parser.WasSupplied("--prefill-chunk")) {
       server::Logger::Warn(
           "scheduling",
@@ -1696,7 +1749,7 @@ int RunServe(std::span<const char* const> args) {
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
     const bool load_ok = backend->load(
-        model, &err, max_context, session_count, server::TextPrefillPolicy{},
+        model, &err, max_context, session_count,
         server::TextSchedulerPolicy{
             .max_pending_requests = max_pending_requests,
             .max_pending_requests_per_client = max_pending_requests_per_client,

@@ -173,13 +173,13 @@ std::vector<std::string> CheckLayeredPrefill(
     const std::shared_ptr<ext::TextModelRunner>& runner,
     const LayeredPrefillCase& test) {
   const auto profile = runner->Descriptor().scheduling;
-  if (!profile || profile->max_layer_groups < 2)
+  if (profile.max_layer_groups < 2)
     return {"the runner's scheduling profile does not split passes"};
-  if (test.prompt.size() <= profile->pass_tokens)
+  if (test.prompt.size() <= profile.pass_tokens)
     return {"the prompt must span more than one pass"};
-  const std::size_t width = profile->pass_tokens;
+  const std::size_t width = profile.pass_tokens;
   const std::size_t groups =
-      test.layer_groups == 0 ? profile->max_layer_groups : test.layer_groups;
+      test.layer_groups == 0 ? profile.max_layer_groups : test.layer_groups;
   const auto sampling = Greedy(test.top_logprobs);
   std::vector<std::string> failures;
   try {

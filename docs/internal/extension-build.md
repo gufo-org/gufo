@@ -109,10 +109,28 @@ version, source (where it was built from, or `module:<path>` for a module), prov
 availability and excluded artifact keys, without touching the GPU. The full
 excluded model-ID and option-name sets stay internal to the collision gate.
 
+An external extension also reports `revision` and `dirty`. Configure reads the
+commit of the extension's Git work tree and whether `git status` lists any
+modified, staged or untracked file there. A directory without Git metadata
+reports its entry in `GUFO_EXTENSION_DIR_REVISIONS` (one per
+`GUFO_EXTENSION_DIRS` entry, in order; a trailing `-dirty` sets `dirty`), else
+`unknown`. The Nix package passes each flake input's `rev`, `dirtyRev` or
+`narHash` this way, because a store path has no `.git`. Configure depends on
+the work tree's `HEAD`, branch, `packed-refs` and index, so a commit, checkout
+or `git add` is recorded by the next build. An edit that touches none of them is
+seen at the next configure. In-tree extensions and modules report neither field.
+
+`sharedKeys` (text: `shared key`) lists every artifact key that two or more
+providers of one capability declare, with those providers in registration
+order. A key selects nothing: Gufo asks each registered probe of the capability
+in that order and the first to accept a file serves it. An unavailable provider
+is listed with its reason. Text providers also report `acceptsUnsizedTensors`,
+because only those that set it are asked about a GGUF with tensors core can't
+size.
 ## Tests
 
 `tests/extensions/` builds synthetic extensions in a separate CMake project, so
 `BUILD_TESTING` never adds fixtures to the production registry. They cover
 archive registration, dependency libraries, generated constants, available CPU
 and unavailable HIP providers, typed option parsing, selection errors, lock and
-discovery provenance, and excluded-key diagnostics.
+discovery provenance, external source revisions and excluded-key diagnostics.

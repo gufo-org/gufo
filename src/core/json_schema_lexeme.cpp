@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/json_number_limits.hpp"
 #include "src/core/json_schema_regex.hpp"
 
 namespace gufo::sampling {
@@ -268,6 +269,19 @@ public:
     if (lower_ && upper_ && multiple_ && !GridPoint(*lower_, *upper_))
       throw JsonSchemaEmpty(
           "JSON Schema: numeric constraints contain no multipleOf value");
+    // Widen the digit caps only for schema numbers that need longer values.
+    for (const auto* value :
+         {lower_ ? &lower_->value : nullptr, upper_ ? &upper_->value : nullptr,
+          multiple_ ? &*multiple_ : nullptr}) {
+      if (!value)
+        continue;
+      const int integral =
+          static_cast<int>(value->digits.size()) - value->scale;
+      if (integral >= integral_digits_)
+        integral_digits_ = integral + 1;
+      if (value->scale >= fraction_digits_)
+        fraction_digits_ = value->scale + 1;
+    }
   }
   bool AcceptValue(const json::Value& value) const override {
     return value.is_number() && Valid(Decimal::Parse(value.dump()));
@@ -294,18 +308,22 @@ public:
     for (std::size_t i = 0; i < text.size(); ++i)
       if ((text[i] < '0' || text[i] > '9') && (text[i] != '.' || i != dot))
         return {};
+    const int integral =
+        static_cast<int>(dot == std::string_view::npos ? text.size() : dot);
+    const int places =
+        dot == std::string_view::npos ? 0 : text.size() - dot - 1;
+    if (integral > integral_digits_ || places > fraction_digits_)
+      return {};
     const auto value = Decimal::Parse(bytes);
     const bool complete = text.back() != '.' && Valid(value);
-    // At the scalar budget there is no room for a completing digit. Do not
-    // admit an unfinished prefix which would fail on the next sampling step.
-    if (bytes.size() == 4096)
+    // At the scalar budget or the decimal cap there is no room for another
+    // digit. Do not admit an unfinished prefix which would fail next step.
+    if (bytes.size() == 4096 || places == fraction_digits_)
       return {complete, complete};
     // Decimal prefixes cover an interval. Before the decimal point, appending
     // integer digits also shifts that interval by powers of ten.
     Decimal low = value;
     low.negative = false;
-    const int places =
-        dot == std::string_view::npos ? 0 : text.size() - dot - 1;
     Decimal high = AddUnit(low, places);
     const bool extend_integer =
         dot == std::string_view::npos && text.front() != '0';
@@ -334,8 +352,9 @@ public:
         if (!multiple_ || GridPoint(lower, upper))
           return {true, complete};
       }
-      if (!extend_integer || (negative && !intersects_lower) ||
-          (!negative && !intersects_upper))
+      if (!extend_integer ||
+          integral + static_cast<int>(shift) + 1 > integral_digits_ ||
+          (negative && !intersects_lower) || (!negative && !intersects_upper))
         break;
       --low.scale;
       --high.scale;
@@ -377,6 +396,8 @@ private:
   bool integer_;
   std::optional<Bound> lower_, upper_;
   std::optional<Decimal> multiple_;
+  int integral_digits_{kMaxJsonNumberDigits},
+      fraction_digits_{kMaxJsonNumberDigits};
 };
 
 // Formats follow JSON Schema's RFC-backed string formats. The grammar validates

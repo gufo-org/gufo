@@ -19,7 +19,7 @@ def file_record(path):
     return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest}
 
 
-def validate_provenance(provenance, mode, extensions):
+def validate_provenance(provenance, mode, extensions, require_clean_revision=False):
     if not isinstance(provenance, dict):
         raise ValueError("invalid extension provenance object")
     if provenance.get("selectionMode") != mode:
@@ -34,6 +34,12 @@ def validate_provenance(provenance, mode, extensions):
         if not isinstance(extension, dict) or not all(extension.get(field) for field in ("name", "version", "source")):
             raise ValueError("incomplete extension provenance")
         names.append(extension["name"])
+        # Only an external extension reports a revision; in-tree ones share Gufo's.
+        if require_clean_revision and "revision" in extension:
+            if extension["revision"] in ("", "unknown"):
+                raise ValueError(f"extension {extension['name']} has no recorded source revision")
+            if extension.get("dirty") is not False:
+                raise ValueError(f"extension {extension['name']} was built from a tree with uncommitted changes")
     if len(names) != len(set(names)):
         raise ValueError("duplicate built extension provenance")
     missing = sorted(set(extensions) - set(names))
@@ -52,7 +58,7 @@ def runtime_records(manifest, directory):
     return records
 
 
-def audit(binary, mode, extensions, licenses, data, runtime_manifests):
+def audit(binary, mode, extensions, licenses, data, runtime_manifests, require_clean_revision=False):
     report = {"status": "FAIL", "binary": str(binary), "artifacts": [], "errors": []}
     try:
         report["artifacts"].append(file_record(binary))
@@ -64,7 +70,7 @@ def audit(binary, mode, extensions, licenses, data, runtime_manifests):
             if result.returncode:
                 raise ValueError(f"installed executable failed: {' '.join(command)}")
         provenance = json.loads(report["provenance_output"]["stdout"])
-        validate_provenance(provenance, mode, extensions)
+        validate_provenance(provenance, mode, extensions, require_clean_revision)
         report["provenance"] = provenance
         if not licenses:
             raise ValueError("at least one required license artifact must be specified")
@@ -86,11 +92,14 @@ def main():
     parser.add_argument("--license", type=Path, action="append", default=[])
     parser.add_argument("--data", type=Path, action="append", default=[])
     parser.add_argument("--runtime-manifest", type=Path, action="append", default=[])
+    parser.add_argument("--require-clean-revision", action="store_true",
+                        help="fail when an external extension reports no source revision or uncommitted changes")
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     if args.report.exists():
         parser.error("report already exists; retain earlier attempts and use a new path")
-    report = audit(args.binary, args.mode, args.extension, args.license, args.data, args.runtime_manifest)
+    report = audit(args.binary, args.mode, args.extension, args.license, args.data, args.runtime_manifest,
+                   args.require_clean_revision)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     if report["status"] != "PASS":

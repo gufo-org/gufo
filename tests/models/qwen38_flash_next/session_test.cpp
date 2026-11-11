@@ -2065,6 +2065,27 @@ void CheckLogprobs(const std::shared_ptr<qfn::Model>& model) {
   }
 }
 
+// Sessions allocate full-context K/V when they are created and the pool admits
+// them through per_request_state_bytes. Prompts write those committed rows, so
+// charging prompt length again refuses cached follow-ups under low host
+// headroom without any new allocation (#1157).
+void CheckPreallocatedStateClaim(const std::shared_ptr<qfn::Model>& model) {
+  gufo::ext::TextSpeculativeConfig speculative;
+  speculative.backend = gufo::ext::TextSpeculativeBackend::kMtp;
+  for (const bool mtp : {false, true}) {
+    const auto runner =
+        mtp ? qfn::CreateQwenFlashNextTextRunner(model, 6145, speculative)
+            : qfn::CreateQwenFlashNextTextRunner(model, 6145);
+    const auto claim = runner->ResourceClaim();
+    Require(claim.per_request_state_bytes.value_or(0) > 0,
+            "Flash-Next claims its full-context session state");
+    Require(!claim.prompt_state_bytes_per_token &&
+                !claim.prompt_admission_budget_bytes &&
+                !claim.prompt_admission_available_bytes,
+            "Flash-Next leaves preallocated prompt state unclaimed");
+  }
+}
+
 int main(int argc, char** argv) {
   const bool logprobs_only =
       argc == 6 && std::string_view(argv[5]) == "--logprobs-only";
@@ -2114,6 +2135,7 @@ int main(int argc, char** argv) {
          .decode_concurrency = 8},
         &error);
     Require(model != nullptr, error);
+    CheckPreallocatedStateClaim(model);
     if (logprobs_only) {
       CheckLogprobs(model);
       CheckServingEos(model);

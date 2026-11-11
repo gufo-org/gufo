@@ -774,23 +774,6 @@ public:
           *memory, *capacity,
           usage.request_state_bytes + usage.temporary_scratch_bytes, 0);
     }
-    // Charge the prompt's deterministic KV footprint at admission. This is
-    // conservative: session allocation may already back some or all rows.
-    const auto& config = model_->GetConfig();
-    const std::size_t kv_element_bytes = execution_policy_.UsesFp16AttentionKv()
-                                             ? sizeof(std::uint16_t)
-                                             : sizeof(float);
-    auto prompt_bytes_per_token =
-        std::size_t{config.FullAttentionLayerCount()} *
-        config.num_key_value_heads * config.head_dim * 2 * kv_element_bytes;
-    if (dflash_model_ != nullptr) {
-      const auto& draft_config = dflash_model_->GetConfig();
-      const std::size_t draft_kv_width =
-          std::size_t{draft_config.num_key_value_heads} * draft_config.head_dim;
-      prompt_bytes_per_token +=
-          2 * std::size_t{dflash_model_->GetDFlashConfig().num_layers} *
-          draft_kv_width * sizeof(float);
-    }
     return {
         .resident_weights_bytes = resident_weights,
         .state_capacity_bytes = capacity,
@@ -799,9 +782,6 @@ public:
         .retained_snapshot_capacity_bytes = snapshot_capacity,
         .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,
-        .prompt_state_bytes_per_token = prompt_bytes_per_token,
-        .prompt_admission_budget_bytes = HostSnapshotCeilingBytes(),
-        .prompt_admission_available_bytes = HostSnapshotCeilingBytes,
     };
   }
 

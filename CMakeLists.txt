@@ -301,6 +301,7 @@ add_library(gufo_core STATIC
   src/core/json_constraint.cpp
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
+  src/core/lora/adapter.cpp
   src/core/sampling.cpp
   src/core/sampling_logit_row.cpp
   src/core/hip/hipblaslt_plan_database.cpp
@@ -695,6 +696,11 @@ function(gufo_qwen_image_21_register_tests)
   target_link_libraries(qwen_image_21_test PRIVATE gufo_qwen_image_21 gufo_test_support)
   add_test(NAME qwen_image_21_test COMMAND qwen_image_21_test)
   set_tests_properties(qwen_image_21_test PROPERTIES LABELS "cpu;models;qwen-image")
+  add_executable(qwen_image_21_lora_test
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/lora_test.cpp)
+  target_link_libraries(qwen_image_21_lora_test PRIVATE gufo_qwen_image_21)
+  add_test(NAME qwen_image_21_lora_test COMMAND qwen_image_21_lora_test)
+  set_tests_properties(qwen_image_21_lora_test PROPERTIES LABELS "cpu;models;qwen-image")
   if(ENGINE_ENABLE_HIP AND TARGET gufo_qwen_image_21_hip)
     add_executable(qwen_image_21_weight_upload_test
       ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/weights_test.cpp)
@@ -706,13 +712,18 @@ function(gufo_qwen_image_21_register_tests)
       LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
     add_executable(qwen_image_21_kernel_test
       ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/kernel_test.hip)
-    target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip
+      hip::host roc::hipblas)
     add_test(NAME qwen_image_21_kernel_test COMMAND qwen_image_21_kernel_test)
     set_tests_properties(qwen_image_21_kernel_test PROPERTIES
       LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
     add_executable(qwen_image_21_probe
       ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/probe.cpp)
     target_link_libraries(qwen_image_21_probe PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    add_executable(qwen_image_21_lora_dump
+      ${PROJECT_SOURCE_DIR}/tools/models/qwen_image_21/lora_dump.cpp)
+    target_link_libraries(qwen_image_21_lora_dump PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip
+      hip::host roc::hipblas OpenSSL::Crypto)
   endif()
 endfunction()
 
@@ -886,6 +897,14 @@ endfunction()
   add_test(NAME websocket_frame_test COMMAND websocket_frame_test)
   set_tests_properties(websocket_frame_test PROPERTIES
     LABELS "cpu;server;correctness")
+
+  add_executable(http_request_test
+    tests/cli/http_request_test.cpp
+    tests/cli/http_request_reference.cpp)
+  target_link_libraries(http_request_test PRIVATE gufo_core)
+  add_test(NAME http_request_test COMMAND http_request_test)
+  set_tests_properties(http_request_test PROPERTIES
+    LABELS "cpu;server;http;correctness")
 
   # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
   if (NOT WIN32)
@@ -1101,6 +1120,13 @@ endfunction()
       COMMAND text_cli_dispatch_test ${command})
     set_tests_properties(text_cli_dispatch_${command} PROPERTIES LABELS "cpu;cli;extensions")
   endforeach()
+
+  add_executable(extension_diagnostics_test
+    tests/cli/extension_diagnostics_test.cpp
+    src/cli/extension_diagnostics.cpp)
+  target_link_libraries(extension_diagnostics_test PRIVATE gufo_ext_runtime)
+  add_test(NAME extension_diagnostics_test COMMAND extension_diagnostics_test)
+  set_tests_properties(extension_diagnostics_test PROPERTIES LABELS "cpu;cli;extensions")
 
   # H3 host contracts share an object with generation. In HIP builds that
   # object references the backend implementations, so tests need both tiers.

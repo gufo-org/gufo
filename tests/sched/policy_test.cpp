@@ -11,7 +11,9 @@ using namespace gufo::sched;
 
 namespace {
 
-const Policy kIncremental({.incremental_prefill = true});
+// An unsplit profile one unit wide, like a runner whose pass is short.
+constexpr TextSchedulingProfile kUnit{.pass_tokens = kPrefillUnitTokens};
+const Policy kIncremental({.profile = kUnit, .incremental_prefill = true});
 
 template<class Exception, class F>
 bool Throws(F&& function) {
@@ -34,8 +36,9 @@ DecodeWork Decode(const Work& work) {
 }
 
 void Preconditions() {
-  assert(Throws<std::invalid_argument>(
-      [] { Policy({.decode_active_tokens = 0}); }));
+  assert(Throws<std::invalid_argument>([] {
+    Policy({.profile = kUnit, .incremental_prefill = true, .unit_tokens = 0});
+  }));
   assert(Throws<std::invalid_argument>([] { (void)kIncremental.Next({}); }));
 }
 
@@ -116,20 +119,25 @@ void FirstBatchAssembles() {
 }
 
 void WholePromptRunners() {
-  // A runner that cannot resume a prompt mid-way always gets all of it.
-  const Policy whole({.decode_active_tokens = 64});
+  // A runner that cannot resume a prompt mid-way always gets all of it, in
+  // one unsplit pass, whatever its profile.
+  const Policy whole({.profile = TextSchedulingProfile{.pass_tokens = 4096,
+                                                       .max_layer_groups = 8},
+                      .unit_tokens = 64});
   const std::vector<PrefillingRequest> prefilling{{.remaining_tokens = 9000},
                                                   {.remaining_tokens = 1}};
   const std::vector<DecodingRequest> decoding{{.started = true}};
-  assert(!Prefill(whole.Next({.prefilling = prefilling, .decoding = decoding}))
-              .max_tokens);
+  const auto beside =
+      Prefill(whole.Next({.prefilling = prefilling, .decoding = decoding}));
+  assert(beside.beside_decoders && !beside.max_tokens &&
+         beside.layer_groups == 1);
   const auto work = Prefill(whole.Next({.prefilling = prefilling}));
   assert(work.peer_waiting && !work.max_tokens);
 }
 
-void CustomBudget() {
+void CustomUnit() {
   const Policy policy(
-      {.decode_active_tokens = 2048, .incremental_prefill = true});
+      {.profile = kUnit, .incremental_prefill = true, .unit_tokens = 2048});
   const std::vector<PrefillingRequest> prefilling{{.remaining_tokens = 9000},
                                                   {.remaining_tokens = 2048}};
   assert(Prefill(policy.Next({.prefilling = prefilling})).max_tokens == 2048u);
@@ -150,10 +158,10 @@ void PrefillRateTracksRecentWork() {
 
 void ProfiledPassesSplitByLayers() {
   const Policy policy(
-      {.incremental_prefill = true,
-       .profile = TextSchedulingProfile{.pass_tokens = 4096,
+      {.profile = TextSchedulingProfile{.pass_tokens = 4096,
                                         .max_layer_groups = 8,
-                                        .max_yield_decode_width = 2}});
+                                        .max_yield_decode_width = 2},
+       .incremental_prefill = true});
   const std::vector<PrefillingRequest> prefilling{{.remaining_tokens = 9000}};
   const std::vector<DecodingRequest> decoding{{.started = true}};
   const WorkQueues queues{.prefilling = prefilling, .decoding = decoding};
@@ -178,12 +186,12 @@ void ProfiledPassesSplitByLayers() {
 
   // A shorter remainder is a shorter pass, with fewer groups: 1,000 tokens
   // at 2.1 s per 4,096 take about 513 ms, three groups of 250 ms, but get
-  // no more than legacy 512-token chunks would: two.
+  // no more than one per 512-token unit: two.
   const std::vector<PrefillingRequest> tail{{.remaining_tokens = 1000}};
   const WorkQueues tail_queues{.prefilling = tail, .decoding = decoding};
   work = Prefill(policy.Next(tail_queues, rate));
   assert(work.max_tokens == 4096u && work.layer_groups == 2);
-  // 1,600 tokens take about 820 ms: four groups, the legacy chunk count.
+  // 1,600 tokens take about 820 ms: four groups, the unit count.
   const std::vector<PrefillingRequest> mid{{.remaining_tokens = 1600}};
   assert(Prefill(policy.Next({.prefilling = mid, .decoding = decoding}, rate))
              .layer_groups == 4);
@@ -192,16 +200,16 @@ void ProfiledPassesSplitByLayers() {
   assert(Prefill(policy.Next({.prefilling = continuation, .decoding = decoding},
                              rate))
              .layer_groups == 1);
-  // Up to the legacy 512-token budget, even a slow pass runs unsplit, as it
-  // would without a profile: 512 tokens at 2 ms each would be five groups.
+  // Up to one 512-token unit, even a slow pass runs unsplit: 512 tokens at
+  // 2 ms each would be five groups.
   PrefillRate slow;
   slow.Observe(4096, 8192);
   const std::vector<PrefillingRequest> budget{{.remaining_tokens = 512}};
   assert(
       Prefill(policy.Next({.prefilling = budget, .decoding = decoding}, slow))
           .layer_groups == 1);
-  // Past it, a slow pass gets at most one group per legacy chunk: 513 tokens
-  // take about 1 s, four target waits, but two chunks.
+  // Past it, a slow pass gets at most one group per unit: 513 tokens take
+  // about 1 s, four target waits, but two units.
   const std::vector<PrefillingRequest> past_budget{{.remaining_tokens = 513}};
   assert(Prefill(policy.Next({.prefilling = past_budget, .decoding = decoding},
                              slow))
@@ -215,7 +223,8 @@ void ProfiledPassesSplitByLayers() {
       Prefill(policy.Next({.prefilling = continuation, .decoding = decoding}))
           .layer_groups == 1);
 
-  // Alone, or beside a waiting short peer, the profile does not apply.
+  // Alone, or beside a waiting short peer, the profile does not apply: a
+  // short peer bounds the long prompt to one unit.
   work = Prefill(policy.Next({.prefilling = prefilling}, fast));
   assert(!work.max_tokens && work.layer_groups == 1);
   const std::vector<PrefillingRequest> short_peer{{.remaining_tokens = 9000},
@@ -225,9 +234,9 @@ void ProfiledPassesSplitByLayers() {
 }
 
 void OnePassPeersGoFirst() {
-  const Policy policy({.incremental_prefill = true,
-                       .profile = TextSchedulingProfile{
-                           .pass_tokens = 4096, .max_layer_groups = 8}});
+  const Policy policy({.profile = TextSchedulingProfile{.pass_tokens = 4096,
+                                                        .max_layer_groups = 8},
+                       .incremental_prefill = true});
   const std::vector<DecodingRequest> decoding{{.started = true}};
   PrefillRate rate;
   rate.Observe(4096, 2100);
@@ -251,32 +260,34 @@ void OnePassPeersGoFirst() {
   assert(
       Prefill(policy.Next({.prefilling = longer, .decoding = decoding}, rate))
           .request == 0);
-  // Without decoders, or without a profile, the front runs.
+  // Without decoders, or when no peer fits one pass, the front runs.
   assert(Prefill(policy.Next({.prefilling = burst}, rate)).request == 0);
-  const Policy unprofiled({.incremental_prefill = true});
-  assert(Prefill(unprofiled.Next({.prefilling = burst, .decoding = decoding}))
+  assert(Prefill(kIncremental.Next({.prefilling = burst, .decoding = decoding}))
              .request == 0);
 }
 
 void RoundsBetweenGroups() {
-  const Policy unprofiled({.incremental_prefill = true});
   const Policy batched(
-      {.incremental_prefill = true,
-       .profile = TextSchedulingProfile{.pass_tokens = 4096,
+      {.profile = TextSchedulingProfile{.pass_tokens = 4096,
                                         .max_layer_groups = 4,
-                                        .max_yield_decode_width = 2}});
+                                        .max_yield_decode_width = 2},
+       .incremental_prefill = true});
   assert(!batched.BetweenGroups({}));
   const std::vector<DecodingRequest> three(3);
   const auto round = batched.BetweenGroups(three);
   assert(round && round->candidates == 2 && !round->due_only);
-  assert(unprofiled.BetweenGroups(three)->candidates == 1);
+  assert(kIncremental.BetweenGroups(three)->candidates == 1);
   const std::vector<DecodingRequest> one(1);
   assert(batched.BetweenGroups(one)->candidates == 1);
 }
 
 void InvalidProfiles() {
+  // Every runner declares a profile; the default one is empty.
+  assert(Throws<std::invalid_argument>(
+      [] { Policy({.incremental_prefill = true}); }));
   const TextSchedulingProfile valid{.pass_tokens = 4096, .max_layer_groups = 4};
-  assert(Throws<std::invalid_argument>([&] { Policy({.profile = valid}); }));
+  // One that cannot resume a prompt mid-way may declare any valid profile.
+  Policy({.profile = valid});
   auto zero_pass = valid;
   zero_pass.pass_tokens = 0;
   auto zero_groups = valid;
@@ -285,7 +296,7 @@ void InvalidProfiles() {
   zero_width.max_yield_decode_width = 0;
   for (const auto& profile : {zero_pass, zero_groups, zero_width})
     assert(Throws<std::invalid_argument>(
-        [&] { Policy({.incremental_prefill = true, .profile = profile}); }));
+        [&] { Policy({.profile = profile, .incremental_prefill = true}); }));
 }
 
 }  // namespace
@@ -298,7 +309,7 @@ int main() {
   DecodersWithoutPrefill();
   FirstBatchAssembles();
   WholePromptRunners();
-  CustomBudget();
+  CustomUnit();
   PrefillRateTracksRecentWork();
   ProfiledPassesSplitByLayers();
   OnePassPeersGoFirst();

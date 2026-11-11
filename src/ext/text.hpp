@@ -190,9 +190,9 @@ struct TextRunnerDescriptor {
   /// Core preset kept for existing extensions.
   sampling::TextModelPreset sampling_preset{
       sampling::TextModelPreset::kUnspecified};
-  /// Prompt scheduling beside other sessions' decoding. Empty keeps passes
-  /// bounded by the host's decode-active budget.
-  std::optional<TextSchedulingProfile> scheduling{};
+  /// Prompt scheduling beside other sessions' decoding. Required: the host
+  /// rejects a runner that leaves `pass_tokens` (or any field) zero.
+  TextSchedulingProfile scheduling{};
 };
 
 struct TextRunnerResourceClaim {
@@ -286,12 +286,13 @@ public:
   /// generation; runners without the feature ignore it.
   virtual void SetProjectionEnabled(bool /*enabled*/) {}
 
-  /// Set by the host for the next Prefill or PrefillThrough call only. A
-  /// runner whose descriptor has a scheduling profile splits each pass into
-  /// about `groups` layer groups of similar duration and calls YieldPrefill()
-  /// between them; it may add a boundary where the pass would otherwise
-  /// stall, such as a wait for input rows. Every layer keeps the arithmetic
-  /// of an unsplit pass. A runner may ignore it and run unsplit passes.
+  /// Set by the host for the next Prefill or PrefillThrough call only, with
+  /// `groups` up to the profile's `max_layer_groups`. The runner splits each
+  /// pass into about `groups` layer groups of similar duration and calls
+  /// YieldPrefill() between them; it may add a boundary where the pass would
+  /// otherwise stall, such as a wait for input rows. Every layer keeps the
+  /// arithmetic of an unsplit pass. A runner may ignore it and run unsplit
+  /// passes.
   /// While yielding, it must hold no lock or scratch its decode paths take.
   void SetPrefillYield(std::size_t groups, PrefillYield yield) {
     prefill_yield_groups_ = yield ? std::max<std::size_t>(groups, 1) : 1;

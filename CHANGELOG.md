@@ -4,6 +4,54 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/internal/releasing.md).
 
+## [0.34.0](https://github.com/gufo-org/gufo/compare/v0.33.0...v0.34.0) (2026-11-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **audio:** decode EmbeddingGemma 2 audio in Rust and drop libsndfile and soxr ([#1118](https://github.com/gufo-org/gufo/issues/1118))
+
+### Features
+
+* **cli:** deprecate --draft-tokens, --min-draft-tokens and --draft-policy ([#1124](https://github.com/gufo-org/gufo/issues/1124)) ([f4bc1ad](https://github.com/gufo-org/gufo/commit/f4bc1adbba91a09788d71523c3212b4fdcb01c16))
+* **extensions:** record the source revision of external extensions ([#1162](https://github.com/gufo-org/gufo/issues/1162)) ([5253acc](https://github.com/gufo-org/gufo/commit/5253acc43ddcd4c0bfe17843d6cb7841e7e10c6d))
+* **h3:** add FL2VA first- and last-frame keyframe conditioning ([#998](https://github.com/gufo-org/gufo/issues/998)) ([92b3f1b](https://github.com/gufo-org/gufo/commit/92b3f1b9ddbaf3f247f6ceb8711198073b64d244))
+
+
+### Bug Fixes
+
+* **cache:** remove disk-only metadata admission limits ([#934](https://github.com/gufo-org/gufo/issues/934)) ([12e8b99](https://github.com/gufo-org/gufo/commit/12e8b99f1e01f336a00b1aef5db55ba4a1da18de))
+* **cache:** size disk publication validation by the candidate, not the whole tier ([#1121](https://github.com/gufo-org/gufo/issues/1121)) ([b97f3b5](https://github.com/gufo-org/gufo/commit/b97f3b5cf5f507cbfa86a061b9dd380104e84547))
+* **ext:** install extension sources that contain file symlinks ([#1151](https://github.com/gufo-org/gufo/issues/1151)) ([7c9328d](https://github.com/gufo-org/gufo/commit/7c9328dca8aa283154bafd547abd5c4be787f54e))
+* **qwen38-flash-next:** recover stale MTP backoff after batch observations ([#912](https://github.com/gufo-org/gufo/issues/912)) ([49b5df1](https://github.com/gufo-org/gufo/commit/49b5df18923ad0445b9ff69b3cd9bda213715ff3))
+* **serve:** continue the live frontier after a re-tokenized answer ([#1154](https://github.com/gufo-org/gufo/issues/1154)) ([#1158](https://github.com/gufo-org/gufo/issues/1158)) ([850b527](https://github.com/gufo-org/gufo/commit/850b5271258f050847b928d68ab4bbb7c8d83c96))
+* **serve:** deprecate the unused shared-byte cache metric ([#1129](https://github.com/gufo-org/gufo/issues/1129)) ([b62b167](https://github.com/gufo-org/gufo/commit/b62b1674ca7f8134a5c1f6487d3dd7690565296c))
+* **serve:** do not charge prompt state for preallocated session runners ([#1164](https://github.com/gufo-org/gufo/issues/1164)) ([be3a81a](https://github.com/gufo-org/gufo/commit/be3a81af6283b28641652d231c0e551db8343a97))
+* **serve:** refuse prompts that exceed the host prompt-state budget ([#1083](https://github.com/gufo-org/gufo/issues/1083)) ([017e924](https://github.com/gufo-org/gufo/commit/017e92490899d4b5b28ded6eaeb2a25f4f597fee))
+* **serve:** return tool-call numbers as the model wrote them ([#1146](https://github.com/gufo-org/gufo/issues/1146)) ([4e95aec](https://github.com/gufo-org/gufo/commit/4e95aecbaec2c61bd2c06900d35c6a51ee4b9f24))
+* **tools:** cap JSON numbers at llama.cpp's 16 digits ([#1168](https://github.com/gufo-org/gufo/issues/1168)) ([5319381](https://github.com/gufo-org/gufo/commit/53193819c5fa7e8d01771a3a9e65e0a5f2520a4f))
+* **tools:** match llama.cpp nested object defaults ([#1128](https://github.com/gufo-org/gufo/issues/1128)) ([bd6b0fd](https://github.com/gufo-org/gufo/commit/bd6b0fdd083568d5eb485a2f3ba37a118a0a15c4))
+
+
+### Performance
+
+* **core:** reduce CPU overhead in sampling and n-gram lookups ([#1127](https://github.com/gufo-org/gufo/issues/1127)) ([ca6955c](https://github.com/gufo-org/gufo/commit/ca6955c4c87bd7b2fe67ad3d878424812c0ef807))
+* **qwen38:** reuse Q8 activations from batched HC mixing ([#958](https://github.com/gufo-org/gufo/issues/958)) ([5f12c75](https://github.com/gufo-org/gufo/commit/5f12c75390437253366229bfe269a3999b366d0b))
+* **qwen:** fuse the batched target FFN HC pair ([#969](https://github.com/gufo-org/gufo/issues/969)) ([f01a457](https://github.com/gufo-org/gufo/commit/f01a457022a3abd180f5eb1bc4315f918b1bdc24))
+* **qwen:** Windows table for the Qwen3.8-27B verification GEMM shapes ([#1122](https://github.com/gufo-org/gufo/issues/1122)) ([b1899cf](https://github.com/gufo-org/gufo/commit/b1899cfac066358fcbce2e09030ebd7bc6e9a96d))
+
+
+### Documentation
+
+* log the first HRX runtime experiments ([#1145](https://github.com/gufo-org/gufo/issues/1145)) ([2e8098f](https://github.com/gufo-org/gufo/commit/2e8098f0d65049e6b0f9a7255241bf363f9b266b))
+* **qwen27b:** pin the Unsloth Dynamic 3.1 Q4_K_XL revision ([#1167](https://github.com/gufo-org/gufo/issues/1167)) ([dbfe834](https://github.com/gufo-org/gufo/commit/dbfe834daf92ddf002c9a6872f63bc8a371dce03))
+
+
+### Code Refactoring
+
+* **audio:** decode EmbeddingGemma 2 audio in Rust and drop libsndfile and soxr ([#1118](https://github.com/gufo-org/gufo/issues/1118)) ([77b6ccf](https://github.com/gufo-org/gufo/commit/77b6ccf6ebf9a5841b44bc4ba1ee914906a85e9d))
+* **serve:** parse WebSocket frames and base64 in Rust ([#1149](https://github.com/gufo-org/gufo/issues/1149)) ([b50ef15](https://github.com/gufo-org/gufo/commit/b50ef15966d5ac73fbe63914f583daf80da73f09))
+
 ## [0.33.0](https://github.com/gufo-org/gufo/compare/v0.32.0...v0.33.0) (2026-11-09)
 
 

@@ -12,22 +12,25 @@
 
 namespace gufo::sched {
 
-/// Prompt tokens one prefill work unit may consume while other sessions
-/// decode, for runners that have no scheduling profile.
-inline constexpr std::size_t kDefaultDecodeActivePrefillTokens = 512;
+/// The policy's prompt granularity. A prompt within it runs unsplit beside
+/// decoders, a layered pass gets at most one group per unit of its tokens
+/// (arXiv 2510.08055, section 4.4), and a long prompt alone stops after each
+/// unit while a short peer or a capture waits.
+inline constexpr std::size_t kPrefillUnitTokens = 512;
 
 /// Longest a decoder should wait for one layer group of a prompt pass. The
 /// group count follows from the measured pass time, up to the profile's
-/// maximum and one group per decode-active budget of the pass's tokens.
+/// maximum and one group per unit of the pass's tokens.
 inline constexpr std::chrono::milliseconds kTargetDecoderWait{250};
 
 struct PolicyOptions {
-  std::size_t decode_active_tokens{kDefaultDecodeActivePrefillTokens};
-  /// The runner can stop a prompt between passes and resume it.
+  /// The runner's profile; every field must be at least one.
+  TextSchedulingProfile profile{};
+  /// The runner can stop a prompt between passes and resume it. Without it,
+  /// every prompt runs whole, in one unsplit pass.
   bool incremental_prefill{false};
-  /// Requires incremental prefill. Empty keeps decode-active passes bounded
-  /// by `decode_active_tokens`.
-  std::optional<TextSchedulingProfile> profile{};
+  /// Tests shrink it to keep prompts small.
+  std::size_t unit_tokens{kPrefillUnitTokens};
 };
 
 struct PrefillingRequest {
@@ -86,7 +89,8 @@ using Work = std::variant<PrefillWork, DecodeWork>;
 /// scheduler owns the queues and executes each decision.
 class Policy {
 public:
-  explicit Policy(PolicyOptions options = {});
+  /// Throws std::invalid_argument for an incomplete profile.
+  explicit Policy(PolicyOptions options);
 
   [[nodiscard]] const PolicyOptions& options() const noexcept {
     return options_;
@@ -108,7 +112,7 @@ private:
   [[nodiscard]] std::size_t LayerGroups(const PrefillRate& rate,
                                         std::size_t remaining_tokens) const;
   [[nodiscard]] bool Short(const PrefillingRequest& request) const noexcept {
-    return request.remaining_tokens <= options_.decode_active_tokens;
+    return request.remaining_tokens <= options_.unit_tokens;
   }
 
   PolicyOptions options_;

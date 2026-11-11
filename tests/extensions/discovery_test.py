@@ -382,6 +382,91 @@ void external_model_register(gufo::ext::Registry&) {}
         report = self.run_fixture()
         self.assertIn("external_model", [e["name"] for e in report["builtExtensions"]])
 
+    def external(self, name):
+        directory = Path(self.temporary.name) / name
+        (directory / "src").mkdir(parents=True)
+        manifest = {
+            "schema": 1, "name": name, "version": "1.0.0", "api_version": ">= 0.3.0",
+            "entry": f"{name}_register", "registration_target": f"gufo_{name}",
+            "depends": [], "platforms": ["linux", "windows"], "options": [],
+            "providers": [{"id": f"{name}-provider", "capability": "embeddings",
+                           "keys": [f"safetensors:{name}"], "model_ids": [f"{name}-model"],
+                           "target": f"gufo_{name}", "entry": f"{name}_provider_register"}],
+            "targets": {f"gufo_{name}": {"requires": []}},
+        }
+        (directory / "extension.json").write_text(json.dumps(manifest))
+        (directory / "src/external.cpp").write_text(f"""#include "gufo/ext/registry.hpp"
+void {name}_provider_register(gufo::ext::Registry&) {{}}
+void {name}_register(gufo::ext::Registry&) {{}}
+""")
+        (directory / "extension.cmake").write_text(
+            f"gufo_extension_target(NAME gufo_{name} SOURCES src/external.cpp LINK_LIBRARIES gufo_ext_runtime)\n")
+        return directory
+
+    def git(self, directory, *arguments):
+        return subprocess.check_output(
+            ["git", "-C", str(directory), "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+             "-c", "commit.gpgsign=false", *arguments], text=True, env=self.env).strip()
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    def test_external_extension_git_revision(self):
+        tracked = self.external("tracked_ext")
+        self.git(tracked, "init", "--quiet")
+        self.git(tracked, "add", ".")
+        self.git(tracked, "commit", "--quiet", "-m", "first")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={tracked.as_posix()}")
+
+        def built():
+            return {e["name"]: e for e in self.run_fixture()["builtExtensions"]}
+        report = built()
+        self.assertEqual(report["tracked_ext"]["revision"], self.git(tracked, "rev-parse", "HEAD"))
+        self.assertIs(report["tracked_ext"]["dirty"], False)
+        # In-tree extensions share the revision of the tree they live in.
+        self.assertNotIn("revision", report["alpha"])
+        self.assertNotIn("dirty", report["alpha"])
+        # A new commit reaches the next build without another cmake -S command.
+        (tracked / "src/external.cpp").write_text((tracked / "src/external.cpp").read_text() + "// second\n")
+        self.git(tracked, "commit", "--quiet", "-am", "second")
+        report = built()
+        self.assertEqual(report["tracked_ext"]["revision"], self.git(tracked, "rev-parse", "HEAD"))
+        self.assertIs(report["tracked_ext"]["dirty"], False)
+        # So does staging a change, and so does an untracked file once
+        # configure runs again.
+        (tracked / "src/external.cpp").write_text((tracked / "src/external.cpp").read_text() + "// third\n")
+        self.git(tracked, "add", "src/external.cpp")
+        report = built()
+        self.assertEqual(report["tracked_ext"]["revision"], self.git(tracked, "rev-parse", "HEAD"))
+        self.assertIs(report["tracked_ext"]["dirty"], True)
+        self.git(tracked, "commit", "--quiet", "-m", "third")
+        self.assertIs(built()["tracked_ext"]["dirty"], False)
+        (tracked / "untracked.txt").write_text("new")
+        self.configure()
+        self.assertIs(built()["tracked_ext"]["dirty"], True)
+
+    def test_external_extension_declared_revision(self):
+        # A directory without Git metadata, such as a Nix store path, reports
+        # the revision the build declares for it, or "unknown".
+        first = self.external("plain_ext")
+        second = self.external("other_ext")
+        directories = f"-DGUFO_EXTENSION_DIRS={first.as_posix()};{second.as_posix()}"
+        self.configure(directories)
+
+        def built():
+            return {e["name"]: e for e in self.run_fixture()["builtExtensions"]}
+        report = built()
+        self.assertEqual((report["plain_ext"]["revision"], report["plain_ext"]["dirty"]), ("unknown", False))
+        self.configure(directories, "-DGUFO_EXTENSION_DIR_REVISIONS=0123abc-dirty;sha256-AbC+/=")
+        report = built()
+        self.assertEqual((report["plain_ext"]["revision"], report["plain_ext"]["dirty"]), ("0123abc", True))
+        self.assertEqual((report["other_ext"]["revision"], report["other_ext"]["dirty"]), ("sha256-AbC+/=", False))
+        self.configure(directories, "-DGUFO_EXTENSION_DIR_REVISIONS=0123abc;unknown")
+        self.assertEqual(built()["other_ext"]["revision"], "unknown")
+        self.configure(directories, "-DGUFO_EXTENSION_DIR_REVISIONS=0123abc",
+                       error="needs one entry per GUFO_EXTENSION_DIRS entry (2), got 1")
+        # A declared revision is free text, such as a tag name.
+        self.configure(directories, '-DGUFO_EXTENSION_DIR_REVISIONS=v1.0@a"b\\c;unknown')
+        self.assertEqual(built()["plain_ext"]["revision"], 'v1.0@a"b\\c')
+
     def test_external_extension_allowlist_violation(self):
         external_dir = Path(self.temporary.name) / "bad_ext"
         external_dir.mkdir(parents=True, exist_ok=True)
