@@ -1,0 +1,129 @@
+{
+  "schema": "gufo-hrx-runtime-comparison/1",
+  "date": "2026-11-11",
+  "gufo_revision": "9612db2e5",
+  "gufo_executable_sha256": "5be51583d589d1df3a007898b22b12edac323659888f8e16706287b4364c5ca1",
+  "baseline_hrx": "d8345774e34e0b0824f11661d331a323e8771dd9",
+  "candidate_hrx": "8ebcdb6b70c3301185d9a648c5b226180323e3e2",
+  "libamdhip64_sha256_both": "a51b02a3074840c1aca88d08394e1ae231d8f8e1f936ca7c57979fea9c8c3838",
+  "model": "Qwen3.8-Flash-Next-UD-Q4_K_XL",
+  "scope": "native gufo bench; pp512,pp2048,tg128; d0; AR; seed 1; 3 repetitions per process; prefill validation 512; loading excluded",
+  "statistics": "Native CLI emits means and standard deviations, not individual repetition timings. Every emitted result is retained.",
+  "order": [
+    "baseline-a",
+    "candidate-a",
+    "baseline-b",
+    "candidate-b"
+  ],
+  "runs": {
+    "baseline-a": {
+      "start_utc": "2026-11-11T15:57:18.264585+00:00",
+      "start_temperature_millic": 32000,
+      "end_temperature_millic": 49000,
+      "power_profile": "performance",
+      "exit_code": 0,
+      "validation": "tokens=512 finite=1 scalar_winner_rank=1 rmse=0.520053 cosine=0.991351 max_error=3.81343",
+      "throughput": {
+        "pp512": {
+          "mean_tok_s": 1255.71,
+          "stddev_tok_s": 8.76
+        },
+        "pp2048": {
+          "mean_tok_s": 1824.78,
+          "stddev_tok_s": 1.59
+        },
+        "tg128": {
+          "mean_tok_s": 30.09,
+          "stddev_tok_s": 0.16
+        }
+      }
+    },
+    "candidate-a": {
+      "start_utc": "2026-11-11T15:59:43.043126+00:00",
+      "start_temperature_millic": 35000,
+      "end_temperature_millic": 53000,
+      "power_profile": "performance",
+      "exit_code": 0,
+      "validation": "tokens=512 finite=1 scalar_winner_rank=1 rmse=0.520053 cosine=0.991351 max_error=3.81343",
+      "throughput": {
+        "pp512": {
+          "mean_tok_s": 1168.64,
+          "stddev_tok_s": 22.59
+        },
+        "pp2048": {
+          "mean_tok_s": 1821.75,
+          "stddev_tok_s": 10.7
+        },
+        "tg128": {
+          "mean_tok_s": 29.8,
+          "stddev_tok_s": 0.9
+        }
+      }
+    },
+    "baseline-b": {
+      "start_utc": "2026-11-11T16:02:34.872483+00:00",
+      "start_temperature_millic": 34000,
+      "end_temperature_millic": 52000,
+      "power_profile": "performance",
+      "exit_code": 0,
+      "validation": "tokens=512 finite=1 scalar_winner_rank=1 rmse=0.520053 cosine=0.991351 max_error=3.81343",
+      "throughput": {
+        "pp512": {
+          "mean_tok_s": 1272.4,
+          "stddev_tok_s": 0.74
+        },
+        "pp2048": {
+          "mean_tok_s": 1829.32,
+          "stddev_tok_s": 0.6
+        },
+        "tg128": {
+          "mean_tok_s": 30.34,
+          "stddev_tok_s": 0.17
+        }
+      }
+    },
+    "candidate-b": {
+      "start_utc": "2026-11-11T16:05:07.439418+00:00",
+      "start_temperature_millic": 35000,
+      "end_temperature_millic": 51000,
+      "power_profile": "performance",
+      "exit_code": 0,
+      "validation": "tokens=512 finite=1 scalar_winner_rank=1 rmse=0.520053 cosine=0.991351 max_error=3.81343",
+      "throughput": {
+        "pp512": {
+          "mean_tok_s": 1269.78,
+          "stddev_tok_s": 2.06
+        },
+        "pp2048": {
+          "mean_tok_s": 1832.49,
+          "stddev_tok_s": 3.62
+        },
+        "tg128": {
+          "mean_tok_s": 30.35,
+          "stddev_tok_s": 0.16
+        }
+      }
+    }
+  },
+  "pair_deltas_percent": {
+    "a": {
+      "pp512": -6.933925826823062,
+      "pp2048": -0.16604741393483335,
+      "tg128": -0.9637753406447347
+    },
+    "b": {
+      "pp512": -0.20591009116630588,
+      "pp2048": 0.17328843504691438,
+      "tg128": 0.03295978905735186
+    }
+  },
+  "greedy_output_check": {
+    "scope": "Separate correctness-only native run: pp1, tg128, r1, seed1, verbose, AR; its timings are excluded from the throughput comparison.",
+    "output_tokens": 128,
+    "baseline_sha256": "4f097b22bb50fbf9121ab9de8897f03e65fb693ce66ade838e1b52671ed21984",
+    "candidate_sha256": "4f097b22bb50fbf9121ab9de8897f03e65fb693ce66ade838e1b52671ed21984",
+    "both_exit_codes": 0,
+    "drafted": 0,
+    "accepted": 0
+  }
+}

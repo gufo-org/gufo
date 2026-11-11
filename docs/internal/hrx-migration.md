@@ -8,10 +8,15 @@ qualify the newer staging runtime.
 ## Current staging integration (November 11, 2026)
 
 The experimental packages pin `gufo-org/hrx-system`'s `gufo-staging` branch
-at `d8345774e34e0b0824f11661d331a323e8771dd9`, based on upstream
+at `8ebcdb6b70c3301185d9a648c5b226180323e3e2`, based on upstream
 `af0c940f77b37dcdfbb6371a0434c6c268edb108`. Each upstream candidate has an
 independent fix branch; staging collects them for Gufo. See the
 [branch and update workflow](../../.devops/nix/hrx/README.md).
+
+The added `fix/aie2p-narrow-sign` fixes NPU F32-to-F16/FP8 vector signs;
+the staging update also documents pre-encoded NPU matrix operands. Neither
+changes the GPU HIP library. Flash-Next validation and matched measurements
+are recorded in [the staging comparison](hrx-migration/flash-next-staging.md).
 
 The first candidate, `fix/cached-kernel-arguments`, proposed in
 [hrx-system#3035](https://github.com/ROCm/hrx-system/pull/3035), selects GPU-cached

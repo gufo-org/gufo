@@ -16,6 +16,7 @@ without adding unrelated changes.
 | --- | --- |
 | [`fix/cached-kernel-arguments`](https://github.com/gufo-org/hrx-system/tree/fix/cached-kernel-arguments) ([upstream PR #3035](https://github.com/ROCm/hrx-system/pull/3035)) | Give PM4 argument generations GPU-cached host-coherent backing independently of native queue control cells. |
 | [`fix/upload-cache-state`](https://github.com/gufo-org/hrx-system/tree/fix/upload-cache-state) ([upstream PR #3036](https://github.com/ROCm/hrx-system/pull/3036)) | Use native transfers for synchronous uploads into device allocations, preserving GPU read performance. Experimental; small-copy preparation can cost more. |
+| [`fix/aie2p-narrow-sign`](https://github.com/gufo-org/hrx-system/tree/fix/aie2p-narrow-sign) | Preserve signs in NPU F32-to-F16/FP8 vector conversions. This does not change the GPU HIP library. |
 
 The staging base includes upstream's loader search-path and queue-policy fixes,
 so Gufo no longer applies its corresponding patches. The two remaining local
