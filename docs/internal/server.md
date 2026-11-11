@@ -1466,11 +1466,12 @@ over sessions times context; retained cache entries are not counted.
 `gufo_prompt_state_budget_bytes` is the host RAM prompt state may claim before
 admission refuses, `gufo_prompt_state_reserved_bytes` the bytes charged to
 in-flight requests, and `gufo_prompt_state_available_bytes` the remainder.
-The charge covers the deterministic KV rows a prompt writes. Qwen and
-Flash-Next also sample host headroom at each submission, after the 4 GiB reserve
-and cgroup limits, and use the smaller of this sample and the startup budget.
-Outstanding requests are subtracted conservatively, even if their rows have
-already committed. This can refuse a prompt that would reuse existing pages.
+The charge covers the deterministic KV rows a prompt writes for runners that
+dynamically allocate prompt state. For runners whose sessions preallocate their
+full-context KV (such as Qwen and Flash-Next), session memory is admitted and
+committed up front through `per_request_state_bytes`, so they leave prompt state
+unclaimed. When claimed, outstanding requests are subtracted conservatively, even
+if their rows have already committed.
 The check does not reserve output-token growth, evict caches or recheck during
 generation; other allocations can still exhaust memory after admission.
 `Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`
