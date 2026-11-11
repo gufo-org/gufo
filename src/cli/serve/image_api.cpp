@@ -10,6 +10,7 @@
 #include <ctime>
 #include <map>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -494,23 +495,7 @@ ImageService::ImageService(std::shared_ptr<ext::ImageRunner> runner,
   if (!model_)
     throw std::invalid_argument("image service requires a runner");
   capabilities_ = model_->Capabilities();
-  for (const auto& [name, path] : loras_.files) {
-    (void)path;
-    if (name.empty() || name.size() > 64 ||
-        name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs"
-                               "tuvwxyz0123456789._-") != std::string::npos)
-      throw std::invalid_argument("LoRA name '" + name +
-                                  "' must be 1-64 of [A-Za-z0-9._-]");
-    if (!lora_info_.emplace(name, ext::ImageLoraInfo{}).second)
-      throw std::invalid_argument("duplicate --lora name '" + name + "'");
-  }
-  for (const auto& lora : loras_.defaults)
-    if (!HasLora(lora.name))
-      throw std::invalid_argument("--lora-default names unknown adapter '" +
-                                  lora.name + "'");
-  Request defaults;
-  defaults.loras = loras_.defaults;
-  ValidateRequest(defaults);
+  ValidateLoraOptions(loras_);
   for (const auto& [name, path] : loras_.files) {
     const auto& info = lora_info_[name] = model_->AddLora(name, path.string());
     Logger::Info("image", "event=lora_registered name=" + name +
@@ -523,6 +508,42 @@ ImageService::ImageService(std::shared_ptr<ext::ImageRunner> runner,
 }
 
 ImageService::~ImageService() = default;
+
+void ValidateLoraOptions(const ImageLoraOptions& loras) {
+  std::set<std::string_view> names;
+  for (const auto& [name, path] : loras.files) {
+    (void)path;
+    if (name.empty() || name.size() > 64 ||
+        name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs"
+                               "tuvwxyz0123456789._-") != std::string::npos)
+      throw std::invalid_argument("LoRA name '" + name +
+                                  "' must be 1-64 of [A-Za-z0-9._-]");
+    if (!names.insert(name).second)
+      throw std::invalid_argument("duplicate --lora name '" + name + "'");
+  }
+  for (const auto& lora : loras.defaults)
+    if (!names.contains(lora.name))
+      throw std::invalid_argument("--lora-default names unknown adapter '" +
+                                  lora.name + "'");
+  ext::ImageRequest defaults;
+  defaults.loras = loras.defaults;
+  ValidateRequest(defaults);
+}
+
+std::vector<ImageLoraListing> ImageService::LoraListings() const {
+  std::map<std::string, int> shared;
+  for (const auto& [name, path] : loras_.files)
+    ++shared[path.filename().string()];
+  std::vector<ImageLoraListing> listings;
+  for (const auto& [name, path] : loras_.files) {
+    const auto file = path.filename().string();
+    if (shared[file] == 1)
+      listings.push_back({file, file});
+    else
+      listings.push_back({name + '/' + file, path.generic_string()});
+  }
+  return listings;
+}
 
 void ImageService::Validate(const Request& request) const {
   if (!request.images.empty() && !capabilities().edits)
@@ -728,7 +749,9 @@ HttpResponse HandleImageLorasRequest(const HttpRequest& request,
     return nullptr;
   };
   auto body = json::Value::array();
-  for (const auto& [name, path] : service.loras().files) {
+  const auto listings = service.LoraListings();
+  for (std::size_t i = 0; i < listings.size(); ++i) {
+    const auto& name = service.loras().files[i].first;
     const auto& info = service.lora_info(name);
     auto metadata = json::Value::object();
     metadata["format"] = info.format;
@@ -738,7 +761,8 @@ HttpResponse HandleImageLorasRequest(const HttpRequest& request,
     auto item = json::Value::object();
     item["name"] = name;
     item["alias"] = name;
-    item["path"] = path.filename().string();
+    item["path"] = listings[i].path;
+    item["display_path"] = listings[i].display_path;
     item["metadata"] = std::move(metadata);
     item["default_scale"] = scale(service.loras().defaults, name);
     item["active_scale"] = scale(active, name);

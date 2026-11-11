@@ -67,11 +67,12 @@ def main():
     for spec in ("x", "x:", ":1", "x:1y"):
         check(["serve", "image", "--model", "x", "--lora-default", spec], 2,
               "--lora-default expects NAME:SCALE")
-    # Adapter names and defaults are checked before any file is opened.
-    check(["serve", "image", "--model", "/missing", "--lora", "a b=/x"], 1,
+    # Adapter names and defaults are usage errors, checked before any file
+    # is opened.
+    check(["serve", "image", "--model", "/missing", "--lora", "a b=/x"], 2,
           "must be 1-64 of [A-Za-z0-9._-]")
     check(["serve", "image", "--model", "/missing", "--lora", "a=/x",
-           "--lora-default", "b:1"], 1, "--lora-default names unknown adapter")
+           "--lora-default", "b:1"], 2, "--lora-default names unknown adapter")
     check(["serve", "tts", "--lora", "a=b"], 2, "Unknown option")
     text = check(["serve", "embedding", "--help"], 0, "--served-model-name")
     assert "--context" not in text and "--sessions" not in text

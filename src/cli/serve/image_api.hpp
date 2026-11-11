@@ -71,6 +71,19 @@ struct ImageLoraOptions {
   std::vector<ext::ImageLora> defaults;
 };
 
+/// Checks adapter names and defaults without opening any file; throws
+/// `std::invalid_argument`.
+void ValidateLoraOptions(const ImageLoraOptions& loras);
+
+/// How `GET /sdapi/v1/loras` lists a registered adapter, as in
+/// stable-diffusion.cpp: `path` is a unique selection ID (the file name,
+/// or `NAME/file name` when several adapters share it) and `display_path`
+/// the file name (the full path when shared).
+struct ImageLoraListing {
+  std::string path;
+  std::string display_path;
+};
+
 class ImageService {
 public:
   using Request = ext::ImageRequest;
@@ -98,6 +111,8 @@ public:
   /// Capability and provider validation; throws `std::invalid_argument`.
   void Validate(const Request& request) const;
   const ImageLoraOptions& loras() const { return loras_; }
+  /// Parallel to `loras().files`.
+  std::vector<ImageLoraListing> LoraListings() const;
   bool HasLora(std::string_view name) const;
   /// Empty for a CallbackImageRunner (no files are read).
   const ext::ImageLoraInfo& lora_info(std::string_view name) const;

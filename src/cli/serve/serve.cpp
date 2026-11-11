@@ -1206,13 +1206,20 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --model <DIR> is required for image server\n";
       return 2;
     }
+    // Adapter names and defaults are usage errors: report them before the
+    // runner loads any weights.
+    try {
+      server::ValidateLoraOptions(options.loras);
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
+    }
     // Selection reads only the probe's metadata, so option errors (another
     // provider's option, a missing sidecar path) stop before any weights load.
     const ext::ImageProvider* provider = nullptr;
     try {
-      provider =
-          &server::SelectImageProvider(registry, options.model,
-                                       provider_options);
+      provider = &server::SelectImageProvider(registry, options.model,
+                                              provider_options);
     } catch (const std::invalid_argument& error) {
       std::cerr << "Error: " << error.what() << '\n';
       return 2;
@@ -1225,8 +1232,7 @@ int RunServe(std::span<const char* const> args) {
     ModelLoadLog load_log(kind, options.model);
     try {
       images = std::make_shared<server::ImageService>(
-          server::CreateImageRunner(*provider, options.model,
-                                    provider_options),
+          server::CreateImageRunner(*provider, options.model, provider_options),
           options.names.empty() ? (provider->id == "qwen-image-21" ||
                                            provider->id == "qwen-image-2.1"
                                        ? "Qwen-Image-2.1"
@@ -1238,8 +1244,9 @@ int RunServe(std::span<const char* const> args) {
                 << error.what() << '\n';
       return 1;
     }
-    std::string loaded = "model=" + images->model_id() + " provider=" +
-                         provider->id + " weights=mapped upload=on_demand";
+    std::string loaded = "model=" + images->model_id() +
+                         " provider=" + provider->id +
+                         " weights=mapped upload=on_demand";
     if (!options.loras.files.empty())
       loaded += " loras=" + std::to_string(options.loras.files.size());
     load_log.Complete(loaded);

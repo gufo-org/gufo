@@ -429,7 +429,8 @@ int main(int argc, char** argv) {
   const auto& ink = list.items()[1];
   assert(style.member_str("name") == "style" &&
          style.member_str("alias") == "style" &&
-         style.member_str("path") == "style.safetensors");
+         style.member_str("path") == "style.safetensors" &&
+         style.member_str("display_path") == "style.safetensors");
   assert(ink.member_str("path") == "ink.safetensors");
   assert(style.find("metadata")->is_object());
   // Listed as the shortest float text; `active_scale` uses the same formatting.
@@ -440,6 +441,28 @@ int main(int argc, char** argv) {
          ink.find("active_scale")->is_null());
   http.method = "POST";
   assert(gufo::server::HandleImageLorasRequest(http, adapters).status == 400);
+  // Adapters sharing a file name keep unique selection paths, as in
+  // stable-diffusion.cpp, and show their full paths.
+  gufo::server::ImageService same_file(
+      qwen_runner(
+          [&](const Request&, const CancellationCheck&) { return Result{}; }),
+      "image-test", {},
+      {.files = {{"a", "/x/one/lora.safetensors"},
+                 {"b", "/x/two/lora.safetensors"},
+                 {"c", "/x/c.safetensors"}},
+       .defaults = {}});
+  http.method = "GET";
+  const auto shared = gufo::json::parse(
+      gufo::server::HandleImageLorasRequest(http, same_file).body);
+  assert(shared.size() == 3);
+  assert(shared.items()[0].member_str("path") == "a/lora.safetensors" &&
+         shared.items()[0].member_str("display_path") ==
+             "/x/one/lora.safetensors");
+  assert(shared.items()[1].member_str("path") == "b/lora.safetensors" &&
+         shared.items()[1].member_str("display_path") ==
+             "/x/two/lora.safetensors");
+  assert(shared.items()[2].member_str("path") == "c.safetensors" &&
+         shared.items()[2].member_str("display_path") == "c.safetensors");
   for (const auto& options : std::vector<gufo::server::ImageLoraOptions>{
            {.files = {{"a b", "/x"}}, .defaults = {}},
            {.files = {{"", "/x"}}, .defaults = {}},
