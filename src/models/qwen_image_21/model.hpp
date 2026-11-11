@@ -18,6 +18,8 @@ using Request = ext::ImageRequest;
 using Metrics = ext::ImageMetrics;
 using Result = ext::ImageResult;
 using CancellationCheck = ext::CancellationCheck;
+using Lora = ext::ImageLora;
+using LoraInfo = ext::ImageLoraInfo;
 
 Image DecodeImage(std::span<const std::uint8_t> bytes);
 std::vector<std::uint8_t> EncodePng(const Image& image);
@@ -70,6 +72,12 @@ public:
                   const Observer& observer = {});
   std::vector<std::uint32_t> Tokenize(std::string_view text) const;
   const SamplingConfig& sampling() const;
+  /// Validate and register an adapter before serving; requests select it by
+  /// name.
+  LoraInfo AddLora(const std::string& name, const std::filesystem::path& path);
+  /// Adapters merged into the transformer weights now (does not wait for
+  /// Generate); empty while a switch is in progress or after one failed.
+  std::vector<Lora> ActiveLoras() const;
 
 private:
   struct Impl;

@@ -85,6 +85,21 @@ models:
 For large uploads, raise `--max-request-bytes` and the proxy's body limit. See
 [llama-swap](../server.md#llama-swap) for the general setup.
 
+## LoRA adapters
+
+Register LoRA safetensors published for `Qwen/Qwen-Image-2.1` at startup and
+select them per request by name:
+
+```sh
+gufo serve image --model "$MODEL_DIR"   --lora voxel=/models/loras/Qwen-Image-2.1-Voxel-Style-3000.safetensors   --lora-default voxel:0.8
+```
+
+Generation JSON and edit forms accept `"loras": [{"name": "voxel", "scale":
+0.8}]`; omitting it applies the `--lora-default` set and `[]` applies none.
+`GET /sdapi/v1/loras` lists the registered adapters. Supported layouts,
+limits and the merge are described in
+[LoRA adapters](../internal/models/qwen-image-2.1/LORA.md).
+
 ## Performance
 
 As of November 1, 2026, on Strix Halo, one 1024 × 1024 image takes:

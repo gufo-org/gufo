@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,6 +38,10 @@ public:
   std::optional<ext::ImageCapabilities> Capabilities() const override {
     return capabilities_;
   }
+  /// Accepts every adapter without reading it.
+  ext::ImageLoraInfo AddLora(const std::string&, const std::string&) override {
+    return {};
+  }
 
 private:
   Callback callback_;
@@ -59,6 +64,26 @@ std::shared_ptr<ext::ImageRunner> CreateImageRunner(
     const ext::ImageProvider& provider, const std::filesystem::path& root,
     const ext::ParsedOptions& options);
 
+/// Adapters registered at startup and the set applied when a request omits
+/// `loras`.
+struct ImageLoraOptions {
+  std::vector<std::pair<std::string, std::filesystem::path>> files;
+  std::vector<ext::ImageLora> defaults;
+};
+
+/// Checks adapter names and defaults without opening any file; throws
+/// `std::invalid_argument`.
+void ValidateLoraOptions(const ImageLoraOptions& loras);
+
+/// How `GET /sdapi/v1/loras` lists a registered adapter, as in
+/// stable-diffusion.cpp: `path` is a unique selection ID (the file name,
+/// or `NAME/file name` when several adapters share it) and `display_path`
+/// the file name (the full path when shared).
+struct ImageLoraListing {
+  std::string path;
+  std::string display_path;
+};
+
 class ImageService {
 public:
   using Request = ext::ImageRequest;
@@ -67,7 +92,8 @@ public:
 
   explicit ImageService(std::shared_ptr<ext::ImageRunner> runner,
                         std::string model_id = "Qwen-Image-2.1",
-                        std::vector<std::string> model_aliases = {});
+                        std::vector<std::string> model_aliases = {},
+                        ImageLoraOptions loras = {});
   ~ImageService();
   const std::string& model_id() const { return model_id_; }
   /// True for the primary ID or a configured alias (#957).
@@ -84,11 +110,20 @@ public:
   }
   /// Capability and provider validation; throws `std::invalid_argument`.
   void Validate(const Request& request) const;
+  const ImageLoraOptions& loras() const { return loras_; }
+  /// Parallel to `loras().files`.
+  std::vector<ImageLoraListing> LoraListings() const;
+  bool HasLora(std::string_view name) const;
+  /// Empty for a CallbackImageRunner (no files are read).
+  const ext::ImageLoraInfo& lora_info(std::string_view name) const;
+  std::vector<ext::ImageLora> ActiveLoras() const;
   Result Generate(const Request& request, const CancellationCheck& cancelled);
 
 private:
   std::string model_id_;
   std::vector<std::string> model_aliases_;
+  ImageLoraOptions loras_;
+  std::map<std::string, ext::ImageLoraInfo, std::less<>> lora_info_;
   std::shared_ptr<ext::ImageRunner> model_;
   std::optional<ext::ImageCapabilities> capabilities_;
   std::timed_mutex gate_;
@@ -96,6 +131,9 @@ private:
 
 HttpResponse HandleImageApiRequest(const HttpRequest& request,
                                    ImageService& service);
+/// `GET /sdapi/v1/loras`: registered adapters in registration order.
+HttpResponse HandleImageLorasRequest(const HttpRequest& request,
+                                     const ImageService& service);
 
 }  // namespace gufo::server
 #endif

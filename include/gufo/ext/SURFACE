@@ -22,6 +22,7 @@ include/gufo/ext/experimental/hip_graph_decode_executor.hpp
 include/gufo/ext/experimental/hip_utils.hpp
 include/gufo/ext/experimental/hipblaslt_plan_database.hpp
 include/gufo/ext/experimental/host_allocations.hpp
+include/gufo/ext/experimental/lora_adapter.hpp
 include/gufo/ext/experimental/managed_alloc.hpp
 include/gufo/ext/experimental/snapshot_transfer.hpp
 include/gufo/ext/experimental/weight_upload.hpp
@@ -96,6 +97,7 @@ src/core/json.hpp
 src/core/json_constraint.hpp
 src/core/json_schema_lexeme.hpp
 src/core/logging/logging.hpp
+src/core/lora/adapter.hpp
 src/core/mapped_prefetch.hpp
 src/core/model_config.hpp
 src/core/platform/fs.hpp
