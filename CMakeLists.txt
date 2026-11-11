@@ -808,6 +808,8 @@ endfunction()
 
   add_executable(audio_decode_test tests/core/audio_decode_test.cpp)
   target_link_libraries(audio_decode_test PRIVATE gufo_core)
+  target_compile_definitions(audio_decode_test PRIVATE
+    GUFO_AUDIO_DECODE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/audio")
   add_test(NAME audio_decode_test COMMAND audio_decode_test)
   set_tests_properties(audio_decode_test PROPERTIES LABELS "cpu;audio;correctness")
 

@@ -10,8 +10,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -522,6 +524,40 @@ void TestOpus() {
       [] { (void)Decode(kOpus, core::AudioLimits{}); }, Status::kUnrecognized);
 }
 
+// libsndfile returns only the first physical stream of a chained Ogg file.
+// Symphonia signals the next stream with ResetRequired, rather than EOF.
+void TestChainedVorbis() {
+  const auto fixture = [](const char* name) {
+    std::ifstream input(std::string(GUFO_AUDIO_DECODE_FIXTURES) + "/" + name,
+                        std::ios::binary);
+    Check(input.good(), std::string("missing audio fixture: ") + name);
+    return Bytes(std::istreambuf_iterator<char>(input), {});
+  };
+  const Bytes first = fixture("vorbis-first.ogg");
+  const Bytes second = fixture("vorbis-second.ogg");
+  const auto expected = Decode(first);
+  Check(expected.sample_rate == 48000 && expected.channels == 1 &&
+            expected.samples.size() == 105600,
+        "first Vorbis stream: 2.2 seconds at 48 kHz");
+  Check(Decode(second).samples.size() == 9600,
+        "second Vorbis stream: 0.2 seconds at 48 kHz");
+  Bytes chained = first;
+  chained.insert(chained.end(), second.begin(), second.end());
+  const auto actual = Decode(chained);
+  Check(actual.sample_rate == expected.sample_rate &&
+            actual.channels == expected.channels,
+        "chained Vorbis: first stream info");
+  ExpectEqual("chained Vorbis: first stream samples", actual.samples,
+              expected.samples);
+
+  // Damage the middle audio page while retaining its final EOS page and
+  // declared frame count. A subsequent valid stream must not hide the loss.
+  chained[first.size() * 3 / 4] ^= 1;
+  ExpectStatus(
+      "damaged first Vorbis stream", [&] { (void)Decode(chained); },
+      Status::kTruncated);
+}
+
 void TestRejections() {
   const Bytes pcm16(320, 0);
   ExpectStatus("empty", [] { (void)Decode({}); }, Status::kUnrecognized);
@@ -655,6 +691,7 @@ int main() {
     TestResampler();
     TestMp3();
     TestOpus();
+    TestChainedVorbis();
     TestRejections();
     TestPcmWavRejections();
     std::cout << "audio decoding passes\n";

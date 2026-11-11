@@ -284,12 +284,16 @@ fn decode_all(
 
 /// The next packet of track `id`, or `None` at the end. A WAV, FLAC or Ogg
 /// stream that ends early ends in an IO error; the frame count reports it.
+/// Like libsndfile, stop at the first physical stream of a chained Ogg file.
 fn next_packet(format: &mut dyn FormatReader, id: u32) -> Result<Option<Packet>, Error> {
     loop {
         match format.next_packet() {
             Ok(Some(packet)) if packet.track_id == id => return Ok(Some(packet)),
             Ok(Some(_)) => {}
             Ok(None) | Err(SymphoniaError::IoError(_)) => return Ok(None),
+            // Ogg's demuxer signals the next physical stream with a reset.
+            // The caller still checks the first stream's declared length.
+            Err(SymphoniaError::ResetRequired) => return Ok(None),
             Err(_) => return Err(Error::Truncated),
         }
     }
