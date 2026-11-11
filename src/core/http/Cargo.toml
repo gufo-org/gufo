@@ -1,0 +1,11 @@
+[package]
+name = "gufo-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+# Request lines and header fields as RFC 9112 defines them.
+httparse = "=1.10.1"

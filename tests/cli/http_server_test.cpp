@@ -339,6 +339,31 @@ void TestFramingAndMetrics() {
   }
   ExpectStatus(server.Send("POST /echo\r\n\r\n"), 400);
   ExpectStatus(server.Send("POST /echo HTTP/1.1 extra\r\n\r\n"), 400);
+  // RFC 9112 2.2: a bare LF ends a line and one empty line before the request
+  // line is ignored; the request line needs single spaces and a token
+  // method, and field values no control bytes.
+  ExpectStatus(server.Send("GET /health HTTP/1.1\nHost: a\n\n"), 200);
+  ExpectStatus(server.Send("\r\nGET /health HTTP/1.1\r\n\r\n"), 200);
+  using std::string_view_literals::operator""sv;
+  for (const std::string_view request :
+       {"GET  /health HTTP/1.1\r\n\r\n"sv, "GET\t/health HTTP/1.1\r\n\r\n"sv,
+        "G@T /health HTTP/1.1\r\n\r\n"sv,
+        "GET /health HTTP/1.1\r\nX: a\x01"
+        "b\r\n\r\n"sv,
+        "GET /health HTTP/1.1\r\nX: a\0b\r\n\r\n"sv,
+        "\r\n\r\nGET /health HTTP/1.1\r\n\r\n"sv}) {
+    ExpectStatus(server.Send(request, true), 400);
+  }
+  // At most 100 header fields; more get 431 (RFC 6585 5).
+  std::string fields;
+  for (int i = 0; i < 100; ++i) {
+    fields += "X-" + std::to_string(i) + ": v\r\n";
+  }
+  ExpectStatus(server.Send("GET /health HTTP/1.1\r\n" + fields + "\r\n"), 200);
+  const auto too_many =
+      server.Send("GET /health HTTP/1.1\r\n" + fields + "X: v\r\n\r\n");
+  ExpectStatus(too_many, 431);
+  assert(too_many.find("request_header_fields_too_large") != std::string::npos);
   ExpectStatus(
       server.Send("POST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nx", true),
       400);

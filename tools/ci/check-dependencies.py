@@ -30,6 +30,7 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "libjpeg-turbo",
     "libwebp",
     "libopus",
+    "httparse (Rust crate)",
     "png (Rust crate)",
     "Rust standard library and crates",
     "symphonia (Rust crates)",

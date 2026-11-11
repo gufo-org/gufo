@@ -887,6 +887,14 @@ endfunction()
   set_tests_properties(websocket_frame_test PROPERTIES
     LABELS "cpu;server;correctness")
 
+  add_executable(http_request_test
+    tests/cli/http_request_test.cpp
+    tests/cli/http_request_reference.cpp)
+  target_link_libraries(http_request_test PRIVATE gufo_core)
+  add_test(NAME http_request_test COMMAND http_request_test)
+  set_tests_properties(http_request_test PROPERTIES
+    LABELS "cpu;server;http;correctness")
+
   # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
   if (NOT WIN32)
   add_executable(http_server_test tests/cli/http_server_test.cpp)
