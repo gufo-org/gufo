@@ -1,0 +1,20 @@
+[
+  {
+    "tag": "baseline",
+    "returncode": 1,
+    "expected_failure": true,
+    "passed": true
+  },
+  {
+    "tag": "hip",
+    "returncode": 0,
+    "expected_failure": false,
+    "passed": true
+  },
+  {
+    "tag": "hrx",
+    "returncode": 0,
+    "expected_failure": false,
+    "passed": true
+  }
+]

@@ -1,7 +1,7 @@
 # HRX priorities for regular GPU models
 
 November 11, 2026: prioritize measured GPU gaps in Gufo's regular models.
-The investigation also found and fixed a Gufo benchmark error that affected
+The investigation also found and fixed Gufo benchmark errors that affected
 our ability to judge HRX. No additional HRX throughput improvement is claimed.
 
 ## Fix: propagate Qwen benchmark synchronization failures
@@ -36,6 +36,27 @@ These are focused benchmark checks, not a new model numerical qualification.
 Native MTP was not executed. The changed prefill branches are covered by AR
 and DFlash2; their decoder kernels are unchanged. The Nix production build
 and shared C++ formatting check pass.
+
+## Fix: reject unsupported Qwen benchmark sampling
+
+Qwen's native benchmark selected tokens through its greedy GPU path even when
+sampling or penalty options were supplied. It therefore measured a different
+workload from the one requested. Its existing CLI test already required these
+requests to fail, but the implementation lacked that check.
+
+The benchmark now uses the shared `can_use_unmodified_argmax()` contract to
+reject unsupported settings before GPU setup, directing users to the serving
+benchmark. Ordinary greedy controls and explicit seeds remain supported.
+This is a second independent Gufo branch; no HRX runtime code changes.
+
+**Gufo gains an honest workload contract:** greedy rates cannot be mistaken
+for sampled or penalized inference. The expanded existing benchmark test
+rejects temperature, repetition, frequency and presence controls across AR
+and both existing DFlash2 test configurations: 24 negative cases over HIP
+and HRX. Six complete successful benchmark runs cover repeated prefill,
+decode and cached depth, with identical token histories. The pre-guard
+executable fails this regression as expected; both corrected runtimes pass.
+Both Nix builds, shared formatting and documentation checks pass.
 
 ## Fresh Flash-Next control
 
@@ -80,10 +101,9 @@ This pair provides no compelling Qwen runtime optimization target. The
 small differences are not gains from the callback fix. The earlier Qwen
 run has undefined behavior and is retained as invalid performance evidence.
 
-The existing complete benchmark test stops earlier at a separate, pre-existing
-failure: Qwen accepts non-greedy sampling controls but always benchmarks greedy
-decoding. The callback checks above pass independently; the sampling contract
-needs a separate fix before the complete benchmark test can pass.
+The first complete benchmark-test attempt exposed the separate sampling
+contract failure. That failed attempt remains in the evidence; the second
+fix above resolves it without weakening the test.
 
 ## Next GPU targets
 

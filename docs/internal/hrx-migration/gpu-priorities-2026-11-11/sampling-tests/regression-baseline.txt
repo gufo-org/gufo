@@ -1,0 +1,1 @@
+Qwen benchmark did not reject sampling controls: ['--temperature', '0.8']

@@ -1,0 +1,2 @@
+warning: Git tree '/home/mixer/gufo-qwen-bench-sync' is dirty
+PASS: Checked 946 C++ files

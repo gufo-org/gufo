@@ -344,6 +344,12 @@ int RunQwenBenchmarkImpl(
     const ext::TextBenchOptions& opt,
     const std::shared_ptr<const core::GgufReader>& reader,
     std::chrono::steady_clock::time_point model_load_start) {
+  if (!opt.sampling.can_use_unmodified_argmax()) {
+    std::cerr << "Error: use the serving benchmark for Qwen sampling.\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
+
   std::string err;
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
