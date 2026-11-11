@@ -15,6 +15,7 @@
 
 #include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
+#include "src/core/sampling_logit_row.hpp"
 
 namespace {
 
@@ -30,6 +31,37 @@ void Expect(bool condition, std::string_view message) {
   if (!condition) {
     std::cerr << "FAILED: " << message << '\n';
     std::exit(1);
+  }
+}
+
+void TestBlockMaximum() {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  // Start unaligned and end at the allocation boundary. Exercise every
+  // masked tail, NaNs in either max operand, infinities and negative rows.
+  for (std::size_t n = 0; n <= 129; ++n) {
+    std::vector<float> values(n + 1, nan);
+    auto block = std::span(values).subspan(1);
+    for (int kind = 0; kind < 4; ++kind) {
+      for (std::size_t i = 0; i < n; ++i)
+        block[i] = kind == 0    ? nan
+                   : kind == 1  ? -inf
+                   : i % 7 == 0 ? nan
+                                : -static_cast<float>(i + 1);
+      if (kind == 3 && n != 0)
+        block[n - 1] = inf;
+      float expected = -inf;
+      for (float value : block)
+        expected = value > expected ? value : expected;
+      Expect(gufo::sampling::BlockMaximum(block) == expected,
+             "block maximum ignores NaN and handles every tail");
+    }
+    for (std::size_t winner = 0; winner < n; ++winner) {
+      std::fill(block.begin(), block.end(), -inf);
+      block[winner] = winner % 2 == 0 ? 0.0F : -0.0F;
+      Expect(gufo::sampling::BlockMaximum(block) == 0.0F,
+             "block maximum finds each lane including signed zero");
+    }
   }
 }
 
@@ -517,6 +549,7 @@ void TestRawLogprobs() {
 }
 
 int main() {
+  TestBlockMaximum();
   TestRawLogprobs();
   TestReasoningBudgetForcesTheEnd();
   TestReasoningBudgetWaitsForOpener();

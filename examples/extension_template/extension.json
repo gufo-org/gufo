@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "template_model",
   "version": "0.1.0",
-  "api_version": ">= 0.2.0",
+  "api_version": ">= 0.3.0",
   "entry": "template_model_register",
   "registration_target": "gufo_template_model",
   "depends": [],

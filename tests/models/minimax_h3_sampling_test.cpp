@@ -14,17 +14,23 @@
 
 namespace {
 
+using gufo::minimax_h3::BuildConditionedTimeRowSchedule;
 using gufo::minimax_h3::BuildEulerPlan;
 using gufo::minimax_h3::BuildInitialNoise;
+using gufo::minimax_h3::BuildKeyframeLayout;
 using gufo::minimax_h3::BuildModulationRowMap;
 using gufo::minimax_h3::BuildReuseSelection;
 using gufo::minimax_h3::BuildServingSchedule;
 using gufo::minimax_h3::BuildTextOnlyLayout;
 using gufo::minimax_h3::BuildTimeRowSchedule;
 using gufo::minimax_h3::GenerationGeometry;
+using gufo::minimax_h3::KeyframeAnchorTimes;
 using gufo::minimax_h3::ModulationRowMapSha256;
+using gufo::minimax_h3::NormalRng;
 using gufo::minimax_h3::PackedLayoutSha256;
+using gufo::minimax_h3::ResolveCanvasSize;
 using gufo::minimax_h3::ResolveGenerationGeometry;
+using gufo::minimax_h3::SegmentKind;
 using gufo::minimax_h3::Sha256;
 using gufo::minimax_h3::SigmaSchedule;
 
@@ -524,12 +530,206 @@ void TestReuseAndEulerPlan() {
 #endif
 }
 
+void TestKeyframeConditioning() {
+  std::string error;
+
+  // Anchor rotary times: goldens captured from numpy float64 evaluation of
+  // the reference expression (float(T) + float(spans.sum()) - 5/3) with the
+  // released spans construction and numpy pairwise summation order.
+  {
+    auto only_first = KeyframeAnchorTimes(13, 7, true, false, &error);
+    CHECK(only_first.has_value());
+    CHECK(only_first->size() == 1);
+    CHECK(only_first->at(0) == 13.0);
+    auto only_last = KeyframeAnchorTimes(13, 7, false, true, &error);
+    CHECK(only_last.has_value());
+    CHECK(only_last->size() == 1);
+    CHECK(std::bit_cast<std::uint64_t>(only_last->at(0)) ==
+          std::bit_cast<std::uint64_t>(0x1.8000000000001p+5));
+    auto pair = KeyframeAnchorTimes(1300, 47, true, true, &error);
+    CHECK(pair.has_value());
+    CHECK(pair->size() == 2);
+    CHECK((*pair)[0] == 1300.0);
+    CHECK(std::bit_cast<std::uint64_t>((*pair)[1]) ==
+          std::bit_cast<std::uint64_t>(0x1.866aaaaaaaaaap+10));
+    auto long_window = KeyframeAnchorTimes(13, 102, false, true, &error);
+    CHECK(long_window.has_value());
+    CHECK(std::bit_cast<std::uint64_t>(long_window->at(0)) ==
+          std::bit_cast<std::uint64_t>(0x1.252aaaaaaaaa9p+9));
+    CHECK(KeyframeAnchorTimes(13, 1, true, true, &error) == std::nullopt);
+    CHECK(KeyframeAnchorTimes(0, 47, false, true, &error) == std::nullopt);
+    CHECK(KeyframeAnchorTimes(13, 47, false, false, &error)->empty());
+  }
+
+  // Conditioned packed sequence: [text | condition | audio | video-target]
+  // with anchors occupying full target-canvas frame grids at their times.
+  {
+    const GenerationGeometry geometry = Geometry(512, 512, 22);
+    const auto anchors = *KeyframeAnchorTimes(
+        6, geometry.temporal.video_latent_frames, true, true, &error);
+    auto layout = BuildKeyframeLayout(6, geometry, anchors, &error);
+    CHECK(layout.has_value());
+    if (!layout.has_value()) {
+      return;
+    }
+    const std::size_t frame_rows = 256;  // (32/2) * (32/2)
+    CHECK(layout->video_condition_rows == 2 * frame_rows);
+    CHECK(layout->audio_target_rows == 74);
+    CHECK(layout->rows() == 6 + 512 + 74 + 7 * frame_rows);
+    CHECK(layout->segments.size() == 4);
+    CHECK(layout->segments[0].kind == SegmentKind::kText);
+    CHECK(layout->segments[1].kind == SegmentKind::kVideoCondition);
+    CHECK(layout->segments[1].begin == 6);
+    CHECK(layout->segments[1].end == 6 + 2 * frame_rows);
+    CHECK(layout->segments[2].kind == SegmentKind::kAudioTarget);
+    CHECK(layout->segments[3].kind == SegmentKind::kVideoTarget);
+    CHECK(layout->positions[6].temporal == 6.0);
+    CHECK(layout->positions[6 + frame_rows].temporal == anchors[1]);
+    const std::size_t target_begin = 6 + 2 * frame_rows + 74;
+    CHECK(layout->positions[6].height ==
+          layout->positions[target_begin].height);
+    CHECK(layout->positions[6].width == layout->positions[target_begin].width);
+    // Audio and video rotary clocks are unchanged by conditioning: they
+    // stay pinned to text_rows, not to the sequence offsets.
+    CHECK(layout->positions[target_begin].temporal == 6.0);
+    CHECK(std::abs(layout->positions[6 + frame_rows].temporal -
+                   (layout->positions[target_begin + 6 * frame_rows].temporal +
+                    5.0)) < 1.0e-12);
+    CHECK(!BuildKeyframeLayout(6, geometry, {}, &error).has_value());
+  }
+
+  // Time-row table: one extra shared 0.999 row; text-only schedule plus one.
+  {
+    auto schedule = BuildServingSchedule(49, &error);
+    CHECK(schedule.has_value());
+    auto plain = BuildTimeRowSchedule(*schedule, &error);
+    auto conditioned = BuildConditionedTimeRowSchedule(*schedule, &error);
+    CHECK(plain.has_value() && conditioned.has_value());
+    CHECK(conditioned->time_rows == plain->time_rows + 1);
+    CHECK(conditioned->video_rows == plain->video_rows);
+    CHECK(conditioned->audio_rows == plain->audio_rows);
+    CHECK(conditioned->condition_rows.size() == 49);
+    for (const std::uint32_t id : conditioned->condition_rows) {
+      CHECK(id == conditioned->condition_rows.front());
+      CHECK(id != conditioned->video_rows.front());
+    }
+  }
+
+  // Row map: conditioned rows carry modality 0 (video) at the 0.999 row.
+  {
+    const GenerationGeometry geometry = Geometry(256, 256, 22);
+    const auto anchors = *KeyframeAnchorTimes(4, 7, true, false, &error);
+    auto layout = BuildKeyframeLayout(4, geometry, anchors, &error);
+    auto schedule = BuildServingSchedule(4, &error);
+    auto rows = BuildConditionedTimeRowSchedule(*schedule, &error);
+    CHECK(layout.has_value() && rows.has_value());
+    auto map = BuildModulationRowMap(*rows, 1, *layout, {}, &error);
+    CHECK(map.has_value());
+    if (map.has_value()) {
+      const std::uint32_t condition_id = rows->condition_rows[1];
+      CHECK((*map)[4] == condition_id * 3 + 0);  // first anchor row
+      CHECK((*map)[4 + 1] == condition_id * 3 + 0);
+      CHECK((*map)[layout->segments[2].begin] == rows->audio_rows[1] * 3 + 2);
+      CHECK((*map)[layout->segments[3].begin] == rows->video_rows[1] * 3 + 0);
+    }
+    // A conditioned layout with the unconditioned schedule must be refused.
+    auto plain_rows = BuildTimeRowSchedule(*schedule, &error);
+    CHECK(!BuildModulationRowMap(*plain_rows, 1, *layout, {}, &error)
+               .has_value());
+  }
+
+  // Request-stream lineage: augmentation noise for each keyframe is drawn
+  // first (packed order), then video, then audio.
+  {
+    constexpr std::uint64_t seed = 4242;
+    constexpr std::size_t condition_elements = 97;
+    constexpr std::size_t video_elements = 24;
+    NormalRng reference(seed);
+    std::vector<float> expected_condition(condition_elements);
+    for (float& value : expected_condition) {
+      value = reference.NextNormal();
+    }
+    std::vector<float> expected_video(video_elements);
+    for (float& value : expected_video) {
+      value = reference.NextNormal();
+    }
+    auto noise = BuildInitialNoise(seed, {condition_elements}, video_elements,
+                                   32, 3, &error);
+    CHECK(noise.has_value());
+    if (noise.has_value()) {
+      CHECK(noise->conditions.size() == 1);
+      CHECK(noise->conditions[0] == expected_condition);
+      CHECK(noise->video == expected_video);
+      CHECK(noise->audio.size() == 32 * 2 * 3);
+    }
+    CHECK(!BuildInitialNoise(seed, {0}, video_elements, 32, 3, &error)
+               .has_value());
+  }
+}
+
 }  // namespace
+
+void TestCanvasRule() {
+  // Expected canvases were produced by running the released rule itself
+  // (diffusers modular_pipelines/minimax_h3/modular_pipeline.py
+  // resolve_canvas_size with canvas_multiple 32), not by this port.
+  struct Case {
+    double aspect_width;
+    double aspect_height;
+    int short_edge;
+    std::int64_t max_pixels;
+    int width;
+    int height;
+  };
+  constexpr std::int64_t kBudget = 768LL * 1344LL;
+  constexpr Case kCases[] = {
+      {1664, 928, 768, kBudget, 1376, 768},
+      {1664, 928, 512, 512 * 512, 672, 384},
+      {1664, 928, 384, 384 * 384, 512, 288},
+      {1664, 928, 320, 320 * 320, 416, 224},
+      {1664, 928, 256, 256 * 256, 352, 192},
+      {16, 9, 768, kBudget, 1344, 768},
+      {9, 16, 768, kBudget, 768, 1344},
+      {1, 1, 768, kBudget, 768, 768},
+      {4, 3, 768, kBudget, 1024, 768},
+      {1, 4, 768, kBudget, 512, 2016},
+      {4, 1, 768, kBudget, 2016, 512},
+      {1856, 576, 768, kBudget, 1824, 576},
+      {928, 1664, 512, 512 * 512, 384, 672},
+      {1, 1, 512, 512 * 512, 512, 512},
+      {21, 9, 768, kBudget, 1536, 672},
+      {3, 2, 512, 512 * 512, 640, 416},
+  };
+  for (const Case& test : kCases) {
+    std::string error;
+    const auto canvas =
+        ResolveCanvasSize(test.aspect_width, test.aspect_height,
+                          test.short_edge, test.max_pixels, &error);
+    CHECK(canvas.has_value());
+    if (canvas.has_value()) {
+      CHECK(canvas->width == test.width);
+      CHECK(canvas->height == test.height);
+    }
+  }
+  std::string error;
+  CHECK(!ResolveCanvasSize(1, 5, 768, kBudget, &error).has_value());
+  CHECK(!ResolveCanvasSize(5, 1, 768, kBudget, &error).has_value());
+  CHECK(!ResolveCanvasSize(0, 1, 768, kBudget, &error).has_value());
+
+  // Rounding after the budget lets a resolved canvas exceed 768*1344; the
+  // largest the rule produces (1856x576) must stay a legal geometry.
+  CHECK(ResolveGenerationGeometry(1376, 768, 22, &error).has_value());
+  CHECK(ResolveGenerationGeometry(1856, 576, 22, &error).has_value());
+  CHECK(ResolveGenerationGeometry(576, 1856, 22, &error).has_value());
+  CHECK(!ResolveGenerationGeometry(1888, 576, 22, &error).has_value());
+}
 
 int main() {
   TestGeometry();
+  TestCanvasRule();
   TestSchedules();
   TestLayouts();
+  TestKeyframeConditioning();
   TestPacking();
   TestNoise();
   TestReuseAndEulerPlan();

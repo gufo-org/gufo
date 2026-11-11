@@ -1,5 +1,9 @@
 #include "src/core/quant/ggml_dequant.hpp"
 
+#if defined(__GNUC__) && defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -641,9 +645,42 @@ const std::uint32_t* Iq3sGrid() noexcept {
   return kIq3sGrid;
 }
 
+#if defined(__GNUC__) && defined(__x86_64__)
+// AVX-512 path: the 16-entry codebook is exactly one register, so each block
+// becomes two nibble-indexed vpermps lookups and two multiplies. Scalar
+// semantics are `Fp16ToFloat(d) * (float)kValues[code]`; the int8->f32
+// widening and the single multiply reproduce it bit-for-bit.
+__attribute__((target("avx512f"))) void DequantizeIQ4_NLAvx512(
+    const block_iq4_nl* blocks, float* dst, std::size_t nb) {
+  const __m512 table = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(kValuesIq4Nl))));
+  const __m128i nibble_mask = _mm_set1_epi8(0x0F);
+  for (std::size_t b = 0; b < nb; ++b) {
+    const __m512 scale = _mm512_set1_ps(Fp16ToFloat(blocks[b].d));
+    const __m128i qs =
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(blocks[b].qs));
+    const __m512i lo = _mm512_cvtepu8_epi32(_mm_and_si128(qs, nibble_mask));
+    const __m512i hi =
+        _mm512_cvtepu8_epi32(_mm_and_si128(_mm_srli_epi16(qs, 4), nibble_mask));
+    _mm512_storeu_ps(dst + b * 32,
+                     _mm512_mul_ps(scale, _mm512_permutexvar_ps(lo, table)));
+    _mm512_storeu_ps(dst + b * 32 + 16,
+                     _mm512_mul_ps(scale, _mm512_permutexvar_ps(hi, table)));
+  }
+}
+
+#endif
+
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k) {
   const auto* blocks = static_cast<const block_iq4_nl*>(src);
   const std::size_t nb = k / 32;
+#if defined(__GNUC__) && defined(__x86_64__)
+  static const bool has_avx512f = __builtin_cpu_supports("avx512f");
+  if (has_avx512f) {
+    DequantizeIQ4_NLAvx512(blocks, dst, nb);
+    return;
+  }
+#endif
   for (std::size_t b = 0; b < nb; ++b) {
     for (std::size_t i = 0; i < 32; ++i) {
       dst[(b * 32) + i] = Iq4NlValue(blocks[b], i);

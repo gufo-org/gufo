@@ -112,6 +112,10 @@ with tempfile.TemporaryDirectory() as temp:
     # and move to a newer release on update.
     repository = Path(temp) / "repository"
     shutil.copytree(fixture, repository)
+    if os.name != "nt":
+        # A file symlink is copied as one and digested under its own name.
+        (repository / "notes.md").write_text("notes\n")
+        (repository / "notes-link.md").symlink_to("notes.md")
     git("init", "--quiet", cwd=repository)
     git("add", ".", cwd=repository)
     first = commit("0.1.0", cwd=repository)
@@ -124,7 +128,7 @@ with tempfile.TemporaryDirectory() as temp:
     host = report["extensionApiVersion"]
     platform = "windows" if os.name == "nt" else "linux"
 
-    def release(version, revision, digest, api=">= 0.2.0"):
+    def release(version, revision, digest, api=">= 0.3.0"):
         return {"version": version, "revision": revision, "digest": digest,
                 "api_version": api, "platforms": [platform]}
 
@@ -148,6 +152,9 @@ with tempfile.TemporaryDirectory() as temp:
     [installed] = installed_extensions()
     assert installed["sourceKind"] == "registry" and installed["revision"] == first, installed
     assert installed["version"] == "0.1.0" and installed["status"] == "ready", installed
+    if os.name != "nt":
+        link = Path(temp) / "store" / "module_fixture" / "source" / "notes-link.md"
+        assert link.is_symlink() and link.read_text() == "notes\n", link
 
     publish(release("0.2.0", second, second_digest), release("0.1.0", first, first_digest))
     [offered] = [e for e in listing() if e["name"] == "module_fixture"]

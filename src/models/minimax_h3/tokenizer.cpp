@@ -532,6 +532,18 @@ bool Tokenizer::ApplyBpe(std::string_view piece,
   return true;
 }
 
+bool Tokenizer::AddedTokenId(std::string_view content,
+                             std::uint32_t* id) const {
+  const auto found = added_tokens_.find(std::string(content));
+  if (found == added_tokens_.end()) {
+    return false;
+  }
+  if (id != nullptr) {
+    *id = found->second;
+  }
+  return true;
+}
+
 bool Tokenizer::EncodePlain(std::string_view text,
                             std::vector<std::uint32_t>* ids,
                             std::string* error) const {

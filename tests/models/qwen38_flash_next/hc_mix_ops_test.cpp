@@ -279,10 +279,14 @@ std::vector<std::uint8_t> Bytes(HipBuffer<T>* buffer) {
   return bytes;
 }
 
-// The one-launch decode mixer against the five kernels it replaces, on
-// small unsaturated activations: every output representation byte for
-// byte, across repeated launches and graph replays (the counters reset).
-void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject) {
+// Compare the one-launch decode mixer with the scalar or batch sequence,
+// including small unsaturated activations and every active representation,
+// across repeated launches and graph replays (the counters reset).
+enum class MixerReference { Scalar, Batch };
+
+void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
+                           float input_scale = 1.0F,
+                           MixerReference reference = MixerReference::Scalar) {
   constexpr std::uint32_t kRank = 320;
   constexpr std::size_t kDim = std::size_t{kStreams} * kHidden;
   constexpr float kEps = 1e-6F;
@@ -294,8 +298,9 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject) {
   const std::size_t inject_count = std::size_t{tokens} * kStreams * parts;
   const auto down = MakeQ8_0(kRank * kDim / 32, 0x5EED0001U + tokens);
   const auto up = MakeQ8_0(kDim * kRank / 32, 0x5EED0002U + tokens);
-  const auto res = MakeValues(rows, 0x0123ABCDU + tokens, 1.0F);
-  const auto block_out = MakeValues(mixed_count, 0x0BADF00DU + tokens, 0.25F);
+  const auto res = MakeValues(rows, 0x0123ABCDU + tokens, input_scale);
+  const auto block_out =
+      MakeValues(mixed_count, 0x0BADF00DU + tokens, 0.25F * input_scale);
   const auto inject = MakeValues(inject_count, 0xC0FFEE00U + tokens, 0.05F);
   auto gamma = MakeValues(kDim, 0x6A6A6A6AU, 0.25F);
   for (float& g : gamma) {
@@ -352,22 +357,51 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject) {
   const float* w_inject = with_inject ? d_inject_w.get() : nullptr;
   Outputs ref(tokens, lo_cols), out(tokens, lo_cols);
   reset(&ref, 0x5A);
-  if (!q::HcCombineQ8_1(ref.res.get(), d_block_out.get(), d_inject.get(), parts,
-                        d_gamma.get(), ref.xn.get(), ref.xn_q8.get(), tokens,
-                        kHidden, kStreams, kEps, nullptr) ||
-      qfn_mmq_q8_0_dense_vec_preq(d_down.get(), nullptr, ref.xn_q8.get(),
-                                  ref.lo.get(), kRank, static_cast<int>(tokens),
-                                  kDim, nullptr) != 0 ||
-      !q::SiluScaleQ8_1(ref.lo.get(), 1.0F / kStreams, tokens, kRank, lo_cols,
-                        ref.lo_q8.get(), nullptr) ||
-      qfn_mmq_q8_0_dense_vec_preq(d_up.get(), nullptr, ref.lo_q8.get(),
-                                  d_gate.get(), kDim, static_cast<int>(tokens),
-                                  kRank, nullptr) != 0) {
-    throw std::runtime_error("decode mixer reference rejected");
+  if (reference == MixerReference::Batch) {
+    // Current production CombineBatch/HcMixBatch reference, not the scalar
+    // HcCombineQ8_1/SiluScaleQ8_1 sequence used by the original fused test.
+    q::HcCombine(ref.res.get(), d_block_out.get(), d_inject.get(), parts,
+                 d_gamma.get(), ref.xn.get(), tokens, kHidden, kStreams, kEps,
+                 nullptr, true);
+    if (qfn_mmq_quantize_q8_1(ref.xn.get(), ref.xn_q8.get(), tokens, kDim,
+                              nullptr) != 0 ||
+        qfn_mmq_q8_0_dense_vec_preq(
+            d_down.get(), nullptr, ref.xn_q8.get(), ref.lo.get(), kRank,
+            static_cast<int>(tokens), kDim, nullptr) != 0)
+      throw std::runtime_error("batch down reference rejected");
+    q::SiluScale(ref.lo.get(), 1.0F / kStreams, std::size_t{tokens} * kRank,
+                 nullptr);
+    if (qfn_mmq_quantize_q8_1(ref.lo.get(), ref.lo_q8.get(), tokens, kRank,
+                              nullptr) != 0 ||
+        qfn_mmq_q8_0_dense_vec_preq(
+            d_up.get(), nullptr, ref.lo_q8.get(), d_gate.get(), kDim,
+            static_cast<int>(tokens), kRank, nullptr) != 0)
+      throw std::runtime_error("batch up reference rejected");
+    q::HcMixEpilogue(ref.xn.get(), d_gate.get(), w_inject, ref.mixed.get(),
+                     with_inject ? ref.inject.get() : nullptr, tokens, kHidden,
+                     kStreams, nullptr);
+    if (qfn_mmq_quantize_q8_1(ref.mixed.get(), ref.mixed_q8.get(), tokens,
+                              kHidden, nullptr) != 0)
+      throw std::runtime_error(
+          "batch consumer quantization reference rejected");
+  } else {
+    if (!q::HcCombineQ8_1(ref.res.get(), d_block_out.get(), d_inject.get(),
+                          parts, d_gamma.get(), ref.xn.get(), ref.xn_q8.get(),
+                          tokens, kHidden, kStreams, kEps, nullptr) ||
+        qfn_mmq_q8_0_dense_vec_preq(
+            d_down.get(), nullptr, ref.xn_q8.get(), ref.lo.get(), kRank,
+            static_cast<int>(tokens), kDim, nullptr) != 0 ||
+        !q::SiluScaleQ8_1(ref.lo.get(), 1.0F / kStreams, tokens, kRank, lo_cols,
+                          ref.lo_q8.get(), nullptr) ||
+        qfn_mmq_q8_0_dense_vec_preq(
+            d_up.get(), nullptr, ref.lo_q8.get(), d_gate.get(), kDim,
+            static_cast<int>(tokens), kRank, nullptr) != 0) {
+      throw std::runtime_error("decode mixer reference rejected");
+    }
+    q::HcMixEpilogue(ref.xn.get(), d_gate.get(), w_inject, ref.mixed.get(),
+                     with_inject ? ref.inject.get() : nullptr, tokens, kHidden,
+                     kStreams, nullptr, ref.mixed_q8.get());
   }
-  q::HcMixEpilogue(ref.xn.get(), d_gate.get(), w_inject, ref.mixed.get(),
-                   with_inject ? ref.inject.get() : nullptr, tokens, kHidden,
-                   kStreams, nullptr, ref.mixed_q8.get());
   CheckHip(hipDeviceSynchronize(), "decode mixer reference");
 
   const q::HcFusedMix mix{d_down.get(),
@@ -489,13 +523,77 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject) {
 
 }  // namespace
 
+void CheckBatchedReadyQ8(std::uint32_t rows, bool inject, float scale) {
+  constexpr std::size_t guard = 256;
+  const auto input = MakeValues(std::size_t{rows} * kHidden * kStreams,
+                                0x572100U + rows, scale);
+  const auto gates = MakeValues(input.size(), 0x781900U + rows, 2.0F);
+  const auto weights =
+      MakeValues(kStreams * kHidden * kStreams, 0x124003U, 0.01F);
+  HipBuffer<float> x(input.size()), g(gates.size()), w(weights.size());
+  Upload(&x, input);
+  Upload(&g, gates);
+  Upload(&w, weights);
+  const auto mixed_bytes = std::size_t{rows} * kHidden * sizeof(float);
+  const auto inject_bytes =
+      std::size_t{rows} * kStreams * q::HcInjectParts(kHidden) * sizeof(float);
+  const auto q8_bytes = qfn_mmq_q8_1_bytes(rows, kHidden);
+  HipBuffer<std::uint8_t> ref_mixed(mixed_bytes + 2 * guard),
+      out_mixed(mixed_bytes + 2 * guard), ref_inject(inject_bytes + 2 * guard),
+      out_inject(inject_bytes + 2 * guard), ref_q8(q8_bytes + 2 * guard),
+      out_q8(q8_bytes + 2 * guard);
+  for (auto* b :
+       {&ref_mixed, &out_mixed, &ref_inject, &out_inject, &ref_q8, &out_q8})
+    CheckHip(hipMemset(b->get(), 0xA5, b->bytes()), "ready-Q8 guards");
+  auto floats = [&](auto& b) {
+    return reinterpret_cast<float*>(b.get() + guard);
+  };
+  q::HcMixEpilogue(x.get(), g.get(), inject ? w.get() : nullptr,
+                   floats(ref_mixed), floats(ref_inject), rows, kHidden,
+                   kStreams, nullptr);
+  if (qfn_mmq_quantize_q8_1(floats(ref_mixed), ref_q8.get() + guard, rows,
+                            kHidden, nullptr) != 0)
+    throw std::runtime_error("ready-Q8 reference quantization failed");
+  q::HcMixEpilogue(x.get(), g.get(), inject ? w.get() : nullptr,
+                   floats(out_mixed), floats(out_inject), rows, kHidden,
+                   kStreams, nullptr, out_q8.get() + guard);
+  CheckHip(hipDeviceSynchronize(), "ready-Q8 completion");
+  const auto exact = [&](auto& a, auto& b, std::size_t used, bool live) {
+    std::vector<std::uint8_t> reference(a.bytes()), actual(b.bytes());
+    CheckHip(
+        hipMemcpy(reference.data(), a.get(), a.bytes(), hipMemcpyDeviceToHost),
+        "ready-Q8 reference");
+    CheckHip(
+        hipMemcpy(actual.data(), b.get(), b.bytes(), hipMemcpyDeviceToHost),
+        "ready-Q8 producer");
+    if (reference != actual)
+      throw std::runtime_error("ready-Q8 producer differs from separate path");
+    for (std::size_t i = 0; i < actual.size(); ++i)
+      if ((!live || i < guard || i >= guard + used) && actual[i] != 0xA5)
+        throw std::runtime_error("ready-Q8 guard or inactive output changed");
+  };
+  exact(ref_mixed, out_mixed, mixed_bytes, true);
+  exact(ref_inject, out_inject, inject_bytes, inject);
+  exact(ref_q8, out_q8, q8_bytes, true);
+}
+
 int main() {
   try {
     for (std::uint32_t n = 1; n <= 8; ++n) {
       CheckFusedDecodeMixer(n, true);
     }
+    for (std::uint32_t rows = 1; rows <= 8; ++rows)
+      for (bool inject : {false, true})
+        for (float scale : {0.0001F, 1.0F, 10000.0F})
+          CheckBatchedReadyQ8(rows, inject, scale);
     CheckFusedDecodeMixer(1, false);
     CheckFusedDecodeMixer(5, false);
+    // Target-batch routing changes must also match the separately launched
+    // CombineBatch/HcMixBatch arithmetic, with small unsaturated inputs.
+    for (std::uint32_t n = 1; n <= 8; ++n)
+      for (bool with_inject : {false, true})
+        for (float scale : {0.0001F, 1.0F, 10000.0F})
+          CheckFusedDecodeMixer(n, with_inject, scale, MixerReference::Batch);
     CheckFusedProjection(96);
     CheckFusedProjection(2049);
     for (std::uint32_t n : {7U, 96U, 1619U})

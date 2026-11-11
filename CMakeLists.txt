@@ -293,6 +293,7 @@ add_subdirectory(src/core/platform)
 add_subdirectory(src/core/rust)
 
 add_library(gufo_core STATIC
+  src/core/base64.cpp
   src/core/image.cpp
   src/core/crypto/sha256.cpp
   src/core/gguf_reader.cpp
@@ -305,7 +306,7 @@ add_library(gufo_core STATIC
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
-  src/core/wav.cpp
+  src/core/audio.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
@@ -805,6 +806,13 @@ endfunction()
   add_test(NAME png_decode_test COMMAND png_decode_test)
   set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
 
+  add_executable(audio_decode_test tests/core/audio_decode_test.cpp)
+  target_link_libraries(audio_decode_test PRIVATE gufo_core)
+  target_compile_definitions(audio_decode_test PRIVATE
+    GUFO_AUDIO_DECODE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/audio")
+  add_test(NAME audio_decode_test COMMAND audio_decode_test)
+  set_tests_properties(audio_decode_test PROPERTIES LABELS "cpu;audio;correctness")
+
   add_executable(wav_decode_test
     tests/core/wav_decode_test.cpp
     tests/core/wav_reference.cpp)
@@ -863,6 +871,21 @@ endfunction()
   add_test(NAME trace_test COMMAND trace_test)
   set_tests_properties(trace_test PROPERTIES LABELS "cpu;server;trace")
   endif()
+
+  add_executable(base64_test
+    tests/core/base64_test.cpp
+    tests/core/base64_reference.cpp)
+  target_link_libraries(base64_test PRIVATE gufo_http)
+  add_test(NAME base64_test COMMAND base64_test)
+  set_tests_properties(base64_test PROPERTIES LABELS "cpu;server;correctness")
+
+  add_executable(websocket_frame_test
+    tests/cli/websocket_frame_test.cpp
+    tests/cli/websocket_frame_reference.cpp)
+  target_link_libraries(websocket_frame_test PRIVATE gufo_core)
+  add_test(NAME websocket_frame_test COMMAND websocket_frame_test)
+  set_tests_properties(websocket_frame_test PROPERTIES
+    LABELS "cpu;server;correctness")
 
   # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
   if (NOT WIN32)
@@ -1092,6 +1115,7 @@ endfunction()
       src/cli/video/video.cpp
     )
     target_link_libraries(video_cli_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries} gufo_ext_runtime)
+    gufo_target_extensions(video_cli_test EXTENSIONS ${gufo_selected_extensions})
     add_test(NAME video_cli_test COMMAND video_cli_test)
     set_tests_properties(video_cli_test PROPERTIES
       LABELS "cpu;server;cli;minimax-h3;quality")
@@ -1307,6 +1331,14 @@ endfunction()
   add_test(NAME minimax_h3_sampling_test COMMAND minimax_h3_sampling_test)
   set_tests_properties(minimax_h3_sampling_test PROPERTIES
     LABELS "cpu;models;minimax-h3;layout;schedule;rng;quality")
+
+  add_executable(minimax_h3_presentation_test
+    tests/models/minimax_h3_presentation_test.cpp)
+  target_link_libraries(minimax_h3_presentation_test PRIVATE gufo_core ${gufo_minimax_h3_test_libraries})
+  add_test(NAME minimax_h3_presentation_test COMMAND minimax_h3_presentation_test)
+  set_tests_properties(minimax_h3_presentation_test PROPERTIES
+    LABELS "cpu;models;minimax-h3;presentation;tokenizer;external-model"
+    SKIP_RETURN_CODE 77)
 
   add_executable(minimax_h3_generation_test
     tests/models/minimax_h3_generation_test.cpp)
@@ -1563,6 +1595,32 @@ endfunction()
       COMMAND minimax_h3_video_vae_hip_test)
     set_tests_properties(minimax_h3_video_vae_real PROPERTIES
       LABELS "gpu;hip;gfx1151;minimax-h3;video;vae;quality;external-model;very-slow"
+      SKIP_RETURN_CODE 77)
+
+    add_executable(minimax_h3_video_vae_encoder_hip_test
+      tests/models/minimax_h3_video_vae_encoder_hip_test.hip)
+    target_compile_definitions(minimax_h3_video_vae_encoder_hip_test PRIVATE
+      GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+      GUFO_H3_VAE_ENCODER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/video-vae-encoder-oracle-v1.json")
+    target_link_libraries(minimax_h3_video_vae_encoder_hip_test PRIVATE
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
+    add_test(NAME minimax_h3_video_vae_encoder_real
+      COMMAND minimax_h3_video_vae_encoder_hip_test)
+    set_tests_properties(minimax_h3_video_vae_encoder_real PROPERTIES
+      LABELS "gpu;hip;gfx1151;minimax-h3;video;vae;encoder;quality;external-model;slow"
+      SKIP_RETURN_CODE 77)
+
+    add_executable(minimax_h3_vision_tower_hip_test
+      tests/models/minimax_h3_vision_tower_hip_test.hip)
+    target_compile_definitions(minimax_h3_vision_tower_hip_test PRIVATE
+      GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+      GUFO_H3_VISION_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/minimax_h3/vision-tower-oracle-v1.json")
+    target_link_libraries(minimax_h3_vision_tower_hip_test PRIVATE
+      gufo_core gufo_minimax_h3 gufo_minimax_h3_hip hip::host)
+    add_test(NAME minimax_h3_vision_tower_real
+      COMMAND minimax_h3_vision_tower_hip_test)
+    set_tests_properties(minimax_h3_vision_tower_real PROPERTIES
+      LABELS "gpu;hip;gfx1151;minimax-h3;vision;tower;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
     add_executable(minimax_h3_audio_vae_hip_test

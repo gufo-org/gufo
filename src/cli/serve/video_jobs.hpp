@@ -44,6 +44,13 @@ struct VideoJobRequest {
   std::string output_format{"mp4"};
   ext::VideoParameters parameters;
   std::uint64_t seed{42};
+  /// Uploaded keyframe bytes for conditioning (issue #177), already
+  /// decoded and validated at admission. Empty selects no anchor. Create()
+  /// stages each non-empty vector as `first_frame.img`/`last_frame.img`
+  /// INSIDE the job directory so cancellation, DELETE, and TTL expiry sweeps
+  /// reclaim the uploaded imagery together with the generated output.
+  std::vector<std::uint8_t> first_frame_bytes;
+  std::vector<std::uint8_t> last_frame_bytes;
 };
 
 struct VideoJobSnapshot {
@@ -59,6 +66,12 @@ struct VideoJobSnapshot {
   std::string output_format;
   std::string error_code;
   std::string error_message;
+  /// SHA-256 of the staged keyframe bytes, verbatim as uploaded in any
+  /// accepted format ("" when absent). Kept in
+  /// the persisted snapshot so job provenance survives restart recovery and
+  /// is merged into the job's parameters.json report.
+  std::string first_frame_sha256;
+  std::string last_frame_sha256;
 };
 
 struct VideoJobContent {

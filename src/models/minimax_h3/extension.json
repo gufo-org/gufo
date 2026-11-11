@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "minimax_h3",
   "version": "0.1.0",
-  "api_version": ">= 0.2.0",
+  "api_version": ">= 0.3.0",
   "entry": "minimax_h3_register",
   "registration_target": "gufo_minimax_h3",
   "depends": [],

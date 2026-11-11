@@ -74,15 +74,54 @@ must match unless the case is in `kKnownDeviations`. It runs in `check-pr`.
 the `.png` files under each directory and prints the median decode time of both
 decoders per file. CTest does not run this mode.
 
-`wav_decode_test` decodes generated WAVs with `core::DecodeWav`, under the
-limits and messages of each caller (server, Qwen3-ASR, Qwen3-TTS), and with
-frozen copies of the three C++ decoders from 0.32.0 in
-`tests/core/wav_reference.cpp`. The cases cover a grid of formats, sample
-widths, channel counts and sample rates, extreme sample values, chunk layouts,
-the length limits and 8,000 random mutations. The samples must match bit for
-bit, or the exception type and message must match. It runs in `check-pr`.
+`wav_decode_test` decodes generated WAVs with `core::DecodeAudio`'s strict
+PCM WAV path, under the limits and status messages of each caller (server,
+Qwen3-ASR, Qwen3-TTS), and with frozen copies of the three C++ decoders from
+0.32.0 in `tests/core/wav_reference.cpp`. The cases cover a grid of formats,
+sample widths, channel counts and sample rates, extreme sample values, chunk
+layouts, the length limits and 8,000 random mutations. The samples must match
+bit for bit, or the messages must match. It runs in `check-pr`.
 `wav_decode_test --time [--repeat N]` prints the median decode time of both
 decoders for long inputs; CTest does not run this mode.
+
+`audio_decode_test` tests `core::DecodeAudio`, `DownmixMono` and `Resample`
+on generated audio: the float value of each WAV encoding (8- to 32-bit PCM,
+32- and 64-bit float, A-law, mu-law) on both paths, every 16-bit, A-law and
+mu-law value and `WAVE_FORMAT_EXTENSIBLE` on `kAll`, the strict path's float
+clamping, the channel mean, also while decoding (`downmix_mono`), sines through the resampler from 8 to 192 kHz to 16 and 48 kHz
+(passband error below 1e-4, stopband rms below 1e-5, soxr's output length),
+small Ogg Opus and MP3 fixtures, and the status of each rejection. It runs in
+`check-pr`. The resampler and audio decoder crates also have Rust unit tests
+(`cargo test -p gufo-resample -p gufo-audio-decode`), which CI does not run.
+The decoder's tests compare its direct WAV sample conversion with symphonia's
+PCM decoder bit for bit.
+`embedding_gemma2_audio_decoder_test` compares EmbeddingGemma 2's decoder with
+waveforms from the official librosa backend: 16 kHz probes within 2e-6;
+resampled probes within 0.02 at the first sample, where soxr starts a
+two-stage stream differently, and within 1e-3 and -55 dB of error energy
+after it.
+
+`base64_test` compares base64 through each caller with frozen copies of the
+0.33.0 code in `tests/core/base64_reference.cpp`: media data URLs
+(`core::ReadImageUrl`), TTS reference audio (`server::DecodeBase64Wav`), audio
+streams and the WebSocket key (`server::DecodeAudioBase64`), and the encoders.
+The cases cover every quad over a set of digits, padding and other bytes, round
+trips of every length up to 300 bytes with mutations, decoded-size limits and a
+1 MiB payload. The decoded bytes, or the result and message, must match. It
+runs in `check-pr`. `base64_test --time [--repeat N]` prints the median time of
+both implementations for a 20 MiB payload; CTest does not run this mode. The
+codec's own Rust unit tests (`cargo test -p gufo-base64`) do not run in CI.
+
+`websocket_frame_test` compares the Rust WebSocket frame reader, driven as
+`WebSocket::ReadLoop` drives it, with a frozen copy of the 0.33.0 `ReadLoop` in
+`tests/cli/websocket_frame_reference.cpp`, which reads from a byte stream
+instead of a socket. The cases cover every length encoding and the message
+limit, a grid of opcode, FIN, RSV and mask bits, every close code from 0 to
+5100, UTF-8 within and across fragments, the message queue's limits, a stream
+cut at every byte and 4,000 random streams and mutations. The frames sent back
+and the messages queued must match. It runs in `check-pr`;
+`audio_websocket_test` covers the socket side. The reader's Rust unit tests
+(`cargo test -p gufo-websocket`) do not run in CI.
 
 ## Hosted versus local checks
 

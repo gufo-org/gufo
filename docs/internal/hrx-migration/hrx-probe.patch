@@ -1,0 +1,170 @@
+diff --git a/libhrx/src/binding/hip/api.c b/libhrx/src/binding/hip/api.c
+index e0e2c836b5..1cb010cda5 100644
+--- a/libhrx/src/binding/hip/api.c
++++ b/libhrx/src/binding/hip/api.c
+@@ -12465,6 +12465,35 @@ HIPAPI hipError_t hipMemsetD32Async(hipDeviceptr_t dstDevice, int i, size_t N,
+ //
+ // See also: hipStreamCreateWithFlags, hipStreamCreateWithPriority,
+ //           hipStreamDestroy, hipStreamSynchronize.
++// Probe patch: HRX_STREAM_DEDICATED_QUEUE=1 gives each user stream its own
++// hardware queue so independent streams can execute concurrently.
++static iree_status_t iree_hip_stream_create_on_dedicated_queue(
++    iree_hal_streaming_context_t* context, unsigned int flags,
++    hipStream_t* stream) {
++  iree_hal_queue_t* acquired_queue = NULL;
++  iree_hal_queue_t* queue = context->queue;
++  iree_status_t status = iree_ok_status();
++  const char* env = getenv("HRX_STREAM_DEDICATED_QUEUE");
++  if (env && env[0] == '1') {
++    iree_hal_queue_params_t queue_params;
++    iree_hal_queue_params_initialize(&queue_params);
++    queue_params.placement = iree_hal_queue_placement(context->queue);
++    queue_params.priority = iree_hal_queue_priority(context->queue);
++    queue_params.features = iree_hal_queue_features(context->queue);
++    queue_params.execution_resources =
++        iree_hal_queue_execution_resources(context->queue);
++    status = iree_hal_queue_acquire(iree_hal_queue_family(context->queue),
++                                    &queue_params, &acquired_queue);
++    if (iree_status_is_ok(status)) queue = acquired_queue;
++  }
++  if (iree_status_is_ok(status)) {
++    status = iree_hip_stream_create(context, queue, flags, /*priority=*/0,
++                                    iree_hal_semaphore_list_empty(), stream);
++  }
++  iree_hal_queue_release(acquired_queue);
++  return status;
++}
++
+ HIPAPI hipError_t hipStreamCreate(hipStream_t* stream) {
+   HIP_API_BEGIN();
+   HIP_DEBUG_LOG("[HIP_API] hipStreamCreate(stream=%p)\n", (void*)stream);
+@@ -12482,9 +12511,8 @@ HIPAPI hipError_t hipStreamCreate(hipStream_t* stream) {
+     HIP_RETURN_ERROR(init_result);
+   }
+ 
+-  iree_status_t status = iree_hip_stream_create(
+-      context, context->queue, hipStreamDefault,
+-      /*priority=*/0, iree_hal_semaphore_list_empty(), stream);
++  iree_status_t status = iree_hip_stream_create_on_dedicated_queue(
++      context, hipStreamDefault, stream);
+ 
+   hipError_t result = iree_status_to_hip_result(status);
+   IREE_TRACE_ZONE_END(z0);
+@@ -12551,9 +12579,8 @@ HIPAPI hipError_t hipStreamCreateWithFlags(hipStream_t* stream,
+     HIP_RETURN_ERROR(init_result);
+   }
+ 
+-  iree_status_t status = iree_hip_stream_create(
+-      context, context->queue, flags,
+-      /*priority=*/0, iree_hal_semaphore_list_empty(), stream);
++  iree_status_t status =
++      iree_hip_stream_create_on_dedicated_queue(context, flags, stream);
+ 
+   hipError_t result = iree_status_to_hip_result(status);
+   IREE_TRACE_ZONE_END(z0);
+diff --git a/runtime/src/iree/hal/driver/amd/gpu/image/hsaco.c b/runtime/src/iree/hal/driver/amd/gpu/image/hsaco.c
+index d08c400ab8..9e94020870 100644
+--- a/runtime/src/iree/hal/driver/amd/gpu/image/hsaco.c
++++ b/runtime/src/iree/hal/driver/amd/gpu/image/hsaco.c
+@@ -378,6 +378,8 @@ static iree_status_t iree_hal_amd_gpu_hsaco_read_dynamic(
+         symbol_stride = value;
+         break;
+       case 14:  // DT_SONAME is descriptive; dependencies use explicit bindings.
++      case 15:  // DT_RPATH: host search paths, meaningless for GPU code.
++      case 29:  // DT_RUNPATH: host search paths, meaningless for GPU code.
+       case 16:  // DT_SYMBOLIC; definitions already resolve within this image.
+       case 21:  // DT_DEBUG is populated by a host loader, never by GPU code.
+       case 22:  // DT_TEXTREL; all segments are writable during loading.
+diff --git a/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/barrier.c b/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/barrier.c
+index d05c148d0e..c038c61e08 100644
+--- a/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/barrier.c
++++ b/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/barrier.c
+@@ -1,3 +1,4 @@
++#include <stdlib.h>
+ // Copyright 2026 The IREE Authors
+ //
+ // Licensed under the Apache License v2.0 with LLVM Exceptions.
+@@ -47,6 +48,18 @@ iree_status_t iree_hal_amd_gpu_pm4_barrier_profile_initialize(
+                                  : 0);
+   const uint32_t system_scope =
+       gfx125 ? IREE_HAL_AMD_GPU_PM4_GCR_GL2_SCOPE_ALL : 0;
++  // Probe patch: HRX_PROBE_NO_GL2=1 drops GL2 writeback/invalidate (unsafe).
++  const char* probe_env = getenv("HRX_PROBE_NO_GL2");
++  const bool probe_no_gl2 = probe_env && probe_env[0] == '1';
++  if (probe_no_gl2) {
++    *out_profile = (iree_hal_amd_gpu_pm4_barrier_profile_t){
++        .shader = shader,
++        .release = lower_writeback | system_scope,
++        .acquire = shader | system_scope,
++        .command_processor_bypasses_l2 = !gfx11,
++    };
++    return iree_ok_status();
++  }
+   *out_profile = (iree_hal_amd_gpu_pm4_barrier_profile_t){
+       .shader = shader,
+       .release =
+diff --git a/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/launch.c b/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/launch.c
+index 76ec78e7fb..6d8bd0c915 100644
+--- a/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/launch.c
++++ b/runtime/src/iree/hal/driver/amd/gpu/queue/pm4/launch.c
+@@ -1,3 +1,4 @@
++#include <stdlib.h>
+ // Copyright 2026 The IREE Authors
+ //
+ // Licensed under the Apache License v2.0 with LLVM Exceptions.
+@@ -137,6 +138,20 @@ iree_status_t iree_hal_amd_gpu_pm4_launch_initialize(
+     launch.requirements |=
+         IREE_HAL_AMD_GPU_PM4_LAUNCH_REQUIREMENT_QUEUE_POINTER;
+   }
++  // Probe patch: HRX_PROBE_INITIATOR_OR / HRX_PROBE_LIMITS_OR (hex) add bits to
++  // COMPUTE_DISPATCH_INITIATOR and COMPUTE_RESOURCE_LIMITS.
++  const char* probe_initiator = getenv("HRX_PROBE_INITIATOR_OR");
++  if (probe_initiator && probe_initiator[0]) {
++    launch.dispatch_initiator |= (uint32_t)strtoul(probe_initiator, NULL, 16);
++  }
++  // Probe patch: HRX_PROBE_INST_PREF=<0..63> overrides RSRC3.INST_PREF_SIZE
++  // (gfx11 bits 9:4).
++  const char* probe_pref = getenv("HRX_PROBE_INST_PREF");
++  if (probe_pref && probe_pref[0] && !gfx125) {
++    const uint32_t pref = (uint32_t)strtoul(probe_pref, NULL, 10) & 0x3fu;
++    launch.resources.resource3 =
++        (launch.resources.resource3 & ~(0x3fu << 4)) | (pref << 4);
++  }
+   *out_launch = launch;
+   return iree_ok_status();
+ }
+@@ -170,7 +185,11 @@ uint32_t* iree_hal_amd_gpu_pm4_launch_emit(
+   const uint32_t wave_count =
+       (workitem_count + (1u << launch->wavefront_size_log2) - 1u) >>
+       launch->wavefront_size_log2;
+-  const uint32_t resource_limits = wave_count % 4 == 0 ? 1u << 22 : 0;
++  uint32_t resource_limits = wave_count % 4 == 0 ? 1u << 22 : 0;
++  const char* probe_limits = getenv("HRX_PROBE_LIMITS_OR");
++  if (probe_limits && probe_limits[0]) {
++    resource_limits |= (uint32_t)strtoul(probe_limits, NULL, 16);
++  }
+   words =
+       iree_hal_amd_gpu_pm4_emit_registers(words, 0x2e15, 1, &resource_limits);
+   // Stop before PIPELINESTAT_ENABLE/PERFCOUNT_ENABLE. Those are native context
+diff --git a/runtime/src/iree/tooling/profile/reader.c b/runtime/src/iree/tooling/profile/reader.c
+index 853296546d..d08ff89a94 100644
+--- a/runtime/src/iree/tooling/profile/reader.c
++++ b/runtime/src/iree/tooling/profile/reader.c
+@@ -4,6 +4,7 @@
+ // See https://llvm.org/LICENSE.txt for license information.
+ // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+ 
++#include <stdlib.h>
+ #include "iree/tooling/profile/reader.h"
+ 
+ #include <inttypes.h>
+@@ -345,7 +346,8 @@ iree_status_t iree_profile_file_for_each_record(
+       ++record_index;
+     }
+   }
+-  if (iree_status_is_ok(status) && validate_session_lifecycle) {
++  if (iree_status_is_ok(status) && validate_session_lifecycle &&
++      !getenv("IREE_PROFILE_ALLOW_OPEN_SESSION")) {
+     for (iree_host_size_t i = 0; i < session_count; ++i) {
+       if (sessions[i].is_active) {
+         status = iree_make_status(

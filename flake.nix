@@ -264,8 +264,12 @@
             src = mkFilteredSource {
               directories = [
                 "src/core/rust"
+                "src/core/audio_decode"
+                "src/core/base64"
                 "src/core/png_decode"
+                "src/core/resample"
                 "src/core/wav_decode"
+                "src/core/websocket"
               ];
               files = [
                 "rust-toolchain.toml"
@@ -308,9 +312,8 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
@@ -431,9 +434,8 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
@@ -728,6 +730,17 @@
           };
           llama-cpp-reference = llamaReferences.${system}.release;
           llama-cpp-mtp-reference = llamaReferences.${system}.mtp;
+          # Experimental HRX HIP runtime and Gufo wrapped to run on it; not
+          # part of releases or hosted checks (docs/internal/hrx-migration.md).
+          hrx = pkgs.${system}.callPackage ./.devops/nix/hrx {
+            rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
+          };
+          # HRX with Loom's compiler and serving tools for GPU and NPU.
+          hrx-loom = self.packages.${system}.hrx.override { withLoom = true; };
+          gufo-hrx = pkgs.${system}.callPackage ./.devops/nix/hrx/gufo.nix {
+            gufo = base;
+            hrx = self.packages.${system}.hrx;
+          };
         }
       );
 

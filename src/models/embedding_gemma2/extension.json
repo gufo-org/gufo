@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "embedding_gemma2",
   "version": "0.1.0",
-  "api_version": ">= 0.2.0",
+  "api_version": ">= 0.3.0",
   "entry": "embedding_gemma2_register",
   "registration_target": "gufo_embedding_gemma2",
   "depends": [],
@@ -49,16 +49,6 @@
     }
   },
   "packages": [
-    {
-      "pkg_config": "sndfile",
-      "nix": "libsndfile",
-      "windows": "libsndfile"
-    },
-    {
-      "pkg_config": "soxr",
-      "nix": "soxr",
-      "windows": "soxr"
-    },
     {
       "pkg_config": "libavformat",
       "nix": "ffmpeg-headless",

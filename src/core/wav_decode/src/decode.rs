@@ -1,24 +1,36 @@
 //! RIFF WAV with interleaved integer PCM or 32-bit float samples, decoded to
-//! `f32` in [-1, 1]. Chunks are walked like the C++ decoders this replaces:
+//! `f32` in [-1, 1]. Chunks are walked like the C++ decoders this replaced:
 //! unknown chunks are skipped, the last `fmt ` and `data` chunks win, and a
 //! chunk that claims more bytes than follow is an error.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    /// Under 44 bytes, or no RIFF/WAVE header.
     NotRiff,
+    /// A chunk claims more bytes than follow.
     Truncated,
+    /// A `fmt ` chunk under 16 bytes.
     InvalidFmt,
+    /// A format tag other than integer PCM or IEEE float.
     UnsupportedFormat,
+    /// Channels or sample rate outside the limits, or zero.
+    OutOfBounds,
+    /// No `data` chunk, or an empty one.
+    NoData,
+    /// A sample width the limits do not accept, or a block alignment that
+    /// does not match it.
     UnsupportedLayout,
     TooLong,
     NonFinite,
 }
 
 /// What a caller accepts. Integer PCM is decoded from 16 bits up to
-/// `max_pcm_bits` (16, 24 or 32); 32-bit float always.
+/// `max_pcm_bits` (16, 24 or 32); 32-bit float always. A sample rate of 0 is
+/// rejected whatever `min_sample_rate` says.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_channels: u32,
+    pub min_sample_rate: u32,
     pub max_sample_rate: u32,
     pub max_seconds: u64,
     pub max_pcm_bits: u32,
@@ -96,14 +108,18 @@ pub fn parse<'a>(bytes: &'a [u8], limits: &Limits) -> Result<Wav<'a>, Error> {
         offset = body + padded;
     }
 
-    if (format != FORMAT_PCM && format != FORMAT_FLOAT)
-        || channels == 0
-        || u32::from(channels) > limits.max_channels
-        || sample_rate == 0
-        || sample_rate > limits.max_sample_rate
-        || data.is_empty()
-    {
+    if format != FORMAT_PCM && format != FORMAT_FLOAT {
         return Err(Error::UnsupportedFormat);
+    }
+    if channels == 0
+        || u32::from(channels) > limits.max_channels
+        || sample_rate < limits.min_sample_rate.max(1)
+        || sample_rate > limits.max_sample_rate
+    {
+        return Err(Error::OutOfBounds);
+    }
+    if data.is_empty() {
+        return Err(Error::NoData);
     }
     let encoding = match (format, u32::from(bits_per_sample)) {
         (FORMAT_PCM, 16) => Encoding::Pcm16,
@@ -118,8 +134,9 @@ pub fn parse<'a>(bytes: &'a [u8], limits: &Limits) -> Result<Wav<'a>, Error> {
     {
         return Err(Error::UnsupportedLayout);
     }
+    // `data` holds at least one whole frame here.
     let frames = (data.len() / block_align) as u64;
-    if frames == 0 || frames > limits.max_seconds.saturating_mul(u64::from(sample_rate)) {
+    if frames > limits.max_seconds.saturating_mul(u64::from(sample_rate)) {
         return Err(Error::TooLong);
     }
     Ok(Wav {
@@ -145,13 +162,14 @@ impl Wav<'_> {
         }
     }
 
-    /// Integer PCM is divided by 2^(bits - 1); floats must be finite and are
-    /// clamped to [-1, 1]. `out` holds `samples()` values; its contents are
-    /// unspecified on error.
-    pub fn decode(&self, out: &mut [f32]) -> Result<(), Error> {
-        assert_eq!(out.len(), self.samples(), "output length");
+    /// Decodes the interleaved samples from `first` on into `out`. Integer
+    /// PCM is divided by 2^(bits - 1); floats must be finite and are clamped
+    /// to [-1, 1]. The contents of `out` are unspecified on error.
+    pub fn decode(&self, first: usize, out: &mut [f32]) -> Result<(), Error> {
         let width = self.bytes_per_sample();
-        let samples = out.iter_mut().zip(self.data.chunks_exact(width));
+        assert!(first + out.len() <= self.samples(), "sample range");
+        let data = &self.data[first * width..(first + out.len()) * width];
+        let samples = out.iter_mut().zip(data.chunks_exact(width));
         match self.encoding {
             Encoding::Pcm16 => {
                 for (out, b) in samples {
@@ -190,6 +208,7 @@ mod tests {
 
     const SHORT: Limits = Limits {
         max_channels: 8,
+        min_sample_rate: 1,
         max_sample_rate: 192_000,
         max_seconds: 30,
         max_pcm_bits: 16,
@@ -237,7 +256,10 @@ mod tests {
     fn decode(bytes: &[u8], limits: &Limits) -> Result<Vec<f32>, Error> {
         let wav = parse(bytes, limits)?;
         let mut out = vec![0.0; wav.samples()];
-        wav.decode(&mut out)?;
+        // In two parts, as gufo-audio-decode decodes in blocks.
+        let (head, tail) = out.split_at_mut(wav.samples() / 2);
+        wav.decode(0, head)?;
+        wav.decode(head.len(), tail)?;
         Ok(out)
     }
 
@@ -293,10 +315,21 @@ mod tests {
 
     #[test]
     fn formats_and_lengths_respect_the_limits() {
+        let alaw = wav(6, 1, 8_000, 8, &[0; 2]);
+        assert_eq!(decode(&alaw, &SHORT), Err(Error::UnsupportedFormat));
         let nine = wav(1, 9, 8_000, 16, &[0; 18]);
-        assert_eq!(decode(&nine, &SHORT), Err(Error::UnsupportedFormat));
+        assert_eq!(decode(&nine, &SHORT), Err(Error::OutOfBounds));
         let fast = wav(1, 1, 192_001, 16, &[0; 2]);
-        assert_eq!(decode(&fast, &SHORT), Err(Error::UnsupportedFormat));
+        assert_eq!(decode(&fast, &SHORT), Err(Error::OutOfBounds));
+        let slow = wav(1, 1, 7_999, 16, &[0; 2]);
+        let eight_khz = Limits {
+            min_sample_rate: 8_000,
+            ..SHORT
+        };
+        assert_eq!(decode(&slow, &eight_khz), Err(Error::OutOfBounds));
+        assert_eq!(decode(&slow, &SHORT).unwrap().len(), 1);
+        let silent = riff(&[fmt(1, 1, 8_000, 16), chunk(b"data", &[])]);
+        assert_eq!(decode(&silent, &SHORT), Err(Error::NoData));
         let mut misaligned = wav(1, 2, 8_000, 16, &[0; 6]);
         assert_eq!(decode(&misaligned, &SHORT), Err(Error::UnsupportedLayout));
         misaligned[32] = 3; // block_align

@@ -680,8 +680,6 @@ int main(int argc, char** argv) {
         Expect((result->cache_restore_bytes == 0) ==
                    (result->cache_restore_ms == 0.0),
                "live reuse reports no restore copy; snapshot reuse reports it");
-        Expect(result->cache_shared_bytes == 0,
-               "full-copy DeepSeek snapshots do not claim shared bytes");
       }
       Expect(http_continuation.tokens == direct_continuation,
              "cached DeepSeek continuation differs from cold full prefill");

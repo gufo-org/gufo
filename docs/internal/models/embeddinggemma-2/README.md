@@ -82,14 +82,31 @@ The contract follows llama.cpp at `68d9053afd4f4d0752ced6187585f862355a40be`:
 Raw base64, base64 audio data URLs and public HTTPS URLs are supported. Local
 files and private network destinations are refused. Audio data URL media types
 are `audio/wav`, `audio/x-wav`, `audio/mpeg`, `audio/mp3`, `audio/flac`, and
-`audio/ogg`. Supported containers are WAV (PCM or float), FLAC, MP3, and Ogg.
+`audio/ogg`. Supported formats are WAV (integer PCM, float, A-law, mu-law,
+IMA or Microsoft ADPCM), FLAC, MP3 (MPEG audio layers I to III), and Ogg
+Vorbis or Opus.
 Audio and images share the request's 20 MiB encoded-byte and 15-second read
 budgets. At most 32 clips are accepted, each at most 30 seconds, 8 channels,
 and 8–192 kHz; decoding also has a 15-second deadline. The HTTP body limit applies.
 
-The decoder pins the official processor's `librosa` backend: libsndfile float32,
-arithmetic channel mean, SOXR HQ resampling to 16 kHz, then zero padding to the
-ceil sample length. There is no waveform amplitude normalization. The model
+The decoder follows the official processor's `librosa` backend: libsndfile
+float32, arithmetic channel mean, SOXR HQ resampling to 16 kHz, then zero
+padding to the ceil sample length. Gufo decodes in Rust (`core::DecodeAudio`
+with `downmix_mono`, which mixes each block as it arrives, and `Resample`):
+symphonia with libsndfile's float scale, libopus
+for Ogg Opus at the rate and gain libsndfile chooses, and its own resampler
+with SOXR HQ's response (linear phase, flat to 0.913 of the lower Nyquist
+frequency, stopband from it, 130 dB). As of November 2026, decoded samples match libsndfile 1.2.2
+exactly for WAV, FLAC and Ogg Opus and within -126 dB of error energy for MP3
+and Vorbis. IMA ADPCM follows FFmpeg instead (-29 to -49 dB), and an MP3 cut
+mid-stream differs in its first frame. Against librosa 1.0.0 on real
+recordings, the 16 kHz waveform is within -60 to -87 dB of error energy for
+speech and music, and -73 dB for the median of the 2,000 ESC-50 clips (-40 dB
+for the worst). The first output sample of a stream that starts abruptly at
+22.05, 44.1 or 96 kHz differs by up to 0.025, because soxr starts its
+two-stage plan differently; from the third sample on, the error is at most
+6.6e-3. There is no waveform amplitude
+normalization. The model
 frontend uses 320-sample periodic Hann windows and a 160-sample hop, a 512-point
 magnitude FFT, 128 HTK mel filters and `log(mel + 0.001)`. Semicausal left padding,
 128-sample waveform padding, full-frame masks and two stride-2 subsampling masks

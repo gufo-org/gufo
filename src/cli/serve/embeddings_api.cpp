@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/base64.hpp"
 #include "src/core/json.hpp"
 
 namespace gufo::server {
@@ -68,24 +69,6 @@ HttpResponse BadRequest(std::string message, std::string code) {
   return Error(400, std::move(message), std::move(code));
 }
 
-std::string Base64(std::span<const std::uint8_t> bytes) {
-  constexpr std::string_view alphabet =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string output;
-  output.reserve((bytes.size() + 2U) / 3U * 4U);
-  for (std::size_t i = 0; i < bytes.size(); i += 3U) {
-    const std::uint32_t word =
-        (std::uint32_t{bytes[i]} << 16U) |
-        (i + 1U < bytes.size() ? std::uint32_t{bytes[i + 1U]} << 8U : 0U) |
-        (i + 2U < bytes.size() ? std::uint32_t{bytes[i + 2U]} : 0U);
-    output += alphabet[(word >> 18U) & 63U];
-    output += alphabet[(word >> 12U) & 63U];
-    output += i + 1U < bytes.size() ? alphabet[(word >> 6U) & 63U] : '=';
-    output += i + 2U < bytes.size() ? alphabet[word & 63U] : '=';
-  }
-  return output;
-}
-
 /// Little-endian IEEE-754 binary32, as OpenAI's base64 format specifies.
 std::string EncodeBase64Floats(std::span<const float> values) {
   std::vector<std::uint8_t> bytes;
@@ -96,7 +79,7 @@ std::string EncodeBase64Floats(std::span<const float> values) {
       bytes.push_back(static_cast<std::uint8_t>((bits >> shift) & 0xFFU));
     }
   }
-  return Base64(bytes);
+  return core::EncodeBase64(bytes);
 }
 
 /// Shortest decimal text that parses back to the same float.

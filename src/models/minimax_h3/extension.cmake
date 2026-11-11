@@ -4,9 +4,11 @@ gufo_extension_target(
   NAME gufo_minimax_h3
   SOURCES
     audio_vae.cpp
+    conditioning.cpp
     denoiser.cpp
     dit.cpp
     generation.cpp
+    image_processor.cpp
     json.cpp
     media.cpp
     prompt_encoder.cpp
@@ -15,6 +17,7 @@ gufo_extension_target(
     sha256.cpp
     tokenizer.cpp
     video_vae.cpp
+    video_vae_encoder.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
@@ -51,6 +54,8 @@ if(TARGET gufo_minimax_h3_hip)
       prompt_encoder.hip
       sampling.hip
       video_vae.hip
+      video_vae_encoder.hip
+      vision_tower.hip
       attention.hip
   )
   target_compile_definitions(gufo_minimax_h3_hip PUBLIC ENGINE_ENABLE_HIP=1)

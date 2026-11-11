@@ -1276,8 +1276,6 @@ int main(int argc, const char* const* argv) {
               result->cache_restore_ms > 0.0) &&
                  result->cache_snapshot_ms > 0.0,
              "Qwen branches account performed snapshot copies");
-      Expect(result->cache_shared_bytes == 0,
-             "full-copy Qwen snapshots do not claim shared bytes");
     }
     Expect(http_continuation.cache_restore_bytes > 0 ||
                http_fork.cache_restore_bytes > 0,

@@ -11,12 +11,13 @@
 #include <numbers>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "gufo/ext/wav.hpp"
+#include "gufo/ext/audio.hpp"
 
 namespace gufo::models::qwen3_asr {
 namespace {
@@ -33,31 +34,48 @@ void SetError(std::string* error, std::string message) {
   }
 }
 
-constexpr core::WavLimits kWavLimits{
+constexpr core::AudioLimits kWavLimits{
     .max_channels = 8,
     .max_sample_rate = 192000,
     .max_seconds = kMaximumSeconds,
     .max_pcm_bits = 32,
 };
 
-constexpr core::WavMessages kWavMessages{
-    .not_riff = "Qwen3-ASR input must be a RIFF WAV",
-    .truncated = "Qwen3-ASR WAV is truncated",
-    .invalid_fmt = "Qwen3-ASR WAV fmt chunk is invalid",
-    .unsupported_format = "Qwen3-ASR WAV format is unsupported",
-    .unsupported_layout =
-        "Qwen3-ASR supports PCM16/24/32 or float32 interleaved WAV",
-    .too_long = "Qwen3-ASR WAV must be at most 30 minutes",
-    .non_finite = "Qwen3-ASR WAV contains non-finite samples",
-};
+std::string_view WavMessage(core::AudioStatus status) {
+  switch (status) {
+    case core::AudioStatus::kUnrecognized:
+      return "Qwen3-ASR input must be a RIFF WAV";
+    case core::AudioStatus::kMalformedHeader:
+      return "Qwen3-ASR WAV fmt chunk is invalid";
+    case core::AudioStatus::kUnsupportedCodec:
+    case core::AudioStatus::kOutOfBounds:
+    case core::AudioStatus::kNoAudio:
+      return "Qwen3-ASR WAV format is unsupported";
+    case core::AudioStatus::kUnsupportedLayout:
+      return "Qwen3-ASR supports PCM16/24/32 or float32 interleaved WAV";
+    case core::AudioStatus::kTooLong:
+      return "Qwen3-ASR WAV must be at most 30 minutes";
+    case core::AudioStatus::kTruncated:
+      return "Qwen3-ASR WAV is truncated";
+    case core::AudioStatus::kNonFinite:
+      return "Qwen3-ASR WAV contains non-finite samples";
+    case core::AudioStatus::kStopped:
+      break;
+  }
+  return "Qwen3-ASR WAV could not be decoded";
+}
 
 AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
-  core::WavAudio wav = core::DecodeWav(bytes, kWavLimits, kWavMessages);
-  return AudioBuffer{
-      .sample_rate = wav.sample_rate,
-      .channels = wav.channels,
-      .samples = std::move(wav.samples),
-  };
+  try {
+    core::DecodedAudio wav = core::DecodeAudio(bytes, kWavLimits);
+    return AudioBuffer{
+        .sample_rate = wav.sample_rate,
+        .channels = wav.channels,
+        .samples = std::move(wav.samples),
+    };
+  } catch (const core::AudioError& error) {
+    throw std::invalid_argument(std::string(WavMessage(error.status())));
+  }
 }
 
 std::int64_t ReflectIndex(std::int64_t index, std::int64_t length) {

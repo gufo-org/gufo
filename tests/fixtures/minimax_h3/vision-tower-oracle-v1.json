@@ -1,0 +1,90 @@
+{
+  "schema": "gufo.minimax-h3-vision-tower-golden.v1",
+  "model_revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+  "reference": "transformers Qwen3VLVisionModel @ 5.22.1",
+  "image": {
+    "path": "video-vae-encoder-keyframe-512.png",
+    "sha256": "cfea214dd642604fe701481c6f26030de01f03586eadd917af52341099e5e894",
+    "width": 512,
+    "height": 512
+  },
+  "grid_thw": [
+    1,
+    32,
+    32
+  ],
+  "geometry": {
+    "rows": 1024,
+    "columns": 1536,
+    "merged_rows": 256,
+    "out_hidden_size": 5120
+  },
+  "arithmetic": {
+    "model_dtype": "bfloat16",
+    "pixel_values": "f32 upstream (uint8/255 - 0.5) / 0.5, merge-block row order, layout ((c*2+t)*16+y)*16+x",
+    "attention": "full block-diagonal (single image); f32 score/P path",
+    "deepstack": "mergers after blocks 8/16/24, postshuffle norm",
+    "noise_floor": "bf16 GEMM ordering drift per block against the CPU torch reference; structural layout bugs fail L2 by >40x"
+  },
+  "quality_bounds": {
+    "relative_l2": 0.05,
+    "relative_max": 2.0
+  },
+  "files": {
+    "video-vision-pixels.f32": {
+      "bytes": 6291456,
+      "dtype": "F32",
+      "shape": [
+        1024,
+        1536
+      ],
+      "sha256": "d96a58532b570bc7c6cb041c95cbfaf3de20ddacad65e2d7489bb71fe7756e9a"
+    },
+    "video-vision-output.f32": {
+      "bytes": 5242880,
+      "dtype": "F32",
+      "shape": [
+        256,
+        5120
+      ],
+      "sha256": "9a3252fe7ab35139ad56a251171e11bef56ea3b66db853cbe0a93234459c0274"
+    },
+    "video-vision-deep-0.f32": {
+      "bytes": 5242880,
+      "dtype": "F32",
+      "shape": [
+        256,
+        5120
+      ],
+      "sha256": "831240400cdb3e7e79052dee33e93c7205db52263249db93dd7afcd6309f2787"
+    },
+    "video-vision-deep-1.f32": {
+      "bytes": 5242880,
+      "dtype": "F32",
+      "shape": [
+        256,
+        5120
+      ],
+      "sha256": "4964be596e1b1e0092572134de5e07e09d5932f3774b8f004a471c9608aa4bf9"
+    },
+    "video-vision-deep-2.f32": {
+      "bytes": 5242880,
+      "dtype": "F32",
+      "shape": [
+        256,
+        5120
+      ],
+      "sha256": "127554be4e4df9e65a20be1c63e7ddfceb54624ccd546599ac792025801aa803"
+    },
+    "video-vae-encoder-keyframe-512.png": {
+      "bytes": 788084,
+      "dtype": "uint8-PNG",
+      "shape": [
+        512,
+        512,
+        3
+      ],
+      "sha256": "cfea214dd642604fe701481c6f26030de01f03586eadd917af52341099e5e894"
+    }
+  }
+}

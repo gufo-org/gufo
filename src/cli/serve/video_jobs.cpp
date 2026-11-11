@@ -237,9 +237,66 @@ bool WriteAtomic(const std::filesystem::path& path, std::string_view contents,
   return true;
 }
 
+// Persisted job.json schema. v2 (issue #177) adds an optional "keyframes"
+// provenance object; RecoverJobs() still accepts v1 so pre-keyframe completed
+// jobs resurrect unchanged.
+constexpr std::string_view kVideoJobSchema = "gufo.video-job.v2";
+constexpr std::string_view kLegacyVideoJobSchema = "gufo.video-job.v1";
+constexpr std::string_view kFirstFrameFileName = "first_frame.img";
+constexpr std::string_view kLastFrameFileName = "last_frame.img";
+
+/// Appends the job-directory keyframe provenance block to a JSON object
+/// (job.json and the parameters.json report share one shape).
+void AddKeyframeProvenance(json::Value& root,
+                           const VideoJobSnapshot& snapshot) {
+  if (snapshot.first_frame_sha256.empty() &&
+      snapshot.last_frame_sha256.empty()) {
+    return;
+  }
+  json::Value keyframes = json::Value::object();
+  if (!snapshot.first_frame_sha256.empty()) {
+    json::Value first = json::Value::object();
+    first["file"] = std::string(kFirstFrameFileName);
+    first["sha256"] = snapshot.first_frame_sha256;
+    keyframes["first_frame"] = std::move(first);
+  }
+  if (!snapshot.last_frame_sha256.empty()) {
+    json::Value last = json::Value::object();
+    last["file"] = std::string(kLastFrameFileName);
+    last["sha256"] = snapshot.last_frame_sha256;
+    keyframes["last_frame"] = std::move(last);
+  }
+  root["keyframes"] = std::move(keyframes);
+}
+
+/// Provider parameters report with the job's keyframe provenance merged in
+/// (issue #177). The integrator's `parameters_json` provider hook stays
+/// untouched; unknown provider payloads are passed through unmodified.
+std::string ParametersReportJson(const ext::VideoParameters& parameters,
+                                 std::uint64_t seed,
+                                 std::string_view prompt_sha256,
+                                 const VideoJobSnapshot& snapshot) {
+  const std::string base =
+      GenerationParametersJson(parameters, seed, prompt_sha256);
+  if (snapshot.first_frame_sha256.empty() &&
+      snapshot.last_frame_sha256.empty()) {
+    return base;
+  }
+  try {
+    json::Value root = json::parse(base);
+    if (!root.is_object()) {
+      return base;
+    }
+    AddKeyframeProvenance(root, snapshot);
+    return root.dump();
+  } catch (const std::exception&) {
+    return base;
+  }
+}
+
 std::string SnapshotJson(const VideoJobSnapshot& snapshot) {
   json::Value root = json::Value::object();
-  root["schema"] = "gufo.video-job.v1";
+  root["schema"] = std::string(kVideoJobSchema);
   root["id"] = snapshot.id;
   root["status"] = std::string(ToString(snapshot.status));
   root["progress"] = snapshot.progress;
@@ -258,6 +315,7 @@ std::string SnapshotJson(const VideoJobSnapshot& snapshot) {
   } else {
     root["error"] = json::Value();
   }
+  AddKeyframeProvenance(root, snapshot);
   return root.dump() + "\n";
 }
 
@@ -313,6 +371,11 @@ struct VideoJobService::Impl {
     VideoJobSnapshot snapshot;
     VideoJobRequest request;
     std::filesystem::path directory;
+    /// Staged keyframe anchors inside `directory` (issue #177); empty when
+    /// the job is text-only. They ride the directory's lifetime so DELETE,
+    /// cancellation, and TTL expiry reclaim uploaded imagery with the output.
+    std::filesystem::path first_frame_path;
+    std::filesystem::path last_frame_path;
     std::filesystem::path content_path;
     std::string media_type;
     std::atomic<bool> cancelled{false};
@@ -507,7 +570,10 @@ struct VideoJobService::Impl {
             expires_at > completed_at &&
             expires_at <=
                 static_cast<double>(std::numeric_limits<std::int64_t>::max());
-        if (value.member_str("schema") != "gufo.video-job.v1" ||
+        const std::string schema = value.member_str("schema");
+        // Accept v1 (pre-keyframe) and v2 (issue #177 provenance) snapshots.
+        if ((schema != std::string(kVideoJobSchema) &&
+             schema != std::string(kLegacyVideoJobSchema)) ||
             !IsVideoId(job->snapshot.id) || job->snapshot.id != directory_id ||
             !IsH3Model(job->snapshot.model) ||
             !ResolveDurationFrames(job->snapshot.seconds) || !valid_output ||
@@ -521,6 +587,18 @@ struct VideoJobService::Impl {
         job->snapshot.created_at = static_cast<std::int64_t>(created_at);
         job->snapshot.completed_at = static_cast<std::int64_t>(completed_at);
         job->snapshot.expires_at = static_cast<std::int64_t>(expires_at);
+        // Optional v2 keyframe provenance; v1 documents simply carry none.
+        if (const json::Value* keyframes = value.find("keyframes");
+            keyframes != nullptr && keyframes->is_object()) {
+          if (const json::Value* first = keyframes->find("first_frame");
+              first != nullptr && first->is_object()) {
+            job->snapshot.first_frame_sha256 = first->member_str("sha256");
+          }
+          if (const json::Value* last = keyframes->find("last_frame");
+              last != nullptr && last->is_object()) {
+            job->snapshot.last_frame_sha256 = last->member_str("sha256");
+          }
+        }
         if (job->snapshot.output_format == "mp4") {
           job->content_path = entry.path() / "output.mp4";
           job->media_type = "video/mp4";
@@ -652,6 +730,8 @@ struct VideoJobService::Impl {
           .prompt = {},
           .seed = job->request.seed,
           .parameters = job->request.parameters,
+          .first_frame_path = job->first_frame_path,
+          .last_frame_path = job->last_frame_path,
       };
       {
         // Delete can clear a queued/active prompt concurrently with admission.
@@ -916,6 +996,50 @@ VideoJobCreateResult VideoJobService::Create(const VideoJobRequest& request) {
       return {.result = VideoJobResult::kInvalid,
               .job = std::nullopt,
               .error = "video job destination already exists"};
+    }
+    // Stage keyframe anchors inside the job directory (issue #177). Uploaded
+    // imagery rides the directory lifetime so DELETE and TTL expiry reclaim
+    // it with the outputs; the snapshot carries SHA-256 provenance written
+    // before Persist emits job.json.
+    const auto stage_keyframe = [&](const std::vector<std::uint8_t>& png,
+                                    std::string_view filename,
+                                    std::filesystem::path* destination,
+                                    std::string* sha256_out) {
+      if (png.empty()) {
+        return true;
+      }
+      *destination = job->directory / filename;
+      std::error_code filesystem_failure;
+      std::filesystem::create_directories(job->directory, filesystem_failure);
+      if (filesystem_failure) {
+        return false;
+      }
+      std::ofstream file(*destination, std::ios::binary | std::ios::trunc);
+      if (!file) {
+        return false;
+      }
+      file.write(reinterpret_cast<const char*>(png.data()),
+                 static_cast<std::streamsize>(png.size()));
+      file.close();
+      if (!file) {
+        return false;
+      }
+      *sha256_out = crypto::Sha256Hex(
+          std::span<const std::uint8_t>(png.data(), png.size()));
+      return true;
+    };
+    if (!stage_keyframe(request.first_frame_bytes, kFirstFrameFileName,
+                        &job->first_frame_path,
+                        &job->snapshot.first_frame_sha256) ||
+        !stage_keyframe(request.last_frame_bytes, kLastFrameFileName,
+                        &job->last_frame_path,
+                        &job->snapshot.last_frame_sha256)) {
+      std::error_code ignored;
+      std::filesystem::remove_all(job->directory, ignored);
+      WipeString(&job->request.prompt);
+      return {.result = VideoJobResult::kIoError,
+              .job = std::nullopt,
+              .error = "cannot stage keyframe anchors"};
     }
     impl_->jobs.emplace(job->snapshot.id, job);
     impl_->queue.push_back(job);

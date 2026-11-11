@@ -18,8 +18,6 @@ gufo_extension_target(
     gufo_ext_runtime
     gufo_platform
     Threads::Threads
-    PkgConfig::sndfile
-    PkgConfig::soxr
 )
 
 if(TARGET gufo_embedding_gemma2)

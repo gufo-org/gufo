@@ -18,6 +18,7 @@
 #include "gufo/ext/registry.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/core/base64.hpp"
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
 #include "src/ext/image.hpp"
@@ -48,24 +49,6 @@ HttpResponse Error(int status, const std::string& message,
                                     : "Internal Server Error",
           .body = body.dump(),
           .headers = {{"Content-Type", "application/json"}}};
-}
-
-std::string Base64(std::span<const std::uint8_t> bytes) {
-  constexpr std::string_view alphabet =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string output;
-  output.reserve((bytes.size() + 2) / 3 * 4);
-  for (std::size_t i = 0; i < bytes.size(); i += 3) {
-    const std::uint32_t word =
-        (std::uint32_t(bytes[i]) << 16) |
-        (i + 1 < bytes.size() ? std::uint32_t(bytes[i + 1]) << 8 : 0) |
-        (i + 2 < bytes.size() ? bytes[i + 2] : 0);
-    output += alphabet[(word >> 18) & 63];
-    output += alphabet[(word >> 12) & 63];
-    output += i + 1 < bytes.size() ? alphabet[(word >> 6) & 63] : '=';
-    output += i + 2 < bytes.size() ? alphabet[word & 63] : '=';
-  }
-  return output;
 }
 
 std::string_view Trim(std::string_view value) {
@@ -594,7 +577,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
         }
       }
       auto item = json::Value::object();
-      item["b64_json"] = Base64(EncodePng(result.image));
+      item["b64_json"] = core::EncodeBase64(EncodePng(result.image));
       data.push_back(std::move(item));
       std::ostringstream details;
       details << "request=" << request.request_id

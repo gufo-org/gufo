@@ -398,13 +398,17 @@ bool ParseArguments(std::string_view arguments,
     *error = "tool arguments must encode a JSON object";
     return false;
   }
-  // Render typed values as the reference chat templates' tojson does (and as
-  // llama.cpp's Jinja runtime does), so a replayed call matches the tokens
-  // the model generated and its continuation checkpoint is reused.
+  // Render typed values as the reference chat templates' tojson does, so a
+  // replayed call matches the tokens the model generated and its continuation
+  // checkpoint is reused. Numbers keep the client's spelling: the one this
+  // server returned, as the model generated it. llama.cpp's Jinja runtime
+  // writes floats from their double (1.0 as 1) and misses those turns.
   for (const auto& [name, value] : parsed.members()) {
     out->push_back({
         .name = name,
-        .value = value.is_string() ? value.get_str() : value.tojson(),
+        .value = value.is_string()
+                     ? value.get_str()
+                     : value.tojson(json::Value::Numbers::kAsParsed),
         .is_string = value.is_string(),
     });
   }
@@ -1366,8 +1370,13 @@ std::size_t FramingHold(std::string_view full, std::size_t end,
   return hold;
 }
 
+// Numbers keep the spelling the model generated, as llama.cpp returns them:
+// above 2^53, and 1.0 or 1e5, a double would change the client's arguments
+// and the replayed turn. Schema checks pass kCanonical, which the native
+// number grammar reads.
 std::string ArgumentsJson(
-    std::span<const tokenization::ChatMessage::ToolArgument> arguments) {
+    std::span<const tokenization::ChatMessage::ToolArgument> arguments,
+    json::Value::Numbers numbers = json::Value::Numbers::kAsParsed) {
   json::Value object = json::Value::object();
   for (const auto& argument : arguments) {
     if (argument.is_string) {
@@ -1380,7 +1389,7 @@ std::string ArgumentsJson(
       object[argument.name] = argument.value;
     }
   }
-  return object.dump();
+  return object.dump(numbers);
 }
 
 // Qwen's XML-like arguments carry no type marker. The advertised schema is
@@ -1663,7 +1672,9 @@ void ParseQwenCalls(
           for (const auto& [name, value] : arguments->members())
             call.arguments.push_back(
                 {.name = name,
-                 .value = value.is_string() ? value.get_str() : value.dump(),
+                 .value = value.is_string()
+                              ? value.get_str()
+                              : value.dump(json::Value::Numbers::kAsParsed),
                  .is_string = value.is_string()});
           complete = true;
         }
@@ -1685,7 +1696,8 @@ void ParseQwenCalls(
           const auto grammar = sampling::JsonConstraint::Compile(
               json::parse(tool->parameters_json), false);
           auto state = grammar->Start();
-          for (const unsigned char byte : ArgumentsJson(call.arguments))
+          for (const unsigned char byte :
+               ArgumentsJson(call.arguments, json::Value::Numbers::kCanonical))
             state = grammar->Advance(state, byte);
           complete = grammar->Complete(state);
         } catch (const std::exception&) {
@@ -2212,7 +2224,9 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   metrics["cache_restore_bytes"] = result.cache_restore_bytes;
   metrics["cache_snapshot_bytes"] = result.cache_snapshot_bytes;
   metrics["cache_disk_queued_bytes"] = result.cache_disk_queued_bytes;
-  metrics["cache_shared_bytes"] = result.cache_shared_bytes;
+  // Deprecated compatibility key; remove at the next breaking release.
+  // See src/deprecated-items-to-remove-at-breaking-release.md.
+  metrics["cache_shared_bytes"] = std::size_t{0};
   metrics["cache_restore_ms"] = result.cache_restore_ms;
   metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
   metrics["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;

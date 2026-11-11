@@ -10,6 +10,7 @@
   libpng,
   libjpeg,
   libwebp,
+  libopus,
   libsndfile,
   soxr,
   openssl,
@@ -42,6 +43,9 @@ let
       else
         sourceRoot + "/src/core/png_decode/Cargo.lock";
   };
+  # The CI timing baseline builds an older revision with this definition;
+  # before the Rust audio decoder, EmbeddingGemma 2 linked libsndfile and soxr.
+  hasRustAudio = builtins.pathExists (sourceRoot + "/src/core/audio_decode/Cargo.toml");
   versionLabel = if releaseVersion == null then "development" else releaseVersion;
   packageVersion =
     if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;
@@ -119,8 +123,7 @@ stdenv.mkDerivation {
     libpng
     libjpeg
     libwebp
-    libsndfile
-    soxr
+    libopus
     openssl
     ffmpeg-headless
     rocmPackages.clr
@@ -130,6 +133,9 @@ stdenv.mkDerivation {
     rocmPackages.rocprim
     rocmPackages.rocwmma
     rocmPackages.rocblas
+  ] ++ lib.optionals (!hasRustAudio) [
+    libsndfile
+    soxr
   ];
 
   cmakeFlags = [

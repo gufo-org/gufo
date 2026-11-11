@@ -10,5 +10,7 @@ license.workspace = true
 crate-type = ["staticlib"]
 
 [dependencies]
+gufo-audio-decode = { path = "../audio_decode" }
+gufo-base64 = { path = "../base64" }
 gufo-png-decode = { path = "../png_decode" }
-gufo-wav-decode = { path = "../wav_decode" }
+gufo-websocket = { path = "../websocket" }

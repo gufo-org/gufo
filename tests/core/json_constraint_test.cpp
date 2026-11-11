@@ -1562,8 +1562,9 @@ void TestOpenNativeTools() {
 }
 
 void TestNonStrictAgentTools() {
-  // Pi's ordinary edit schema leaves nested objects open. This must not switch
-  // the entire tool set to JSON or alter the model's native chat template.
+  // Pi's ordinary edit schema omits nested additionalProperties. This must not
+  // switch the entire tool set to JSON or alter the model's native chat
+  // template.
   const auto schema = parse(R"({"type":"object","properties":{
     "path":{"type":"string"},
     "edits":{"type":"array","items":{"type":"object","properties":{
@@ -1628,7 +1629,7 @@ void TestNonStrictAgentTools() {
       auto extra = call;
       extra.replace(extra.find(edits), edits.size(),
                     R"([{"oldText":"a","newText":"b","note":{"line":3}}])");
-      assert(Accepts(*grammar, extra));
+      assert(!Accepts(*grammar, extra));
       auto missing = call;
       const auto edits_begin = missing.find(
           format == Format::kQwen ? "<parameter=edits>"
@@ -2382,7 +2383,7 @@ void TestLlamaCppToolGrammarGoldens() {
     ++rows;
     differences += explained;
   }
-  assert(rows == 688 && differences < rows / 5);
+  assert(rows == 736 && differences < rows / 5);
 }
 
 // An invented native syntax, absent from ToolFormat, with non-JSON value
@@ -2771,6 +2772,141 @@ void TestQwenFrameNewlineIsNotACloser() {
   }
 }
 
+// #1126: an escaped quote in a hallucinated extra key let repeated }]
+// remain viable string contents until max_tokens. Match llama.cpp's default
+// for objects with declared properties, including inside native parameters.
+void TestNestedToolObjectDefaults() {
+  const auto schema = parse(R"({"type":"object","properties":{
+    "revision":{"type":"string"},
+    "files":{"type":"array","items":{"type":"object","properties":{
+      "end_line":{"type":"integer"},"path":{"type":"string"},
+      "start_line":{"type":"integer"}},"required":["path"]}}},
+    "required":["revision","files"]})");
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek}) {
+    for (const bool extras : {false, true}) {
+      auto parameters = schema;
+      if (extras)
+        parameters["properties"]["files"]["items"]["additionalProperties"] =
+            true;
+      const auto grammar =
+          JsonConstraint::ToolParameters(parameters, false, format);
+      const auto argument = [&](std::string_view files) {
+        if (format == Format::kQwen)
+          return "<parameter=revision>\nabc\n</"
+                 "parameter>\n<parameter=files>\n" +
+                 std::string(files) + "\n</parameter>\n";
+        if (format == Format::kDeepSeek)
+          return "<｜DSML｜parameter name=\"revision\" string=\"true\">abc"
+                 "</｜DSML｜parameter>\n<｜DSML｜parameter name=\"files\" "
+                 "string=\"false\">" +
+                 std::string(files) + "</｜DSML｜parameter>\n";
+        return "{\"revision\":\"abc\",\"files\":" + std::string(files) + "}";
+      };
+      assert(Accepts(*grammar, argument(R"([{"path":"a"}])")));
+      assert(
+          Accepts(*grammar,
+                  argument(R"([{"end_line":100,"path":"a","start_line":1}])")));
+      assert(Accepts(*grammar, argument(R"([{"path":"a","note":1}])")) ==
+             extras);
+      // Schema order and llama.cpp's order (required first, then optional
+      // properties in schema order) are both accepted; other orders are not.
+      assert(
+          Accepts(*grammar,
+                  argument(R"([{"path":"a","end_line":100,"start_line":1}])")));
+      assert(!Accepts(
+          *grammar,
+          argument(R"([{"path":"a","start_line":1,"end_line":100}])")));
+      assert(!Accepts(*grammar, argument(R"([{"start_line":1,"path":"a"}])")));
+      auto state = grammar->Start();
+      // The actual failing key follows path/start_line, after the optional
+      // end_line slot. It must be rejected before an unbounded string begins.
+      const std::string broken =
+          R"([{"path":"a","start_line":1,"end_line\":100}]}]}])";
+      auto malformed = argument(broken);
+      malformed.resize(malformed.find(broken) + broken.size());
+      for (const unsigned char byte : malformed)
+        state = grammar->Advance(state, byte);
+      assert(state.empty() == !extras);
+    }
+  }
+}
+
+// Nested objects accept schema order and llama.cpp's order (required members
+// first, then optional ones in schema order), and no other order.
+void TestObjectMemberOrders() {
+  const auto in_order = [](const std::vector<int>& keys,
+                           const std::vector<int>& order,
+                           const std::vector<bool>& required) {
+    std::size_t i = 0;
+    for (const int key : keys) {
+      for (; i < order.size() && order[i] != key; ++i)
+        if (required[order[i]])
+          return false;
+      if (i++ == order.size())
+        return false;
+    }
+    for (; i < order.size(); ++i)
+      if (required[order[i]])
+        return false;
+    return true;
+  };
+  using Format = JsonConstraint::ToolFormat;
+  constexpr int n = 4;
+  for (unsigned pattern = 0; pattern < (1u << n); ++pattern) {
+    std::vector<bool> required(n);
+    auto item = gufo::json::Value::object();
+    item["type"] = "object";
+    item["properties"] = gufo::json::Value::object();
+    item["required"] = gufo::json::Value::array();
+    std::vector<int> schema_order, llama_order;
+    for (int i = 0; i < n; ++i) {
+      const auto name = "k" + std::to_string(i);
+      item["properties"][name] = parse(R"({"type":"integer"})");
+      required[i] = pattern >> i & 1;
+      if (required[i]) {
+        item["required"].push_back(name);
+        llama_order.push_back(i);
+      }
+      schema_order.push_back(i);
+    }
+    for (int i = 0; i < n; ++i)
+      if (!required[i])
+        llama_order.push_back(i);
+    auto schema = parse(R"({"type":"object","required":["o"]})");
+    schema["properties"] = gufo::json::Value::object();
+    schema["properties"]["o"] = item;
+    for (const auto format :
+         {Format::kJson, Format::kQwen, Format::kDeepSeek}) {
+      const auto grammar =
+          JsonConstraint::ToolParameters(schema, false, format);
+      for (unsigned subset = 0; subset < (1u << n); ++subset) {
+        std::vector<int> keys;
+        for (int i = 0; i < n; ++i)
+          if (subset >> i & 1)
+            keys.push_back(i);
+        do {
+          std::string object = "{";
+          for (const int key : keys)
+            object += (object.size() > 1 ? ",\"k" : "\"k") +
+                      std::to_string(key) + "\":1";
+          object += "}";
+          const auto text =
+              format == Format::kQwen
+                  ? "<parameter=o>\n" + object + "\n</parameter>\n"
+              : format == Format::kDeepSeek
+                  ? "<｜DSML｜parameter name=\"o\" string=\"false\">" + object +
+                        "</｜DSML｜parameter>\n"
+                  : "{\"o\":" + object + "}";
+          assert(Accepts(*grammar, text) ==
+                 (in_order(keys, schema_order, required) ||
+                  in_order(keys, llama_order, required)));
+        } while (std::ranges::next_permutation(keys).found);
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -2804,6 +2940,8 @@ int main(int argc, char** argv) {
     }
     return 0;
   }
+  TestNestedToolObjectDefaults();
+  TestObjectMemberOrders();
   TestJsonLanguage();
   TestSchemaLanguage();
   TestSchemaIntersections();

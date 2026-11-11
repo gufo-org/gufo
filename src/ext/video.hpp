@@ -38,6 +38,19 @@ struct VideoRequest {
   std::string prompt;
   std::uint64_t seed{0};
   VideoParameters parameters;
+  /// Optional keyframe conditioning anchors (issue #177). Empty paths select
+  /// the text-only path, which must stay bit-identical. When set, the file is
+  /// a PNG/JPEG/WebP image in display orientation, staged by the caller into a
+  /// location owned for the request's lifetime (server jobs stage inside the
+  /// job directory so expiry sweeps reclaim it). `first_frame_path` anchors the
+  /// first generated frame, `last_frame_path` the final frame; both may be
+  /// supplied together. With an anchor, `parameters` geometry is a size
+  /// budget: a runner may generate at the anchor's aspect ratio within it
+  /// and reports the generated canvas in its telemetry. Runners that do not
+  /// implement keyframe conditioning MUST report an error rather than
+  /// silently ignore these anchors.
+  std::filesystem::path first_frame_path;
+  std::filesystem::path last_frame_path;
 };
 
 struct VideoTelemetry {

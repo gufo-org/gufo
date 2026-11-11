@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,35 @@
 #include "src/core/gguf_reader.hpp"
 
 namespace {
+
+void TestIq4NlExact() {
+  // Independent GGML codebook. Exhaust half scales and every low/high code.
+  constexpr std::array<int, 16> codes{-127, -104, -83, -65, -49, -35, -22, -10,
+                                      1,    13,   25,  38,  53,  69,  89,  113};
+  for (std::uint32_t scale = 0; scale < 65536; ++scale) {
+    std::array<std::uint8_t, 19> bytes{};
+    const auto half = static_cast<std::uint16_t>(scale);
+    std::memcpy(bytes.data() + 1, &half, 2);
+    for (std::size_t i = 0; i < 16; ++i)
+      bytes[i + 3] = static_cast<std::uint8_t>(i | ((15 - i) << 4));
+    std::array<float, 34> out{};
+    out.front() = out.back() = 123.0F;
+    gufo::quant::DequantizeIQ4_NL(bytes.data() + 1, out.data() + 1, 32);
+    for (std::size_t i = 0; i < 32; ++i) {
+      const auto code = i < 16 ? i : 31 - i;
+      const float expected =
+          gufo::quant::Fp16ToFloat(half) * static_cast<float>(codes[code]);
+      const float actual = out[i + 1];
+      if (std::bit_cast<std::uint32_t>(actual) !=
+          std::bit_cast<std::uint32_t>(expected)) {
+        std::cerr << "IQ4_NL exact mismatch at scale " << scale << '\n';
+        std::exit(1);
+      }
+    }
+    if (out.front() != 123.0F || out.back() != 123.0F)
+      std::exit(1);
+  }
+}
 
 constexpr std::size_t kBlockElements = 256;
 
@@ -554,6 +584,7 @@ void TestDequantizeRowMatchesGgufPy() {
 }  // namespace
 
 int main() {
+  TestIq4NlExact();
   TestQ4();
   TestQ6();
   TestQ3();

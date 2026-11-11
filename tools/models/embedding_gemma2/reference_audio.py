@@ -90,6 +90,7 @@ def main():
             encoded = buffer.getvalue()
             decoded = load_audio_librosa(base64.b64encode(encoded).decode(), sampling_rate=16000)
             records.append({"name": f"{container}_{rate}_{channels}_{length}",
+                            "resampled": rate != 16000,
                             "encoded_hex": encoded.hex(), "waveform": decoded.tolist()})
         with open(args.decoder_output, "w", encoding="utf-8") as handle:
             json.dump({"transformers_revision": args.transformers_revision,
