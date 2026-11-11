@@ -8,8 +8,8 @@ qualify the newer staging runtime.
 ## Current staging integration (November 11, 2026)
 
 The experimental packages pin `gufo-org/hrx-system`'s `gufo-staging` branch
-at `e74f5d7829faca49abdc442241d108a931079635`, based on upstream
-`af0c940f77b37dcdfbb6371a0434c6c268edb108`. Each upstream candidate has an
+at `2ebcaaece8fa731cf2e14e978c9f6242540c3341`, based on upstream
+`d9cdd48346e6b4e90eb8ccb11e826535ee63bf89`. Each upstream candidate has an
 independent fix branch; staging collects them for Gufo. See the
 [branch and update workflow](../../.devops/nix/hrx/README.md).
 

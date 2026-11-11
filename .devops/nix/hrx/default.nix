@@ -22,13 +22,13 @@
 let
   # Exact commit of gufo-org/hrx-system's gufo-staging branch. Individual
   # fixes remain on independent branches for upstream review; see README.md.
-  revision = "e74f5d7829faca49abdc442241d108a931079635";
+  revision = "2ebcaaece8fa731cf2e14e978c9f6242540c3341";
 
   src = fetchFromGitHub {
     owner = "gufo-org";
     repo = "hrx-system";
     rev = revision;
-    hash = "sha256-qfV32iWGzXs8RdGbHVmhU93Dy+gVHuXBH+H6Xy5/1kk=";
+    hash = "sha256-da6x7wU4whbgVNSIaUrQsbIl0x529gyMiUQHEkTjJwc=";
   };
 
   # Every download pinned in MODULE.cmake.lock and Loom's ISA XML descriptor,
