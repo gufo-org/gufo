@@ -41,6 +41,7 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | DS4 GB10/GX10 fork | Adapted paired MoE launch code, now HIP | `MIT` | `910501e` | [xangel82/DS4](https://github.com/xangel82/DS4-GB10-GX10-DSpark-CUDA) |
 | h3.c | Adapted H3 geometry, scheduling and sampler; implementation reference | `MIT` | `8974cc055ea9c02fcd14cc27dfda3e1027c05153` | [antirez/h3.c](https://github.com/antirez/h3.c) |
 | ccv TensorOps ancestry | Attribution retained through h3.c | `BSD-3-Clause` | h3.c pin above | [liuliu/ccv](https://github.com/liuliu/ccv) |
+| Gyro trellis quantization | Vendored, unmodified reference decoder and codebook for the Flash-Next TQ2_T experts, at `src/models/qwen38_flash_next/gyro/`; [license text](licenses/gyro.txt) | `Apache-2.0` | AgentionAI Gyro (TQ2_T, GGUF id 144) | [agention-gyro](https://gitlab.com/agentionai-group/agention-gyro) |
 
 Upstream license texts are retained in `licenses/` and
 [src/models/deepseek_v4_flash/LICENSE.ds4](src/models/deepseek_v4_flash/LICENSE.ds4).

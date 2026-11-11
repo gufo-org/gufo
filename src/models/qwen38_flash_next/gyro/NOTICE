@@ -1,0 +1,13 @@
+Gyro trellis quantization reference decoder
+Copyright 2026 AgentionAI (Laurent Zuijdwijk)
+
+This directory vendors, unmodified, the normative reference decoder and
+codebook for the Gyro trellis tensor formats TQ2_T, TQK4..TQK7 and TQP5..TQP7
+(`tq_ref.c`, `tq_ref.h`, `tq_codebook.c`) from AgentionAI's Gyro project:
+
+  https://gitlab.com/agentionai-group/agention-gyro
+
+Licensed under the Apache License, Version 2.0 (see licenses/gyro.txt).
+Gufo's Flash-Next kernels in `../kernels/rocm/trellis.*` are original work that
+follows the byte-level format defined here; the CPU dequantization path uses
+this decoder as its reference.

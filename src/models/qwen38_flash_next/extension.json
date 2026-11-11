@@ -30,6 +30,26 @@
           "mtp": "--mtp-model"
         }
       }
+    },
+    {
+      "id": "flash-next-gyro-m",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:qwen4exp"
+      ],
+      "model_ids": [
+        "flash-next-gyro-m"
+      ],
+      "speculative": [
+        "mtp"
+      ],
+      "target": "gufo_qwen38_flash_next_hip",
+      "entry": "qwen38_flash_next_gyro_provider_register",
+      "serving": {
+        "draft_options": {
+          "mtp": "--mtp-model"
+        }
+      }
     }
   ],
   "options": [
@@ -42,6 +62,7 @@
         "prompt"
       ],
       "providers": [
+        "flash-next-gyro-m",
         "flash-next-q4"
       ],
       "help": "MTP draft model path for speculative decoding"
@@ -72,12 +93,16 @@
       "fixtures/"
     ]
   },
+  "licenses": [
+    "licenses/gyro.txt"
+  ],
   "vendored_paths": [
+    "src/models/qwen38_flash_next/gyro/",
     "src/models/qwen38_flash_next/kernels/rocm/mmq/"
   ],
   "docs": {
     "title": "Qwen3.8 Flash-Next",
-    "inputs": "Sharded Q4 GGUF; text/images",
+    "inputs": "Sharded Q4 GGUF or Gyro-M TQ2_T GGUF; text/images",
     "guide": "docs/models/qwen3.8-flash-next.md"
   },
   "tests": [
