@@ -34,13 +34,15 @@ class DistributionTests(unittest.TestCase):
         self.provenance = {"extensionApiVersion": "0.1.0", "selectionMode": "lock",
                            "builtExtensions": [{"name": "example", "version": "1.0.0", "source": "external"}]}
 
-    def audit(self, mode="lock", licenses=None, data=(), runtime=(), extensions=("example",)):
+    def audit(self, mode="lock", licenses=None, data=(), runtime=(), extensions=("example",),
+              require_clean_revision=False):
         def run(command, **kwargs):
             return SimpleNamespace(returncode=0, stderr="", stdout=(json.dumps(self.provenance)
                                    if "diagnose" in command else "gufo version test"))
         with patch.object(install.subprocess, "run", side_effect=run):
             return install.audit(self.binary, mode, extensions,
-                                 [self.license] if licenses is None else licenses, data, runtime)
+                                 [self.license] if licenses is None else licenses, data, runtime,
+                                 require_clean_revision)
 
     def test_install_inventory_and_hashes(self):
         report = self.audit()
@@ -75,6 +77,23 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(self.audit()["status"], "FAIL")
         self.provenance["builtExtensions"] = [{"name": "example"}]
         self.assertEqual(self.audit()["status"], "FAIL")
+
+    def test_clean_revision_requirement(self):
+        # In-tree extensions report no revision and always pass.
+        self.assertEqual(self.audit(require_clean_revision=True)["status"], "PASS")
+        external = {"name": "external", "version": "1.0.0", "source": "../external"}
+        self.provenance["builtExtensions"].append(external)
+        for fields, error in (({"revision": "unknown", "dirty": False}, "no recorded source revision"),
+                              ({"revision": "0123abc", "dirty": True}, "uncommitted changes"),
+                              ({"revision": "0123abc"}, "uncommitted changes")):
+            with self.subTest(fields=fields):
+                self.provenance["builtExtensions"][1] = external | fields
+                self.assertEqual(self.audit()["status"], "PASS")
+                report = self.audit(require_clean_revision=True)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(error, report["errors"][0])
+        self.provenance["builtExtensions"][1] = external | {"revision": "0123abc", "dirty": False}
+        self.assertEqual(self.audit(require_clean_revision=True)["status"], "PASS")
 
     def test_windows_ports_and_features(self):
         (self.root / "extensions.lock").write_text('{"extensions":["example"]}')

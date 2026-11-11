@@ -669,6 +669,70 @@ function(_gufo_provider_constant out json index enabled reason)
   set(${out} "{.id=\"${id}\", .capability=Capability::${capability_${capability}}, .keys=${keys}, .model_ids=${model_ids}, .speculative=${speculative}, .options=${option_values}, .available=${available}, .unavailable_reason=\"${reason}\", .extension=\"\"}" PARENT_SCOPE)
 endfunction()
 
+# Record the source revision of an external extension: the commit of its Git
+# work tree and whether that tree has uncommitted changes, else the revision
+# declared for its directory (a trailing "-dirty" marks uncommitted changes),
+# else "unknown". Configure reruns when the work tree's HEAD or index changes.
+function(_gufo_extension_source_revision name root declared)
+  set(revision "unknown")
+  set(dirty false)
+  find_package(Git QUIET)
+  if(Git_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${root}" ls-files --error-unmatch extension.json
+      RESULT_VARIABLE untracked OUTPUT_QUIET ERROR_QUIET)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${root}" rev-parse --verify HEAD
+      RESULT_VARIABLE no_commit OUTPUT_VARIABLE commit ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(untracked EQUAL 0 AND no_commit EQUAL 0 AND commit MATCHES "^[0-9a-f]+$")
+      set(revision "${commit}")
+      execute_process(COMMAND "${GIT_EXECUTABLE}" --no-optional-locks -C "${root}" status --porcelain
+        RESULT_VARIABLE failed OUTPUT_VARIABLE changes ERROR_QUIET)
+      if(NOT failed EQUAL 0 OR NOT "${changes}" STREQUAL "")
+        set(dirty true)
+      endif()
+      set(tracked HEAD index packed-refs logs/HEAD)
+      execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${root}" symbolic-ref -q HEAD
+        RESULT_VARIABLE detached OUTPUT_VARIABLE branch ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if(detached EQUAL 0)
+        list(APPEND tracked "${branch}")
+      endif()
+      foreach(file IN LISTS tracked)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${root}" rev-parse --git-path "${file}"
+          RESULT_VARIABLE failed OUTPUT_VARIABLE path ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+        get_filename_component(path "${path}" ABSOLUTE BASE_DIR "${root}")
+        # A missing dependency would rerun configure on every build.
+        if(failed EQUAL 0 AND EXISTS "${path}" AND NOT IS_DIRECTORY "${path}")
+          set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+        endif()
+      endforeach()
+    endif()
+  endif()
+  if(revision STREQUAL "unknown" AND NOT "${declared}" STREQUAL "")
+    if(declared MATCHES "^(.+)-dirty$")
+      set(revision "${CMAKE_MATCH_1}")
+      set(dirty true)
+    else()
+      set(revision "${declared}")
+    endif()
+  endif()
+  set_property(GLOBAL PROPERTY "GUFO_EXT_${name}_REVISION" "${revision}")
+  set_property(GLOBAL PROPERTY "GUFO_EXT_${name}_DIRTY" "${dirty}")
+endfunction()
+
+# The C++ initializer of an extension's ExtensionInfo. Only an external
+# extension records a revision.
+function(_gufo_extension_info_cpp out name version source_cpp)
+  set(info "{\"${name}\", \"${version}\", ${source_cpp}")
+  get_property(revision GLOBAL PROPERTY "GUFO_EXT_${name}_REVISION")
+  if(NOT "${revision}" STREQUAL "")
+    get_property(dirty GLOBAL PROPERTY "GUFO_EXT_${name}_DIRTY")
+    # A declared revision is free text, such as a tag name.
+    string(REPLACE "\\" "\\\\" revision "${revision}")
+    string(REPLACE "\"" "\\\"" revision "${revision}")
+    string(APPEND info ", \"${revision}\", ${dirty}")
+  endif()
+  set(${out} "${info}}" PARENT_SCOPE)
+endfunction()
+
 # Append one extension's registration to generated declarations and body, and
 # link its enabled targets into the registering target. A non-empty source
 # expression replaces the recorded source directory, for runtime-loaded modules.
@@ -692,7 +756,8 @@ function(_gufo_extension_registration out_declarations out_body target name dire
   if(kind STREQUAL library)
     _gufo_json(version "${json}" STRING version)
     file(RELATIVE_PATH source "${PROJECT_SOURCE_DIR}" "${root}")
-    string(APPEND body "  registry.BeginExtension({\"${name}\", \"${version}\", \"${source}\"});\n")
+    _gufo_extension_info_cpp(info "${name}" "${version}" "\"${source}\"")
+    string(APPEND body "  registry.BeginExtension(${info});\n")
     set(${out_declarations} "${declarations}" PARENT_SCOPE)
     set(${out_body} "${body}" PARENT_SCOPE)
     return()
@@ -708,12 +773,12 @@ function(_gufo_extension_registration out_declarations out_body target name dire
   string(REPLACE "\\" "/" source "${source}")
   string(REPLACE "\"" "\\\"" source "${source}")
   if(NOT "${source_expression}" STREQUAL "")
-    set(source_cpp "${source_expression}")
+    set(info "{\"${name}\", \"${version}\", ${source_expression}}")
   else()
-    set(source_cpp "\"${source}\"")
+    _gufo_extension_info_cpp(info "${name}" "${version}" "\"${source}\"")
   endif()
   string(APPEND declarations "#include <gufo/ext/generated/${name}_constants.hpp>\nvoid ${entry}(gufo::ext::Registry&);\n")
-  string(APPEND body "  registry.BeginExtension({\"${name}\", \"${version}\", ${source_cpp}});\n  ::${entry}(registry);\n")
+  string(APPEND body "  registry.BeginExtension(${info});\n  ::${entry}(registry);\n")
   target_link_libraries(${target} PRIVATE ${registration_target})
   set(constants "// Generated. Do not edit.\n#pragma once\n#include <gufo/ext/registry.hpp>\nnamespace gufo::ext::generated::extension_${name} {\n")
   string(JSON count LENGTH "${json}" providers)
@@ -805,7 +870,8 @@ function(gufo_target_extensions target)
       _gufo_extension_values(values "${json}" "${field}")
       _gufo_cpp_strings(${field} ${values})
     endforeach()
-    string(APPEND body "  registry.AddExcluded({{\"${name}\", \"${version}\", \"${source}\"}, ${keys}, ${model_ids}, ${options}, \"${reason}\"});\n")
+    _gufo_extension_info_cpp(info "${name}" "${version}" "\"${source}\"")
+    string(APPEND body "  registry.AddExcluded({${info}, ${keys}, ${model_ids}, ${options}, \"${reason}\"});\n")
   endforeach()
   if(ARG_LOAD_MODULES)
     # The executable defines the loader; it registers modules after built-ins.
