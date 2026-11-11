@@ -988,13 +988,17 @@ void Runtime::MergeLoras(Matrix& weight, std::span<const LoraTerm> terms) {
   Bf16ToFloat<<<Blocks(n), 256, 0, stream_>>>(Ptr(weight), w, n);
   for (const auto& term : terms) {
     const auto& patch = *term.patch;
-    if (patch.rows != weight.rows || patch.cols != weight.cols)
+    if (patch.base_row < 0 || patch.base_row + patch.rows > weight.rows ||
+        patch.cols != weight.cols)
       throw std::logic_error("LoRA patch shape mismatch: " + patch.target);
     const auto first = static_cast<std::size_t>(patch.first_row);
+    // The patch covers rows [base_row, base_row + rows) of the weight.
+    const auto count = static_cast<std::size_t>(patch.rows) * patch.cols;
+    auto* rows = w + static_cast<std::size_t>(patch.base_row) * patch.cols;
     if (patch.diff.data) {
-      const auto diff = upload(patch.diff, first * patch.cols, n);
-      BlasCheck(hipblasSaxpy(blas_, static_cast<int>(n), &term.strength,
-                             reinterpret_cast<const float*>(diff.data), 1, w,
+      const auto diff = upload(patch.diff, first * patch.cols, count);
+      BlasCheck(hipblasSaxpy(blas_, static_cast<int>(count), &term.strength,
+                             reinterpret_cast<const float*>(diff.data), 1, rows,
                              1));
       continue;
     }
@@ -1005,18 +1009,18 @@ void Runtime::MergeLoras(Matrix& weight, std::span<const LoraTerm> terms) {
     const auto* u = reinterpret_cast<const float*>(up.data);
     const auto* d = reinterpret_cast<const float*>(down.data);
     if (!patch.magnitude.data) {
-      LoraLowRank(blas_, w, u, d, patch.rows, patch.cols, patch.rank,
+      LoraLowRank(blas_, rows, u, d, patch.rows, patch.cols, patch.rank,
                   patch.scale * term.strength);
       continue;
     }
-    auto delta = Raw(n * 4);
+    auto delta = Raw(count * 4);
     auto* dw = reinterpret_cast<float*>(delta.data);
-    Check(hipMemsetAsync(dw, 0, n * 4, stream_));
+    Check(hipMemsetAsync(dw, 0, count * 4, stream_));
     LoraLowRank(blas_, dw, u, d, patch.rows, patch.cols, patch.rank,
                 patch.scale);
     const auto magnitude = upload(patch.magnitude, first, patch.rows);
-    LoraDora(w, dw, reinterpret_cast<const float*>(magnitude.data), patch.rows,
-             patch.cols, term.strength, stream_);
+    LoraDora(rows, dw, reinterpret_cast<const float*>(magnitude.data),
+             patch.rows, patch.cols, term.strength, stream_);
   }
   FloatToBf16<<<Blocks(n), 256, 0, stream_>>>(w, Ptr(weight), n);
   Check(hipGetLastError());

@@ -301,6 +301,7 @@ add_library(gufo_core STATIC
   src/core/json_constraint.cpp
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
+  src/core/lora/adapter.cpp
   src/core/sampling.cpp
   src/core/sampling_logit_row.cpp
   src/core/hip/hipblaslt_plan_database.cpp

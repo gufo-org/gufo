@@ -120,15 +120,19 @@ registered names are accepted, never paths. Seeded replay requires the same
 seed and the same `loras` list, in the same order.
 
 `GET /sdapi/v1/loras` lists the registered adapters in registration order, in
-the Automatic1111 shape plus the scales in use:
+the Automatic1111 and stable-diffusion.cpp shape plus the scales in use:
 
 ```json
 [{"name": "style", "alias": "style", "path": "style.safetensors",
+  "display_path": "style.safetensors",
   "metadata": {"format": "peft+alpha", "targets": 224, "rank": "16-16"},
   "default_scale": 0.5, "active_scale": 0.8}]
 ```
 
-`path` is the file name only; `targets` counts the base weights the adapter
+`path` is unique: the file name, or `NAME/<file name>` when several
+registered adapters share a file name. `display_path` is the file name, or
+the path given to `--lora` when shared, as stable-diffusion.cpp shows
+ambiguous files. `targets` counts the base weights the adapter
 patches, not the tensors in its file. `active_scale` reflects the adapters
 currently merged into the weights (none while a switch is running or after a
 failed one), `default_scale` the `--lora-default` set.
@@ -147,8 +151,9 @@ failed one), `default_scale` the `--lora-default` set.
 
 Scale per pair is `alpha / rank` with `alpha` from `X.alpha`, else from the
 Diffusers `lora_adapter_metadata` (`lora_alpha`, rsLoRA `alpha / sqrt(rank)`),
-else `alpha = rank`. Other metadata such as `ss_network_alpha` is ignored, as
-in ComfyUI. Targets are every transformer projection and norm weight, including
+else `alpha = rank`. A one-element `X.scale` tensor, as stable-diffusion.cpp
+reads it, is the scale itself and takes precedence over `X.alpha`. Other
+metadata such as `ss_network_alpha` is ignored, as in ComfyUI. Targets are every transformer projection and norm weight, including
 `img_in`, `txt_in`, the timestep embedder, `modulation.1`, `norm_out.linear`
 and `proj_out`. Semantics follow [ComfyUI](../../src/models/qwen_image_21/UPSTREAM.md#lora-adapters).
 

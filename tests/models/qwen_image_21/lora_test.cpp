@@ -473,6 +473,88 @@ int main() {
                                   ".lora_A.weight", ".lora_B.weight", 2, 4, 1)),
       "norm_q.lora_A.weight: low-rank pair on a 1-D tensor");
 
+  // stable-diffusion.cpp's `.scale` is the scale itself and wins over alpha.
+  {
+    auto tensors = Pair(kQ, ".lora_down.weight", ".lora_up.weight", 4, 8, 8);
+    tensors.push_back({std::string(kQ) + ".scale", {}, "F32", -0.25F});
+    tensors.push_back({std::string(kQ) + ".alpha", {}, "F32", -2.0F});
+    const LoraAdapter adapter(Write("scale.safetensors", tensors), Base);
+    assert(adapter.format() == "down-up+scale");
+    assert(Find(adapter, kQTarget).scale == 0.75F);
+  }
+  Rejects(Write("r.safetensors",
+                Join({q, {{"transformer_blocks.0.attn.to_k.scale", {}}}})),
+          "to_k.scale: alpha/dora_scale without a pair");
+
+  // The shared parser with a fused-base schema (MiniMax H3 style): to_q/k/v
+  // patch row thirds of one qkv tensor, and ff.net.0.proj stores [value,
+  // gate] while the base stores [gate, value].
+  {
+    gufo::lora::Schema schema;
+    schema.base = [](std::string_view name) {
+      if (name == "blocks.0.attn.qkv_proj.weight")
+        return std::vector<int>{24, 8};
+      if (name == "blocks.0.mlp.fc1.weight")
+        return std::vector<int>{16, 8};
+      return std::vector<int>{};
+    };
+    schema.prefixes = {"diffusion_model."};
+    schema.modules = {
+        {"blocks.0.attn.to_q", {{"blocks.0.attn.qkv_proj.weight", 0, 8}}},
+        {"blocks.0.attn.to_k", {{"blocks.0.attn.qkv_proj.weight", 8, 8}}},
+        {"blocks.0.attn.to_v", {{"blocks.0.attn.qkv_proj.weight", 16, 8}}},
+        {"blocks.0.ff.net.0.proj",
+         {{"blocks.0.mlp.fc1.weight", 8, 8},
+          {"blocks.0.mlp.fc1.weight", 0, 8}}},
+    };
+    auto tensors = Join({Pair("diffusion_model.blocks.0.attn.to_k",
+                              ".lora_A.weight", ".lora_B.weight", 2, 8, 8),
+                         Pair("blocks.0.ff.net.0.proj", ".lora_A.weight",
+                              ".lora_B.weight", 2, 16, 8)});
+    tensors.push_back({"blocks.0.attn.to_v.diff", {8, 8}});
+    tensors.push_back({"blocks.0.ff.net.0.proj.dora_scale", {16, 1}});
+    const gufo::lora::Adapter adapter(Write("fused.safetensors", tensors),
+                                      schema);
+    assert(adapter.format() == "peft+diff+dora+proj");
+    const auto& p = adapter.patches();
+    assert(p.size() == 4);
+    // Sorted by target, then base row.
+    assert(p[0].target == "blocks.0.attn.qkv_proj.weight" &&
+           p[0].base_row == 8 && p[0].rows == 8 && p[0].first_row == 0 &&
+           p[0].rank == 2);
+    assert(p[1].base_row == 16 && p[1].diff.data && p[1].first_row == 0);
+    assert(p[2].target == "blocks.0.mlp.fc1.weight" && p[2].base_row == 0 &&
+           p[2].first_row == 8 && p[2].magnitude.data);
+    assert(p[3].base_row == 8 && p[3].first_row == 0 && p[3].cols == 8);
+    const auto rejects = [](const fs::path& path,
+                            const gufo::lora::Schema& with,
+                            const std::string& expected) {
+      try {
+        gufo::lora::Adapter adapter(path, with);
+      } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find(expected) != std::string::npos;
+      }
+      return false;
+    };
+    auto overlap = schema;
+    overlap.modules["blocks.0.attn.to_k"] = {
+        {"blocks.0.attn.qkv_proj.weight", 4, 8}};
+    assert(rejects(
+        Write(
+            "overlap.safetensors",
+            Join({Pair("blocks.0.attn.to_q", ".lora_A", ".lora_B", 2, 8, 8),
+                  Pair("blocks.0.attn.to_k", ".lora_A", ".lora_B", 2, 8, 8)})),
+        overlap, "qkv_proj.weight is patched by several modules"));
+    assert(rejects(
+        Write("unknown.safetensors",
+              Pair("blocks.0.attn.to_out", ".lora_A", ".lora_B", 2, 8, 8)),
+        schema, "not a transformer module of this model"));
+    assert(rejects(
+        Write("rows.safetensors",
+              Pair("blocks.0.ff.net.0.proj", ".lora_A", ".lora_B", 2, 8, 8)),
+        schema, "(fused proj needs 2x rows)"));
+  }
+
   fs::remove_all(Directory());
   std::cout << "PASS qwen_image_21_lora_test\n";
   return 0;
