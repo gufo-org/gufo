@@ -308,7 +308,7 @@ int Run() {
     std::string bytes(random() % 48, '\0');
     for (char& byte : bytes)
       byte = static_cast<char>(random());
-    if (!bytes.empty() && stream % 2 == 0)
+    if (bytes.size() >= 2 && stream % 2 == 0)
       bytes[1] = static_cast<char>(bytes[1] | 0x80);
     Compare(totals, bytes);
   }
