@@ -85,6 +85,9 @@ public:
     bool stop_at_eos{true};
     std::vector<std::string> stop_sequences;
     bool return_progress{false};
+    /// A chat template rendered the prompt, trimming whitespace from the
+    /// edges of message content.
+    bool chat_template{false};
   };
 
   class Request {

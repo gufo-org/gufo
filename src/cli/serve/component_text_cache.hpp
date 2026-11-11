@@ -101,12 +101,14 @@ public:
   // the tokens the model sampled, and a recurrent frontier cannot rewind to
   // the first difference (#1154). When the prompt repeats the whole text of an
   // idle live frontier, replace that part with the frontier's own tokens.
-  // Whitespace the template trimmed from the ends of a message stays as the
-  // model generated it, and a frontier ending inside a prompt token continues
-  // with the rest of that token. `stable` follows the rewrite, and the prompt
-  // stays below `max_tokens`. Returns whether the prompt changed.
+  // With `trimmed` (a chat template rendered the prompt), whitespace it trimmed
+  // from the edges of a reply stays as the model generated it; whitespace
+  // missing anywhere else is an edit. A frontier ending inside a prompt token
+  // continues with the rest of that token. `stable` follows the rewrite, and
+  // the prompt stays below `max_tokens`. Returns whether the prompt changed.
   bool AlignToLiveFrontier(std::vector<ContinuationToken>& prompt,
-                           std::size_t& stable, std::size_t max_tokens) const;
+                           std::size_t& stable, std::size_t max_tokens,
+                           bool trimmed) const;
   [[nodiscard]] std::size_t capacity() const noexcept;
   // RAM the cache may retain after host limits; zero with the RAM cache off.
   [[nodiscard]] std::size_t ram_budget() const noexcept;

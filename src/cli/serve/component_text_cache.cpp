@@ -192,6 +192,10 @@ struct ComponentTextCache::Impl {
     // The live frontier's prompt, to tell whether any checkpoint covers it.
     std::vector<cache::Token> live_tokens;
     cache::Identity live_input;
+    // Edges of replies within live_tokens, where a chat template trims
+    // whitespace from message content: where a reply begins, and where it
+    // ends or its final token begins. Kept across live continuations.
+    std::vector<std::size_t> reply_starts, reply_ends;
     // Acquisition order; cold assignment replaces the oldest live frontier.
     std::uint64_t used{};
     bool busy{};
@@ -729,6 +733,8 @@ struct ComponentTextCache::Lease::Impl {
   cache::ResourceCharge edit_metadata;
   SnapshotPurpose purpose{SnapshotPurpose::kContinuation};
   std::vector<cache::Token> capture_tokens;
+  // Reply edges of the live frontier this lease continues.
+  std::vector<std::size_t> reply_starts, reply_ends;
   ContinuationLookup lookup_result;
   ComponentCacheMetrics metrics;
   Impl(ComponentTextCache::Impl* cache, ComponentTextCache::Impl::Entry* entry,
@@ -1037,6 +1043,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   cache::PrefixLookup found;
   Impl::Entry* entry = nullptr;
   std::optional<cache::BorrowedLocation> live;
+  std::vector<std::size_t> reply_starts, reply_ends;
   std::size_t common = 0;
   {
     const std::lock_guard lock(impl_->mutex);
@@ -1159,6 +1166,12 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       entry->live.reset();
       entry->live_tokens.clear();
     }
+    if (live) {
+      reply_starts = std::move(entry->reply_starts);
+      reply_ends = std::move(entry->reply_ends);
+    }
+    entry->reply_starts.clear();
+    entry->reply_ends.clear();
   }
   std::unique_ptr<Lease> lease;
   try {
@@ -1195,8 +1208,11 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       entry->durable.reset();
     }
     bool restored = bool(live);
-    if (live)
+    if (live) {
       request.cached = found.selected->boundary;
+      request.reply_starts = std::move(reply_starts);
+      request.reply_ends = std::move(reply_ends);
+    }
     // Prefill continues a checkpoint exactly only from an aligned position.
     // The complete prompt stays off the alignment for an unchanged retry,
     // which continues it without prefill; a longer prompt takes an aligned
@@ -1536,15 +1552,23 @@ struct FrontierEnd {
   std::string partial;
 };
 
+// Where a chat template may have trimmed whitespace from a reply in
+// `frontier`: at the start of a reply, or at its end or before its final
+// (end-of-turn) token. Without a template nothing was trimmed.
+struct TrimEdges {
+  std::span<const std::size_t> starts, ends;
+};
+
 // Where the text of all of `frontier` ends in `prompt`, or nothing when the
 // texts differ first. Only tokens past an ID mismatch are decoded; equal IDs
 // at a shared boundary are skipped as they are. The template trims whitespace
 // around message content, so frontier whitespace the prompt lacks matches
-// where the frontier ends or both continue with the same token.
+// only at the edges of a reply, where the frontier ends or both continue with
+// the same token. Whitespace a client removed elsewhere is an edit.
 std::optional<FrontierEnd> FrontierTextEnd(
     std::span<const ContinuationToken> frontier,
     std::span<const ContinuationToken> prompt, std::size_t common,
-    const TextModelRunner& runner) {
+    const TextModelRunner& runner, TrimEdges edges) {
   const auto piece = [&](ContinuationToken token) {
     return runner.Decode(std::span<const ContinuationToken>(&token, 1));
   };
@@ -1581,10 +1605,18 @@ std::optional<FrontierEnd> FrontierTextEnd(
       --at;
       if (!frontier_ahead || !TrimmedWhitespace(ahead))
         return std::nullopt;
+      // `ahead` is the rest of frontier token f - 1; all of it when the
+      // whitespace starts at that token.
+      const auto first = f - 1;
+      const bool whole = ahead.size() == piece(frontier[first]).size();
       while (f < frontier.size() && frontier[f] != prompt[p] &&
              TrimmedWhitespace(piece(frontier[f])))
         ++f;
       if (f < frontier.size() && frontier[f] != prompt[p])
+        return std::nullopt;
+      if (std::ranges::find(edges.ends, f) == edges.ends.end() &&
+          (!whole ||
+           std::ranges::find(edges.starts, first) == edges.starts.end()))
         return std::nullopt;
       ahead.clear();
       continue;
@@ -1601,7 +1633,7 @@ std::optional<FrontierEnd> FrontierTextEnd(
 
 bool ComponentTextCache::AlignToLiveFrontier(
     std::vector<ContinuationToken>& prompt, std::size_t& stable,
-    std::size_t max_tokens) const {
+    std::size_t max_tokens, bool trimmed) const {
   const std::lock_guard lock(impl_->mutex);
   const std::vector<ContinuationToken>* selected = nullptr;
   std::size_t seam = 0;
@@ -1620,7 +1652,10 @@ bool ComponentTextCache::AlignToLiveFrontier(
       return false;
     if (common == 0 || (selected && frontier.size() <= selected->size()))
       continue;
-    auto end = FrontierTextEnd(frontier, prompt, common, *impl_->runner);
+    const auto edges = trimmed
+                           ? TrimEdges{entry->reply_starts, entry->reply_ends}
+                           : TrimEdges{};
+    auto end = FrontierTextEnd(frontier, prompt, common, *impl_->runner, edges);
     if (!end || (stable != 0 && stable < end->prompt))
       continue;
     std::vector<ContinuationToken> tail;
@@ -2001,6 +2036,15 @@ std::size_t ComponentTextCache::Lease::Commit(
   impl_->slot.Commit();
   {
     const std::lock_guard lock(impl_->cache->mutex);
+    auto& starts = impl_->entry->reply_starts;
+    auto& ends = impl_->entry->reply_ends;
+    starts = std::move(impl_->reply_starts);
+    ends = std::move(impl_->reply_ends);
+    if (live.size() > impl_->prompt.size()) {
+      starts.push_back(impl_->prompt.size());
+      ends.push_back(live.size() - 1);
+      ends.push_back(live.size());
+    }
     impl_->entry->live_tokens = live;
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
     impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
