@@ -7,7 +7,7 @@ runs its Q4 and Q8 GGUF files, optionally sped up with the DFlash2 draft model.
 
 | File | Size | Needed for |
 | --- | --- | --- |
-| `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 16.35 GiB | Text, Q4 target |
+| `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 16.45 GiB | Text, Q4 target |
 | `Qwen3.8-27B-UD-Q8_K_XL.gguf` | 29.30 GiB | Text, Q8 target |
 | `mmproj-BF16.gguf` | | Images |
 | `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` | | DFlash2, with either target |
@@ -18,7 +18,7 @@ and image projector add their own weights.
 ```sh
 hf download unsloth/Qwen3.8-27B-GGUF \
   Qwen3.8-27B-UD-Q4_K_XL.gguf mmproj-BF16.gguf \
-  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
+  --revision ce331efc48d5722b4b8041f72793e530eae18d9b \
   --local-dir models/qwen3.8-27b
 hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
   Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
