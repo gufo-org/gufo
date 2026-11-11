@@ -64,7 +64,10 @@ lone last one) sets the canvas aspect ratio. The preset's internal canvas
 sets the size budget: its short edge and pixel count, so an anchored request
 costs about the same as the preset. Upstream's rule then rounds both axes to
 multiples of 32, which can exceed the budget by up to 3.6%, and keyframes
-must lie between 1:4 and 4:1. A 1664x928 keyframe generates at 1376x768 with
+must lie between 1:4 and 4:1. The resolved canvas must also hold the vision
+processor's 65,536-pixel minimum, below which the released processor would
+upscale the keyframe; only `dev` at extreme ratios falls short and is
+rejected. A 1664x928 keyframe generates at 1376x768 with
 `exact-1344x768` (exactly as upstream) and at 672x384 with `exact`; presets
 that upscale their output keep that scale. The geometry anchor is then
 stretched onto the canvas, which only absorbs the rounding, and a last frame

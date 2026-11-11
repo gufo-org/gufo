@@ -172,7 +172,10 @@ def main() -> int:
             "attention": "full block-diagonal (single image)",
             "deepstack": "mergers after blocks 8/16/24, postshuffle norm",
         },
-        "quality_bounds": {"relative_l2": 0.05, "relative_max": 1.5},
+        # Both sides are BF16. Against an FP32 run of this tower the oracle
+        # itself reaches relative_max 2.46 on the merger (relative_l2 0.044),
+        # so the max bound must leave room for two independent BF16 paths.
+        "quality_bounds": {"relative_l2": 0.05, "relative_max": 2.0},
         "files": files,
     }
     (out_dir / "vision-tower-oracle-v1.json").write_text(

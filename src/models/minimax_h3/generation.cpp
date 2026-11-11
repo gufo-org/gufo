@@ -508,6 +508,17 @@ std::optional<GenerationParameters> ResolveKeyframeParameters(
   if (!canvas.has_value()) {
     return std::nullopt;
   }
+  // The released processor would upscale such a keyframe before the vision
+  // tower; only the small `dev` budget and custom canvases reach this.
+  if (static_cast<std::int64_t>(canvas->width) * canvas->height <
+      image_processor::kVisionMinimumPixels) {
+    SetError(error,
+             "MiniMax H3 keyframe canvas " + std::to_string(canvas->width) +
+                 "x" + std::to_string(canvas->height) +
+                 " is below the 65536-pixel vision minimum; use a larger "
+                 "preset or size, or a keyframe closer to square");
+    return std::nullopt;
+  }
   const auto scale_axis = [](int value, int preset_output,
                              int preset_internal) {
     if (preset_output == preset_internal) {

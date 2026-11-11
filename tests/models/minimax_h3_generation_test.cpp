@@ -313,6 +313,11 @@ void TestKeyframeCanvas() {
         "a portrait keyframe resolves a portrait canvas");
   Check(!h3::ResolveKeyframeParameters(*exact, 5000, 1000, &error).has_value(),
         "keyframes beyond the released 4:1 aspect range are rejected");
+  // dev's 256x256 budget resolves a 3.7:1 keyframe to 480x128, which the
+  // released processor would upscale before the vision tower.
+  const auto dev = h3::ResolveGenerationPreset("dev", &error);
+  Check(!h3::ResolveKeyframeParameters(*dev, 1850, 500, &error).has_value(),
+        "keyframe canvases below the vision minimum are rejected");
 }
 
 void TestAtomicFrames() {

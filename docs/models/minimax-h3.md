@@ -87,7 +87,8 @@ work.
 The first frame (or a lone last frame) sets the video's aspect ratio, between
 1:4 and 4:1; the preset sets its size. A 1664 × 928 frame gives a 1376 × 768
 video with `exact-1344x768` and 672 × 384 with `exact`. A last frame next to a
-first one is cropped to fit. `fast` and `aggressive` follow the frames less
+first one is cropped to fit. With `dev`, keyframes far from square are refused
+because the video would be too small. `fast` and `aggressive` follow the frames less
 closely than `exact`.
 
 ## Limits

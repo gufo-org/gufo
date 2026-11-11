@@ -48,6 +48,11 @@ enum class KeyframeFit {
                                    std::vector<std::uint8_t>* rgb,
                                    std::string* error);
 
+// The processor's `size.shortest_edge` (smart_resize min_pixels). Below it the
+// reference upscales the keyframe before patching, which BuildKeyframeVision
+// does not reproduce, so smaller canvases are rejected.
+inline constexpr std::int64_t kVisionMinimumPixels = 65536;
+
 // Builds vision-tower rows from canvas RGB8 produced by PrepareKeyframe:
 // width/height must be multiples of 32, `rgb` covers width * height * 3
 // bytes. The single frame is duplicated across both temporal taps and each

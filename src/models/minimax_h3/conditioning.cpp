@@ -217,14 +217,15 @@ bool MixKeyframeNoise(const PreparedKeyframe& keyframe,
   // in float32 and the products keep eager float32 rounding boundaries
   // (scheduling_minimax_h3.py; before_denoise.py:958-959). Contraction into
   // FMA would shift ~1e-8 of the anchor and is amplified downstream.
+  {
 #pragma clang fp contract(off)
-  const float clean = kH3KeyframeConditionTimestep;
-  const float noisy = 1.0F - kH3KeyframeConditionTimestep;
-  for (std::size_t element = 0; element < mixed->size(); ++element) {
-    (*mixed)[element] =
-        clean * keyframe.latent[element] + noisy * augmentation[element];
+    const float clean = kH3KeyframeConditionTimestep;
+    const float noisy = 1.0F - kH3KeyframeConditionTimestep;
+    for (std::size_t element = 0; element < mixed->size(); ++element) {
+      (*mixed)[element] =
+          clean * keyframe.latent[element] + noisy * augmentation[element];
+    }
   }
-#pragma clang fp contract(on)
   return true;
 }
 

@@ -28,7 +28,7 @@
   },
   "quality_bounds": {
     "relative_l2": 0.05,
-    "relative_max": 1.5
+    "relative_max": 2.0
   },
   "files": {
     "video-vision-pixels.f32": {

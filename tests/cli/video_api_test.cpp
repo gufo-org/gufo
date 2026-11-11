@@ -384,15 +384,18 @@ void TestKeyframeAnchors(const std::filesystem::path& root) {
         "the staged anchor file exists inside the job directory");
   Check(StagedSha256(generation.first_frame_path) == png_sha,
         "staged anchor bytes are verbatim");
-  const std::filesystem::path job_json =
-      generation.first_frame_path.parent_path() / "job.json";
-  std::ifstream provenance(job_json);
-  const std::string persisted((std::istreambuf_iterator<char>(provenance)),
-                              std::istreambuf_iterator<char>());
-  Check(persisted.find("keyframes") != std::string::npos &&
-            persisted.find(png_sha) != std::string::npos,
-        "job.json records keyframe provenance");
+  // Read job.json only once the worker is done replacing it: an open handle
+  // makes the atomic replace fail on Windows.
   WaitCompleted(service, id);
+  {
+    std::ifstream provenance(generation.first_frame_path.parent_path() /
+                             "job.json");
+    const std::string persisted((std::istreambuf_iterator<char>(provenance)),
+                                std::istreambuf_iterator<char>());
+    Check(persisted.find("keyframes") != std::string::npos &&
+              persisted.find(png_sha) != std::string::npos,
+          "job.json records keyframe provenance");
+  }
   const HttpResponse deleted = Send(service, "DELETE", "/v1/videos/" + id);
   Check(deleted.status == 200 &&
             !std::filesystem::exists(generation.first_frame_path),

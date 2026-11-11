@@ -217,6 +217,10 @@ bool BuildKeyframeVision(const std::vector<std::uint8_t>& rgb, int width,
     SetError(error, "MiniMax H3 keyframe pixels do not cover the canvas");
     return false;
   }
+  if (static_cast<std::int64_t>(width) * height < kVisionMinimumPixels) {
+    SetError(error, "MiniMax H3 keyframe canvas is below the vision minimum");
+    return false;
+  }
   const auto grid_h = height / 16;
   const auto grid_w = width / 16;
   constexpr int kRowWidth = 3 * 2 * 16 * 16;  // (c, t, y, x) == 1536.
