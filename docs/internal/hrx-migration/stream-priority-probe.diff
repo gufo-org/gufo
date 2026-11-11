@@ -1,0 +1,45 @@
+diff --git a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+index c6214b1eb4..628586fbc7 100644
+--- a/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
++++ b/src/models/qwen38_flash_next/kernels/rocm/executor.cpp
+@@ -7,6 +7,7 @@
+ #include <chrono>
+ #include <cmath>
+ #include <cstddef>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <gufo/ext/experimental/managed_alloc.hpp>
+@@ -1006,12 +1007,30 @@
+   if (e->has_mtp() && !Check(gufo::hip::PrepareBatchedGPUArgmax(),
+                              "MTP argmax preparation", error_msg))
+     return nullptr;
+-  if (!Check(hipStreamCreate(&e->stream_), "hipStreamCreate", error_msg)) {
++  // PROBE (not for landing): GUFO_PROBE_STREAM_PRIORITY=main|side creates that
++  // stream at the device's greatest priority.
++  const char* probe_priority = std::getenv("GUFO_PROBE_STREAM_PRIORITY");
++  int least_priority = 0;
++  int greatest_priority = 0;
++  (void)hipDeviceGetStreamPriorityRange(&least_priority, &greatest_priority);
++  const auto create_stream = [&](hipStream_t* stream, const char* role) {
++    if (probe_priority != nullptr && std::strcmp(probe_priority, role) == 0)
++      return hipStreamCreateWithPriority(stream, hipStreamDefault,
++                                         greatest_priority);
++    return hipStreamCreate(stream);
++  };
++  if (probe_priority != nullptr)
++    std::fprintf(stderr, "probe: %s stream priority %d (range %d..%d)\n",
++                 probe_priority, greatest_priority, least_priority,
++                 greatest_priority);
++  if (!Check(create_stream(&e->stream_, "main"), "hipStreamCreate",
++             error_msg)) {
+     return nullptr;
+   }
+   if (!Check(hipEventCreateWithFlags(&e->counts_ready_, hipEventDisableTiming),
+              "expert counts event", error_msg) ||
+-      !Check(hipStreamCreate(&e->side_stream_), "side stream", error_msg) ||
++      !Check(create_stream(&e->side_stream_, "side"), "side stream",
++             error_msg) ||
+       !Check(hipEventCreateWithFlags(&e->side_start_, hipEventDisableTiming),
+              "side stream fork event", error_msg) ||
+       !Check(hipEventCreateWithFlags(&e->side_done_, hipEventDisableTiming),

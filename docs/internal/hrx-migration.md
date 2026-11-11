@@ -330,6 +330,12 @@ Flash-Next prefill validation as HIP and measures pp512 1309-1317, pp2048
 1876-1890 and tg128 30.52-30.58 tok/s (two `-r 3` runs); an idle LFM3 server
 draws 13 W at 0% GPU busy.
 
+## Experiments
+
+Experiments with HRX, Loom and libamdf, and how to rerun them, are in
+[`hrx-migration/EXPERIMENTS.md`](hrx-migration/EXPERIMENTS.md). Upstream fix
+status is tracked in #1144.
+
 ## Profiling HRX
 
 ```sh

@@ -1,0 +1,35 @@
+diff --git a/libhrx/src/binding/common/graph.c b/libhrx/src/binding/common/graph.c
+index ad848e9832..e256be63bc 100644
+--- a/libhrx/src/binding/common/graph.c
++++ b/libhrx/src/binding/common/graph.c
+@@ -2433,8 +2433,22 @@ static void iree_hal_streaming_capture_transaction_unlock(
+   *transaction = (iree_hal_streaming_capture_transaction_t){0};
+ }
+ 
++
++// Debug patch: HRX_DEBUG_CAPTURE=1 prints a backtrace where a capture is
++// invalidated, naming the HIP entry point that caused it.
++#include <execinfo.h>
++#include <stdio.h>
++#include <stdlib.h>
++static void hrx_debug_capture_invalidation(const char* where) {
++  if (!getenv("HRX_DEBUG_CAPTURE")) return;
++  void* frames[24];
++  int count = backtrace(frames, 24);
++  fprintf(stderr, "hrx capture invalidated in %s:\n", where);
++  backtrace_symbols_fd(frames, count, 2);
++}
+ static void iree_hal_streaming_capture_transaction_invalidate(
+     iree_hal_streaming_capture_transaction_t* transaction) {
++  hrx_debug_capture_invalidation("capture_transaction_invalidate");
+   iree_atomic_store(&transaction->graph->capture_state,
+                     IREE_HAL_STREAMING_GRAPH_CAPTURE_STATE_INVALIDATED,
+                     iree_memory_order_release);
+@@ -2444,6 +2458,7 @@ static void iree_hal_streaming_capture_transaction_invalidate(
+ 
+ bool iree_hal_streaming_capture_graph_invalidate(
+     iree_hal_streaming_graph_t* graph, unsigned long long capture_id) {
++  hrx_debug_capture_invalidation("capture_graph_invalidate");
+   IREE_ASSERT_ARGUMENT(graph);
+   bool invalidated = false;
+   iree_slim_mutex_lock(&graph->capture_mutex);
