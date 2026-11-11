@@ -1645,12 +1645,12 @@ bool ComponentTextCache::AlignToLiveFrontier(
   if (!selected)
     return false;
   if (Logger::Enabled(LogLevel::kDebug))
-    Logger::Debug("cache", "event=frontier_aligned frontier_tokens=" +
-                               std::to_string(selected->size()) +
-                               " prompt_seam=" + std::to_string(seam) +
-                               " split_tokens=" + std::to_string(rest.size()) +
-                               " prompt_tokens=" +
-                               std::to_string(prompt.size()));
+    Logger::Debug("cache",
+                  "event=frontier_aligned frontier_tokens=" +
+                      std::to_string(selected->size()) +
+                      " prompt_seam=" + std::to_string(seam) +
+                      " split_tokens=" + std::to_string(rest.size()) +
+                      " prompt_tokens=" + std::to_string(prompt.size()));
   if (stable != 0)
     stable = stable - seam + selected->size() + rest.size();
   std::vector<ContinuationToken> aligned;

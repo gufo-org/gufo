@@ -2685,13 +2685,14 @@ void RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers() {
 void RetokenizedAnswerContinuesTheLiveFrontier() {
   // 50 stands for <|im_end|>; the template trims whitespace before it.
   static const std::map<TextRunnerToken, std::string> pieces{
-      {20, "sk"},    {21, "\xC3\xBD"}, {22, "sk\xC3\xBD"}, {30, "L"},
-      {31, "iev"},   {32, "Lie"},      {33, "v"},          {34, "iex"},
-      {40, "."},     {41, ".\n\n"},    {42, "\n\n"},       {43, "\xE3\x80\x80"},
-      {44, " "},     {50, "<|im_end|>"}};
+      {20, "sk"},  {21, "\xC3\xBD"},  {22, "sk\xC3\xBD"}, {30, "L"},
+      {31, "iev"}, {32, "Lie"},       {33, "v"},          {34, "iex"},
+      {40, "."},   {41, ".\n\n"},     {42, "\n\n"},       {43, "\xE3\x80\x80"},
+      {44, " "},   {50, "<|im_end|>"}};
   class TextRunner final : public Runner {
   public:
-    std::vector<TextRunnerToken> Tokenize(std::string_view text) const override {
+    std::vector<TextRunnerToken> Tokenize(
+        std::string_view text) const override {
       for (const auto& [token, piece] : pieces)
         if (piece == text)
           return {token};
@@ -2737,8 +2738,8 @@ void RetokenizedAnswerContinuesTheLiveFrontier() {
 
   // finish=length on whitespace: the prompt trims it before <|im_end|>.
   assert((align({1, 40, 42}, {1, 40, 50, 6}) == Tokens{1, 40, 42, 50, 6}));
-  assert((align({1, 40, 44, 43}, {1, 40, 50, 6}) ==
-          Tokens{1, 40, 44, 43, 50, 6}));
+  assert(
+      (align({1, 40, 44, 43}, {1, 40, 50, 6}) == Tokens{1, 40, 44, 43, 50, 6}));
   // finish=stop after whitespace, and whitespace merged into punctuation.
   assert((align({1, 40, 42, 50}, {1, 40, 50, 6}) == Tokens{1, 40, 42, 50, 6}));
   assert((align({1, 41}, {1, 40, 50, 6}) == Tokens{1, 41, 50, 6}));
