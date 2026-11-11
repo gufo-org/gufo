@@ -45,6 +45,17 @@ std::shared_ptr<gufo::ext::TextModelRunner> Create(const std::string& model,
   auto runner = gufo::models::qwen::CreateQwenTextRunner(options, &error);
   if (!runner)
     throw std::runtime_error(error);
+  // Sessions allocate full-context K/V, including DFlash draft rows, when they
+  // are created, and the pool admits them through per_request_state_bytes.
+  // Charging prompt length again refuses cached follow-ups under low host
+  // headroom without any new allocation (#1157).
+  const auto claim = runner->ResourceClaim();
+  if (claim.per_request_state_bytes.value_or(0) == 0 ||
+      claim.prompt_state_bytes_per_token ||
+      claim.prompt_admission_budget_bytes ||
+      claim.prompt_admission_available_bytes)
+    throw std::runtime_error(
+        "Qwen must claim its session state and leave prompt state unclaimed");
   return runner;
 }
 

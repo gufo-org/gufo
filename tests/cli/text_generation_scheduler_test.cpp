@@ -3664,62 +3664,7 @@ void TestPromptAdmissionRollsBackFailedEnqueue() {
          "a failed enqueue does not poison the remaining prompt budget");
 }
 
-void TestPreallocatedSessionFollowUpAdmittedUnderLowHeadroom() {
-  auto control = std::make_shared<FakeControl>();
-  control->max_context = 256;
-
-  // 1. When prompt state is claimed, a follow-up request whose total prompt
-  // tokens exceed host headroom is refused with kInsufficientMemory even though
-  // the prefix was already executed and cached in the session.
-  control->prompt_state_bytes_per_token = 16;
-  control->prompt_admission_budget_bytes = 128;
-  std::size_t headroom = 128;
-  control->prompt_admission_available_bytes = [&] { return headroom; };
-
-  auto rejecting_scheduler = MakeScheduler(control, 1);
-  const auto first = rejecting_scheduler->Submit({5, 6, 7}, 1, 0.0F).Wait();
-  Expect(!first.cancelled, "initial prompt completes");
-
-  // Headroom drops below the full prompt charge (5 tokens * 16 B/token = 80 B >
-  // 64 B).
-  headroom = 64;
-  bool refused = false;
-  try {
-    (void)rejecting_scheduler->Submit({5, 6, 7, 8, 9}, 1, 0.0F);
-  } catch (const TextGenerationError& error) {
-    refused = error.code() == TextGenerationErrorCode::kInsufficientMemory &&
-              error.required_bytes() == 80 && error.remaining_bytes() == 64;
-  }
-  Expect(refused,
-         "prompt-claiming runner refuses cached follow-up when prompt charge "
-         "exceeds headroom");
-
-  // 2. Runners whose sessions preallocate their full-context KV (such as Qwen
-  // and Flash-Next) leave prompt state unclaimed because their KV storage is
-  // already committed and admitted through per_request_state_bytes.
-  // With prompt state unclaimed, follow-ups are admitted and complete even
-  // when available host headroom is zero.
-  control->prompt_state_bytes_per_token = std::nullopt;
-  control->prompt_admission_budget_bytes = std::nullopt;
-  control->prompt_admission_available_bytes = nullptr;
-
-  auto preallocated_scheduler = MakeScheduler(control, 1);
-  const auto initial =
-      preallocated_scheduler->Submit({5, 6, 7}, 1, 0.0F).Wait();
-  Expect(!initial.cancelled,
-         "initial prompt completes with preallocated session");
-
-  const auto follow_up =
-      preallocated_scheduler->Submit({5, 6, 7, 8, 9}, 1, 0.0F).Wait();
-  Expect(!follow_up.cancelled,
-         "cached follow-up is admitted and completes when prompt state is "
-         "unclaimed");
-}
-
 int main() {
-  // Log assertions in this binary match the plain "[LEVEL] [component]" text
-  // captured from a redirected sink; a TTY stderr would tint the level tag.
-  gufo::platform::SetEnv("NO_COLOR", "1");
 #if defined(ENGINE_ENABLE_HIP)
   TestBackendPreservesModelSamplingPreset();
   TestBackendRejectsInvalidSamplingDefaults();
@@ -3727,6 +3672,9 @@ int main() {
   TestTokenLogprobs();
   TestReasoningTokenCount();
   TestPublicationWaitUsesRecentSubstantialPrefill();
+  // Log assertions in this binary match the plain "[LEVEL] [component]" text
+  // captured from a redirected sink; a TTY stderr would tint the level tag.
+  gufo::platform::SetEnv("NO_COLOR", "1");
   TestProgressLoggingIsOptInAndBounded();
   TestStructuredOutputIsPreparedBeforeServing();
   TestAdmissionLoggingIsDebugTierOnly();
@@ -3830,7 +3778,6 @@ int main() {
   TestPromptStateAdmissionBudget();
   TestPromptAdmissionTracksLiveHeadroom();
   TestPromptAdmissionRollsBackFailedEnqueue();
-  TestPreallocatedSessionFollowUpAdmittedUnderLowHeadroom();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();
   TestExpiredQueuedRequestNeverConsumesState();
   TestSlowConsumerOutputIsBoundedAndReclaimed();
