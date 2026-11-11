@@ -1,7 +1,7 @@
 # Qwen-Image-2.1 implementation notes
 
 Developer detail behind the [public model page](../../../models/qwen-image-2.1.md).
-[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) · [ROCm](ROCM.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [LoRA adapters](LORA.md) · [Experiments](EXPERIMENTS.md) · [ROCm](ROCM.md)
 
 Native HIP image generation and editing on AMD Strix Halo (`gfx1151`). Loads
 BF16 safetensors directly; Python is not needed for inference. The checkpoint
