@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <semaphore>
 #include <sstream>
@@ -2678,6 +2679,151 @@ void RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers() {
     assert((runner->captures != 0) == enabled);
   }
 }
+// The model sampled "sk" "ý" and "Lie" "v"; the next prompt replays that
+// answer as text and tokenizes it as "ský" and "L" "iev" (#1154). Only the
+// live frontier holds the work, as with the RAM cache off.
+void RetokenizedAnswerContinuesTheLiveFrontier() {
+  // 50 stands for <|im_end|>; the template trims whitespace before it.
+  static const std::map<TextRunnerToken, std::string> pieces{
+      {20, "sk"},  {21, "\xC3\xBD"},  {22, "sk\xC3\xBD"}, {30, "L"},
+      {31, "iev"}, {32, "Lie"},       {33, "v"},          {34, "iex"},
+      {40, "."},   {41, ".\n\n"},     {42, "\n\n"},       {43, "\xE3\x80\x80"},
+      {44, " "},   {50, "<|im_end|>"}};
+  class TextRunner final : public Runner {
+  public:
+    std::vector<TextRunnerToken> Tokenize(
+        std::string_view text) const override {
+      for (const auto& [token, piece] : pieces)
+        if (piece == text)
+          return {token};
+      return {};
+    }
+    std::string Decode(std::span<const TextRunnerToken> tokens) const override {
+      std::string text;
+      for (const auto token : tokens) {
+        const auto found = pieces.find(token);
+        text += found != pieces.end() ? found->second
+                                      : "<" + std::to_string(token) + ">";
+      }
+      return text;
+    }
+  };
+  auto runner = std::make_shared<TextRunner>();
+  using Tokens = std::vector<TextRunnerToken>;
+  // Commits `frontier`, whose reply the model generated from `reply` on.
+  const auto commit = [&](ComponentTextCache& cache, const Tokens& frontier,
+                          std::size_t reply) {
+    const Tokens prompt(frontier.begin(), frontier.begin() + reply);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    lease->PreparePrefill(prompt.size());
+    runner->adapter->Append(state.slot, frontier, frontier);
+    (void)lease->Commit({}, {}, frontier);
+  };
+  // The prompt the cache gives `prompt` after `frontier`, or nothing.
+  const auto align = [&](const Tokens& frontier, Tokens prompt,
+                         std::size_t reply = 1,
+                         bool trimmed = true) -> std::optional<Tokens> {
+    ComponentTextCache cache(runner, 1, 0, {}, false, 0, false);
+    commit(cache, frontier, reply);
+    const auto original = prompt;
+    std::size_t stable = 0;
+    if (!cache.AlignToLiveFrontier(prompt, stable, 4096, trimmed)) {
+      assert(prompt == original && stable == 0);
+      return std::nullopt;
+    }
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->cache_hit() && lease->cached_tokens() == frontier.size());
+    lease->Invalidate();
+    return prompt;
+  };
+
+  // finish=length on whitespace: the prompt trims it before <|im_end|>.
+  assert((align({1, 40, 42}, {1, 40, 50, 6}) == Tokens{1, 40, 42, 50, 6}));
+  assert(
+      (align({1, 40, 44, 43}, {1, 40, 50, 6}) == Tokens{1, 40, 44, 43, 50, 6}));
+  // finish=stop after whitespace, and whitespace merged into punctuation.
+  assert((align({1, 40, 42, 50}, {1, 40, 50, 6}) == Tokens{1, 40, 42, 50, 6}));
+  assert((align({1, 41}, {1, 40, 50, 6}) == Tokens{1, 41, 50, 6}));
+  assert((align({1, 41, 50}, {1, 40, 50, 6}) == Tokens{1, 41, 50, 6}));
+  // Leading whitespace of a reply.
+  assert((align({1, 42, 32, 33, 50}, {1, 32, 33, 50, 6}) ==
+          Tokens{1, 42, 32, 33, 50, 6}));
+  // Cut off inside "ský": the rest of that token follows the frontier.
+  assert((align({1, 2, 20}, {1, 2, 22, 50, 6}) == Tokens{1, 2, 20, 21, 50, 6}));
+  // Whitespace is not dropped before text that differs, nor kept where the
+  // prompt continues the frontier differently.
+  assert(!align({1, 42, 5}, {1, 6}));
+  assert(!align({1, 40, 42, 5}, {1, 40, 50, 6}));
+  // Text is never dropped, only whitespace.
+  assert(!align({1, 40, 33}, {1, 40, 50, 6}));
+  // A fragment that does not tokenize back to itself ("ie" of "Lie").
+  assert(!align({1, 30}, {1, 32, 50}));
+  // Whitespace a client removed inside a reply, or from a prompt the model
+  // did not answer, is an edit, as is any whitespace without a template.
+  assert(!align({1, 40, 42, 32, 33, 50}, {1, 40, 32, 33, 50, 6}));
+  assert(!align({1, 40, 42, 32, 33, 50}, {1, 40, 32, 33, 50, 6}, 4));
+  assert(!align({1, 40, 42}, {1, 40, 50, 6}, 1, false));
+  assert(!align({1, 42, 32, 33, 50}, {1, 32, 33, 50, 6}, 1, false));
+  assert((align({1, 2, 20, 21, 50}, {1, 2, 22, 50, 6}, 1, false) ==
+          Tokens{1, 2, 20, 21, 50, 6}));
+  {
+    // A later turn: the frontier keeps the whitespace an earlier one
+    // restored, so the edges of that reply move with it.
+    ComponentTextCache cache(runner, 1, 0, {}, false, 0, false);
+    commit(cache, {1, 40, 42, 50}, 1);
+    Tokens prompt{1, 40, 50, 6};
+    std::size_t stable = 0;
+    assert(cache.AlignToLiveFrontier(prompt, stable, 4096, true));
+    assert((prompt == Tokens{1, 40, 42, 50, 6}));
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->cache_hit() && lease->cached_tokens() == 4);
+    auto& state = dynamic_cast<State&>(lease->state());
+    lease->PreparePrefill(prompt.size());
+    const Tokens tail{6, 7};
+    runner->adapter->Append(state.slot, tail, tail);
+    (void)lease->Commit({}, {}, Tokens{1, 40, 42, 50, 6, 7});
+    Tokens next{1, 40, 50, 6, 7, 8};
+    assert(cache.AlignToLiveFrontier(next, stable, 4096, true));
+    assert((next == Tokens{1, 40, 42, 50, 6, 7, 8}));
+  }
+
+  ComponentTextCache cache(runner, 1, 0, {}, false, 0, false);
+  const Tokens sampled{1, 2, 3, 20, 21, 4, 32, 33, 5};
+  commit(cache, sampled, 3);
+  const auto unchanged = [&](Tokens prompt, std::size_t stable = 0,
+                             std::size_t limit = 4096) {
+    const auto original = prompt;
+    const auto original_stable = stable;
+    const bool aligned = cache.AlignToLiveFrontier(prompt, stable, limit, true);
+    return !aligned && prompt == original && stable == original_stable;
+  };
+  // Already the frontier's own tokens.
+  assert(unchanged({1, 2, 3, 20, 21, 4, 32, 33, 5, 6}));
+  // Different text inside the answer.
+  assert(unchanged({1, 2, 3, 22, 4, 30, 34, 5, 6}));
+  // The prompt edits the frontier's last token.
+  assert(unchanged({1, 2, 3, 22, 4, 30, 31, 9, 6}));
+  // The prompt ends before the frontier's text does.
+  assert(unchanged({1, 2, 3, 22, 4, 32}));
+  // The stable boundary lies inside the replaced tokens.
+  assert(unchanged({1, 2, 3, 22, 4, 30, 31, 5, 6, 7}, 4));
+  // The aligned prompt would reach the context limit.
+  assert(unchanged({1, 2, 3, 22, 4, 30, 31, 5, 6, 7}, 0, 11));
+
+  Tokens prompt{1, 2, 3, 22, 4, 30, 31, 5, 6, 7};
+  std::size_t stable = 8;
+  assert(cache.AlignToLiveFrontier(prompt, stable, 4096, true));
+  assert((prompt == Tokens{1, 2, 3, 20, 21, 4, 32, 33, 5, 6, 7}));
+  assert(stable == 9);
+  auto lease = cache.Acquire(prompt, {}, {}, true, stable, true);
+  assert(lease->cache_hit() && lease->cached_tokens() == sampled.size());
+  // A busy frontier is not offered.
+  Tokens busy{1, 2, 3, 22, 4, 30, 31, 5, 6, 7};
+  std::size_t busy_stable = 0;
+  assert(!cache.AlignToLiveFrontier(busy, busy_stable, 4096, true));
+  lease->Invalidate();
+}
 // Disk metadata admission is independent of the RAM and disk budgets.
 // Account for a fully committed disk-capture pool without allocating its bytes.
 void RamCacheOffAllowsLargeDiskIndexMetadata() {
@@ -3187,6 +3333,7 @@ int main() {
   OverRamCaptureStagesPrivateStateUnderPressure(false);
   OverRamCaptureStagesPrivateStateUnderPressure(true);
   RamCacheOffCommitsNoBackingAndKeepsLiveFrontiers();
+  RetokenizedAnswerContinuesTheLiveFrontier();
   RamCacheOffWithDiskCommitsOnlyStagingBacking();
   HostBelowReserveRefusesUnlessRamCacheOff();
   TrimmedRamBudgetIsReported();
