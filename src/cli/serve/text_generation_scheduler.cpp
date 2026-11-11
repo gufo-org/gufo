@@ -548,6 +548,21 @@ void PrepareStructuredOutput(const TextModelRunner& runner) {
   Logger::Info("loader", line.str());
 }
 
+// Every text runner declares a scheduling profile; the policy rejects one
+// that does not.
+sched::Policy SchedulingPolicy(const std::shared_ptr<TextRunnerPool>& pool,
+                               const TextSchedulerPolicy& scheduler_policy) {
+  if (pool == nullptr) {
+    throw std::invalid_argument(
+        "text generation scheduler runner pool must not be null");
+  }
+  const auto descriptor = pool->runner().Descriptor();
+  return sched::Policy(
+      {.profile = descriptor.scheduling,
+       .incremental_prefill = descriptor.capabilities.incremental_prefill,
+       .unit_tokens = scheduler_policy.prefill_unit_tokens});
+}
+
 }  // namespace
 
 struct TextGenerationScheduler::Request::Impl {
@@ -562,11 +577,10 @@ struct TextGenerationScheduler::Request::Impl {
 
 struct TextGenerationScheduler::Impl {
   Impl(std::shared_ptr<TextRunnerPool> model_runner_pool,
-       TextPrefillPolicy model_prefill_policy,
        TextSchedulerPolicy model_scheduler_policy)
       : runner_pool(std::move(model_runner_pool)),
-        prefill_policy(model_prefill_policy),
         scheduler_policy(model_scheduler_policy),
+        policy(SchedulingPolicy(runner_pool, model_scheduler_policy)),
         output_budget(std::make_shared<OutputBudget>(
             model_scheduler_policy.max_buffered_output_bytes_total)) {
     if (runner_pool == nullptr) {
@@ -587,10 +601,6 @@ struct TextGenerationScheduler::Impl {
     }
     incremental_prefill_supported =
         runner_pool->runner().Descriptor().capabilities.incremental_prefill;
-    policy = sched::Policy(
-        {.decode_active_tokens = prefill_policy.decode_active_tokens,
-         .incremental_prefill = incremental_prefill_supported,
-         .profile = runner_pool->runner().Descriptor().scheduling});
     final_token_advance_required =
         runner_pool->runner()
             .Descriptor()
@@ -2220,7 +2230,6 @@ struct TextGenerationScheduler::Impl {
   }
 
   std::shared_ptr<TextRunnerPool> runner_pool;
-  TextPrefillPolicy prefill_policy;
   TextSchedulerPolicy scheduler_policy;
   sched::Policy policy;
   // Reused by every work-unit decision.
@@ -2419,9 +2428,8 @@ void TextGenerationScheduler::Request::Cancel() noexcept {
 
 TextGenerationScheduler::TextGenerationScheduler(
     std::shared_ptr<TextRunnerPool> runner_pool,
-    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy)
-    : impl_(std::make_unique<Impl>(std::move(runner_pool), prefill_policy,
-                                   scheduler_policy)) {}
+    TextSchedulerPolicy scheduler_policy)
+    : impl_(std::make_unique<Impl>(std::move(runner_pool), scheduler_policy)) {}
 
 TextGenerationScheduler::~TextGenerationScheduler() = default;
 
@@ -2531,8 +2539,6 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->result.prompt_tokens = prompt.size();
   request->result.token_metrics_recorded = true;
   request->result.client_id = request->client_id;
-  request->result.configured_active_prefill_tokens =
-      impl_->prefill_policy.decode_active_tokens;
   request->result.requested_logical_concurrency =
       impl_->runner_pool->capacity();
   request->result.execution_plan =

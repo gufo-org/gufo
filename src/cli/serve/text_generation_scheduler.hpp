@@ -25,18 +25,12 @@ enum class TextRequestPhase : std::uint8_t {
   kTerminal,
 };
 
-inline constexpr std::size_t kDefaultDecodeActivePrefillTokens =
-    sched::kDefaultDecodeActivePrefillTokens;
 inline constexpr std::size_t kDefaultMaxOutputBytes =
     static_cast<std::size_t>(1024) * 1024;
 inline constexpr std::size_t kDefaultMaxBufferedOutputBytes =
     static_cast<std::size_t>(64) * 1024;
 inline constexpr std::size_t kDefaultMaxBufferedOutputBytesTotal =
     static_cast<std::size_t>(256) * 1024;
-
-struct TextPrefillPolicy {
-  std::size_t decode_active_tokens{kDefaultDecodeActivePrefillTokens};
-};
 
 struct TextSchedulerPolicy {
   /// Internal cadence; idle monitoring performs no work during inference.
@@ -57,6 +51,9 @@ struct TextSchedulerPolicy {
   /// disables it.
   std::chrono::milliseconds stall_timeout{0};
   bool log_progress{false};
+  /// Internal prompt granularity of the scheduling policy
+  /// (sched::kPrefillUnitTokens); tests shrink it to keep prompts small.
+  std::size_t prefill_unit_tokens{sched::kPrefillUnitTokens};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.
@@ -123,7 +120,6 @@ public:
   };
 
   explicit TextGenerationScheduler(std::shared_ptr<TextRunnerPool> runner_pool,
-                                   TextPrefillPolicy prefill_policy = {},
                                    TextSchedulerPolicy scheduler_policy = {});
   ~TextGenerationScheduler();
 

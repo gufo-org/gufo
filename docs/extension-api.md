@@ -69,18 +69,31 @@ a pass ending at that position leaves.
 
 ## Scheduling beside decoders
 
-While other sessions decode, Gufo bounds each prompt pass so they don't wait
-for all of it. Without a profile, a runner gets short passes of 512 tokens and
-pays their overhead. A runner whose full pass takes more than about
-half a second should declare a `TextSchedulingProfile` in
-`TextRunnerDescriptor::scheduling` (header `gufo/ext/scheduling.hpp`) and split
-its passes by layers instead:
+Every text runner declares a `TextSchedulingProfile` in
+`TextRunnerDescriptor::scheduling` (header `gufo/ext/scheduling.hpp`); Gufo
+refuses to load one that leaves a field at zero. While other sessions decode,
+Gufo bounds each prompt pass with it so they don't wait for all of it:
 
 - `pass_tokens` is the width Gufo uses for a prompt beside decoders, normally
   the model's own prefill pass. A prompt running alone isn't bounded.
-- Before such a pass, Gufo calls `SetPrefillYield(groups, yield)` on the
-  prompt's state. `groups` comes from the measured time of the pass, capped at
-  `max_layer_groups` and at one group per 512 tokens.
+- `max_layer_groups` is how many layer groups one such pass may be split into.
+  One runs every pass unsplit, so decoders wait for the whole pass.
+- `max_yield_decode_width` is how many sessions one decode step between groups
+  may batch. Declare only what the loaded mode can run inside a yield.
+
+Choose the groups from the time of a full pass:
+
+- **Up to about half a second:** declare `max_layer_groups` 1. Decoders wait
+  for one pass, which is no longer than a few decode steps.
+- **Longer:** split the pass by layers. Decoders otherwise stall for the whole
+  pass: 2 s on Qwen3.8-Flash-Next, 6.5 s on Qwen3.8-27B and 8 s on DeepSeek V4
+  Flash at 4,096 tokens. Allow enough groups for about 250 ms each: the
+  in-tree models declare 8 (Flash-Next) or 16.
+
+To split, before such a pass Gufo calls `SetPrefillYield(groups, yield)` on the
+prompt's state. `groups` comes from the measured time of the pass, capped at
+`max_layer_groups` and at one group per 512 tokens.
+
 - Split the pass into about that many groups of similar **duration**, not layer
   count, with a boundary right after any wait such as an input read. Between
   groups, call `state.YieldPrefill()`: it steps every other decoding session
@@ -88,8 +101,9 @@ its passes by layers instead:
 - Every layer must do the same arithmetic as an unsplit pass, so output stays
   bit-identical. While yielding, hold no lock or scratch the decode paths use.
 
-A profile requires `incremental_prefill`. In-tree tests check a profiled runner
-with `gufo::test::CheckLayeredPrefill`
+A runner without `incremental_prefill` prefills every prompt whole in one
+unsplit pass; its profile is checked but not used. In-tree tests check a
+runner that splits passes with `gufo::test::CheckLayeredPrefill`
 (`tests/support/layered_prefill_conformance.hpp`): every token and
 log-probability must match between running alone and interleaved, on real
 weights for each mode the profile covers.

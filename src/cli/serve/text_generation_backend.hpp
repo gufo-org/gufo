@@ -211,7 +211,6 @@ public:
     std::size_t max_prefill_layer_groups{1};
     /// Decode rounds other sessions ran between those groups.
     std::size_t prefill_yield_rounds{0};
-    std::size_t configured_active_prefill_tokens{0};
     std::size_t queue_depth_at_submit{0};
     std::size_t client_queue_depth_at_submit{0};
     std::size_t resident_requests_at_admission{0};

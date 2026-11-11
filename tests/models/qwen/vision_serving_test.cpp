@@ -426,7 +426,7 @@ int main(int argc, char** argv) {
             mode_cache.draft_model_artifact_fingerprint);
       }
       Require(runner != nullptr, "failed to create runner");
-      const bool loaded = backend->load(runner, &error, 4, {}, {}, mode_cache);
+      const bool loaded = backend->load(runner, &error, 4, {}, mode_cache);
       Require(loaded, error);
       return backend;
     };
