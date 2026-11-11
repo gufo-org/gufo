@@ -178,12 +178,13 @@ public:
         Seq({Literal("\\u"), unicode}),
     });
     string_ = Seq({Byte('"'), Repeat(character), Byte('"')});
+    // As in llama.cpp, the exponent is also an integral part.
+    constexpr auto kDigits = JsonSchemaLexeme::kMaxNumberDigits;
     const auto positive =
-        Alt({Byte('0'), Seq({Range('1', '9'), Repeat(digits)})});
+        Alt({Byte('0'), Seq({Range('1', '9'), AtMost(digits, kDigits - 1)})});
     integer_ = Seq({Optional(Byte('-')), positive});
-    const auto fraction = Seq({Byte('.'), digits, Repeat(digits)});
-    const auto exponent =
-        Seq({Class("eE"), Optional(Class("+-")), digits, Repeat(digits)});
+    const auto fraction = Seq({Byte('.'), digits, AtMost(digits, kDigits - 1)});
+    const auto exponent = Seq({Class("eE"), Optional(Class("+-")), positive});
     number_ = Seq({integer_, Optional(fraction), Optional(exponent)});
     bool_ = Alt({Literal("true"), Literal("false")});
     null_ = Literal("null");
@@ -1350,21 +1351,17 @@ private:
   }
   std::uint32_t UnsignedInterval(const std::string& low,
                                  const std::optional<std::string>& high) {
+    // An open end stops at llama.cpp's 16 digits, or at the bound's length.
+    const auto top = high.value_or(std::string(
+        std::max<std::size_t>(JsonSchemaLexeme::kMaxNumberDigits, low.size()),
+        '9'));
     Sequence choices;
-    const auto last = high ? high->size() : low.size();
-    for (std::size_t length = low.size(); length <= last; ++length) {
+    for (std::size_t length = low.size(); length <= top.size(); ++length) {
       const auto first =
           length == low.size() ? low : "1" + std::string(length - 1, '0');
-      const auto end =
-          high && length == high->size() ? *high : std::string(length, '9');
+      const auto end = length == top.size() ? top : std::string(length, '9');
       if (first <= end)
         choices.push_back(DigitsBetween(first, end));
-    }
-    if (!high) {
-      Sequence longer{Range('1', '9')};
-      longer.insert(longer.end(), low.size(), Range('0', '9'));
-      longer.push_back(Repeat(Range('0', '9')));
-      choices.push_back(Seq(std::move(longer)));
     }
     if (choices.empty())
       throw JsonSchemaEmpty(

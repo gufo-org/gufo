@@ -496,8 +496,9 @@ void TestPrimitiveConstraints() {
   const auto pattern = compile(
       R"({"type":"string","pattern":"^@[a-zA-Z0-9_]+$","maxLength":6})");
   const auto positive = compile(R"({"type":"number","exclusiveMinimum":0})");
+  // The 16th decimal is the last one: it must complete the number.
   auto number_state = positive->Start();
-  for (unsigned char byte : std::string("{\"x\":0.") + std::string(4093, '0'))
+  for (unsigned char byte : std::string("{\"x\":0.") + std::string(15, '0'))
     number_state = positive->Advance(number_state, byte);
   assert(!number_state.empty());
   assert(positive->Advance(number_state, '0').empty());
@@ -760,7 +761,13 @@ void TestIntegerBoundsAndRecursion() {
   const auto large = scalar(R"("exclusiveMinimum":9007199254740992)");
   assert(!Accepts(*large, "{\"x\":9007199254740992}"));
   assert(Accepts(*large, "{\"x\":9007199254740993}"));
-  assert(Accepts(*large, "{\"x\":1000000000000000000000000000000000}"));
+  // An open upper end stops at llama.cpp's 16 digits.
+  assert(Accepts(*large, "{\"x\":9999999999999999}"));
+  assert(!Accepts(*large, "{\"x\":10000000000000000}"));
+  const auto huge = scalar(R"("minimum":1e20)");
+  assert(Accepts(*huge, "{\"x\":100000000000000000000}"));
+  assert(!Accepts(*huge, "{\"x\":99999999999999999999}"));
+  assert(!Accepts(*huge, "{\"x\":1000000000000000000000}"));
   const auto negative = scalar(R"("exclusiveMaximum":-9007199254740992)");
   assert(!Accepts(*negative, "{\"x\":-9007199254740992}"));
   assert(Accepts(*negative, "{\"x\":-9007199254740993}"));
@@ -2383,7 +2390,7 @@ void TestLlamaCppToolGrammarGoldens() {
     ++rows;
     differences += explained;
   }
-  assert(rows == 736 && differences < rows / 5);
+  assert(rows == 792 && differences < rows / 5);
 }
 
 // An invented native syntax, absent from ToolFormat, with non-JSON value
@@ -2832,6 +2839,83 @@ void TestNestedToolObjectDefaults() {
   }
 }
 
+// Issue #1166: Flash-Next wrote "start_line": 114000... until the token
+// limit. llama.cpp's integral-part and decimal-part allow at most 16 digits.
+void TestNumberDigitLimits() {
+  const auto field = [](std::string_view schema) {
+    return JsonConstraint::Compile(
+        parse(R"({"type":"object","properties":{"x":)" + std::string(schema) +
+              R"(},"required":["x"],"additionalProperties":false})"),
+        true);
+  };
+  const auto accepts = [](const JsonConstraint& grammar, std::string value) {
+    return Accepts(grammar, "{\"x\":" + value + "}");
+  };
+  const auto digits = [](std::size_t count) {
+    return "1" + std::string(count - 1, '0');
+  };
+  const auto fraction = [](std::size_t count) {
+    return "0." + std::string(count, '1');
+  };
+  for (const std::string_view schema :
+       {R"({"type":"integer"})", R"({"type":"number"})",
+        R"({"type":"integer","minimum":1})", R"({"type":"number","minimum":0})",
+        R"({"type":"integer","maximum":0})",
+        R"({"type":"integer","multipleOf":1})"}) {
+    const auto grammar = field(schema);
+    const std::string sign =
+        schema.find("maximum") != std::string_view::npos ? "-" : "";
+    assert(accepts(*grammar, sign + digits(16)));
+    assert(!accepts(*grammar, sign + digits(17)));
+    if (schema.find("integer") != std::string_view::npos)
+      continue;
+    assert(accepts(*grammar, fraction(16)));
+    assert(!accepts(*grammar, fraction(17)));
+  }
+  // Untyped tool values use the same number rule.
+  const auto untyped = JsonConstraint::ToolParameters(
+      parse(R"({"type":"object","properties":{"x":{}},"required":["x"]})"),
+      false, JsonConstraint::ToolFormat::kJson);
+  assert(accepts(*untyped, digits(16)));
+  assert(!accepts(*untyped, digits(17)));
+  assert(accepts(*untyped, fraction(16)));
+  assert(!accepts(*untyped, fraction(17)));
+  const auto number = field(R"({"type":"number"})");
+  assert(accepts(*number, "1e0"));
+  assert(accepts(*number, "1E-" + std::string(16, '9')));
+  assert(!accepts(*number, "1e" + std::string(17, '9')));
+  assert(!accepts(*number, "1e05"));
+  // Bounds and multipleOf that need longer values widen the lexeme's caps by
+  // one digit past the bound, which leaves room for exclusive bounds.
+  const auto tiny =
+      field(R"({"type":"number","exclusiveMinimum":0,"maximum":1e-20})");
+  assert(accepts(*tiny, "0.00000000000000000001"));
+  assert(accepts(*tiny, "0.000000000000000000005"));
+  assert(!accepts(*tiny, "0.0000000000000000000005"));
+  const auto big = field(R"({"type":"number","minimum":1e20})");
+  assert(accepts(*big, digits(21)));
+  assert(accepts(*big, digits(22)));
+  assert(!accepts(*big, digits(23)));
+
+  const auto parameters = parse(R"({"type":"object","properties":{
+    "files":{"type":"array","items":{"type":"object","properties":{
+      "end_line":{"type":"integer"},"path":{"type":"string"},
+      "start_line":{"type":"integer"}},"required":["path"]}},
+    "revision":{"type":"string"}},"required":["revision","files"]})");
+  const auto tool = JsonConstraint::ToolParameters(
+      parameters, false, JsonConstraint::ToolFormat::kQwen);
+  const std::string prefix =
+      "<parameter=revision>\n866b7e81f59cc7f2597d29295bc9c487f3e3a9b9\n"
+      "</parameter>\n<parameter=files>\n"
+      R"([{"path": "static/index.html", "start_line": )";
+  auto state = tool->Start();
+  for (const unsigned char byte : prefix + digits(16))
+    state = tool->Advance(state, byte);
+  assert(!state.empty());
+  assert(tool->Advance(state, '0').empty());
+  assert(Accepts(*tool, prefix + "1140}]\n</parameter>\n"));
+}
+
 // Nested objects accept schema order and llama.cpp's order (required members
 // first, then optional ones in schema order), and no other order.
 void TestObjectMemberOrders() {
@@ -2941,6 +3025,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   TestNestedToolObjectDefaults();
+  TestNumberDigitLimits();
   TestObjectMemberOrders();
   TestJsonLanguage();
   TestSchemaLanguage();

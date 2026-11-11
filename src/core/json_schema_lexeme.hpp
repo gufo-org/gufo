@@ -24,6 +24,9 @@ public:
     bool prefix{false};
     bool complete{false};
   };
+  // llama.cpp's integral-part and decimal-part: at most 16 digits each, so a
+  // number cannot grow until the token limit.
+  static constexpr int kMaxNumberDigits = 16;
   virtual ~JsonSchemaLexeme() = default;
   // Reject impossible bytes before copying request state. This alphabet is a
   // superset of every valid transition, not a replacement for the predicate.

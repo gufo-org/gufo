@@ -116,6 +116,32 @@ def rows(call):
                  call([("files", '[{"path": "a", "end_line": 2, "start_line": 1}]')]),
                  call([]), call([("files", '[{"path": "a", "note": 1}]')])]
         result.append([f"nested/{name}", json.dumps(schema), *map(json.dumps, cands)])
+    # Numbers (#1166): llama.cpp's integral-part and decimal-part stop at 16
+    # digits, and its exponent is an integral part. Candidates: the longest
+    # accepted value, one digit more, no arguments and an undeclared argument.
+    sixteen, seventeen = "1" + "0" * 15, "1" + "0" * 16
+    for name, p, good, bad in [
+        ("integer", {"type": "integer"}, sixteen, seventeen),
+        ("integer_min", {"type": "integer", "minimum": 1}, sixteen, seventeen),
+        ("integer_max", {"type": "integer", "maximum": 0},
+         "-" + sixteen, "-" + seventeen),
+        ("number_integral", {"type": "number"}, sixteen, seventeen),
+        ("number_decimal", {"type": "number"}, "0." + "1" * 16, "0." + "1" * 17),
+        ("number_exponent", {"type": "number"}, "1e5", "1e05"),
+    ]:
+        schema = {"type": "object", "properties": {"v": p}, "required": ["v"]}
+        cands = [call([("v", good)]), call([("v", bad)]), call([]),
+                 call([("v", good), ("zz", "1")])]
+        result.append([f"digits/{name}", json.dumps(schema), *map(json.dumps, cands)])
+    item = {"type": "object", "required": ["path"], "properties": {
+        "end_line": {"type": "integer"}, "path": {"type": "string"},
+        "start_line": {"type": "integer"}}}
+    schema = {"type": "object", "required": ["files"], "properties": {
+        "files": {"type": "array", "items": item}}}
+    cands = [call([("files", f'[{{"path": "a", "start_line": {sixteen}}}]')]),
+             call([("files", f'[{{"path": "a", "start_line": {seventeen}}}]')]),
+             call([]), call([("files", '[{"path": "a", "note": 1}]')])]
+    result.append(["digits/nested", json.dumps(schema), *map(json.dumps, cands)])
     return result
 
 
