@@ -1,0 +1,7 @@
+{
+  "base_gufo_revision": "3044b2b02",
+  "candidate_package": "/nix/store/hx0y7jvl7w4zxdf7v5nvqb9yy3sp8hjw-gufo-0-unstable-3044b2b-dirty",
+  "candidate_executable_sha256": "b56428e21eb0625aa05b02063ffa4fc0eb11dcd974c16a13349167ee6647576d",
+  "runtime_source_change": "Six-line Qwen sampling guard; callback fix unchanged. No kernels changed.",
+  "regression": "Existing check_bench, expanded to reject temperature/repetition/frequency/presence controls, run on HIP and HRX. Before-guard executable fails as expected."
+}

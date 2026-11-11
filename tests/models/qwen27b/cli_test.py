@@ -336,12 +336,17 @@ def check_bench(binary, model, draft):
          "--draft-policy", policy] for policy in ("fixed", "adaptive")
     ]
     for backend in backends:
-        sampled = subprocess.run(
-            common + backend + ["--temperature", "0.8", "--seed", "73"],
-            text=True, capture_output=True, timeout=30)
-        if (sampled.returncode != 1 or
-                "use the serving benchmark for Qwen" not in sampled.stderr):
-            raise AssertionError("Qwen benchmark did not reject sampled generation")
+        for unsupported in (["--temperature", "0.8"],
+                            ["--repeat-penalty", "1.1"],
+                            ["--frequency-penalty", "0.1"],
+                            ["--presence-penalty", "0.1"]):
+            sampled = subprocess.run(
+                common + backend + unsupported + ["--seed", "73"],
+                text=True, capture_output=True, timeout=30)
+            if (sampled.returncode != 1 or
+                    "use the serving benchmark for Qwen" not in sampled.stderr):
+                raise AssertionError(
+                    f"Qwen benchmark did not reject sampling controls: {unsupported}")
         result = subprocess.run(common + backend, text=True, capture_output=True,
                                 timeout=180, check=True)
         if "HIP error:" in result.stderr:
