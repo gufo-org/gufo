@@ -1,0 +1,8 @@
+Model loaded in 14347 ms (success).
+[Prefill Validation] tokens=512 finite=1 scalar_winner_rank=1 rmse=0.520053 cosine=0.991351 max_error=3.81343
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+| Qwen3.8 Flash Next               | 103.69 GiB | ROCm (HIP) |              pp512 |       1273.70 ± 2.70 |
+| Qwen3.8 Flash Next               | 103.69 GiB | ROCm (HIP) |             pp2048 |       1836.91 ± 6.08 |
+| Qwen3.8 Flash Next               | 103.69 GiB | ROCm (HIP) |              tg128 |         30.39 ± 0.14 |
+

@@ -1,0 +1,278 @@
+[
+  {
+    "tag": "hip-fail-0",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 0,
+    "passed": true,
+    "LD_LIBRARY_PATH": null
+  },
+  {
+    "tag": "hip-fail-2",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": null
+  },
+  {
+    "tag": "hip-fail-3",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": null
+  },
+  {
+    "tag": "hip-fail-4",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": null
+  },
+  {
+    "tag": "hip-fail-5",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": null
+  },
+  {
+    "tag": "hip-depth-decode",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "8",
+      "-d",
+      "0,32",
+      "-r",
+      "1",
+      "--verbose",
+      "--validate-prefill",
+      "32"
+    ],
+    "returncode": 0,
+    "passed": true,
+    "LD_LIBRARY_PATH": null
+  },
+  {
+    "tag": "hrx-fail-0",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 0,
+    "passed": true,
+    "LD_LIBRARY_PATH": "/nix/store/2z5yrfk8swk40hnxbyriz6klhxml0gc9-hrx-system-0-unstable-2026-11-11/lib"
+  },
+  {
+    "tag": "hrx-fail-2",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": "/nix/store/2z5yrfk8swk40hnxbyriz6klhxml0gc9-hrx-system-0-unstable-2026-11-11/lib"
+  },
+  {
+    "tag": "hrx-fail-3",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": "/nix/store/2z5yrfk8swk40hnxbyriz6klhxml0gc9-hrx-system-0-unstable-2026-11-11/lib"
+  },
+  {
+    "tag": "hrx-fail-4",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": "/nix/store/2z5yrfk8swk40hnxbyriz6klhxml0gc9-hrx-system-0-unstable-2026-11-11/lib"
+  },
+  {
+    "tag": "hrx-fail-5",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "0",
+      "-r",
+      "1"
+    ],
+    "returncode": 1,
+    "passed": true,
+    "LD_LIBRARY_PATH": "/nix/store/2z5yrfk8swk40hnxbyriz6klhxml0gc9-hrx-system-0-unstable-2026-11-11/lib"
+  },
+  {
+    "tag": "hrx-depth-decode",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-p",
+      "32",
+      "-n",
+      "8",
+      "-d",
+      "0,32",
+      "-r",
+      "1",
+      "--verbose",
+      "--validate-prefill",
+      "32"
+    ],
+    "returncode": 0,
+    "passed": true,
+    "LD_LIBRARY_PATH": "/nix/store/2z5yrfk8swk40hnxbyriz6klhxml0gc9-hrx-system-0-unstable-2026-11-11/lib"
+  },
+  {
+    "tag": "hip-dflash-depth-decode",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "--speculative",
+      "dflash2",
+      "--dflash-model",
+      "/persist/models/store/Qwen3.8-27B-DFlash2/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "-p",
+      "32",
+      "-n",
+      "8",
+      "-d",
+      "0,32",
+      "-r",
+      "1",
+      "--verbose"
+    ],
+    "returncode": 0,
+    "passed": true,
+    "LD_LIBRARY_PATH": null
+  },
+  {
+    "tag": "hrx-dflash-depth-decode",
+    "command": [
+      "/home/mixer/hrx-validation/qwen-bench-sync-candidate/bin/gufo",
+      "bench",
+      "-m",
+      "/persist/models/store/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "--speculative",
+      "dflash2",
+      "--dflash-model",
+      "/persist/models/store/Qwen3.8-27B-DFlash2/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "-p",
+      "32",
+      "-n",
+      "8",
+      "-d",
+      "0,32",
+      "-r",
+      "1",
+      "--verbose"
+    ],
+    "returncode": 0,
+    "passed": true,
+    "LD_LIBRARY_PATH": "/nix/store/2z5yrfk8swk40hnxbyriz6klhxml0gc9-hrx-system-0-unstable-2026-11-11/lib"
+  }
+]

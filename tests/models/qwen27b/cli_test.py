@@ -344,6 +344,8 @@ def check_bench(binary, model, draft):
             raise AssertionError("Qwen benchmark did not reject sampled generation")
         result = subprocess.run(common + backend, text=True, capture_output=True,
                                 timeout=180, check=True)
+        if "HIP error:" in result.stderr:
+            raise AssertionError(f"benchmark reported a HIP failure: {result.stderr}")
         traces = BENCH_TRACE.findall(result.stderr)
         if [(int(depth), int(count)) for depth, count, _ in traces] != [
                 (0, 8), (0, 8), (32, 8), (32, 8)]:

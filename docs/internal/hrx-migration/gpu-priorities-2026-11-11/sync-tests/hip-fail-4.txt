@@ -1,0 +1,10 @@
+HIP: found 1 ROCm devices (Total VRAM: 126976 MiB):
+  Device 0: AMD Radeon 8060S Graphics, gfx1151, Wave Size: 32, VRAM: 126976 MiB
+Model loaded in 1094 ms (success).
+[sync-fault] call=1 real=0 injected=0
+[sync-fault] call=2 real=0 injected=0
+[sync-fault] call=3 real=0 injected=0
+[sync-fault] call=4 real=0 injected=1
+| model                          |       size |     params | backend    |            test |                   t/s |
+| ------------------------------ | ---------- | ---------- | ---------- | --------------- | --------------------- |
+HIP error: invalid argument at /build/source/src/models/qwen/drivers.cpp:614

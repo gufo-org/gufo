@@ -1,0 +1,8 @@
+[
+  {
+    "tag": "baseline",
+    "returncode": 1,
+    "expected_failure": true,
+    "passed": false
+  }
+]

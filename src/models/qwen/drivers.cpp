@@ -577,7 +577,7 @@ int RunQwenBenchmarkImpl(
       has_prepared_depth = true;
     }
 
-    const auto restore_depth = [&] {
+    const auto restore_depth = [&]() -> hipError_t {
       if (depth == 0) {
         gpu_exec->Reset();
       } else {
@@ -585,13 +585,13 @@ int RunQwenBenchmarkImpl(
         if (dflash_verifier)
           dflash_verifier->RestoreSnapshot(*prepared_draft);
       }
-      HIP_CHECK(hipDeviceSynchronize());
+      return hipDeviceSynchronize();
     };
 
     for (const std::size_t p_len : opt.n_prompts) {
       const auto prompt_tokens = MakeBenchmarkTokens(p_len, depth);
 
-      const auto prefill = [&] {
+      const auto prefill = [&]() -> hipError_t {
         if (dflash_verifier) {
           if (depth == 0) {
             (void)dflash_verifier->Prime(prompt_tokens);
@@ -603,18 +603,18 @@ int RunQwenBenchmarkImpl(
           (void)gpu_exec->ForwardPromptBatch(prompt_tokens,
                                              static_cast<std::uint32_t>(depth));
         }
-        HIP_CHECK(hipDeviceSynchronize());
+        return hipDeviceSynchronize();
       };
-      restore_depth();
-      prefill();
+      HIP_CHECK(restore_depth());
+      HIP_CHECK(prefill());
 
       std::vector<double> runs;
       runs.reserve(opt.repetitions);
       for (std::size_t r = 0; r < opt.repetitions; ++r) {
-        restore_depth();
+        HIP_CHECK(restore_depth());
 
         const auto t0 = std::chrono::high_resolution_clock::now();
-        prefill();
+        HIP_CHECK(prefill());
         const auto t1 = std::chrono::high_resolution_clock::now();
 
         const double elapsed_sec =
@@ -628,7 +628,7 @@ int RunQwenBenchmarkImpl(
     }
 
     for (const std::size_t g_len : opt.n_gens) {
-      restore_depth();
+      HIP_CHECK(restore_depth());
       (void)gpu_exec->ForwardToken(
           static_cast<tokenization::TokenId>((depth % 1000) + 100),
           static_cast<std::uint32_t>(depth));
@@ -639,7 +639,7 @@ int RunQwenBenchmarkImpl(
       std::vector<double> acceptance_runs;
       acceptance_runs.reserve(opt.repetitions);
       for (std::size_t r = 0; r < opt.repetitions; ++r) {
-        restore_depth();
+        HIP_CHECK(restore_depth());
 
         std::unique_ptr<speculative::IDraftBackend> draft_backend;
         if (opt.speculative_backend == "mtp") {

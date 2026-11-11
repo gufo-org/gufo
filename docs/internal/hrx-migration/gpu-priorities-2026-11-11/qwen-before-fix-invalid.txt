@@ -1,0 +1,22 @@
+HIP: found 1 ROCm devices (Total VRAM: 126976 MiB):
+  Device 0: AMD Radeon 8060S Graphics, gfx1151, Wave Size: 32, VRAM: 126976 MiB
+Model loaded in 5696 ms (success).
+[Prefill Validation] tokens=512 sequential_top1=220 batched_top1=220 top1_match=yes finite=yes
+  max_abs_diff=0.08253670 mean_abs_diff=0.01185823 rmse=0.01499962 cosine_similarity=0.99999493
+| model                          |       size |     params | backend    |            test |                   t/s |
+| ------------------------------ | ---------- | ---------- | ---------- | --------------- | --------------------- |
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:606
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:606
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:606
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:606
+| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |          pp2048 |        639.19 ± 1.81 |
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+HIP error: no error at /build/source/src/models/qwen/drivers.cpp:588
+| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |           tg128 |         12.35 ± 0.01 |
+
