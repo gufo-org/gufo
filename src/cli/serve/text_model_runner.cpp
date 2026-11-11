@@ -1788,4 +1788,11 @@ std::size_t TextRunnerPool::CachedPrefixTokens(
   return impl_->component_cache->CachedPrefixTokens(prompt, context);
 }
 
+bool TextRunnerPool::AlignToLiveFrontier(
+    std::vector<TextRunnerToken>& prompt,
+    std::size_t& cache_prefix_tokens) const {
+  return impl_->component_cache->AlignToLiveFrontier(
+      prompt, cache_prefix_tokens, impl_->validated.descriptor.max_context);
+}
+
 }  // namespace gufo::server

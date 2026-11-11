@@ -189,6 +189,12 @@ public:
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(
       std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
       std::uint64_t checkpoint_id = 0) const;
+  /// When a text-only prompt repeats an idle live frontier's text, uses that
+  /// frontier's tokens for it, so a different split of a previous answer does
+  /// not lose the frontier (#1154). Moves `cache_prefix_tokens` with the
+  /// rewrite.
+  bool AlignToLiveFrontier(std::vector<TextRunnerToken>& prompt,
+                           std::size_t& cache_prefix_tokens) const;
 
 private:
   struct Impl;

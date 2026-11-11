@@ -1487,6 +1487,180 @@ std::size_t ComponentTextCache::CachedPrefixTokens(
   return common ? impl_->index.CommonPrefixTokens(query)
                 : impl_->index.CachedPrefixTokens(query);
 }
+
+namespace {
+// Unicode White_Space and the separators Python's str.strip also removes:
+// what chat templates trim from the ends of message content.
+bool TrimmedWhitespace(std::string_view text) {
+  if (text.empty())
+    return false;
+  for (std::size_t i = 0; i < text.size();) {
+    const auto lead = static_cast<unsigned char>(text[i]);
+    char32_t cp = lead;
+    std::size_t length = 1;
+    if (lead >= 0x80) {
+      // No whitespace needs four bytes.
+      if ((lead & 0xE0) == 0xC0) {
+        cp = lead & 0x1F;
+        length = 2;
+      } else if ((lead & 0xF0) == 0xE0) {
+        cp = lead & 0x0F;
+        length = 3;
+      } else {
+        return false;
+      }
+      if (i + length > text.size())
+        return false;
+      for (std::size_t k = 1; k < length; ++k) {
+        const auto next = static_cast<unsigned char>(text[i + k]);
+        if ((next & 0xC0) != 0x80)
+          return false;
+        cp = (cp << 6) | (next & 0x3F);
+      }
+    }
+    if (!((cp >= 0x09 && cp <= 0x0D) || cp == 0x20 ||
+          (cp >= 0x1C && cp <= 0x1F) || cp == 0x85 || cp == 0xA0 ||
+          cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 ||
+          cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000))
+      return false;
+    i += length;
+  }
+  return true;
+}
+
+struct FrontierEnd {
+  // Prompt tokens the frontier's text covers.
+  std::size_t prompt{};
+  // Bytes of the last of them past the frontier's end, when it ends inside
+  // one, as a reply cut off by the token limit can.
+  std::string partial;
+};
+
+// Where the text of all of `frontier` ends in `prompt`, or nothing when the
+// texts differ first. Only tokens past an ID mismatch are decoded; equal IDs
+// at a shared boundary are skipped as they are. The template trims whitespace
+// around message content, so frontier whitespace the prompt lacks matches
+// where the frontier ends or both continue with the same token.
+std::optional<FrontierEnd> FrontierTextEnd(
+    std::span<const ContinuationToken> frontier,
+    std::span<const ContinuationToken> prompt, std::size_t common,
+    const TextModelRunner& runner) {
+  const auto piece = [&](ContinuationToken token) {
+    return runner.Decode(std::span<const ContinuationToken>(&token, 1));
+  };
+  std::size_t f = common, p = common;
+  // Bytes one side has consumed past the other's last token boundary.
+  std::string ahead;
+  bool frontier_ahead = false;
+  for (;;) {
+    if (ahead.empty()) {
+      if (f == frontier.size())
+        return FrontierEnd{p, {}};
+      if (p == prompt.size())
+        return std::nullopt;
+      if (frontier[f] == prompt[p]) {
+        ++f;
+        ++p;
+        continue;
+      }
+      ahead = piece(frontier[f++]);
+      frontier_ahead = true;
+      if (ahead.empty())
+        return std::nullopt;
+    }
+    const auto lagging = frontier_ahead ? prompt : frontier;
+    auto& at = frontier_ahead ? p : f;
+    if (at == lagging.size()) {
+      if (frontier_ahead)
+        return std::nullopt;
+      return FrontierEnd{p, std::move(ahead)};
+    }
+    const auto next = piece(lagging[at++]);
+    const auto n = std::min(ahead.size(), next.size());
+    if (next.empty() || ahead.compare(0, n, next, 0, n) != 0) {
+      --at;
+      if (!frontier_ahead || !TrimmedWhitespace(ahead))
+        return std::nullopt;
+      while (f < frontier.size() && frontier[f] != prompt[p] &&
+             TrimmedWhitespace(piece(frontier[f])))
+        ++f;
+      if (f < frontier.size() && frontier[f] != prompt[p])
+        return std::nullopt;
+      ahead.clear();
+      continue;
+    }
+    if (next.size() <= ahead.size()) {
+      ahead.erase(0, n);
+    } else {
+      ahead = next.substr(n);
+      frontier_ahead = !frontier_ahead;
+    }
+  }
+}
+}  // namespace
+
+bool ComponentTextCache::AlignToLiveFrontier(
+    std::vector<ContinuationToken>& prompt, std::size_t& stable,
+    std::size_t max_tokens) const {
+  const std::lock_guard lock(impl_->mutex);
+  const std::vector<ContinuationToken>* selected = nullptr;
+  std::size_t seam = 0;
+  // Tokens for the rest of a prompt token the frontier ends inside.
+  std::vector<ContinuationToken> rest;
+  for (const auto& entry : impl_->entries) {
+    const auto& frontier = entry->live_tokens;
+    // Positions of image inputs would move with the rewrite.
+    if (!entry->live || entry->busy || frontier.empty() ||
+        entry->live_input !=
+            At(Inputs(frontier.size(), nullptr), frontier.size()))
+      continue;
+    const auto common = static_cast<std::size_t>(
+        std::ranges::mismatch(frontier, prompt).in1 - frontier.begin());
+    if (common == frontier.size())
+      return false;
+    if (common == 0 || (selected && frontier.size() <= selected->size()))
+      continue;
+    auto end = FrontierTextEnd(frontier, prompt, common, *impl_->runner);
+    if (!end || (stable != 0 && stable < end->prompt))
+      continue;
+    std::vector<ContinuationToken> tail;
+    if (!end->partial.empty()) {
+      // A fragment that does not tokenize back to its own bytes (a split
+      // UTF-8 sequence, say) cannot follow the frontier.
+      try {
+        tail = impl_->runner->Tokenize(end->partial);
+      } catch (const std::exception&) {
+        continue;
+      }
+      if (tail.empty() || impl_->runner->Decode(tail) != end->partial)
+        continue;
+    }
+    if (frontier.size() + tail.size() + (prompt.size() - end->prompt) >=
+        max_tokens)
+      continue;
+    selected = &frontier;
+    seam = end->prompt;
+    rest = std::move(tail);
+  }
+  if (!selected)
+    return false;
+  if (Logger::Enabled(LogLevel::kDebug))
+    Logger::Debug("cache", "event=frontier_aligned frontier_tokens=" +
+                               std::to_string(selected->size()) +
+                               " prompt_seam=" + std::to_string(seam) +
+                               " split_tokens=" + std::to_string(rest.size()) +
+                               " prompt_tokens=" +
+                               std::to_string(prompt.size()));
+  if (stable != 0)
+    stable = stable - seam + selected->size() + rest.size();
+  std::vector<ContinuationToken> aligned;
+  aligned.reserve(selected->size() + rest.size() + prompt.size() - seam);
+  aligned.assign(selected->begin(), selected->end());
+  aligned.insert(aligned.end(), rest.begin(), rest.end());
+  aligned.insert(aligned.end(), prompt.begin() + seam, prompt.end());
+  prompt = std::move(aligned);
+  return true;
+}
 ComponentTextCache::Lease::Lease(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 ComponentTextCache::Lease::~Lease() {
