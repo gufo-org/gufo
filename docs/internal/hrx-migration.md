@@ -8,10 +8,19 @@ qualify the newer staging runtime.
 ## Current staging integration (November 11, 2026)
 
 The experimental packages pin `gufo-org/hrx-system`'s `gufo-staging` branch
-at `d8345774e34e0b0824f11661d331a323e8771dd9`, based on upstream
+at `e74f5d7829faca49abdc442241d108a931079635`, based on upstream
 `af0c940f77b37dcdfbb6371a0434c6c268edb108`. Each upstream candidate has an
 independent fix branch; staging collects them for Gufo. See the
 [branch and update workflow](../../.devops/nix/hrx/README.md).
+
+Two NPU compiler fixes followed the first staging pin. They are documented with
+their validation in the fork's `docs/gufo-staging-validation.md`:
+
+- `fix/aie2p-narrow-sign` keeps negative signs when AIE2P vectors narrow from
+  F32 to F16 or FP8.
+- `perf/aie2p-schedule` schedules AIE2P leaves without matrix instructions in
+  source order. LFM3-1.7B NPU prefill of 2,117 tokens drops from 6.47 s to
+  5.96 s, with identical outputs.
 
 The first candidate, `fix/cached-kernel-arguments`, proposed in
 [hrx-system#3035](https://github.com/ROCm/hrx-system/pull/3035), selects GPU-cached
