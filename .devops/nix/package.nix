@@ -19,6 +19,10 @@
   rustToolchain,
   rustPlatform,
   rocmPackages,
+  libuuid,
+  # XRT with the amdxdna plugin (.devops/nix/xrt) builds the NPU runtime.
+  # Null only for revisions that predate it (the CI timing baseline).
+  xrt ? null,
   releaseVersion ? null,
   extensionsFromLock ? false,
   extensions ? [ ],
@@ -152,6 +156,9 @@ stdenv.mkDerivation {
   ] ++ lib.optionals (!hasRustAudio) [
     libsndfile
     soxr
+  ] ++ lib.optionals (xrt != null) [
+    xrt
+    libuuid
   ];
 
   cmakeFlags = [
@@ -163,6 +170,9 @@ stdenv.mkDerivation {
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
+  ] ++ lib.optionals (xrt != null) [
+    "-DGUFO_ENABLE_XRT=ON"
+    "-DXRT_DIR=${xrt}/opt/xilinx/xrt/share/cmake/XRT"
   ] ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
   ++ lib.optionals (extensions != [ ]) [
     "-DGUFO_EXTENSION_DIRS=${lib.concatMapStringsSep ";" (ext: "${ext}") extensions}"
@@ -199,6 +209,11 @@ stdenv.mkDerivation {
     # without rebuilding the unchanged HIP/BLAS compiler and kernel libraries.
     wrapProgram "$out/bin/gufo" \
       --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"
+  '' + lib.optionalString (xrt != null) ''
+    # XRT finds its amdxdna plugin under XILINX_XRT.
+    for program in gufo gufo-server; do
+      wrapProgram "$out/bin/$program" --set-default XILINX_XRT "${xrt}/opt/xilinx/xrt"
+    done
   '';
   installCheckPhase = ''
     runHook preInstallCheck
@@ -225,7 +240,7 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock;
+    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock xrt;
     extensionMetadata = import ./extension-metadata.nix {
       inherit lib sourceRoot extensions extensionsFromLock;
     };

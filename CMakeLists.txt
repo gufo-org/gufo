@@ -85,6 +85,12 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
 
 # CPU-only builds exist for host checks; production targets gfx1151 only.
 option(ENGINE_ENABLE_HIP "Build the gfx1151 HIP backend" ON)
+# The XDNA NPU runtime through XRT (src/core/npu). Off: the NPU API stays,
+# and no device opens.
+option(GUFO_ENABLE_XRT "Build the XDNA NPU runtime on XRT" OFF)
+if (GUFO_ENABLE_XRT AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  message(FATAL_ERROR "GUFO_ENABLE_XRT supports Linux only")
+endif()
 include(cmake/GufoExtensionDiscovery.cmake)
 gufo_discover_extensions()
 set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")
@@ -291,6 +297,7 @@ endif()
 
 add_subdirectory(src/core/platform)
 add_subdirectory(src/core/rust)
+add_subdirectory(src/core/npu)
 
 add_library(gufo_core STATIC
   src/core/base64.cpp
@@ -310,7 +317,7 @@ add_library(gufo_core STATIC
   src/core/audio.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
+target_link_libraries(gufo_core PUBLIC gufo_platform gufo_npu ICU::uc ICU::i18n
   Threads::Threads gufo_rust JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
@@ -1462,6 +1469,19 @@ endfunction()
       LABELS "cpu;platform"
       ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:platform_library_fixture>")
   endif()
+
+  add_library(npu_dispatch_fixture SHARED tests/core/npu_dispatch_fixture.cpp)
+  set_target_properties(npu_dispatch_fixture PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/core"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/core")
+  add_executable(npu_test tests/core/npu_test.cpp)
+  target_include_directories(npu_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(npu_test PRIVATE gufo_npu)
+  add_dependencies(npu_test npu_dispatch_fixture)
+  add_test(NAME npu_test COMMAND npu_test
+    "$<TARGET_FILE:npu_dispatch_fixture>" "${CMAKE_CURRENT_BINARY_DIR}/tests/core/npu-sysfs")
+  set_tests_properties(npu_test PROPERTIES LABELS "cpu;npu")
 
   # the publish suite drives descriptors through dup2
   if (NOT WIN32)

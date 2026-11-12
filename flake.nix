@@ -768,6 +768,8 @@
             gufo = base;
             hrx = self.packages.${system}.hrx;
           };
+          # XRT with its amdxdna plugin, as the Gufo package links it.
+          xrt-amdxdna = gufoPackages.${system}.xrt-amdxdna;
         }
       );
 

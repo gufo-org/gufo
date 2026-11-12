@@ -1,0 +1,16 @@
+# The NPU runtime. Only xrt.cpp touches XRT; npu.hpp names no XRT type, so
+# runners and extensions build the same way with or without it.
+if (GUFO_ENABLE_XRT)
+  find_package(XRT REQUIRED CONFIG)
+  set(npu_backend xrt.cpp)
+else()
+  set(npu_backend unavailable.cpp)
+endif()
+add_library(gufo_npu STATIC common.cpp ${npu_backend})
+target_include_directories(gufo_npu PRIVATE ${PROJECT_SOURCE_DIR})
+target_compile_features(gufo_npu PUBLIC cxx_std_20)
+target_link_libraries(gufo_npu PUBLIC gufo_platform)
+if (GUFO_ENABLE_XRT)
+  target_compile_definitions(gufo_npu PUBLIC GUFO_ENABLE_XRT=1)
+  target_link_libraries(gufo_npu PRIVATE XRT::xrt_coreutil)
+endif()

@@ -8,6 +8,7 @@
 
 set(GUFO_LINK_GRAPH_PROTECTED
   gufo_platform
+  gufo_npu
   gufo_logging
   gufo_hip_host
   gufo_cache

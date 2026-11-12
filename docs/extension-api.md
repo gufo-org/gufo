@@ -181,3 +181,36 @@ A GGUF whose tensors use a type or shape Gufo doesn't know, such as your own
 quantization, still opens: those tensors have `sized == false`. Only a provider
 that sets `accepts_unsized_tensors` is asked to probe such a file, and it reads
 those tensors itself.
+
+## NPU programs
+
+`gufo/ext/experimental/npu.hpp` runs mlir-aie (IRON) designs on the Strix Halo
+XDNA NPU through XRT. An **NPU program** is one xclbin and the instruction
+streams built for it:
+
+```cpp
+namespace npu = gufo::npu;
+npu::Device device = npu::Device::Open();
+npu::Program prefill = npu::Program::Load(device, dir / "prefill.xclbin");
+npu::Instructions insts = prefill.LoadInstructions(dir / "prefill.insts");
+npu::Buffer weights = prefill.LoadBuffer(dir / "weights.bin", 4);
+npu::Buffer state = prefill.Allocate(state_bytes, 3);
+npu::Run run = prefill.Start(insts, {&state, &weights});
+run.Wait();
+state.FromDevice(0, logits_bytes);
+```
+
+Buffers are kernel arguments 3 and up and work in every program of the device.
+`Start` returns at once, so you can sample while the NPU runs the next step.
+Switching programs costs milliseconds; keep a prefill or a decode step in one.
+
+For a design with run-time values (token, position), open its dispatch library
+with `DispatchLibrary::Open` and generate streams. If only a few address words
+change, `DiffInstructions` turns two generated streams into patches for
+`Instructions::Apply`.
+
+The header has no XRT types, so your extension builds without XRT. The Linux
+package ships the runtime. A build without XRT (`GUFO_ENABLE_XRT=OFF`, the
+CMake default) keeps the API, and `Device::Open` throws `npu::Error`. Call
+`ProbeDevices()` to see whether the machine has an NPU before you register the
+NPU path.
