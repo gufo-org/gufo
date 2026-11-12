@@ -19,6 +19,7 @@
 #include "gufo/ext/registry.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/multipart.hpp"
 #include "src/core/base64.hpp"
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
@@ -50,63 +51,6 @@ HttpResponse Error(int status, const std::string& message,
                                     : "Internal Server Error",
           .body = body.dump(),
           .headers = {{"Content-Type", "application/json"}}};
-}
-
-std::string_view Trim(std::string_view value) {
-  while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
-    value.remove_prefix(1);
-  while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
-    value.remove_suffix(1);
-  return value;
-}
-
-std::string Parameter(std::string_view value, std::string_view key) {
-  // RFC 7578 quoted-string parameters. Filenames are deliberately ignored.
-  while (!value.empty()) {
-    const auto separator = value.find(';');
-    if (separator == std::string_view::npos)
-      break;
-    value.remove_prefix(separator + 1);
-    value = Trim(value);
-    const auto equal = value.find('=');
-    if (equal == std::string_view::npos)
-      break;
-    const auto name = Trim(value.substr(0, equal));
-    value.remove_prefix(equal + 1);
-    std::string result;
-    if (!value.empty() && value.front() == '"') {
-      value.remove_prefix(1);
-      bool closed = false;
-      while (!value.empty()) {
-        char c = value.front();
-        value.remove_prefix(1);
-        if (c == '"') {
-          closed = true;
-          break;
-        }
-        if (c == '\\') {
-          if (value.empty())
-            throw std::invalid_argument("truncated multipart escape");
-          c = value.front();
-          value.remove_prefix(1);
-        }
-        if (static_cast<unsigned char>(c) < 32)
-          throw std::invalid_argument(
-              "control character in multipart parameter");
-        result += c;
-      }
-      if (!closed)
-        throw std::invalid_argument("unclosed multipart parameter");
-    } else {
-      const auto end = value.find(';');
-      result = Trim(value.substr(0, end));
-      value = end == std::string_view::npos ? std::string_view{}
-                                            : value.substr(end);
-    }
-    if (name == key)
-      return result;
-  }
-  return {};
 }
 
 void CheckImage(const ext::ImageBuffer& image) {
@@ -247,104 +191,62 @@ struct Parsed {
 };
 
 Parsed Multipart(const HttpRequest& request) {
-  const auto content_type = request.header("content-type");
-  if (!content_type.starts_with("multipart/form-data"))
-    throw std::invalid_argument("image edits require multipart/form-data");
-  const auto boundary = Parameter(content_type, "boundary");
-  if (boundary.empty() || boundary.size() > 70 ||
-      boundary.find_first_of("\r\n") != std::string::npos)
-    throw std::invalid_argument("invalid multipart boundary");
-  const std::string marker = "--" + boundary;
-  std::string_view body = request.body;
-  if (!body.starts_with(marker))
-    throw std::invalid_argument("multipart body does not start with boundary");
-  body.remove_prefix(marker.size());
   Parsed parsed;
-  std::size_t image_bytes = 0, image_pixels = 0, fields = 0;
-  for (;;) {
-    if (body.starts_with("--")) {
-      body.remove_prefix(2);
-      if (body != "" && body != "\r\n")
-        throw std::invalid_argument("data after final multipart boundary");
-      break;
-    }
-    if (!body.starts_with("\r\n"))
-      throw std::invalid_argument("invalid multipart separator");
-    body.remove_prefix(2);
-    const auto header_end = body.find("\r\n\r\n");
-    if (header_end == std::string_view::npos || header_end > 16384)
-      throw std::invalid_argument("invalid multipart headers");
-    auto headers = body.substr(0, header_end);
-    std::string name;
-    bool disposition_seen = false;
-    while (!headers.empty()) {
-      const auto end = headers.find("\r\n");
-      const auto line = headers.substr(0, end);
-      const auto colon = line.find(':');
-      if (colon == std::string_view::npos)
-        throw std::invalid_argument("malformed multipart header");
-      std::string key(line.substr(0, colon));
-      std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
+  std::size_t image_bytes = 0, image_pixels = 0;
+  const MultipartResult form = ParseMultipart(
+      request.header("content-type"), request.body,
+      {.max_fields = 32, .unique_names = false},
+      [&](const MultipartField& field) {
+        const std::string name(field.name);
+        const std::string_view data = field.content;
+        if (name == "image" || name == "image[]") {
+          if (parsed.images.size() == 10 ||
+              data.size() > core::kMaxEncodedImageBytes - image_bytes)
+            throw std::invalid_argument(
+                "image inputs exceed 10 images or 20 MiB");
+          image_bytes += data.size();
+          parsed.images.push_back(DecodeImage(
+              std::span(reinterpret_cast<const std::uint8_t*>(data.data()),
+                        data.size())));
+          const auto& decoded = parsed.images.back();
+          image_pixels +=
+              static_cast<std::size_t>(decoded.width) * decoded.height;
+          if (image_pixels > core::kMaxImagePixels)
+            throw std::invalid_argument(
+                "reference images exceed 32 megapixels combined");
+        } else {
+          if (name == "mask")
+            throw std::invalid_argument(
+                "mask uploads are unsupported; provide annotated reference "
+                "images");
+          if (parsed.fields.contains(name))
+            throw std::invalid_argument("duplicate field " + name);
+          if (data.size() > (64U << 10U))
+            throw std::invalid_argument("multipart field too large");
+          if (name == "n" || name == "seed" || name == "steps" ||
+              name == "stream" || name == "loras") {
+            parsed.fields[name] = ParseJson(data);
+          } else {
+            parsed.fields[name] = std::string(data);
+          }
+        }
+        return true;
       });
-      if (key == "content-disposition") {
-        if (disposition_seen)
-          throw std::invalid_argument("duplicate multipart disposition");
-        disposition_seen = true;
-        const auto value = Trim(line.substr(colon + 1));
-        if (!value.starts_with("form-data"))
-          throw std::invalid_argument("expected form-data disposition");
-        name = Parameter(value, "name");
-      }
-      if (end == std::string_view::npos)
-        break;
-      headers.remove_prefix(end + 2);
-    }
-    if (name.empty())
-      throw std::invalid_argument("multipart field has no name");
-    body.remove_prefix(header_end + 4);
-    const std::string delimiter = "\r\n" + marker;
-    std::size_t end = 0;
-    for (;;) {
-      end = body.find(delimiter, end);
-      if (end == std::string_view::npos)
-        throw std::invalid_argument("missing final multipart boundary");
-      const auto suffix = body.substr(end + delimiter.size());
-      if (suffix.starts_with("\r\n") || suffix.starts_with("--"))
-        break;
-      ++end;
-    }
-    const auto data = body.substr(0, end);
-    body.remove_prefix(end + delimiter.size());
-    if (++fields > 32)
+  switch (form.status) {
+    case MultipartStatus::kComplete:
+      break;
+    case MultipartStatus::kNotFormData:
+      throw std::invalid_argument("image edits require multipart/form-data");
+    case MultipartStatus::kBadBoundary:
+      throw std::invalid_argument("invalid multipart boundary");
+    case MultipartStatus::kTooManyFields:
       throw std::invalid_argument("too many multipart fields");
-    if (name == "image" || name == "image[]") {
-      if (parsed.images.size() == 10 ||
-          data.size() > core::kMaxEncodedImageBytes - image_bytes)
-        throw std::invalid_argument("image inputs exceed 10 images or 20 MiB");
-      image_bytes += data.size();
-      parsed.images.push_back(DecodeImage(std::span(
-          reinterpret_cast<const std::uint8_t*>(data.data()), data.size())));
-      const auto& decoded = parsed.images.back();
-      image_pixels += static_cast<std::size_t>(decoded.width) * decoded.height;
-      if (image_pixels > core::kMaxImagePixels)
-        throw std::invalid_argument(
-            "reference images exceed 32 megapixels combined");
-    } else {
-      if (name == "mask")
-        throw std::invalid_argument(
-            "mask uploads are unsupported; provide annotated reference images");
-      if (parsed.fields.contains(name))
-        throw std::invalid_argument("duplicate field " + name);
-      if (data.size() > (64U << 10U))
-        throw std::invalid_argument("multipart field too large");
-      if (name == "n" || name == "seed" || name == "steps" ||
-          name == "stream" || name == "loras") {
-        parsed.fields[name] = ParseJson(data);
-      } else {
-        parsed.fields[name] = std::string(data);
-      }
-    }
+    case MultipartStatus::kMalformed:
+      throw std::invalid_argument(form.detail);
+    case MultipartStatus::kDuplicateField:
+    case MultipartStatus::kStopped:
+      // Names may repeat here, and the field handler throws, not stops.
+      throw std::logic_error("unexpected multipart result");
   }
   if (parsed.images.empty())
     throw std::invalid_argument("image edit requires an image");

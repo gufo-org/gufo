@@ -1,11 +1,13 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+mod multipart;
 mod request;
 
 use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
 
+use multipart::{Failure, Limits};
 use request::{Lookup, Parsed};
 
 #[repr(C)]
@@ -193,6 +195,104 @@ pub unsafe extern "C" fn gufo_http_has_token(
     })
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GufoMultipartParse {
+    Complete = 0,
+    NotFormData = 1,
+    BadBoundary = 2,
+    Malformed = 3,
+    TooManyFields = 4,
+    DuplicateField = 5,
+    Stopped = 6,
+    Internal = 7,
+}
+
+/// One field of a form; its slices live during the call only.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GufoMultipartField {
+    pub name: GufoHttpSlice,
+    pub has_filename: c_int,
+    pub content: GufoHttpSlice,
+}
+
+/// Takes one field, in order; returns nonzero to stop.
+pub type GufoMultipartFieldFn =
+    unsafe extern "C" fn(context: *mut c_void, field: *const GufoMultipartField) -> c_int;
+
+/// Reads the `multipart/form-data` body, calling `field` for each field in
+/// order. More than `max_fields` fields, or with `unique_names` a repeated
+/// name, ends it. On `Malformed`, `error` got the message; on
+/// `DuplicateField`, the repeated name.
+///
+/// # Safety
+/// `content_type` and `body` point to their lengths of readable bytes, or the
+/// length is 0; `field` and `error` may be called with `context` until this
+/// returns.
+#[allow(unsafe_code, clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gufo_multipart_parse(
+    content_type: *const u8,
+    content_type_len: usize,
+    body: *const u8,
+    body_len: usize,
+    max_fields: usize,
+    unique_names: c_int,
+    field: Option<GufoMultipartFieldFn>,
+    error: Option<GufoHttpBytesFn>,
+    context: *mut c_void,
+) -> GufoMultipartParse {
+    guard(GufoMultipartParse::Internal, || {
+        // SAFETY: the caller guarantees `content_type_len` readable bytes.
+        let Some(content_type) = (unsafe { gufo_ffi::input(content_type, content_type_len) })
+        else {
+            return GufoMultipartParse::Internal;
+        };
+        // SAFETY: the caller guarantees `body_len` readable bytes.
+        let (Some(body), Some(field), Some(error)) =
+            (unsafe { gufo_ffi::input(body, body_len) }, field, error)
+        else {
+            return GufoMultipartParse::Internal;
+        };
+        let limits = Limits {
+            max_fields,
+            unique_names: unique_names != 0,
+        };
+        let result = multipart::parse(content_type, body, limits, &mut |parsed| {
+            let out = GufoMultipartField {
+                name: GufoHttpSlice::of(parsed.name),
+                has_filename: c_int::from(parsed.has_filename),
+                content: GufoHttpSlice::of(parsed.content),
+            };
+            // SAFETY: the caller allows calling `field` with `context` here;
+            // `out` and its slices live during the call.
+            unsafe { field(context, &out) == 0 }
+        });
+        let report = |bytes: &[u8]| {
+            // SAFETY: the caller allows calling `error` with `context`;
+            // `bytes` live during the call.
+            unsafe { error(context, bytes.as_ptr(), bytes.len()) };
+        };
+        match result {
+            Ok(()) => GufoMultipartParse::Complete,
+            Err(Failure::NoMemory) => GufoMultipartParse::Internal,
+            Err(Failure::NotFormData) => GufoMultipartParse::NotFormData,
+            Err(Failure::Boundary) => GufoMultipartParse::BadBoundary,
+            Err(Failure::TooManyFields) => GufoMultipartParse::TooManyFields,
+            Err(Failure::Stopped) => GufoMultipartParse::Stopped,
+            Err(Failure::Malformed(message)) => {
+                report(message.as_bytes());
+                GufoMultipartParse::Malformed
+            }
+            Err(Failure::Duplicate(name)) => {
+                report(&name);
+                GufoMultipartParse::DuplicateField
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
@@ -227,6 +327,109 @@ mod tests {
         unsafe {
             (*context.cast::<Vec<u8>>()).extend_from_slice(std::slice::from_raw_parts(data, len))
         };
+    }
+
+    unsafe extern "C" fn multipart_field(
+        context: *mut c_void,
+        field: *const GufoMultipartField,
+    ) -> c_int {
+        // SAFETY: the test passes a Vec and the parser lends a field for the call.
+        unsafe {
+            let field = &*field;
+            (*context.cast::<Vec<u8>>()).extend_from_slice(std::slice::from_raw_parts(
+                field.content.data,
+                field.content.len,
+            ));
+        }
+        0
+    }
+
+    unsafe extern "C" fn multipart_stop(
+        _context: *mut c_void,
+        _field: *const GufoMultipartField,
+    ) -> c_int {
+        1
+    }
+
+    #[test]
+    fn multipart_results_and_caller_errors() {
+        let content_type = b"multipart/form-data; boundary=b";
+        let body = b"--b\r\nContent-Disposition: form-data; name=a\r\n\r\nv\r\n--b--";
+        let mut value = Vec::<u8>::new();
+        let mut call = |data: *const u8, len, input: *const u8, input_len, limit, field, error| {
+            value.clear();
+            // SAFETY: inputs are valid borrowed buffers or deliberate null-pointer
+            // errors; callbacks use the live Vec passed as their context.
+            let result = unsafe {
+                gufo_multipart_parse(
+                    data,
+                    len,
+                    input,
+                    input_len,
+                    limit,
+                    1,
+                    field,
+                    error,
+                    (&raw mut value).cast(),
+                )
+            };
+            (result, value.clone())
+        };
+        let run = |field, error, limit| {
+            (
+                content_type.as_ptr(),
+                content_type.len(),
+                body.as_ptr(),
+                body.len(),
+                limit,
+                field,
+                error,
+            )
+        };
+        let (ty, ty_len, input, len, limit, field, error) = run(
+            Some(multipart_field as GufoMultipartFieldFn),
+            Some(keep_bytes as GufoHttpBytesFn),
+            1,
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, field, error),
+            (GufoMultipartParse::Complete, b"v".to_vec())
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, 0, field, error).0,
+            GufoMultipartParse::TooManyFields
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, Some(multipart_stop), error).0,
+            GufoMultipartParse::Stopped
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, None, error).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, field, None).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(std::ptr::null(), 1, input, len, limit, field, error).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(ty, ty_len, std::ptr::null(), 1, limit, field, error).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(ty, ty_len, std::ptr::null(), 0, limit, field, error),
+            (
+                GufoMultipartParse::Malformed,
+                b"multipart body has no opening boundary".to_vec()
+            )
+        );
+        assert_eq!(
+            call(std::ptr::null(), 0, input, len, limit, field, error).0,
+            GufoMultipartParse::NotFormData
+        );
     }
 
     fn parse(

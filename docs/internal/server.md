@@ -26,7 +26,18 @@ control bytes. A bare LF ends a line, and one empty line before the request line
 is ignored. Other heads, `Transfer-Encoding` (chunked bodies are not
 implemented), and `Content-Length` values that are not decimal digits or
 disagree get 400; more than 100 header fields, llama-server's limit too, get
-431. Chat Completions, Responses and Messages stream with Server-Sent
+431. Multipart form bodies, which the ASR, image-edit and video APIs take, are
+parsed in Rust as RFC 7578 defines them: a `boundary` of 1 to 70 RFC 2046
+characters, the last one not a space; parameters as RFC 9110 writes them
+(quoted strings with escapes, case-insensitive names, each at most once, at
+most 16 per header field), tolerating spaces around `=` and
+parameters without a value; exactly one `form-data` `Content-Disposition` with
+a `name` per part; part header lines ending in CRLF, at most 16 KiB and 16
+fields per part; the first boundary at the start of the body, a delimiter only
+where optional spaces and tabs and CRLF follow it (or `--` followed by
+padding and CRLF or EOF for the close delimiter). An epilogue after the final
+CRLF is ignored. Each API sets its field limit (ASR 12, video 16, image 32)
+and whether names must be unique (ASR and video). Chat Completions, Responses and Messages stream with Server-Sent
 Events; closing the socket cancels the request in the scheduler. JSON parsing
 rejects duplicate keys, invalid numbers and nesting beyond 128 containers.
 Python may serve development tools and conformance tests, never requests.

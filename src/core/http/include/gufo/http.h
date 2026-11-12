@@ -9,9 +9,9 @@ extern "C" {
 #endif
 
 /* The C interface of the Rust HTTP request parser: request heads as RFC 9112
-   defines them (through httparse), body framing, query parameters and token
-   lists in header fields. src/cli/serve/http_server.cpp reads its requests
-   with it. */
+   defines them (through httparse), body framing, query parameters, token
+   lists in header fields and multipart/form-data bodies.
+   src/cli/serve/http_server.cpp reads its requests with it. */
 typedef enum GufoHttpParse {
   GUFO_HTTP_COMPLETE = 0,
   /* No empty line has ended the head yet. */
@@ -76,6 +76,48 @@ int gufo_http_query_param(const uint8_t* query, size_t query_len,
    case and the spaces and tabs around each item; 0 if not; -1 on a bug. */
 int gufo_http_has_token(const uint8_t* value, size_t value_len,
                         const uint8_t* token, size_t token_len);
+
+typedef enum GufoMultipartParse {
+  GUFO_MULTIPART_COMPLETE = 0,
+  /* The Content-Type is not multipart/form-data. */
+  GUFO_MULTIPART_NOT_FORM_DATA = 1,
+  /* Its boundary is missing, not 1 to 70 RFC 2046 characters, or in malformed
+     parameters. */
+  GUFO_MULTIPART_BAD_BOUNDARY = 2,
+  /* The body breaks RFC 7578; the error sink got the message. */
+  GUFO_MULTIPART_MALFORMED = 3,
+  /* More than max_fields fields. */
+  GUFO_MULTIPART_TOO_MANY_FIELDS = 4,
+  /* With unique_names, a repeated field name; the error sink got it. */
+  GUFO_MULTIPART_DUPLICATE_FIELD = 5,
+  /* The field callback returned nonzero. */
+  GUFO_MULTIPART_STOPPED = 6,
+  /* A caller bug (null pointer) or a parser bug. */
+  GUFO_MULTIPART_INTERNAL = 7,
+} GufoMultipartParse;
+
+/* One field of a form; its slices are valid during the callback only. */
+typedef struct GufoMultipartField {
+  GufoHttpSlice name;
+  /* Its Content-Disposition has a filename (or filename*) parameter. */
+  int has_filename;
+  GufoHttpSlice content;
+} GufoMultipartField;
+
+/* Takes one field, in body order; returns nonzero to stop. */
+typedef int (*GufoMultipartFieldFn)(void* context,
+                                    const GufoMultipartField* field);
+
+/* Reads a multipart/form-data body as RFC 7578 defines it (RFC 2046 framing
+   from the first boundary at the body's start, with the epilogue ignored;
+   RFC 9110 parameters), calling field for each field in order, each only
+   after the checks that precede it. */
+GufoMultipartParse gufo_multipart_parse(const uint8_t* content_type,
+                                        size_t content_type_len,
+                                        const uint8_t* body, size_t body_len,
+                                        size_t max_fields, int unique_names,
+                                        GufoMultipartFieldFn field,
+                                        GufoHttpBytesFn error, void* context);
 
 #ifdef __cplusplus
 }
