@@ -420,8 +420,8 @@ struct TextRunnerPool::Request::Impl {
       }
     }
     snapshot_tokens.reserve(prompt.size());
-    // A runner without prefix reuse captures nothing: an earlier snapshot target
-    // would only end the first prefill pass there.
+    // A runner without prefix reuse captures nothing: an earlier snapshot
+    // target would only end the first prefill pass there.
     if (!runner->Descriptor().capabilities.prefix_reuse)
       count = prompt.size();
     snapshot_tokens.assign(prompt.begin(), prompt.begin() + count);
@@ -436,8 +436,8 @@ struct TextRunnerPool::Request::Impl {
     }
     ngram_baseline = runner->NgramRows(state);
     checkpoints = lease->PlannedCaptures(cache_prefix_tokens);
-    // A runner without prefix reuse keeps no captures: planned checkpoints would
-    // only split prefill passes (and run the tail as decode steps).
+    // A runner without prefix reuse keeps no captures: planned checkpoints
+    // would only split prefill passes (and run the tail as decode steps).
     if (!runner->Descriptor().capabilities.prefix_reuse)
       checkpoints.clear();
     if (alignment > 1 || context) {
