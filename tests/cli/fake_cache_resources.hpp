@@ -20,6 +20,7 @@ struct FakeCacheOptions {
   // Idle work gets no transfer stream while this is set.
   const bool* defer_idle{};
   std::size_t* captures{};
+  cache::MemoryDomain row_domain{cache::MemoryDomain::kHost};
 };
 
 // Host-memory backing for a FakeAdapter, so serving tests run the component
@@ -48,8 +49,9 @@ inline std::unique_ptr<ComponentCacheResources> MakeFakeCacheResources(
     const auto size = private_state ? 64ULL : row_bytes;
     const auto offset =
         private_state ? row_backing + (i - row_blocks) * 64 : i * row_bytes;
-    auto reservation =
-        ledger.Reserve(cache::ResourceCategory::kBackingFree, size);
+    auto reservation = ledger.Reserve(
+        cache::ResourceCategory::kBackingFree, size,
+        private_state ? cache::MemoryDomain::kHost : options.row_domain);
     auto bytes = std::span(*data).subspan(offset, size);
     blocks->push_back({reservation.Convert(), bytes,
                        std::shared_ptr<const void>(data, bytes.data()),
@@ -84,7 +86,7 @@ inline std::unique_ptr<ComponentCacheResources> MakeFakeCacheResources(
             block.pool.ReserveBacking(request.category));
         if (captures)
           ++*captures;
-        return ComponentCaptureBuffer{
+        auto result = ComponentCaptureBuffer{
             block.data,
             [reservation, owner = block.owner] {
               return cache::Payload::Committed(reservation->Convert(), owner);
@@ -97,6 +99,8 @@ inline std::unique_ptr<ComponentCacheResources> MakeFakeCacheResources(
                                std::move(*reservation), owner,
                                bytes.first(request.bytes), source));
             }};
+        result.domain = block.pool.Info().domain;
+        return result;
       } catch (const std::bad_alloc&) {
       }
     }
@@ -113,6 +117,7 @@ inline std::unique_ptr<ComponentCacheResources> MakeFakeCacheResources(
       return cache::TransferResult::kSucceeded;
     });
   };
+  resources->copy_device_rows = resources->copy_observed_rows;
   return resources;
 }
 

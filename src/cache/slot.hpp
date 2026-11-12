@@ -62,6 +62,7 @@ public:
   [[nodiscard]] bool PreservationFailed() const;
   [[nodiscard]] std::size_t Bytes() const;
   [[nodiscard]] ResourceCategory Category() const;
+  [[nodiscard]] MemoryDomain BackingDomain() const;
   [[nodiscard]] PersistencePin PinPersistence() const;
   [[nodiscard]] bool PersistencePinned() const;
   [[nodiscard]] bool HasBacking() const;
@@ -83,7 +84,8 @@ public:
   SlotLease& operator=(const SlotLease&) = delete;
   [[nodiscard]] Slot& Execution() const;
   [[nodiscard]] BorrowedLocation Location() const;
-  // Caller supplies initialized committed backing and an assigned reservation.
+  // Caller supplies committed backing and an assigned reservation. Device
+  // backing requires SupportsDeviceRows and is filled through its device copy.
   // Admission/allocation happens before borrowing; no request-path allocation
   // of backing is performed here. Buffer and owner must describe the same
   // block.

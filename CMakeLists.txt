@@ -247,6 +247,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
+  target_compile_definitions(gufo_cache_hip PRIVATE ENGINE_ENABLE_HIP=1)
   if (BUILD_TESTING)
     target_compile_options(gufo_cache_hip PRIVATE -UNDEBUG)
   endif()

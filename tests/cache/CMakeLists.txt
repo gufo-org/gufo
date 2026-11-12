@@ -1,5 +1,12 @@
 add_library(gufo_cache_fake STATIC fake_adapter.cpp)
 if (ENGINE_ENABLE_HIP)
+  add_executable(cache_device_backing_test device_backing_test.cpp)
+  target_link_libraries(cache_device_backing_test PRIVATE gufo_cache_hip gufo_cache_fake)
+  target_compile_options(cache_device_backing_test PRIVATE -UNDEBUG)
+  gufo_stage_hip_runtime(cache_device_backing_test)
+  add_test(NAME cache_device_backing_test COMMAND cache_device_backing_test)
+  set_tests_properties(cache_device_backing_test PROPERTIES
+    LABELS "hip;gpu;gfx1151;cache" TIMEOUT 60 SKIP_RETURN_CODE 77)
   add_executable(cache_backing_test backing_test.cpp)
   target_link_libraries(cache_backing_test PRIVATE gufo_cache_hip gufo_cache_fake)
   target_compile_options(cache_backing_test PRIVATE -UNDEBUG)

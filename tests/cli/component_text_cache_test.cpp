@@ -175,6 +175,52 @@ public:
     return s.adapter.Positions(s.slot).front().valid_rows;
   }
 };
+class DeviceRunner final : public Runner {
+public:
+  mutable std::atomic<std::size_t> device_copies{}, persistence_reads{};
+  mutable std::atomic<bool> defer_device_reads{};
+  TextRunnerResourceClaim ResourceClaim() const override {
+    auto claim = Runner::ResourceClaim();
+    claim.retained_device_snapshot_capacity_bytes = 2048 * 16;
+    return claim;
+  }
+  std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+      cache::ResourceLedger& ledger, std::size_t) const override {
+    class DeviceAdapter final : public FakeAdapter {
+    public:
+      explicit DeviceAdapter(std::atomic<std::size_t>& copies)
+          : copies(copies) {}
+      bool SupportsDeviceRows() const override { return true; }
+      cache::Completion CopyRowsOutDevice(const cache::Slot& slot,
+                                          cache::ComponentId component,
+                                          cache::Rows first, cache::Rows end,
+                                          std::span<std::byte> bytes,
+                                          cache::Stream& stream) override {
+        ++copies;
+        return CopyRowsOut(slot, component, first, end, bytes, stream);
+      }
+      std::atomic<std::size_t>& copies;
+    };
+    auto owned = std::make_unique<DeviceAdapter>(device_copies);
+    adapter = owned.get();
+    auto resources = server::testing::MakeFakeCacheResources(
+        ledger, std::move(owned), {.row_domain = cache::MemoryDomain::kDevice});
+    const auto acquire = resources->stream;
+    resources->stream = [this, acquire,
+                         foreground = std::this_thread::get_id()] {
+      if (defer_device_reads.load() && std::this_thread::get_id() != foreground)
+        return std::unique_ptr<cache::Stream>{};
+      return acquire();
+    };
+    const auto read = resources->copy_device_rows;
+    resources->copy_device_rows = [this, read](auto source, auto destination,
+                                               cache::Stream& stream) {
+      ++persistence_reads;
+      return read(source, destination, stream);
+    };
+    return resources;
+  }
+};
 void BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim() {
   class BudgetRunner final : public Runner {
   public:
@@ -1511,7 +1557,11 @@ void ReusedConversationOutlivesOneUseRequests() {
   conversation.push_back(9);
   assert(turn(conversation) == 16);
 }
-void RestartAndCorruption() {
+void RestartAndCorruption(bool device = false) {
+  const auto make_runner = [device]() -> std::shared_ptr<Runner> {
+    return device ? std::make_shared<DeviceRunner>()
+                  : std::make_shared<Runner>();
+  };
   const TemporaryDirectory temp("gufo-component-serving-test");
   const std::filesystem::path directory = temp.path();
   const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
@@ -1520,15 +1570,40 @@ void RestartAndCorruption() {
   const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
   TextRunnerToken token;
   {
-    auto runner = std::make_shared<Runner>();
-    TextRunnerPool pool(runner, 1, disk);
-    auto first = pool.Acquire(prompt);
-    Prefill(first);
-    token = Generate(first);
-    (void)first.Commit();
+    auto runner = make_runner();
+    {
+      TextRunnerPool pool(runner, 1, disk);
+      auto* device_runner = dynamic_cast<DeviceRunner*>(runner.get());
+      struct ResumeReads {
+        DeviceRunner* runner;
+        ~ResumeReads() {
+          if (runner)
+            runner->defer_device_reads.store(false);
+        }
+      } resume{device_runner};
+      if (device_runner)
+        device_runner->defer_device_reads.store(true);
+      auto first = pool.Acquire(prompt);
+      Prefill(first);
+      token = Generate(first);
+      (void)first.Commit();
+      if (device_runner) {
+        // Force preservation before allowing the disk reader to proceed.
+        // The reader must use the device callback after the slot is reused.
+        const std::vector<TextRunnerToken> other{91, 92, 93};
+        auto overwrite = pool.Acquire(other);
+        Prefill(overwrite);
+        overwrite.Invalidate();
+        device_runner->defer_device_reads.store(false);
+      }
+    }
+    if (device) {
+      const auto& counters = dynamic_cast<const DeviceRunner&>(*runner);
+      assert(counters.device_copies > 0 && counters.persistence_reads > 0);
+    }
   }
   {
-    auto runner = std::make_shared<Runner>();
+    auto runner = make_runner();
     TextRunnerPool pool(runner, 1, disk);
     auto retry = pool.Acquire(prompt);
     assert(retry.cache_disk_hit());
@@ -1549,7 +1624,7 @@ void RestartAndCorruption() {
     }
   }
   {
-    auto runner = std::make_shared<Runner>();
+    auto runner = make_runner();
     TextRunnerPool pool(runner, 1, disk);
     auto corrupted = pool.Acquire(prompt);
     assert(!corrupted.cache_hit());
@@ -3308,6 +3383,7 @@ int main() {
   EditBoundariesSurviveActualBackingPressure();
   ReusedConversationOutlivesOneUseRequests();
   RestartAndCorruption();
+  RestartAndCorruption(true);
   FailedCaptureKeepsPublishedBoundary();
   BackingPressureKeepsSharedPrefix();
   BackingPressureKeepsSharedPrefix(true);

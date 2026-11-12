@@ -504,6 +504,58 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `disk_capacity_bytes` and `slot_pinned_bytes` (host memory the sessions pinned
 at startup, charged on top of `capacity_bytes`).
 
+### Qwen27 device backing on Windows
+
+When the integrated GPU exposes a matching OS video-memory budget, Qwen27
+also admits a device pool for complete KV chunks. Its capacity is the smaller
+of 8 GiB and one quarter of the GPU headroom left after a 4 GiB dispatch
+reserve. Headroom is the smaller of HIP free bytes and the process's OS
+budget minus usage. Host RAM is not added to either reading. Serving selects
+the final limit after execution slots allocate; disabling the RAM cache
+also disables this pool.
+
+Short histories keep the host capture path. The host row allowance uses the
+smaller of half the backing capacity and the capacity minus two complete
+per-component allocation classes (private state and worst-case tails),
+divided by the total row width. The half-pool reserve also leaves room for
+retained checkpoints and persistence readers while a capture is being built.
+Only complete chunks ending beyond that allowance prefer device backing. This
+keeps device bookkeeping out of small working sets while adding retention
+space for longer histories. Reuse protection counts committed device bytes,
+not its unused capacity, so a host-only history keeps the host turnover window.
+
+The provider uses `hipMalloc`, without a managed allocation fallback, in
+128 MiB segments with 512 KiB blocks. Before and after growth it checks both
+the device budget and the cache's host ceiling, preserving the host cache's
+4 GiB system reserve. The larger model-state admission margin does not limit
+cache growth. Committed blocks stay allocated until the cache and its last
+reader close; these checks bound growth, not OS-driven eviction.
+Rows fall back to host backing when device allocation is unavailable. Capture
+admission also accepts the host-only plan, so a smaller device budget cannot
+disqualify a capture that fits the host pool. Admission remains conservative
+when only a combination of both pools could fit the complete request.
+
+Contiguous rows retain the existing borrowed capture: idle work or a mutation
+guard preserves them into their reserved device backing before overwrite.
+Other layouts copy at capture. Private state, partial tails, metadata and
+disk staging retain host storage. Each device allocation has its own owner,
+so adjacent virtual addresses cannot cause a transfer across two allocations.
+Readers and persistence jobs keep owners until their transfers settle. Disk
+writes read device payloads through the provider into the fixed host staging
+buffer; the host never dereferences a device address.
+
+The ledger charges each allocation once, to its memory domain. Persistence
+pins remain an overlay. `global_ram_bytes` and `global_device_bytes` report
+the two domains separately, with corresponding peak gauges. Device gauges
+are included only when a device allocation is present in the sample or peak.
+`global_device_free_backing_bytes` separates free device blocks from the
+aggregate free category; each pool prepares and admits against its own domain.
+The configured line reports `host_capacity_bytes`, `device_capacity_bytes` and their sum as
+the logical retained-payload `capacity_bytes`; the host CLI budget and grid
+selection continue to use only host capacity.
+
+### Host backing
+
 Flash-Next prepares a bounded two-segment reserve before readiness and can
 prepare the next segment before a prefill with at least 512 tokens remaining
 or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative

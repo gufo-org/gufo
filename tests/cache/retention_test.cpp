@@ -299,8 +299,9 @@ struct PressureFixture {
   PrefixIndex index{ledger};
   Log log;
   RetentionPolicy policy;
-  explicit PressureFixture(std::size_t ram = 1ULL << 30)
-      : ledger({ram, ram, 0, ram}), policy(ledger, index, &log) {
+  explicit PressureFixture(std::size_t ram = 1ULL << 30, std::size_t device = 0)
+      : ledger({ram + device, ram, 0, ram + device, device}),
+        policy(ledger, index, &log) {
     index.Register({1}, kPressureComponents);
   }
   // Each conversation executes separately, so no two share chunks. Admission
@@ -614,11 +615,11 @@ void ForkedParentOutlivesItsChildren() {
   assert(f.Cached(parent) == 12);
   assert(f.Reclaim() == fork);
 }
-void ReuseProtectionLastsOneTurnover() {
+void ReuseProtectionLastsOneTurnover(std::size_t device = 0) {
   // A reused conversation outlives newer one-use requests (cache-pressure UI
   // tasks) for one turnover of the RAM budget, then ages out like any other.
   constexpr std::size_t kRam = 64 * 1024;
-  PressureFixture f(kRam);
+  PressureFixture f(kRam, device);
   auto conversation = Conversation(1, 16);
   f.Add(conversation);
   f.policy.Touch(f.log.events.back().checkpoint);
@@ -1272,6 +1273,8 @@ int main() {
   UnreusedConversationKeepsItsStem();
   ForkedParentOutlivesItsChildren();
   ReuseProtectionLastsOneTurnover();
+  // Unused device capacity must not prolong host-only reuse protection.
+  ReuseProtectionLastsOneTurnover(8 * 64 * 1024);
   RecordSourceReplacement();
   FullOptionalExactReplacement();
   FailureAndReplay();

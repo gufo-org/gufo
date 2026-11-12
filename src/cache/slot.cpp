@@ -36,6 +36,7 @@ struct RowState {
   std::size_t row_bytes{};
   std::size_t bytes{};
   ResourceCategory category;
+  MemoryDomain domain{MemoryDomain::kHost};
   mutable std::mutex mutex;
   std::condition_variable_any changed;
   std::size_t readers{};
@@ -173,8 +174,12 @@ struct LeaseState final : MutationGuard {
         metrics.stream_wait_ns += Nanoseconds(stream_start);
       }
       const auto start = Clock::now();
-      auto copy = adapter.CopyRowsOut(*raw, r->component, first, end, buffer,
-                                      leased_stream ? *leased_stream : stream);
+      auto& target_stream = leased_stream ? *leased_stream : stream;
+      auto copy = r->domain == MemoryDomain::kDevice
+                      ? adapter.CopyRowsOutDevice(*raw, r->component, first,
+                                                  end, buffer, target_stream)
+                      : adapter.CopyRowsOut(*raw, r->component, first, end,
+                                            buffer, target_stream);
       if (copy.Wait() != TransferResult::kSucceeded)
         throw std::runtime_error("borrowed row preservation failed");
       {
@@ -477,8 +482,12 @@ struct LeaseState final : MutationGuard {
       if (!size)
         started = Clock::now();
       auto& copy = copies[size++].emplace(r, std::move(transfer), *source);
-      copy.completion.emplace(adapter.CopyRowsOut(
-          *raw, r->component, copy.first, copy.end, copy.buffer, *copy.stream));
+      copy.completion.emplace(
+          r->domain == MemoryDomain::kDevice
+              ? adapter.CopyRowsOutDevice(*raw, r->component, copy.first,
+                                          copy.end, copy.buffer, *copy.stream)
+              : adapter.CopyRowsOut(*raw, r->component, copy.first, copy.end,
+                                    copy.buffer, *copy.stream));
     }
     finish();
   }
@@ -618,6 +627,9 @@ ResourceCategory BorrowedRows::Category() const {
   std::lock_guard lock(state_->mutex);
   return state_->category;
 }
+MemoryDomain BorrowedRows::BackingDomain() const {
+  return state_->domain;
+}
 PersistencePin BorrowedRows::PinPersistence() const {
   std::lock_guard lock(state_->mutex);
   if (state_->buffer.empty())
@@ -698,6 +710,8 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
   const auto p = std::ranges::find(positions, c, &ComponentPosition::id);
   if (!slot.IsValid() || !retained_owner || !info.assigned_backing ||
       !info.reserved ||
+      (info.domain == MemoryDomain::kDevice &&
+       !state_->adapter.SupportsDeviceRows()) ||
       (info.category != ResourceCategory::kBackingAssigned &&
        info.category != ResourceCategory::kPrivateTail) ||
       d == descriptors.end() || !HasRows(d->kind) || p == positions.end() ||
@@ -724,6 +738,7 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
   rows->end = end;
   rows->bytes = info.bytes;
   rows->category = info.category;
+  rows->domain = info.domain;
   rows->metadata = metadata.Convert();
   // Raise the guard bound before registration: a failure afterwards may only
   // leave it conservatively high, never hide a registered range.

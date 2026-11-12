@@ -209,7 +209,8 @@ PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
 PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
                                      std::uint64_t bytes, std::size_t alignment,
                                      std::shared_ptr<BorrowedRows> rows,
-                                     CopyRows read_live)
+                                     CopyRows read_live,
+                                     CopyRows read_device_backing)
     : rows_(std::move(rows)),
       live_reads_(read_live && rows_ && rows_->SourceViewBytes() >= bytes),
       private_file_(private_file),
@@ -219,35 +220,54 @@ PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
   if (!rows_ || !rows_->IsValid() || !rows_->HasBacking() || !alignment_ ||
       bytes_ % alignment_ || bytes_ > rows_->Bytes())
     throw std::invalid_argument("invalid borrowed persistence source");
+  if (rows_->BackingDomain() == MemoryDomain::kDevice && !read_device_backing)
+    throw std::invalid_argument("device backing requires a persistence reader");
   if (live_reads_) {
-    copy_ = [rows = rows_, copy = std::move(read_live)](
+    copy_ = [rows = rows_, copy = std::move(read_live),
+             backing_copy = std::move(read_device_backing)](
                 std::uint64_t offset, std::span<std::byte> destination,
                 Stream& stream) {
       // Preserved rows are read from their backing, the others from the
       // slot. Either way the pin keeps the bytes until the copy completes.
       auto pin = rows->Pin();
       const auto source = pin.Bytes().subspan(offset, destination.size());
-      if (!pin.Location()) {
+      if (!pin.Location() && rows->BackingDomain() == MemoryDomain::kHost) {
         std::memcpy(destination.data(), source.data(), destination.size());
         return Completion(std::make_unique<SettledSignal>());
       }
-      auto completion = copy(source, destination, stream);
+      auto completion = pin.Location()
+                            ? copy(source, destination, stream)
+                            : backing_copy(source, destination, stream);
       return Completion(std::make_unique<PinnedRowSignal>(
           std::move(pin), std::move(completion)));
     };
     return;
   }
-  copy_ = [rows = rows_](std::uint64_t offset, std::span<std::byte> destination,
-                         Stream&) {
+  if (rows_->BackingDomain() == MemoryDomain::kHost) {
+    copy_ = [rows = rows_](std::uint64_t offset,
+                           std::span<std::byte> destination, Stream&) {
+      const auto owner = rows->Owner();
+      if (!owner)
+        throw std::runtime_error("borrowed persistence source retired");
+      std::memcpy(destination.data(),
+                  static_cast<const std::byte*>(owner.get()) + offset,
+                  destination.size());
+      return Completion(std::make_unique<SettledSignal>());
+    };
+    return;
+  }
+  copy_ = [rows = rows_, copy = std::move(read_device_backing)](
+              std::uint64_t offset, std::span<std::byte> destination,
+              Stream& stream) {
     // Write waits for preservation before entering disk publication. Owner
     // refuses retired or still-live rows, so this never reads a live slot.
-    const auto owner = rows->Owner();
-    if (!owner)
+    auto pin = rows->Pin();
+    if (pin.Location() || !pin.Owner())
       throw std::runtime_error("borrowed persistence source retired");
-    std::memcpy(destination.data(),
-                static_cast<const std::byte*>(owner.get()) + offset,
-                destination.size());
-    return Completion(std::make_unique<SettledSignal>());
+    const auto source = pin.Bytes().subspan(offset, destination.size());
+    auto completion = copy(source, destination, stream);
+    return Completion(std::make_unique<PinnedRowSignal>(std::move(pin),
+                                                        std::move(completion)));
   };
 }
 PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,

@@ -85,6 +85,12 @@ public:
                                              cache::Rows first, cache::Rows end,
                                              std::span<const std::byte>,
                                              cache::Stream&) override;
+  [[nodiscard]] bool SupportsDeviceRows() const override { return true; }
+  [[nodiscard]] cache::Completion CopyRowsOutDevice(const cache::Slot&,
+                                                    cache::ComponentId,
+                                                    cache::Rows, cache::Rows,
+                                                    std::span<std::byte>,
+                                                    cache::Stream&) override;
   [[nodiscard]] std::span<const std::byte> BorrowRowsView(
       const cache::Slot&, cache::ComponentId, cache::Rows first,
       cache::Rows end) const override;
@@ -105,7 +111,8 @@ private:
                                                const ContinuationComponent&,
                                                bool load, cache::Rows first,
                                                cache::Rows end, std::byte*,
-                                               cache::Stream&);
+                                               cache::Stream&,
+                                               bool device_destination = false);
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> draft_model_;
   hip::QwenDFlashGpuDraftConfig draft_config_;

@@ -24,6 +24,37 @@ public:
 };
 constexpr ResourceLimits kLimits{1 << 20, 1 << 20, 1 << 20, 1 << 20};
 
+void PayloadDomainsSurviveMoves() {
+  ResourceLedger ledger({4096, 2048, 0, 4096, 2048});
+  const auto make = [&](MemoryDomain domain) {
+    auto backing =
+        ledger.Reserve(ResourceCategory::kBackingFree, 32, domain).Convert();
+    auto assigned = backing.ReserveBacking(ResourceCategory::kPrivateState);
+    return Payload::Committed(assigned.Convert(),
+                              std::make_shared<std::array<std::byte, 32>>());
+  };
+  {
+    auto host = make(MemoryDomain::kHost);
+    auto device = make(MemoryDomain::kDevice);
+    const std::weak_ptr<const void> previous = host.Owner();
+    const auto* device_address = device.Owner().get();
+    host = std::move(device);
+    assert(previous.expired());
+    assert(host.Domain() == MemoryDomain::kDevice);
+    assert(host.Owner().get() == device_address);
+    assert(ledger.Snapshot().ram_bytes == 0);
+    assert(ledger.Snapshot().device_bytes == 32);
+    device = make(MemoryDomain::kHost);
+    std::swap(host, device);
+    assert(host.Domain() == MemoryDomain::kHost);
+    assert(device.Domain() == MemoryDomain::kDevice);
+    assert(device.Owner().get() == device_address);
+    assert(host.Domain() == host.CommittedCharge().Info().domain);
+    assert(device.Domain() == device.CommittedCharge().Info().domain);
+  }
+  assert(ledger.Snapshot().total_bytes == 0);
+}
+
 struct Fixture {
   Fixture() = default;
   Fixture(Rows window_rows, Rows ring_rows) : adapter(window_rows, ring_rows) {}
@@ -837,6 +868,7 @@ void Baseline() {
 }
 }  // namespace
 int main() {
+  PayloadDomainsSurviveMoves();
   RejectedPayloadsReleaseOwnersFirst();
   EmptyAndShortCheckpoints();
   PrivateOnlyCheckpoints();

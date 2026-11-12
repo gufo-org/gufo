@@ -209,6 +209,7 @@ struct TextRunnerResourceClaim {
   /// The server subtracts outstanding reservations conservatively, including
   /// those released during the sample. Empty keeps the fixed budget.
   std::function<std::size_t()> prompt_admission_available_bytes;
+  std::size_t retained_device_snapshot_capacity_bytes{};
 };
 
 struct TextRunnerMeasuredResources {

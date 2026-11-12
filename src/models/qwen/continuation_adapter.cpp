@@ -761,6 +761,19 @@ cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
   return TransferRows(state, component, false, first, end, bytes.data(),
                       stream);
 }
+cache::Completion ContinuationAdapter::CopyRowsOutDevice(
+    const cache::Slot& slot, cache::ComponentId id, Rows first, Rows end,
+    std::span<std::byte> bytes, cache::Stream& stream) {
+  auto& state = As(const_cast<cache::Slot&>(slot));
+  const auto& component = Component(id);
+  const auto row = component.descriptor.row_bytes;
+  if (!state.IsValid() || !row || first > end || end > state.position ||
+      bytes.size() != (end - first) * row)
+    throw std::invalid_argument("invalid Qwen device row capture");
+  Check(hipStreamSynchronize(state.executor->arena_.stream));
+  return TransferRows(state, component, false, first, end, bytes.data(), stream,
+                      true);
+}
 cache::Completion ContinuationAdapter::CopyRowsIn(
     cache::Slot& slot, cache::ComponentId id, Rows first, Rows end,
     std::span<const std::byte> bytes, cache::Stream& stream) {
@@ -812,7 +825,8 @@ std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
 }
 cache::Completion ContinuationAdapter::TransferRows(
     State& state, const ContinuationComponent& component, bool load, Rows first,
-    Rows end, std::byte* bytes, cache::Stream& stream) {
+    Rows end, std::byte* bytes, cache::Stream& stream,
+    bool device_destination) {
   const auto& c = model_->GetConfig();
   auto& arena = state.executor->arena_;
   const auto row = component.descriptor.row_bytes;
@@ -828,9 +842,16 @@ cache::Completion ContinuationAdapter::TransferRows(
   return Transfer(state, load, stream, [&](hip::TransferStream& transfer) {
     if (first == end)
       return;
-    const auto direction = load ? hipMemcpyDefault : hipMemcpyDeviceToHost;
+    const auto direction = load                 ? hipMemcpyDefault
+                           : device_destination ? hipMemcpyDeviceToDevice
+                                                : hipMemcpyDeviceToHost;
     if (policy_.UsesFp16AttentionKv()) {
       auto* device = native + first * row;
+      if (device_destination) {
+        Check(hipMemcpyAsync(bytes, device, (end - first) * row,
+                             hipMemcpyDeviceToDevice, transfer.Native()));
+        return;
+      }
       Check(load ? hip::CopySnapshotToDevice(device, bytes, (end - first) * row,
                                              transfer.Native())
                  : hip::CopySnapshotToHost(bytes, device, (end - first) * row,

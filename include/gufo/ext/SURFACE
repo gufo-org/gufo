@@ -84,6 +84,7 @@ src/core/hip/detail/dispatch_telemetry.hpp
 src/core/hip/detail/gemv_dispatcher.hpp
 src/core/hip/detail/hip_graph_decode_executor.hpp
 src/core/hip/detail/hipblaslt_plan_database.hpp
+src/core/hip/device_cache_budget.hpp
 src/core/hip/heap_placement.hpp
 src/core/hip/hip_utils.hpp
 src/core/hip/host_allocations.hpp

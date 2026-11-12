@@ -222,7 +222,10 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
                c.descriptor.row_bytes;
     else
       rows += c.position.valid_rows * c.descriptor.row_bytes;
-  const auto turnover = ledger_.Limits().ram_bytes;
+  const auto limits = ledger_.Limits();
+  // Unused device capacity must not prolong host-only reuse protection.
+  // Count the additional pool only as it commits physical backing.
+  const auto turnover = limits.ram_bytes + ledger_.Snapshot().device_bytes;
   const auto fresh = [&](const Record& x) {
     return x.reused_at && admitted_bytes_ - *x.reused_at < turnover;
   };
@@ -561,7 +564,8 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
        before > after ? before - after : 0);
 }
 bool RetentionPolicy::Reclaim(const RetentionRequest& r) {
-  if (r.new_payload_bytes > ledger_.Limits().ram_bytes)
+  const auto limits = ledger_.Limits();
+  if (r.new_payload_bytes > limits.ram_bytes + limits.device_bytes)
     return false;
   const auto victim = Victim(r, false);
   if (victim == limit_)
@@ -583,7 +587,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
     return refuse(RetentionReason::kInvalid);
   const auto limits = ledger_.Limits();
   if (r.new_payload_bytes > limits.total_bytes ||
-      r.new_payload_bytes > limits.ram_bytes)
+      r.new_payload_bytes > limits.ram_bytes + limits.device_bytes)
     return refuse(RetentionReason::kByteCapacity);
   // ReserveSnapshot's optional-role record guard precedes its exact-match
   // search. Republishing an exact boundary still needs an eligible victim.

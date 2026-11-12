@@ -233,6 +233,7 @@ struct ComponentTextCache::Impl {
   // The cache's own RAM budget. The ledger limit adds what the slots pinned.
   // Zero when the RAM cache is off.
   std::size_t budget{};
+  std::size_t host_budget{};
   // RAM backing committed only to copy captures on their way to disk.
   std::size_t disk_backing{};
   bool ram_enabled{true};
@@ -251,9 +252,12 @@ struct ComponentTextCache::Impl {
         // Persistence pins remain bounded by the disk-capture backing pool.
         ledger([&]() -> cache::ResourceLimits {
           const auto staging = options ? cache::kDefaultDiskStagingBytes : 0;
-          if (ram_on)
-            return {slot_ceiling + staging, slot_ceiling, staging,
-                    slot_ceiling};
+          if (ram_on) {
+            const auto device = this->runner->ResourceClaim()
+                                    .retained_device_snapshot_capacity_bytes;
+            return {slot_ceiling + staging + device, slot_ceiling, staging,
+                    slot_ceiling + device, device};
+          }
           const auto unlimited = std::numeric_limits<std::size_t>::max();
           return {unlimited, unlimited, staging, kDiskOnlyBackingBytes};
         }()),
@@ -372,7 +376,12 @@ struct ComponentTextCache::Impl {
       }
     } else if (resources->commit_backing) {
       const auto staging = ledger.Limits().staging_bytes;
-      ledger.ConstrainLimits({limit + staging, limit, staging, limit});
+      const auto device =
+          std::min(ledger.Limits().device_bytes,
+                   this->runner->ResourceClaim()
+                       .retained_device_snapshot_capacity_bytes);
+      ledger.ConstrainLimits(
+          {limit + staging + device, limit, staging, limit + device, device});
       ram = std::min(ram, limit > pinned ? limit - pinned : 0);
       resources->commit_backing(ram);
       slot_pinned_bytes = pinned;
@@ -380,9 +389,12 @@ struct ComponentTextCache::Impl {
       // Slots allocated under the host ceiling; return to the budget. This
       // ignores pinned_bytes: a runner that pins must commit backing.
       const auto staging = ledger.Limits().staging_bytes;
-      ledger.ConstrainLimits({ram + staging, ram, staging, ram});
+      const auto device = ledger.Limits().device_bytes;
+      ledger.ConstrainLimits(
+          {ram + staging + device, ram, staging, ram + device, device});
     }
-    budget = ram_enabled ? ram : 0;
+    budget = ram_enabled ? ram + ledger.Limits().device_bytes : 0;
+    host_budget = ram_enabled ? ram : 0;
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index);
       for (const auto& durable : disk->Entries()) {
@@ -421,7 +433,8 @@ struct ComponentTextCache::Impl {
               "schema=component-cache-v1 event=disk_over_budget" + fields);
       }
       queue = std::make_unique<cache::PersistenceQueue>(
-          ledger, *streaming, kPersistenceDepth, ram,
+          ledger, *streaming, kPersistenceDepth,
+          ram + ledger.Limits().device_bytes,
           [this] {
             const std::lock_guard lock(mutex);
             return std::ranges::none_of(
@@ -498,18 +511,22 @@ struct ComponentTextCache::Impl {
             return catalog->EvictOne();
           });
     }
-    Logger::Info("cache",
-                 "schema=component-cache-v1 event=configured sessions=" +
-                     std::to_string(count) +
-                     " snapshot_entries=128 capacity_bytes=" +
-                     std::to_string(budget) + " staging_capacity_bytes=" +
-                     std::to_string(ledger.Limits().staging_bytes) +
-                     " automatic_bytes=" + std::to_string(automatic_bytes) +
-                     " max_bytes=" + std::to_string(max_bytes) +
-                     " disk_capacity_bytes=" + std::to_string(disk_capacity) +
-                     " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes) +
-                     " ram_cache=" + (ram_enabled ? "on" : "off") +
-                     " disk_backing_bytes=" + std::to_string(disk_backing));
+    Logger::Info(
+        "cache",
+        "schema=component-cache-v1 event=configured sessions=" +
+            std::to_string(count) +
+            " snapshot_entries=128 capacity_bytes=" + std::to_string(budget) +
+            " host_capacity_bytes=" + std::to_string(host_budget) +
+            " device_capacity_bytes=" +
+            std::to_string(ledger.Limits().device_bytes) +
+            " staging_capacity_bytes=" +
+            std::to_string(ledger.Limits().staging_bytes) +
+            " automatic_bytes=" + std::to_string(automatic_bytes) +
+            " max_bytes=" + std::to_string(max_bytes) +
+            " disk_capacity_bytes=" + std::to_string(disk_capacity) +
+            " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes) +
+            " ram_cache=" + (ram_enabled ? "on" : "off") +
+            " disk_backing_bytes=" + std::to_string(disk_backing));
   }
   ~Impl() {
     // Settle immutable-source readers before slots/resources/index unwind.
@@ -596,17 +613,28 @@ struct ComponentTextCache::Impl {
         // Read rows still in a slot from there: idle preservation only runs
         // while no request is busy, and a waiting job keeps its pins.
         sources.emplace_back(private_file, file, bytes, 1, std::move(rows),
-                             resources->copy_observed_rows);
+                             resources->copy_observed_rows,
+                             resources->copy_device_rows);
         return cache::DiskPayload{file, bytes, 0};
       }
       auto owner = payload.Owner();
       if (!owner)
         throw std::logic_error("persistence source is not immutable");
+      auto device_copy = payload.Domain() == cache::MemoryDomain::kDevice
+                             ? resources->copy_device_rows
+                             : cache::PersistenceSource::CopyRows{};
+      if (payload.Domain() == cache::MemoryDomain::kDevice && !device_copy)
+        throw std::logic_error("missing device persistence copy");
       sources.emplace_back(
           private_file, file, bytes, 1, payload.CommittedCharge(), owner,
-          [owner, checkpoint](std::uint64_t offset,
-                              std::span<std::byte> destination,
-                              cache::Stream&) {
+          [owner, checkpoint, device_copy](std::uint64_t offset,
+                                           std::span<std::byte> destination,
+                                           cache::Stream& stream) {
+            if (device_copy)
+              return device_copy(
+                  {static_cast<const std::byte*>(owner.get()) + offset,
+                   destination.size()},
+                  destination, stream);
             std::memcpy(destination.data(),
                         static_cast<const std::byte*>(owner.get()) + offset,
                         destination.size());
@@ -976,22 +1004,31 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
   TransferBatch transfers(cache->resources->transfer_batch_size);
   for (auto& copy : copies) {
     const auto& r = copy.request;
-    transfers.Add([&] { return cache->resources->stream(); },
-                  [&](cache::Stream& stream) {
-                    return r.category == cache::ResourceCategory::kPrivateState
-                               ? cache->resources->adapter->CapturePrivate(
-                                     slot.Execution(), r.component,
-                                     copy.buffer.bytes.first(r.bytes), stream)
-                               : cache->resources->adapter->CopyRowsOut(
-                                     slot.Execution(), r.component, r.first,
-                                     r.end, copy.buffer.bytes.first(r.bytes),
-                                     stream);
-                  });
+    transfers.Add(
+        [&] { return cache->resources->stream(); },
+        [&](cache::Stream& stream) {
+          return r.category == cache::ResourceCategory::kPrivateState
+                     ? cache->resources->adapter->CapturePrivate(
+                           slot.Execution(), r.component,
+                           copy.buffer.bytes.first(r.bytes), stream)
+                 : copy.buffer.domain == cache::MemoryDomain::kDevice
+                     ? cache->resources->adapter->CopyRowsOutDevice(
+                           slot.Execution(), r.component, r.first, r.end,
+                           copy.buffer.bytes.first(r.bytes), stream)
+                     : cache->resources->adapter->CopyRowsOut(
+                           slot.Execution(), r.component, r.first, r.end,
+                           copy.buffer.bytes.first(r.bytes), stream);
+        });
   }
   transfers.Finish();
   for (auto& copy : copies) {
     auto payload = copy.buffer.finish();
     auto owner = payload.Owner();
+    auto device_copy = payload.Domain() == cache::MemoryDomain::kDevice
+                           ? cache->resources->copy_device_rows
+                           : cache::PersistenceSource::CopyRows{};
+    if (payload.Domain() == cache::MemoryDomain::kDevice && !device_copy)
+      throw std::logic_error("missing device persistence copy");
     metrics.captured_bytes += payload.Bytes();
     metrics.copied_payload_bytes += copy.request.bytes;
     durable->sources.emplace_back(
@@ -1002,7 +1039,13 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
                                 &cache::ComponentDescriptor::id)
                   ->row_bytes,
         payload.CommittedCharge(), owner,
-        [owner](auto offset, auto destination, cache::Stream&) {
+        [owner, device_copy](auto offset, auto destination,
+                             cache::Stream& stream) {
+          if (device_copy)
+            return device_copy(
+                {static_cast<const std::byte*>(owner.get()) + offset,
+                 destination.size()},
+                destination, stream);
           std::memcpy(destination.data(),
                       static_cast<const std::byte*>(owner.get()) + offset,
                       destination.size());
@@ -1029,7 +1072,7 @@ std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();
 }
 std::size_t ComponentTextCache::ram_budget() const noexcept {
-  return impl_->budget;
+  return impl_->host_budget;
 }
 
 std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
@@ -1928,6 +1971,11 @@ std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
                                ? cache.resources->adapter->CapturePrivate(
                                      request.slot.Execution(),
                                      payload.component, buffer, stream)
+                           : buffers[i].domain == cache::MemoryDomain::kDevice
+                               ? cache.resources->adapter->CopyRowsOutDevice(
+                                     request.slot.Execution(),
+                                     payload.component, payload.first, end,
+                                     buffer, stream)
                                : cache.resources->adapter->CopyRowsOut(
                                      request.slot.Execution(),
                                      payload.component, payload.first, end,
@@ -2095,7 +2143,7 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
        true,
        false,
        {},
-       cache::GridLimit(impl_->cache->budget, private_bytes)});
+       cache::GridLimit(impl_->cache->host_budget, private_bytes)});
   std::vector<std::size_t> boundaries;
   for (const auto& capture : plan)
     if (!capture.required &&
