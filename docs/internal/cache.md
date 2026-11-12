@@ -574,7 +574,11 @@ Optional setup or admission refusal leaves the completed live execution valid.
 The disk queue writes these copies during idle work.
 A refused capture or full persistence queue can still leave an earlier fallback.
 Before their first restore, generated copies use free capacity or replace older
-unused frontiers. Prompt admission reclaims unused generated copies before exact
+unused frontiers. Where the backing provider can estimate capacity, optional
+copies also leave projected headroom for an equivalent incremental capture.
+Headroom refusal cannot bypass the limit through optional disk staging. This
+protects private-state capacity, without promising space for an arbitrary larger
+prompt or unfragmented allocation. Prompt admission reclaims unused generated copies before exact
 retries, including their queued disk writes; active writes are left alone.
 Once a generated checkpoint restores a request it competes normally. Unused
 generated victims are dropped rather than requeued for demotion.

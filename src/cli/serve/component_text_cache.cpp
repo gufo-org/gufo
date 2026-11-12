@@ -56,6 +56,10 @@ std::size_t PayloadBytes(const cache::DiskManifest& manifest) {
   }
   return bytes;
 }
+class FrontierHeadroomRefused final : public std::runtime_error {
+public:
+  FrontierHeadroomRefused() : std::runtime_error("frontier capture headroom") {}
+};
 struct DurableCapture {
   cache::ResourceCharge metadata;
   std::shared_ptr<const void> branch;
@@ -2044,6 +2048,21 @@ std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
             });
             while (true) {
               try {
+                if (request.generated_frontier &&
+                    cache.resources->can_capture) {
+                  auto metadata = cache.ledger.Reserve(
+                      cache::ResourceCategory::kMetadata,
+                      2 * payloads.size() * sizeof(cache::PayloadRequest));
+                  std::vector<cache::PayloadRequest> with_headroom(
+                      payloads.begin(), payloads.end());
+                  with_headroom.insert(with_headroom.end(), payloads.begin(),
+                                       payloads.end());
+                  if (!cache.resources->can_capture(with_headroom)) {
+                    if (reclaim())
+                      continue;
+                    throw FrontierHeadroomRefused();
+                  }
+                }
                 if (cache.resources->can_capture &&
                     !cache.resources->can_capture(payloads))
                   throw cache::ResourceExhausted();
@@ -2117,6 +2136,11 @@ std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
             transfers.Finish();
           });
       break;
+    } catch (const FrontierHeadroomRefused&) {
+      // Do not bypass the foreground reserve through optional disk staging.
+      // The live frontier remains usable until its eventual reassignment.
+      Logger::Info("cache", "event=frontier_capture_refused reason=headroom");
+      return {};
     } catch (const cache::ResourceExhausted&) {
       if (!reclaim()) {
         if (cache.queue && request.purpose != SnapshotPurpose::kHistory) {

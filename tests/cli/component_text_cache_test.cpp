@@ -44,6 +44,7 @@ public:
   mutable std::size_t captures{};
   std::function<void()> on_bind;
   bool defer_idle{};
+  bool check_capacity{};
   bool in_pass{};
   bool partial{};
   std::size_t alignment{1};
@@ -104,7 +105,8 @@ public:
         {.private_blocks = private_blocks,
          .row_backing_bytes = row_backing_bytes,
          .defer_idle = &defer_idle,
-         .captures = &captures});
+         .captures = &captures,
+         .check_capacity = check_capacity});
   }
   std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
@@ -1351,6 +1353,55 @@ void GeneratedFrontierKeepsTheCurrentRetryUnderPressure() {
   auto repeated = cache.Acquire(prompt, {}, {}, true, 0, true);
   assert(repeated->cached_tokens() == prompt.size());
   repeated->Invalidate();
+}
+void OptionalFrontiersLeaveTheNextPromptACompleteCapture() {
+  const TemporaryDirectory temp("gufo-frontier-headroom-test");
+  for (bool disk_on : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    runner->private_blocks = 2;
+    runner->check_capacity = true;
+    const std::optional<TextRunnerDiskCacheOptions> disk =
+        disk_on ? std::optional(TextRunnerDiskCacheOptions{
+                      .directory = temp.path().string(),
+                      .capacity_bytes = 1 << 20,
+                      .min_checkpoint_step_tokens = 0})
+                : std::nullopt;
+    {
+      ComponentTextCache cache(runner, 1, 1 << 22, disk);
+      const std::vector<TextRunnerToken> prompt{1, 2, 3, 4};
+      auto first = cache.Acquire(prompt, {}, {}, true, 0, true);
+      auto& state = dynamic_cast<State&>(first->state());
+      runner->adapter->Append(state.slot, prompt, prompt);
+      assert(first->TryReserveSnapshot(first->CaptureBytes(), prompt.size(),
+                                       false, SnapshotPurpose::kRetry));
+      assert(first->PublishSnapshot(prompt, first->Capture()));
+      const std::vector<TextRunnerToken> tail{5, 6, 7, 8};
+      runner->adapter->Append(state.slot, tail, tail);
+      auto frontier = prompt;
+      frontier.insert(frontier.end(), tail.begin(), tail.end());
+      (void)first->Commit({}, {}, frontier);
+      const std::vector<TextRunnerToken> other{90, 91, 92, 93};
+      auto peer = cache.Acquire(other, {}, {}, true, 0, true);
+      runner->adapter->Append(dynamic_cast<State&>(peer->state()).slot, other,
+                              other);
+      assert(peer->TryReserveSnapshot(peer->CaptureBytes(), other.size(), false,
+                                      SnapshotPurpose::kRetry));
+      assert(peer->PublishSnapshot(other, peer->Capture()));
+      peer->Invalidate();
+      // The optional copy did not consume the last private-state block and
+      // force the next unrelated prompt to evict the previous exact retry.
+      auto retry = cache.Acquire(prompt, {}, {}, true, 0, true);
+      assert(retry->cached_tokens() == prompt.size());
+      retry->Invalidate();
+    }
+    if (disk_on) {
+      cache::ResourceLedger ledger({1 << 24, 1 << 24, 1 << 20, 1 << 20});
+      cache::DiskStore store(ledger, temp.path(), 1 << 20);
+      for (const auto& entry : store.Entries())
+        assert(entry.Manifest().purpose !=
+               cache::CheckpointPurpose::kGenerated);
+    }
+  }
 }
 void PromptCaptureReclaimsUnusedGeneratedStateFirst() {
   auto runner = std::make_shared<Runner>();
@@ -3471,6 +3522,7 @@ int main() {
   StableChatPrefixSurvivesInterruptedFraming();
   WarmTurnsAdvanceTheStableCheckpoint();
   GeneratedFrontierKeepsTheCurrentRetryUnderPressure();
+  OptionalFrontiersLeaveTheNextPromptACompleteCapture();
   PromptCaptureReclaimsUnusedGeneratedStateFirst();
   IdleFrontierSetupRefusalKeepsTheCompletedLiveExecution();
   IdleFrontierCaptureReturnsBeforeCopyAndAdmissionWaits();

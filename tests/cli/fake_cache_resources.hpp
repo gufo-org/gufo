@@ -20,6 +20,7 @@ struct FakeCacheOptions {
   // Idle work gets no transfer stream while this is set.
   const bool* defer_idle{};
   std::size_t* captures{};
+  bool check_capacity{};
 };
 
 // Host-memory backing for a FakeAdapter, so serving tests run the component
@@ -67,6 +68,28 @@ inline std::unique_ptr<ComponentCacheResources> MakeFakeCacheResources(
     return std::make_unique<FakeStream>(true);
   };
   resources->transfer_batch_size = 4;
+  if (options.check_capacity)
+    resources->can_capture = [blocks](auto requests) {
+      std::vector<bool> assigned(blocks->size());
+      for (const auto& request : requests) {
+        bool found = false;
+        for (std::size_t i = 0; i < blocks->size(); ++i) {
+          const auto& block = (*blocks)[i];
+          if (assigned[i] || request.bytes > block.data.size() ||
+              (request.category == cache::ResourceCategory::kPrivateState) !=
+                  block.private_state ||
+              block.pool.Info().category !=
+                  cache::ResourceCategory::kBackingFree)
+            continue;
+          assigned[i] = true;
+          found = true;
+          break;
+        }
+        if (!found)
+          return false;
+      }
+      return true;
+    };
   resources->allocate = [captures = options.captures, blocks,
                          data](const cache::PayloadRequest& request) {
     for (const auto& block : *blocks) {
