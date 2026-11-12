@@ -75,11 +75,38 @@ unpatched:
 python tools\windows\patch_sdk_math.py %HIP_PATH%
 ```
 
-## 3. Configure and build
+## 3. Build XRT (once)
+
+The NPU runtime (`src/core/npu`) links XRT's `xrt_coreutil`, and configure
+stops at `find_package(XRT)` without it. XRT has no Windows package; build it
+from source at the commit CI pins (`XRT_REV` in
+[`windows-build.yml`](.github/workflows/windows-build.yml)), against static
+Boost and OpenCL headers from vcpkg:
 
 ```cmd
-tools\windows\vs-env.cmd cmake --preset windows-release
+%VCPKG_ROOT%\vcpkg install --classic --triplet x64-windows-static boost-filesystem boost-program-options boost-property-tree boost-format boost-algorithm boost-interprocess boost-optional boost-tokenizer boost-range boost-endian boost-uuid boost-regex boost-lexical-cast boost-process boost-tuple boost-any opencl
+git init C:\src\xrt-src
+git -C C:\src\xrt-src remote add origin https://github.com/Xilinx/XRT.git
+git -C C:\src\xrt-src fetch --depth 1 origin 06c43a7f93fee129d32def1d372e17a8e69c05d2
+git -C C:\src\xrt-src checkout FETCH_HEAD
+git -C C:\src\xrt-src submodule update --init --recursive --depth 1
+tools\windows\vs-env.cmd cmake -S C:\src\xrt-src\src -B C:\src\xrt-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DXRT_NPU=1 -DDISABLE_ABI_CHECK=1 -DBOOST_ROOT=%VCPKG_ROOT%/installed/x64-windows-static -DKHRONOS=%VCPKG_ROOT%/installed/x64-windows-static -DCMAKE_INSTALL_PREFIX=C:/xrt
+tools\windows\vs-env.cmd cmake --build C:\src\xrt-build
+tools\windows\vs-env.cmd cmake --install C:\src\xrt-build
+```
+
+This installs `C:\xrt\share\cmake\XRT\xrt-config.cmake` and
+`C:\xrt\xrt_coreutil.dll`. When CI bumps `XRT_REV`, rebuild at the new commit.
+Running on the NPU also needs AMD's NPU driver, which supplies the device
+plugin; without it Gufo runs on the GPU and `diagnose` warns
+`No XDNA NPU found`.
+
+## 4. Configure and build
+
+```cmd
+tools\windows\vs-env.cmd cmake --preset windows-release -DXRT_DIR=C:/xrt/share/cmake/XRT
 tools\windows\vs-env.cmd cmake --build --preset windows-release
+copy C:\xrt\xrt_coreutil.dll build\windows-release\
 ```
 
 `vs-env.cmd` finds Visual Studio with `vswhere`, loads the x64 environment and
@@ -88,12 +115,14 @@ calling script stops after it. The first configure builds the dependencies
 through vcpkg (ICU and OpenSSL take several minutes). The build produces
 `build\windows-release\gufo.exe` and `gufo-server.exe`, with the TheRock
 runtime DLLs and the `rocblas\` and `hipblaslt\` kernel libraries staged
-beside them.
+beside them. The build does not stage `xrt_coreutil.dll`; without the copy,
+`gufo.exe` exits silently with status `0xC0000135`. Build trees configured
+before XRT became required need one reconfigure with `-DXRT_DIR`.
 
 For the host test suite, which needs no GPU:
 
 ```cmd
-tools\windows\vs-env.cmd cmake --preset windows-cpu-test
+tools\windows\vs-env.cmd cmake --preset windows-cpu-test -DXRT_DIR=C:/xrt/share/cmake/XRT
 tools\windows\vs-env.cmd cmake --build --preset windows-cpu-test --target check-pr
 ```
 
@@ -109,7 +138,7 @@ cache objects that share a `/Zi` PDB:
 tools\windows\vs-env.cmd cmake --preset windows-release -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
 ```
 
-## 4. Verify
+## 5. Verify
 
 ```cmd
 build\windows-release\gufo.exe diagnose
@@ -151,6 +180,8 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
   to the executable, ahead of the older `amdhip64` the AMD driver installs in
   System32; copy the whole folder (`gufo.exe`, the DLLs, `rocblas\` and
   `hipblaslt\`).
+- If configure fails with `Could not find a package configuration file
+  provided by "XRT"`, build XRT (step 3) and pass `-DXRT_DIR`.
 - After reinstalling or upgrading the SDK, rerun the patch in step 2 and
   rebuild into a fresh build directory so the runtime stages again.
 
