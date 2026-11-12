@@ -26,14 +26,16 @@ NPU:
   int16 per row and block scales are applied in integer arithmetic, so results
   match f32 activations to about 5e-5.
 
-Speech providers receive their declared options, so an NPU switch such as
-`--npu` reaches them as it reaches text providers:
+Speech and decision providers receive their declared options, so an NPU
+switch such as `--npu` reaches them as it reaches text providers:
 - `AsrRunnerOptions::provider_options` and `TtsRunnerOptions::provider_options`
   (`ParsedOptions`): the explicit values of the options the provider declares
   in its manifest for `serve asr` / `serve tts` (manifest commands `serve` or
   the full subcommand). `gufo serve asr` and `gufo serve tts --help` list them
   under "Provider options". Runners built through `create_with_options` get
   them; an option that was not given is absent.
+- `DecisionRunnerOptions::provider_options`: likewise for `serve decision` and
+  `decide`, whose `--help` lists them.
 
 Public CMake contract: Gufo requires XRT (`XRT::xrt_coreutil`), found through
 `XRT_DIR`, `XILINX_XRT` or `/opt/xilinx/xrt`.
