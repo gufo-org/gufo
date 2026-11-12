@@ -277,11 +277,9 @@ jobs:
           $config = Get-ChildItem $env:XRT_ROOT -Recurse -Filter xrt-config.cmake | Select-Object -First 1
           if (-not $config) { throw 'XRT CMake config missing' }
           "XRT_DIR=$($config.DirectoryName -replace '\\', '/')" >> $env:GITHUB_ENV
-          New-Item -ItemType Directory -Force build/windows-release | Out-Null
-          # Gufo imports only xrt_coreutil; the NPU driver supplies the device shim.
-          $coreutil = Get-ChildItem $env:XRT_ROOT -Recurse -Filter 'xrt_coreutil.dll' | Select-Object -First 1
-          if (-not $coreutil) { throw 'xrt_coreutil.dll missing' }
-          Copy-Item $coreutil.FullName build/windows-release
+          # Gufo delay-loads xrt_coreutil.dll and uses the NPU driver's copy
+          # (System32): a copy beside gufo.exe cannot find the driver's device
+          # shim. Do not stage it; check_bundle.py rejects a bundled one.
 
       - name: Check out external extension
         if: ${{ inputs.extension-repo != '' }}
@@ -377,7 +375,7 @@ jobs:
           }
           Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
           Copy-Item "$env:XRT_ROOT/LICENSE" "$dist/xrt-LICENSE.txt"
-          "XRT $env:XRT_REV, source: https://github.com/Xilinx/XRT/tree/$env:XRT_REV; Apache-2.0; built with XRT_NPU=1." |
+          "XRT $env:XRT_REV, source: https://github.com/Xilinx/XRT/tree/$env:XRT_REV; Apache-2.0; built with XRT_NPU=1; Gufo is linked against its headers and import library, and xrt_coreutil.dll comes from the AMD NPU driver." |
             Set-Content "$dist/xrt-version.txt" -Encoding ascii
           'LLVM OpenMP 18.1.8, source: https://github.com/llvm/llvm-project/tree/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/openmp; Apache-2.0 WITH LLVM-exception; built with OPENMP_MSVC_NAME_SCHEME=ON.' |
             Set-Content "$dist/llvm-openmp-version.txt" -Encoding ascii

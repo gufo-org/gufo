@@ -13,6 +13,9 @@ kernel directories beside it. Bundles include an LLVM OpenMP runtime built
 from upstream LLVM 18.1.8 source under Apache-2.0 with LLVM exceptions, using
 `libomp140.x86_64.dll` as required by the SDK. The license is included under
 `llvm-openmp-LICENSE.txt`, with source provenance in `llvm-openmp-version.txt`.
+The NPU runtime uses XRT from AMD's NPU driver, which the bundle does not
+ship; without the driver, `gufo diagnose` warns `No XDNA NPU found` and the
+GPU paths work as before.
 
 The v0.24.0 ZIP omitted this DLL ([#801](https://github.com/gufo-org/gufo/issues/801)).
 If it exits silently, including for `--help`, with status `0xC0000135`, the
@@ -99,13 +102,12 @@ This installs `C:\xrt\share\cmake\XRT\xrt-config.cmake`, the import library
 Gufo links, and `C:\xrt\xrt_coreutil.dll`. When CI bumps `XRT_REV`, rebuild
 at the new commit.
 
-At run time, use the `xrt_coreutil.dll` that AMD's NPU driver installs in
-System32, not this one. The source-built DLL loads the device shim
-(`xrt_core.dll`) from its own directory, and the driver keeps the shim in its
-DriverStore folder. With the source-built DLL beside `gufo.exe`, `gufo
-diagnose --section npu` warns `No XDNA NPU found` even with the driver
-installed. On a machine without the NPU driver, copy the source-built DLL
-beside `gufo.exe` so that it starts; Gufo then runs on the GPU only.
+Do not copy that DLL beside `gufo.exe`. Gufo delay-loads `xrt_coreutil.dll`
+and uses the one AMD's NPU driver installs in System32. The source-built DLL
+loads the device shim (`xrt_core.dll`) from its own directory, but the driver
+keeps the shim in its DriverStore folder, so with a copy beside `gufo.exe`,
+`gufo diagnose --section npu` warns `No XDNA NPU found` even with the driver
+installed. Without the NPU driver, Gufo starts and runs on the GPU only.
 
 ## 4. Configure and build
 
@@ -120,10 +122,9 @@ calling script stops after it. The first configure builds the dependencies
 through vcpkg (ICU and OpenSSL take several minutes). The build produces
 `build\windows-release\gufo.exe` and `gufo-server.exe`, with the TheRock
 runtime DLLs and the `rocblas\` and `hipblaslt\` kernel libraries staged
-beside them. The build does not stage `xrt_coreutil.dll` (see step 3); if
-neither the driver's nor a copied one is found, `gufo.exe` exits silently
-with status `0xC0000135`. Build trees configured before XRT became required
-need one reconfigure with `-DXRT_DIR`.
+beside them; `xrt_coreutil.dll` comes from the NPU driver (step 3). Build
+trees configured before XRT became required need one reconfigure with
+`-DXRT_DIR`.
 
 For the host test suite, which needs no GPU:
 

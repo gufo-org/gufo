@@ -40,6 +40,9 @@ can't see the state of a server that is already running; use `/health` and
   `ls -l /dev/accel/accel0`. Your user needs access to it, usually through
   the `render` group.
 - In a container, pass `--device /dev/accel/accel0`.
+- On Windows, install AMD's NPU driver; it supplies XRT
+  (`xrt_coreutil.dll` in System32). Remove any `xrt_coreutil.dll` beside
+  `gufo.exe`: that copy cannot find the driver's device plugin.
 
 ## The server stops with `device_lost`
 
