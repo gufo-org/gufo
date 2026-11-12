@@ -1203,6 +1203,11 @@ int RunServe(std::span<const char* const> args) {
                      "Serve image generation and editing (Qwen-Image-2.1 or "
                      "an image extension provider).");
     AddImageOptions(parser, &options);
+    // Edits accept up to 20 MiB of reference images; the 8 MiB default
+    // rejected an 8-reference edit with 413. A leading --max-request-bytes
+    // keeps its value.
+    if (max_request_body_bytes == static_cast<std::size_t>(8) * 1024 * 1024)
+      max_request_body_bytes = 32ULL << 20;
     add_server_options(parser, false);
     ProviderOptions declared_options(registry,
                                      std::string(ext::kImageServeCommand),

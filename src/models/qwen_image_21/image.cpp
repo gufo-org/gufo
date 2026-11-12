@@ -72,14 +72,9 @@ std::vector<Filter> LanczosFilters(int input, int output) {
   return result;
 }
 
-}  // namespace
-
-std::uint64_t InitialNoiseSeed(std::uint64_t seed,
-                               std::span<const Image> images) {
-  if (images.empty())
-    return seed;
+std::uint64_t HashSeed(std::span<const std::uint8_t> domain, std::uint64_t seed,
+                       std::span<const Image> images) {
   crypto::Sha256Hasher hash;
-  constexpr std::uint8_t domain[] = "Qwen-Image-2.1 edit noise v1";
   hash.Update(domain);
   const auto append = [&](std::uint64_t value) {
     std::array<std::uint8_t, 8> bytes{};
@@ -100,6 +95,22 @@ std::uint64_t InitialNoiseSeed(std::uint64_t seed,
   for (int i = 0; i < 8; ++i)
     result |= static_cast<std::uint64_t>(digest[i]) << (8 * i);
   return result;
+}
+
+}  // namespace
+
+std::uint64_t InitialNoiseSeed(std::uint64_t seed,
+                               std::span<const Image> images,
+                               const Image* init_image) {
+  if (init_image) {
+    constexpr std::uint8_t domain[] = "Qwen-Image-2.1 img2img noise v1";
+    return HashSeed(domain, InitialNoiseSeed(seed, images),
+                    std::span(init_image, 1));
+  }
+  if (images.empty())
+    return seed;
+  constexpr std::uint8_t domain[] = "Qwen-Image-2.1 edit noise v1";
+  return HashSeed(domain, seed, images);
 }
 
 Image DecodeImage(std::span<const std::uint8_t> bytes) {
@@ -271,6 +282,22 @@ void ValidateRequest(const Request& request) {
       throw std::invalid_argument(
           "LoRA scale must be finite and at most 10 in magnitude");
   }
+  if (request.negative_prompt.size() > (64U << 10U))
+    throw std::invalid_argument("negative prompt exceeds 64 KiB");
+  if (request.guidance_scale &&
+      !(*request.guidance_scale >= 1 && *request.guidance_scale <= 20))
+    throw std::invalid_argument("guidance_scale must be between 1 and 20");
+  if (!(request.strength >= 0.01 && request.strength <= 1))
+    throw std::invalid_argument("strength must be between 0.01 and 1");
+  if (request.strength <= kFullStrength && !request.init_image)
+    throw std::invalid_argument("strength below 1 requires an input image");
+  if (request.init_image)
+    CheckImage(*request.init_image);
+}
+
+float ResolveGuidance(const Request& request) {
+  return request.guidance_scale.value_or(
+      request.negative_prompt.empty() ? 1.0F : kDefaultGuidanceScale);
 }
 
 std::string ConditionPrompt(std::string_view prompt,
@@ -283,9 +310,9 @@ std::string ConditionPrompt(std::string_view prompt,
          " The image has alpha channel and the background is transparent.";
 }
 
-std::vector<float> FlowSigmas(int steps, int image_tokens) {
-  if (steps < 2 || steps > 100 || image_tokens < 1)
-    throw std::invalid_argument("invalid image flow schedule");
+namespace {
+
+std::vector<float> Schedule(int steps, int image_tokens) {
   const double mu = 0.5 + (image_tokens - 256) * (0.9 - 0.5) / (8192 - 256);
   const float shift = static_cast<float>(std::exp(mu));
   std::vector<float> sigmas(steps + 1);
@@ -297,6 +324,28 @@ std::vector<float> FlowSigmas(int steps, int image_tokens) {
   for (int i = 0; i < steps; ++i)
     sigmas[i] = 1.0F - (1.0F - sigmas[i]) / scale;
   sigmas[steps] = 0;
+  return sigmas;
+}
+
+}  // namespace
+
+std::vector<float> FlowSigmas(int steps, int image_tokens) {
+  if (steps < 2 || steps > 100 || image_tokens < 1)
+    throw std::invalid_argument("invalid image flow schedule");
+  return Schedule(steps, image_tokens);
+}
+
+std::vector<float> DenoiseSigmas(int steps, double strength, int image_tokens) {
+  if (!(strength >= 0.01 && strength <= 1))
+    throw std::invalid_argument("invalid image denoise strength");
+  if (strength > kFullStrength)
+    return FlowSigmas(steps, image_tokens);
+  if (steps < 2 || steps > 100 || image_tokens < 1)
+    throw std::invalid_argument("invalid image flow schedule");
+  // ComfyUI KSampler: int(steps / denoise) steps, keep the last steps + 1.
+  const int total = static_cast<int>(steps / strength);
+  auto sigmas = Schedule(total, image_tokens);
+  sigmas.erase(sigmas.begin(), sigmas.end() - (steps + 1));
   return sigmas;
 }
 
@@ -318,6 +367,17 @@ std::vector<float> SamplingConfig::Sigmas(int requested,
   auto result = sample_sigmas;
   result.push_back(0);
   return result;
+}
+
+std::vector<float> SamplingConfig::DenoiseSigmas(int requested, double strength,
+                                                 int image_tokens) const {
+  if (strength > kFullStrength)
+    return Sigmas(requested, image_tokens);
+  if (IsTurbo())
+    throw std::invalid_argument(
+        "Qwen-Image-2.1-Turbo supports image to image only at strength 1");
+  return qwen_image_21::DenoiseSigmas(ResolveSteps(requested), strength,
+                                      image_tokens);
 }
 
 }  // namespace gufo::models::qwen_image_21
