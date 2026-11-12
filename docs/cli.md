@@ -111,8 +111,8 @@ the same distribution.
 | Option | Default | Use |
 | --- | --- | --- |
 | `--prefill-chunk` | ignored | Deprecated and ignored; it will be removed. A prompt beside decoding requests is split by layers, so they keep decoding. |
-| `--max-pending` | 16 | Requests waiting for a session. |
-| `--max-pending-per-client` | `--max-pending` | Waiting requests per client IP. |
+| `--max-pending` | 16 | Requests waiting for a session. `0` turns the queue off: when every session is busy, a request gets `429` at once, so a router can fail over. |
+| `--max-pending-per-client` | `--max-pending` | Waiting requests per client IP. At most `--max-pending`; `0` lets a client run only on a free session. |
 | `--request-timeout-ms` | off | Cancel a request after this long, waiting included. |
 | `--stall-timeout-ms` | off | Exit as `device_lost` when generation stops progressing, so a supervisor restarts the server. At least 60000. |
 | `--max-output-bytes` | 1 MiB | Largest response. |
