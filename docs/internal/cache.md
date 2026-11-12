@@ -111,6 +111,14 @@ just prompt tokens. A request that continues no live frontier takes the least
 recently used idle session (Flash-Next prefers one without a frontier), so
 it does not replace the frontier of a conversation that has just replied.
 
+A client replays the previous answer as text, and the next prompt can tokenize
+it differently from the sampled tokens (#1154). At admission, after earlier
+requests have committed their frontiers, a text-only prompt whose text repeats
+a frontier is rewritten to that frontier's tokens. An unchanged retry of such a
+prompt is rewritten to the same tokens when a checkpoint retains them, so an
+identical request samples identical output. A prompt whose own tokens already
+begin a frontier is never rewritten.
+
 A **snapshot** is an immutable retained checkpoint. Reusing one means restoring
 it into a session, which costs a copy.
 
