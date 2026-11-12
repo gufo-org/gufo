@@ -203,6 +203,21 @@ void ReusedExactRetryOutlivesAnUnrelatedColdRetry() {
   assert(!f.policy.Reclaim(request));
   assert(f.Cached({1, 2, 3, 4}) == 4);
 }
+void ReusedExactRetryYieldsToItsOwnContinuation() {
+  // Reuse protection does not pin a retry against the history it started:
+  // a continuation extending the exact prompt still replaces it first.
+  Fixture f;
+  f.Add({1, 2, 3});
+  const auto retry = f.Add({1, 2, 3, 4}, RetentionPurpose::kRetry, 3);
+  f.policy.Touch(retry);
+  assert(f.policy.Rank(retry) == 3);
+  const std::vector<Token> longer{1, 2, 3, 4, 5};
+  RetentionRequest request{longer, {1}, {}, RetentionPurpose::kContinuation};
+  assert(f.policy.Reclaim(request));
+  assert(f.log.events.back().action == RetentionAction::kRemoved);
+  assert(f.log.events.back().checkpoint == retry);
+  assert(f.Cached({1, 2, 3, 4}) == 3);
+}
 void SharedGridBeforeTheActualDivergenceIsAFork() {
   Fixture f;
   const std::vector<Token> root(8, 7);
@@ -649,6 +664,37 @@ void ForkedParentOutlivesItsChildren() {
   parent.push_back(7);
   assert(f.Cached(parent) == 12);
   assert(f.Reclaim() == fork);
+}
+void ReusedRetryProtectionExpiresAfterOneTurnover() {
+  // A restored exact retry stays protected for one RAM-budget turnover of
+  // newly admitted bytes, then becomes a disposable retry copy again.
+  constexpr std::size_t kRam = 64 * 1024;
+  PressureFixture f(kRam);
+  f.Add({1, 2, 3});
+  const std::vector<Token> exact{1, 2, 3, 4};
+  RetentionRequest request{exact, {1}, {}, RetentionPurpose::kRetry, 3};
+  assert(f.policy.Admit(request, [&] {
+    return IndexCheckpoint(f.ledger, exact, {1}, {}, kPressureComponents);
+  }));
+  const auto retry = f.log.events.back().checkpoint;
+  assert(f.policy.Rank(retry) == 0);
+  f.policy.Touch(retry);
+  Token next = 100;
+  std::size_t admitted = 0;
+  constexpr std::size_t kRequest = 4096 + 16 * 64;
+  // Retiring each newer conversation keeps the ledger below its limit, so
+  // only the byte clock, not pressure eviction, ages the protection.
+  while (admitted + kRequest < kRam) {
+    assert(f.policy.Rank(retry) == 3);
+    f.policy.Remove(f.Add(Conversation(next++, 16)));
+    admitted += kRequest;
+  }
+  while (admitted < 2 * kRam) {
+    f.policy.Remove(f.Add(Conversation(next++, 16)));
+    admitted += kRequest;
+  }
+  assert(f.policy.Rank(retry) == 0);
+  assert(f.Cached(exact) == 4);
 }
 void ReuseProtectionLastsOneTurnover() {
   // A reused conversation outlives newer one-use requests (cache-pressure UI
@@ -1355,6 +1401,7 @@ int main() {
   Branches();
   RanksAndSources();
   ReusedExactRetryOutlivesAnUnrelatedColdRetry();
+  ReusedExactRetryYieldsToItsOwnContinuation();
   SharedGridBeforeTheActualDivergenceIsAFork();
   LongPrefixRelationsAfterReplacement();
   ShortPeersDoNotCoverHistory();
@@ -1369,6 +1416,7 @@ int main() {
   SharedShortPrefixIsNotCheap();
   UnreusedConversationKeepsItsStem();
   ForkedParentOutlivesItsChildren();
+  ReusedRetryProtectionExpiresAfterOneTurnover();
   ReuseProtectionLastsOneTurnover();
   RecordSourceReplacement();
   FullOptionalExactReplacement();
