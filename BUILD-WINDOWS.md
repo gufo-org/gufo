@@ -136,6 +136,29 @@ Some host suites stay Linux-only (they simulate `RLIMIT_FSIZE`, fork
 themselves or fault libc symbols); their targets are off on Windows and the
 Linux CI runs them.
 
+**NPU designs (optional):** to compile the in-tree IRON designs and run
+`npu_device_test` on the NPU, install the Windows wheels of the versions
+[`.devops/nix/iron`](.devops/nix/iron/default.nix) pins (mlir-aie 1.4.5 and
+Peano `peanoVersion`) into a Python 3.12 or 3.13 venv. aiecc packages the
+design with XRT's `xclbinutil`, so put `C:\xrt\unwrapped` on `PATH`:
+
+```cmd
+py -3.12 -m venv C:\src\iron-venv
+C:\src\iron-venv\Scripts\python -m pip install numpy ml-dtypes cloudpickle https://github.com/Xilinx/mlir-aie/releases/download/v1.4.5/mlir_aie-1.4.5-cp312-cp312-win_amd64.whl https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026111101%2B81af12b7-py3-none-win_amd64.whl
+set GUFO_IRON_PYTHON=C:\src\iron-venv\Scripts\python.exe
+set PEANO_INSTALL_DIR=C:\src\iron-venv\Lib\site-packages\llvm-aie
+set PATH=C:\xrt\unwrapped;%PATH%
+tools\windows\vs-env.cmd cmake --preset windows-release -B build\npu-test -DBUILD_TESTING=ON -DXRT_DIR=C:/xrt/share/cmake/XRT
+tools\windows\vs-env.cmd cmake --build build\npu-test --target npu_device_test
+set PATH=%CD%\build\windows-release;%PATH%
+build\npu-test\npu_device_test.exe build\npu-test\npu\q8gemm
+```
+
+It prints the relative error of each product against a double reference
+(about 3e-5). The design's `q8gemm_dispatch.so` is a Windows DLL despite its
+name. `npu_test` needs permission to create symbolic links (Developer Mode or
+an elevated shell) for its sysfs fixture.
+
 **Faster rebuilds:** with `ccache` on `PATH`, CMake compiles C, C++ and HIP
 through it. Configure with embedded debug information, because ccache cannot
 cache objects that share a `/Zi` PDB:
