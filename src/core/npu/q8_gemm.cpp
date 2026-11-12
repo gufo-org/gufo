@@ -120,8 +120,10 @@ struct Q8Gemm::Impl {
     return int(matrices.size()) - 1;
   }
 
-  std::vector<Job> Plan(std::span<const Call> calls) {
-    std::vector<Job> jobs;
+  // Jobs of the calls in dispatches: each dispatch's A rows and outputs fit
+  // the staging buffers (a large batch takes several dispatches).
+  std::vector<std::vector<Job>> Plan(std::span<const Call> calls) {
+    std::vector<std::vector<Job>> groups(1);
     std::size_t a_words = 0, c_words = 0;
     for (std::size_t i = 0; i < calls.size(); ++i) {
       const Matrix& m = matrices.at(std::size_t(calls[i].id));
@@ -129,18 +131,23 @@ struct Q8Gemm::Impl {
         const int G =
             std::max(1, std::min(kMaxA / (2 * p.kc), kMaxTiles / p.nt));
         for (int r0 = 0; r0 < calls[i].rows; r0 += 8 * G) {
-          Job j{&m, &p,      i,       r0, std::min(8 * G, calls[i].rows - r0),
-                0,  a_words, c_words, {}};
-          j.g = (j.nr + 7) / 8;
-          a_words += std::size_t(j.g) * p.kc * 2 * kRecWords;
-          c_words += std::size_t(8) * j.g * p.nt * 4 * kOutWords;
-          jobs.push_back(std::move(j));
+          const int nr = std::min(8 * G, calls[i].rows - r0), g = (nr + 7) / 8;
+          const std::size_t aw = std::size_t(g) * p.kc * 2 * kRecWords,
+                            cw = std::size_t(8) * g * p.nt * 4 * kOutWords;
+          if (aw * 4 > a.size() || cw * 4 > c.size())
+            throw Error("Q8Gemm: one job exceeds the staging buffers");
+          if ((a_words + aw) * 4 > a.size() || (c_words + cw) * 4 > c.size()) {
+            groups.emplace_back();
+            a_words = c_words = 0;
+          }
+          groups.back().push_back(
+              Job{&m, &p, i, r0, nr, g, a_words, c_words, {}});
+          a_words += aw;
+          c_words += cw;
         }
       }
     }
-    if (a_words * 4 > a.size() || c_words * 4 > c.size())
-      throw Error("Q8Gemm: batch too large");
-    return jobs;
+    return groups;
   }
 
   const Instructions& Stream(const std::vector<Job>& jobs,
@@ -252,29 +259,32 @@ struct Q8Gemm::Impl {
 
   void Run(std::span<const Call> calls) {
     std::lock_guard lock(mutex);
-    std::vector<Job> jobs = Plan(calls);
-    std::vector<int> key;
-    for (const Call& call : calls)
-      key.push_back(call.id), key.push_back(call.rows);
-    const Instructions& ins = Stream(jobs, key);
-    std::size_t a_end = 0, c_end = 0;
-    for (Job& j : jobs) {
-      Pack(j, calls[j.call].x);
-      a_end = j.a_words + std::size_t(j.g) * j.p->kc * 2 * kRecWords;
-      c_end = j.c_words + std::size_t(8) * j.g * j.p->nt * 4 * kOutWords;
-    }
-    a.ToDevice(0, a_end * 4);
-    program.Start(ins, {&a, &arena, &c}).Wait();
-    c.FromDevice(0, c_end * 4);
-    // The buffer is uncached: copy it out once, then unpack.
-    out.resize(c_end);
-    std::memcpy(out.data(), c.data(), c_end * 4);
+    std::vector<std::vector<Job>> groups = Plan(calls);
     for (const Call& call : calls)
       std::fill_n(call.y,
                   std::size_t(call.rows) * matrices[std::size_t(call.id)].n,
                   0.0f);
-    for (const Job& j : jobs)
-      Unpack(j, calls[j.call].y);
+    for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+      auto& jobs = groups[gi];
+      std::vector<int> key{int(gi)};
+      for (const Call& call : calls)
+        key.push_back(call.id), key.push_back(call.rows);
+      const Instructions& ins = Stream(jobs, key);
+      std::size_t a_end = 0, c_end = 0;
+      for (Job& j : jobs) {
+        Pack(j, calls[j.call].x);
+        a_end = j.a_words + std::size_t(j.g) * j.p->kc * 2 * kRecWords;
+        c_end = j.c_words + std::size_t(8) * j.g * j.p->nt * 4 * kOutWords;
+      }
+      a.ToDevice(0, a_end * 4);
+      program.Start(ins, {&a, &arena, &c}).Wait();
+      c.FromDevice(0, c_end * 4);
+      // The buffer is uncached: copy it out once, then unpack.
+      out.resize(c_end);
+      std::memcpy(out.data(), c.data(), c_end * 4);
+      for (const Job& j : jobs)
+        Unpack(j, calls[j.call].y);
+    }
   }
 };
 
