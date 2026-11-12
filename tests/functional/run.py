@@ -31,10 +31,19 @@ from metrics import compare, comparison_status, join_server_timings, timing_meas
 TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "openai-count-tokens", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
           "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
+          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-type-unions", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
           "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection", "cache")
 # Suites that already run another suite's checks; selecting both repeats the work.
 INCLUDED_IN = {"auto-tools": "tools", "tool-native-types": "tool-native-schemas"}
+# Server --context each suite's histories need. Without an explicit --context
+# the runner starts the server with the largest one selected (8192 at least).
+MIN_CONTEXT = {"cache-stalls": 65536, "cache-depth": 32768, "cache-transforms": 32768,
+               "cache-pressure": 32768, "cache-shared-prefix": 16384, "cache-compaction": 16384,
+               "cache-messages-loop": 16384, "prefill-scheduling": 16384}
+DEFAULT_CONTEXT = 8192
+# These fill the RAM budget before measuring; the default budget sized for the
+# host takes far more requests than they send for a model with small checkpoints.
+NEEDS_CACHE_RAM = ("cache-bridge", "cache-pressure")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -260,7 +269,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True,
                         help="New report directory; existing results are never overwritten")
-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"), required=True)
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "provider"), required=True,
+                        help="Expected text defaults; provider reads the served model's own from /props")
     parser.add_argument("--suite", action="append", choices=("all", *SUITES), required=True,
                         help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
@@ -307,7 +317,17 @@ def main():
                          or option(command, "--mmproj") is not None)]
     selected = [suite for suite in dict.fromkeys(selected) if INCLUDED_IN.get(suite) not in selected]
     disk_enabled = bool(set(selected) & {"cache", "image-count"})
+    context_needed = max([DEFAULT_CONTEXT, *(MIN_CONTEXT.get(suite, 0) for suite in selected)])
     try:
+        pressure = [suite for suite in NEEDS_CACHE_RAM if suite in selected]
+        if pressure and option(command, "--cache-ram-bytes") is None:
+            raise ValueError(f"{' and '.join(pressure)} require --cache-ram-bytes in the server "
+                             "command, small enough that their background requests fill it")
+        if option(command, "--context") is not None and \
+                int(option(command, "--context")) < context_needed:
+            raise ValueError(", ".join(f"{suite} needs --context {MIN_CONTEXT[suite]}"
+                                       for suite in selected
+                                       if MIN_CONTEXT.get(suite, 0) > int(option(command, "--context"))))
         overrides = sampling_overrides(command)
         sessions = int(option(command, "--sessions", "4"))
         if not 1 <= sessions <= 8:
@@ -334,7 +354,7 @@ def main():
         port = reserve.getsockname()[1]
     command = [command[0], "serve", "--host", "127.0.0.1", "--port", str(port),
                *command[2:]]
-    for flag, default in (("--sessions", "4"), ("--context", "8192"),
+    for flag, default in (("--sessions", "4"), ("--context", str(context_needed)),
                           ("--served-model-name", "functional-test"),
                           ("--max-pending-per-client", str(max(4, sessions)))):
         if option(command, flag) is None:

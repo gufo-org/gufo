@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/core/platform/os_info.hpp"
 
@@ -264,6 +265,195 @@ void TestLifecycleAndRange(const std::filesystem::path& root) {
         "DELETE returns a deletion object");
   Check(Send(service, "GET", "/v1/videos/" + id).status == 404,
         "deleted jobs are no longer visible");
+}
+
+// 8x8 RGB PNG (deterministic) shared by the keyframe anchor tests: hex form
+// for raw multipart bodies, base64 form for JSON data URLs, and the SHA-256
+// of the decoded bytes for staged-file verification.
+constexpr char kTestPngHex[] =
+    "89504e470d0a1a0a0000000d49484452000000080000000808020000004b6d29dc000000d3"
+    "49"
+    "44415478da01c80037ff00890e1b896bb8a51d9175f4f62070f7458b646d01cd846a820061"
+    "25"
+    "9381f9d054edc912acceee87efd4e2fcb59d8530c7da0045b40b0b32e8b78d01e387a69985"
+    "e7"
+    "d495948ef83db07832006e99832f770077db39e9e57ef74adf95032c71f1f5badb8a002fb5"
+    "fb"
+    "e52618bcb871f32656b9b6d7128bc4136aad9351e20078e9738ea030a904a918aa2eeea9cf"
+    "75"
+    "8f5ce44265893b3a005613eb7a4548db9fe13fd1068003c7926df491591d77f792006f1563"
+    "62"
+    "7560ef6a1999fadeb3a4bf69878c838ed546e6ea8a8b677f8f947a010000000049454e44ae"
+    "42"
+    "6082";
+std::vector<std::uint8_t> HexToBytes(std::string_view hex) {
+  const auto value = [](char c) -> int {
+    if (c >= '0' && c <= '9') {
+      return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+      return c - 'a' + 10;
+    }
+    return c - 'A' + 10;
+  };
+  std::vector<std::uint8_t> bytes;
+  for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+    bytes.push_back(
+        static_cast<std::uint8_t>((value(hex[i]) << 4) | value(hex[i + 1])));
+  }
+  return bytes;
+}
+
+std::string Base64Encode(const std::vector<std::uint8_t>& bytes) {
+  static constexpr char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string output;
+  for (std::size_t i = 0; i < bytes.size(); i += 3) {
+    const std::uint32_t group =
+        (static_cast<std::uint32_t>(bytes[i]) << 16) |
+        (i + 1 < bytes.size() ? static_cast<std::uint32_t>(bytes[i + 1]) << 8
+                              : 0U) |
+        (i + 2 < bytes.size() ? static_cast<std::uint32_t>(bytes[i + 2]) : 0U);
+    output += kAlphabet[(group >> 18) & 63U];
+    output += kAlphabet[(group >> 12) & 63U];
+    output += i + 1 < bytes.size() ? kAlphabet[(group >> 6) & 63U] : '=';
+    output += i + 2 < bytes.size() ? kAlphabet[group & 63U] : '=';
+  }
+  return output;
+}
+
+std::string MultipartWithFile(
+    std::string_view boundary,
+    const std::vector<std::pair<std::string, std::string>>& fields,
+    std::string_view file_field, std::string_view filename,
+    const std::vector<std::uint8_t>& bytes) {
+  std::string body;
+  for (const auto& [name, value] : fields) {
+    body += "--";
+    body += boundary;
+    body += "\r\nContent-Disposition: form-data; name=\"";
+    body += name;
+    body += "\"\r\n\r\n";
+    body += value;
+    body += "\r\n";
+  }
+  body += "--";
+  body += boundary;
+  body += "\r\nContent-Disposition: form-data; name=\"";
+  body += file_field;
+  body += "\"; filename=\"";
+  body += filename;
+  body += "\"\r\nContent-Type: image/png\r\n\r\n";
+  body.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  body += "\r\n--";
+  body += boundary;
+  body += "--\r\n";
+  return body;
+}
+
+std::string StagedSha256(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  const std::string contents((std::istreambuf_iterator<char>(file)),
+                             std::istreambuf_iterator<char>());
+  return gufo::crypto::Sha256Hex(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(contents.data()), contents.size()));
+}
+
+void TestKeyframeAnchors(const std::filesystem::path& root) {
+  FakeRunner runner;
+  VideoJobService service(Options(root, &runner));
+  Check(service.ready(), service.initialization_error());
+  const std::vector<std::uint8_t> png =
+      HexToBytes(std::string_view(kTestPngHex, sizeof(kTestPngHex) - 1));
+  const std::string png_sha = gufo::crypto::Sha256Hex(
+      std::span<const std::uint8_t>(png.data(), png.size()));
+
+  const std::string created_body =
+      R"({"model":"minimax-h3-dev","prompt":"anchor adherence","size":"256x256","seconds":"1","gufo":{"output_format":"ppm"},"first_frame":"data:image/png;base64,)" +
+      Base64Encode(png) + R"("})";
+  const HttpResponse created =
+      Send(service, "POST", "/v1/videos", created_body, {}, "application/json");
+  Check(created.status == 202, "keyframe data URL request is accepted");
+  const std::string id = CreatedId(created);
+  runner.WaitForCalls(1);
+  const VideoRequest generation = runner.latest();
+  Check(!generation.first_frame_path.empty() &&
+            generation.last_frame_path.empty(),
+        "first-frame anchor reaches the runner alone");
+  Check(std::filesystem::exists(generation.first_frame_path),
+        "the staged anchor file exists inside the job directory");
+  Check(StagedSha256(generation.first_frame_path) == png_sha,
+        "staged anchor bytes are verbatim");
+  // Read job.json only once the worker is done replacing it: an open handle
+  // makes the atomic replace fail on Windows.
+  WaitCompleted(service, id);
+  {
+    std::ifstream provenance(generation.first_frame_path.parent_path() /
+                             "job.json");
+    const std::string persisted((std::istreambuf_iterator<char>(provenance)),
+                                std::istreambuf_iterator<char>());
+    Check(persisted.find("keyframes") != std::string::npos &&
+              persisted.find(png_sha) != std::string::npos,
+          "job.json records keyframe provenance");
+  }
+  const HttpResponse deleted = Send(service, "DELETE", "/v1/videos/" + id);
+  Check(deleted.status == 200 &&
+            !std::filesystem::exists(generation.first_frame_path),
+        "DELETE sweeps staged anchors with the job directory");
+
+  const std::string multipart =
+      MultipartWithFile("gufo-keyframe-boundary",
+                        {{"model", "minimax-h3-dev"},
+                         {"prompt", "multipart anchor"},
+                         {"size", "256x256"},
+                         {"seconds", "1"},
+                         {"gufo", R"({"output_format":"ppm"})"}},
+                        "last_frame", "scene.png", png);
+  const HttpResponse uploaded =
+      Send(service, "POST", "/v1/videos", multipart, {},
+           "multipart/form-data; boundary=gufo-keyframe-boundary");
+  Check(uploaded.status == 202, "multipart keyframe file part is accepted");
+  runner.WaitForCalls(2);
+  const VideoRequest from_upload = runner.latest();
+  Check(from_upload.first_frame_path.empty() &&
+            !from_upload.last_frame_path.empty(),
+        "multipart last_frame anchor reaches the runner");
+  Check(StagedSha256(from_upload.last_frame_path) == png_sha,
+        "multipart staged anchor bytes are verbatim");
+  WaitCompleted(service, CreatedId(uploaded));
+
+  const HttpResponse undecodable = Send(
+      service, "POST", "/v1/videos",
+      R"({"model":"minimax-h3","prompt":"x","seconds":5,"first_frame":"data:image/png;base64,!!!!not base64!!!!"})",
+      {}, "application/json");
+  Check(undecodable.status == 400 &&
+            undecodable.body.find("invalid_frame_image") != std::string::npos,
+        "an undecodable data URL anchor is rejected");
+
+  const HttpResponse remote_url = Send(
+      service, "POST", "/v1/videos",
+      R"({"model":"minimax-h3","prompt":"x","seconds":5,"first_frame":"https://example.com/frame.png"})",
+      {}, "application/json");
+  Check(remote_url.status == 400 &&
+            remote_url.body.find("invalid_frame_image") != std::string::npos,
+        "a remote URL anchor is rejected without fetching");
+
+  const HttpResponse wrong_type =
+      Send(service, "POST", "/v1/videos",
+           R"({"model":"minimax-h3","prompt":"x","seconds":5,"first_frame":7})",
+           {}, "application/json");
+  Check(wrong_type.status == 400 &&
+            wrong_type.body.find("invalid_frame_image") != std::string::npos,
+        "a non-string anchor is rejected");
+
+  const HttpResponse references = Send(
+      service, "POST", "/v1/videos",
+      R"({"model":"minimax-h3","prompt":"x","seconds":5,"references":["a"]})",
+      {}, "application/json");
+  Check(references.status == 400 &&
+            references.body.find("unsupported_input_reference") !=
+                std::string::npos,
+        "ordered references remain rejected while keyframes work");
 }
 
 void TestValidation(const std::filesystem::path& root) {
@@ -558,6 +748,7 @@ int main() {
   std::filesystem::remove_all(base, ignored);
   std::filesystem::create_directories(base);
   TestLifecycleAndRange(base / "lifecycle");
+  TestKeyframeAnchors(base / "keyframes");
   TestValidation(base / "validation");
   TestDurations(base / "durations");
   TestLongPrompts(base / "long-prompts");

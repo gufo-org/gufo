@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "qwen3_asr",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.3.0",
   "entry": "qwen3_asr_register",
   "registration_target": "gufo_qwen3_asr",
   "depends": [],
@@ -53,7 +53,7 @@
   "docs": {
     "title": "Qwen3-ASR 1.7B",
     "inputs": "BF16 safetensors; audio to text",
-    "guide": "docs/models/qwen3-asr/README.md"
+    "guide": "docs/models/qwen3-asr.md"
   },
   "tests": [
     {

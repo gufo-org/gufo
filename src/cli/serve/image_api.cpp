@@ -10,11 +10,16 @@
 #include <ctime>
 #include <map>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
+#include <variant>
 
+#include "gufo/ext/registry.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/core/base64.hpp"
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
 #include "src/ext/image.hpp"
@@ -45,24 +50,6 @@ HttpResponse Error(int status, const std::string& message,
                                     : "Internal Server Error",
           .body = body.dump(),
           .headers = {{"Content-Type", "application/json"}}};
-}
-
-std::string Base64(std::span<const std::uint8_t> bytes) {
-  constexpr std::string_view alphabet =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string output;
-  output.reserve((bytes.size() + 2) / 3 * 4);
-  for (std::size_t i = 0; i < bytes.size(); i += 3) {
-    const std::uint32_t word =
-        (std::uint32_t(bytes[i]) << 16) |
-        (i + 1 < bytes.size() ? std::uint32_t(bytes[i + 1]) << 8 : 0) |
-        (i + 2 < bytes.size() ? bytes[i + 2] : 0);
-    output += alphabet[(word >> 18) & 63];
-    output += alphabet[(word >> 12) & 63];
-    output += i + 1 < bytes.size() ? alphabet[(word >> 6) & 63] : '=';
-    output += i + 2 < bytes.size() ? alphabet[word & 63] : '=';
-  }
-  return output;
 }
 
 std::string_view Trim(std::string_view value) {
@@ -230,7 +217,7 @@ void ValidateRequest(const ext::ImageRequest& request) {
     throw std::invalid_argument("image steps must be between 2 and 100");
   if (request.images.size() > 10)
     throw std::invalid_argument(
-        "Qwen-Image supports at most 10 reference images");
+        "image edits accept at most 10 reference images");
   std::size_t pixels = 0;
   for (const auto& image : request.images) {
     CheckImage(image);
@@ -239,6 +226,19 @@ void ValidateRequest(const ext::ImageRequest& request) {
   if (pixels > core::kMaxImagePixels)
     throw std::invalid_argument(
         "reference images exceed 32 megapixels combined");
+  if (request.loras.size() > 16)
+    throw std::invalid_argument("image requests apply at most 16 LoRAs");
+  for (std::size_t i = 0; i < request.loras.size(); ++i) {
+    const auto& lora = request.loras[i];
+    if (lora.name.empty())
+      throw std::invalid_argument("LoRA name must not be empty");
+    for (std::size_t j = 0; j < i; ++j)
+      if (request.loras[j].name == lora.name)
+        throw std::invalid_argument("duplicate LoRA " + lora.name);
+    if (!std::isfinite(lora.scale) || std::abs(lora.scale) > 10)
+      throw std::invalid_argument(
+          "LoRA scale must be finite and at most 10 in magnitude");
+  }
 }
 
 struct Parsed {
@@ -339,7 +339,7 @@ Parsed Multipart(const HttpRequest& request) {
       if (data.size() > (64U << 10U))
         throw std::invalid_argument("multipart field too large");
       if (name == "n" || name == "seed" || name == "steps" ||
-          name == "stream") {
+          name == "stream" || name == "loras") {
         parsed.fields[name] = ParseJson(data);
       } else {
         parsed.fields[name] = std::string(data);
@@ -375,42 +375,200 @@ std::string String(const json::Value& fields, const char* name,
   return value->str();
 }
 
+std::vector<ext::ImageLora> ParseLoras(const json::Value& fields,
+                                       const ImageService& service) {
+  const auto* value = fields.find("loras");
+  if (!value)
+    return service.loras().defaults;
+  if (!value->is_array())
+    throw std::invalid_argument("loras must be an array");
+  std::vector<ext::ImageLora> loras;
+  for (const auto& entry : value->items()) {
+    if (!entry.is_object())
+      throw std::invalid_argument("loras entries must be objects");
+    for (const auto& [key, member] : entry.members()) {
+      (void)member;
+      if (key != "name" && key != "scale")
+        throw std::invalid_argument("unsupported LoRA parameter: " + key);
+    }
+    const auto* name = entry.find("name");
+    if (!name || !name->is_string())
+      throw std::invalid_argument("LoRA name must be a string");
+    if (!service.HasLora(name->str()))
+      throw std::invalid_argument("unknown LoRA adapter: " + name->str());
+    auto& lora = loras.emplace_back(ext::ImageLora{name->str()});
+    if (const auto* scale = entry.find("scale")) {
+      if (!scale->is_number())
+        throw std::invalid_argument("LoRA scale must be a number");
+      // Converting an out-of-range double to float is undefined.
+      const double value = scale->as_double();
+      if (!std::isfinite(value) || std::abs(value) > 10)
+        throw std::invalid_argument(
+            "LoRA scale must be finite and at most 10 in magnitude");
+      lora.scale = static_cast<float>(value);
+    }
+  }
+  return loras;
+}
+
+std::string LoraList(const std::vector<ext::ImageLora>& loras) {
+  std::ostringstream list;
+  for (const auto& lora : loras)
+    if (lora.scale != 0)
+      list << (list.tellp() > 0 ? "," : "") << lora.name << ':' << lora.scale;
+  return list.tellp() > 0 ? list.str() : "none";
+}
+
 }  // namespace
 
-ImageService::ImageService(const std::filesystem::path& root,
-                           std::string model_id, Runner runner,
-                           std::vector<std::string> model_aliases)
+const ext::ImageProvider& SelectImageProvider(
+    const ext::Registry& registry, const std::filesystem::path& root,
+    const ext::ParsedOptions& options) {
+  const auto* provider = ext::ProbeImageProvider(root.string());
+  if (!provider) {
+    provider = ext::FindImageProvider("qwen-image-21");
+  }
+  if (!provider) {
+    provider = ext::FindImageProvider("qwen-image-2.1");
+  }
+  if (!provider) {
+    throw std::runtime_error("extension 'qwen_image_21' is not registered");
+  }
+  if (options.empty())
+    return *provider;
+  // Explicit options must belong to the provider that claims the model; the
+  // parser accepted the union of every available provider's declarations.
+  const auto& info = registry.Provider(provider->id);
+  ext::ValidateSelectedOptions(registry, ext::kImageServeCommand, info,
+                               options);
+  for (const auto& [name, value] : options) {
+    const auto spec =
+        std::ranges::find_if(info.options, [&](const ext::OptionSpec& option) {
+          return option.name == name &&
+                 ext::OptionApplies(option, ext::kImageServeCommand);
+        });
+    if (spec == info.options.end() || spec->type != ext::OptionType::kPath)
+      continue;
+    const auto& path = std::get<std::string>(value);
+    std::error_code error;
+    if (path.empty() || !std::filesystem::exists(path, error))
+      throw std::invalid_argument(name + " does not exist: " + path);
+  }
+  return *provider;
+}
+
+std::shared_ptr<ext::ImageRunner> CreateImageRunner(
+    const ext::ImageProvider& provider, const std::filesystem::path& root,
+    const ext::ParsedOptions& options) {
+  std::string error;
+  std::unique_ptr<ext::ImageRunner> runner;
+  if (provider.create_with_options) {
+    runner = provider.create_with_options(
+        {.model_root = root.string(), .options = options}, &error);
+  } else if (!options.empty()) {
+    throw std::runtime_error("image provider " + provider.id +
+                             " declares startup options but has no "
+                             "options-aware factory");
+  } else if (provider.create) {
+    runner = provider.create(root.string(), &error);
+  } else {
+    throw std::runtime_error("image provider " + provider.id +
+                             " cannot run in this build");
+  }
+  if (!runner) {
+    throw std::runtime_error("failed to create runner for " + root.string() +
+                             (error.empty() ? "" : ": " + error));
+  }
+  return runner;
+}
+
+ImageService::ImageService(std::shared_ptr<ext::ImageRunner> runner,
+                           std::string model_id,
+                           std::vector<std::string> model_aliases,
+                           ImageLoraOptions loras)
     : model_id_(std::move(model_id)),
       model_aliases_(std::move(model_aliases)),
-      runner_(std::move(runner)) {
+      loras_(std::move(loras)),
+      model_(std::move(runner)) {
   if (model_id_.empty())
     throw std::invalid_argument("image model ID must not be empty");
-  if (!runner_) {
-    const auto* provider = ext::ProbeImageProvider(root.string());
-    if (!provider) {
-      provider = ext::FindImageProvider("qwen-image-21");
-    }
-    if (!provider) {
-      provider = ext::FindImageProvider("qwen-image-2.1");
-    }
-    if (!provider) {
-      throw std::runtime_error("extension 'qwen_image_21' is not registered");
-    }
-    std::string create_error;
-    model_ = provider->create(root.string(), &create_error);
-    if (!model_) {
-      throw std::runtime_error(
-          "failed to create runner for " + root.string() +
-          (create_error.empty() ? "" : ": " + create_error));
-    }
-    runner_ = [this](const Request& request,
-                     const CancellationCheck& cancelled) {
-      return model_->Generate(request, cancelled);
-    };
+  if (!model_)
+    throw std::invalid_argument("image service requires a runner");
+  capabilities_ = model_->Capabilities();
+  ValidateLoraOptions(loras_);
+  for (const auto& [name, path] : loras_.files) {
+    const auto& info = lora_info_[name] = model_->AddLora(name, path.string());
+    Logger::Info("image", "event=lora_registered name=" + name +
+                              " file=" + path.filename().string() +
+                              " format=" + info.format +
+                              " targets=" + std::to_string(info.targets) +
+                              " rank=" + std::to_string(info.min_rank) + '-' +
+                              std::to_string(info.max_rank));
   }
 }
 
 ImageService::~ImageService() = default;
+
+void ValidateLoraOptions(const ImageLoraOptions& loras) {
+  std::set<std::string_view> names;
+  for (const auto& [name, path] : loras.files) {
+    (void)path;
+    if (name.empty() || name.size() > 64 ||
+        name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs"
+                               "tuvwxyz0123456789._-") != std::string::npos)
+      throw std::invalid_argument("LoRA name '" + name +
+                                  "' must be 1-64 of [A-Za-z0-9._-]");
+    if (!names.insert(name).second)
+      throw std::invalid_argument("duplicate --lora name '" + name + "'");
+  }
+  for (const auto& lora : loras.defaults)
+    if (!names.contains(lora.name))
+      throw std::invalid_argument("--lora-default names unknown adapter '" +
+                                  lora.name + "'");
+  ext::ImageRequest defaults;
+  defaults.loras = loras.defaults;
+  ValidateRequest(defaults);
+}
+
+std::vector<ImageLoraListing> ImageService::LoraListings() const {
+  std::map<std::string, int> shared;
+  for (const auto& [name, path] : loras_.files)
+    ++shared[path.filename().string()];
+  std::vector<ImageLoraListing> listings;
+  for (const auto& [name, path] : loras_.files) {
+    const auto file = path.filename().string();
+    if (shared[file] == 1)
+      listings.push_back({file, file});
+    else
+      listings.push_back({name + '/' + file, path.generic_string()});
+  }
+  return listings;
+}
+
+void ImageService::Validate(const Request& request) const {
+  if (!request.images.empty() && !capabilities().edits)
+    throw std::invalid_argument("model " + model_id_ +
+                                " does not support image edits");
+  if (request.background == ext::ImageBackground::kTransparent &&
+      !capabilities().transparent_background)
+    throw std::invalid_argument(
+        "model " + model_id_ +
+        " does not support transparent backgrounds; use background auto or "
+        "opaque");
+  model_->ValidateRequest(request);
+}
+
+bool ImageService::HasLora(std::string_view name) const {
+  return lora_info_.contains(name);
+}
+
+const ext::ImageLoraInfo& ImageService::lora_info(std::string_view name) const {
+  return lora_info_.find(name)->second;
+}
+
+std::vector<ext::ImageLora> ImageService::ActiveLoras() const {
+  return model_->ActiveLoras();
+}
 
 ImageService::Result ImageService::Generate(
     const Request& request, const CancellationCheck& cancelled) {
@@ -420,7 +578,15 @@ ImageService::Result ImageService::Generate(
       throw std::runtime_error("image request cancelled");
   if (cancelled && cancelled())
     throw std::runtime_error("image request cancelled");
-  return runner_(request, cancelled);
+  if (!capabilities_ &&
+      request.background == ext::ImageBackground::kTransparent) {
+    auto legacy = request;
+    legacy.prompt =
+        "This is an RGBA image with transparency. " + request.prompt +
+        " The image has alpha channel and the background is transparent.";
+    return model_->Generate(legacy, cancelled);
+  }
+  return model_->Generate(request, cancelled);
 }
 
 HttpResponse HandleImageApiRequest(const HttpRequest& request,
@@ -430,6 +596,10 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
   try {
     Parsed parsed;
     const bool edit = request.path == "/v1/images/edits";
+    // Reject before decoding uploads when the model cannot edit at all.
+    if (edit && !service.capabilities().edits)
+      throw std::invalid_argument("model " + service.model_id() +
+                                  " does not support image edits");
     if (edit)
       parsed = Multipart(request);
     else {
@@ -462,15 +632,19 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
       throw std::invalid_argument("streaming image responses are unsupported");
     (void)String(fields, "user", "");
     const auto background = String(fields, "background", "auto");
-    if (background != "auto" && background != "transparent" &&
-        background != "opaque")
-      throw std::invalid_argument("invalid image background");
     ext::ImageRequest generation;
+    if (background == "auto")
+      generation.background = ext::ImageBackground::kAuto;
+    else if (background == "opaque")
+      generation.background = ext::ImageBackground::kOpaque;
+    else if (background == "transparent")
+      generation.background = ext::ImageBackground::kTransparent;
+    else
+      throw std::invalid_argument(
+          "background must be auto, opaque or transparent");
+    // The prompt reaches the provider unchanged; model-specific conditioning
+    // for the requested background belongs to the provider.
     generation.prompt = String(fields, "prompt", "");
-    if (background == "transparent")
-      generation.prompt =
-          "This is an RGBA image with transparency. " + generation.prompt +
-          " The image has alpha channel and the background is transparent.";
     generation.images = std::move(parsed.images);
     const auto size = String(fields, "size", "auto");
     if (size == "auto") {
@@ -503,14 +677,16 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
         Number(fields, "seed",
                (static_cast<std::uint64_t>(entropy()) << 21) ^ entropy(), 0,
                (1ULL << 53) - 1);
+    generation.loras = ParseLoras(fields, service);
     const auto count = Number(fields, "n", 1, 1, 10);
     ValidateRequest(generation);
+    service.Validate(generation);
     auto body = json::Value::object();
     body["created"] = static_cast<double>(std::time(nullptr));
     auto data = json::Value::array();
     for (std::uint64_t i = 0; i < count; ++i) {
       auto result = service.Generate(generation, request.is_cancelled);
-      if (background == "opaque") {
+      if (generation.background == ext::ImageBackground::kOpaque) {
         for (std::size_t p = 0; p < result.image.rgba.size(); p += 4) {
           const int a = result.image.rgba[p + 3];
           for (int c = 0; c < 3; ++c)
@@ -520,7 +696,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
         }
       }
       auto item = json::Value::object();
-      item["b64_json"] = Base64(EncodePng(result.image));
+      item["b64_json"] = core::EncodeBase64(EncodePng(result.image));
       data.push_back(std::move(item));
       std::ostringstream details;
       details << "request=" << request.request_id
@@ -528,8 +704,11 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
               << " seed=" << generation.seed << " size=" << generation.width
               << 'x' << generation.height
               << " references=" << generation.images.size()
-              << " steps=" << result.metrics.steps
-              << " prompt_ms=" << result.metrics.prompt_ms
+              << " steps=" << result.metrics.steps;
+      if (!service.loras().files.empty())
+        details << " loras=" << LoraList(generation.loras)
+                << " lora_ms=" << result.metrics.lora_ms;
+      details << " prompt_ms=" << result.metrics.prompt_ms
               << " denoise_ms=" << result.metrics.denoise_ms
               << " vae_ms=" << result.metrics.vae_ms
               << " total_ms=" << result.metrics.total_ms
@@ -548,6 +727,53 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
   } catch (const std::exception& error) {
     return Error(500, error.what(), "image_generation_failed");
   }
+}
+
+HttpResponse HandleImageLorasRequest(const HttpRequest& request,
+                                     const ImageService& service) {
+  if (request.method != "GET")
+    return Error(400, "/sdapi/v1/loras requires GET", "invalid_method");
+  const auto active = service.ActiveLoras();
+  const auto scale = [](const std::vector<ext::ImageLora>& loras,
+                        const std::string& name) -> json::Value {
+    for (const auto& lora : loras)
+      if (lora.name == name) {
+        // Shortest float text, so 0.8 is listed as 0.8.
+        char text[32];
+        const auto end =
+            std::to_chars(text, text + sizeof(text), lora.scale).ptr;
+        double value = lora.scale;
+        std::from_chars(text, end, value);
+        return value;
+      }
+    return nullptr;
+  };
+  auto body = json::Value::array();
+  const auto listings = service.LoraListings();
+  for (std::size_t i = 0; i < listings.size(); ++i) {
+    const auto& name = service.loras().files[i].first;
+    const auto& info = service.lora_info(name);
+    auto metadata = json::Value::object();
+    metadata["format"] = info.format;
+    metadata["targets"] = info.targets;
+    metadata["rank"] =
+        std::to_string(info.min_rank) + '-' + std::to_string(info.max_rank);
+    auto item = json::Value::object();
+    item["name"] = name;
+    item["alias"] = name;
+    item["path"] = listings[i].path;
+    item["display_path"] = listings[i].display_path;
+    item["metadata"] = std::move(metadata);
+    item["default_scale"] = scale(service.loras().defaults, name);
+    item["active_scale"] = scale(active, name);
+    body.push_back(std::move(item));
+  }
+  return {.status = 200,
+          .reason = "OK",
+          .body = body.dump(),
+          .headers = {{"Content-Type", "application/json"}},
+          .streaming_body = {},
+          .log_details = {}};
 }
 
 }  // namespace gufo::server

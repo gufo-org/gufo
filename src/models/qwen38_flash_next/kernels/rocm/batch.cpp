@@ -16,6 +16,8 @@ namespace {
 
 constexpr std::uint32_t kBatchSessions = 8;
 constexpr std::uint32_t kDecodeRows = 8;
+static_assert(kBatchSessions * kDecodeRows <= Executor::kHookParkedRows,
+              "a batched decode inside a layer hook must fit the parked rows");
 
 bool Fail(std::string* error, const std::string& message) {
   if (error != nullptr) {
@@ -157,8 +159,16 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
   half_src_ = nullptr;
   // Keep each row's scalar epilogue/reduction independently of the total
   // row count, including prompt replay and concatenated decode batches.
+  // Decode-sized projections can consume the epilogue's exact Q8_1 rows.
+  // Wider batches retain their existing tiled/padded quantization route.
+  const bool q8 = rows <= kDecodeRows && c.hidden_size % 32 == 0 &&
+                  qfn_mmq_q8_1_bytes(1, static_cast<int>(c.hidden_size)) ==
+                      c.hidden_size / 32 * 36;
   HcMixEpilogue(s_.xn, s_.hc_gate, fused_inject ? m.inject.f32() : nullptr,
-                mixed, inject, rows, c.hidden_size, c.hc_count, stream_);
+                mixed, inject, rows, c.hidden_size, c.hc_count, stream_,
+                q8 ? s_.mixed_q8_1 : nullptr);
+  if (q8)
+    mixed_q8_ready_ = {mixed, s_.mixed_q8_1, rows, c.hidden_size};
   inject_parts_ = fused_inject ? HcInjectParts(c.hidden_size) : 1;
   if (inject != nullptr && !m.inject.empty() && !fused_inject) {
     if (!DenseBatch(m.inject, s_.xn, inject, rows, error))
@@ -1236,10 +1246,23 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
                       error)) {
         return false;
       }
-      CombineBatch(base.res, l.hc_ffn.norm.f32(), rows);
-      if (!HcMixBatch(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,
-                      error))
-        return false;
+      // This immediate combine/mix pair has no intervening residual reader.
+      // Reuse the scalar route's existing exact fused decode implementation;
+      // wider rows and deferred/other-format states keep the batched path.
+      if (rows != 0 && FusedMixer(l.hc_ffn, rows) &&
+          pending_combine_.mixer == nullptr && !res_deferred_ &&
+          !defer_residual_ && !moe_pending_) {
+        DropReadyQ8();
+        Combine(base.res, l.hc_ffn.norm.f32(), rows, nullptr, &l.hc_ffn);
+        if (!HcMix(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,
+                   error))
+          return false;
+      } else {
+        CombineBatch(base.res, l.hc_ffn.norm.f32(), rows);
+        if (!HcMixBatch(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,
+                        error))
+          return false;
+      }
       if (!MoeBatch(l, base.mixed, base.block_out, rows, error))
         return false;
       const float* next_norm =

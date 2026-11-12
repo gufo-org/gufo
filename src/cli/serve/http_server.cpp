@@ -1,5 +1,7 @@
 #include "src/cli/serve/http_server.hpp"
 
+#include <gufo/http.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -12,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -78,19 +81,54 @@ private:
 // Socket I/O helpers
 // ---------------------------------------------------------------------------
 
-bool ReadUntil(std::string& out, int fd, std::string_view delim) {
+// Reads until the Rust parser finds a complete request head or rejects it
+// (GUFO_HTTP_MALFORMED, or GUFO_HTTP_TOO_MANY_FIELDS beyond 100 fields);
+// GUFO_HTTP_PARTIAL when the connection ends first or more than 16 MiB arrive
+// without one. `out` keeps the body bytes read with the head. On
+// GUFO_HTTP_COMPLETE, `request` has the head's header fields. A failure on the
+// server's side (memory, a parser bug) throws, so the caller answers 500.
+GufoHttpParse ReadHead(std::string& out, int fd, HttpRequest& request,
+                       GufoHttpHead& head) {
+  struct FieldContext {
+    HttpRequest* request;
+    std::exception_ptr failure;
+  } context{&request, nullptr};
+  const GufoHttpFieldFn add_field =
+      [](void* opaque, const std::uint8_t* name, std::size_t name_len,
+         const std::uint8_t* value, std::size_t value_len) noexcept -> int {
+    auto& context = *static_cast<FieldContext*>(opaque);
+    try {
+      context.request->headers.emplace_back(
+          std::string(reinterpret_cast<const char*>(name), name_len),
+          std::string(reinterpret_cast<const char*>(value), value_len));
+      return 0;
+    } catch (...) {
+      context.failure = std::current_exception();
+      return 1;
+    }
+  };
   char buf[4096];
-  while (out.find(delim) == std::string::npos) {
+  std::size_t known_partial = 0;
+  while (true) {
     const std::intptr_t n = net::Receive(fd, buf, sizeof(buf), 0);
     if (n < 0 && net::IsSocketInterrupted())
       continue;
     if (n <= 0)
-      return false;
+      return GUFO_HTTP_PARTIAL;
     out.append(buf, static_cast<std::size_t>(n));
     if (out.size() > (static_cast<std::size_t>(16) * 1024 * 1024))
-      return false;
+      return GUFO_HTTP_PARTIAL;
+    const GufoHttpParse parsed = gufo_http_parse_head(
+        reinterpret_cast<const std::uint8_t*>(out.data()), out.size(),
+        known_partial, &head, add_field, &context);
+    if (context.failure)
+      std::rethrow_exception(context.failure);
+    if (parsed == GUFO_HTTP_INTERNAL)
+      throw std::runtime_error("Rust HTTP request parser failed internally");
+    if (parsed != GUFO_HTTP_PARTIAL)
+      return parsed;
+    known_partial = out.size();
   }
-  return true;
 }
 
 bool ReadN(std::string& out, int fd, std::size_t n) {
@@ -161,71 +199,6 @@ std::string ToLower(std::string_view s) {
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   }
   return out;
-}
-
-std::string UrlDecode(std::string_view s) {
-  std::string out;
-  out.reserve(s.size());
-  for (std::size_t i = 0; i < s.size(); ++i) {
-    const char c = s[i];
-    if (c == '+') {
-      out += ' ';
-    } else if (c == '%' && i + 2 < s.size()) {
-      auto hexval = [](char h) {
-        if (h >= '0' && h <= '9')
-          return h - '0';
-        if (h >= 'a' && h <= 'f')
-          return h - 'a' + 10;
-        if (h >= 'A' && h <= 'F')
-          return h - 'A' + 10;
-        return -1;
-      };
-      const int high = hexval(s[i + 1]);
-      const int low = hexval(s[i + 2]);
-      if (high >= 0 && low >= 0) {
-        out += static_cast<char>((high << 4) | low);
-        i += 2;
-      } else {
-        out += c;
-      }
-    } else {
-      out += c;
-    }
-  }
-  return out;
-}
-
-std::optional<std::size_t> ParseContentLength(const HttpRequest& request) {
-  std::optional<std::size_t> length;
-  for (const auto& [name, value] : request.headers) {
-    const auto lowered = ToLower(name);
-    // Chunked transfer is not implemented. Never interpret its encoded bytes
-    // as an empty or partial inference request.
-    if (lowered == "transfer-encoding") {
-      return std::nullopt;
-    }
-    if (lowered != "content-length") {
-      continue;
-    }
-    std::size_t parsed = 0;
-    const auto [end, error] =
-        std::from_chars(value.data(), value.data() + value.size(), parsed);
-    if (error != std::errc{} || end != value.data() + value.size() ||
-        (length.has_value() && *length != parsed)) {
-      return std::nullopt;
-    }
-    length = parsed;
-  }
-  return length.value_or(0);
-}
-
-/// RFC 9110 10.1.1: a client that sends "Expect: 100-continue" (curl does for
-/// bodies over 1 MiB) waits for an interim 100 response before the body.
-bool ExpectsContinue(const HttpRequest& request) {
-  return std::ranges::any_of(request.headers, [](const auto& header) {
-    return ToLower(header.first) == "expect" &&
-           ToLower(header.second) == "100-continue";
-  });
 }
 
 bool HasHeader(const HttpResponse& response, std::string_view name) {
@@ -1397,6 +1370,46 @@ HttpResponse AnthropicCountTokens(const HttpRequest& req,
              "invalid_prompt");
 }
 
+// llama-server's /tokenize at its defaults: raw text, control-token spellings
+// parsed and nothing prepended, as /completion tokenizes a prompt. The options
+// that would change that are refused rather than ignored.
+HttpResponse LlamaTokenize(const HttpRequest& req, TextGenerationBackend& b) {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  const auto* content = body.find("content");
+  if (content == nullptr || !content->is_string()) {
+    return InvalidCompatibilityRequest("'content' must be a string");
+  }
+  for (const auto& [field, supported] :
+       {std::pair{"add_special", false}, std::pair{"parse_special", true},
+        std::pair{"with_pieces", false}}) {
+    const auto* value = body.find(field);
+    if (value == nullptr || value->is_null())
+      continue;
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'" + std::string(field) +
+                                         "' must be a boolean");
+    if (value->as_bool() != supported)
+      return InvalidCompatibilityRequest("'" + std::string(field) +
+                                         "' is supported only as " +
+                                         (supported ? "true" : "false"));
+  }
+  const auto tokens = b.tokenize(content->str());
+  if (!tokens)
+    return NotImplemented(req, b);
+  json::Value ids = json::Value::array();
+  for (const auto token : *tokens)
+    ids.push_back(static_cast<std::size_t>(token));
+  json::Value resp = json::Value::object();
+  resp["tokens"] = std::move(ids);
+  return Ok(resp);
+}
+
 HttpResponse LlamaCompletion(const HttpRequest& req,
                              TextGenerationBackend& b) try {
   json::Value body;
@@ -1666,6 +1679,21 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
          "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
       << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
+  if (const auto budget = b.prompt_admission_budget()) {
+    out << "# HELP gufo_prompt_state_budget_bytes Host RAM prompt state may "
+           "claim before admission refuses\n"
+        << "# TYPE gufo_prompt_state_budget_bytes gauge\n"
+        << "gufo_prompt_state_budget_bytes " << budget->budget_bytes << "\n"
+        << "# HELP gufo_prompt_state_reserved_bytes Host prompt state charged "
+           "to in-flight requests\n"
+        << "# TYPE gufo_prompt_state_reserved_bytes gauge\n"
+        << "gufo_prompt_state_reserved_bytes " << budget->used_bytes << "\n"
+        << "# HELP gufo_prompt_state_available_bytes Remaining host prompt "
+           "state budget\n"
+        << "# TYPE gufo_prompt_state_available_bytes gauge\n"
+        << "gufo_prompt_state_available_bytes " << budget->available_bytes
+        << "\n";
+  }
   return {.status = 200,
           .reason = "OK",
           .body = out.str(),
@@ -1871,22 +1899,28 @@ bool IsListenAddress(const std::string& host) {
 // ---------------------------------------------------------------------------
 
 std::string HttpRequest::query_param(const std::string& key) const {
-  std::string_view remaining = query;
-  while (!remaining.empty()) {
-    const auto end = remaining.find('&');
-    const auto parameter = remaining.substr(0, end);
-    const auto equals = parameter.find('=');
-    if (UrlDecode(parameter.substr(0, equals)) == key) {
-      return equals == std::string_view::npos
-                 ? ""
-                 : UrlDecode(parameter.substr(equals + 1));
+  struct Found {
+    std::string value;
+    std::exception_ptr failure;
+  } found;
+  const GufoHttpBytesFn keep = [](void* opaque, const std::uint8_t* data,
+                                  std::size_t len) noexcept {
+    auto& out = *static_cast<Found*>(opaque);
+    try {
+      out.value.assign(reinterpret_cast<const char*>(data), len);
+    } catch (...) {
+      out.failure = std::current_exception();
     }
-    if (end == std::string_view::npos) {
-      break;
-    }
-    remaining.remove_prefix(end + 1);
-  }
-  return "";
+  };
+  const int status = gufo_http_query_param(
+      reinterpret_cast<const std::uint8_t*>(query.data()), query.size(),
+      reinterpret_cast<const std::uint8_t*>(key.data()), key.size(), keep,
+      &found);
+  if (found.failure)
+    std::rethrow_exception(found.failure);
+  if (status < 0)
+    throw std::logic_error("Rust query parser failed internally");
+  return found.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -1963,6 +1997,7 @@ void HttpServer::register_routes() {
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);
   add("POST", "/apply-template", HandleApplyTemplate);
+  add("POST", "/tokenize", LlamaTokenize);
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);
@@ -2274,6 +2309,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                  "server_error", "image_service_unavailable");
     return HandleImageApiRequest(req, *images_);
   }
+  if (req.path == "/sdapi/v1/loras" && images_ != nullptr)
+    return HandleImageLorasRequest(req, *images_);
   if (req.path == "/v1/audio/speech/stream") {
     if (!tts_ || !tts_->ready())
       return Err(503, "Service Unavailable", "TTS is not configured",
@@ -2391,89 +2428,41 @@ void HttpServer::handle_connection(int client_fd,
   try {
     bool ok = false;
     bool payload_too_large = false;
+    bool too_many_fields = false;
     {
       std::string buffer;
-      if (ReadUntil(buffer, client_fd, "\r\n\r\n")) {
-        // ReadUntil over-reads: `buffer` holds the headers, the blank line, and
-        // possibly some body bytes already. Split at the blank line and carry
-        // the over-read body bytes forward so we only read the remainder from
-        // the socket.
-        const auto delim_pos = buffer.find("\r\n\r\n");
-        const std::string headers = buffer.substr(0, delim_pos);
-        std::string body = buffer.substr(delim_pos + 4);
+      GufoHttpHead head{};
+      const GufoHttpParse parsed = ReadHead(buffer, client_fd, req, head);
+      too_many_fields = parsed == GUFO_HTTP_TOO_MANY_FIELDS;
+      if (parsed == GUFO_HTTP_COMPLETE) {
+        // ReadHead over-reads: `buffer` holds the head and possibly some body
+        // bytes already. Carry those forward so we only read the remainder
+        // from the socket.
+        std::string body = buffer.substr(head.len);
+        const auto text = [](GufoHttpSlice slice) {
+          return std::string(reinterpret_cast<const char*>(slice.data),
+                             slice.len);
+        };
+        req.method = text(head.method);
+        req.path = text(head.path);
+        req.query = text(head.query);
+        http11 = head.http11 != 0;
 
-        const auto eol = headers.find("\r\n");
-        const std::string line =
-            (eol == std::string::npos) ? headers : headers.substr(0, eol);
-        std::istringstream ls(line);
-        std::string target;
-        std::string version;
-        std::string extra;
-        ls >> req.method >> target >> version;
-        http11 = version == "HTTP/1.1";
-        bool valid_headers = !req.method.empty() && target.starts_with('/') &&
-                             (version == "HTTP/1.0" || version == "HTTP/1.1") &&
-                             !(ls >> extra);
-        const auto qpos = target.find('?');
-        if (qpos != std::string::npos) {
-          req.query = target.substr(qpos + 1);
-          req.path = target.substr(0, qpos);
-        } else {
-          req.path = target;
-        }
-
-        std::size_t cursor =
-            eol == std::string::npos ? headers.size() : eol + 2;
-        while (cursor < headers.size()) {
-          const std::size_t next = headers.find("\r\n", cursor);
-          const std::size_t line_end =
-              next == std::string::npos ? headers.size() : next;
-          const std::string_view header_line(headers.data() + cursor,
-                                             line_end - cursor);
-          const std::size_t colon = header_line.find(':');
-          // RFC 9112 5.1: reject whitespace before the colon and obsolete
-          // line folding instead of storing a name no lookup would match.
-          const auto token = [](char c) {
-            return std::isalnum(static_cast<unsigned char>(c)) != 0 ||
-                   std::string_view("!#$%&'*+-.^_`|~").find(c) !=
-                       std::string_view::npos;
-          };
-          if (colon != std::string_view::npos && colon > 0 &&
-              std::ranges::all_of(header_line.substr(0, colon), token)) {
-            std::string name(header_line.substr(0, colon));
-            std::string_view raw_value = header_line.substr(colon + 1);
-            while (!raw_value.empty() &&
-                   std::isspace(
-                       static_cast<unsigned char>(raw_value.front())) != 0) {
-              raw_value.remove_prefix(1);
-            }
-            while (!raw_value.empty() &&
-                   std::isspace(static_cast<unsigned char>(raw_value.back())) !=
-                       0) {
-              raw_value.remove_suffix(1);
-            }
-            req.headers.emplace_back(std::move(name), std::string(raw_value));
-          } else {
-            valid_headers = false;
-          }
-          if (next == std::string::npos) {
-            break;
-          }
-          cursor = next + 2;
-        }
-
-        const auto parsed_length = ParseContentLength(req);
-        const std::size_t content_length = parsed_length.value_or(0);
+        const bool framing_valid =
+            head.framing_valid != 0 &&
+            std::in_range<std::size_t>(head.content_length);
+        const std::size_t content_length =
+            framing_valid ? static_cast<std::size_t>(head.content_length) : 0;
         const std::size_t remaining =
             content_length > body.size() ? content_length - body.size() : 0;
-        if (!valid_headers || !parsed_length.has_value()) {
+        if (!framing_valid) {
           ok = false;
         } else if (content_length > options_.max_request_body_bytes) {
           payload_too_large = true;
         } else if (content_length > 0) {
           if (remaining > 0) {
             // A HTTP/1.0 request's expectation is ignored (RFC 9110 10.1.1).
-            ok = (!http11 || !ExpectsContinue(req) ||
+            ok = (!http11 || head.expect_continue == 0 ||
                   SendAll(client_fd, "HTTP/1.1 100 Continue\r\n\r\n")) &&
                  ReadN(body, client_fd, remaining);
           } else {
@@ -2520,6 +2509,10 @@ void HttpServer::handle_connection(int client_fd,
     if (payload_too_large) {
       resp = Err(413, "Payload Too Large", "request body is too large",
                  "invalid_request_error", "payload_too_large");
+    } else if (too_many_fields) {
+      resp = Err(431, "Request Header Fields Too Large",
+                 "request has more than 100 header fields",
+                 "invalid_request_error", "request_header_fields_too_large");
     } else if (!ok) {
       resp = Err(400, "Bad Request", "malformed request",
                  "invalid_request_error", "bad_request");
@@ -2653,18 +2646,8 @@ void HttpServer::handle_connection(int client_fd,
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
-    const char* reason = "Service Unavailable";
-    if (exception.http_status() == 408) {
-      reason = "Request Timeout";
-    } else if (exception.http_status() == 429) {
-      reason = "Too Many Requests";
-    }
-    HttpResponse resp = Err(exception.http_status(), reason, exception.what(),
-                            "server_error", exception.stable_code());
+    HttpResponse resp = TextGenerationErrorResponse(exception);
     resp.headers.emplace_back("X-Request-ID", req.request_id);
-    if (exception.retryable()) {
-      resp.headers.emplace_back("Retry-After", "1");
-    }
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
                        duration_ms,

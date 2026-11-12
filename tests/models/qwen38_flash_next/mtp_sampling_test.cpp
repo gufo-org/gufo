@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -17,6 +18,59 @@ namespace sampling = gufo::sampling;
 void Require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
+}
+
+void CheckBatchBackoffRecovery() {
+  // Captured at the first solo decision after a greedy TP2 batch. Its
+  // acceptance estimates favor drafting, but the old retry interval is 13.
+  qfn::MtpLengthController ordinary(7, 2), recovered(7, 2);
+  auto state = ordinary.State();
+  constexpr std::array<std::uint32_t, 7> successes{
+      1078325013U, 1069007103U, 1075288886U, 1069547520U,
+      1069547520U, 1069547520U, 1069547520U};
+  constexpr std::array<std::uint32_t, 7> failures{
+      1063797667U, 1076100766U, 1069702916U, 1056964608U,
+      1056964608U, 1056964608U, 1056964608U};
+  for (unsigned i = 0; i < 7; ++i) {
+    state.successes[i] = std::bit_cast<float>(successes[i]);
+    state.failures[i] = std::bit_cast<float>(failures[i]);
+  }
+  state.retry_tokens = 13;
+  state.explored_depth = 3;
+  state.probe_delay = 10;
+  state.failed_depths = 7;
+  Require(ordinary.Restore(state) && recovered.Restore(state),
+          "captured acceptance/backoff state was rejected");
+  ordinary.Observe(1, 1, 150, 0);
+  recovered.Observe(1, 1, 150, 0, false, true);
+  const auto a = ordinary.State(), b = recovered.State();
+  Require(a.retry_tokens == 13 && b.retry_tokens == 0,
+          "profitable batch evidence did not supersede stale backoff");
+  Require(a.successes == b.successes && a.failures == b.failures &&
+              a.probe_depth == b.probe_depth &&
+              a.explored_depth == b.explored_depth &&
+              a.probe_delay == b.probe_delay &&
+              a.failed_depths == b.failed_depths,
+          "backoff recovery changed acceptance or exploration history");
+  Require(ordinary.Choose(7, 150, 1) == 0 && recovered.Choose(7, 150, 1) != 0,
+          "recovered session did not resume drafting alone");
+  qfn::MtpLengthController restored(7, 2);
+  Require(restored.Restore(b), "recovered state could not be restored");
+  for (unsigned budget = 0; budget <= 7; ++budget)
+    Require(restored.Choose(budget, 150, 1) == recovered.Choose(budget, 150, 1),
+            "recovery changed restored or budget-limited choices");
+
+  Require(recovered.Restore(state), "backoff fixture restore failed");
+  recovered.Observe(0, 0, 150, 0, false, true);
+  Require(recovered.State().retry_tokens == 13,
+          "an empty observation cleared the AR interval");
+  state.successes.fill(0.001F);
+  state.failures.fill(1.0F);
+  Require(recovered.Restore(state), "poor acceptance state was rejected");
+  recovered.Observe(0, 1, 150, 0, false, true);
+  Require(
+      recovered.State().retry_tokens == 16 && recovered.Choose(7, 150, 1) == 0,
+      "unprofitable batch evidence incorrectly bypassed backoff");
 }
 
 void CheckLengthController() {
@@ -486,6 +540,7 @@ int main() {
   try {
     CheckVerificationBoundaries();
     CheckLengthController();
+    CheckBatchBackoffRecovery();
     CheckOccupancyOverride();
     CheckPolicyConcurrency();
     CheckCalibratedCosts();

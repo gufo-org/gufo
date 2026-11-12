@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <gufo/ext/platform/pages.hpp>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
@@ -38,7 +40,8 @@ bool Check(hipError_t err, const char* what, std::string* error_msg) {
   if (err == hipSuccess) {
     return true;
   }
-  AssignError(error_msg, std::string(what) + ": " + hipGetErrorString(err));
+  if (error_msg != nullptr)
+    AssignError(error_msg, std::string(what) + ": " + hipGetErrorString(err));
   return false;
 }
 
@@ -953,6 +956,7 @@ Executor::~Executor() {
     (void)ngram_->WaitRead();
   }
   (void)hipFree(batch_logits_);
+  (void)hipFree(hook_park_);
   (void)hipFree(wide_controls_);
   for (float* p : wide_allocations_)
     (void)hipFree(p);
@@ -1315,7 +1319,68 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       return nullptr;
     }
   }
+  if (!e->CalibrateDecodeOverlap(error_msg))
+    return nullptr;
   return e;
+}
+
+bool Executor::CalibrateDecodeOverlap(std::string* error_msg) {
+  decode_overlap_ = false;
+  const auto& layers = model_->layers();
+  // Only Q8_0 shared experts overlap (see Moe).
+  if (std::none_of(layers.begin(), layers.end(), [](const DeviceLayer& l) {
+        return l.shexp_gate.type == GgmlType::kQ8_0 &&
+               l.shexp_up.type == GgmlType::kQ8_0 &&
+               l.shexp_down.type == GgmlType::kQ8_0;
+      }))
+    return true;
+  // One decode row through every layer: the weights stream from memory as
+  // they do in decode instead of being reread from cache.
+  std::vector<float> row(config().hidden_size);
+  for (std::size_t i = 0; i < row.size(); ++i)
+    row[i] = 0.1F * std::sin(static_cast<float>(i) * 0.13F);
+  if (!Check(hipMemcpy(s_.mixed, row.data(), row.size() * sizeof(float),
+                       hipMemcpyHostToDevice),
+             "overlap calibration input", error_msg))
+    return false;
+  // Time eager passes, not graph replays. The fork/join cost shows up in eager
+  // passes too, so they rank the layouts the same way (Windows/TheRock 10.0:
+  // eager 9.8 ms serial vs 12.7 ms overlapped, replays 8.9 vs 12.9 ms).
+  // Capturing a graph this early instead left that process's decode about
+  // 0.7% slower. Alternate the layouts and keep each one's fastest pass; the
+  // first round grows the GEMM tier's arena and is not timed.
+  const auto dispatch = SavedDispatch();
+  double best[2] = {std::numeric_limits<double>::infinity(),
+                    std::numeric_limits<double>::infinity()};
+  for (int round = 0; round < 4; ++round) {
+    for (int layout = 0; layout < 2; ++layout) {
+      decode_overlap_ = layout == 1;
+      const auto start = std::chrono::steady_clock::now();
+      for (const auto& l : layers) {
+        // In decode the HC mixer rewrites each layer's MoE input, which
+        // invalidates the converted-input caches. Clear them here too, so
+        // every layer converts its input instead of reusing the previous
+        // layer's copy of the same s_.mixed.
+        DropReadyQ8();
+        q8t_src_ = nullptr;
+        half_src_ = nullptr;
+        if (!Moe(l, s_.mixed, s_.block_out, 1, error_msg))
+          return false;
+      }
+      if (!Check(hipStreamSynchronize(stream_), "overlap calibration",
+                 error_msg))
+        return false;
+      const std::chrono::duration<double> elapsed =
+          std::chrono::steady_clock::now() - start;
+      if (round > 0)
+        best[layout] = std::min(best[layout], elapsed.count());
+    }
+  }
+  DispatchState() = dispatch;
+  // A tie keeps the serial layout. The layouts' outputs are identical, so
+  // either choice changes only speed.
+  decode_overlap_ = best[1] < best[0];
+  return true;
 }
 
 std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
@@ -2501,6 +2566,9 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
   }
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
+  // Rows a previous pass prefetched are ready by the PLE layer; any others
+  // are read now, and that layer waits for them.
+  ple_cold_ = true;
   if ((prefetch_.pending || prefetch_.ready) && !speculative &&
       session.ngram_ == prefetch_.before) {
     // A cache checkpoint or another step budget can end this chunk before
@@ -2518,8 +2586,10 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
             c, session.ngram_, tokens,
             std::span<std::uint32_t>(host_rows_.data(), n * c.ple_heads));
       }
-      if (shared == tokens.size())
+      if (shared == tokens.size()) {
+        ple_cold_ = false;
         return true;
+      }
       // Only one table read runs at a time: finish the prefetch, which had a
       // whole chunk to complete, then read the rows past it.
       FinishPrefetch();
@@ -2635,8 +2705,15 @@ bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
     return false;
   }
   if (!embeddings_ready && !prefetch_next_.empty()) {
-    PrefetchPle(session, prefetch_next_);
-    prefetch_next_ = {};
+    // A decode between layer groups first finishes the table read in
+    // flight, so a pass that yields starts this one after its first decode
+    // round (RunLayerHook); it still has most of the pass to complete.
+    if (hook_ && prefill_phase) {
+      prefetch_deferred_ = true;
+    } else {
+      PrefetchPle(session, prefetch_next_);
+      prefetch_next_ = {};
+    }
   }
   const std::uint32_t hc_dim = c.HcDim();
   Q8Input emb;
@@ -3044,15 +3121,23 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // The shared expert (gated by the last router row) does not depend on
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
-  // A wide batch runs them on the side stream beside the routed experts,
-  // which leave compute idle while they stream expert weights. The shared
+  // The side stream runs them beside the routed experts. Any gain depends on
+  // the workload: both paths read weights and can contend for DRAM. The shared
   // expert writes its own scratch and may quantize x into s_.x_q8t, so no
   // main-stream work may use s_.x_q8t before JoinSide.
   // Only the Q8_0 shared expert overlaps: its kernels take stream_, while
   // the BF16, F16 and F32 routes go through BLAS handles bound to the main
   // stream.
-  const bool overlap = ExpertMatrixRows(n_tokens) && !last_only &&
-                       l.shexp_gate.type == GgmlType::kQ8_0 &&
+  // A decode pass replays from a captured graph, so the fork and join below
+  // must stay inside the capture region: side_stream_ joins the capture
+  // through side_start_, and the main stream joins back through side_done_.
+  // Extend the existing wide/prefill overlap to 1-8 decode rows only where
+  // Create measured it to pay for its joins (decode_overlap_). The
+  // intermediate 9-32-row route keeps its previous serial dispatch until it
+  // is separately qualified. Rows are the total token rows, not sessions.
+  const bool overlap = (ExpertMatrixRows(n_tokens) ||
+                        (decode_overlap_ && n_tokens <= kVecBatch)) &&
+                       !last_only && l.shexp_gate.type == GgmlType::kQ8_0 &&
                        l.shexp_up.type == GgmlType::kQ8_0 &&
                        l.shexp_down.type == GgmlType::kQ8_0;
   const hipStream_t main = stream_;
@@ -3063,8 +3148,53 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
                "side stream wait", error_msg)) {
       return false;
     }
-    stream_ = side_stream_;
+    // Waiting on an event recorded inside the capture is what makes the side
+    // stream part of it. This checks the fork, not the replayed arithmetic:
+    // exact eager/replay comparisons must also cover the side-stream writes.
+    if (capturing_) {
+      hipStreamCaptureStatus side_status = hipStreamCaptureStatusNone;
+      if (!Check(hipStreamIsCapturing(side_stream_, &side_status),
+                 "side stream capture query", error_msg) ||
+          side_status != hipStreamCaptureStatusActive) {
+        AssignError(error_msg,
+                    "shared-expert overlap did not join the graph capture");
+        return false;
+      }
+    }
   }
+  // Restore the launch stream and publish any queued side work even when a
+  // shared-expert launch throws. The join guard runs after this scope unwinds.
+  struct JoinGuard {
+    const Executor* executor;
+    ~JoinGuard() { (void)executor->JoinSide(nullptr); }
+  } join_guard{this};
+  struct SharedScope {
+    const Executor* executor;
+    hipStream_t main;
+    bool overlap;
+    bool finished{false};
+    hipError_t Finish() noexcept {
+      executor->stream_ = main;
+      if (finished)
+        return hipSuccess;
+      finished = true;
+      if (!overlap)
+        return hipSuccess;
+      const auto status =
+          hipEventRecord(executor->side_done_, executor->side_stream_);
+      if (status == hipSuccess) {
+        executor->side_pending_ = true;
+      } else if (!executor->capturing_) {
+        // Capture cleanup discards recorded work; only eager work needs a
+        // host wait when no completion event could be recorded.
+        (void)hipStreamSynchronize(executor->side_stream_);
+      }
+      return status;
+    }
+    ~SharedScope() { (void)Finish(); }
+  } shared_scope{this, main, overlap};
+  if (overlap)
+    stream_ = side_stream_;
   const auto shared_expert = [&] {
     shexp_half_ready_ = false;
     if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
@@ -3084,22 +3214,8 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
     return Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens, error_msg);
   };
   const bool shared_ok = shared_expert();
-  stream_ = main;
-  if (overlap) {
-    if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
-               error_msg)) {
-      // Nothing to join: wait for the whole side stream instead.
-      (void)hipStreamSynchronize(side_stream_);
-      return false;
-    }
-    side_pending_ = true;
-  }
-  // Every exit, including errors, orders the main stream after the shared
-  // expert: its side-stream writes must not race the next pass.
-  struct JoinGuard {
-    const Executor* executor;
-    ~JoinGuard() { (void)executor->JoinSide(nullptr); }
-  } join_guard{this};
+  if (!Check(shared_scope.Finish(), "side stream join", error_msg))
+    return false;
   if (!shared_ok) {
     return false;
   }
@@ -3130,8 +3246,10 @@ bool Executor::JoinSide(std::string* error_msg) const {
   if (!side_pending_)
     return true;
   side_pending_ = false;
-  return Check(hipStreamWaitEvent(stream_, side_done_, 0),
-               "side stream join wait", error_msg);
+  const auto status = hipStreamWaitEvent(stream_, side_done_, 0);
+  if (status != hipSuccess && !capturing_)
+    (void)hipStreamSynchronize(side_stream_);
+  return Check(status, "side stream join wait", error_msg);
 }
 
 bool Executor::WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const {
@@ -3355,14 +3473,8 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
       // record identical commands while the GPU executes it. Short prefix
       // and draft graphs keep their existing route. No second pass is launched.
       if (synchronize && (key & (std::uint64_t{1} << 40)) == 0) {
-        auto dispatch = std::tie(
-            moe_pending_, defer_residual_, res_deferred_, shexp_half_ready_,
-            q8t_src_, q8t_rows_, q8t_cols_, half_src_, half_rows_, half_cols_,
-            half_bf16_, xn_half_, inject_parts_, inject_fused_, q8_slot_,
-            xn_q8_ready_, mixed_q8_ready_, pending_combine_);
-        const auto before = std::apply(
-            [](const auto&... fields) { return std::make_tuple(fields...); },
-            dispatch);
+        auto dispatch = DispatchState();
+        const auto before = SavedDispatch();
         if (!body())
           return false;
         // Producer readiness and alternating scratch addresses must match
@@ -3378,10 +3490,30 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
               "graph capture", error_msg)) {
         return false;
       }
+      // Overlapped launches verify that their side stream joined this
+      // capture (see Moe). An exception must end the HIP capture too, not
+      // merely clear our flag, or subsequent requests inherit a live capture.
+      struct CaptureScope {
+        const Executor* executor;
+        hipStream_t origin;
+        bool active{true};
+        ~CaptureScope() {
+          executor->capturing_ = false;
+          if (active) {
+            hipGraph_t abandoned = nullptr;
+            (void)hipStreamEndCapture(origin, &abandoned);
+            if (abandoned != nullptr)
+              (void)hipGraphDestroy(abandoned);
+          }
+        }
+      } capture_scope{this, stream_};
+      capturing_ = true;
       const bool ok = body();
-      if (!Check(hipStreamEndCapture(stream_, &captured), "graph capture end",
-                 error_msg) ||
-          !ok) {
+      capturing_ = false;
+      const auto capture_status =
+          hipStreamEndCapture(capture_scope.origin, &captured);
+      capture_scope.active = false;
+      if (!Check(capture_status, "graph capture end", error_msg) || !ok) {
         if (captured != nullptr) {
           (void)hipGraphDestroy(captured);
         }
@@ -3415,11 +3547,16 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::string* error_msg,
                        std::span<PrefillCheckpoint* const> checkpoints,
                        std::span<const std::int32_t> next) const {
-  // Only this call's PLE layer may start the prefetch of `next`.
+  // Only this call's PLE layer, or its first layer hook, may start the
+  // prefetch of `next`.
   struct NextHint {
     std::span<const std::int32_t>& hint;
-    ~NextHint() { hint = {}; }
-  } next_hint{prefetch_next_};
+    bool& deferred;
+    ~NextHint() {
+      hint = {};
+      deferred = false;
+    }
+  } next_hint{prefetch_next_, prefetch_deferred_};
   if (mode == ForwardMode::kPrefill) {
     prefetch_next_ = next;
   }
@@ -3591,6 +3728,153 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   return true;
 }
 
+std::vector<std::uint32_t> Executor::LayerHookBoundaries(
+    std::size_t groups) const {
+  const Config& c = config();
+  // The pass reads its PLE rows at that layer; until then the table read's
+  // pinned buffers belong to it.
+  const std::uint32_t first =
+      c.ple_layer >= 0 ? static_cast<std::uint32_t>(c.ple_layer) : 0;
+  std::vector<std::uint32_t> after;
+  for (std::size_t k = 1; k < groups; ++k) {
+    const auto layer =
+        static_cast<std::uint32_t>(k * c.num_layers / groups) - 1;
+    if (layer >= first && layer + 1 < c.num_layers &&
+        (after.empty() || after.back() != layer))
+      after.push_back(layer);
+  }
+  return after;
+}
+
+bool Executor::RunLayerHook(Session& session, std::string* error_msg) const {
+  // The host may read pinned buffers this pass still copies from (the PLE
+  // rows), and `between` rewrites them: finish the queued layers first.
+  if (!Check(hipStreamSynchronize(stream_), "layer hook sync", error_msg))
+    return false;
+  // Everything that carries one layer's output into the next: the scratch
+  // views and the producer bookkeeping.
+  const Scratch base = s_;
+  const auto xn_half = xn_half_;
+  const auto inject_parts = inject_parts_;
+  const auto inject_fused = inject_fused_;
+  const auto q8_slot = q8_slot_;
+  const auto xn_ready = xn_q8_ready_;
+  const auto mixed_ready = mixed_q8_ready_;
+  const auto pending = pending_combine_;
+  const auto moe_pending = moe_pending_;
+  const auto defer = defer_residual_;
+  const auto deferred = res_deferred_;
+  const auto shexp_half = shexp_half_ready_;
+  const auto selected = selected_logits_;
+  const auto wide_rows = wide_rows_;
+  const auto prefetch_next = prefetch_next_;
+  // A decode's Forward clears both on return.
+  const bool prefetch_deferred = prefetch_deferred_;
+  const auto routed_max_rows = routed_max_rows_;
+  const auto routed_n_tiles = routed_n_tiles_;
+  const auto routed_wide_tiles = routed_wide_tiles_;
+  const auto routed_tile_rows = routed_tile_rows_;
+  const auto routed_tile_cols = routed_tile_cols_;
+  const bool phase = prefill_phase;
+  // Decode rows, MTP verification and batched chains included, stay below
+  // kHookParkedRows of the shared scratch. Park those rows of the buffers
+  // this pass still reads: the residual stream, the inject parts, the wide
+  // combine's norm in xn_half/xn_q8t (otherwise xn), and a deferred residual
+  // update in block_out/hc_defer_w.
+  const Config& c = config();
+  constexpr std::size_t kParked = kHookParkedRows;
+  struct Parked {
+    void* buffer;
+    std::size_t bytes;
+  };
+  std::vector<Parked> parked{
+      {s_.res, kParked * c.HcDim() * sizeof(float)},
+      {s_.inject,
+       kParked * c.hc_count * HcInjectParts(c.hidden_size) * sizeof(float)}};
+  if (xn_half) {
+    parked.push_back({s_.xn_half, kParked * c.HcDim() * sizeof(__half)});
+    parked.push_back({s_.xn_q8t, Q8TiledBytes(kParked, c.HcDim())});
+  } else {
+    parked.push_back({s_.xn, kParked * c.HcDim() * sizeof(float)});
+  }
+  if (deferred) {
+    parked.push_back({s_.block_out, kParked * c.hidden_size * sizeof(float)});
+    parked.push_back({s_.hc_defer_w, kParked * c.hc_count * sizeof(float)});
+  }
+  if (hook_park_ == nullptr) {
+    const std::size_t most =
+        kParked * (c.HcDim() * (sizeof(float) + sizeof(__half)) +
+                   c.hc_count * HcInjectParts(c.hidden_size) * sizeof(float) +
+                   c.hidden_size * sizeof(float) + c.hc_count * sizeof(float)) +
+        Q8TiledBytes(kParked, c.HcDim());
+    if (!Check(hipMalloc(&hook_park_, most), "layer hook park", error_msg))
+      return false;
+  }
+  auto* at = static_cast<std::uint8_t*>(hook_park_);
+  for (const auto& p : parked) {
+    if (!Check(hipMemcpyAsync(at, p.buffer, p.bytes, hipMemcpyDeviceToDevice,
+                              stream_),
+               "layer hook park", error_msg))
+      return false;
+    at += p.bytes;
+  }
+  // A pass ends with no deferred work; hand `between` that state. Moving the
+  // hook out also keeps a decode inside it from yielding again.
+  inject_fused_ = nullptr;
+  xn_q8_ready_ = {};
+  mixed_q8_ready_ = {};
+  pending_combine_ = {};
+  defer_residual_ = false;
+  res_deferred_ = false;
+  shexp_half_ready_ = false;
+  auto hook = std::move(hook_);
+  hook_ = {};
+  {
+    // Decode entry points other than Forward rely on the decode phase
+    // outside any pass; prefill routes would also grow arenas a graph
+    // capture forbids.
+    PrefillPhase decode_phase(false);
+    hook();
+  }
+  hook_ = std::move(hook);
+  prefill_phase = phase;
+  UseScratch(base);
+  at = static_cast<std::uint8_t*>(hook_park_);
+  for (const auto& p : parked) {
+    if (!Check(hipMemcpyAsync(p.buffer, at, p.bytes, hipMemcpyDeviceToDevice,
+                              stream_),
+               "layer hook unpark", error_msg))
+      return false;
+    at += p.bytes;
+  }
+  xn_half_ = xn_half;
+  inject_parts_ = inject_parts;
+  inject_fused_ = inject_fused;
+  q8_slot_ = q8_slot;
+  xn_q8_ready_ = xn_ready;
+  mixed_q8_ready_ = mixed_ready;
+  pending_combine_ = pending;
+  moe_pending_ = moe_pending;
+  defer_residual_ = defer;
+  res_deferred_ = deferred;
+  shexp_half_ready_ = shexp_half;
+  selected_logits_ = selected;
+  wide_rows_ = wide_rows;
+  prefetch_next_ = prefetch_next;
+  routed_max_rows_ = routed_max_rows;
+  routed_n_tiles_ = routed_n_tiles;
+  routed_wide_tiles_ = routed_wide_tiles;
+  routed_tile_rows_ = routed_tile_rows;
+  routed_tile_cols_ = routed_tile_cols;
+  UseYarn(session);
+  prefetch_deferred_ = false;
+  if (prefetch_deferred) {
+    PrefetchPle(session, prefetch_next_);
+    prefetch_next_ = {};
+  }
+  return true;
+}
+
 bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            std::uint32_t n_logits, bool download_logits,
                            bool speculative, bool sparse,
@@ -3740,6 +4024,13 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
       return false;
     }
     normed = next_norm != nullptr;
+    // A pass whose n-gram rows were not prefetched (a prompt's first) waits
+    // for the table read at the PLE layer: yield right after it as well.
+    if (hook_ && prefill_phase && il + 1 < c.num_layers &&
+        (std::ranges::binary_search(hook_layers_, il) ||
+         (ple_cold_ && c.IsPleLayer(il))) &&
+        !RunLayerHook(session, error_msg))
+      return false;
   }
   if (end_layer < c.num_layers) {
     return true;

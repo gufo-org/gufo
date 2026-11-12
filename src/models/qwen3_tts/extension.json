@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "qwen3_tts",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.3.0",
   "entry": "qwen3_tts_register",
   "registration_target": "gufo_qwen3_tts",
   "depends": [],
@@ -56,7 +56,7 @@
   "docs": {
     "title": "Qwen3-TTS 12Hz 1.7B",
     "inputs": "BF16 safetensors; text/reference audio to speech",
-    "guide": "docs/models/qwen3-tts/README.md"
+    "guide": "docs/models/qwen3-tts.md"
   },
   "tests": [
     {

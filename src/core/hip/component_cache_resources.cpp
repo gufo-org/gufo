@@ -25,13 +25,14 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                                  cache::ResourceLedger& ledger,
                                  ComponentCacheHooks hooks) {
   struct Backing {
-    hip::TransferPool streams{64};
+    explicit Backing(std::size_t streams) : streams(streams) {}
+    hip::TransferPool streams;
     std::unique_ptr<hip::CommittedBackingPool> pool;
     std::map<std::uint32_t, std::size_t> component_classes;
   };
   auto result = std::make_unique<cache::ComponentCacheResources>();
   result->adapter = std::move(adapter);
-  auto backing = std::make_shared<Backing>();
+  auto backing = std::make_shared<Backing>(hooks.transfer_streams);
   result->transfer_batch_size = 16;
   const auto rounded = [](std::size_t bytes) {
     return (bytes + 4095) / 4096 * 4096;
@@ -49,7 +50,10 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                                 result->adapter.get()](std::size_t budget) {
     const auto plan = adapter->BackingPlan(budget);
     if (plan.size() != 1)
-      throw std::invalid_argument("insufficient component backing budget");
+      throw std::invalid_argument(
+          "a RAM cache budget of " + std::to_string(budget) +
+          " bytes is too small for its backing; use a larger "
+          "--cache-ram-bytes, or --cache-ram-bytes off");
     const auto& allocation = plan.front();
     // Pages commit as captures need them. A payload cannot span segments,
     // so segments of about 128 MiB bound registration pauses and stranded

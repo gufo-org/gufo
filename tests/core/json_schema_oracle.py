@@ -78,6 +78,31 @@ def main():
         expected = [validator.is_valid(json.loads(text, parse_float=Decimal)) for text in texts]
         cases.append((schema, texts, expected))
 
+    # All nonempty type subsets, including overlapping integer/number types.
+    # Keep containers closed/deterministic to match the grammar's object policy.
+    union_types = ["string", "number", "integer", "boolean", "null", "array", "object"]
+    union_values = ['"a"', '""', '0', '-1', '1.5', 'true', 'false', 'null',
+                    '[]', '[1]', '{}', '{"x":1}']
+    for count in range(1, len(union_types) + 1):
+        for types in itertools.combinations(union_types, count):
+            member = {"type": list(types)}
+            if "array" in types:
+                member["items"] = {"type": "integer"}
+            if "object" in types:
+                member.update(properties={}, additionalProperties=False)
+            add(member, union_values)
+    add({"type": ["string", "number", "boolean", "null"],
+         "minLength": 2, "maximum": 3}, union_values + ['"ab"', '4'])
+    add({"type": ["string", "integer", "null"], "enum": ["a", 1, None]}, union_values)
+    add({"type": ["string", "integer", "null"], "minimum": 5, "maximum": 2}, union_values)
+    add({"type": ["string", "boolean"], "minLength": 3, "maxLength": 1}, union_values)
+    add({"type": ["array", "number"], "items": {"type": "integer"},
+         "minItems": 2, "maxItems": 1}, union_values)
+
+    add({"type": ["number", "integer", "string"],
+         "anyOf": [{"type": ["integer", "number"]}, {"type": "string"}]}, union_values)
+
+
     add({"type": "object", "properties": {"a": {"type": "integer"},
          "b": {"type": "boolean"}}, "required": ["a", "b"],
          "additionalProperties": False,

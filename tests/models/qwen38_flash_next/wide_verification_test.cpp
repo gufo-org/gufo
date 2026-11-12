@@ -19,6 +19,8 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/core/platform/fs.hpp"
@@ -251,6 +253,115 @@ struct DeviceModelTestAccess {
   }
 };
 
+// Test-only access: production has no switch for disabling graphs or overlap.
+struct ExecutorTestAccess {
+  static void EagerNext(Session& session) { session.warmed_.clear(); }
+  static std::size_t Graphs(const Session& session) {
+    return session.graphs_.size();
+  }
+  static bool Capturing(const Executor& exec) { return exec.capturing_; }
+  /// Forces a decode layout; returns the one Create calibrated.
+  static bool SetDecodeOverlap(const Executor& exec, bool overlap) {
+    return std::exchange(const_cast<Executor&>(exec).decode_overlap_, overlap);
+  }
+  static void RequireIdle(const Executor& exec) {
+    for (const auto stream : {exec.stream_, exec.side_stream_}) {
+      hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+      if (hipStreamIsCapturing(stream, &status) != hipSuccess ||
+          status != hipStreamCaptureStatusNone)
+        throw std::runtime_error("failed pass left a HIP capture active");
+    }
+    if (exec.capturing_ || exec.side_pending_)
+      throw std::runtime_error("failed pass left capture or side work pending");
+  }
+  static void PoisonShared(const Executor& exec, std::uint32_t rows) {
+    if (hipMemsetAsync(exec.s_.shexp_out, 0xff,
+                       std::size_t{rows} * exec.config().hidden_size * 4,
+                       exec.stream_) != hipSuccess)
+      throw std::runtime_error("shared-expert poison failed");
+  }
+  static void CheckMoeCapture(const Executor& exec, std::uint32_t rows,
+                              bool throw_in_capture = false) {
+    std::string error;
+    auto session =
+        exec.CreateSession(core::SessionMode::kAutoregressive, 128, &error);
+    if (!session)
+      throw std::runtime_error(error);
+    const std::size_t count = std::size_t{rows} * exec.config().hidden_size;
+    std::vector<float> input(count);
+    for (std::size_t i = 0; i < count; ++i)
+      input[i] = 0.1F * std::sin(static_cast<float>(i) * 0.13F);
+    if (hipMemcpy(exec.s_.mixed, input.data(), count * 4,
+                  hipMemcpyHostToDevice) != hipSuccess)
+      throw std::runtime_error("MoE input upload failed");
+    bool checked = false;
+    const auto body = [&] {
+      exec.DropReadyQ8();
+      exec.q8t_src_ = nullptr;
+      exec.half_src_ = nullptr;
+      if (!exec.Moe(exec.model_->layers().front(), exec.s_.mixed,
+                    exec.s_.block_out, rows, &error))
+        throw std::runtime_error(error);
+      if (exec.capturing_) {
+        hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+        if (hipStreamIsCapturing(exec.side_stream_, &status) != hipSuccess ||
+            status != (rows <= 8 && exec.decode_overlap_
+                           ? hipStreamCaptureStatusActive
+                           : hipStreamCaptureStatusNone))
+          throw std::runtime_error("unexpected MoE overlap shape");
+        checked = true;
+        if (throw_in_capture)
+          throw std::runtime_error("injected capture failure");
+      }
+      return true;
+    };
+    const auto read = [&](std::vector<float>& out) {
+      if (hipStreamSynchronize(exec.stream_) != hipSuccess ||
+          hipMemcpy(out.data(), exec.s_.block_out, count * 4,
+                    hipMemcpyDeviceToHost) != hipSuccess)
+        throw std::runtime_error("MoE output download failed");
+    };
+    // The first pass warms the shape eagerly; the second captures and
+    // launches; the third replays. Comparing the eager and replayed block
+    // output catches a graph that dropped the shared expert, which poisoning
+    // its scratch makes visible.
+    constexpr std::uint64_t key = std::uint64_t{1} << 63;
+    std::vector<float> expected(count), actual(count);
+    if (!exec.Run(*session, key, true, body, &error, false))
+      throw std::runtime_error(error);
+    read(expected);
+    const auto main = exec.stream_;
+    bool threw = false;
+    try {
+      if (!exec.Run(*session, key, true, body, &error, false))
+        throw std::runtime_error(error);
+    } catch (const std::runtime_error& e) {
+      if (!throw_in_capture ||
+          std::string_view(e.what()) != "injected capture failure")
+        throw;
+      threw = true;
+    }
+    if (!checked || threw != throw_in_capture || exec.stream_ != main)
+      throw std::runtime_error("capture failure was not exercised or restored");
+    RequireIdle(exec);
+    if (throw_in_capture) {
+      throw_in_capture = false;
+      if (Graphs(*session) != 0 ||
+          !exec.Run(*session, key, true, body, &error, false))
+        throw std::runtime_error("capture did not recover after exception");
+    }
+    if (Graphs(*session) != 1)
+      throw std::runtime_error("MoE capture did not install a usable graph");
+    PoisonShared(exec, rows);
+    if (!exec.Run(*session, key, true, body, &error, false))
+      throw std::runtime_error(error);
+    read(actual);
+    if (std::memcmp(expected.data(), actual.data(), count * 4) != 0)
+      throw std::runtime_error("MoE graph replay changed the block output");
+    RequireIdle(exec);
+  }
+};
+
 }  // namespace gufo::models::qwen38_flash_next::rocm
 
 namespace {
@@ -314,6 +425,126 @@ qfn::Config SyntheticConfig() {
 std::int32_t Argmax(std::span<const float> row) {
   return static_cast<std::int32_t>(std::max_element(row.begin(), row.end()) -
                                    row.begin());
+}
+
+void RequireExact(std::span<const float> expected,
+                  std::span<const float> actual, const std::string& what) {
+  const auto finite = [](float v) { return std::isfinite(v); };
+  if (expected.size() != actual.size() ||
+      !std::all_of(expected.begin(), expected.end(), finite) ||
+      !std::all_of(actual.begin(), actual.end(), finite) ||
+      std::memcmp(expected.data(), actual.data(), expected.size_bytes()) != 0)
+    throw std::runtime_error(what);
+}
+
+// Each width warms, captures and replays twice with different token histories.
+// Poisoning the shared output prevents an earlier eager/reference pass from
+// concealing a graph that omits the shared expert. The oracle is forced eager
+// without adding a production dispatch switch.
+void DecodeGraphChecks(const Executor& exec) {
+  using Access = rocm::ExecutorTestAccess;
+  const auto& c = exec.config();
+  std::string error;
+  // Both decode layouts must replay exactly, whichever one Create picked.
+  const bool calibrated = Access::SetDecodeOverlap(exec, false);
+  std::cout << "calibrated decode overlap=" << calibrated << '\n';
+  for (const bool overlap : {false, true}) {
+    Access::SetDecodeOverlap(exec, overlap);
+    for (const auto prompt_size : {4U, c.indexer_top_k + 8}) {
+      for (std::uint32_t width = 1; width <= 8; ++width) {
+        auto eager = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
+                                        128, &error);
+        auto replay = exec.CreateSession(gufo::core::SessionMode::kSpeculative,
+                                         128, &error);
+        if (!eager || !replay)
+          Throw("graph sessions", error);
+        std::vector<std::int32_t> prompt(prompt_size);
+        for (std::uint32_t i = 0; i < prompt_size; ++i)
+          prompt[i] = static_cast<std::int32_t>((i * 17 + 3) % c.vocab_size);
+        for (auto* session : {eager.get(), replay.get()}) {
+          if (!exec.Forward(*session, prompt, 0, nullptr,
+                            Executor::ForwardMode::kPrefill, &error))
+            Throw("graph prefill", error);
+        }
+        std::size_t graphs = 0;
+        for (std::uint32_t pass = 0; pass < 4; ++pass) {
+          std::vector<std::int32_t> tokens(width);
+          for (std::uint32_t i = 0; i < width; ++i)
+            tokens[i] = static_cast<std::int32_t>(
+                (pass * 53 + i * 23 + prompt_size) % c.vocab_size);
+          std::vector<float> expected(std::size_t{width} * c.vocab_size);
+          std::vector<float> actual(expected.size());
+          const auto mode = width == 1 ? Executor::ForwardMode::kDecode
+                                       : Executor::ForwardMode::kVerify;
+          Access::EagerNext(*eager);
+          if (!exec.Forward(*eager, tokens, width, expected.data(), mode,
+                            &error))
+            Throw("eager graph oracle", error);
+          Access::PoisonShared(exec, width);
+          if (!exec.Forward(*replay, tokens, width, actual.data(), mode,
+                            &error))
+            Throw("graph candidate", error);
+          RequireExact(
+              expected, actual,
+              "eager/replay logits differ: width=" + std::to_string(width) +
+                  " pass=" + std::to_string(pass));
+          const auto count = Access::Graphs(*replay);
+          if ((pass == 0 && count != 0) || (pass == 1 && count == 0) ||
+              (pass > 1 && count != graphs))
+            throw std::runtime_error("fixture did not warm/capture/replay");
+          graphs = count;
+        }
+        std::cout << "decode graph width=" << width
+                  << " sparse=" << (prompt_size > c.indexer_top_k)
+                  << " overlap=" << overlap << " eager/replay logits exact\n";
+      }
+    }
+    for (const auto rows : {1U, 8U, 9U, 32U})
+      Access::CheckMoeCapture(exec, rows);
+    Access::CheckMoeCapture(exec, 1, true);
+  }
+
+  // Cancel the suffix capture after at least one layer has recorded MoE side
+  // work (the overlapped layout is still forced). Prefix capture and
+  // eager-before-capture execution stay enabled.
+  auto failed =
+      exec.CreateSession(gufo::core::SessionMode::kAutoregressive, 128, &error);
+  auto peer =
+      exec.CreateSession(gufo::core::SessionMode::kAutoregressive, 128, &error);
+  if (!failed || !peer)
+    Throw("capture cancellation sessions", error);
+  const std::array<std::int32_t, 4> prompt{3, 7, 11, 19};
+  std::vector<float> expected(c.vocab_size), actual(c.vocab_size);
+  const std::int32_t token = 23;
+  if (!exec.Forward(*failed, prompt, 0, nullptr,
+                    Executor::ForwardMode::kPrefill, &error) ||
+      !exec.Forward(*failed, std::span(&token, 1), 1, actual.data(),
+                    Executor::ForwardMode::kDecode, &error))
+    Throw("capture cancellation warmup", error);
+  unsigned captured_checks = 0;
+  failed->SetCancellationCheck(
+      [&] { return Access::Capturing(exec) && ++captured_checks == 3; });
+  if (exec.Forward(*failed, std::span(&token, 1), 1, actual.data(),
+                   Executor::ForwardMode::kDecode, &error) ||
+      captured_checks != 3)
+    throw std::runtime_error("fixture did not cancel during capture");
+  Access::RequireIdle(exec);
+  failed->SetCancellationCheck({});
+  failed->Reset();
+  for (auto* session : {peer.get(), failed.get()}) {
+    if (!exec.Forward(*session, prompt, 0, nullptr,
+                      Executor::ForwardMode::kPrefill, &error))
+      Throw("post-cancellation prefill", error);
+  }
+  if (!exec.Forward(*peer, std::span(&token, 1), 1, expected.data(),
+                    Executor::ForwardMode::kDecode, &error) ||
+      !exec.Forward(*failed, std::span(&token, 1), 1, actual.data(),
+                    Executor::ForwardMode::kDecode, &error))
+    Throw("post-cancellation decode", error);
+  RequireExact(expected, actual, "cancelled capture changed reused executor");
+  Access::RequireIdle(exec);
+  Access::SetDecodeOverlap(exec, calibrated);
+  std::cout << "capture exception/cancellation recovery exact\n";
 }
 
 /// A wide copy verification (ForwardWide) must give every row the logits of
@@ -408,12 +639,21 @@ int WideChecks(const Executor& exec) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  const bool graph_only =
+      argc == 2 && std::string_view(argv[1]) == "--decode-graph-only";
+  if (argc != 1 && !graph_only)
+    return 2;
   try {
-    const auto config = SyntheticConfig();
+    auto config = SyntheticConfig();
+    if (graph_only) {
+      config.vocab_size = 256;
+      config.ple_eos_token = 255;
+      config.indexer_top_k = 64;
+    }
     auto model = rocm::DeviceModelTestAccess::Build(config);
     std::string error;
-    if (!model->SetDraftVocab(2048, {8000, 8001}, &error))
+    if (!graph_only && !model->SetDraftVocab(2048, {8000, 8001}, &error))
       Throw("draft vocabulary", error);
     // The n-gram rows come from a BF16 table file, as from the artifact.
     TemporaryDirectory temp("qfn-wide-verification");
@@ -440,12 +680,19 @@ int main() {
     gufo::platform::CloseFile(file);
     if (!ngram)
       Throw("n-gram table", error);
-    // A whole 2,030-token prompt in one pass needs the wide scratch.
-    auto exec = Executor::Create(
-        *model, ngram.get(),
-        {.max_batch = 2048, .max_logit_rows = 8, .max_speculative = 8}, &error);
+    // A whole 2,030-token prompt in one pass needs the wide scratch. The
+    // focused graph regression needs only short prompts around a small budget.
+    auto exec = Executor::Create(*model, ngram.get(),
+                                 {.max_batch = graph_only ? 128U : 2048U,
+                                  .max_logit_rows = 8,
+                                  .max_speculative = 8},
+                                 &error);
     if (!exec)
       Throw("executor", error);
+    if (graph_only) {
+      DecodeGraphChecks(*exec);
+      return 0;
+    }
     if (WideChecks(*exec) != 0)
       return 1;
     std::cout << "wide verification matches eight-row passes\n";

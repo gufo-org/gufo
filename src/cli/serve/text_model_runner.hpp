@@ -31,6 +31,8 @@ using ext::InitialOutputState;
 using ext::kHostSnapshotHeadroomBytes;
 using ext::MeminfoAvailableBytes;
 using ext::ParseRamCacheOption;
+using ext::PrefillYield;
+using ext::ReasoningMarkup;
 using ext::TextDecodeSelection;
 using ext::TextDecodeStep;
 using ext::TextExecutionPlan;
@@ -47,10 +49,8 @@ using ext::TextRunnerDescriptor;
 using ext::TextRunnerDiskCacheOptions;
 using ext::TextRunnerMeasuredResources;
 using ext::TextRunnerNgramRows;
-using ext::TextRunnerPersistenceDescriptor;
 using ext::TextRunnerRamCacheOptions;
 using ext::TextRunnerResourceClaim;
-using ext::TextRunnerSnapshot;
 using ext::TextRunnerState;
 using ext::TextRunnerToken;
 
@@ -115,7 +115,11 @@ public:
     static constexpr std::size_t kSharedPrefixMinTokens = 512;
 
     void PrepareBatchExecution();
-    [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+    /// With `yield`, a runner with a scheduling profile splits the pass into
+    /// at most `layer_groups` layer groups and runs it between them.
+    [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens,
+                                          std::size_t layer_groups = 1,
+                                          const PrefillYield& yield = {});
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
@@ -157,6 +161,8 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  /// Validated resource claim, including host prompt-state admission inputs.
+  [[nodiscard]] const TextRunnerResourceClaim& resource_claim() const noexcept;
   [[nodiscard]] TextExecutionPlan SelectDecodePlan(
       std::size_t ready_requests) const;
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
@@ -183,6 +189,14 @@ public:
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(
       std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
       std::uint64_t checkpoint_id = 0) const;
+  /// When a text-only prompt repeats an idle live frontier's text, uses that
+  /// frontier's tokens for it, so a different split of a previous answer does
+  /// not lose the frontier (#1154). Moves `cache_prefix_tokens` with the
+  /// rewrite. `chat_template` allows whitespace the template trimmed from
+  /// the edges of a reply.
+  bool AlignToLiveFrontier(std::vector<TextRunnerToken>& prompt,
+                           std::size_t& cache_prefix_tokens,
+                           bool chat_template) const;
 
 private:
   struct Impl;
@@ -191,10 +205,16 @@ private:
 
 /// Build output constraints and attach server-authored instructions as framing,
 /// preserving client message content and the model's native prompt layout.
+/// `tool_format` receives the built-in format the request was constrained
+/// with (none for a provider syntax) and `tool_dialect` the runner's dialect
+/// identity, which the response parsers select by. Throws
+/// std::invalid_argument for an identity that is neither built in nor
+/// registered.
 [[nodiscard]] std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
-    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr,
+    std::string* tool_dialect = nullptr);
 
 }  // namespace gufo::server
 

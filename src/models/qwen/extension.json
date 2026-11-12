@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "qwen",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.3.0",
   "entry": "qwen_register",
   "registration_target": "gufo_qwen",
   "depends": [],
@@ -75,7 +75,7 @@
   "docs": {
     "title": "Qwen3.8 27B",
     "inputs": "Q4/Q8 GGUF; text/images",
-    "guide": "docs/models/qwen3.8-27b/README.md"
+    "guide": "docs/models/qwen3.8-27b.md"
   },
   "tests": [
     {

@@ -4,6 +4,7 @@
 // static helper visibility and launch behavior.
 
 #include "ds4_rocm_device.hip.hpp"
+#include "ds4_rocm_q8_decode.hip.hpp"
 
 __device__ static void hc4_split_one(float *out, const float *mix, const float *scale, const float *base, uint32_t sinkhorn_iters, float epsv) {
 #if __clang_major__ >= 24
@@ -371,12 +372,32 @@ __global__ static void hc_split_weighted_sum_fused_kernel(
     }
 }
 
-/* QCOLS != 0 is the single-token decode form for n_embd == QCOLS * 256: each
- * thread keeps its QCOLS normalized values in registers and also writes the
- * Q8_0 (norm_q8) and, when set, Q8_K (norm_q8k) forms of norm_out for the
- * projections that read them, saving their quantize launches. */
-template <uint32_t QCOLS>
-__global__ static void hc_split_weighted_sum_norm_fused_kernel(
+/* On AMD GPUs an operation on two NaNs returns the one in a fixed operand
+ * slot, and LLVM commutes floating-point operands as its passes rank them.
+ * These helpers keep the operands in the written slots, so the propagated NaN
+ * follows the source, and fast-math cannot reassociate the products. */
+__device__ __forceinline__ static float hc_mul(float a, float b) {
+    float r;
+    asm("v_mul_f32 %0, %1, %2" : "=v"(r) : "v"(a), "v"(b));
+    return r;
+}
+
+__device__ __forceinline__ static float hc_fma(float a, float b, float c) {
+    asm("v_fmac_f32 %0, %1, %2" : "+v"(c) : "v"(a), "v"(b));
+    return c;
+}
+
+__device__ __forceinline__ static float hc_add(float a, float b) {
+    float r;
+    asm("v_add_f32 %0, %1, %2" : "=v"(r) : "v"(a), "v"(b));
+    return r;
+}
+
+/* Each of a row's SLICES blocks repeats the split, the whole weighted sum and
+ * the sum-of-squares tree, so every block derives the same RMS scale. The
+ * residual loads come before the split so that they complete during it. */
+template <uint32_t SLICES, bool QUANTIZE>
+__global__ __launch_bounds__(256) static void hc_split_weighted_sum_norm_fused_kernel(
         float *out,
         float *norm_out,
         int8_t *norm_q8,
@@ -389,27 +410,44 @@ __global__ static void hc_split_weighted_sum_norm_fused_kernel(
         const float *base,
         const float *norm_w,
         uint32_t n_embd,
-        uint32_t n_hc,
         uint32_t n_rows,
         uint32_t sinkhorn_iters,
         float epsv,
         float norm_eps) {
-    const uint32_t t = blockIdx.x;
+    constexpr uint32_t COLS = 16u;
+    constexpr uint32_t N = COLS / SLICES;
+    const uint32_t t = blockIdx.x / SLICES;
+    const uint32_t slice = blockIdx.x % SLICES;
     const uint32_t d = threadIdx.x;
-    if (t >= n_rows || n_hc != 4) return;
-    const uint32_t mix_hc = 24;
-    float *sp = split + (uint64_t)t * mix_hc;
+    if (t >= n_rows) return;
+    constexpr uint32_t mix_hc = 24;
+    const float *residual = residual_hc + (uint64_t)t * 4u * n_embd;
+    float r[4][COLS];
+#pragma unroll
+    for (uint32_t k = 0; k < COLS; k++) {
+#pragma unroll
+        for (uint32_t h = 0; h < 4; h++) r[h][k] = residual[(uint64_t)h * n_embd + k * 256u + d];
+    }
+    float w[N];
+#pragma unroll
+    for (uint32_t k = 0; k < N; k++) w[k] = norm_w[(slice * N + k) * 256u + d];
+
+    __shared__ float sp[mix_hc];
     if (d == 0) hc4_split_one(sp, mix + (uint64_t)t * mix_hc, scale, base, sinkhorn_iters, epsv);
     __syncthreads();
+    if (slice == 0 && d < mix_hc) split[(uint64_t)t * mix_hc + d] = sp[d];
 
+    const float s0 = sp[0], s1 = sp[1], s2 = sp[2], s3 = sp[3];
     float sum = 0.0f;
-    for (uint32_t col = d; col < n_embd; col += blockDim.x) {
-        float acc = 0.0f;
-        for (uint32_t h = 0; h < 4; h++) {
-            acc += residual_hc[(uint64_t)t * 4u * n_embd + (uint64_t)h * n_embd + col] * sp[h];
-        }
-        out[(uint64_t)t * n_embd + col] = acc;
-        sum += acc * acc;
+    float y[N];
+#pragma unroll
+    for (uint32_t k = 0; k < COLS; k++) {
+        float acc = hc_mul(s0, r[0][k]);
+        acc = hc_fma(s1, r[1][k], acc);
+        acc = hc_fma(s2, r[2][k], acc);
+        acc = hc_fma(s3, r[3][k], acc);
+        sum = fmaf(acc, acc, sum);
+        if (k / N == slice) y[k % N] = acc;
     }
 
     __shared__ float partial[256];
@@ -420,23 +458,161 @@ __global__ static void hc_split_weighted_sum_norm_fused_kernel(
         __syncthreads();
     }
     const float norm_scale = rsqrtf(partial[0] / (float)n_embd + norm_eps);
-    if constexpr (QCOLS == 0) {
-        for (uint32_t col = d; col < n_embd; col += blockDim.x) {
-            const float v = out[(uint64_t)t * n_embd + col];
-            norm_out[(uint64_t)t * n_embd + col] = v * norm_scale * norm_w[col];
-        }
-    } else {
-        float y[QCOLS];
 #pragma unroll
-        for (uint32_t k = 0; k < QCOLS; k++) {
-            const uint32_t col = k * 256u + d;
-            const float v = out[(uint64_t)t * n_embd + col];
-            y[k] = v * norm_scale * norm_w[col];
-            norm_out[(uint64_t)t * n_embd + col] = y[k];
+    for (uint32_t k = 0; k < N; k++) {
+        const uint64_t col = (uint64_t)t * n_embd + (slice * N + k) * 256u + d;
+        out[col] = y[k];
+        y[k] = hc_mul(hc_mul(y[k], norm_scale), w[k]);
+        norm_out[col] = y[k];
+    }
+    if constexpr (QUANTIZE) {
+        quantize_q8_0_cols256<N>(y, d, norm_q8 + (uint64_t)t * n_embd + slice * N * 256u,
+                                 norm_q8_scale + (uint64_t)t * (n_embd / 32u) + slice * N * 8u);
+        if (norm_q8k) quantize_q8_K_cols256<N>(y, d, norm_q8k + (uint64_t)t * COLS + slice * N);
+    }
+}
+
+__device__ __forceinline__ static float hc_plain_rms_scale(const float (&r)[4][16], uint32_t d,
+                                                           uint32_t n, float eps) {
+    float sum = 0.0f;
+#pragma unroll
+    for (uint32_t h = 0; h < 4u; h++) {
+#pragma unroll
+        for (uint32_t k = 0; k < 16u; k++) sum += r[h][k] * r[h][k];
+    }
+    __shared__ float partial[256];
+    partial[d] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (d < stride) partial[d] += partial[d + stride];
+        __syncthreads();
+    }
+    return rsqrtf(partial[0] / (float)n + eps);
+}
+
+__device__ __forceinline__ static void hc_mix_row_f16(float *out, const __half *wr, const float *x,
+                                                      float scale, uint32_t in_dim, uint32_t row,
+                                                      uint32_t tid) {
+    constexpr uint32_t kGroups = 16u;
+    __shared__ float partial[32];
+    if (tid < 32u) {
+        float sum = 0.0f;
+        const uint64_t chunk = in_dim / 32u;
+        const uint64_t k1 = (uint64_t)(tid + 1u) * chunk;
+        for (uint64_t i = (uint64_t)tid * chunk; i + 4u * kGroups - 1u < k1; i += 4u * kGroups) {
+            float2 weight01[kGroups], weight23[kGroups];
+            float4 activation[kGroups];
+#pragma unroll
+            for (uint32_t group = 0; group < kGroups; group++) {
+                weight01[group] = __half22float2(
+                    *reinterpret_cast<const __half2 *>(wr + i + 4u * group));
+                weight23[group] = __half22float2(
+                    *reinterpret_cast<const __half2 *>(wr + i + 4u * group + 2u));
+                const float4 v = *reinterpret_cast<const float4 *>(x + i + 4u * group);
+                activation[group] = make_float4(hc_mul(v.x, scale), hc_mul(v.y, scale),
+                                                hc_mul(v.z, scale), hc_mul(v.w, scale));
+            }
+#pragma unroll
+            for (uint32_t group = 0; group < kGroups; group++) {
+                sum = fmaf(weight01[group].x, activation[group].x, sum);
+                sum = fmaf(weight01[group].y, activation[group].y, sum);
+                sum = fmaf(weight23[group].x, activation[group].z, sum);
+                sum = fmaf(weight23[group].y, activation[group].w, sum);
+            }
         }
-        quantize_q8_0_cols256<QCOLS>(y, d, norm_q8 + (uint64_t)t * n_embd,
-                                     norm_q8_scale + (uint64_t)t * (n_embd / 32u));
-        if (norm_q8k) quantize_q8_K_cols256<QCOLS>(y, d, norm_q8k + (uint64_t)t * QCOLS);
+        partial[tid] = sum;
+    }
+    __syncthreads();
+    if (tid == 0u) {
+        float total = partial[0];
+#pragma unroll
+        for (uint32_t lane = 1; lane < 32u; lane++) total = hc_add(partial[lane], total);
+        out[row] = total;
+    }
+}
+
+__global__ __launch_bounds__(256) static void hc_mix_decode_kernel(
+        float *mix,
+        const float *residual_hc,
+        const __half *w,
+        uint32_t w_stride,
+        uint32_t n_embd,
+        uint32_t hc_dim,
+        float norm_eps) {
+    const uint32_t d = threadIdx.x;
+    float r[4][16];
+#pragma unroll
+    for (uint32_t k = 0; k < 16u; k++) {
+#pragma unroll
+        for (uint32_t h = 0; h < 4u; h++) r[h][k] = residual_hc[(uint64_t)h * n_embd + k * 256u + d];
+    }
+    const float scale = hc_plain_rms_scale(r, d, hc_dim, norm_eps);
+    hc_mix_row_f16(mix, w + (uint64_t)blockIdx.x * w_stride, residual_hc, scale, hc_dim,
+                   blockIdx.x, d);
+}
+
+__global__ static void matmul_q8_0_hc_expand_preq_rows_w32_kernel(
+        float *out_hc,
+        float *block_out,
+        const float *block_add,
+        const float *residual_hc,
+        const float *split,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint32_t n_embd,
+        uint64_t blocks,
+        uint32_t rows_per_block,
+        int has_add) {
+    const uint64_t row = (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+    const uint32_t d = (uint32_t)row;
+    const float *post = split + 4u;
+    const float *comb = split + 8u;
+    const bool hc_lane = lane < 4u;
+    float post_v = 0.0f, add_v = 0.0f, res_v[4] = {}, comb_v[4] = {};
+    if (hc_lane) {
+        post_v = post[lane];
+        if (has_add) add_v = block_add[d];
+#pragma unroll
+        for (uint32_t src = 0; src < 4u; src++) {
+            res_v[src] = residual_hc[(uint64_t)src * n_embd + d];
+            comb_v[src] = comb[src * 4u + lane];
+        }
+    }
+
+    const unsigned char *wr = w + row * blocks * 34u;
+    const uint64_t full = in_dim / 32u;
+    float acc = 0.0f;
+    uint64_t b = lane;
+#pragma unroll 1
+    for (; b < full; b += 32u) {
+        const unsigned char *blk = wr + b * 34u;
+        int32_t q[8];
+#pragma unroll
+        for (uint32_t j = 0; j < 8u; j++) q[j] = load_i8x4_i32_unaligned((const int8_t *)(blk + 2u) + 4u * j);
+        const float scale = __half2float(*(const __half *)blk);
+        const float xs = xscale[b];
+        const int dot = dot_i8x32_dp4a_loaded(q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], xq + b * 32u);
+        acc = q8_0_decode_accumulate(acc, scale, xs, dot);
+    }
+    for (; b < blocks; b += 32u) {
+        const uint64_t i0 = b * 32u;
+        const uint64_t bn = in_dim - i0 < 32u ? in_dim - i0 : 32u;
+        const int dot = dot_i8_block((const int8_t *)(wr + b * 34u + 2u), xq + i0, bn, 1);
+        acc += __half2float(*(const __half *)(wr + b * 34u)) * xscale[b] * (float)dot;
+    }
+    const float total = __shfl(warp_sum_f32(acc), 0, 32);
+    if (lane == 0u) block_out[d] = total;
+    if (hc_lane) {
+        const float block_v = has_add ? hc_add(add_v, total) : total;
+        float hc_acc = hc_mul(post_v, block_v);
+#pragma unroll
+        for (uint32_t src = 0; src < 4u; src++) hc_acc = hc_fma(comb_v[src], res_v[src], hc_acc);
+        out_hc[(uint64_t)lane * n_embd + d] = hc_acc;
     }
 }
 
@@ -460,6 +636,7 @@ __global__ static void hc4_norm_mix_split_weighted_sum_kernel(
         float *split_out,
         const float *residual_hc,
         const __half *mix_w,
+        uint32_t w_stride,
         const float *scale,
         const float *base,
         uint32_t n_embd,
@@ -520,7 +697,7 @@ __global__ static void hc4_norm_mix_split_weighted_sum_kernel(
     /* Apply RMS scaling after projecting the raw F32 row. Reduce one output
      * column before starting the next to limit live registers. */
     for (uint32_t j = 0; j < MIX_HC; j++) {
-        const __half *wrow = mix_w + (uint64_t)j * hc_dim + col0;
+        const __half *wrow = mix_w + (uint64_t)j * w_stride + col0;
         float a = 0.0f;
 #pragma unroll
         for (uint32_t h = 0; h < 4u; h++) {

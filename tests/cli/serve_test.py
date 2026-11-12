@@ -51,7 +51,29 @@ def main():
                "--served-model-name", "dup", "--model", "missing.gguf"], 2,
               "duplicate --served-model-name")
     check(["serve", "image"], 2, "--model <DIR> is required")
+    # Image provider options come from manifests of built, available providers
+    # (#974). Undeclared spellings stay usage errors before any model loads,
+    # and a host option keeps a value that looks like a provider option.
+    check(["serve", "image", "--help"], 0, "Image model directory")
+    check(["serve", "image", "--model", "/missing", "--not-declared", "x"], 2,
+          "Unknown option: --not-declared")
+    check(["serve", "image", "--served-model-name", "--not-declared"], 2,
+          "--model <DIR> is required")
     check(["serve", "embedding"], 2, "--model <DIR> is required")
+    text = check(["serve", "image", "--help"], 0, "--lora <NAME=PATH>")
+    assert "--lora-default <NAME:SCALE>" in text
+    check(["serve", "image", "--model", "x", "--lora", "bad"], 2,
+          "--lora expects NAME=VALUE")
+    for spec in ("x", "x:", ":1", "x:1y"):
+        check(["serve", "image", "--model", "x", "--lora-default", spec], 2,
+              "--lora-default expects NAME:SCALE")
+    # Adapter names and defaults are usage errors, checked before any file
+    # is opened.
+    check(["serve", "image", "--model", "/missing", "--lora", "a b=/x"], 2,
+          "must be 1-64 of [A-Za-z0-9._-]")
+    check(["serve", "image", "--model", "/missing", "--lora", "a=/x",
+           "--lora-default", "b:1"], 2, "--lora-default names unknown adapter")
+    check(["serve", "tts", "--lora", "a=b"], 2, "Unknown option")
     text = check(["serve", "embedding", "--help"], 0, "--served-model-name")
     assert "--context" not in text and "--sessions" not in text
     assert "--default-prompt-name" in text
@@ -241,7 +263,8 @@ def main():
 
     for command in ("prompt", "chat", "bench"):
         check([command, "--help"], 0, "--draft-policy")
-        check([command, "--draft-tokens", "0"], 2, "draft-tokens")
+        check([command, "--draft-tokens", "0"], 2 if command == "bench" else 0,
+              "--draft-tokens is deprecated")
     check(["chat", "unexpected"], 2, "Unexpected argument")
     check(["chat", "--prompt", "unused"], 2, "Unknown option")
     print("Serving and text CLI checks passed.")

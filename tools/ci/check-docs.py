@@ -6,6 +6,8 @@ Validates:
 1. Presence of maintained user/developer documentation and license notices.
 2. Local Markdown links and section anchor integrity without network access.
 3. Syntax validity of fenced JSON code blocks.
+4. Public documentation rules from docs/AGENTS.md: title and summary, listing
+   in the docs index, line budgets, filler words, issue numbers and figures.
 """
 
 import argparse
@@ -22,20 +24,24 @@ REQUIRED_DOC_FILES = [
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
     "AGENTS.md",
-    "docs/CLI.md",
-    "docs/DEVELOPMENT.md",
-    "docs/RELEASING.md",
+    "docs/cli.md",
+    "docs/internal/development.md",
+    "docs/internal/releasing.md",
     "docs/models/README.md",
-    "docs/SERVER.md",
-    "docs/TESTING.md",
-    "docs/BENCHMARKS.md",
-    "docs/PERFORMANCE.md",
+    "docs/server.md",
+    "docs/internal/testing.md",
+    "docs/internal/benchmarks.md",
+    "docs/internal/performance.md",
     # BEGIN GENERATED MODEL DOCS
-    *[f"docs/models/{model}/{document}.md"
+    *[f"docs/models/{model}.md"
+      for model in ("deepseek-v4-flash", "embeddinggemma-2", "minimax-h3",
+                    "qwen-image-2.1", "qwen3-asr", "qwen3-tts",
+                    "qwen3.8-27b", "qwen3.8-flash-next")],
+    *[f"docs/internal/models/{model}/{document}.md"
       for model in ("deepseek-v4-flash", "embeddinggemma-2", "minimax-h3",
                     "qwen-image-2.1", "qwen3-asr", "qwen3-tts",
                     "qwen3.8-27b", "qwen3.8-flash-next")
-      for document in ("README", "BENCHMARKS", "QUALITY", "EXPERIMENTS")],
+      for document in ("BENCHMARKS", "QUALITY", "EXPERIMENTS")],
     # END GENERATED MODEL DOCS
 ]
 
@@ -232,6 +238,116 @@ def check_links_and_anchors(repo_root: Path, md_files: List[Path]) -> Tuple[int,
     return total_links_checked, errors
 
 
+# Public pages: docs/*.md and docs/models/*.md; docs/AGENTS.md and
+# docs/internal/ are not published. See docs/AGENTS.md.
+DOCS_INDEX = "docs/README.md"
+MODELS_INDEX = "docs/models/README.md"
+PAGE_BUDGET = 250
+MODEL_PAGE_BUDGET = 120
+FILLER_REGEX = re.compile(
+    r"\b(simply|just|easily|basically|obviously|note that|it is worth|seamless(?:ly)?|blazing)\b",
+    re.IGNORECASE)
+ISSUE_REGEX = re.compile(r"(?<![\w&/#])#\d{2,}\b|github\.com/[^/\s]+/[^/\s]+/(?:pull|issues)/\d+")
+FIGURE_DIR = "docs/figures"
+FIGURE_STYLE = "docs/figures/style.css"
+FIGURE_MAX_BYTES = 30 * 1024
+FIGURE_FORBIDDEN = ("<script", "<foreignObject", "<image", "@import", "url(http", "@font-face")
+
+
+def public_pages(repo_root: Path) -> List[Path]:
+    """Published pages: docs/*.md and docs/models/*.md, without agent files."""
+    pages = sorted((repo_root / "docs").glob("*.md")) + sorted((repo_root / "docs/models").glob("*.md"))
+    return [p for p in pages if p.name not in {"AGENTS.md", "CLAUDE.md"}]
+
+
+def prose_lines(content: str) -> List[str]:
+    """Lines outside fenced code, with inline code and link targets blanked."""
+    lines = []
+    for line in strip_fenced_blocks(content).splitlines():
+        line = re.sub(r"`[^`]*`", "``", line)
+        line = re.sub(r"\]\([^)]*\)", "]()", line)
+        lines.append(line)
+    return lines
+
+
+def check_public_pages(repo_root: Path) -> List[str]:
+    """Apply the docs/AGENTS.md rules to every published page."""
+    errors: List[str] = []
+    index_links: Set[Path] = set()
+    for index in (DOCS_INDEX, MODELS_INDEX):
+        path = repo_root / index
+        if path.exists():
+            for match in MD_LINK_REGEX.finditer(strip_fenced_blocks(path.read_text(encoding="utf-8"))):
+                target = match.group("target").split("#", 1)[0]
+                if target and "://" not in target:
+                    index_links.add((path.parent / target).resolve())
+    for page in public_pages(repo_root):
+        rel = page.relative_to(repo_root).as_posix()
+        content = page.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        if not lines or not lines[0].startswith("# "):
+            errors.append(f"{rel}:1: Public page must start with a '# Title' line")
+        elif len(lines) < 3 or lines[1] != "" or not lines[2].strip() or lines[2].startswith(("#", "|", "- ", "* ", "```", "~~~", "!", ">")):
+            errors.append(f"{rel}:3: Title must be followed by a blank line and a summary paragraph")
+        if rel not in (DOCS_INDEX, MODELS_INDEX) and page.resolve() not in index_links:
+            errors.append(f"{rel}: Public page is not linked from {DOCS_INDEX} or {MODELS_INDEX}")
+        budget = MODEL_PAGE_BUDGET if page.parent.name == "models" and page.name != "README.md" else PAGE_BUDGET
+        if len(lines) > budget:
+            errors.append(f"{rel}: {len(lines)} lines exceed the {budget}-line budget; split it or move detail to docs/internal/")
+        for number, line in enumerate(prose_lines(content), start=1):
+            for match in FILLER_REGEX.finditer(line):
+                errors.append(f"{rel}:{number}: Filler word '{match.group(0)}'; see docs/AGENTS.md")
+            for match in ISSUE_REGEX.finditer(line):
+                errors.append(f"{rel}:{number}: Issue or pull request reference '{match.group(0)}' on a public page")
+    return errors
+
+
+def check_figures(repo_root: Path) -> List[str]:
+    """SVG figures embed the canonical style and stay GitHub- and website-safe."""
+    errors: List[str] = []
+    style_path = repo_root / FIGURE_STYLE
+    figure_dir = repo_root / FIGURE_DIR
+    if not figure_dir.exists():
+        return errors
+    style = style_path.read_text(encoding="utf-8") if style_path.exists() else None
+    if style is None:
+        errors.append(f"{FIGURE_STYLE}: Missing canonical figure style")
+    for svg in sorted(figure_dir.rglob("*.svg")):
+        rel = svg.relative_to(repo_root).as_posix()
+        text = svg.read_text(encoding="utf-8")
+        if svg.stat().st_size > FIGURE_MAX_BYTES:
+            errors.append(f"{rel}: Figure is larger than {FIGURE_MAX_BYTES // 1024} KB")
+        for token in FIGURE_FORBIDDEN:
+            if token.lower() in text.lower():
+                errors.append(f"{rel}: Figure contains forbidden '{token}'")
+        if re.search(r"\shref=\"(?!#)|xlink:href=\"(?!#)", text):
+            errors.append(f"{rel}: Figure references an external resource")
+        if re.search(r"\sstyle=\"|\s(?:fill|stroke|font-family|font-size)=\"(?!none)", text):
+            errors.append(f"{rel}: Figure uses inline presentation; use classes from {FIGURE_STYLE}")
+        root = re.search(r"<svg\b[^>]*>", text)
+        if not root:
+            errors.append(f"{rel}: No <svg> element")
+            continue
+        attrs = dict(re.findall(r'([\w:-]+)="([^"]*)"', root.group(0)))
+        view_box = attrs.get("viewBox", "").split()
+        if len(view_box) != 4 or view_box[2] != attrs.get("width") or view_box[3] != attrs.get("height"):
+            errors.append(f"{rel}: width and height must equal the viewBox size")
+        elif view_box[2] != "760":
+            errors.append(f"{rel}: Figures are 760 units wide")
+        if attrs.get("role") != "img" or not re.search(r"<title\b[^>]*>[^<]+</title>", text):
+            errors.append(f"{rel}: Figure needs role=\"img\" and a non-empty <title>")
+        styles = re.findall(r"<style>\n(.*?)</style>", text, flags=re.S)
+        if style is not None and styles != [style]:
+            errors.append(f"{rel}: <style> must embed {FIGURE_STYLE} verbatim, once")
+        prefix = svg.stem + "-"
+        for figure_id in re.findall(r'\sid="([^"]+)"', text):
+            if not figure_id.startswith(prefix):
+                errors.append(f"{rel}: id '{figure_id}' must start with '{prefix}'")
+        if not re.search(r'<rect\b[^>]*class="fig-bg"', text):
+            errors.append(f"{rel}: Figure must draw a fig-bg background rectangle")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Validate documentation integrity, links, anchors, and syntax."
@@ -253,6 +369,10 @@ def main() -> int:
     md_files = find_markdown_files(repo_root)
     links_count, link_errors = check_links_and_anchors(repo_root, md_files)
     all_errors.extend(link_errors)
+
+    # 3. Public documentation rules and figures
+    all_errors.extend(check_public_pages(repo_root))
+    all_errors.extend(check_figures(repo_root))
 
     if all_errors:
         print(f"\n[check-docs] FAILED: Found {len(all_errors)} documentation errors:")

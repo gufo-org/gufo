@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,7 +13,9 @@
 #include "gufo/ext/registry.hpp"
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/sampling_options.hpp"
+#include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
 
@@ -155,8 +158,7 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "Speculative", &opt.dflash_model_path);
 
   parser.AddOption("", "--draft-policy", "POLICY",
-                   "DFlash2 draft length policy: fixed or adaptive "
-                   "(default: adaptive)",
+                   "Deprecated and ignored: each model sets its draft length",
                    "Speculative", &opt.draft_policy);
 
   parser.AddOption("", "--dspark-model", "PATH",
@@ -164,11 +166,11 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "Speculative", &opt.dspark_model_path);
 
   parser.AddOption("", "--draft-tokens", "N",
-                   "Maximum draft tokens per speculative step (default: 7)",
+                   "Deprecated and ignored: each model sets its draft length",
                    "Speculative", &opt.draft_tokens);
 
   parser.AddOption("", "--min-draft-tokens", "N",
-                   "Minimum draft tokens per speculative step (default: 1)",
+                   "Deprecated and ignored: each model sets its draft length",
                    "Speculative", &opt.min_draft_tokens);
 
   // Execution
@@ -184,13 +186,15 @@ void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
 
 std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
                                               std::string* error_msg,
-                                              std::string_view command) {
+                                              std::string_view command,
+                                              ProviderOptions& provider) {
   ArgParser parser("gufo " + std::string(command),
                    command == "chat" ? "Interactive conversation."
                                      : "Execute one prompt request and exit.");
   PromptOptions opt;
   bool speculative_explicit = false;
   RegisterTextOptions(parser, opt, speculative_explicit, command);
+  provider.Register(parser);
 
   if (!parser.Parse(args, error_msg)) {
     return std::nullopt;
@@ -200,6 +204,7 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
   }
   opt.sampling_supplied = SamplingOptionsSupplied(parser);
   try {
+    provider.Parse();
     opt.sampling.Validate();
   } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr) {
@@ -235,27 +240,11 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
       *error_msg = "DSpark requires --dspark-model";
     return std::nullopt;
   }
-  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
-      opt.min_draft_tokens > opt.draft_tokens) {
-    if (error_msg != nullptr) {
-      *error_msg = "min-draft-tokens cannot exceed draft-tokens";
-    }
-    return std::nullopt;
-  }
-
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
-    if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
-    return std::nullopt;
-  }
-  if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
-    if (error_msg != nullptr)
-      *error_msg =
-          "DFlash2 requires --min-draft-tokens 1; bound blocks with "
-          "--draft-tokens";
-    return std::nullopt;
+  // Each model sets its draft settings (TextSpeculativeDefaults).
+  for (const char* option :
+       {"--draft-tokens", "--min-draft-tokens", "--draft-policy"}) {
+    if (parser.WasSupplied(option))
+      std::cerr << "Warning: " << option << " is deprecated and ignored\n";
   }
 
   if (opt.reasoning_mode != "on" && opt.reasoning_mode != "off" &&
@@ -291,6 +280,44 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
   return opt;
 }
 
+// Delivers the selected provider's options and resolves its draft settings;
+// false after reporting an error.
+bool PrepareForProvider(const ProviderOptions& provider,
+                        const ext::TextProvider& selected, PromptOptions* opt) {
+  try {
+    opt->provider_options = provider.Select(selected.id);
+    const auto settings =
+        ResolveSpeculativeSettings(selected, opt->speculative_backend, {});
+    opt->draft_tokens = settings.max_draft_tokens;
+    opt->min_draft_tokens = settings.min_draft_tokens;
+    opt->draft_policy = settings.draft_policy;
+  } catch (const std::invalid_argument& exception) {
+    std::cerr << "Error: " << exception.what() << "\n";
+    return false;
+  }
+  return true;
+}
+
+// Applies the provider's recommended sampling defaults under the explicit
+// command-line settings, with the thinking mode `--think` selects.
+bool ResolvePromptSampling(const ext::TextProvider& provider,
+                           const core::GgufReader& reader, PromptOptions* opt) {
+  if (provider.sampling_defaults == nullptr) {
+    return true;
+  }
+  opt->sampling = sampling::ResolveTextSampling(
+      provider.sampling_defaults(reader), opt->thinking_mode(), opt->sampling,
+      opt->sampling_supplied);
+  try {
+    opt->sampling.Validate();
+  } catch (const std::invalid_argument& exception) {
+    std::cerr << "Error: invalid model sampling defaults: " << exception.what()
+              << "\n";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 static void PrintTextHelp(std::string_view program_name,
@@ -301,6 +328,10 @@ static void PrintTextHelp(std::string_view program_name,
                    command == "chat" ? "Interactive conversation."
                                      : "Execute one prompt request and exit.");
   RegisterTextOptions(parser, opt, speculative_explicit, command);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, std::string(command));
+  provider.Register(parser);
   parser.PrintHelp();
 }
 
@@ -314,12 +345,19 @@ void PrintChatHelp(std::string_view program_name) {
 
 std::optional<PromptOptions> ParsePromptOptions(
     std::span<const char* const> args, std::string* error_msg) {
-  return ParseTextOptions(args, error_msg, "prompt");
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider(registry, "prompt");
+  return ParseTextOptions(args, error_msg, "prompt", provider);
 }
 
 int RunPrompt(std::span<const char* const> args) {
   std::string parse_err;
-  const auto opt_res = ParsePromptOptions(args, &parse_err);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "prompt");
+  const auto opt_res =
+      ParseTextOptions(args, &parse_err, "prompt", provider_options);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -362,7 +400,8 @@ int RunPrompt(std::span<const char* const> args) {
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  auto reader_owner = gufo::core::GgufReader::OpenFile(
+      opt.model_path, &err, {.allow_unsized_tensors = true});
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
@@ -372,11 +411,23 @@ int RunPrompt(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+    std::cerr << "Error loading GGUF model '" << opt.model_path
+              << "': " << reader->UnsizedTensorError() << "\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   if (provider == nullptr || provider->prompt_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for prompt\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
+  if (!PrepareForProvider(provider_options, *provider, &opt)) {
+    PrintModelLoadTime(model_load_start, false);
+    return 2;
+  }
+  if (!ResolvePromptSampling(*provider, *reader, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
@@ -385,7 +436,11 @@ int RunPrompt(std::span<const char* const> args) {
 
 int RunChat(std::span<const char* const> args) {
   std::string parse_err;
-  const auto opt_res = ParseTextOptions(args, &parse_err, "chat");
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "chat");
+  const auto opt_res =
+      ParseTextOptions(args, &parse_err, "chat", provider_options);
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -405,7 +460,8 @@ int RunChat(std::span<const char* const> args) {
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  auto reader_owner = gufo::core::GgufReader::OpenFile(
+      opt.model_path, &err, {.allow_unsized_tensors = true});
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
@@ -415,11 +471,23 @@ int RunChat(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+    std::cerr << "Error loading GGUF model '" << opt.model_path
+              << "': " << reader->UnsizedTensorError() << "\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   if (provider == nullptr || provider->chat_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for chat\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
+  if (!PrepareForProvider(provider_options, *provider, &opt)) {
+    PrintModelLoadTime(model_load_start, false);
+    return 2;
+  }
+  if (!ResolvePromptSampling(*provider, *reader, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }

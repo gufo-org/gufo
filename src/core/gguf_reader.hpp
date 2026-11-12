@@ -1,6 +1,7 @@
 #ifndef GUFO_CORE_GGUF_READER_HPP_
 #define GUFO_CORE_GGUF_READER_HPP_
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -138,6 +139,11 @@ struct GgufTensorInfo {
   std::uint64_t offset{0};
   const void* data{nullptr};
   std::size_t size_bytes{0};
+  /// False when core cannot size this storage type or shape (a reader opened
+  /// with `GgufOpenOptions::allow_unsized_tensors`). `size_bytes` then spans
+  /// the bytes the file reserves for the tensor: up to the next tensor's
+  /// offset, or to the end of the data.
+  bool sized{true};
 
   [[nodiscard]] std::uint64_t ElementCount() const noexcept {
     if (dimensions.empty()) {
@@ -167,6 +173,13 @@ struct GgufMappedRegion {
   std::filesystem::path source_path{};
 };
 
+struct GgufOpenOptions {
+  /// Accept tensors whose storage type or shape core cannot size, such as an
+  /// extension's own quantization, instead of rejecting the file. Only
+  /// callers that select a provider by `GgufTensorInfo::sized` set this.
+  bool allow_unsized_tensors{false};
+};
+
 /// Zero-copy, lightweight GGUF binary reader and tensor indexer.
 class GgufReader {
 public:
@@ -179,11 +192,13 @@ public:
 
   /// Memory-maps a .gguf file from disk and parses metadata and tensor headers.
   [[nodiscard]] static std::unique_ptr<GgufReader> OpenFile(
-      const std::filesystem::path& path, std::string* error_msg = nullptr);
+      const std::filesystem::path& path, std::string* error_msg = nullptr,
+      GgufOpenOptions options = {});
 
   /// Parses a GGUF file from an existing in-memory buffer without file mapping.
   [[nodiscard]] static std::unique_ptr<GgufReader> OpenMemory(
-      const void* data, std::size_t size, std::string* error_msg = nullptr);
+      const void* data, std::size_t size, std::string* error_msg = nullptr,
+      GgufOpenOptions options = {});
 
   [[nodiscard]] std::uint32_t GetVersion() const noexcept { return version_; }
   [[nodiscard]] std::uint64_t GetTensorCount() const noexcept {
@@ -225,6 +240,16 @@ public:
   [[nodiscard]] std::span<const GgufTensorInfo> GetTensors() const noexcept {
     return tensors_;
   }
+  /// The first tensor core cannot size, or null when every tensor is sized.
+  /// Inline: the extension runtime probes with it without the reader library.
+  [[nodiscard]] const GgufTensorInfo* FirstUnsizedTensor() const noexcept {
+    const auto found =
+        std::ranges::find(tensors_, false, &GgufTensorInfo::sized);
+    return found == tensors_.end() ? nullptr : &*found;
+  }
+  /// The error a reader opened without `allow_unsized_tensors` reports for
+  /// this file, or empty when every tensor is sized.
+  [[nodiscard]] std::string UnsizedTensorError() const;
 
   /// Names the weight format this file was produced in, for benchmark and
   /// diagnostic output. Prefers the `general.file_type` the quantizer recorded
@@ -243,12 +268,13 @@ private:
   GgufReader() = default;
 
   [[nodiscard]] static std::unique_ptr<GgufReader> OpenSingleFile(
-      const std::filesystem::path& path, std::string* error_msg);
+      const std::filesystem::path& path, std::string* error_msg,
+      GgufOpenOptions options);
   [[nodiscard]] static std::unique_ptr<GgufReader> OpenSplitFileSet(
       const std::filesystem::path& path, std::unique_ptr<GgufReader> first,
-      std::string* error_msg);
+      std::string* error_msg, GgufOpenOptions options);
 
-  bool ParseHeaders(std::string* error_msg);
+  bool ParseHeaders(std::string* error_msg, GgufOpenOptions options = {});
 
   const std::uint8_t* data_{nullptr};
   std::size_t size_{0};

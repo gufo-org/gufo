@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -39,6 +40,43 @@ bool DiskCacheEnabled(const TextDiskCacheConfig& config) {
 
 }  // namespace
 
+std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning,
+    const std::function<std::string(tokenization::TokenId)>& decode) {
+  using State = TextGenerationBackend::InitialOutputState;
+  if (initial == State::kContent || reasoning.close.empty() ||
+      (initial == State::kAuto && reasoning.open.empty()))
+    return 0;
+  // The parsers match delimiters in text, and tokens at their edges can merge
+  // with neighbouring output, so match in text too and map back to tokens.
+  std::string text;
+  std::vector<std::size_t> ends;
+  ends.reserve(tokens.size());
+  for (const auto token : tokens) {
+    text += decode(token);
+    ends.push_back(text.size());
+  }
+  const std::string_view view = text;
+  std::size_t begin = 0;
+  if (initial == State::kAuto) {
+    const auto leading = view.find_first_not_of(" \t\r\n");
+    if (leading == std::string_view::npos ||
+        !view.substr(leading).starts_with(reasoning.open))
+      return 0;
+    begin = leading + reasoning.open.size();
+  } else if (view.starts_with(reasoning.open)) {
+    begin = reasoning.open.size();
+  }
+  const auto end = std::min(view.find(reasoning.close, begin), view.size());
+  if (begin >= end)
+    return 0;
+  const auto first = std::ranges::upper_bound(ends, begin);
+  const auto last = std::lower_bound(first, ends.end(), end);
+  return static_cast<std::size_t>(last - first) + 1;
+}
+
 struct InferenceBackend::Impl {
 #if defined(ENGINE_ENABLE_HIP)
   struct State {
@@ -59,41 +97,50 @@ struct InferenceBackend::Impl {
         std::shared_ptr<const State> model_state,
         TextGenerationScheduler::Request scheduled_request,
         InitialOutputState initial = InitialOutputState::kContent,
-        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {})
+        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {},
+        std::string tool_dialect = {})
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)),
-          tool_format_(tool_format) {
-      if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ =
-            state_->scheduler->runner().TokenizeControl("</think>");
-    }
+          tool_format_(tool_format),
+          tool_dialect_(std::move(tool_dialect)),
+          initial_(initial),
+          reasoning_(state_->scheduler->runner().ReasoningDelimiters()) {}
 
     Result Wait(const TokenCallback& on_token,
                 const ProgressCallback& on_progress,
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
-      if (!reasoning_end_.empty()) {
-        const auto end =
-            std::search(result.tokens.begin(), result.tokens.end(),
-                        reasoning_end_.begin(), reasoning_end_.end());
-        result.reasoning_tokens =
-            static_cast<std::size_t>(end - result.tokens.begin());
-      }
+      const auto& runner = state_->scheduler->runner();
+      result.reasoning_tokens =
+          CountReasoningTokens(result.tokens, initial_, reasoning_,
+                               [&runner](tokenization::TokenId token) {
+                                 return runner.Decode(std::span(&token, 1));
+                               });
       return result;
     }
 
     void Cancel() noexcept override { request_.Cancel(); }
+
+    ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return reasoning_;
+    }
 
     std::optional<sampling::JsonConstraint::ToolFormat> ToolFormat()
         const override {
       return tool_format_;
     }
 
+    std::optional<std::string> ToolDialectId() const override {
+      return tool_dialect_;
+    }
+
   private:
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
-    std::vector<tokenization::TokenId> reasoning_end_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
+    const std::string tool_dialect_;
+    const InitialOutputState initial_;
+    const ext::ReasoningMarkup reasoning_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {
@@ -112,7 +159,7 @@ struct InferenceBackend::Impl {
       bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
       const std::vector<std::string>& stop_sequences = {},
       InitialOutputState initial = InitialOutputState::kContent,
-      bool cache_persist = true) const {
+      bool cache_persist = true, bool chat_template = false) const {
     Result result;
     result.prompt_tokens = prompt_tokens.size();
     result.client_id = client_id.empty() ? "anonymous" : client_id;
@@ -136,6 +183,7 @@ struct InferenceBackend::Impl {
             .cache_persist = cache_persist,
             .cache_prefix_tokens = cache_prefix_tokens,
             .stop_sequences = stop_sequences,
+            .chat_template = chat_template,
         });
     ScheduledGenerationRequest generation(std::move(current),
                                           std::move(request), initial);
@@ -154,7 +202,6 @@ InferenceBackend::~InferenceBackend() = default;
 #if defined(ENGINE_ENABLE_HIP)
 bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
                             std::string* error, std::size_t session_count,
-                            TextPrefillPolicy prefill_policy,
                             TextSchedulerPolicy scheduler_policy,
                             const TextDiskCacheConfig& disk_cache_config,
                             TextRunnerRamCacheOptions ram_cache_config) {
@@ -170,10 +217,16 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
   }
   try {
     const auto desc = runner->Descriptor();
+    if (desc.sampling_defaults.has_value()) {
+      sampling::ValidateTextSamplingDefaults(*desc.sampling_defaults);
+    }
     auto new_state = std::make_unique<Impl::State>();
     new_state->model_path = desc.model_id;
     new_state->sampling_defaults.max_tokens = 0;
-    new_state->sampling_defaults.model = desc.sampling_preset;
+    new_state->sampling_defaults.provider =
+        desc.sampling_defaults.has_value()
+            ? desc.sampling_defaults
+            : sampling::PresetDefaults(desc.sampling_preset);
     new_state->sampling_defaults.sampling = sampling::SamplingConfig{};
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = desc.capabilities.supports_vision;
@@ -193,36 +246,45 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
         std::move(runner), session_count, std::move(runner_disk_cache),
         ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
-        std::move(runner_pool), prefill_policy, scheduler_policy);
+        std::move(runner_pool), scheduler_policy);
     {
       const std::lock_guard<std::mutex> lock(impl_->state_mutex);
       impl_->state = std::move(new_state);
     }
     return true;
+  } catch (const std::bad_alloc&) {
+    SetError(error, "out of host memory while preparing " +
+                        std::to_string(session_count) + " sessions");
+    return false;
   } catch (const std::exception& exception) {
     SetError(error, exception.what());
     return false;
   }
 }
 
-bool InferenceBackend::load(const std::string& model_path, std::string* error,
-                            std::uint32_t max_context,
-                            std::size_t session_count,
-                            TextPrefillPolicy prefill_policy,
-                            TextSchedulerPolicy scheduler_policy,
-                            const TextSpeculativeConfig& speculative_config,
-                            const TextDiskCacheConfig& disk_cache_config,
-                            const std::string& vision_model_path,
-                            TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+bool InferenceBackend::load(
+    const std::string& model_path, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextSchedulerPolicy scheduler_policy,
+    const TextSpeculativeConfig& speculative_config,
+    const TextDiskCacheConfig& disk_cache_config,
+    const std::string& vision_model_path,
+    TextRunnerRamCacheOptions ram_cache_config, bool enable_yarn,
+    const PrepareRunnerOptions& prepare_runner_options) {
   std::string load_error;
-  auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
+  auto reader_owner = core::GgufReader::OpenFile(
+      model_path, &load_error, {.allow_unsized_tensors = true});
   if (reader_owner == nullptr) {
     SetError(error, "Failed to open GGUF: " + load_error);
     return false;
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
   const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+    // No provider owns this layout: keep the reader's own diagnostic.
+    SetError(error, "Failed to open GGUF: " + reader->UnsizedTensorError());
+    return false;
+  }
   if (provider == nullptr || provider->create == nullptr) {
     SetError(error, "No text provider found for model architecture");
     return false;
@@ -238,16 +300,20 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .ram_cache = ram_cache_config,
       .enable_yarn = enable_yarn,
   };
+  if (prepare_runner_options &&
+      !prepare_runner_options(*provider, *reader, &options, error)) {
+    return false;
+  }
   auto runner = provider->create(options, error);
   if (runner == nullptr) {
     return false;
   }
-  return load(std::move(runner), error, session_count, prefill_policy,
-              scheduler_policy, disk_cache_config, ram_cache_config);
+  return load(std::move(runner), error, session_count, scheduler_policy,
+              disk_cache_config, ram_cache_config);
 }
 #else
 bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner>,
-                            std::string* error, std::size_t, TextPrefillPolicy,
+                            std::string* error, std::size_t,
                             TextSchedulerPolicy, const TextDiskCacheConfig&,
                             TextRunnerRamCacheOptions) {
   SetError(error, "HIP engine is disabled");
@@ -255,10 +321,11 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner>,
 }
 
 bool InferenceBackend::load(const std::string&, std::string* error,
-                            std::uint32_t, std::size_t, TextPrefillPolicy,
-                            TextSchedulerPolicy, const TextSpeculativeConfig&,
+                            std::uint32_t, std::size_t, TextSchedulerPolicy,
+                            const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
-                            TextRunnerRamCacheOptions, bool) {
+                            TextRunnerRamCacheOptions, bool,
+                            const PrepareRunnerOptions&) {
   SetError(error, "HIP engine is disabled");
   return false;
 }
@@ -330,6 +397,25 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
                           : std::vector<SessionState>{};
 #else
   return {};
+#endif
+}
+
+std::optional<InferenceBackend::PromptAdmissionBudget>
+InferenceBackend::prompt_admission_budget() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr)
+    return std::nullopt;
+  auto budget = state->scheduler->PromptAdmissionBudgetSnapshot();
+  if (!budget.has_value())
+    return std::nullopt;
+  return PromptAdmissionBudget{
+      .budget_bytes = budget->budget_bytes,
+      .used_bytes = budget->used_bytes,
+      .available_bytes = budget->available_bytes,
+  };
+#else
+  return std::nullopt;
 #endif
 }
 
@@ -508,16 +594,16 @@ InferenceBackend::Result InferenceBackend::chat(
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+      initial != TextGenerationBackend::InitialOutputState::kContent)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            *request.reasoning.budget_tokens, prompt->tokens, initial);
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
       prompt->cache_prefix_tokens, request.stop_sequences, initial,
-      request.cache_persist);
+      request.cache_persist, true);
 #else
   (void)request;
   (void)max_tokens;
@@ -585,8 +671,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 
   auto effective_sampling = sampling_config;
   std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
-  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
-                                          &effective_sampling, &tool_format);
+  std::string tool_dialect;
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(),
+                           &effective_sampling, &tool_format, &tool_dialect);
   const auto& effective_request = constrained ? *constrained : request;
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
@@ -597,10 +685,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial == TextGenerationBackend::InitialOutputState::kReasoning)
+      initial != TextGenerationBackend::InitialOutputState::kContent)
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
-            *request.reasoning.budget_tokens, prompt->tokens);
+            *request.reasoning.budget_tokens, prompt->tokens, initial);
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(
@@ -616,9 +704,11 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .cache_prefix_tokens = prompt->cache_prefix_tokens,
           .stop_sequences = request.stop_sequences,
           .return_progress = request.return_progress,
+          .chat_template = true,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
-      state, std::move(scheduled_request), initial, tool_format);
+      state, std::move(scheduled_request), initial, tool_format,
+      std::move(tool_dialect));
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);
@@ -681,6 +771,20 @@ std::optional<std::string> InferenceBackend::render_chat_prompt(
   return state->scheduler->runner().RenderPrompt(effective_request);
 #else
   (void)request;
+  return std::nullopt;
+#endif
+}
+
+std::optional<std::vector<std::uint32_t>> InferenceBackend::tokenize(
+    std::string_view text) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  return state->scheduler->runner().Tokenize(text);
+#else
+  (void)text;
   return std::nullopt;
 #endif
 }

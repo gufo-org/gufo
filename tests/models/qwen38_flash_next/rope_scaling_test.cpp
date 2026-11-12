@@ -4,7 +4,7 @@
 // golden table and its regeneration command live in rope_scaling_golden.hpp
 // (shared with the CPU-oracle check in rope_scaling_oracle_test.cpp, which
 // links the model oracle and stays out of the hosted set; see
-// docs/DEVELOPMENT.md).
+// docs/internal/development.md).
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 #include <cmath>

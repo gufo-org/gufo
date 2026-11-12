@@ -29,18 +29,31 @@ class PlanTest(unittest.TestCase):
         return devlab_plan.select(paths, self.data, **kwargs)
 
     def test_disabled_models_are_named_and_not_planned(self):
-        self.assertIn('deepseek4', self.registry['disabled'])
-        plan = devlab_plan.select(['src/models/deepseek_v4_flash/model.cpp', 'src/core/sampling.cpp'],
-                                  self.registry)
+        data = {**self.registry, 'disabled': {'deepseek4': 'reason'}}
+        plan = devlab_plan.select(['src/models/deepseek_v4_flash/model.cpp', 'src/core/sampling.cpp'], data)
         self.assertEqual({item['id'] for item in plan['models']}, {'flash-next-q4'})
         self.assertNotIn('deepseek4', {group['profile'].split('/')[0] for group in plan['groups']})
         self.assertEqual([row['id'] for row in plan['disabled']], ['deepseek4'])
         self.assertTrue(plan['disabled'][0]['reason'])
-        self.assertEqual(devlab_models.asset_keys(plan, self.registry), ['flash-next'])
+        self.assertEqual(devlab_models.asset_keys(plan, data), ['flash-next'])
         broken = {**self.registry, 'disabled': {'deepseek-typo': 'reason'}}
         with patch('devlab_models.json.loads', return_value=broken):
             with self.assertRaises(ValueError):
                 devlab_models.registry()
+
+    def test_curated_suites_apply_at_every_tier(self):
+        suites = self.registry['models']['deepseek4']['suites']
+        for tier in ('pr', 'full'):
+            with self.subTest(tier=tier):
+                plan = self.plan('src/models/deepseek_v4_flash/engine.cpp', tier=tier)
+                planned = [suite for group in plan['groups'] for suite in group['suites']]
+                self.assertEqual(planned, suites)
+                self.assertFalse(plan['release_only'] or plan['deferred'])
+                self.assertIn('cache-growth', {row['suite'] for row in plan['out_of_scope']})
+        unknown = {**self.data, 'models': {**self.data['models'], 'deepseek4': {
+            **self.data['models']['deepseek4'], 'suites': ['cache', 'no-such-suite']}}}
+        with self.assertRaises(ValueError):
+            devlab_plan.select(['src/models/deepseek_v4_flash/engine.cpp'], unknown)
 
     def models(self, *paths, **kwargs):
         return {item['id'] for item in self.plan(*paths, **kwargs)['models']}
@@ -84,7 +97,7 @@ class PlanTest(unittest.TestCase):
             ('src/models/qwen3_tts/hip/synthesis_runtime.cpp', {'qwen3-tts-base'}),
             ('tests/functional/fixtures/audio/clear-english-voice.wav', {'qwen3-asr', 'qwen3-tts-base'})]:
             self.assertEqual(self.models(path), expected)
-        self.assertEqual(self.models('docs/SERVER.md'), set())
+        self.assertEqual(self.models('docs/server.md'), set())
         self.assertEqual(self.models('src/models/qwen_image_21/model.cpp'), set())
         self.assertEqual(self.models('src/models/minimax_h3/runtime.cpp'), set())
 
@@ -114,7 +127,7 @@ class PlanTest(unittest.TestCase):
                          ['asr', 'tts-base'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/models/deepseek_v4_flash/model.cpp'), self.data),
                          ['deepseek4', 'dspark'])
-        self.assertEqual(devlab_models.asset_keys(self.plan('docs/SERVER.md'), self.data), [])
+        self.assertEqual(devlab_models.asset_keys(self.plan('docs/server.md'), self.data), [])
         for asset in self.data['assets'].values():
             self.assertRegex(asset['revision'], r'^[0-9a-f]{40}$')
 

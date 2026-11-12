@@ -129,6 +129,69 @@ int VideoEncoderLatentFrameCount(int frame_count) noexcept {
   return frame_count > 0 ? (frame_count + 3) / 4 : 0;
 }
 
+namespace {
+
+// Python round() on a double: nearest, ties to even.
+double RoundHalfEven(double value) noexcept {
+  const double floored = std::floor(value);
+  const double fraction = value - floored;
+  if (fraction > 0.5) {
+    return floored + 1.0;
+  }
+  if (fraction < 0.5) {
+    return floored;
+  }
+  return std::fmod(floored, 2.0) == 0.0 ? floored : floored + 1.0;
+}
+
+}  // namespace
+
+std::optional<CanvasSize> ResolveCanvasSize(double aspect_width,
+                                            double aspect_height,
+                                            int short_edge,
+                                            std::int64_t max_pixels,
+                                            std::string* error) {
+  // modular_pipeline.py resolve_canvas_size, step for step: `** 0.5` is C
+  // pow() in CPython, kept here rather than sqrt() for bit parity.
+  if (!(aspect_width > 0.0) || !(aspect_height > 0.0) ||
+      !std::isfinite(aspect_width) || !std::isfinite(aspect_height) ||
+      short_edge < kH3CanvasMultiple || max_pixels <= 0) {
+    SetError(error, "MiniMax H3 canvas aspect ratio must be positive");
+    return std::nullopt;
+  }
+  const double ratio = aspect_width / aspect_height;
+  if (ratio < kH3MinimumAspectRatio || ratio > kH3MaximumAspectRatio) {
+    SetError(error,
+             "MiniMax H3 supports aspect ratios from 1:4 to 4:1; the "
+             "keyframe is outside that range");
+    return std::nullopt;
+  }
+  double width = 0.0;
+  double height = 0.0;
+  if (ratio >= 1.0) {
+    width = static_cast<double>(short_edge) * ratio;
+    height = static_cast<double>(short_edge);
+  } else {
+    width = static_cast<double>(short_edge);
+    height = static_cast<double>(short_edge) / ratio;
+  }
+  const double area = width * height;
+  if (area > static_cast<double>(max_pixels)) {
+    const double scale = std::pow(static_cast<double>(max_pixels) / area, 0.5);
+    width *= scale;
+    height *= scale;
+  }
+  const double multiple = kH3CanvasMultiple;
+  return CanvasSize{
+      .width = std::max(kH3CanvasMultiple,
+                        static_cast<int>(RoundHalfEven(width / multiple)) *
+                            kH3CanvasMultiple),
+      .height = std::max(kH3CanvasMultiple,
+                         static_cast<int>(RoundHalfEven(height / multiple)) *
+                             kH3CanvasMultiple),
+  };
+}
+
 std::optional<GenerationGeometry> ResolveGenerationGeometry(
     int width, int height, int requested_frames, std::string* error) {
   if (width < kH3CanvasMultiple || height < kH3CanvasMultiple ||
@@ -140,7 +203,8 @@ std::optional<GenerationGeometry> ResolveGenerationGeometry(
   }
   if (static_cast<std::int64_t>(width) * height > kH3MaximumPixels) {
     SetError(error,
-             "MiniMax H3 canvas exceeds the released 768*1344 pixel limit");
+             "MiniMax H3 canvas exceeds the largest canvas of the released "
+             "768*1344 rule (1856x576 pixels)");
     return std::nullopt;
   }
   if (requested_frames < 5 || requested_frames > kH3MaximumFrames) {
@@ -256,6 +320,43 @@ std::optional<TimeRowSchedule> BuildTimeRowSchedule(
   return rows;
 }
 
+std::optional<TimeRowSchedule> BuildConditionedTimeRowSchedule(
+    const SigmaSchedule& schedule, std::string* error) {
+  std::optional<TimeRowSchedule> rows = BuildTimeRowSchedule(schedule, error);
+  if (!rows) {
+    return std::nullopt;
+  }
+  const int evaluations = schedule.evaluations();
+  rows->condition_rows.resize(static_cast<std::size_t>(evaluations));
+  std::uint32_t shared = 0;
+  float shared_value = 0.0F;
+  bool have_shared = false;
+  for (int step = 0; step < evaluations; ++step) {
+    const std::size_t index = static_cast<std::size_t>(step);
+    // Reference: conditioned rows carry max(video timestep, 0.999) every
+    // step, deduplicated per forward by exact float equality (torch.unique);
+    // mirrors the video == audio branch above.
+    const float video = 1.0F - schedule.video[index];
+    const float audio = 1.0F - schedule.audio[index];
+    const float condition = video > kH3KeyframeConditionTimestep
+                                ? video
+                                : kH3KeyframeConditionTimestep;
+    if (condition == video) {
+      rows->condition_rows[index] = rows->video_rows[index];
+    } else if (condition == audio) {
+      rows->condition_rows[index] = rows->audio_rows[index];
+    } else if (have_shared && condition == shared_value) {
+      rows->condition_rows[index] = shared;
+    } else {
+      shared = rows->time_rows++;
+      shared_value = condition;
+      have_shared = true;
+      rows->condition_rows[index] = shared;
+    }
+  }
+  return rows;
+}
+
 std::string_view ToString(SegmentKind kind) noexcept {
   switch (kind) {
     case SegmentKind::kText:
@@ -264,13 +365,16 @@ std::string_view ToString(SegmentKind kind) noexcept {
       return "audio";
     case SegmentKind::kVideoTarget:
       return "video";
+    case SegmentKind::kVideoCondition:
+      return "video-condition";
   }
   return "unknown";
 }
 
-std::optional<PackedLayout> BuildTextOnlyLayout(
-    std::size_t text_rows, const GenerationGeometry& geometry,
-    std::string* error) {
+std::optional<PackedLayout> BuildLayout(std::size_t text_rows,
+                                        const GenerationGeometry& geometry,
+                                        std::span<const double> anchor_temporal,
+                                        std::string* error) {
   if (text_rows == 0 || text_rows > std::numeric_limits<std::uint32_t>::max() ||
       geometry.width < kH3CanvasMultiple ||
       geometry.height < kH3CanvasMultiple ||
@@ -303,6 +407,11 @@ std::optional<PackedLayout> BuildTextOnlyLayout(
     SetError(error, "MiniMax H3 frame row count overflows");
     return std::nullopt;
   }
+  std::size_t condition_rows = 0;
+  if (!CheckedMultiply(anchor_temporal.size(), frame_rows, &condition_rows)) {
+    SetError(error, "MiniMax H3 condition row count overflows");
+    return std::nullopt;
+  }
   std::size_t video_rows = 0;
   std::size_t audio_rows = 0;
   if (!CheckedMultiply(
@@ -312,10 +421,12 @@ std::optional<PackedLayout> BuildTextOnlyLayout(
       !CheckedMultiply(
           2, static_cast<std::size_t>(geometry.temporal.audio_latent_frames),
           &audio_rows) ||
-      text_rows > std::numeric_limits<std::size_t>::max() - audio_rows ||
-      text_rows + audio_rows >
+      text_rows > std::numeric_limits<std::size_t>::max() - condition_rows ||
+      text_rows + condition_rows >
+          std::numeric_limits<std::size_t>::max() - audio_rows ||
+      text_rows + condition_rows + audio_rows >
           std::numeric_limits<std::size_t>::max() - video_rows ||
-      text_rows + audio_rows + video_rows >
+      text_rows + condition_rows + audio_rows + video_rows >
           std::numeric_limits<std::uint32_t>::max()) {
     SetError(error, "MiniMax H3 packed row count overflows");
     return std::nullopt;
@@ -324,14 +435,16 @@ std::optional<PackedLayout> BuildTextOnlyLayout(
   PackedLayout layout;
   layout.text_rows = text_rows;
   layout.audio_target_rows = audio_rows;
+  layout.video_condition_rows = condition_rows;
   layout.video_target_rows = video_rows;
   layout.video_latent_frames = geometry.temporal.video_latent_frames;
   layout.latent_height = geometry.latent_height;
   layout.latent_width = geometry.latent_width;
   layout.audio_latent_frames = geometry.temporal.audio_latent_frames;
   try {
-    layout.positions.reserve(text_rows + audio_rows + video_rows);
-    layout.segments.reserve(3);
+    layout.positions.reserve(text_rows + condition_rows + audio_rows +
+                             video_rows);
+    layout.segments.reserve(4);
     for (std::size_t row = 0; row < text_rows; ++row) {
       layout.positions.push_back({static_cast<double>(row), 0.0, 0.0});
     }
@@ -339,6 +452,16 @@ std::optional<PackedLayout> BuildTextOnlyLayout(
 
     const std::vector<Position3D> frame =
         FrameGrid(geometry.latent_height, geometry.latent_width);
+    if (!anchor_temporal.empty()) {
+      for (const double anchor_time : anchor_temporal) {
+        for (const Position3D& position : frame) {
+          layout.positions.push_back(
+              {anchor_time, position.height, position.width});
+        }
+      }
+      layout.segments.push_back({text_rows, text_rows + condition_rows,
+                                 SegmentKind::kVideoCondition});
+    }
     const double low_width = frame.front().width;
     const double high_width =
         frame[static_cast<std::size_t>(geometry.latent_width / 2) - 1].width;
@@ -351,8 +474,9 @@ std::optional<PackedLayout> BuildTextOnlyLayout(
          ++index) {
       layout.positions.push_back({cursor + index, 0.0, high_width});
     }
-    layout.segments.push_back(
-        {text_rows, text_rows + audio_rows, SegmentKind::kAudioTarget});
+    layout.segments.push_back({text_rows + condition_rows,
+                               text_rows + condition_rows + audio_rows,
+                               SegmentKind::kAudioTarget});
 
     double time = cursor;
     for (int index = 0; index < geometry.temporal.video_latent_frames;
@@ -363,7 +487,8 @@ std::optional<PackedLayout> BuildTextOnlyLayout(
       time += kFrameRescale * kFramesPerToken[static_cast<std::size_t>(index) %
                                               kFramesPerToken.size()];
     }
-    layout.segments.push_back({text_rows + audio_rows, layout.positions.size(),
+    layout.segments.push_back({text_rows + condition_rows + audio_rows,
+                               layout.positions.size(),
                                SegmentKind::kVideoTarget});
   } catch (const std::exception&) {
     SetError(error,
@@ -373,13 +498,107 @@ std::optional<PackedLayout> BuildTextOnlyLayout(
   return layout;
 }
 
+std::optional<PackedLayout> BuildTextOnlyLayout(
+    std::size_t text_rows, const GenerationGeometry& geometry,
+    std::string* error) {
+  return BuildLayout(text_rows, geometry, {}, error);
+}
+
+std::optional<PackedLayout> BuildKeyframeLayout(
+    std::size_t text_rows, const GenerationGeometry& geometry,
+    std::span<const double> anchor_temporal, std::string* error) {
+  if (anchor_temporal.empty()) {
+    SetError(error, "MiniMax H3 keyframe layout requires an anchor");
+    return std::nullopt;
+  }
+  return BuildLayout(text_rows, geometry, anchor_temporal, error);
+}
+
+namespace {
+
+double NumpyPairwiseSum(std::span<const double> values) {
+  // Reproduce numpy 2.5.x np.float64 summation exactly (loops_utils.h.src,
+  // DOUBLE_pairwise_sum): fewer than 8 elements accumulate sequentially from
+  // -0.0; up to the 128-element block use eight accumulators with the exact
+  // fold tree and a sequential tail; longer inputs recurse on a split
+  // rounded down to a multiple of 8. The FL2VA last-anchor rotary time is
+  // defined by this summation order; a plain loop differs in the last ulp.
+  const std::size_t n = values.size();
+  if (n < 8U) {
+    double res = -0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+      res += values[i];
+    }
+    return res;
+  }
+  if (n <= 128U) {
+    double r[8];
+    for (std::size_t i = 0; i < 8U; ++i) {
+      r[i] = values[i];
+    }
+    std::size_t i = 8U;
+    for (; i + 8U <= n; i += 8U) {
+      for (std::size_t lane = 0; lane < 8U; ++lane) {
+        r[lane] += values[i + lane];
+      }
+    }
+    double res =
+        ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+    for (; i < n; ++i) {
+      res += values[i];
+    }
+    return res;
+  }
+  std::size_t n2 = n / 2U;
+  n2 -= n2 % 8U;
+  return NumpyPairwiseSum(values.subspan(0, n2)) +
+         NumpyPairwiseSum(values.subspan(n2));
+}
+
+}  // namespace
+
+std::optional<std::vector<double>> KeyframeAnchorTimes(std::size_t text_rows,
+                                                       int video_latent_frames,
+                                                       bool have_first,
+                                                       bool have_last,
+                                                       std::string* error) {
+  if (!have_first && !have_last) {
+    return std::vector<double>{};
+  }
+  if (video_latent_frames < 2 || text_rows == 0U) {
+    SetError(error, "invalid MiniMax H3 keyframe anchor geometry");
+    return std::nullopt;
+  }
+  const double text_time = static_cast<double>(text_rows);
+  std::vector<double> anchors;
+  if (have_first) {
+    // The first anchor shares the generated frame-zero rotary time.
+    anchors.push_back(text_time);
+  }
+  if (have_last) {
+    // spans = ones(L) * (5/3); spans[o::5] *= (1,4,4,4,4)[o]; the anchor
+    // sits one rescale unit before the pairwise sum of all spans.
+    std::vector<double> spans(static_cast<std::size_t>(video_latent_frames),
+                              kFrameRescale);
+    for (std::size_t offset = 0; offset < kFramesPerToken.size(); ++offset) {
+      const double factor = static_cast<double>(kFramesPerToken[offset]);
+      for (std::size_t index = offset; index < spans.size(); index += 5U) {
+        spans[index] *= factor;
+      }
+    }
+    anchors.push_back((text_time + NumpyPairwiseSum(spans)) - kFrameRescale);
+  }
+  return anchors;
+}
+
 std::optional<std::vector<std::uint32_t>> BuildModulationRowMap(
     const TimeRowSchedule& time_rows, int step, const PackedLayout& layout,
     std::span<const std::uint8_t> text_tags, std::string* error) {
   if (step < 0 ||
       static_cast<std::size_t>(step) >= time_rows.video_rows.size() ||
       time_rows.video_rows.size() != time_rows.audio_rows.size() ||
-      layout.positions.empty() || layout.segments.size() != 3 ||
+      layout.positions.empty() ||
+      (layout.segments.size() != 3 && layout.segments.size() != 4) ||
       (!text_tags.empty() && text_tags.size() != layout.text_rows)) {
     SetError(error, "invalid MiniMax H3 modulation row-map arguments");
     return std::nullopt;
@@ -419,6 +638,14 @@ std::optional<std::vector<std::uint32_t>> BuildModulationRowMap(
         break;
       case SegmentKind::kVideoTarget:
         time_row = time_rows.video_rows[static_cast<std::size_t>(step)];
+        modality = 0;
+        break;
+      case SegmentKind::kVideoCondition:
+        if (time_rows.condition_rows.size() != time_rows.video_rows.size()) {
+          SetError(error, "MiniMax H3 conditioned layout lacks a row schedule");
+          return std::nullopt;
+        }
+        time_row = time_rows.condition_rows[static_cast<std::size_t>(step)];
         modality = 0;
         break;
     }
@@ -630,9 +857,21 @@ std::optional<InitialNoise> BuildInitialNoise(std::uint64_t seed,
                                               int audio_channels,
                                               int audio_time,
                                               std::string* error) {
+  return BuildInitialNoise(seed, {}, video_elements, audio_channels, audio_time,
+                           error);
+}
+
+std::optional<InitialNoise> BuildInitialNoise(
+    std::uint64_t seed, const std::vector<std::size_t>& condition_elements,
+    std::size_t video_elements, int audio_channels, int audio_time,
+    std::string* error) {
   std::size_t stereo_time = 0;
   std::size_t audio_elements = 0;
+  const bool condition_ok =
+      std::none_of(condition_elements.begin(), condition_elements.end(),
+                   [](std::size_t elements) { return elements == 0; });
   if (video_elements == 0 || audio_channels < 1 || audio_time < 1 ||
+      !condition_ok ||
       !CheckedMultiply(2, static_cast<std::size_t>(audio_time), &stereo_time) ||
       !CheckedMultiply(static_cast<std::size_t>(audio_channels), stereo_time,
                        &audio_elements)) {
@@ -645,11 +884,20 @@ std::optional<InitialNoise> BuildInitialNoise(std::uint64_t seed,
     noise.video.resize(video_elements);
     noise.audio.resize(audio_elements);
     audio_rows.resize(audio_elements);
+    for (const std::size_t elements : condition_elements) {
+      noise.conditions.emplace_back(elements);
+    }
   } catch (const std::exception&) {
     SetError(error, "out of memory allocating MiniMax H3 initial noise");
     return std::nullopt;
   }
+  // Request-stream consumption order (reference before_denoise.py): one
+  // augmentation tensor per keyframe in packed order, then video, then
+  // audio; drawing in any other order shifts every later tensor.
   NormalRng rng(seed);
+  for (std::vector<float>& condition : noise.conditions) {
+    rng.Fill(condition);
+  }
   rng.Fill(noise.video);
   rng.Fill(audio_rows);
   if (!UnpackAudio(audio_rows, audio_channels, audio_time, noise.audio,

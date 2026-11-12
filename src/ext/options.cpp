@@ -10,9 +10,6 @@
 
 namespace gufo::ext {
 namespace {
-bool Applies(const OptionSpec& option, std::string_view command) {
-  return std::ranges::find(option.commands, command) != option.commands.end();
-}
 OptionValue ParseValue(OptionType type, std::string_view value,
                        const std::string& name) {
   if (type == OptionType::kString || type == OptionType::kPath) {
@@ -41,6 +38,12 @@ OptionValue ParseValue(OptionType type, std::string_view value,
                               std::string(value));
 }
 }  // namespace
+bool OptionApplies(const OptionSpec& option, std::string_view command) {
+  return std::ranges::any_of(option.commands, [&](std::string_view declared) {
+    return declared == command ||
+           (declared == "serve" && command.starts_with("serve "));
+  });
+}
 bool IsCoreOption(std::string_view name) {
 #define GUFO_CORE_OPTION(value) \
   if (name == value)            \
@@ -54,7 +57,7 @@ ParsedOptions ParseOptions(const Registry& registry, std::string_view command,
                            std::span<const OptionSpec> core_options) {
   std::map<std::string, OptionType, std::less<>> specs;
   auto add = [&](const OptionSpec& option) {
-    if (!Applies(option, command))
+    if (!OptionApplies(option, command))
       return;
     const auto [it, inserted] = specs.emplace(option.name, option.type);
     if (!inserted && it->second != option.type) {
@@ -148,7 +151,7 @@ void ValidateSelectedOptions(const Registry& registry, std::string_view command,
     }
     if (!IsCoreOption(name) &&
         !std::ranges::any_of(selected.options, [&](const auto& option) {
-          return option.name == name && Applies(option, command);
+          return option.name == name && OptionApplies(option, command);
         })) {
       throw std::invalid_argument("provider " + selected.id +
                                   " does not support " + name + " for " +

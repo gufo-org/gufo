@@ -243,8 +243,9 @@ void TestContentTrace() {
 }
 
 // The threshold covers the lifecycle lines too: `--log-level=warn|error` boots
-// and stops without a word, which docs/SERVER.md states, while an escalation
-// keeps its own tier and a filtered INFO receipt line never reaches the log.
+// and stops without a word, which docs/internal/server.md states, while an
+// escalation keeps its own tier and a filtered INFO receipt line never reaches
+// the log.
 void TestQuietTiersSuppressLifecycle() {
   const CapturedLogs warn = CaptureTraffic(LogLevel::kWarn);
   assert(warn.text.find("event=listening") == std::string::npos);
@@ -338,6 +339,31 @@ void TestFramingAndMetrics() {
   }
   ExpectStatus(server.Send("POST /echo\r\n\r\n"), 400);
   ExpectStatus(server.Send("POST /echo HTTP/1.1 extra\r\n\r\n"), 400);
+  // RFC 9112 2.2: a bare LF ends a line and one empty line before the request
+  // line is ignored; the request line needs single spaces and a token
+  // method, and field values no control bytes.
+  ExpectStatus(server.Send("GET /health HTTP/1.1\nHost: a\n\n"), 200);
+  ExpectStatus(server.Send("\r\nGET /health HTTP/1.1\r\n\r\n"), 200);
+  using std::string_view_literals::operator""sv;
+  for (const std::string_view request :
+       {"GET  /health HTTP/1.1\r\n\r\n"sv, "GET\t/health HTTP/1.1\r\n\r\n"sv,
+        "G@T /health HTTP/1.1\r\n\r\n"sv,
+        "GET /health HTTP/1.1\r\nX: a\x01"
+        "b\r\n\r\n"sv,
+        "GET /health HTTP/1.1\r\nX: a\0b\r\n\r\n"sv,
+        "\r\n\r\nGET /health HTTP/1.1\r\n\r\n"sv}) {
+    ExpectStatus(server.Send(request, true), 400);
+  }
+  // At most 100 header fields; more get 431 (RFC 6585 5).
+  std::string fields;
+  for (int i = 0; i < 100; ++i) {
+    fields += "X-" + std::to_string(i) + ": v\r\n";
+  }
+  ExpectStatus(server.Send("GET /health HTTP/1.1\r\n" + fields + "\r\n"), 200);
+  const auto too_many =
+      server.Send("GET /health HTTP/1.1\r\n" + fields + "X: v\r\n\r\n");
+  ExpectStatus(too_many, 431);
+  assert(too_many.find("request_header_fields_too_large") != std::string::npos);
   ExpectStatus(
       server.Send("POST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nx", true),
       400);
@@ -590,6 +616,58 @@ void TestApplyTemplate() {
   assert(server.backend->calls == calls);
   server.backend->rendered_prompt.reset();
   server.backend->reasoning = {};
+}
+
+void TestLlamaTokenize() {
+  RunningServer server;
+  const int calls = server.backend->calls;
+
+  // A backend that cannot tokenize says so.
+  ExpectStatus(server.Post("/tokenize", R"({"content":"hi"})"), 501);
+
+  // The ids are the backend's for the content, unchanged; the control-token
+  // spelling reaches it as text, for the tokenizer to parse.
+  server.backend->token_ids = std::vector<std::uint32_t>{151644, 872, 7};
+  const auto response =
+      server.Post("/tokenize", R"({"content":"<|im_start|>user hi"})");
+  ExpectStatus(response, 200);
+  const auto body =
+      gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+  const auto* tokens = body.find("tokens");
+  assert(tokens != nullptr && tokens->is_array() && tokens->size() == 3);
+  assert(tokens->items()[0].as_size() == 151644 &&
+         tokens->items()[2].as_size() == 7);
+  assert(server.backend->tokenized_text == "<|im_start|>user hi");
+
+  // llama-server's defaults are accepted when sent; other values change the
+  // tokens and are refused rather than ignored.
+  ExpectStatus(server.Post("/tokenize", R"({"content":"hi","add_special":false,
+                                            "parse_special":true,
+                                            "with_pieces":false})"),
+               200);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","add_special":true})"), 400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","parse_special":false})"),
+      400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","with_pieces":true})"), 400);
+  ExpectStatus(
+      server.Post("/tokenize", R"({"content":"hi","add_special":"no"})"), 400);
+  ExpectStatus(server.Post("/tokenize", R"({"content":["hi"]})"), 400);
+  ExpectStatus(server.Post("/tokenize", R"({})"), 400);
+  ExpectStatus(server.Post("/tokenize", "not json"), 400);
+
+  // Empty content is no tokens, as in llama-server.
+  server.backend->token_ids = std::vector<std::uint32_t>{};
+  const auto empty = server.Post("/tokenize", R"({"content":""})");
+  ExpectStatus(empty, 200);
+  const auto none = gufo::json::parse(empty.substr(empty.find("\r\n\r\n") + 4));
+  assert(none.find("tokens") != nullptr && none.find("tokens")->is_array() &&
+         none.find("tokens")->empty());
+  // Tokenizing never generates.
+  assert(server.backend->calls == calls);
+  server.backend->token_ids.reset();
 }
 
 void TestOpenAiInputTokens() {
@@ -849,6 +927,23 @@ void TestLlamaSlotsAndMetrics() {
   }
   assert(metrics.find("# TYPE llamacpp:kv_cache_usage_ratio gauge\n") !=
          std::string::npos);
+  // A backend that publishes its prompt-state admission budget exposes it
+  // beside the KV ratio; a backend without one emits no budget gauges.
+  server.backend->prompt_budget =
+      gufo::server::TextGenerationBackend::PromptAdmissionBudget{
+          .budget_bytes = 4096,
+          .used_bytes = 1024,
+          .available_bytes = 3072,
+      };
+  const auto budget_metrics = get("/metrics");
+  assert(budget_metrics.find("gufo_prompt_state_budget_bytes 4096\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("gufo_prompt_state_reserved_bytes 1024\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("gufo_prompt_state_available_bytes 3072\n") !=
+         std::string::npos);
+  assert(budget_metrics.find("# TYPE gufo_prompt_state_budget_bytes gauge\n") !=
+         std::string::npos);
 }
 
 void TestResponsesToolImages() {
@@ -973,7 +1068,8 @@ void TestCompatibilityRequests() {
     auto body = parse(endpoint.body);
     response_body(server.Post(endpoint.path, body.dump()));
     assert(server.backend->LastCall().max_tokens == 0);
-    server.backend->defaults.model = gufo::sampling::TextModelPreset::kQwen38;
+    server.backend->defaults.provider = gufo::sampling::PresetDefaults(
+        gufo::sampling::TextModelPreset::kQwen38);
     server.backend->defaults.supplied = {};
     server.backend->reasoning.enabled = false;
     response_body(server.Post(endpoint.path, body.dump()));
@@ -2166,6 +2262,44 @@ void TestGenerationFailureLogsCause() {
   assert(count("[ERROR] [chat] context exceeded") == 3);
 }
 
+void TestPromptMemoryRefusalDetails() {
+  RunningServer server;
+  server.backend->reject_memory = true;
+  for (const bool stream : {false, true}) {
+    for (const auto* path : {"/v1/completions", "/v1/chat/completions",
+                             "/v1/responses", "/v1/messages"}) {
+      auto request = gufo::json::parse(R"({"model":"test"})");
+      const std::string_view endpoint(path);
+      if (endpoint == "/v1/completions") {
+        request["prompt"] = "hello";
+        request["max_tokens"] = 8;
+      } else if (endpoint == "/v1/responses") {
+        request["input"] = "hello";
+        request["max_output_tokens"] = 8;
+      } else {
+        request["messages"] =
+            gufo::json::parse(R"([{"role":"user","content":"hi"}])");
+        request[endpoint == "/v1/messages" ? "max_tokens"
+                                           : "max_completion_tokens"] = 8;
+      }
+      request["stream"] = stream;
+      const auto response = server.Post(path, request.dump());
+      ExpectStatus(response, 503);
+      assert(response.find("Retry-After: 1") != std::string::npos);
+      const auto body =
+          gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+      const auto* error = body.find("error");
+      assert(error && error->member_str("code") == "insufficient_memory" &&
+             error->member_size("required_bytes") == 4096 &&
+             error->member_size("remaining_bytes") == 512);
+      const auto* usage = body.find("usage");
+      const auto* details = usage ? usage->find("gufo") : nullptr;
+      assert(details && details->member_size("required_bytes") == 4096 &&
+             details->member_size("remaining_bytes") == 512);
+    }
+  }
+}
+
 void TestDeviceLoss() {
   std::atomic<int> hook_calls{0};
   RunningServer server({.on_device_lost = [&] { ++hook_calls; }});
@@ -2761,7 +2895,7 @@ void TestResponseSamplingDefaults() {
   using gufo::sampling::TextModelPreset;
   for (const auto model :
        {TextModelPreset::kQwen38, TextModelPreset::kDeepSeekV4Flash}) {
-    server.backend->defaults.model = model;
+    server.backend->defaults.provider = gufo::sampling::PresetDefaults(model);
     for (const bool server_thinking : {false, true}) {
       server.backend->reasoning.enabled = server_thinking;
       for (const char* effort :
@@ -3517,6 +3651,7 @@ int main() {
   TestFallbackBackendMetrics();
   TestLlamaProps();
   TestApplyTemplate();
+  TestLlamaTokenize();
   TestOpenAiInputTokens();
   TestLlamaSlotsAndMetrics();
   TestCompatibilityRequests();
@@ -3526,6 +3661,7 @@ int main() {
   TestServedModelNames();
   TestRawCompletionStreaming();
   TestGenerationFailureLogsCause();
+  TestPromptMemoryRefusalDetails();
   TestDeviceLoss();
   TestDeviceLossWhileWriterBlocked();
   TestRawCompletionLogprobs();

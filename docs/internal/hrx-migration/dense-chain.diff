@@ -1,0 +1,21 @@
+51a52,62
+>   // Scratch variant: rewrite the upload on the GPU (device-to-device copy) so
+>   // no cache lines from the host upload remain.
+>   if (std::getenv("BENCH_D2D_REWRITE")) {
+>     void* q = nullptr;
+>     CheckHip(hipMalloc(&q, host.size() * sizeof(T)), "hipMalloc");
+>     CheckHip(hipMemcpy(q, p, host.size() * sizeof(T), hipMemcpyDeviceToDevice),
+>              "hipMemcpy");
+>     CheckHip(hipDeviceSynchronize(), "hipDeviceSynchronize");
+>     CheckHip(hipFree(p), "hipFree");
+>     p = q;
+>   }
+104a116
+>     // Scratch variant: 20 chained launches per event pair hide per-submit latency.
+106c118,119
+<     launch();
+---
+>     for (int j = 0; j < 20; ++j)
+>       launch();
+109a123
+>     ms[i] /= 20.0f;

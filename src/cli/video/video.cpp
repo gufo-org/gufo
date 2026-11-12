@@ -8,12 +8,14 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
 
+#include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
@@ -76,6 +78,14 @@ void RegisterVideoOptions(ArgParser& parser, VideoCliOptions& options,
       "", "--preset", "NAME",
       "exact, exact-1344x768, fast, aggressive, or dev (default: exact)",
       "Model & Output", &overrides.preset);
+  parser.AddOption("", "--first-frame", "FILE",
+                   "FL2VA first-frame anchor (PNG/JPEG/WebP, display "
+                   "orientation)",
+                   "Model & Output", &request.first_frame_path);
+  parser.AddOption("", "--last-frame", "FILE",
+                   "FL2VA last-frame anchor; with --first-frame the first "
+                   "stretches to the canvas and the last is cover-cropped",
+                   "Model & Output", &request.last_frame_path);
   parser.AddOption("", "--seed", "N", "Noise RNG seed (default: 42)",
                    "Denoising", &request.seed);
   const auto integer_override = [&](std::string_view name,
@@ -295,6 +305,14 @@ void PrintVideoHelp(std::string_view program_name) {
 
 std::optional<VideoCliOptions> ParseVideoOptions(
     std::span<const char* const> args, std::string* error) {
+  // The video subcommand resolves presets and validation through the model
+  // provider registry; like every other entry point it must register the
+  // built-in extensions first. Registration is idempotent per provider id.
+  static std::once_flag extensions_once;
+  std::call_once(extensions_once, [] {
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+  });
   VideoCliOptions options;
   options.request.seed = 42;
   options.request.source_manifest = DefaultH3SourceManifest();

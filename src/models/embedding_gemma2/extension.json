@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "embedding_gemma2",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.3.0",
   "entry": "embedding_gemma2_register",
   "registration_target": "gufo_embedding_gemma2",
   "depends": [],
@@ -50,16 +50,6 @@
   },
   "packages": [
     {
-      "pkg_config": "sndfile",
-      "nix": "libsndfile",
-      "windows": "libsndfile"
-    },
-    {
-      "pkg_config": "soxr",
-      "nix": "soxr",
-      "windows": "soxr"
-    },
-    {
       "pkg_config": "libavformat",
       "nix": "ffmpeg-headless",
       "windows": "ffmpeg[avformat]"
@@ -101,7 +91,7 @@
   "docs": {
     "title": "EmbeddingGemma 2",
     "inputs": "BF16 safetensors; text/image to embeddings",
-    "guide": "docs/models/embeddinggemma-2/README.md"
+    "guide": "docs/models/embeddinggemma-2.md"
   },
   "tests": [
     {

@@ -4,9 +4,11 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -60,7 +62,7 @@ struct DurableCapture {
   cache::DiskManifest manifest;
   std::vector<cache::PersistenceSource> sources;
 };
-class ComponentSnapshot final : public TextRunnerSnapshot {
+class ComponentSnapshot final : public ContinuationSnapshot {
 public:
   std::shared_ptr<const cache::Checkpoint> checkpoint;
   std::shared_ptr<DurableCapture> durable;
@@ -158,8 +160,23 @@ public:
     }
   }
 };
-}  // namespace
 
+std::string HostReserveMessage(std::size_t sessions, std::size_t requested,
+                               std::size_t available) {
+  constexpr std::size_t kMiB = std::size_t{1} << 20;
+  return std::to_string(sessions) +
+         (sessions == 1 ? " session leaves " : " sessions leave ") +
+         std::to_string(available / kMiB) +
+         " MiB for the RAM cache above the " +
+         std::to_string(kHostSnapshotHeadroomBytes / kMiB) +
+         " MiB host reserve" +
+         (requested
+              ? " (" + std::to_string(requested / kMiB) + " MiB requested)"
+              : std::string()) +
+         ". Use fewer --sessions, a smaller --context, or --cache-ram-bytes "
+         "off to serve without RAM checkpoints";
+}
+}  // namespace
 struct ComponentTextCache::Impl {
   struct Entry {
     // Guard fallbacks outlive their slots. Idle pieces and capture/load work
@@ -175,6 +192,10 @@ struct ComponentTextCache::Impl {
     // The live frontier's prompt, to tell whether any checkpoint covers it.
     std::vector<cache::Token> live_tokens;
     cache::Identity live_input;
+    // Edges of replies within live_tokens, where a chat template trims
+    // whitespace from message content: where a reply begins, and where it
+    // ends or its final token begins. Kept across live continuations.
+    std::vector<std::size_t> reply_starts, reply_ends;
     // Acquisition order; cold assignment replaces the oldest live frontier.
     std::uint64_t used{};
     bool busy{};
@@ -202,9 +223,6 @@ struct ComponentTextCache::Impl {
   // equals the small explicit budget used before off existed, and it retains
   // nothing.
   static constexpr std::size_t kDiskOnlyBackingBytes = std::size_t{512} << 20;
-  // Ledger room for index and request metadata when the RAM cache is off. It
-  // caps accounting only; the memory is not reserved.
-  static constexpr std::size_t kOffMetadataBytes = std::size_t{64} << 20;
   // Queue ownership plus transient submissions before superseded callbacks
   // release their serving handles. No callback runs under the serving mutex.
   std::array<std::shared_ptr<const cache::Checkpoint>, 2 * kPersistenceDepth>
@@ -228,9 +246,17 @@ struct ComponentTextCache::Impl {
         // Disk transfers lease one fixed pinned staging buffer. Its size does
         // not change restore or write speed (#562), and a larger one only
         // takes pinned RAM and device heap from the cache and the sessions.
-        ledger({slot_ceiling + (options ? cache::kDefaultDiskStagingBytes : 0),
-                slot_ceiling, options ? cache::kDefaultDiskStagingBytes : 0,
-                slot_ceiling}),
+        // Off disables checkpoint retention, not metadata accounting. Disk
+        // recovery and publication must admit their bookkeeping from startup.
+        // Persistence pins remain bounded by the disk-capture backing pool.
+        ledger([&]() -> cache::ResourceLimits {
+          const auto staging = options ? cache::kDefaultDiskStagingBytes : 0;
+          if (ram_on)
+            return {slot_ceiling + staging, slot_ceiling, staging,
+                    slot_ceiling};
+          const auto unlimited = std::numeric_limits<std::size_t>::max();
+          return {unlimited, unlimited, staging, kDiskOnlyBackingBytes};
+        }()),
         resources(this->runner->CreateComponentCacheResources(ledger, ram)),
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
@@ -280,19 +306,57 @@ struct ComponentTextCache::Impl {
       entries.push_back(std::move(entry));
     }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
+    // RAM cache limit for a runner that pins its slots; computed before the
+    // branch below so a short host refuses the load before anything commits.
+    std::size_t pinned{}, limit{};
+    if (ram_enabled && resources->commit_backing) {
+      const auto claim = this->runner->ResourceClaim();
+      // The claim measures the host after the slots allocated, so bytes they
+      // pinned are missing from it. Add them back: in full to the ceiling,
+      // and half to the automatic budget, which is half the available RAM.
+      // The ledger charges them on top of the cache's own budget.
+      pinned = resources->pinned_bytes ? resources->pinned_bytes() : 0;
+      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
+      const auto automatic = measured + pinned / 2;
+      const auto ceiling =
+          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
+      automatic_bytes =
+          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
+      // Staging is pinned host memory too, so the host keeps its reserve
+      // only if both fit under the ceiling.
+      const auto staging = ledger.Limits().staging_bytes;
+      const auto requested = ram;
+      max_bytes = ceiling > staging ? ceiling - staging : 0;
+      ram = std::min(ram, max_bytes);
+      if (automatic_ram)
+        ram = std::min(ram, automatic);
+      // Within the host ceiling and the limit the slots allocated under. Other
+      // charges above the budget are refused here, as without pins.
+      limit = std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
+      const auto charged = ledger.Snapshot().ram_bytes;
+      const auto granted = std::min(ram, limit > pinned ? limit - pinned : 0);
+      // The ceiling is measured after the slots allocated. When they leave
+      // no RAM for the cache above the host reserve, refuse the load with
+      // the remedies instead of serving without the cache the user expects
+      // (#1053). An explicit budget below the other charges is the
+      // operator's setting, not the host's state.
+      const bool host_bound = automatic_ram || ram < requested;
+      if (max_bytes < charged || !granted || (limit < charged && host_bound))
+        throw std::runtime_error(HostReserveMessage(
+            count, requested, max_bytes > pinned ? max_bytes - pinned : 0));
+      if (limit < charged)
+        throw std::runtime_error(
+            "--cache-ram-bytes " + std::to_string(requested) +
+            " is below the " + std::to_string(charged) +
+            " bytes the cache already holds for its sessions and metadata");
+    }
     if (!ram_enabled) {
       // Only disk captures copy through backing, so without a disk cache no
-      // pool exists. The ledger admits what the slots already charged, that
-      // backing, and request metadata.
+      // pool exists.
       ram = options ? kDiskOnlyBackingBytes : 0;
       disk_backing = ram;
       slot_pinned_bytes =
           resources->pinned_bytes ? resources->pinned_bytes() : 0;
-      const auto staging = ledger.Limits().staging_bytes;
-      const auto limit =
-          std::min(ledger.Limits().ram_bytes,
-                   ledger.Snapshot().ram_bytes + ram + kOffMetadataBytes);
-      ledger.ConstrainLimits({limit + staging, limit, staging, limit});
       if (resources->commit_backing) {
         if (ram) {
           resources->commit_backing(ram);
@@ -307,30 +371,7 @@ struct ComponentTextCache::Impl {
         }
       }
     } else if (resources->commit_backing) {
-      const auto claim = this->runner->ResourceClaim();
-      // The claim measures the host after the slots allocated, so bytes they
-      // pinned are missing from it. Add them back: in full to the ceiling,
-      // and half to the automatic budget, which is half the available RAM.
-      // The ledger charges them on top of the cache's own budget.
-      const auto pinned =
-          resources->pinned_bytes ? resources->pinned_bytes() : 0;
-      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
-      const auto automatic = measured + pinned / 2;
-      const auto ceiling =
-          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
-      automatic_bytes =
-          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
-      // Staging is pinned host memory too, so the host keeps its reserve
-      // only if both fit under the ceiling.
       const auto staging = ledger.Limits().staging_bytes;
-      max_bytes = ceiling > staging ? ceiling - staging : 0;
-      ram = std::min(ram, max_bytes);
-      if (automatic_ram)
-        ram = std::min(ram, automatic);
-      // Within the host ceiling and the limit the slots allocated under. Other
-      // charges above the budget are refused here, as without pins.
-      const auto limit =
-          std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
       ledger.ConstrainLimits({limit + staging, limit, staging, limit});
       ram = std::min(ram, limit > pinned ? limit - pinned : 0);
       resources->commit_backing(ram);
@@ -692,6 +733,8 @@ struct ComponentTextCache::Lease::Impl {
   cache::ResourceCharge edit_metadata;
   SnapshotPurpose purpose{SnapshotPurpose::kContinuation};
   std::vector<cache::Token> capture_tokens;
+  // Reply edges of the live frontier this lease continues.
+  std::vector<std::size_t> reply_starts, reply_ends;
   ContinuationLookup lookup_result;
   ComponentCacheMetrics metrics;
   Impl(ComponentTextCache::Impl* cache, ComponentTextCache::Impl::Entry* entry,
@@ -730,10 +773,10 @@ struct ComponentTextCache::Lease::Impl {
         .reused = cached != 0,
         .reused_tokens = cached};
   }
-  std::unique_ptr<TextRunnerSnapshot> CaptureDurable();
+  std::unique_ptr<ContinuationSnapshot> CaptureDurable();
 };
 
-std::unique_ptr<TextRunnerSnapshot>
+std::unique_ptr<ContinuationSnapshot>
 ComponentTextCache::Lease::Impl::CaptureDurable() {
   if (!persist || !cache->queue || !cache->resources->copy_observed_rows ||
       purpose == SnapshotPurpose::kHistory)
@@ -758,7 +801,8 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
       throw std::logic_error("incomplete durable capture positions");
     pieces += d.kind == cache::ComponentKind::kPrivateState
                   ? 1
-                  : p->valid_rows / d.rows_per_chunk +
+                  : (p->valid_rows - cache::FirstChunkRow(d, p->valid_rows)) /
+                            d.rows_per_chunk +
                         bool(p->valid_rows % d.rows_per_chunk);
   }
   // Admit metadata before vectors/owners. No append payload allocation is
@@ -810,31 +854,41 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
         std::ranges::find(positions, d.id, &cache::ComponentPosition::id);
     cache::DiskComponent component{.descriptor = d, .position = *p};
     const auto completed =
-        d.kind == cache::ComponentKind::kAppendRows
+        cache::HasRows(d.kind)
             ? p->valid_rows / d.rows_per_chunk * d.rows_per_chunk
             : 0;
-    cache::Rows inherited = 0;
-    if (completed && ancestor) {
+    // Window components start at their first retained chunk, not row 0.
+    const auto start = cache::FirstChunkRow(d, p->valid_rows);
+    cache::Rows inherited = start;
+    if (completed > start && ancestor) {
       const auto& components = ancestor->Manifest().components;
       const auto previous = std::ranges::find_if(
           components, [&](const auto& c) { return c.descriptor.id == d.id; });
       if (previous != components.end()) {
-        const auto chunks = std::min<std::size_t>(previous->chunks.size(),
-                                                  completed / d.rows_per_chunk);
-        component.chunks.assign(previous->chunks.begin(),
-                                previous->chunks.begin() + chunks);
-        inherited = chunks * d.rows_per_chunk;
+        // The ancestor's chunk j covers row previous_first + j rows_per_chunk;
+        // its window never starts past this capture's.
+        const auto previous_first =
+            cache::FirstChunkRow(d, previous->position.valid_rows);
+        const auto skip =
+            std::min<std::size_t>(previous->chunks.size(),
+                                  (start - previous_first) / d.rows_per_chunk);
+        const auto chunks =
+            std::min<std::size_t>(previous->chunks.size() - skip,
+                                  (completed - start) / d.rows_per_chunk);
+        component.chunks.assign(previous->chunks.begin() + skip,
+                                previous->chunks.begin() + skip + chunks);
+        inherited = start + chunks * d.rows_per_chunk;
       }
     }
     std::shared_ptr<cache::BorrowedRows> rows;
-    if (completed) {
+    if (completed > start) {
       if (inherited != completed) {
         auto view = cache->resources->adapter->BorrowRowsView(
             slot.Execution(), d.id, inherited, completed);
         if (!view.empty())
           rows = slot.Observe(d.id, inherited, completed, view);
       }
-      component.chunks.reserve(completed / d.rows_per_chunk);
+      component.chunks.reserve((completed - start) / d.rows_per_chunk);
     }
     const auto capture = [&](cache::Rows first, cache::Rows end,
                              bool private_file) {
@@ -974,6 +1028,9 @@ ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();
 }
+std::size_t ComponentTextCache::ram_budget() const noexcept {
+  return impl_->budget;
+}
 
 std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
@@ -986,6 +1043,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   cache::PrefixLookup found;
   Impl::Entry* entry = nullptr;
   std::optional<cache::BorrowedLocation> live;
+  std::vector<std::size_t> reply_starts, reply_ends;
   std::size_t common = 0;
   {
     const std::lock_guard lock(impl_->mutex);
@@ -1108,6 +1166,12 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       entry->live.reset();
       entry->live_tokens.clear();
     }
+    if (live) {
+      reply_starts = std::move(entry->reply_starts);
+      reply_ends = std::move(entry->reply_ends);
+    }
+    entry->reply_starts.clear();
+    entry->reply_ends.clear();
   }
   std::unique_ptr<Lease> lease;
   try {
@@ -1124,20 +1188,31 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     // an unusable live frontier) can require another reset before cold use.
     bool clean = !live;
     // A frontier captured between prefill passes cannot select the next token
-    // of a prompt that ends there; serve that prompt from a shallower boundary.
+    // of a prompt that ends there, and a runner may refuse other prompts; serve
+    // those from a shallower boundary.
     const auto decodable = [&](std::size_t boundary) {
-      return boundary < prompt.size() ||
-             impl_->runner->HasDecodeFrontier(*request.state);
+      return (boundary < prompt.size() ||
+              impl_->runner->HasDecodeFrontier(*request.state)) &&
+             impl_->runner->CanContinue(*request.state, prompt.size());
     };
-    if (live && !decodable(found.selected->boundary)) {
+    // Prefill must not resume inside an indivisible input of this prompt,
+    // which a checkpoint from another prompt with the same tokens can do.
+    const auto whole_inputs = [&](std::size_t boundary) {
+      return !context || context->PrefillStop(boundary, false) == boundary;
+    };
+    if (live && (!decodable(found.selected->boundary) ||
+                 !whole_inputs(found.selected->boundary))) {
       live.reset();
       const std::lock_guard lock(impl_->mutex);
       entry->branch = std::make_shared<const std::uint8_t>(0);
       entry->durable.reset();
     }
     bool restored = bool(live);
-    if (live)
+    if (live) {
       request.cached = found.selected->boundary;
+      request.reply_starts = std::move(reply_starts);
+      request.reply_ends = std::move(reply_ends);
+    }
     // Prefill continues a checkpoint exactly only from an aligned position.
     // The complete prompt stays off the alignment for an unchanged retry,
     // which continues it without prefill; a longer prompt takes an aligned
@@ -1147,8 +1222,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     for (const auto& candidate : found.candidates) {
       if (restored || (cancelled && cancelled()))
         break;
-      if (candidate.live || (candidate.boundary % alignment != 0 &&
-                             candidate.boundary < prompt.size()))
+      if (candidate.live || !whole_inputs(candidate.boundary) ||
+          (candidate.boundary % alignment != 0 &&
+           candidate.boundary < prompt.size()))
         continue;
       try {
         if (candidate.checkpoint) {
@@ -1427,6 +1503,199 @@ std::size_t ComponentTextCache::CachedPrefixTokens(
   return common ? impl_->index.CommonPrefixTokens(query)
                 : impl_->index.CachedPrefixTokens(query);
 }
+
+namespace {
+// Unicode White_Space and the separators Python's str.strip also removes:
+// what chat templates trim from the ends of message content.
+bool TrimmedWhitespace(std::string_view text) {
+  if (text.empty())
+    return false;
+  for (std::size_t i = 0; i < text.size();) {
+    const auto lead = static_cast<unsigned char>(text[i]);
+    char32_t cp = lead;
+    std::size_t length = 1;
+    if (lead >= 0x80) {
+      // No whitespace needs four bytes.
+      if ((lead & 0xE0) == 0xC0) {
+        cp = lead & 0x1F;
+        length = 2;
+      } else if ((lead & 0xF0) == 0xE0) {
+        cp = lead & 0x0F;
+        length = 3;
+      } else {
+        return false;
+      }
+      if (i + length > text.size())
+        return false;
+      for (std::size_t k = 1; k < length; ++k) {
+        const auto next = static_cast<unsigned char>(text[i + k]);
+        if ((next & 0xC0) != 0x80)
+          return false;
+        cp = (cp << 6) | (next & 0x3F);
+      }
+    }
+    if (!((cp >= 0x09 && cp <= 0x0D) || cp == 0x20 ||
+          (cp >= 0x1C && cp <= 0x1F) || cp == 0x85 || cp == 0xA0 ||
+          cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 ||
+          cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000))
+      return false;
+    i += length;
+  }
+  return true;
+}
+
+struct FrontierEnd {
+  // Prompt tokens the frontier's text covers.
+  std::size_t prompt{};
+  // Bytes of the last of them past the frontier's end, when it ends inside
+  // one, as a reply cut off by the token limit can.
+  std::string partial;
+};
+
+// Where a chat template may have trimmed whitespace from a reply in
+// `frontier`: at the start of a reply, or at its end or before its final
+// (end-of-turn) token. Without a template nothing was trimmed.
+struct TrimEdges {
+  std::span<const std::size_t> starts, ends;
+};
+
+// Where the text of all of `frontier` ends in `prompt`, or nothing when the
+// texts differ first. Only tokens past an ID mismatch are decoded; equal IDs
+// at a shared boundary are skipped as they are. The template trims whitespace
+// around message content, so frontier whitespace the prompt lacks matches
+// only at the edges of a reply, where the frontier ends or both continue with
+// the same token. Whitespace a client removed elsewhere is an edit.
+std::optional<FrontierEnd> FrontierTextEnd(
+    std::span<const ContinuationToken> frontier,
+    std::span<const ContinuationToken> prompt, std::size_t common,
+    const TextModelRunner& runner, TrimEdges edges) {
+  const auto piece = [&](ContinuationToken token) {
+    return runner.Decode(std::span<const ContinuationToken>(&token, 1));
+  };
+  std::size_t f = common, p = common;
+  // Bytes one side has consumed past the other's last token boundary.
+  std::string ahead;
+  bool frontier_ahead = false;
+  for (;;) {
+    if (ahead.empty()) {
+      if (f == frontier.size())
+        return FrontierEnd{p, {}};
+      if (p == prompt.size())
+        return std::nullopt;
+      if (frontier[f] == prompt[p]) {
+        ++f;
+        ++p;
+        continue;
+      }
+      ahead = piece(frontier[f++]);
+      frontier_ahead = true;
+      if (ahead.empty())
+        return std::nullopt;
+    }
+    const auto lagging = frontier_ahead ? prompt : frontier;
+    auto& at = frontier_ahead ? p : f;
+    if (at == lagging.size()) {
+      if (frontier_ahead)
+        return std::nullopt;
+      return FrontierEnd{p, std::move(ahead)};
+    }
+    const auto next = piece(lagging[at++]);
+    const auto n = std::min(ahead.size(), next.size());
+    if (next.empty() || ahead.compare(0, n, next, 0, n) != 0) {
+      --at;
+      if (!frontier_ahead || !TrimmedWhitespace(ahead))
+        return std::nullopt;
+      // `ahead` is the rest of frontier token f - 1; all of it when the
+      // whitespace starts at that token.
+      const auto first = f - 1;
+      const bool whole = ahead.size() == piece(frontier[first]).size();
+      while (f < frontier.size() && frontier[f] != prompt[p] &&
+             TrimmedWhitespace(piece(frontier[f])))
+        ++f;
+      if (f < frontier.size() && frontier[f] != prompt[p])
+        return std::nullopt;
+      if (std::ranges::find(edges.ends, f) == edges.ends.end() &&
+          (!whole ||
+           std::ranges::find(edges.starts, first) == edges.starts.end()))
+        return std::nullopt;
+      ahead.clear();
+      continue;
+    }
+    if (next.size() <= ahead.size()) {
+      ahead.erase(0, n);
+    } else {
+      ahead = next.substr(n);
+      frontier_ahead = !frontier_ahead;
+    }
+  }
+}
+}  // namespace
+
+bool ComponentTextCache::AlignToLiveFrontier(
+    std::vector<ContinuationToken>& prompt, std::size_t& stable,
+    std::size_t max_tokens, bool trimmed) const {
+  const std::lock_guard lock(impl_->mutex);
+  const std::vector<ContinuationToken>* selected = nullptr;
+  std::size_t seam = 0;
+  // Tokens for the rest of a prompt token the frontier ends inside.
+  std::vector<ContinuationToken> rest;
+  for (const auto& entry : impl_->entries) {
+    const auto& frontier = entry->live_tokens;
+    // Positions of image inputs would move with the rewrite.
+    if (!entry->live || entry->busy || frontier.empty() ||
+        entry->live_input !=
+            At(Inputs(frontier.size(), nullptr), frontier.size()))
+      continue;
+    const auto common = static_cast<std::size_t>(
+        std::ranges::mismatch(frontier, prompt).in1 - frontier.begin());
+    if (common == frontier.size())
+      return false;
+    if (common == 0 || (selected && frontier.size() <= selected->size()))
+      continue;
+    const auto edges = trimmed
+                           ? TrimEdges{entry->reply_starts, entry->reply_ends}
+                           : TrimEdges{};
+    auto end = FrontierTextEnd(frontier, prompt, common, *impl_->runner, edges);
+    if (!end || (stable != 0 && stable < end->prompt))
+      continue;
+    std::vector<ContinuationToken> tail;
+    if (!end->partial.empty()) {
+      // A fragment that does not tokenize back to its own bytes (a split
+      // UTF-8 sequence, say) cannot follow the frontier.
+      try {
+        tail = impl_->runner->Tokenize(end->partial);
+      } catch (const std::exception&) {
+        continue;
+      }
+      if (tail.empty() || impl_->runner->Decode(tail) != end->partial)
+        continue;
+    }
+    if (frontier.size() + tail.size() + (prompt.size() - end->prompt) >=
+        max_tokens)
+      continue;
+    selected = &frontier;
+    seam = end->prompt;
+    rest = std::move(tail);
+  }
+  if (!selected)
+    return false;
+  if (Logger::Enabled(LogLevel::kDebug))
+    Logger::Debug("cache",
+                  "event=frontier_aligned frontier_tokens=" +
+                      std::to_string(selected->size()) +
+                      " prompt_seam=" + std::to_string(seam) +
+                      " split_tokens=" + std::to_string(rest.size()) +
+                      " prompt_tokens=" + std::to_string(prompt.size()));
+  if (stable != 0)
+    stable = stable - seam + selected->size() + rest.size();
+  std::vector<ContinuationToken> aligned;
+  aligned.reserve(selected->size() + rest.size() + prompt.size() - seam);
+  aligned.assign(selected->begin(), selected->end());
+  aligned.insert(aligned.end(), rest.begin(), rest.end());
+  aligned.insert(aligned.end(), prompt.begin() + seam, prompt.end());
+  prompt = std::move(aligned);
+  return true;
+}
 ComponentTextCache::Lease::Lease(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 ComponentTextCache::Lease::~Lease() {
@@ -1512,7 +1781,7 @@ std::size_t ComponentTextCache::Lease::CaptureBytes(
       impl_->cache->resources->adapter->PrefillCheckpointPositions(
           impl_->slot.Execution(), boundary));
 }
-std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
+std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
   auto& request = *impl_;
   auto& cache = *request.cache;
   auto positions =
@@ -1767,6 +2036,15 @@ std::size_t ComponentTextCache::Lease::Commit(
   impl_->slot.Commit();
   {
     const std::lock_guard lock(impl_->cache->mutex);
+    auto& starts = impl_->entry->reply_starts;
+    auto& ends = impl_->entry->reply_ends;
+    starts = std::move(impl_->reply_starts);
+    ends = std::move(impl_->reply_ends);
+    if (live.size() > impl_->prompt.size()) {
+      starts.push_back(impl_->prompt.size());
+      ends.push_back(live.size() - 1);
+      ends.push_back(live.size());
+    }
     impl_->entry->live_tokens = live;
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
     impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
@@ -1799,10 +2077,15 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
   if (!impl_->cache->ram_enabled && !impl_->cache->queue)
     return {};
   const auto& adapter = *impl_->cache->resources->adapter;
+  // Each grid checkpoint keeps its private state and at most a window plus a
+  // partial leading chunk. Checkpoints closer than a window share those rows,
+  // so this bound can only plan fewer captures than RAM holds.
   std::size_t private_bytes = 0;
   for (const auto& d : adapter.Components())
     if (d.kind == cache::ComponentKind::kPrivateState)
       private_bytes += d.state_bytes;
+    else if (d.kind == cache::ComponentKind::kWindowRows)
+      private_bytes += (d.window_rows + d.rows_per_chunk - 1) * d.row_bytes;
   const auto plan = cache::PlanCaptures(
       adapter, impl_->slot.Execution(),
       {impl_->prompt.size(),

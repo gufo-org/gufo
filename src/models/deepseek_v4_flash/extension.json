@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "deepseek_v4_flash",
   "version": "0.1.0",
-  "api_version": ">= 0.1.0",
+  "api_version": ">= 0.3.0",
   "entry": "deepseek_v4_flash_register",
   "registration_target": "gufo_deepseek_v4_flash",
   "depends": [],
@@ -82,7 +82,7 @@
   "docs": {
     "title": "DeepSeek V4 Flash",
     "inputs": "Flash 0731 mixed IQ2/Q2/Q8 GGUF; text",
-    "guide": "docs/models/deepseek-v4-flash/README.md"
+    "guide": "docs/models/deepseek-v4-flash.md"
   },
   "tests": [
     {

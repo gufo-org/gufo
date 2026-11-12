@@ -2,7 +2,160 @@
 
 Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
-[the release guide](docs/RELEASING.md).
+[the release guide](docs/internal/releasing.md).
+
+## [0.34.0](https://github.com/gufo-org/gufo/compare/v0.33.0...v0.34.0) (2026-11-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **audio:** decode EmbeddingGemma 2 audio in Rust and drop libsndfile and soxr ([#1118](https://github.com/gufo-org/gufo/issues/1118))
+
+### Features
+
+* **cli:** deprecate --draft-tokens, --min-draft-tokens and --draft-policy ([#1124](https://github.com/gufo-org/gufo/issues/1124)) ([f4bc1ad](https://github.com/gufo-org/gufo/commit/f4bc1adbba91a09788d71523c3212b4fdcb01c16))
+* **extensions:** record the source revision of external extensions ([#1162](https://github.com/gufo-org/gufo/issues/1162)) ([5253acc](https://github.com/gufo-org/gufo/commit/5253acc43ddcd4c0bfe17843d6cb7841e7e10c6d))
+* **h3:** add FL2VA first- and last-frame keyframe conditioning ([#998](https://github.com/gufo-org/gufo/issues/998)) ([92b3f1b](https://github.com/gufo-org/gufo/commit/92b3f1b9ddbaf3f247f6ceb8711198073b64d244))
+
+
+### Bug Fixes
+
+* **cache:** remove disk-only metadata admission limits ([#934](https://github.com/gufo-org/gufo/issues/934)) ([12e8b99](https://github.com/gufo-org/gufo/commit/12e8b99f1e01f336a00b1aef5db55ba4a1da18de))
+* **cache:** size disk publication validation by the candidate, not the whole tier ([#1121](https://github.com/gufo-org/gufo/issues/1121)) ([b97f3b5](https://github.com/gufo-org/gufo/commit/b97f3b5cf5f507cbfa86a061b9dd380104e84547))
+* **ext:** install extension sources that contain file symlinks ([#1151](https://github.com/gufo-org/gufo/issues/1151)) ([7c9328d](https://github.com/gufo-org/gufo/commit/7c9328dca8aa283154bafd547abd5c4be787f54e))
+* **qwen38-flash-next:** recover stale MTP backoff after batch observations ([#912](https://github.com/gufo-org/gufo/issues/912)) ([49b5df1](https://github.com/gufo-org/gufo/commit/49b5df18923ad0445b9ff69b3cd9bda213715ff3))
+* **serve:** continue the live frontier after a re-tokenized answer ([#1154](https://github.com/gufo-org/gufo/issues/1154)) ([#1158](https://github.com/gufo-org/gufo/issues/1158)) ([850b527](https://github.com/gufo-org/gufo/commit/850b5271258f050847b928d68ab4bbb7c8d83c96))
+* **serve:** deprecate the unused shared-byte cache metric ([#1129](https://github.com/gufo-org/gufo/issues/1129)) ([b62b167](https://github.com/gufo-org/gufo/commit/b62b1674ca7f8134a5c1f6487d3dd7690565296c))
+* **serve:** do not charge prompt state for preallocated session runners ([#1164](https://github.com/gufo-org/gufo/issues/1164)) ([be3a81a](https://github.com/gufo-org/gufo/commit/be3a81af6283b28641652d231c0e551db8343a97))
+* **serve:** refuse prompts that exceed the host prompt-state budget ([#1083](https://github.com/gufo-org/gufo/issues/1083)) ([017e924](https://github.com/gufo-org/gufo/commit/017e92490899d4b5b28ded6eaeb2a25f4f597fee))
+* **serve:** return tool-call numbers as the model wrote them ([#1146](https://github.com/gufo-org/gufo/issues/1146)) ([4e95aec](https://github.com/gufo-org/gufo/commit/4e95aecbaec2c61bd2c06900d35c6a51ee4b9f24))
+* **tools:** cap JSON numbers at llama.cpp's 16 digits ([#1168](https://github.com/gufo-org/gufo/issues/1168)) ([5319381](https://github.com/gufo-org/gufo/commit/53193819c5fa7e8d01771a3a9e65e0a5f2520a4f))
+* **tools:** match llama.cpp nested object defaults ([#1128](https://github.com/gufo-org/gufo/issues/1128)) ([bd6b0fd](https://github.com/gufo-org/gufo/commit/bd6b0fdd083568d5eb485a2f3ba37a118a0a15c4))
+
+
+### Performance
+
+* **core:** reduce CPU overhead in sampling and n-gram lookups ([#1127](https://github.com/gufo-org/gufo/issues/1127)) ([ca6955c](https://github.com/gufo-org/gufo/commit/ca6955c4c87bd7b2fe67ad3d878424812c0ef807))
+* **qwen38:** reuse Q8 activations from batched HC mixing ([#958](https://github.com/gufo-org/gufo/issues/958)) ([5f12c75](https://github.com/gufo-org/gufo/commit/5f12c75390437253366229bfe269a3999b366d0b))
+* **qwen:** fuse the batched target FFN HC pair ([#969](https://github.com/gufo-org/gufo/issues/969)) ([f01a457](https://github.com/gufo-org/gufo/commit/f01a457022a3abd180f5eb1bc4315f918b1bdc24))
+* **qwen:** Windows table for the Qwen3.8-27B verification GEMM shapes ([#1122](https://github.com/gufo-org/gufo/issues/1122)) ([b1899cf](https://github.com/gufo-org/gufo/commit/b1899cfac066358fcbce2e09030ebd7bc6e9a96d))
+
+
+### Documentation
+
+* log the first HRX runtime experiments ([#1145](https://github.com/gufo-org/gufo/issues/1145)) ([2e8098f](https://github.com/gufo-org/gufo/commit/2e8098f0d65049e6b0f9a7255241bf363f9b266b))
+* **qwen27b:** pin the Unsloth Dynamic 3.1 Q4_K_XL revision ([#1167](https://github.com/gufo-org/gufo/issues/1167)) ([dbfe834](https://github.com/gufo-org/gufo/commit/dbfe834daf92ddf002c9a6872f63bc8a371dce03))
+
+
+### Code Refactoring
+
+* **audio:** decode EmbeddingGemma 2 audio in Rust and drop libsndfile and soxr ([#1118](https://github.com/gufo-org/gufo/issues/1118)) ([77b6ccf](https://github.com/gufo-org/gufo/commit/77b6ccf6ebf9a5841b44bc4ba1ee914906a85e9d))
+* **serve:** parse WebSocket frames and base64 in Rust ([#1149](https://github.com/gufo-org/gufo/issues/1149)) ([b50ef15](https://github.com/gufo-org/gufo/commit/b50ef15966d5ac73fbe63914f583daf80da73f09))
+
+## [0.33.0](https://github.com/gufo-org/gufo/compare/v0.32.0...v0.33.0) (2026-11-09)
+
+
+### Features
+
+* **ext:** add image provider startup options and request capability validation ([#1050](https://github.com/gufo-org/gufo/issues/1050)) ([00d7ccb](https://github.com/gufo-org/gufo/commit/00d7ccb0939f415df151418cc03f7667e9ee5c7e))
+* **ext:** let component caches set their transfer stream count ([#1108](https://github.com/gufo-org/gufo/issues/1108)) ([2fd9e46](https://github.com/gufo-org/gufo/commit/2fd9e460973399befa7da01eeba9ce3db7ededbf))
+
+
+### Bug Fixes
+
+* **cache:** keep snapshot copies inside one host registration ([#1117](https://github.com/gufo-org/gufo/issues/1117)) ([3016d65](https://github.com/gufo-org/gufo/commit/3016d6520585027916f844292aa1d019f9a04cc2))
+* **cache:** let optional copies displace conversations unused for one record turnover ([#1104](https://github.com/gufo-org/gufo/issues/1104)) ([fe2694b](https://github.com/gufo-org/gufo/commit/fe2694bce83008910fe135d6f800846b5d5673cb))
+* **ds4:** keep DSpark greedy output equal to plain decoding ([#1105](https://github.com/gufo-org/gufo/issues/1105)) ([8c332a0](https://github.com/gufo-org/gufo/commit/8c332a023d522f9c8ad9ad75717d66259deabdd7))
+* **functional:** let the text suites run models without a Qwen or DeepSeek preset ([#1103](https://github.com/gufo-org/gufo/issues/1103)) ([718a388](https://github.com/gufo-org/gufo/commit/718a388d031364e5707f11fc21890b6b4f54c24a))
+* **qwen38-flash-next:** measure the decode shared-expert overlap before using it ([#1107](https://github.com/gufo-org/gufo/issues/1107)) ([#1112](https://github.com/gufo-org/gufo/issues/1112)) ([365cc5a](https://github.com/gufo-org/gufo/commit/365cc5a5f8f16f8c83d585d7d794a5b2983be900))
+* **serve:** read the DXGI budget for state capacity on Windows iGPUs ([#910](https://github.com/gufo-org/gufo/issues/910)) ([3a89a05](https://github.com/gufo-org/gufo/commit/3a89a056ba660aee54413443aa8e78b80b5992c6))
+
+
+### Performance
+
+* **ds4:** faster DeepSeek V4 Flash decode from two HC kernel changes ([#1106](https://github.com/gufo-org/gufo/issues/1106)) ([5f9612c](https://github.com/gufo-org/gufo/commit/5f9612c3b19ab6676b842095bc88bb9b32da5cf0))
+
+
+### Documentation
+
+* rewrite the README as a short front page ([#1115](https://github.com/gufo-org/gufo/issues/1115)) ([2dac5ee](https://github.com/gufo-org/gufo/commit/2dac5eeb470f5939243375674efab2ae70ec4b85))
+
+
+### Code Refactoring
+
+* **audio:** decode WAV with one Rust decoder for serve, Qwen3-ASR and Qwen3-TTS ([#1110](https://github.com/gufo-org/gufo/issues/1110)) ([768a482](https://github.com/gufo-org/gufo/commit/768a482f780bc17c08a740855d35de2de5846e09))
+
+## [0.32.0](https://github.com/gufo-org/gufo/compare/v0.31.0...v0.32.0) (2026-11-08)
+
+
+### Features
+
+* **ds4:** split prompt passes by layers so other sessions keep decoding ([#1080](https://github.com/gufo-org/gufo/issues/1080)) ([cf68c63](https://github.com/gufo-org/gufo/commit/cf68c63f1e9e370dd6f799dc468ff5bd2b4c2516))
+* **ext:** add optional text hidden-state encoding to text runners ([#1073](https://github.com/gufo-org/gufo/issues/1073)) ([aac3f84](https://github.com/gufo-org/gufo/commit/aac3f843f9348dcf474e8bc4c126dbcb3a0e9d75))
+* **ext:** deliver declared provider options to text runners and commands ([#1046](https://github.com/gufo-org/gufo/issues/1046)) ([832ecdb](https://github.com/gufo-org/gufo/commit/832ecdbbd3d6f4886f25ae19cc2a8b157f5dece9))
+* **ext:** experiment with extensions built as loadable modules ([#1077](https://github.com/gufo-org/gufo/issues/1077)) ([0fb50ce](https://github.com/gufo-org/gufo/commit/0fb50ce436044a9687c78635e7afbc2bb65fc6f4))
+* **ext:** let text providers declare their speculation defaults ([#1047](https://github.com/gufo-org/gufo/issues/1047)) ([4938016](https://github.com/gufo-org/gufo/commit/49380168782f37d3967c3687ea07d7c78d86b3b9))
+* **ext:** let text runners see the whole prompt end during prefill ([#1069](https://github.com/gufo-org/gufo/issues/1069)) ([fb619ba](https://github.com/gufo-org/gufo/commit/fb619ba141ae4fcf70c43e27de43662622c94ddf))
+* **ext:** let text runners split prompt passes by layers so other sessions keep decoding ([#1039](https://github.com/gufo-org/gufo/issues/1039)) ([1e74ffa](https://github.com/gufo-org/gufo/commit/1e74ffa49188eee250e5ebd1a11b08975c0f1318))
+* **ext:** open GGUF tensors core cannot size for providers that accept them ([#966](https://github.com/gufo-org/gufo/issues/966)) ([e120193](https://github.com/gufo-org/gufo/commit/e1201933cac8e243a92777515c340fcdffb3490a))
+* **qwen27b:** split prompt passes by layers so other sessions keep decoding ([#1079](https://github.com/gufo-org/gufo/issues/1079)) ([90b9745](https://github.com/gufo-org/gufo/commit/90b9745fd6692b53eb3359458fc933cdb2037615))
+* **qwen38-flash-next:** split prompt passes by layers so other sessions keep decoding ([#1042](https://github.com/gufo-org/gufo/issues/1042)) ([3888e22](https://github.com/gufo-org/gufo/commit/3888e22eff4f63851c46c51107a82ca892f494a9))
+* **serve:** add llama-server's /tokenize ([#1082](https://github.com/gufo-org/gufo/issues/1082)) ([6d79381](https://github.com/gufo-org/gufo/commit/6d79381486b6213c726cd9f57ecedde75645b649))
+* **server:** deprecate --prefill-chunk now that prompts beside decoders are split by layers ([#1095](https://github.com/gufo-org/gufo/issues/1095)) ([12f8d8a](https://github.com/gufo-org/gufo/commit/12f8d8ab9a944b2df3efe388b44246ec37923c53))
+
+
+### Bug Fixes
+
+* **bench:** let model-bench measure models without a speculative mode ([#1099](https://github.com/gufo-org/gufo/issues/1099)) ([17d6fa2](https://github.com/gufo-org/gufo/commit/17d6fa256158096b3452d31fd157b2e78134ff32))
+* **ds4:** build the Q8 to F16 weight cache in one pass so output never depends on free memory ([#1045](https://github.com/gufo-org/gufo/issues/1045)) ([211dba4](https://github.com/gufo-org/gufo/commit/211dba49fa736466d55feb66870aeeff05bef38a))
+* **ds4:** compare GGUF float metadata with a relative tolerance ([#1065](https://github.com/gufo-org/gufo/issues/1065)) ([800eb68](https://github.com/gufo-org/gufo/commit/800eb68d1245098553619df4ccc1ace3d71495d8))
+* **json:** accept annotation keywords such as $schema in strict schemas ([#1059](https://github.com/gufo-org/gufo/issues/1059)) ([de29d6a](https://github.com/gufo-org/gufo/commit/de29d6a7b2f95ecb2fb756d8f8ad632e5569061a))
+* **json:** accept general type unions in strict tool schemas ([#1052](https://github.com/gufo-org/gufo/issues/1052)) ([0f251d4](https://github.com/gufo-org/gufo/commit/0f251d4a850328b3e4e76eda4170e5cab730c014))
+* **qwen38_flash_next:** decline checkpoints with unsupported expert formats in the probe ([#1041](https://github.com/gufo-org/gufo/issues/1041)) ([b7cf081](https://github.com/gufo-org/gufo/commit/b7cf081da29d8757de139399989ee6849c24b173))
+* **sampling:** end a reasoning budget when the constraint grammar leaves reasoning ([#1064](https://github.com/gufo-org/gufo/issues/1064)) ([f07fd2f](https://github.com/gufo-org/gufo/commit/f07fd2fefcc72f538beed6bcd7c8f4d88b788f3e))
+* **serve:** keep a tool opener's leading separator out of required structured replies ([#1043](https://github.com/gufo-org/gufo/issues/1043)) ([1175eeb](https://github.com/gufo-org/gufo/commit/1175eebeb8eb069809fd5fe2582d7bcb448adaa2))
+* **serve:** refuse a RAM cache the host cannot hold with the remedies instead of bad_alloc ([#1063](https://github.com/gufo-org/gufo/issues/1063)) ([0d12f7b](https://github.com/gufo-org/gufo/commit/0d12f7b7f2e1518375d5b649026997f030b29cd6))
+
+
+### Performance
+
+* **ds4:** faster DeepSeek V4 Flash decode at long context ([#1062](https://github.com/gufo-org/gufo/issues/1062)) ([0e2cab6](https://github.com/gufo-org/gufo/commit/0e2cab6cc2e86a03082df4381662d66b4317384f))
+* **image:** decode PNG with new Rust png crate ([#913](https://github.com/gufo-org/gufo/issues/913)) ([c229292](https://github.com/gufo-org/gufo/commit/c229292182781568ec10c769ef6315f064a0f21f))
+* **qwen38-flash-next:** overlap the shared expert with routed experts on decode ([#1048](https://github.com/gufo-org/gufo/issues/1048)) ([80786f7](https://github.com/gufo-org/gufo/commit/80786f73d9287abc9a00a68207b387383242ef89))
+
+
+### Documentation
+
+* keep installed extensions in a container volume ([#1094](https://github.com/gufo-org/gufo/issues/1094)) ([53cc9a5](https://github.com/gufo-org/gufo/commit/53cc9a51bbd1a41bceb63ec3b4c5303c99f31877))
+* rework documentation into public and internal pages ([#1090](https://github.com/gufo-org/gufo/issues/1090)) ([cf86cb2](https://github.com/gufo-org/gufo/commit/cf86cb2717ef1275ddbf1506ff3ab7a6df88785c))
+* say where each documentation version is published ([#1093](https://github.com/gufo-org/gufo/issues/1093)) ([8d72025](https://github.com/gufo-org/gufo/commit/8d7202502ba816d14278673f72c0095c194a9987))
+
+
+### Code Refactoring
+
+* **sched:** move the text scheduler's work-unit policy into src/sched ([#1037](https://github.com/gufo-org/gufo/issues/1037)) ([6cc8a42](https://github.com/gufo-org/gufo/commit/6cc8a42ca84438a0566ee498a315f35c6190dc8e))
+
+## [0.31.0](https://github.com/gufo-org/gufo/compare/v0.30.0...v0.31.0) (2026-11-05)
+
+
+### Features
+
+* **cache:** add window-row components for sliding-window attention ([#1010](https://github.com/gufo-org/gufo/issues/1010)) ([555f859](https://github.com/gufo-org/gufo/commit/555f859fc3f6d4dd0c74cb42f4a3f7fbca8bef3a))
+* **ext:** add public link targets for extension executables ([#1032](https://github.com/gufo-org/gufo/issues/1032)) ([55c21af](https://github.com/gufo-org/gufo/commit/55c21af0753a9baff538373078f753b5878ae15f))
+* **ext:** keep indivisible prompt spans whole across prefill stops and checkpoints ([#1011](https://github.com/gufo-org/gufo/issues/1011)) ([d02a1d2](https://github.com/gufo-org/gufo/commit/d02a1d2d5fe36f6e5683b762cda05618283d13f5))
+* **ext:** let text providers declare their reasoning delimiters ([#1008](https://github.com/gufo-org/gufo/issues/1008)) ([2728aa7](https://github.com/gufo-org/gufo/commit/2728aa7e221f01e85792b4f9745834c76651a6f4))
+* **ext:** let text providers register native tool dialects ([#1013](https://github.com/gufo-org/gufo/issues/1013)) ([2c97b72](https://github.com/gufo-org/gufo/commit/2c97b72d8671ddd0c74ae7d517b8cef4ebb78871))
+* **ext:** let text providers supply sampling defaults and restore them in prompt and chat ([#1009](https://github.com/gufo-org/gufo/issues/1009)) ([3115315](https://github.com/gufo-org/gufo/commit/311531543e0470cc666097eabf1940be61378218))
+
+
+### Bug Fixes
+
+* **gguf:** open tensorless split shards that end without data padding ([#1021](https://github.com/gufo-org/gufo/issues/1021)) ([118b7c6](https://github.com/gufo-org/gufo/commit/118b7c63f825bb9dde2e6de2285ed2c9be005019))
+
+
+### Code Refactoring
+
+* **ext:** make the component cache the only continuation contract ([#1026](https://github.com/gufo-org/gufo/issues/1026)) ([65fe68a](https://github.com/gufo-org/gufo/commit/65fe68a9f39650a98a65ba80d6adcc80129992de))
 
 ## [0.30.0](https://github.com/gufo-org/gufo/compare/v0.29.0...v0.30.0) (2026-11-04)
 

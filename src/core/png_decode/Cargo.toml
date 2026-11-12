@@ -1,0 +1,10 @@
+[package]
+name = "gufo-png-decode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+png = "=0.18.1"

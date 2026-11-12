@@ -12,6 +12,8 @@
 #include <system_error>
 #include <utility>
 
+#include "src/models/minimax_h3/conditioning.hpp"
+#include "src/models/minimax_h3/image_processor.hpp"
 #include "src/models/minimax_h3/sampling.hpp"
 #include "src/models/minimax_h3/sha256.hpp"
 #include "src/models/minimax_h3/tokenizer.hpp"
@@ -486,6 +488,56 @@ std::optional<GenerationParameters> ResolveGenerationPreset(
   return parameters;
 }
 
+std::optional<GenerationParameters> ResolveKeyframeParameters(
+    const GenerationParameters& parameters, int keyframe_width,
+    int keyframe_height, std::string* error) {
+  if (parameters.internal_width < kH3CanvasMultiple ||
+      parameters.internal_height < kH3CanvasMultiple ||
+      parameters.output_width < 2 || parameters.output_height < 2 ||
+      keyframe_width <= 0 || keyframe_height <= 0) {
+    SetError(error, "invalid MiniMax H3 keyframe canvas request");
+    return std::nullopt;
+  }
+  const int short_edge =
+      std::min(parameters.internal_width, parameters.internal_height);
+  const std::int64_t budget =
+      static_cast<std::int64_t>(parameters.internal_width) *
+      parameters.internal_height;
+  const auto canvas = ResolveCanvasSize(keyframe_width, keyframe_height,
+                                        short_edge, budget, error);
+  if (!canvas.has_value()) {
+    return std::nullopt;
+  }
+  // The released processor would upscale such a keyframe before the vision
+  // tower; only the small `dev` budget and custom canvases reach this.
+  if (static_cast<std::int64_t>(canvas->width) * canvas->height <
+      image_processor::kVisionMinimumPixels) {
+    SetError(error,
+             "MiniMax H3 keyframe canvas " + std::to_string(canvas->width) +
+                 "x" + std::to_string(canvas->height) +
+                 " is below the 65536-pixel vision minimum; use a larger "
+                 "preset or size, or a keyframe closer to square");
+    return std::nullopt;
+  }
+  const auto scale_axis = [](int value, int preset_output,
+                             int preset_internal) {
+    if (preset_output == preset_internal) {
+      return value;
+    }
+    const double scaled =
+        static_cast<double>(value) * preset_output / (2.0 * preset_internal);
+    return std::max(1, static_cast<int>(std::lround(scaled))) * 2;
+  };
+  GenerationParameters resolved = parameters;
+  resolved.internal_width = canvas->width;
+  resolved.internal_height = canvas->height;
+  resolved.output_width = scale_axis(canvas->width, parameters.output_width,
+                                     parameters.internal_width);
+  resolved.output_height = scale_axis(canvas->height, parameters.output_height,
+                                      parameters.internal_height);
+  return resolved;
+}
+
 bool ValidateGenerationParameters(const GenerationParameters& parameters,
                                   std::string* error) {
   if (parameters.preset.empty() || parameters.output_width < 2 ||
@@ -620,7 +672,37 @@ bool GenerateTextVideo(const GenerationRequest& request,
     }
     return false;
   }
+  const bool conditioned =
+      !request.first_frame_path.empty() || !request.last_frame_path.empty();
+  // The geometry anchor (packed index 0: the first keyframe, or a lone last
+  // one) selects the canvas before any model work, as the released resize
+  // step does; the text-only path keeps the preset canvas untouched.
+  GenerationParameters parameters = request.parameters;
+  core::Image first_image;
+  core::Image last_image;
+  if (conditioned) {
+    if ((!request.first_frame_path.empty() &&
+         !DecodeKeyframe(request.first_frame_path, &first_image, error)) ||
+        (!request.last_frame_path.empty() &&
+         !DecodeKeyframe(request.last_frame_path, &last_image, error))) {
+      return false;
+    }
+    const core::Image& anchor =
+        request.first_frame_path.empty() ? last_image : first_image;
+    auto resolved = ResolveKeyframeParameters(
+        request.parameters, static_cast<int>(anchor.width),
+        static_cast<int>(anchor.height), error);
+    if (!resolved.has_value() ||
+        !ValidateGenerationParameters(*resolved, error)) {
+      return false;
+    }
+    parameters = std::move(*resolved);
+  }
   GenerationTelemetry local;
+  local.internal_width = parameters.internal_width;
+  local.internal_height = parameters.internal_height;
+  local.output_width = parameters.output_width;
+  local.output_height = parameters.output_height;
   const auto total_begin = Clock::now();
   Report(progress, progress_opaque, "inventory", 0, 1);
   auto begin = Clock::now();
@@ -646,18 +728,63 @@ bool GenerateTextVideo(const GenerationRequest& request,
   local.prompt_tokens = tokens.size();
 
   Report(progress, progress_opaque, "prompt", 0, 1);
+  // Reference workflow order (modular_blocks_minimax_h3.py): resize onto the
+  // canvas by the index rule, present keyframes to the prompt encoder, then
+  // VisualVAE-encode. Anchor latents depend only on pixels (fixed posterior
+  // seed), so their order against the prompt stream is numerically neutral.
+  std::vector<PreparedKeyframe> keyframes;
+  if (conditioned) {
+    const int canvas_width = parameters.internal_width;
+    const int canvas_height = parameters.internal_height;
+    if (!request.first_frame_path.empty()) {
+      keyframes.emplace_back();
+      if (!PrepareKeyframe(first_image, canvas_width, canvas_height, false,
+                           &keyframes.back(), error)) {
+        return false;
+      }
+    }
+    if (!request.last_frame_path.empty()) {
+      // A lone last keyframe is packed index 0: the released geometry
+      // anchor stretches it (before_encoder.py), while a follower beside a
+      // first keyframe takes the aspect-cover crop.
+      const bool follower = !keyframes.empty();
+      keyframes.emplace_back();
+      if (!PrepareKeyframe(last_image, canvas_width, canvas_height, follower,
+                           &keyframes.back(), error)) {
+        return false;
+      }
+    }
+  }
   begin = Clock::now();
   PromptEmbedding embedding;
-  if (!EncodePromptLayer50(*inventory, tokens, {}, cancellation, &embedding,
-                           &local.prompt_encoder, error)) {
-    return false;
+  if (keyframes.empty()) {
+    if (!EncodePromptLayer50(*inventory, tokens, {}, cancellation, &embedding,
+                             &local.prompt_encoder, error)) {
+      return false;
+    }
+  } else {
+    std::vector<KeyframeVision> keyframe_visions;
+    keyframe_visions.reserve(keyframes.size());
+    for (const PreparedKeyframe& keyframe : keyframes) {
+      KeyframeVision vision;
+      if (!image_processor::BuildKeyframeVision(
+              keyframe.rgb, keyframe.width, keyframe.height, &vision, error)) {
+        return false;
+      }
+      keyframe_visions.push_back(std::move(vision));
+    }
+    if (!EncodePromptMultimodal(*inventory, tokenizer, request.prompt,
+                                keyframe_visions, cancellation, &embedding,
+                                &local.prompt_encoder, error)) {
+      return false;
+    }
   }
   local.prompt_ms = Milliseconds(begin, Clock::now());
   Report(progress, progress_opaque, "prompt", 1, 1);
 
-  const auto geometry = ResolveGenerationGeometry(
-      request.parameters.internal_width, request.parameters.internal_height,
-      request.parameters.frames, error);
+  const auto geometry = ResolveGenerationGeometry(parameters.internal_width,
+                                                  parameters.internal_height,
+                                                  parameters.frames, error);
   if (!geometry.has_value()) {
     return false;
   }
@@ -666,23 +793,81 @@ bool GenerateTextVideo(const GenerationRequest& request,
       static_cast<std::size_t>(geometry->temporal.video_latent_frames) *
       static_cast<std::size_t>(geometry->latent_height) *
       static_cast<std::size_t>(geometry->latent_width);
-  auto noise =
-      BuildInitialNoise(request.seed, video_elements, kH3AudioLatentChannels,
-                        geometry->temporal.audio_latent_frames, error);
-  if (!noise.has_value()) {
-    return false;
+  std::vector<float> condition_rows;
+  std::vector<double> anchor_temporal;
+  std::optional<InitialNoise> noise;
+  if (!conditioned) {
+    noise =
+        BuildInitialNoise(request.seed, video_elements, kH3AudioLatentChannels,
+                          geometry->temporal.audio_latent_frames, error);
+    if (!noise.has_value()) {
+      return false;
+    }
+  } else {
+    const std::size_t latent_elements =
+        kH3VideoVaeLatentChannels *
+        static_cast<std::size_t>(geometry->latent_height) *
+        static_cast<std::size_t>(geometry->latent_width);
+    for (PreparedKeyframe& keyframe : keyframes) {
+      if (!EncodeKeyframeLatent(*inventory, keyframe, cancellation, nullptr,
+                                error)) {
+        return false;
+      }
+    }
+    // Request-stream consumption order (before_denoise.py): one augmentation
+    // tensor per keyframe in packed order, then video, then audio.
+    noise = BuildInitialNoise(
+        request.seed,
+        std::vector<std::size_t>(keyframes.size(), latent_elements),
+        video_elements, kH3AudioLatentChannels,
+        geometry->temporal.audio_latent_frames, error);
+    if (!noise.has_value()) {
+      return false;
+    }
+    const std::size_t rows_per_keyframe =
+        static_cast<std::size_t>(geometry->latent_height / 2) *
+        static_cast<std::size_t>(geometry->latent_width / 2);
+    for (std::size_t index = 0; index < keyframes.size(); ++index) {
+      std::vector<float> mixed;
+      if (!MixKeyframeNoise(keyframes[index], noise->conditions[index], &mixed,
+                            error)) {
+        return false;
+      }
+      const std::size_t offset = condition_rows.size();
+      condition_rows.resize(offset + rows_per_keyframe * kH3VideoPatchWidth);
+      if (!PatchifyVideo(mixed, kH3VideoLatentChannels, 1,
+                         geometry->latent_height, geometry->latent_width,
+                         std::span<float>(condition_rows).subspan(offset),
+                         error)) {
+        return false;
+      }
+    }
+    auto anchors = KeyframeAnchorTimes(embedding.tokens,
+                                       geometry->temporal.video_latent_frames,
+                                       !request.first_frame_path.empty(),
+                                       !request.last_frame_path.empty(), error);
+    if (!anchors.has_value()) {
+      return false;
+    }
+    anchor_temporal = std::move(*anchors);
   }
-  std::vector<std::uint8_t> tags(embedding.tokens, 1);
+  std::vector<std::uint8_t> tags =
+      !embedding.tags.empty() ? embedding.tags
+                              : std::vector<std::uint8_t>(embedding.tokens, 1);
   auto denoiser = DenoiserSession::Create(
       *inventory,
       {.geometry = *geometry,
-       .evaluations = request.parameters.evaluations,
+       .evaluations = parameters.evaluations,
        .text_rows = embedding.tokens,
-       .active_blocks = request.parameters.active_blocks,
-       .reuse_interval = request.parameters.reuse_interval,
-       .row_parallel_attention = request.parameters.row_parallel_attention},
-      {.layer50 = embedding.values, .tags = tags}, cancellation,
-      &local.denoiser, error);
+       .active_blocks = parameters.active_blocks,
+       .reuse_interval = parameters.reuse_interval,
+       .row_parallel_attention = parameters.row_parallel_attention,
+       .condition_video_rows = condition_rows.size() / kH3VideoPatchWidth},
+      {.layer50 = embedding.values,
+       .tags = tags,
+       .condition_rows = condition_rows,
+       .anchor_temporal = anchor_temporal},
+      cancellation, &local.denoiser, error);
   if (denoiser == nullptr) {
     return false;
   }
@@ -704,7 +889,7 @@ bool GenerateTextVideo(const GenerationRequest& request,
         reinterpret_cast<const unsigned char*>(embedding.values.data()),
         embedding.values.size() * sizeof(std::uint16_t));
     const LatentManifestContext context{
-        .parameters = &request.parameters,
+        .parameters = &parameters,
         .seed = request.seed,
         .prompt_sha256 = Sha256(prompt_bytes),
         .conditioning_sha256 = Sha256(conditioning_bytes),
@@ -726,12 +911,12 @@ bool GenerateTextVideo(const GenerationRequest& request,
   ProgressBridge video_progress{progress, progress_opaque, "video_vae"};
   VideoFrames frames;
   const bool video_ok =
-      request.parameters.selected_frames.empty()
+      parameters.selected_frames.empty()
           ? video_decoder->Decode(noise->video, cancellation,
                                   ForwardVideoProgress, &video_progress,
                                   &frames, &local.video_vae, error)
           : video_decoder->DecodeSelected(
-                noise->video, request.parameters.selected_frames, cancellation,
+                noise->video, parameters.selected_frames, cancellation,
                 ForwardVideoProgress, &video_progress, &frames,
                 &local.video_vae, error);
   if (!video_ok) {
@@ -747,7 +932,7 @@ bool GenerateTextVideo(const GenerationRequest& request,
     return false;
   }
 
-  if (request.parameters.decode_audio) {
+  if (parameters.decode_audio) {
     begin = Clock::now();
     auto audio_decoder = AudioVaeDecoder::Create(
         *inventory, geometry->temporal.audio_latent_frames, cancellation,
@@ -764,19 +949,19 @@ bool GenerateTextVideo(const GenerationRequest& request,
     }
     local.audio_vae_ms = Milliseconds(begin, Clock::now());
     audio_decoder.reset();
-    if (request.parameters.mux) {
+    if (parameters.mux) {
       begin = Clock::now();
       const std::vector<std::uint8_t> rgb24 = ToRgb24(frames);
-      if (!WriteSynchronizedMp4(
-              request.output_path, rgb24,
-              static_cast<int>(frames.frame_indices.size()),
-              {.input_width = frames.width,
-               .input_height = frames.height,
-               .output_width = request.parameters.output_width,
-               .output_height = request.parameters.output_height,
-               .fps = kH3FramesPerSecond},
-              waveform.pcm, waveform.samples, waveform.channels,
-              waveform.sample_rate, cancellation, &local.media, error)) {
+      if (!WriteSynchronizedMp4(request.output_path, rgb24,
+                                static_cast<int>(frames.frame_indices.size()),
+                                {.input_width = frames.width,
+                                 .input_height = frames.height,
+                                 .output_width = parameters.output_width,
+                                 .output_height = parameters.output_height,
+                                 .fps = kH3FramesPerSecond},
+                                waveform.pcm, waveform.samples,
+                                waveform.channels, waveform.sample_rate,
+                                cancellation, &local.media, error)) {
         return false;
       }
       local.media_ms = Milliseconds(begin, Clock::now());
@@ -808,6 +993,10 @@ std::string GenerationTelemetryJson(const GenerationTelemetry& telemetry) {
   output << std::fixed << std::setprecision(3) << "{\n"
          << "  \"schema\": \"gufo.minimax-h3-generation-telemetry.v1\",\n"
          << "  \"prompt_tokens\": " << telemetry.prompt_tokens << ",\n"
+         << "  \"internal_width\": " << telemetry.internal_width << ",\n"
+         << "  \"internal_height\": " << telemetry.internal_height << ",\n"
+         << "  \"output_width\": " << telemetry.output_width << ",\n"
+         << "  \"output_height\": " << telemetry.output_height << ",\n"
          << "  \"inventory_ms\": " << telemetry.inventory_ms << ",\n"
          << "  \"inventory_json_bytes\": "
          << telemetry.inventory.json_bytes_read << ",\n"

@@ -8,6 +8,8 @@ from cache_compaction import ARCHIVE_LINE
 from cache_growth import check_unchanged_retry, log_offset
 from cache_shared_prefix import BOUNDARY_ALLOWANCE
 
+# Background requests that must publish twice the RAM budget before measuring.
+FILL_REQUESTS = 48
 TOOLS = [{"type": "function", "function": {
     "name": "read_archive", "description": "Read background records.",
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}}]
@@ -156,7 +158,7 @@ def fill_budget(run, label, capacity):
     if not capacity:
         raise AssertionError("cache-pressure requires the configured RAM budget")
     published = 0
-    for index in range(48):
+    for index in range(FILL_REQUESTS):
         result = run.chat(f"{label}_fill_{index:02d}", history(f"{label}_fill_{index}", 8))
         published += result["usage"]["gufo"]["cache_snapshot_bytes"]
         if published >= 2 * capacity:
@@ -164,7 +166,9 @@ def fill_budget(run, label, capacity):
                                                "published_bytes": published,
                                                "requests": index + 1}
             return
-    raise AssertionError(f"unqualified: published {published} bytes for {capacity}-byte budget")
+    raise AssertionError(f"unqualified: {FILL_REQUESTS} background requests published "
+                         f"{published} bytes for {capacity}-byte budget; try "
+                         f"--cache-ram-bytes {published // 2} or less")
 
 
 def check_cache_pressure(client, model, checks, chat_result, capacity, concurrency=1):

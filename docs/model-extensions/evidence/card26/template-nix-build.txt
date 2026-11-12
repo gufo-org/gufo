@@ -1,4 +1,0 @@
-this derivation will be built:
-  /nix/store/a8dkcwdhncc7nvzgm6qq5w0jv9k00bdm-gufo-0-unstable-ae7ef25.drv
-building '/nix/store/a8dkcwdhncc7nvzgm6qq5w0jv9k00bdm-gufo-0-unstable-ae7ef25.drv'...
-/nix/store/3nvg5dqnww7zf0w05dc9clvy5dbigy3b-gufo-0-unstable-ae7ef25

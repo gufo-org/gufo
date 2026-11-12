@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/json_number_limits.hpp"
 #include "src/core/json_schema_regex.hpp"
 
 namespace gufo::sampling {
@@ -268,6 +269,19 @@ public:
     if (lower_ && upper_ && multiple_ && !GridPoint(*lower_, *upper_))
       throw JsonSchemaEmpty(
           "JSON Schema: numeric constraints contain no multipleOf value");
+    // Widen the digit caps only for schema numbers that need longer values.
+    for (const auto* value :
+         {lower_ ? &lower_->value : nullptr, upper_ ? &upper_->value : nullptr,
+          multiple_ ? &*multiple_ : nullptr}) {
+      if (!value)
+        continue;
+      const int integral =
+          static_cast<int>(value->digits.size()) - value->scale;
+      if (integral >= integral_digits_)
+        integral_digits_ = integral + 1;
+      if (value->scale >= fraction_digits_)
+        fraction_digits_ = value->scale + 1;
+    }
   }
   bool AcceptValue(const json::Value& value) const override {
     return value.is_number() && Valid(Decimal::Parse(value.dump()));
@@ -294,18 +308,22 @@ public:
     for (std::size_t i = 0; i < text.size(); ++i)
       if ((text[i] < '0' || text[i] > '9') && (text[i] != '.' || i != dot))
         return {};
+    const int integral =
+        static_cast<int>(dot == std::string_view::npos ? text.size() : dot);
+    const int places =
+        dot == std::string_view::npos ? 0 : text.size() - dot - 1;
+    if (integral > integral_digits_ || places > fraction_digits_)
+      return {};
     const auto value = Decimal::Parse(bytes);
     const bool complete = text.back() != '.' && Valid(value);
-    // At the scalar budget there is no room for a completing digit. Do not
-    // admit an unfinished prefix which would fail on the next sampling step.
-    if (bytes.size() == 4096)
+    // At the scalar budget or the decimal cap there is no room for another
+    // digit. Do not admit an unfinished prefix which would fail next step.
+    if (bytes.size() == 4096 || places == fraction_digits_)
       return {complete, complete};
     // Decimal prefixes cover an interval. Before the decimal point, appending
     // integer digits also shifts that interval by powers of ten.
     Decimal low = value;
     low.negative = false;
-    const int places =
-        dot == std::string_view::npos ? 0 : text.size() - dot - 1;
     Decimal high = AddUnit(low, places);
     const bool extend_integer =
         dot == std::string_view::npos && text.front() != '0';
@@ -334,8 +352,9 @@ public:
         if (!multiple_ || GridPoint(lower, upper))
           return {true, complete};
       }
-      if (!extend_integer || (negative && !intersects_lower) ||
-          (!negative && !intersects_upper))
+      if (!extend_integer ||
+          integral + static_cast<int>(shift) + 1 > integral_digits_ ||
+          (negative && !intersects_lower) || (!negative && !intersects_upper))
         break;
       --low.scale;
       --high.scale;
@@ -377,6 +396,8 @@ private:
   bool integer_;
   std::optional<Bound> lower_, upper_;
   std::optional<Decimal> multiple_;
+  int integral_digits_{kMaxJsonNumberDigits},
+      fraction_digits_{kMaxJsonNumberDigits};
 };
 
 // Formats follow JSON Schema's RFC-backed string formats. The grammar validates
@@ -824,23 +845,18 @@ private:
   std::vector<bool> can_close_;
 };
 
-// Native calls can start before </think>. Keep literal marker mentions and
-// Markdown code quoted; a complete native function header starts constrained
-// tool decoding. Only a small scan state belongs to each speculative branch.
+// Native calls can start before the reasoning close delimiter. Keep literal
+// marker mentions and Markdown code quoted; a complete native function header
+// starts constrained tool decoding. Only a small scan state belongs to each
+// speculative branch.
 class ReasoningLexeme final : public JsonSchemaLexeme {
 public:
-  ReasoningLexeme(std::string tool_prefix, ReasoningEnd end)
+  ReasoningLexeme(std::string tool_prefix, ReasoningEnd end, std::string close)
       : tool_prefix_(std::move(tool_prefix)),
+        close_(std::move(close)),
         end_(end),
-        tool_failure_(tool_prefix_.size()) {
-    for (std::size_t i = 1, matched = 0; i < tool_prefix_.size(); ++i) {
-      while (matched && tool_prefix_[i] != tool_prefix_[matched])
-        matched = tool_failure_[matched - 1];
-      if (tool_prefix_[i] == tool_prefix_[matched])
-        ++matched;
-      tool_failure_[i] = matched;
-    }
-  }
+        tool_failure_(Failure(tool_prefix_)),
+        close_failure_(Failure(close_)) {}
   bool CacheTransitions() const override { return true; }
   bool PlainReasoning(std::string_view encoded) const override {
     Scan state{};
@@ -907,15 +923,13 @@ public:
         return prefix + 1;
       return std::uint32_t{0};
     };
-    constexpr std::string_view explicit_end = "</think>";
-    constexpr std::array<std::uint32_t, 8> explicit_failure{};
     state.explicit_prefix =
-        advance(state.explicit_prefix, explicit_end, explicit_failure);
+        advance(state.explicit_prefix, close_, close_failure_);
     state.tool_prefix =
         state.inline_quote || state.fence
             ? 0
             : advance(state.tool_prefix, tool_prefix_, tool_failure_);
-    if (state.explicit_prefix == explicit_end.size())
+    if (state.explicit_prefix == close_.size())
       return {false, end_ == ReasoningEnd::kExplicit};
     if (state.tool_prefix == tool_prefix_.size())
       return {false, end_ == ReasoningEnd::kTool};
@@ -933,9 +947,23 @@ private:
     std::uint32_t run{}, run_char{}, run_at_start{}, fence_char{};
     std::uint32_t nonblank{}, closing_fence{};
   };
+  // Knuth-Morris-Pratt failure links, so overlapping marker prefixes survive.
+  static std::vector<std::uint32_t> Failure(std::string_view marker) {
+    std::vector<std::uint32_t> failure(marker.size());
+    for (std::size_t i = 1, matched = 0; i < marker.size(); ++i) {
+      while (matched && marker[i] != marker[matched])
+        matched = failure[matched - 1];
+      if (marker[i] == marker[matched])
+        ++matched;
+      failure[i] = static_cast<std::uint32_t>(matched);
+    }
+    return failure;
+  }
   std::string tool_prefix_;
+  std::string close_;
   ReasoningEnd end_;
   std::vector<std::uint32_t> tool_failure_;
+  std::vector<std::uint32_t> close_failure_;
 };
 
 }  // namespace
@@ -953,8 +981,9 @@ std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Whitespace() {
   return whitespace;
 }
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Reasoning(
-    std::string tool_prefix, ReasoningEnd end) {
-  return std::make_shared<ReasoningLexeme>(std::move(tool_prefix), end);
+    std::string tool_prefix, ReasoningEnd end, std::string close) {
+  return std::make_shared<ReasoningLexeme>(std::move(tool_prefix), end,
+                                           std::move(close));
 }
 
 json::Value JsonSchemaLexeme::IntersectMultipleOf(const json::Value& a,

@@ -95,9 +95,12 @@ void Validate(const DiskManifest& m) {
     references += c.chunks.size() + bool(tail) + bool(private_state);
     if (references > kMaxReferences)
       Invalid();
-    if (d.kind == ComponentKind::kAppendRows) {
+    if (HasRows(d.kind)) {
       if (!d.row_bytes || !d.rows_per_chunk || d.state_bytes || private_state ||
-          c.chunks.size() != c.position.valid_rows / d.rows_per_chunk)
+          (d.kind == ComponentKind::kWindowRows) != (d.window_rows != 0) ||
+          c.chunks.size() != (c.position.valid_rows -
+                              FirstChunkRow(d, c.position.valid_rows)) /
+                                 d.rows_per_chunk)
         Invalid();
       (void)Multiply(d.row_bytes, c.position.valid_rows);
       auto full_bytes = Multiply(d.row_bytes, d.rows_per_chunk);
@@ -111,7 +114,7 @@ void Validate(const DiskManifest& m) {
            tail.value().bytes != Multiply(d.row_bytes, remaining)))
         Invalid();
     } else if (d.kind == ComponentKind::kPrivateState) {
-      if (d.row_bytes || d.rows_per_chunk || !d.state_bytes ||
+      if (d.row_bytes || d.rows_per_chunk || !d.state_bytes || d.window_rows ||
           !c.chunks.empty() || tail || !private_state ||
           private_state->bytes != d.state_bytes ||
           c.position.valid_rows != m.tokens.size())
@@ -193,7 +196,10 @@ MetadataPlan PlanMetadata(std::span<const std::uint8_t> bytes) {
   auto components = r.Count(kMaxComponents, 47);
   plan.retained = Add(plan.retained, components * sizeof(DiskComponent));
   for (std::size_t i = 0; i < components; ++i) {
-    r.Blob(41);
+    // The kind byte follows the ID and layout version; a window component
+    // also carries its window size.
+    if (r.Blob(41)[8] == static_cast<std::uint8_t>(ComponentKind::kWindowRows))
+      r.Blob(8);
     auto chunks = r.Count(kMaxReferences - plan.references, 32);
     plan.references += chunks;
     r.Blob(chunks * 32);
@@ -392,9 +398,12 @@ std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
 }
 std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
   Validate(m);
+  const bool windowed = std::ranges::any_of(m.components, [](const auto& c) {
+    return c.descriptor.kind == ComponentKind::kWindowRows;
+  });
   Writer w;
   w.Blob(kMagic);
-  w.Number(kDiskFormatVersion, 4);
+  w.Number(windowed ? kDiskWindowFormatVersion : kDiskFormatVersion, 4);
   w.Number(m.checkpoint.value, 8);
   w.Number(m.lineage.value, 8);
   w.Blob(m.compatibility);
@@ -416,6 +425,8 @@ std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
     w.Number(d.rows_per_chunk, 8);
     w.Number(d.state_bytes, 8);
     w.Number(c.position.valid_rows, 8);
+    if (d.kind == ComponentKind::kWindowRows)
+      w.Number(d.window_rows, 8);
     w.Number(c.chunks.size(), 4);
     for (const auto& p : c.chunks)
       w.Payload(p);
@@ -440,8 +451,10 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     Invalid();
   Reader r{bytes.first(bytes.size() - 8)};
   auto magic = r.Blob(kMagic.size());
-  if (!std::equal(magic.begin(), magic.end(), kMagic.begin()) ||
-      r.Number(4) != kDiskFormatVersion)
+  if (!std::equal(magic.begin(), magic.end(), kMagic.begin()))
+    Invalid();
+  const auto version = r.Number(4);
+  if (version != kDiskFormatVersion && version != kDiskWindowFormatVersion)
     Invalid();
   DiskManifest m;
   m.checkpoint.value = r.Number(8);
@@ -469,6 +482,11 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     d.rows_per_chunk = r.Number(8);
     d.state_bytes = r.Number(8);
     c.position = {d.id, r.Number(8)};
+    if (d.kind == ComponentKind::kWindowRows) {
+      if (version != kDiskWindowFormatVersion)
+        Invalid();
+      d.window_rows = r.Number(8);
+    }
     auto chunks = r.Count(kMaxReferences - references, 32);
     c.chunks.reserve(chunks);
     references += chunks;
@@ -488,7 +506,13 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     c.private_state = optional_payload();
     m.components.push_back(std::move(c));
   }
-  if (!r.bytes.empty())
+  // Only manifests with window components use the window format version, so
+  // every manifest has one canonical encoding.
+  if (!r.bytes.empty() ||
+      (version == kDiskWindowFormatVersion &&
+       std::ranges::none_of(m.components, [](const auto& c) {
+         return c.descriptor.kind == ComponentKind::kWindowRows;
+       })))
     Invalid();
   Validate(m);
   return m;
@@ -673,7 +697,7 @@ struct DiskStore::Impl {
       node = {};
     }
   }
-  void ValidateReferences(bool reject = true) {
+  void ValidateReferences() {
     if (entries.empty())
       return;
     // Shared files must describe the same immutable lineage/range/layout.
@@ -706,8 +730,9 @@ struct DiskStore::Impl {
       auto claim = [&](bool is_private, const DiskPayload& p,
                        const ComponentDescriptor& d, std::uint64_t first) {
         const std::vector<std::uint64_t> geometry{
-            m.lineage.value,  d.id.value, d.layout_version, d.row_bytes,
-            d.rows_per_chunk, first,      p.bytes,          p.checksum};
+            m.lineage.value, d.id.value,       d.layout_version,
+            d.row_bytes,     d.rows_per_chunk, first,
+            p.bytes,         p.checksum,       d.window_rows};
         auto [it, inserted] = claims.try_emplace(
             {is_private, p.file}, Claim{m.compatibility, geometry, {}, false});
         auto& value = it->second;
@@ -718,7 +743,7 @@ struct DiskStore::Impl {
         value.entries.push_back(i);
       };
       for (const auto& c : m.components) {
-        Rows first{};
+        Rows first = FirstChunkRow(c.descriptor, c.position.valid_rows);
         for (const auto& p : c.chunks) {
           claim(false, p, c.descriptor, first);
           first = Add(first, c.descriptor.rows_per_chunk);
@@ -736,9 +761,6 @@ struct DiskStore::Impl {
       if (owners.size() > 1)
         for (auto i : owners)
           rejected[i] = true;
-    if (!reject &&
-        std::find(rejected.begin(), rejected.end(), true) != rejected.end())
-      Invalid();
     std::size_t i{};
     std::erase_if(entries, [&](const auto&) {
       const bool remove = rejected[i++];
@@ -746,6 +768,63 @@ struct DiskStore::Impl {
         ++stats.rejected_manifests;
       return remove;
     });
+  }
+  // Applies ValidateReferences' rules to the publication candidate, the last
+  // entry. Indexed entries were already validated against each other, so only
+  // pairs involving the candidate can conflict. Its catalog is sized by the
+  // candidate rather than by every reference on disk: a full catalog grows
+  // with the tier and, charged while the RAM cache fills its share of the
+  // ledger, would refuse every later publication (#1030).
+  void ValidateCandidate() {
+    const auto& candidate = entries.back().manifest_;
+    using Geometry = std::array<std::uint64_t, 9>;
+    const auto each_reference = [](const DiskManifest& m, auto&& visit) {
+      for (const auto& c : m.components) {
+        const auto& d = c.descriptor;
+        Rows first = FirstChunkRow(d, c.position.valid_rows);
+        const auto geometry = [&](const DiskPayload& p) {
+          return Geometry{m.lineage.value, d.id.value,       d.layout_version,
+                          d.row_bytes,     d.rows_per_chunk, first,
+                          p.bytes,         p.checksum,       d.window_rows};
+        };
+        for (const auto& p : c.chunks) {
+          visit(false, p.file, geometry(p));
+          first = Add(first, d.rows_per_chunk);
+        }
+        for (auto p : {c.tail, c.private_state})
+          if (p)
+            visit(true, p->file, geometry(*p));
+      }
+    };
+    std::size_t references{};
+    for (const auto& c : candidate.components)
+      references = Add(references,
+                       c.chunks.size() + bool(c.tail) + bool(c.private_state));
+    using Claims = std::map<std::pair<bool, DiskFileId>, Geometry>;
+    // Map records plus tree links and allocator overhead per reference.
+    auto working =
+        ledger->Reserve(ResourceCategory::kMetadata,
+                        Multiply(references, sizeof(Claims::value_type) + 64));
+    Claims claims;
+    each_reference(candidate, [&](bool is_private, const DiskFileId& file,
+                                  const Geometry& geometry) {
+      auto [it, inserted] = claims.try_emplace({is_private, file}, geometry);
+      if (!inserted && (is_private || it->second != geometry))
+        Invalid();
+    });
+    for (std::size_t i = 0; i + 1 < entries.size(); ++i) {
+      const auto& m = entries[i].manifest_;
+      if (m.checkpoint == candidate.checkpoint)
+        Invalid();
+      const bool compatible = m.compatibility == candidate.compatibility;
+      each_reference(m, [&](bool is_private, const DiskFileId& file,
+                            const Geometry& geometry) {
+        auto it = claims.find({is_private, file});
+        if (it != claims.end() &&
+            (is_private || !compatible || it->second != geometry))
+          Invalid();
+      });
+    }
   }
   void Sync(platform::PlatformFile file) {
     auto begin = std::chrono::steady_clock::now();
@@ -1224,7 +1303,7 @@ struct DiskStore::Impl {
     entries.push_back(std::move(candidate));
     bool manifest_attempted{};
     try {
-      ValidateReferences(false);
+      ValidateCandidate();
       index_guard.unlock();
       // Candidate is invisible to pinned snapshots until committed. Reuse from
       // filesystem existence after validating claims, never from this

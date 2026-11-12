@@ -744,7 +744,13 @@ void CheckArenaGraphReplay() {
     CheckHip(hipMalloc(&d, decoy_bytes), "decoy");
     CheckHip(hipMemset(d, 0x5A, decoy_bytes), "decoy fill");
   }
-  CheckHip(hipMemset(d_y, 0, small * m * 4), "clear");
+  // Clear `d_y` through the replay's own stream: a synchronous hipMemset
+  // runs on the legacy NULL stream, which does not order with launches on
+  // a non-blocking stream. The memset raced the replayed kernels and
+  // intermittently zeroed rows they had already written; the async form
+  // restores stream order (witnessed on gfx1151, ROCm core-10.1: 7/80
+  // stock vs 0/80 stream-ordered, every failure partial-zero only).
+  CheckHip(hipMemsetAsync(d_y, 0, small * m * 4, stream), "clear");
   CheckHip(hipGraphLaunch(replay, stream), "replay");
   CheckHip(hipStreamSynchronize(stream), "replay wait");
   const bool output_ok = download(small) == want_small;

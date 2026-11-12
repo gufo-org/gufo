@@ -3,7 +3,7 @@
 // architecture-neutral and report the device they ran on.
 //
 // Build: nix develop -c tools/bench/build.sh gfx1151_peak
-//        GUFO_HIP_ARCH=gfx1150 nix develop -c tools/bench/build.sh gfx1151_peak
+//        nix develop -c tools/bench/build.sh --arch=gfx1150 gfx1151_peak
 // Run: /tmp/gfx1151_peak
 //
 // Every accumulator is consumed, every thread has a separate checksum, and

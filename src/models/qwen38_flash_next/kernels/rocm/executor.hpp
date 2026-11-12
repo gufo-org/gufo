@@ -15,6 +15,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -141,6 +142,7 @@ public:
 
 private:
   friend class Executor;
+  friend struct ExecutorTestAccess;  // eager/replay checks in GPU tests
   friend struct PrefillCheckpoint;
   friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
   Session() = default;
@@ -331,6 +333,22 @@ public:
       std::span<PrefillCheckpoint* const> checkpoints = {},
       std::span<const std::int32_t> next = {}) const;
 
+  /// Layer boundaries for splitting a prefill pass into at most `groups`
+  /// groups of about equal depth, never before the PLE layer has read its
+  /// n-gram rows: its table read uses buffers a decode would reuse.
+  [[nodiscard]] std::vector<std::uint32_t> LayerHookBoundaries(
+      std::size_t groups) const;
+  /// During kPrefill passes, after each layer in `after_layers` (ascending,
+  /// from LayerHookBoundaries), call `between` with the pass's cross-layer
+  /// rows parked and its deferred work set aside. `between` may decode other
+  /// sessions; every layer of the pass keeps its unsplit arithmetic. An
+  /// empty hook disables the split.
+  void SetLayerHook(std::vector<std::uint32_t> after_layers,
+                    std::function<void()> between) const {
+    hook_layers_ = std::move(after_layers);
+    hook_ = std::move(between);
+  }
+
   struct BatchItem {
     Session* session;
     std::span<const std::int32_t> tokens;
@@ -347,6 +365,10 @@ public:
   /// Rows a single session may verify at once when every proposal after the
   /// anchor is copied from its history (ForwardWide), or 0 without MTP.
   static constexpr std::uint32_t kWideRows = 64;
+  /// Every decode route, wide copy verification and batched MTP chains
+  /// included, stays below this row of the shared scratch; a layer hook
+  /// parks these rows of the prefill pass it interrupts.
+  static constexpr std::uint32_t kHookParkedRows = kWideRows;
   [[nodiscard]] std::uint32_t max_copy_rows() const noexcept {
     return has_mtp() ? std::min({kWideRows, options_.max_batch, copy_rows_cap_})
                      : 0;
@@ -506,6 +528,7 @@ public:
   [[nodiscard]] bool has_mtp() const noexcept { return model_->has_mtp(); }
 
 private:
+  friend struct ExecutorTestAccess;  // capture failure injection in GPU tests
   Executor() = default;
 
   /// Visits every device region of a snapshot in payload order with
@@ -664,6 +687,26 @@ private:
   bool Run(Session& session, std::uint64_t key, bool graph,
            const std::function<bool()>& body, std::string* error_msg,
            bool synchronize = true) const;
+  /// The host-side dispatch state a pass advances. A pass that is executed
+  /// and then recorded again must restore it first (Run).
+  [[nodiscard]] auto DispatchState() const {
+    return std::tie(moe_pending_, defer_residual_, res_deferred_,
+                    shexp_half_ready_, q8t_src_, q8t_rows_, q8t_cols_,
+                    half_src_, half_rows_, half_cols_, half_bf16_, xn_half_,
+                    inject_parts_, inject_fused_, q8_slot_, xn_q8_ready_,
+                    mixed_q8_ready_, pending_combine_);
+  }
+  /// A copy of the DispatchState values, to assign back to it.
+  [[nodiscard]] auto SavedDispatch() const {
+    return std::apply(
+        [](const auto&... fields) { return std::make_tuple(fields...); },
+        DispatchState());
+  }
+  /// Times every layer's one-row MoE with and without the shared-expert
+  /// overlap and keeps the faster layout in decode_overlap_. Create calls it
+  /// once, after allocating scratch (about 120 ms). Touches only scratch and
+  /// restores DispatchState: no session or model state.
+  bool CalibrateDecodeOverlap(std::string* error_msg);
 
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
@@ -682,6 +725,18 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// Whether 1-8-row decode passes run the shared expert on side_stream_.
+  /// Their graphs then fork and join once per MoE layer, and what those two
+  /// cross-stream dependencies cost depends on the runtime. On Linux/ROCm
+  /// 10.1 they are cheap and the overlap speeds decode up about 1.5%. On
+  /// Windows/TheRock 10.0 they cost about 50 us per layer, more than the
+  /// whole shared expert takes (issue #1107). Create measures both layouts
+  /// (CalibrateDecodeOverlap). Wide and prefill passes always overlap.
+  bool decode_overlap_{false};
+  /// True only while Run records a graph. Overlapped launches check capture
+  /// membership at the fork; eager/replay tests separately check the results.
+  /// False on replay, which executes no host dispatch or membership queries.
+  mutable bool capturing_{false};
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;
@@ -945,6 +1000,15 @@ private:
     std::uint32_t n{0};
   };
   mutable PendingCombine pending_combine_;
+  mutable std::vector<std::uint32_t> hook_layers_;
+  mutable std::function<void()> hook_;
+  mutable void* hook_park_{nullptr};  ///< parked rows; allocated on first use
+  /// This pass reads its n-gram rows at its start rather than from a
+  /// previous pass's prefetch.
+  mutable bool ple_cold_{false};
+  /// The next chunk's n-gram prefetch waits for this pass's first yield.
+  mutable bool prefetch_deferred_{false};
+  bool RunLayerHook(Session& session, std::string* error_msg) const;
   void* hc_fused_state_{nullptr};  ///< HcMixQ8Fused's counters (zeroed)
 };
 

@@ -258,6 +258,29 @@ void ValidateRequest(const Request& request) {
   if (pixels > core::kMaxImagePixels)
     throw std::invalid_argument(
         "reference images exceed 32 megapixels combined");
+  if (request.loras.size() > 16)
+    throw std::invalid_argument("image requests apply at most 16 LoRAs");
+  for (std::size_t i = 0; i < request.loras.size(); ++i) {
+    const auto& lora = request.loras[i];
+    if (lora.name.empty())
+      throw std::invalid_argument("LoRA name must not be empty");
+    for (std::size_t j = 0; j < i; ++j)
+      if (request.loras[j].name == lora.name)
+        throw std::invalid_argument("duplicate LoRA " + lora.name);
+    if (!std::isfinite(lora.scale) || std::abs(lora.scale) > 10)
+      throw std::invalid_argument(
+          "LoRA scale must be finite and at most 10 in magnitude");
+  }
+}
+
+std::string ConditionPrompt(std::string_view prompt,
+                            ext::ImageBackground background) {
+  if (background != ext::ImageBackground::kTransparent)
+    return std::string(prompt);
+  // Qwen-Image-2.1 produces RGBA output when the prompt names the alpha
+  // channel; the framing is model-specific, so it lives in this provider.
+  return "This is an RGBA image with transparency. " + std::string(prompt) +
+         " The image has alpha channel and the background is transparent.";
 }
 
 std::vector<float> FlowSigmas(int steps, int image_tokens) {

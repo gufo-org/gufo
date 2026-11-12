@@ -34,12 +34,23 @@ for fmt in ("qwen", "deepseek"):
             key = (label, f"cand{i}"); cls = classes[key[1]]
             if label.split("/")[-1] in ("one_of", "pattern_tag", "untyped", "not_null", "str_null", "all_of_str", "string", "format", "pattern") and cls == "invalid_value":
                 cls = "valid"  # these candidates repeat a schema-valid value
+            if label.startswith("nested/") and cls == "invalid_value":
+                cls = "valid"  # the same object in llama.cpp's property order
+            if label.startswith("digits/") and cls == "invalid_value":
+                cls = "beyond_16_digits"  # past llama.cpp's integral/decimal part
+            if label in ("nested/addl_true", "nested/addl_schema", "nested/pattern_props",
+                         "nested/unevaluated_true") and cls == "undeclared":
+                cls = "valid"  # the schema admits this extra nested key
             lv, gv = ll[key], gg[key]
             prop = label.split("/")[-1]
             note = ""
             if lv != gv:
                 if gv and not lv and prop in ("all_of_int", "int_empty") and cls == "valid":
                     note = "llama.cpp's grammar rejects this schema-valid value"
+                elif gv and not lv and label.startswith("nested/") and key[1] == "cand1":
+                    note = "gufo also accepts schema property order"
+                elif gv and not lv and label in ("nested/pattern_props", "nested/unevaluated_true"):
+                    note = "gufo keeps objects with unsupported property applicators open"
                 elif label in ("root_ref", "root_typed_ref"):
                     note = "gufo follows a root $ref, as its native path did before"
                 elif not gv and lv and cls == "invalid_value":

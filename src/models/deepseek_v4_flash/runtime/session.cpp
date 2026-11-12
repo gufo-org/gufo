@@ -586,7 +586,7 @@ static void session_dspark_note_cycle(ds4_session* session,
 
 // Cost units are hundredths of one ordinary batch decode step, calibrated
 // offline on gfx1151 at 0/4K/16K with tg128, rounded up to five units.
-// See docs/models/deepseek-v4-flash/artifacts/cost-calibration.json. Runtime wall clocks
+// See docs/internal/models/deepseek-v4-flash/artifacts/cost-calibration.json. Runtime wall clocks
 // never influence token decisions.
 static uint32_t session_dspark_cycle_cost(const ds4_session* session,
                                           uint32_t tail, size_t concurrency) {
@@ -1457,6 +1457,17 @@ int ds4_session_ctx(const ds4_session *session) {
 
 uint32_t ds4_session_prefill_capacity(const ds4_session* session) {
   return session ? session->prefill_capacity : 0;
+}
+
+uint32_t ds4_session_prefill_capacity_for(int context_size) {
+  return ds4_rocm_graph_prefill_capacity(context_size);
+}
+
+void ds4_session_set_prefill_yield(ds4_session* session, uint32_t groups,
+                                   void (*yield)(void* user_data),
+                                   void* user_data) {
+  if (session)
+    ds4_rocm_graph_set_prefill_yield(session->graph, groups, yield, user_data);
 }
 
 uint32_t ds4_layer_ratio(uint32_t layer) {

@@ -73,9 +73,12 @@ std::uint64_t AdvanceHash(std::uint64_t hash, std::span<const Token> rows,
   return hash;
 }
 
+constexpr Rows kEmptyRingSlot = std::numeric_limits<Rows>::max();
+
 class FakeSlot final : public Slot {
 public:
-  explicit FakeSlot(MutationGuard& guard) : guard_(guard) {}
+  FakeSlot(MutationGuard& guard, Rows ring_rows)
+      : guard_(guard), ring(ring_rows), occupant(ring_rows, kEmptyRingSlot) {}
   FakeSlot(const FakeSlot&) = delete;
   FakeSlot& operator=(const FakeSlot&) = delete;
   FakeSlot(FakeSlot&&) = delete;
@@ -94,6 +97,14 @@ public:
       guard_.BeforeRelease(kTarget, 0, target.size());
     if (!draft.empty())
       guard_.BeforeRelease(kDraft, 0, draft.size());
+    if (window_rows)
+      guard_.BeforeRelease(kWindow, 0, window_rows);
+  }
+  [[nodiscard]] bool Resident(Rows first, Rows end) const {
+    for (Rows row = first; row < end; ++row)
+      if (occupant[row % ring.size()] != row)
+        return false;
+    return true;
   }
   bool Busy() const noexcept {
     return pending_reads != 0 || pending_loads != 0;
@@ -102,8 +113,14 @@ public:
   std::vector<Token> target, draft;
   // Target/draft boundaries and their private recurrent hash chains.
   std::array<std::uint64_t, 4> recurrent{0, 0, kSeed, kSeed};
-  std::array<ComponentPosition, 3> expected{};
+  std::vector<ComponentPosition> expected;
   std::vector<std::uint8_t> target_loaded, draft_loaded;
+  // Window rows mirror the target tokens. The ring never reallocates, so
+  // borrowed views stay fixed; occupant names the row each slot holds.
+  std::vector<Token> ring;
+  std::vector<Rows> occupant;
+  Rows window_rows{0};
+  std::vector<std::uint8_t> window_loaded;
   mutable std::vector<std::shared_ptr<FakeTransfer>> transfers;
   mutable std::size_t pending_reads{0};
   std::size_t pending_loads{0};
@@ -232,27 +249,65 @@ Completion FakeStream::SubmitTracked(
   return Completion(std::move(signal));
 }
 
+namespace {
+const ComponentDescriptor* WindowDescriptor(
+    std::span<const ComponentDescriptor> components) {
+  const auto it =
+      std::ranges::find(components, kWindow, &ComponentDescriptor::id);
+  return it == components.end() ? nullptr : &*it;
+}
+// First row of the loaded window prefix, then its contiguous loaded end.
+Rows WindowLoadedEnd(const FakeSlot& slot, const ComponentDescriptor& d) {
+  auto row = FirstChunkRow(d, slot.window_rows);
+  while (row < slot.window_rows && slot.window_loaded[row])
+    ++row;
+  return row;
+}
+}  // namespace
+FakeAdapter::FakeAdapter(Rows window_rows, Rows ring_rows, bool private_state)
+    : FakeAdapter() {
+  if (!window_rows || ring_rows % 4 || ring_rows < window_rows + 3)
+    throw std::invalid_argument("fake window ring cannot hold a window");
+  components_.push_back({kWindow, 1, ComponentKind::kWindowRows, sizeof(Token),
+                         4, 0, window_rows});
+  ring_rows_ = ring_rows;
+  private_state_ = private_state;
+  if (!private_state)
+    std::erase_if(components_, [](const auto& component) {
+      return component.id == kRecurrent;
+    });
+}
 Capabilities FakeAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
 }
 FakeAdapter::FakeAdapter(Rows rows_per_chunk)
-    : components_{{
+    : components_{
           {kTarget, 1, ComponentKind::kAppendRows, sizeof(Token),
            rows_per_chunk, 0},
           {kDraft, 1, ComponentKind::kAppendRows, sizeof(Token), rows_per_chunk,
            0},
           {kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 32},
-      }} {}
+      } {}
 std::span<const ComponentDescriptor> FakeAdapter::Components() const {
   return components_;
 }
 Identity FakeAdapter::CompatibilityIdentity() const {
-  return {'f', 'a', 'k', 'e', 2};
+  if (!ring_rows_)
+    return {'f', 'a', 'k', 'e', 2};
+  return {'f',
+          'a',
+          'k',
+          'e',
+          2,
+          'w',
+          static_cast<std::uint8_t>(components_.back().window_rows),
+          static_cast<std::uint8_t>(ring_rows_),
+          static_cast<std::uint8_t>(private_state_)};
 }
 std::unique_ptr<Slot> FakeAdapter::CreateSlot(MutationGuard& guard) {
   if (std::exchange(fail_allocation_, false))
     throw std::bad_alloc();
-  return std::make_unique<FakeSlot>(guard);
+  return std::make_unique<FakeSlot>(guard, ring_rows_);
 }
 void FakeAdapter::SetPrefillPassRows(Rows rows) {
   if (!rows)
@@ -275,11 +330,18 @@ std::vector<Rows> FakeAdapter::PlanPrefill(const Slot& slot, Rows first,
 }
 std::vector<ComponentPosition> FakeAdapter::Positions(const Slot& slot) const {
   const auto& state = AsSlot(slot);
-  return {{kTarget, state.restoring ? ContiguousRows(state.target_loaded)
-                                    : state.target.size()},
-          {kDraft, state.restoring ? ContiguousRows(state.draft_loaded)
-                                   : state.draft.size()},
-          {kRecurrent, state.recurrent[0]}};
+  std::vector<ComponentPosition> positions{
+      {kTarget, state.restoring ? ContiguousRows(state.target_loaded)
+                                : state.target.size()},
+      {kDraft, state.restoring ? ContiguousRows(state.draft_loaded)
+                               : state.draft.size()}};
+  if (private_state_)
+    positions.push_back({kRecurrent, state.recurrent[0]});
+  if (const auto* window = WindowDescriptor(components_))
+    positions.push_back({kWindow, state.restoring
+                                      ? WindowLoadedEnd(state, *window)
+                                      : state.window_rows});
+  return positions;
 }
 std::vector<ComponentPosition> FakeAdapter::PrefillCheckpointPositions(
     const Slot& slot, Rows boundary) const {
@@ -287,9 +349,14 @@ std::vector<ComponentPosition> FakeAdapter::PrefillCheckpointPositions(
   if (!slot.IsValid() || state.Busy() || boundary <= state.target.size())
     throw std::invalid_argument("invalid fake in-pass boundary");
   // The serving fixture advances target and draft by the same prefill tail.
-  return {{kTarget, boundary},
-          {kDraft, state.draft.size() + boundary - state.target.size()},
-          {kRecurrent, boundary}};
+  std::vector<ComponentPosition> positions{
+      {kTarget, boundary},
+      {kDraft, state.draft.size() + boundary - state.target.size()}};
+  if (private_state_)
+    positions.push_back({kRecurrent, boundary});
+  if (ring_rows_)
+    positions.push_back({kWindow, boundary});
+  return positions;
 }
 void FakeAdapter::BeginRestore(Slot& slot,
                                std::span<const ComponentPosition> positions) {
@@ -297,11 +364,12 @@ void FakeAdapter::BeginRestore(Slot& slot,
   if (state.Busy() || state.failed || state.restoring)
     throw std::logic_error(
         "reset failed restores and settle transfers before BeginRestore");
-  if (positions.size() != 3)
+  if (positions.size() != components_.size())
     throw std::invalid_argument("restore requires every component position");
   const Rows target_end = Position(positions, kTarget);
   const Rows draft_end = Position(positions, kDraft);
-  if (Position(positions, kRecurrent) != target_end)
+  if ((private_state_ && Position(positions, kRecurrent) != target_end) ||
+      (ring_rows_ && Position(positions, kWindow) != target_end))
     throw std::invalid_argument(
         "private boundary differs from target boundary");
   CheckRange(0, target_end,
@@ -318,6 +386,10 @@ void FakeAdapter::BeginRestore(Slot& slot,
                                std::max<Rows>(state.target.size(), target_end));
   state.guard_.BeforeOverwrite(kDraft, 0,
                                std::max<Rows>(state.draft.size(), draft_end));
+  if (ring_rows_) {
+    state.guard_.BeforeOverwrite(kWindow, 0,
+                                 std::max(state.window_rows, target_end));
+  }
   if (state.Busy())
     throw std::logic_error(
         "guard returned with preservation transfers pending");
@@ -325,8 +397,15 @@ void FakeAdapter::BeginRestore(Slot& slot,
   state.draft = std::move(draft);
   state.target_loaded = std::move(target_loaded);
   state.draft_loaded = std::move(draft_loaded);
-  state.expected = {
-      {{kTarget, target_end}, {kDraft, draft_end}, {kRecurrent, target_end}}};
+  state.expected = {{kTarget, target_end}, {kDraft, draft_end}};
+  if (private_state_)
+    state.expected.push_back({kRecurrent, target_end});
+  if (ring_rows_) {
+    state.expected.push_back({kWindow, target_end});
+    std::ranges::fill(state.occupant, kEmptyRingSlot);
+    state.window_rows = target_end;
+    state.window_loaded.assign(static_cast<std::size_t>(target_end), 0);
+  }
   state.recurrent = {0, 0, kSeed, kSeed};
   state.private_loaded = false;
   state.private_pieces.fill(false);
@@ -419,6 +498,16 @@ Completion FakeAdapter::CopyRowsOut(const Slot& slot, ComponentId id,
   CheckRange(first, end, dst.size());
   const auto& state = AsSlot(slot);
   RequireCapture(state);
+  if (ring_rows_ && id == kWindow) {
+    if (end > state.window_rows || !state.Resident(first, end))
+      throw std::invalid_argument("cannot capture evicted window rows");
+    return SubmitRead(slot, stream, [&state, first, end, dst] {
+      for (Rows row = first; row < end; ++row)
+        std::memcpy(dst.data() + (row - first) * sizeof(Token),
+                    &state.ring[row % state.ring.size()], sizeof(Token));
+      return TransferResult::kSucceeded;
+    });
+  }
   const auto& rows = RowArray(state, id);
   if (end > rows.size())
     throw std::invalid_argument("cannot capture unavailable rows");
@@ -435,6 +524,23 @@ Completion FakeAdapter::CopyRowsIn(Slot& slot, ComponentId id, Rows first,
   RequireLoad(state);
   try {
     CheckRange(first, end, src.size());
+    if (ring_rows_ && id == kWindow) {
+      // Only rows a continuation reads, from the first retained chunk.
+      if (first < FirstChunkRow(components_.back(), state.window_rows) ||
+          end > state.window_rows)
+        throw std::invalid_argument("restore range outside the window");
+      return SubmitLoad(slot, stream, [&state, first, end, src] {
+        for (Rows row = first; row < end; ++row) {
+          const auto at = row % state.ring.size();
+          std::memcpy(&state.ring[at],
+                      src.data() + (row - first) * sizeof(Token),
+                      sizeof(Token));
+          state.occupant[at] = row;
+          state.window_loaded[row] = 1;
+        }
+        return TransferResult::kSucceeded;
+      });
+    }
     auto& rows = RowArray(state, id);
     if (end > rows.size())
       throw std::invalid_argument("restore range exceeds prepared capacity");
@@ -494,10 +600,15 @@ bool FakeAdapter::Validate(Slot& slot,
   auto& state = AsSlot(slot);
   if (!state.restoring)
     throw std::logic_error("validation requires an active restore");
+  if (!private_state_)
+    state.recurrent = {state.target.size(), state.draft.size(),
+                       AdvanceHash(kSeed, state.target, 0),
+                       AdvanceHash(kSeed, state.draft, 0)};
   const auto actual = Positions(slot);
   const bool complete =
-      !state.Busy() && !state.failed && state.private_loaded &&
-      positions.size() == 3 &&
+      !state.Busy() && !state.failed &&
+      (state.private_loaded || !private_state_) &&
+      positions.size() == components_.size() &&
       ContiguousRows(state.target_loaded) == state.target.size() &&
       ContiguousRows(state.draft_loaded) == state.draft.size() &&
       std::ranges::all_of(state.expected,
@@ -523,6 +634,9 @@ bool FakeAdapter::Invalidate(Slot& slot) noexcept {
   state.draft.clear();
   state.target_loaded.clear();
   state.draft_loaded.clear();
+  std::ranges::fill(state.occupant, kEmptyRingSlot);
+  state.window_rows = 0;
+  state.window_loaded.clear();
   state.expected = {};
   state.recurrent = {0, 0, kSeed, kSeed};
   state.transfers.clear();
@@ -540,6 +654,15 @@ std::span<const std::byte> FakeAdapter::BorrowRowsView(const Slot& slot,
                                                        Rows end) const {
   const auto& state = AsSlot(slot);
   RequireCapture(state);
+  if (ring_rows_ && component == kWindow) {
+    if (first >= end || end > state.window_rows || !state.Resident(first, end))
+      throw std::invalid_argument("invalid borrowed fake window range");
+    // A range that wraps the ring is not one span and cannot be borrowed.
+    const auto at = first % state.ring.size();
+    if (at + (end - first) > state.ring.size())
+      return {};
+    return std::as_bytes(std::span(state.ring).subspan(at, end - first));
+  }
   const auto& rows = RowArray(state, component);
   if (first >= end || end > rows.size())
     throw std::invalid_argument("invalid borrowed fake range");
@@ -563,9 +686,27 @@ void FakeAdapter::Append(Slot& slot, std::span<const Token> target,
       AdvanceHash(state.recurrent[3], new_draft, state.draft.size());
   state.guard_.BeforeOverwrite(kTarget, 0, new_target.size());
   state.guard_.BeforeOverwrite(kDraft, 0, new_draft.size());
+  const Rows first = state.window_rows, end = new_target.size();
+  if (ring_rows_) {
+    // Each new row evicts the one a ring length earlier, then is written.
+    const auto evict = [&](Rows row) {
+      return row > ring_rows_ ? row - ring_rows_ : 0;
+    };
+    if (evict(first) < evict(end))
+      state.guard_.BeforeOverwrite(kWindow, evict(first), evict(end));
+    if (first < end)
+      state.guard_.BeforeOverwrite(kWindow, first, end);
+  }
   if (state.Busy())
     throw std::logic_error(
         "guard returned with preservation transfers pending");
+  if (ring_rows_) {
+    for (Rows row = first; row < end; ++row) {
+      state.ring[row % ring_rows_] = new_target[row];
+      state.occupant[row % ring_rows_] = row;
+    }
+    state.window_rows = end;
+  }
   state.target = std::move(new_target);
   state.draft = std::move(new_draft);
   state.recurrent = {state.target.size(), state.draft.size(), target_hash,
@@ -577,6 +718,18 @@ std::uint64_t FakeAdapter::RecurrentHash(const Slot& slot) const {
 }
 void FakeAdapter::GuardRows(Slot& slot, ComponentId c, Rows first, Rows end) {
   AsSlot(slot).guard_.BeforeOverwrite(c, first, end);
+}
+std::vector<Token> FakeAdapter::WindowTokens(const Slot& slot) const {
+  const auto& state = AsSlot(slot);
+  if (!ring_rows_)
+    throw std::logic_error("fake adapter has no window component");
+  const auto first = WindowFirstRow(components_.back(), state.window_rows);
+  if (!state.Resident(first, state.window_rows))
+    throw std::logic_error("window rows evicted or not loaded");
+  std::vector<Token> tokens;
+  for (Rows row = first; row < state.window_rows; ++row)
+    tokens.push_back(state.ring[row % ring_rows_]);
+  return tokens;
 }
 void FakeAdapter::FailNextAllocation() noexcept {
   fail_allocation_ = true;

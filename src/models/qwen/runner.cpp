@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "gufo/ext/component_cache_resources.hpp"
+#include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/speculative_verifier.hpp"
@@ -35,6 +37,7 @@
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
+#include "src/models/qwen/probe.hpp"
 
 namespace gufo::models::qwen {
 namespace {
@@ -583,6 +586,28 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
   return *qwen;
 }
 
+// Arms the session's layer hook from the host's yield for one prefill step.
+class PrefillYieldScope {
+public:
+  PrefillYieldScope(hip::QwenGpuExecutor& executor,
+                    const TextRunnerState& state)
+      : executor_(executor) {
+    if (state.prefill_yield_groups() > 1)
+      executor_.SetPrefillYield(state.prefill_yield_groups(),
+                                [&state] { state.YieldPrefill(); });
+  }
+  ~PrefillYieldScope() { executor_.SetPrefillYield(1, {}); }
+  PrefillYieldScope(const PrefillYieldScope&) = delete;
+  PrefillYieldScope& operator=(const PrefillYieldScope&) = delete;
+
+private:
+  hip::QwenGpuExecutor& executor_;
+};
+
+// Beside decoders, prompts keep the 4,096-row pass and split it into layer
+// groups: one pass takes about 6.5 s, a decode step about 82 ms.
+constexpr std::size_t kMaxPrefillLayerGroups = 16;
+
 // Shared runner base for the HIP models. Device-loss probing is the runtime's
 // `ext::DeviceProbe` (RFC step 6); the probe holds its buffer and private
 // stream from construction, with the 5 s bound the scheduler expects.
@@ -609,21 +634,15 @@ public:
         execution_policy_(hip::QwenExecutionPolicy::Production()) {
     if (!artifact_fingerprint.empty()) {
       const bool speculative = dflash_model_ != nullptr;
-      persistence_ = TextRunnerPersistenceDescriptor{
-          .compatibility_identity = QwenCompatibilityIdentity(
-              artifact_fingerprint, draft_artifact_fingerprint, max_context_,
-              execution_policy_, speculative, speculative_options_,
-              dflash_policy_),
-          .payload_version = kQwenComponentPayloadVersion,
-      };
-      component_identity_ = persistence_->compatibility_identity;
+      component_identity_ = QwenCompatibilityIdentity(
+          artifact_fingerprint, draft_artifact_fingerprint, max_context_,
+          execution_policy_, speculative, speculative_options_, dflash_policy_);
     } else {
       component_identity_ =
           QwenProcessIdentity(model_.get(), dflash_model_.get(), max_context_);
     }
   }
 
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
@@ -692,8 +711,6 @@ public:
             TextRunnerCapabilities{
                 .supports_vision = model_->VisionEncoder() != nullptr,
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
                 .final_token_advance_required = !speculative_enabled,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = speculative_enabled,
@@ -705,8 +722,16 @@ public:
                 .partial_prefill_retention = true,
                 .prefill_rollback = true,
             },
-        .persistence = persistence_,
-        .sampling_preset = sampling::TextPreset(model_->GetConfig()),
+        .sampling_defaults = QwenSamplingDefaults(model_->GetConfig()),
+        // Each session owns its executor, so a yield's decodes, batched
+        // ones included, share no buffer with the pass they interrupt.
+        .scheduling =
+            TextSchedulingProfile{
+                .pass_tokens = std::min<std::size_t>(
+                    max_context_, hip::QwenGpuArena::kMaxPromptBatch),
+                .max_layer_groups = kMaxPrefillLayerGroups,
+                .max_yield_decode_width = MaximumDecodeBatchWidth(),
+            },
     };
   }
 
@@ -731,20 +756,23 @@ public:
             hip::QwenGpuArena::SsmReplayLogBytes(model_->GetConfig(),
                                                  hip::kSsmReplayCapacity);
     }
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      capacity = free_bytes;
-    }
     // Snapshot buffers are device allocations, but on a unified-memory APU
     // they are carved from the same RAM as every host allocation, and HIP's
     // free figure does not see host pressure. Cap them by the host budget too.
+    // They keep HIP's own free figure: only the state capacity check reads the
+    // OS video-memory budget.
     std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
     std::size_t snapshot_ceiling = HostSnapshotCeilingBytes();
-    if (capacity.has_value()) {
-      snapshot_capacity = std::min(snapshot_capacity, *capacity);
-      snapshot_ceiling = std::min(snapshot_ceiling, *capacity);
+    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
+      capacity = memory->free_bytes;
+      snapshot_capacity =
+          std::min<std::size_t>(snapshot_capacity, memory->hip_free_bytes);
+      snapshot_ceiling =
+          std::min<std::size_t>(snapshot_ceiling, memory->hip_free_bytes);
+      gufo::hip::LogStateCapacity(
+          *memory, *capacity,
+          usage.request_state_bytes + usage.temporary_scratch_bytes, 0);
     }
     return {
         .resident_weights_bytes = resident_weights,
@@ -847,9 +875,81 @@ public:
     return model_->GetTokenizer().Decode(tokens);
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error(
-        "Qwen execution slots are owned by the component cache");
+  [[nodiscard]] std::optional<TextHiddenStateEncoding> HiddenStateEncoding()
+      const override {
+    return TextHiddenStateEncoding{
+        .width = model_->GetConfig().hidden_size,
+        .max_tokens = max_context_,
+    };
+  }
+
+  // Runs on a private executor, never on a component-cache slot, so sessions,
+  // prefix caches and snapshots are untouched. The capture is the last
+  // decoder layer's residual output before output_norm (prefill_chunk.cpp).
+  [[nodiscard]] TextHiddenStateStatus EncodeHiddenStates(
+      const TextHiddenStateRequest& request, TextHiddenStates* states,
+      std::string* error) const override {
+    const auto finish = [&](TextHiddenStateStatus status, std::string message) {
+      if (states != nullptr)
+        *states = {};
+      if (error != nullptr)
+        *error = std::move(message);
+      return status;
+    };
+    if (states == nullptr)
+      throw std::invalid_argument("hidden-state encoding needs an output");
+    const auto tokens = request.tokens;
+    if (tokens.empty())
+      return finish(TextHiddenStateStatus::kInvalidInput,
+                    "hidden-state encoding needs at least one token");
+    if (tokens.size() > max_context_)
+      return finish(TextHiddenStateStatus::kInvalidInput,
+                    "prompt exceeds the hidden-state encoding limit");
+    const std::size_t vocabulary = model_->GetConfig().vocab_size;
+    if (std::ranges::any_of(tokens, [vocabulary](TextRunnerToken token) {
+          return token >= vocabulary;
+        }))
+      return finish(TextHiddenStateStatus::kInvalidInput,
+                    "prompt token is outside the model vocabulary");
+
+    std::lock_guard lock(hidden_state_mutex_);
+    try {
+      auto& executor = HiddenStateExecutor(tokens.size());
+      // Leave the executor empty and unarmed however the call ends.
+      struct Release {
+        hip::QwenGpuExecutor& executor;
+        ~Release() {
+          executor.SetCancellationCheck({});
+          try {
+            executor.SetPromptHiddenCapture(false);
+          } catch (...) {
+          }
+          executor.Reset();
+        }
+      } release{executor};
+      executor.Reset();
+      executor.SetCancellationCheck(request.is_cancelled);
+      executor.SetPromptHiddenCapture(true);
+      (void)executor.ForwardPromptBatch(tokens, 0, false);
+      const std::size_t width = model_->GetConfig().hidden_size;
+      const auto hidden = executor.GetPromptHiddenStates();
+      if (hidden.size() != tokens.size() * width)
+        throw std::logic_error("Qwen hidden-state capture size mismatch");
+      states->rows = tokens.size();
+      states->width = width;
+      states->values.assign(hidden.begin(), hidden.end());
+    } catch (const hip::QwenPrefillCancelled&) {
+      return finish(TextHiddenStateStatus::kCancelled,
+                    "hidden-state encoding cancelled");
+    } catch (const std::exception& e) {
+      // A failed device pass may leave the executor unusable; the next call
+      // builds a fresh one.
+      hidden_state_executor_.reset();
+      return finish(TextHiddenStateStatus::kFailed, e.what());
+    }
+    if (error != nullptr)
+      error->clear();
+    return TextHiddenStateStatus::kOk;
   }
 
   void PreparePrefixReuse(
@@ -866,6 +966,7 @@ public:
     // Keep the entry recurrence pinned so cancellation can stop between
     // layers without discarding already completed prompt work.
     auto activity = qwen.BeginPrefill();
+    const PrefillYieldScope yield(qwen.executor(), state);
     try {
       if (offset != qwen.position()) {
         throw std::logic_error(
@@ -1069,6 +1170,25 @@ public:
   }
 
 private:
+  // Shares the loaded weights; only the attention/recurrent state is private.
+  // Sized to the longest prompt encoded so far in 1,024-token steps, so a
+  // runner with a long serving context does not reserve a second full-length
+  // KV cache for short encoder prompts.
+  [[nodiscard]] hip::QwenGpuExecutor& HiddenStateExecutor(
+      std::size_t tokens) const {
+    constexpr std::size_t kStep = 1024;
+    if (hidden_state_executor_ == nullptr ||
+        hidden_state_executor_->GetMaxContext() < tokens) {
+      const auto context = static_cast<std::uint32_t>(std::min<std::size_t>(
+          max_context_,
+          std::max<std::size_t>(2, (tokens + kStep - 1) / kStep * kStep)));
+      hidden_state_executor_.reset();
+      hidden_state_executor_ = std::make_unique<hip::QwenGpuExecutor>(
+          model_, context, execution_policy_);
+    }
+    return *hidden_state_executor_;
+  }
+
   [[nodiscard]] std::size_t MaximumDecodeBatchWidth() const noexcept {
     const std::size_t rows_per_session = dflash_model_ != nullptr ? 8 : 1;
     return std::clamp<std::size_t>(max_context_ / rows_per_session, 1, 8);
@@ -1085,8 +1205,9 @@ private:
   /// Rows a lookup copy of a request decoding alone may verify (DFlash).
   std::uint32_t copy_rows_{static_cast<std::uint32_t>(
       hip::QwenGpuExecutor::kMaxWideVerificationRows)};
-  std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
+  mutable std::mutex hidden_state_mutex_;
+  mutable std::unique_ptr<hip::QwenGpuExecutor> hidden_state_executor_;
 };
 
 }  // namespace
@@ -1138,6 +1259,13 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
   if (!model) {
     if (error)
       *error = "Failed to create GPU model: " + load_error;
+    return nullptr;
+  }
+  try {
+    models::qwen::vision::PrepareForServing(model->VisionEncoder());
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
     return nullptr;
   }
   std::uint32_t max_context = options.max_context;

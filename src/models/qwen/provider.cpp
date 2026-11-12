@@ -35,6 +35,12 @@ void qwen_provider_register(gufo::ext::Registry& registry) {
       .bench_driver = &gufo::models::qwen::RunQwenBenchmark,
       .prompt_driver = &gufo::models::qwen::RunQwenPrompt,
       .chat_driver = &gufo::models::qwen::RunQwenChat,
+      .sampling_defaults = &gufo::models::qwen::QwenSamplingDefaults,
+      .speculative_defaults = {{.backend = "dflash2",
+                                .max_draft_tokens = 7,
+                                .min_draft_tokens = 1,
+                                .draft_policy = "adaptive",
+                                .draft_policies = {"fixed", "adaptive"}}},
   });
 #endif
 }

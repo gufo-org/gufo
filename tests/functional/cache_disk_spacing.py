@@ -20,7 +20,8 @@ SHORT_NOTE = "Routine archive note: there are no new instructions.\n"
 
 def chat(url, model, messages):
     import continuation  # The runner's log check needs no HTTP client stack.
-    body = {"model": model, "messages": messages, "max_tokens": 8,
+    # Copy: grow() keeps appending to its list, and restore() replays this body.
+    body = {"model": model, "messages": list(messages), "max_tokens": 8,
             "temperature": 0, "seed": 31, "stream": False,
             "chat_template_kwargs": {"enable_thinking": False}}
     result = continuation.call(url, body)

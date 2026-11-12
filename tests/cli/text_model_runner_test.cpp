@@ -47,7 +47,6 @@ using gufo::server::TextRunnerDiskCacheOptions;
 using gufo::server::TextRunnerMeasuredResources;
 using gufo::server::TextRunnerPool;
 using gufo::server::TextRunnerResourceClaim;
-using gufo::server::TextRunnerSnapshot;
 using gufo::server::TextRunnerState;
 using gufo::server::TextRunnerToken;
 
@@ -188,7 +187,6 @@ public:
             TextRunnerCapabilities{
                 .incremental_prefill = true,
             },
-        .persistence = std::nullopt,
     };
   }
 
@@ -248,11 +246,6 @@ public:
     return text;
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error("slots are owned by the component cache");
-  }
-
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<gufo::server::ComponentCacheResources>
   CreateComponentCacheResources(gufo::cache::ResourceLedger& ledger,
                                 std::size_t) const override {
@@ -380,17 +373,7 @@ public:
 private:
 };
 
-class SnapshotRunner : public FakeRunner {
-public:
-  using FakeRunner::FakeRunner;
-
-  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
-    auto descriptor = FakeRunner::Descriptor();
-    descriptor.capabilities.snapshot = true;
-    descriptor.capabilities.fork = true;
-    return descriptor;
-  }
-};
+using SnapshotRunner = FakeRunner;
 
 void TestPromptCountingValidatesCapabilitiesBeforeInference() {
   const auto stats = std::make_shared<FakeStats>();
@@ -544,6 +527,87 @@ void TestBatchedAdvancePreservesIndependentRequests() {
   second.Invalidate();
 }
 
+void TestReasoningDelimitersFollowTheRunner() {
+  class MarkupRunner final : public FakeRunner {
+  public:
+    MarkupRunner(std::optional<gufo::ext::ReasoningTags> tags,
+                 std::optional<gufo::ext::ReasoningMarkup> markup)
+        : FakeRunner(std::make_shared<FakeStats>()),
+          tags_(std::move(tags)),
+          markup_(std::move(markup)) {}
+    gufo::ext::ReasoningTags ReasoningBudgetTags() const override {
+      return tags_ ? *tags_ : FakeRunner::ReasoningBudgetTags();
+    }
+    gufo::ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return markup_ ? *markup_ : FakeRunner::ReasoningDelimiters();
+    }
+
+  private:
+    std::optional<gufo::ext::ReasoningTags> tags_;
+    std::optional<gufo::ext::ReasoningMarkup> markup_;
+  };
+  using Markup = gufo::ext::ReasoningMarkup;
+  Expect(MarkupRunner({}, {}).ReasoningDelimiters() ==
+             Markup{"<think>", "</think>"},
+         "the default delimiters are the classic think pair");
+  Expect(MarkupRunner(
+             gufo::ext::ReasoningTags{
+                 "<think>", "\n</think>", {"</think>", "<tool_call>"}},
+             {})
+                 .ReasoningDelimiters() == Markup{"<think>", "</think>"},
+         "default delimiters follow the first budget end, not the forced text");
+  Expect(MarkupRunner(gufo::ext::ReasoningTags{"<a>", "<b>", {"<b>"}}, {})
+                 .ReasoningDelimiters() == Markup{"<a>", "<b>"},
+         "default delimiters follow the declared budget tags");
+  Expect(MarkupRunner(gufo::ext::ReasoningTags{}, {}).ReasoningDelimiters() ==
+             Markup{"<think>", "</think>"},
+         "undeclared budget tags keep the classic framing");
+  const Markup custom{"[[ponder>>\n", "<<ponder]]"};
+  Expect(MarkupRunner({}, custom).ReasoningDelimiters() == custom,
+         "a runner declares multi-token delimiters beyond its budget tags");
+  bool rejected = false;
+  try {
+    TextRunnerPool pool(
+        std::make_shared<MarkupRunner>(std::nullopt, Markup{"<a>", ""}), 1);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an empty close delimiter is rejected at load");
+  rejected = false;
+  try {
+    TextRunnerPool pool(
+        std::make_shared<MarkupRunner>(std::nullopt, Markup{"\n<a>", "</a>"}),
+        1);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an open delimiter with leading whitespace is rejected");
+
+  // An automatic budget waits for the output's own opener, ignoring the
+  // opener of an earlier turn in the prompt.
+  class BudgetRunner final : public FakeRunner {
+  public:
+    BudgetRunner() : FakeRunner(std::make_shared<FakeStats>()) {}
+    gufo::ext::ReasoningTags ReasoningBudgetTags() const override {
+      return {"7", "8", {"8"}};
+    }
+    std::vector<TextRunnerToken> TokenizeControl(
+        std::string_view text) const override {
+      return {static_cast<TextRunnerToken>(text.front() - '0')};
+    }
+  };
+  const BudgetRunner budget_runner;
+  const std::vector<TextRunnerToken> prompt{1, 7, 2};
+  const auto automatic = budget_runner.BuildReasoningBudget(
+      4, prompt, gufo::ext::InitialOutputState::kAuto);
+  Expect(automatic && automatic->opener == 7 && automatic->prompt.empty(),
+         "an automatic budget starts at the output's opener");
+  const auto opened = budget_runner.BuildReasoningBudget(4, prompt);
+  Expect(opened && !opened->opener &&
+             opened->prompt == std::vector<TextRunnerToken>{2},
+         "a prompt-opened budget counts the prompt's open block");
+}
+
 void TestResourceClaimsAreValidatedBeforeAllocation() {
   auto stats = std::make_shared<FakeStats>();
   std::string message;
@@ -563,8 +627,6 @@ void TestResourceClaimsAreValidatedBeforeAllocation() {
          "invalid resource claim is rejected before state allocation");
 }
 
-// A runner written against the single-boundary PrefillThrough keeps working
-// through the default boundaries form, one checkpoint per call.
 std::size_t RegularFiles(const std::filesystem::path& directory) {
   std::size_t files = 0;
   for (const auto& entry :
@@ -1014,9 +1076,246 @@ void TestServerInstructionsAreFraming() {
 
 }  // namespace
 
+// A dialect absent from ToolFormat: identity, grammar and parser come from
+// its registration alone.
+void ScanNothing(std::string_view, std::span<const std::string_view>,
+                 std::vector<gufo::ext::ScannedToolCall>*,
+                 std::vector<std::pair<std::size_t, std::size_t>>*, bool) {}
+
+void TestProviderToolDialectSelection() {
+  using Constraint = gufo::sampling::JsonConstraint;
+  const Constraint::ToolSyntax syntax{
+      .open = "<<invoke:",
+      .name_suffix = ">>",
+      .close = "<</invoke>>",
+      .name_delimiters = ">",
+      .values = {.string_open = "«",
+                 .string_close = "»",
+                 .bare_keys = true,
+                 .whitespace = false,
+                 .sorted_keys = true},
+  };
+  gufo::ext::RegisterToolDialect({
+      .markers = {"<<invoke:"},
+      .scan_tool_calls = &ScanNothing,
+      .id = "ledger-runner",
+      .syntax = syntax,
+  });
+  const auto rejects = [](gufo::ext::ToolDialect dialect) {
+    try {
+      gufo::ext::RegisterToolDialect(std::move(dialect));
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  Expect(rejects({.markers = {"<tool_call>"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "qwen",
+                  .syntax = syntax}),
+         "host-parsed identities cannot be registered");
+  Expect(rejects({.markers = {"[[call"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "bracket",
+                  .syntax = syntax}),
+         "markers must contain '<'");
+  Expect(rejects({.markers = {"<<call:"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "mismatch",
+                  .syntax = syntax}),
+         "the grammar's opener must be a parser marker");
+  Expect(rejects({.markers = {"<<invoke:"}, .id = "noscan", .syntax = syntax}),
+         "a dialect needs a parser");
+  Expect(rejects({.markers = {"<<invoke:"},
+                  .scan_tool_calls = &ScanNothing,
+                  .id = "nogrammar"}),
+         "a dialect needs a grammar");
+  Expect(gufo::ext::FindToolDialect("ledger-runner") != nullptr &&
+             gufo::ext::FindToolDialect("ledger-runner")->syntax == syntax,
+         "registered dialects are found by identity");
+
+  class DialectRunner final : public FakeRunner {
+  public:
+    explicit DialectRunner(
+        std::string id, std::optional<gufo::ext::ReasoningMarkup> markup = {},
+        gufo::ext::InitialOutputState initial =
+            gufo::ext::InitialOutputState::kAuto)
+        : FakeRunner(std::make_shared<FakeStats>()),
+          id_(std::move(id)),
+          markup_(std::move(markup)),
+          initial_(initial) {}
+    std::string ToolDialectId() const override { return id_; }
+    gufo::ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return markup_ ? *markup_ : FakeRunner::ReasoningDelimiters();
+    }
+    gufo::ext::InitialOutputState InitialOutputState(
+        const ChatRequest&) const override {
+      return initial_;
+    }
+    std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+    BuildConstraintVocabulary() const override {
+      return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+          256, [](std::uint32_t id) {
+            return gufo::sampling::ConstraintVocabulary::Piece{
+                std::string(1, static_cast<char>(id)), false};
+          });
+    }
+
+  private:
+    std::string id_;
+    std::optional<gufo::ext::ReasoningMarkup> markup_;
+    gufo::ext::InitialOutputState initial_;
+  };
+  const auto accepts = [](const Constraint& grammar, std::string_view text) {
+    auto state = grammar.Start();
+    for (const unsigned char byte : text) {
+      state = grammar.Advance(state, byte);
+      if (state.empty())
+        return false;
+    }
+    return grammar.Complete(state);
+  };
+  const DialectRunner runner("ledger-runner");
+  Expect(FakeRunner(std::make_shared<FakeStats>()).ToolDialectId() == "json",
+         "existing runners keep the identity of their format");
+  const std::string call = "<<invoke:record>>{text:«hi»}<</invoke>>";
+  for (const auto choice :
+       {ChatRequest::ToolChoice::kRequired, ChatRequest::ToolChoice::kAuto,
+        ChatRequest::ToolChoice::kNone}) {
+    ChatRequest request;
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kUser, "go");
+    request.tool_choice = choice;
+    request.tools = {
+        {.name = "record",
+         .parameters_json =
+             R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
+    gufo::sampling::SamplingConfig sampling;
+    std::optional<Constraint::ToolFormat> format{Constraint::ToolFormat::kQwen};
+    std::string dialect;
+    const auto constrained = gufo::server::ConstrainChatRequest(
+        request, runner, &sampling, &format, &dialect);
+    Expect(dialect == "ledger-runner" && !format,
+           "the runner's identity selects the provider dialect");
+    if (choice == ChatRequest::ToolChoice::kNone) {
+      Expect(!constrained && !sampling.constraint,
+             "tool_choice none leaves the output unconstrained");
+      continue;
+    }
+    Expect(constrained && sampling.constraint &&
+               constrained->messages.size() == 1 &&
+               constrained->messages.front().framing_suffix.empty(),
+           "a native dialect constrains without a JSON instruction");
+    const auto& grammar = *sampling.constraint->grammar;
+    Expect(accepts(grammar, call),
+           "the provider grammar constrains the request");
+    Expect(
+        accepts(
+            grammar,
+            R"(<tool_call>{"name":"record","arguments":{"text":"hi"}}</tool_call>)") ==
+            (choice == ChatRequest::ToolChoice::kAuto),
+        "the JSON envelope is no call of this dialect, only prose");
+    Expect(accepts(grammar, "Plain answer.") ==
+               (choice == ChatRequest::ToolChoice::kAuto),
+           "only automatic tool choice admits a plain answer");
+  }
+  // The reasoning phase of the grammar uses the runner's delimiters.
+  const auto constrain = [](const DialectRunner& reasoner, bool tools,
+                            std::optional<bool> enabled = {}) {
+    ChatRequest request;
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kUser, "go");
+    request.reasoning.enabled = enabled;
+    if (tools) {
+      request.tool_choice = ChatRequest::ToolChoice::kRequired;
+      request.tools = {
+          {.name = "record",
+           .parameters_json =
+               R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
+    } else {
+      request.response_format = Constraint::Object();
+    }
+    gufo::sampling::SamplingConfig sampling;
+    (void)gufo::server::ConstrainChatRequest(request, reasoner, &sampling);
+    return sampling.constraint->grammar;
+  };
+  const gufo::ext::ReasoningMarkup ponder{"[[ponder>>\n", "<<ponder]]"};
+  using Initial = gufo::ext::InitialOutputState;
+  for (const bool tools : {true, false}) {
+    const std::string answer = tools ? call : R"({"x":1})";
+    const auto opened = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kReasoning), tools);
+    Expect(accepts(*opened, "Plan.<<ponder]]" + answer),
+           "prompt-opened reasoning ends at the provider's close");
+    Expect(!accepts(*opened, "Plan.</think>" + answer + "</think>"),
+           "the classic close does not end provider reasoning");
+    const auto automatic = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kAuto), tools);
+    Expect(accepts(*automatic, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+               accepts(*automatic, answer),
+           "the model may open reasoning with the provider's opener");
+    Expect(!accepts(*automatic, "<think>\nPlan.</think>" + answer) &&
+               !accepts(*automatic, "[[ponder>>Plan.<<ponder]]" + answer),
+           "other reasoning framing is no reasoning of this provider");
+    const auto disabled = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kAuto), tools, false);
+    Expect(!accepts(*disabled, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+               accepts(*disabled, answer),
+           "disabled reasoning admits no reasoning phase");
+    const auto content = constrain(
+        DialectRunner("ledger-runner", ponder, Initial::kContent), tools);
+    Expect(!accepts(*content, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+               accepts(*content, answer),
+           "content output admits no reasoning phase");
+  }
+  // The default markup builds the same reasoning grammar as before.
+  {
+    const DialectRunner classic("json", std::nullopt, Initial::kReasoning);
+    const auto grammar = constrain(classic, false);
+    Expect(grammar == Constraint::WithReasoning(Constraint::Object()),
+           "default reasoning markup keeps the classic grammar");
+  }
+  bool rejected = false;
+  try {
+    gufo::sampling::SamplingConfig sampling;
+    (void)gufo::server::ConstrainChatRequest(
+        ChatRequest{}, DialectRunner("unregistered"), &sampling);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Expect(rejected, "an unknown identity is a request error");
+  rejected = false;
+  try {
+    TextRunnerPool pool(std::make_shared<DialectRunner>("unregistered"), 1);
+  } catch (const std::invalid_argument& error) {
+    rejected = std::string_view(error.what()).find("unregistered") !=
+               std::string_view::npos;
+  }
+  Expect(rejected, "an unknown identity is rejected at load");
+  TextRunnerPool pool(std::make_shared<DialectRunner>("ledger-runner"), 1);
+}
+
+void LegacyResourceClaimAggregateKeepsItsFields() {
+  // Public pre-admission aggregate order: adding optional claims must not
+  // reinterpret snapshot capacities or the device-lock requirement.
+  const gufo::ext::TextRunnerResourceClaim claim{1, 2, 3, 4, 5, 6, true};
+  Expect(claim.resident_weights_bytes == 1 && claim.state_capacity_bytes == 2 &&
+             claim.per_request_state_bytes == 3 &&
+             claim.temporary_scratch_bytes == 4 &&
+             claim.retained_snapshot_capacity_bytes == 5 &&
+             claim.retained_snapshot_ceiling_bytes == 6 &&
+             claim.requires_device_runtime_lock,
+         "legacy aggregate values retain their original fields");
+  Expect(!claim.prompt_state_bytes_per_token &&
+             !claim.prompt_admission_budget_bytes &&
+             !claim.prompt_admission_available_bytes,
+         "legacy aggregate initializers leave prompt admission disabled");
+}
+
 int main() {
+  LegacyResourceClaimAggregateKeepsItsFields();
   TestPromptCountingValidatesCapabilitiesBeforeInference();
   TestServerInstructionsAreFraming();
+  TestReasoningDelimitersFollowTheRunner();
+  TestProviderToolDialectSelection();
   TestPreparedConstraintVocabularyKeepsGrammarBehavior();
   TestBoundedPrefillDecodeAndPrefixReuse();
   TestAbandonedRequestRollsBackState();

@@ -117,7 +117,10 @@ struct RetentionRequest {
 // remain valid after removal and their ledger charges cannot be spent again
 // prematurely.
 //
-// Record-capacity removal keeps the ported rank-then-LRU order. Byte
+// Record-capacity removal keeps the ported rank-then-LRU order. When no
+// record is rank-eligible, an optional retry/history copy takes the least
+// recently used conversation that it and its retained descendants have not
+// used within one record-table turnover (the record limit in uses). Byte
 // pressure removes, in order: retry copies; cheap checkpoints, whose private
 // state exceeds eight times the rows they restore; conversations not reused
 // within one RAM-budget turnover, least recently used first; then reused

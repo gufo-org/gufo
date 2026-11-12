@@ -40,7 +40,7 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,
                           mutable_suffix_tokens=ASSISTANT_OPENING_TOKENS):
     """An unchanged retry reuses the complete prompt. Under memory pressure the
     previous request's complete-prompt copy is refused rather than displace
-    another conversation's last checkpoint (docs/KV-CACHE.md); the retry then
+    another conversation's last checkpoint (docs/internal/cache.md); the retry then
     restores the stable boundary and prefills only the mutable suffix. For
     agent histories that includes the last user turn; its bound is measured
     separately with the count-tokens endpoint, not padded with extra slack.

@@ -49,6 +49,8 @@ void reference_topk(uint32_t* out, const float* scores, uint32_t* scratch,
         out, scratch, scores, n, tokens, 512, stride, stride);
   }
 }
+
+constexpr uint32_t reference_topk_max_keys = 32768;
 }  // namespace
 
 void check_dspark_candidates() {
@@ -169,8 +171,8 @@ void check_indexer_selection(bool benchmark) {
   std::uniform_real_distribution<float> values(-4.F, 4.F);
   unsigned cases_passed = 0;
   for (uint32_t tokens : {1u, 6u, 33u, 2048u}) {
-    for (uint32_t n :
-         {1025u, 2048u, 2049u, 4096u, 8192u, 8704u, 16384u, 16385u, 32768u}) {
+    for (uint32_t n : {1025u, 2048u, 2049u, 4096u, 8192u, 8704u, 9217u, 16384u,
+                       16385u, 32768u, 32769u, 47104u, 65536u}) {
       if ((tokens == 33 && n < 4096) ||
           (tokens == 2048 && n != 8704 && n != 16385))
         continue;
@@ -211,11 +213,15 @@ void check_indexer_selection(bool benchmark) {
         }
         check(hipMemcpy(scores, input.data(), input.size() * sizeof(float),
                         hipMemcpyHostToDevice));
-        reference_topk(ref, scores, scratch, n, tokens, radix_bytes);
-        check(hipGetLastError());
-        check(hipMemcpy(reference.data(), ref,
-                        reference.size() * sizeof(uint32_t),
-                        hipMemcpyDeviceToHost));
+        if (n <= reference_topk_max_keys) {
+          reference_topk(ref, scores, scratch, n, tokens, radix_bytes);
+          check(hipGetLastError());
+          check(hipMemcpy(reference.data(), ref,
+                          reference.size() * sizeof(uint32_t),
+                          hipMemcpyDeviceToHost));
+        } else {
+          reference = expected;
+        }
         for (int repeat = 0; repeat < 2; ++repeat) {
           check(hipMemset(out, 0xff, actual.size() * sizeof(uint32_t)));
           if (!indexer_partial_topk_launch(out, scores, n, tokens, 512)) {
@@ -232,9 +238,24 @@ void check_indexer_selection(bool benchmark) {
                 n, tokens, mode, repeat);
             std::exit(8);
           }
+          if (indexer_seeded_topk_fits(n, tokens, 512)) {
+            check(hipMemset(out, 0xff, actual.size() * sizeof(uint32_t)));
+            check(indexer_seeded_topk_launch(out, scores, n, tokens, scratch));
+            check(hipMemcpy(actual.data(), out,
+                            actual.size() * sizeof(uint32_t),
+                            hipMemcpyDeviceToHost));
+            if (actual != expected) {
+              std::fprintf(stderr,
+                           "Seeded top-k ordering mismatch: n=%u tokens=%u "
+                           "mode=%u repeat=%d\n",
+                           n, tokens, mode, repeat);
+              std::exit(8);
+            }
+          }
         }
         ++cases_passed;
-        if (benchmark && (mode == 0 || mode == 2 || mode == 4)) {
+        if (benchmark && n <= reference_topk_max_keys &&
+            (mode == 0 || mode == 2 || mode == 4)) {
           const int repetitions = tokens > 6 ? 3 : 50;
           hipEvent_t start, end;
           check(hipEventCreate(&start));

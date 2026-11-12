@@ -44,6 +44,15 @@ struct GenerationParameters {
 /// 22-frame diagnostic extension.
 [[nodiscard]] std::optional<int> ResolveDurationFrames(
     std::string_view seconds, std::string* error = nullptr);
+/// Canvas for a keyframe-conditioned request, by the released rule: the
+/// geometry-anchor keyframe (packed index 0) sets the aspect ratio, and the
+/// preset's internal canvas sets the short edge and pixel budget, so the
+/// 1344x768 preset resolves exactly as upstream does and smaller presets keep
+/// their cost. A preset that upscales its output keeps that scale per axis
+/// (rounded to even). Everything else is copied from `parameters`.
+[[nodiscard]] std::optional<GenerationParameters> ResolveKeyframeParameters(
+    const GenerationParameters& parameters, int keyframe_width,
+    int keyframe_height, std::string* error = nullptr);
 [[nodiscard]] bool ValidateGenerationParameters(
     const GenerationParameters& parameters, std::string* error = nullptr);
 [[nodiscard]] std::string GenerationParametersJson(
@@ -70,6 +79,13 @@ struct GenerationRequest {
   std::string prompt;
   std::uint64_t seed{0};
   GenerationParameters parameters;
+  // FL2VA keyframe anchors (issue #177). Empty keeps the text-only path
+  // bit-identical. The packed-index-0 keyframe (first, or a lone last) sets
+  // the canvas aspect via ResolveKeyframeParameters, with the preset as the
+  // size budget; it is then stretched onto that canvas only to absorb the
+  // rounding, and a follower is cover-cropped (the released index rule).
+  std::filesystem::path first_frame_path;
+  std::filesystem::path last_frame_path;
 };
 
 struct GenerationTelemetry {
@@ -83,6 +99,12 @@ struct GenerationTelemetry {
   double media_ms{0.0};
   double total_ms{0.0};
   std::size_t prompt_tokens{0};
+  // The canvas actually generated: the preset's, or the one a geometry-anchor
+  // keyframe resolved (ResolveKeyframeParameters).
+  int internal_width{0};
+  int internal_height{0};
+  int output_width{0};
+  int output_height{0};
   InspectionTelemetry inventory;
   PromptEncoderTelemetry prompt_encoder;
   DenoiserTelemetry denoiser;

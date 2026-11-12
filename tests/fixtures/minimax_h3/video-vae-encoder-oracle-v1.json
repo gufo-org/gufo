@@ -1,0 +1,486 @@
+{
+  "arithmetic": {
+    "activations": "F32",
+    "causal_temporal": "T=1 collapses every 3x3x3 causal conv to its last temporal tap",
+    "group_norm": "32 groups, eps 1e-6, affine, temporal-isolated (single frame)",
+    "padding": "spatial reflect 1; downsample asymmetric reflect (0,1,0,1) then stride",
+    "weights": "released F32"
+  },
+  "files": {
+    "video-vae-encoder-keyframe-512-moments.f32": {
+      "bytes": 196608,
+      "dtype": "F32",
+      "sha256": "f17ded648d1b526b91b244e882a2ac88ad4561cc2baec79b167a5043aceb45fa",
+      "shape": [
+        48,
+        32,
+        32
+      ]
+    },
+    "video-vae-encoder-keyframe-512.f32": {
+      "bytes": 3145728,
+      "dtype": "F32",
+      "sha256": "4201d5813dbe749d3aa4878de9eb11a7e5297320e4a89387e665bbb4ab9733a7",
+      "shape": [
+        3,
+        512,
+        512
+      ]
+    },
+    "video-vae-encoder-keyframe-512.png": {
+      "bytes": 788084,
+      "dtype": "uint8-PNG",
+      "sha256": "cfea214dd642604fe701481c6f26030de01f03586eadd917af52341099e5e894",
+      "shape": [
+        512,
+        512,
+        3
+      ]
+    },
+    "video-vae-encoder-stage-conv_in.f32": {
+      "bytes": 2097152,
+      "dtype": "F32",
+      "sha256": "18a45290ee9d0ea12a57ef23f3175e16cfa4ae268d3a5118efd522cb208719cd",
+      "shape": [
+        128,
+        64,
+        64
+      ]
+    },
+    "video-vae-encoder-stage-down-0.f32": {
+      "bytes": 524288,
+      "dtype": "F32",
+      "sha256": "a34c4378de459aeec928cbe5609e5de0eca3f13399020032470b2f25a01c3b2a",
+      "shape": [
+        128,
+        32,
+        32
+      ]
+    },
+    "video-vae-encoder-stage-down-1.f32": {
+      "bytes": 262144,
+      "dtype": "F32",
+      "sha256": "277d7feddeab96a6c7a1c887181223d4616c520630b7a85fd59e1e6de3303f3f",
+      "shape": [
+        256,
+        16,
+        16
+      ]
+    },
+    "video-vae-encoder-stage-down-2.f32": {
+      "bytes": 65536,
+      "dtype": "F32",
+      "sha256": "2ad0cdeb96dbd552ebe5927680c420b0003ed2ac29e3baa275985f404e5539d6",
+      "shape": [
+        256,
+        8,
+        8
+      ]
+    },
+    "video-vae-encoder-stage-down-3.f32": {
+      "bytes": 32768,
+      "dtype": "F32",
+      "sha256": "1734b8fe58bbf8143712d630a17862631c64607257ffb5995ec0e864993e057e",
+      "shape": [
+        512,
+        4,
+        4
+      ]
+    },
+    "video-vae-encoder-stage-down-4.f32": {
+      "bytes": 32768,
+      "dtype": "F32",
+      "sha256": "3092baaa48cfd9d742a55fd4199b88a884a0fc44d332c9e986d97f0605d373f8",
+      "shape": [
+        512,
+        4,
+        4
+      ]
+    },
+    "video-vae-encoder-stage-down-5.f32": {
+      "bytes": 65536,
+      "dtype": "F32",
+      "sha256": "db47fe07d2c3d0470c4b6f5df20edd189a5f89889a6c0c6fa1430c9e2de4e776",
+      "shape": [
+        1024,
+        4,
+        4
+      ]
+    },
+    "video-vae-encoder-stage-moments.f32": {
+      "bytes": 3072,
+      "dtype": "F32",
+      "sha256": "058c15f30175e9758cc17fb6c2bcc110a32e16a8d24293f8a7541aed02b21e99",
+      "shape": [
+        48,
+        4,
+        4
+      ]
+    },
+    "video-vae-encoder-stage-norm_out.f32": {
+      "bytes": 65536,
+      "dtype": "F32",
+      "sha256": "7c5111314344a9c491133614627583e54fc6b1de68624fc0dfec3ea7c8b75153",
+      "shape": [
+        1024,
+        4,
+        4
+      ]
+    },
+    "video-vae-encoder-stage-pre_quant.f32": {
+      "bytes": 3072,
+      "dtype": "F32",
+      "sha256": "dfe1ea3ba23146d74b4859da98f99c20f00f8c01d74498a87578c7c335bbfb54",
+      "shape": [
+        48,
+        4,
+        4
+      ]
+    },
+    "video-vae-encoder-tile-00-moments.f32": {
+      "bytes": 49152,
+      "dtype": "F32",
+      "sha256": "7bcc5eaccf0ff145e03b016ed52186bcec9d35fb59c597ac4ce3e1cb2731aff4",
+      "shape": [
+        48,
+        16,
+        16
+      ]
+    },
+    "video-vae-encoder-tile-00-pre_quant.f32": {
+      "bytes": 49152,
+      "dtype": "F32",
+      "sha256": "2a82b4dae978b8f89b2d3a03980ef86e16a44cc0eb807a205d45756bee27614e",
+      "shape": [
+        48,
+        16,
+        16
+      ]
+    }
+  },
+  "generator": {
+    "algorithm": "numpy.random.default_rng(seed).bytes",
+    "dtype": "uint8",
+    "seed": 20261102,
+    "shape": [
+      512,
+      512,
+      3
+    ]
+  },
+  "geometry": {
+    "canvas": [
+      512,
+      512
+    ],
+    "channels": [
+      128,
+      256,
+      256,
+      512,
+      512,
+      1024
+    ],
+    "moments": [
+      48,
+      32,
+      32
+    ],
+    "space_down": [
+      2,
+      2,
+      2,
+      2,
+      1,
+      1
+    ],
+    "spatial_ratio": 16,
+    "stage_canvas": [
+      64,
+      64
+    ],
+    "stage_moments": [
+      48,
+      4,
+      4
+    ],
+    "time_down": [
+      1,
+      2,
+      2,
+      1,
+      1,
+      1
+    ]
+  },
+  "keyframe_uint8_sha256": "e4ff86db996dc48a853d8fe56d6d6650a8679791f2962df9f1a31eab6b937949",
+  "model_revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "scale": 0.00392156862745098,
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "type": "imagenet"
+  },
+  "quality_bounds": {
+    "relative_l2": 0.05,
+    "relative_max": 0.05
+  },
+  "reference_implementation": {
+    "encoder": "FL2VA/video_vae/vae_cnn.py EncoderFCN3D (fp32, eval)",
+    "normalization": "FL2VA/video_vae/normalize.py imagenet",
+    "tiling": "FL2VA/video_vae/klvae.py split_tiles/blend transcribed and asserted bitwise equal to the shipped legacy functions and to diffusers autoencoder_kl_minimax_h3.py _split_tiles/_blend/_stitch_tiles"
+  },
+  "reference_revision": "8974cc055ea9c02fcd14cc27dfda3e1027c05153",
+  "schema": "gufo.minimax-h3-video-vae-encoder-golden.v1",
+  "source_checkpoint": "FL2VA/video_vae/source/model.safetensors",
+  "source_checkpoint_sha256": "5f0c2e161d895a9fee7645ca32d4a7e3a22b90cacfcbeba62ec999cdbbefe0d3",
+  "stages": {
+    "conv_in": {
+      "file": "video-vae-encoder-stage-conv_in.f32",
+      "shape": [
+        128,
+        64,
+        64
+      ]
+    },
+    "down.0": {
+      "file": "video-vae-encoder-stage-down-0.f32",
+      "shape": [
+        128,
+        32,
+        32
+      ]
+    },
+    "down.1": {
+      "file": "video-vae-encoder-stage-down-1.f32",
+      "shape": [
+        256,
+        16,
+        16
+      ]
+    },
+    "down.2": {
+      "file": "video-vae-encoder-stage-down-2.f32",
+      "shape": [
+        256,
+        8,
+        8
+      ]
+    },
+    "down.3": {
+      "file": "video-vae-encoder-stage-down-3.f32",
+      "shape": [
+        512,
+        4,
+        4
+      ]
+    },
+    "down.4": {
+      "file": "video-vae-encoder-stage-down-4.f32",
+      "shape": [
+        512,
+        4,
+        4
+      ]
+    },
+    "down.5": {
+      "file": "video-vae-encoder-stage-down-5.f32",
+      "shape": [
+        1024,
+        4,
+        4
+      ]
+    },
+    "moments": {
+      "file": "video-vae-encoder-stage-moments.f32",
+      "shape": [
+        48,
+        4,
+        4
+      ]
+    },
+    "norm_out": {
+      "file": "video-vae-encoder-stage-norm_out.f32",
+      "shape": [
+        1024,
+        4,
+        4
+      ]
+    },
+    "pre_quant": {
+      "file": "video-vae-encoder-stage-pre_quant.f32",
+      "shape": [
+        48,
+        4,
+        4
+      ]
+    }
+  },
+  "teacher": {
+    "deterministic_algorithms": true,
+    "elapsed_seconds": 50.93092630102183,
+    "encoder_parameters": 180337888,
+    "implementation": "shipped checkpoint bundle, fp32 CPU",
+    "numpy_version": "2.5.4",
+    "threads": 1,
+    "tiling_parity": {
+      "real_activations": "diffusers _stitch_tiles and legacy tiled_encode bitwise equal to the transcription on the canvas tiles and on 64x64 probes at tile 32/48"
+    },
+    "torch_version": "2.9.1+cpu"
+  },
+  "tile_stages": {
+    "moments": "video-vae-encoder-tile-00-moments.f32",
+    "pre_quant": "video-vae-encoder-tile-00-pre_quant.f32"
+  },
+  "tiling": {
+    "axes": {
+      "1024": {
+        "lengths": [
+          256,
+          256,
+          256,
+          256,
+          256
+        ],
+        "overlaps_latent": [
+          4,
+          4,
+          4,
+          4
+        ],
+        "overlaps_pixels": [
+          64,
+          64,
+          64,
+          64
+        ],
+        "starts": [
+          0,
+          192,
+          384,
+          576,
+          768
+        ]
+      },
+      "1344": {
+        "lengths": [
+          256,
+          256,
+          256,
+          256,
+          256,
+          256,
+          256
+        ],
+        "overlaps_latent": [
+          5,
+          5,
+          5,
+          5,
+          4,
+          4
+        ],
+        "overlaps_pixels": [
+          80,
+          80,
+          80,
+          80,
+          64,
+          64
+        ],
+        "starts": [
+          0,
+          176,
+          352,
+          528,
+          704,
+          896,
+          1088
+        ]
+      },
+      "256": {
+        "lengths": [
+          256
+        ],
+        "overlaps_latent": [],
+        "overlaps_pixels": [],
+        "starts": [
+          0
+        ]
+      },
+      "320": {
+        "lengths": [
+          256,
+          256
+        ],
+        "overlaps_latent": [
+          12
+        ],
+        "overlaps_pixels": [
+          192
+        ],
+        "starts": [
+          0,
+          64
+        ]
+      },
+      "512": {
+        "lengths": [
+          256,
+          256,
+          256
+        ],
+        "overlaps_latent": [
+          8,
+          8
+        ],
+        "overlaps_pixels": [
+          128,
+          128
+        ],
+        "starts": [
+          0,
+          128,
+          256
+        ]
+      },
+      "768": {
+        "lengths": [
+          256,
+          256,
+          256,
+          256
+        ],
+        "overlaps_latent": [
+          6,
+          5,
+          5
+        ],
+        "overlaps_pixels": [
+          96,
+          80,
+          80
+        ],
+        "starts": [
+          0,
+          160,
+          336,
+          512
+        ]
+      }
+    },
+    "blend": "linear 1-pos/n then pos/n over latent rows, then columns, then trim",
+    "enabled": true,
+    "minimum_overlap_pixels": 64,
+    "round_robin_widening": 16,
+    "tile_pixels": 256
+  }
+}

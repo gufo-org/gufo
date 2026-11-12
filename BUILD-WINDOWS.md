@@ -35,6 +35,9 @@ release packaging builds the upstream runtime instead.
   workload (MSVC x64).
 - **Git**, **CMake ≥ 3.29**, **Ninja** (Visual Studio bundles both;
   `vs-env.cmd` puts them on `PATH`) and **Python 3**.
+- **Rust 1.88 or newer** from [rustup](https://rustup.rs), with the
+  `x86_64-pc-windows-msvc` target. Rustup reads the pinned version from
+  `rust-toolchain.toml`; Cargo builds the Rust components.
 - **vcpkg**, a full clone (the manifest baseline resolves through its
   history), with `VCPKG_ROOT` set to it:
 
@@ -153,7 +156,7 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
 
 ## External source extensions
 
-Use the [extension distribution recipe](docs/model-extensions/DISTRIBUTION.md#native-windows-and-zip-recipe)
+Use the [extension distribution recipe](docs/internal/extension-distribution.md#native-windows-and-zip-recipe)
 for vcpkg dependency preflight, external source selection, CMake installation,
 license/data staging and fresh-ZIP runtime checks. Declared metadata dependencies
 do not install additional vcpkg ports automatically.

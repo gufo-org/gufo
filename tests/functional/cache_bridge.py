@@ -102,7 +102,8 @@ def check_cache_bridge(client, model, checks, chat_result, capacity_bytes):
     while published < FILL_FACTOR * capacity_bytes:
         if side == MAX_FILL_REQUESTS:
             raise AssertionError(f"unqualified: {side} background requests published "
-                                 f"{published} of {capacity_bytes} budget bytes")
+                                 f"{published} of {capacity_bytes} budget bytes; try "
+                                 f"--cache-ram-bytes {int(published / FILL_FACTOR)} or less")
         _, result = chat(f"bridge_fill_{side:03d}", notice(side))
         published += result["usage"]["gufo"]["cache_snapshot_bytes"]
         side += 1

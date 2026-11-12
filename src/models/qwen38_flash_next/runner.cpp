@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "gufo/ext/component_cache_resources.hpp"
+#include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
@@ -28,6 +29,7 @@
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
+#include "src/models/qwen38_flash_next/probe.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -215,6 +217,31 @@ const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
   return *qfn;
 }
 
+// Arms the model's layer hook from the host's yield for one prefill step.
+class PrefillYieldScope {
+public:
+  PrefillYieldScope(const QwenFlashNextModel& model,
+                    const TextRunnerState& state)
+      : model_(model) {
+    if (state.prefill_yield_groups() > 1)
+      model_.SetPrefillYield(state.prefill_yield_groups(),
+                             [&state] { state.YieldPrefill(); });
+  }
+  ~PrefillYieldScope() { model_.SetPrefillYield(1, {}); }
+  PrefillYieldScope(const PrefillYieldScope&) = delete;
+  PrefillYieldScope& operator=(const PrefillYieldScope&) = delete;
+
+private:
+  const QwenFlashNextModel& model_;
+};
+
+// Beside decoders, prompts keep the 4,096-row pass and split it into layer
+// groups: one pass takes about 2.1 s, a decode step about 34 ms.
+constexpr std::size_t kMaxPrefillLayerGroups = 8;
+// Every batched plan runs inside a layer hook (Executor::kHookParkedRows),
+// so each round decodes all decoders at once rather than one in turn.
+constexpr std::size_t kMaxBatchWidth = 8;
+
 class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
@@ -234,17 +261,12 @@ public:
     // lifetime is an exact process-local identity; durable caches still
     // require the validated full artifact fingerprints below.
     if (!artifact_fingerprint.empty()) {
-      persistence_ = TextRunnerPersistenceDescriptor{
-          .compatibility_identity = QwenFlashNextCompatibilityIdentity(
-              artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
-              use_mtp_, max_context_, max_draft_tokens_,
-              model_->DecodeConcurrency(),
-              models::qwen38_flash_next::RopePositionPolicy(
-                  model_->config().rope_scaling)),
-          .payload_version =
-              models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
-      };
-      component_identity_ = persistence_->compatibility_identity;
+      component_identity_ = QwenFlashNextCompatibilityIdentity(
+          artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
+          use_mtp_, max_context_, max_draft_tokens_,
+          model_->DecodeConcurrency(),
+          models::qwen38_flash_next::RopePositionPolicy(
+              model_->config().rope_scaling));
     } else {
       component_identity_ = QwenFlashNextProcessIdentity(
           model_.get(), max_context_, use_mtp_, max_draft_tokens_,
@@ -252,7 +274,6 @@ public:
     }
   }
 
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
@@ -286,13 +307,12 @@ public:
             TextRunnerCapabilities{
                 .supports_vision = model_->VisionEncoder() != nullptr,
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = use_mtp_,
                 .batched_multi_token_decode = use_mtp_,
-                .batched_multi_token_decode_max_width = use_mtp_ ? 8u : 0u,
+                .batched_multi_token_decode_max_width =
+                    use_mtp_ ? kMaxBatchWidth : 0u,
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
@@ -302,28 +322,34 @@ public:
                     std::max<std::size_t>(1, model_->config().compress_ratio),
                 .max_in_pass_checkpoints = rocm::kMaxPassCheckpoints,
             },
-        .persistence = persistence_,
-        .sampling_preset = sampling::TextModelPreset::kQwen38,
+        .sampling_defaults = FlashNextSamplingDefaults(),
+        .scheduling =
+            TextSchedulingProfile{
+                .pass_tokens = model_->PrefillCapacity(),
+                .max_layer_groups = kMaxPrefillLayerGroups,
+                .max_yield_decode_width = kMaxBatchWidth,
+            },
     };
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
+    const auto session_bytes = model_->SessionBytes(
+        use_mtp_ ? gufo::core::SessionMode::kSpeculative
+                 : gufo::core::SessionMode::kAutoregressive,
+        max_context_);
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
       const auto deferred = model_->DeferredScratchBytes();
-      capacity = free_bytes > deferred ? free_bytes - deferred : 0;
+      capacity =
+          memory->free_bytes > deferred ? memory->free_bytes - deferred : 0;
+      gufo::hip::LogStateCapacity(*memory, *capacity, session_bytes, deferred);
     }
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
-        .per_request_state_bytes = model_->SessionBytes(
-            use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                     : gufo::core::SessionMode::kAutoregressive,
-            max_context_),
+        .per_request_state_bytes = session_bytes,
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
         .temporary_scratch_bytes = 0,
@@ -336,7 +362,7 @@ public:
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
     std::vector<TextExecutionPlan> plans{
         {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
-    for (std::size_t width = 2; width <= 8; ++width) {
+    for (std::size_t width = 2; width <= kMaxBatchWidth; ++width) {
       plans.push_back(
           {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
     }
@@ -415,11 +441,6 @@ public:
     return model_->tokenizer().Decode(tokens);
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error(
-        "Flash-Next execution slots are owned by the component cache");
-  }
-
   void PreparePrefixReuse(
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
@@ -464,6 +485,7 @@ public:
                                       ? model_->PrefillThroughCapacity()
                                       : model_->PrefillCapacity()})));
     std::string error;
+    const PrefillYieldScope yield(*model_, state);
     if (!qfn.session().Sync(prefix, &error, next)) {
       qfn.set_position(0);
       throw std::runtime_error("Qwen3.8-Flash-Next prefill failed: " + error);
@@ -489,7 +511,6 @@ public:
     return bytes ? std::optional<std::size_t>(bytes) : std::nullopt;
   }
 
-  using TextModelRunner::PrefillThrough;
   [[nodiscard]] TextPrefillStep PrefillThrough(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t budget,
@@ -514,12 +535,13 @@ public:
                                       : model_->PrefillCapacity()})));
     std::vector<std::uint32_t> points(boundaries.begin(), boundaries.end());
     double capture_ms = 0;
+    const PrefillYieldScope yield(*model_, state);
     try {
       qfn.adapter().PrefillThrough(
           qfn.slot(), prefix, points,
           [&](std::size_t index) {
             const auto started = std::chrono::steady_clock::now();
-            consume(index, nullptr);
+            consume(index);
             capture_ms += std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - started)
                               .count();
@@ -766,7 +788,6 @@ private:
   std::uint32_t max_context_;
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
-  std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
 };
 
@@ -852,6 +873,13 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
   if (!model) {
     if (error)
       *error = "Failed to load Flash-Next model: " + load_error;
+    return nullptr;
+  }
+  try {
+    models::qwen::vision::PrepareForServing(model->VisionEncoder());
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
     return nullptr;
   }
   // Each eight rows of wide copy verification past the first reserve

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "gufo/ext/component_cache_resources.hpp"
+#include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/text.hpp"
@@ -27,6 +28,7 @@
 #include "src/models/deepseek_v4_flash/continuation_identity.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/deepseek_v4_flash/probe.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
 namespace {
@@ -92,6 +94,30 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   return *deepseek;
 }
 
+// Arms the session's layer hook from the host's yield for one prefill step.
+class PrefillYieldScope {
+public:
+  PrefillYieldScope(models::deepseek_v4_flash::Session& session,
+                    const TextRunnerState& state)
+      : session_(session) {
+    if (state.prefill_yield_groups() > 1)
+      session_.SetPrefillYield(state.prefill_yield_groups(),
+                               [&state] { state.YieldPrefill(); });
+  }
+  ~PrefillYieldScope() { session_.SetPrefillYield(1, {}); }
+  PrefillYieldScope(const PrefillYieldScope&) = delete;
+  PrefillYieldScope& operator=(const PrefillYieldScope&) = delete;
+
+private:
+  models::deepseek_v4_flash::Session& session_;
+};
+
+// Beside decoders, prompts keep the 4,096-row pass and split it into layer
+// groups: one pass takes about 8.2 s, a decode step about 56 ms.
+constexpr std::size_t kMaxPrefillLayerGroups = 16;
+// Batched AR decode and DSpark verification take two to eight sessions.
+constexpr std::size_t kMaxBatchWidth = 8;
+
 std::vector<TextRunnerToken> DeepSeekRunnerTokens(std::span<const int> tokens) {
   std::vector<TextRunnerToken> converted;
   converted.reserve(tokens.size());
@@ -135,14 +161,10 @@ public:
         throw std::invalid_argument(
             "DSpark disk cache requires a support SHA-256 fingerprint");
       }
-      persistence_ = TextRunnerPersistenceDescriptor{
-          .compatibility_identity = DeepSeekCompatibilityIdentity(
-              artifact_fingerprint,
-              use_dspark_ ? support_fingerprint : std::string{}, max_context_,
-              max_draft_tokens_),
-          .payload_version = DS4_SESSION_PAYLOAD_VERSION,
-      };
-      component_identity_ = persistence_->compatibility_identity;
+      component_identity_ = DeepSeekCompatibilityIdentity(
+          artifact_fingerprint,
+          use_dspark_ ? support_fingerprint : std::string{}, max_context_,
+          max_draft_tokens_);
     } else {
       // Without file fingerprints the loaded model is the identity; durable
       // caches require the validated artifact identity above.
@@ -151,7 +173,6 @@ public:
     }
   }
 
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
@@ -187,8 +208,6 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = dspark,
@@ -196,17 +215,25 @@ public:
                 .batched_multi_token_decode_max_width = 8u,
                 .prefix_reuse = true,
             },
-        .persistence = persistence_,
-        .sampling_preset = sampling::TextModelPreset::kDeepSeekV4Flash,
+        .sampling_defaults = DeepSeekSamplingDefaults(),
+        // Decodes between layer groups, batched ones and DSpark verification
+        // included, use their own batch workspace (rocm_graph_yield_prefill).
+        .scheduling =
+            TextSchedulingProfile{
+                .pass_tokens =
+                    models::deepseek_v4_flash::Session::PrefillCapacityFor(
+                        static_cast<int>(max_context_)),
+                .max_layer_groups = kMaxPrefillLayerGroups,
+                .max_yield_decode_width = kMaxBatchWidth,
+            },
     };
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      capacity = free_bytes;
+    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
+      capacity = memory->free_bytes;
+      gufo::hip::LogStateCapacity(*memory, *capacity, 0, 0);
     }
     return {
         .resident_weights_bytes = std::nullopt,
@@ -226,7 +253,7 @@ public:
             .physical_width = 1,
         },
     };
-    for (std::size_t width = 2; width <= 8; ++width) {
+    for (std::size_t width = 2; width <= kMaxBatchWidth; ++width) {
       plans.push_back({
           .kind = TextExecutionPlanKind::kBatched,
           .physical_width = width,
@@ -318,11 +345,6 @@ public:
     return text;
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error(
-        "DeepSeek execution slots are owned by the component cache");
-  }
-
   void PreparePrefixReuse(
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
@@ -352,6 +374,7 @@ public:
     const std::size_t next_position = offset + consumed;
     const auto prefix = DeepSeekEngineTokens(prompt.first(next_position));
     std::string error;
+    const PrefillYieldScope yield(deepseek.session(), state);
     if (!deepseek.session().Sync(prefix, &error)) {
       deepseek.set_position(0);
       throw std::runtime_error("DeepSeek prefill failed: " + error);
@@ -723,7 +746,6 @@ private:
   std::uint32_t max_context_;
   bool use_dspark_;
   std::uint32_t max_draft_tokens_;
-  std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
 };
 

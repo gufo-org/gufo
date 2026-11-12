@@ -1,7 +1,7 @@
 # llama.cpp tool-grammar parity
 
 Regenerates `tests/fixtures/llama_cpp_tool_grammar.json`, which
-`json_constraint_test` replays: for 86 tool schemas and 4 candidate outputs per
+`json_constraint_test` replays: for 99 tool schemas and 4 candidate outputs per
 schema, the verdict of llama.cpp's own Qwen3-Coder and DeepSeek tool grammars
 (its GBNF engine, `tool_choice: "required"`) beside Gufo's. Every disagreement
 must match a reviewed reason in `golden.py`. This fixture covers its listed

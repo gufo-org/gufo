@@ -1,9 +1,7 @@
 name: Release automation
 
 on:
-  schedule:
-    # Daily at a non-round minute to reduce scheduler congestion.
-    - cron: "17 5 * * *"
+  # Releases are cut on demand from the Actions tab ("Run workflow").
   workflow_dispatch:
 
 permissions:
@@ -38,6 +36,7 @@ jobs:
           repositories: |
             gufo
             toolboxes
+            website
           permission-actions: read
           permission-contents: write
           permission-issues: write
@@ -63,6 +62,18 @@ jobs:
             '{event_type: "gufo-release", client_payload: {tag: $tag}}' \
             | gh api --method POST repos/gufo-org/toolboxes/dispatches --input -
 
+      - name: Request website docs for existing release
+        if: ${{ steps.release-please.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.release-please.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n --arg tag "$RELEASE_TAG" \
+            '{event_type: "gufo-release", client_payload: {tag: $tag}}' \
+            | gh api --method POST repos/gufo-org/website/dispatches --input -
+
       - name: Wait for release PR checks
         if: >-
           ${{ steps.release-please.outputs.prs_created == 'true' &&
@@ -80,7 +91,7 @@ jobs:
           fi
 
           required_checks=(
-            "Validate PR title"
+            "Validate PR title and extension API"
             "Run CPU and repository checks"
             # The full functional suite on Strix Halo; only releases require it.
             "devlab/functional"
@@ -148,6 +159,7 @@ jobs:
           repositories: |
             gufo
             toolboxes
+            website
           permission-actions: read
           permission-contents: write
           permission-issues: write
@@ -198,3 +210,15 @@ jobs:
           jq -n --arg tag "$RELEASE_TAG" \
             '{event_type: "gufo-release", client_payload: {tag: $tag}}' \
             | gh api --method POST repos/gufo-org/toolboxes/dispatches --input -
+
+      - name: Request website docs for new release
+        if: ${{ steps.publish-release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.publish-release.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n --arg tag "$RELEASE_TAG" \
+            '{event_type: "gufo-release", client_payload: {tag: $tag}}' \
+            | gh api --method POST repos/gufo-org/website/dispatches --input -

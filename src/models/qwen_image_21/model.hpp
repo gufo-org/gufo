@@ -8,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace gufo::models::qwen_image_21 {
@@ -17,6 +18,8 @@ using Request = ext::ImageRequest;
 using Metrics = ext::ImageMetrics;
 using Result = ext::ImageResult;
 using CancellationCheck = ext::CancellationCheck;
+using Lora = ext::ImageLora;
+using LoraInfo = ext::ImageLoraInfo;
 
 Image DecodeImage(std::span<const std::uint8_t> bytes);
 std::vector<std::uint8_t> EncodePng(const Image& image);
@@ -37,6 +40,14 @@ struct Observer {
 };
 
 void ValidateRequest(const Request& request);
+/// Model prompt for the caller's prompt and background intent. Transparent
+/// requests receive the RGBA framing Qwen-Image-2.1 needs for alpha output;
+/// auto and opaque requests keep the prompt unchanged.
+std::string ConditionPrompt(std::string_view prompt,
+                            ext::ImageBackground background);
+/// Qwen-Image-2.1 accepts reference images and transparent backgrounds.
+inline constexpr ext::ImageCapabilities kCapabilities{
+    .edits = true, .transparent_background = true};
 std::vector<float> FlowSigmas(int steps, int image_tokens);
 
 /// Base flow matching or the qualified checkpoint-supplied Turbo schedule.
@@ -61,6 +72,12 @@ public:
                   const Observer& observer = {});
   std::vector<std::uint32_t> Tokenize(std::string_view text) const;
   const SamplingConfig& sampling() const;
+  /// Validate and register an adapter before serving; requests select it by
+  /// name.
+  LoraInfo AddLora(const std::string& name, const std::filesystem::path& path);
+  /// Adapters merged into the transformer weights now (does not wait for
+  /// Generate); empty while a switch is in progress or after one failed.
+  std::vector<Lora> ActiveLoras() const;
 
 private:
   struct Impl;

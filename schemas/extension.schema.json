@@ -420,7 +420,7 @@
         "properties": {
           "pkg_config": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.+-]*$"
           },
           "nix": {
             "type": "string",

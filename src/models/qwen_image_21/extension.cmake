@@ -6,12 +6,14 @@ gufo_extension_target(
     image.cpp
     weights.cpp
     tokenizer.cpp
+    lora.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
     gufo_core
     gufo_qwen_text
     ICU::i18n
+    PNG::PNG
 )
 
 if(TARGET gufo_qwen_image_21)

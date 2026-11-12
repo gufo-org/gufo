@@ -658,6 +658,151 @@ void VerifiedDependencies() {
   assert(retire() == settled);
 }
 }  // namespace
+// A window manifest lists the chunks from its window's first row, uses the
+// window format version and size, and shares chunk files with other
+// manifests at different list positions. Window 3 rows, chunks of 2.
+DiskManifest Windowed(Rows rows, std::vector<unsigned> chunks, unsigned tail,
+                      unsigned checkpoint) {
+  DiskManifest m;
+  m.checkpoint = {checkpoint};
+  m.lineage = {3};
+  m.compatibility.fill(0x42);
+  m.tokens.assign(rows, 17);
+  DiskComponent window{{{1}, 4, ComponentKind::kWindowRows, 4, 2, 0, 3},
+                       {{1}, rows},
+                       {},
+                       {},
+                       {}};
+  for (auto id : chunks)
+    window.chunks.push_back({Id(id), 8, 90 + id});
+  if (tail)
+    window.tail = DiskPayload{Id(tail), 4, 90 + tail};
+  m.components.push_back(window);
+  m.components.push_back({{{2}, 5, ComponentKind::kPrivateState, 0, 0, 16},
+                          {{2}, rows},
+                          {},
+                          {},
+                          DiskPayload{Id(100 + checkpoint), 16, 101}});
+  return m;
+}
+void WindowFormat() {
+  const auto eight = Windowed(8, {1, 2}, 0, 7);  // Chunks [4, 6) and [6, 8).
+  auto encoded = EncodeManifest(eight);
+  assert(encoded[8] == kDiskWindowFormatVersion);
+  auto decoded = DecodeManifest(encoded);
+  assert(decoded.components[0].descriptor.window_rows == 3);
+  assert(decoded.components[0].chunks == eight.components[0].chunks);
+  assert(EncodeManifest(decoded) == encoded);
+  for (std::size_t i = 0; i < encoded.size(); ++i)
+    Reject([&] { (void)DecodeManifest(std::span(encoded).first(i)); });
+  // Window components need the window format version.
+  auto old = encoded;
+  old[8] = kDiskFormatVersion;
+  const auto checksum = DiskChecksum(std::span(old).first(old.size() - 8));
+  for (unsigned i = 0; i < 8; ++i)
+    old[old.size() - 8 + i] = (checksum >> (8 * i)) & 255;
+  Reject([&] { (void)DecodeManifest(old); });
+  // Chunks start at the window's first chunk, never at row 0.
+  Reject([&] { (void)EncodeManifest(Windowed(8, {1}, 0, 7)); });
+  Reject([&] { (void)EncodeManifest(Windowed(8, {9, 1, 2}, 0, 7)); });
+  auto unsized = eight;
+  unsized.components[0].descriptor.window_rows = 0;
+  Reject([&] { (void)EncodeManifest(unsized); });
+  // Chunk [6, 8) is second in one manifest and first in the other.
+  Directory d;
+  {
+    DiskStore init(ledger, d.path, UINT64_MAX);
+  }
+  const auto nine = Windowed(9, {2}, 3, 8);  // Chunk [6, 8) and row 8.
+  for (const auto* m : {&eight, &nine})
+    Payloads(d.path, *m);
+  Put(d.path, eight, 7);
+  Put(d.path, nine, 8);
+  {
+    DiskStore store(ledger, d.path, UINT64_MAX);
+    assert(store.Entries().size() == 2);
+    assert(store.Stats().rejected_manifests == 0);
+  }
+}
+// Publication validates its candidate against stored checkpoints. That check
+// must not need RAM-ledger headroom proportional to every reference on disk:
+// the RAM cache fills the same ledger, and a refusal there stopped all disk
+// publication permanently once the tier had grown (#1030).
+void ValidationIndependentOfStoredReferences() {
+  Directory d;
+  {
+    DiskStore init(ledger, d.path, UINT64_MAX);
+  }
+  constexpr unsigned kStored = 2, kRows = 16384;
+  const std::array<std::uint8_t, 1> byte{0};
+  const auto checksum = DiskChecksum(byte);
+  const auto file = [](unsigned manifest, unsigned row) {
+    auto id = Id(row);
+    id[2] = manifest + 1;
+    return id;
+  };
+  const auto rows = [&](unsigned manifest, unsigned count) {
+    DiskManifest m;
+    m.checkpoint = {100 + manifest};
+    m.lineage = {3};
+    m.compatibility.fill(0x42);
+    m.tokens = {17, 18, 19};
+    DiskComponent c{{{1}, 4, ComponentKind::kAppendRows, 1, 1, 0},
+                    {{1}, count},
+                    {},
+                    {},
+                    {}};
+    for (unsigned row = 0; row < count; ++row)
+      c.chunks.push_back({file(manifest, row), 1, checksum});
+    m.components.push_back(std::move(c));
+    return m;
+  };
+  for (unsigned i = 0; i < kStored; ++i) {
+    auto m = rows(i, kRows);
+    Payloads(d.path, m);
+    Put(d.path, m, 1000 + i);
+  }
+  // Ample for publishing one small checkpoint, far below a catalog of all
+  // kStored * kRows stored references.
+  constexpr std::size_t kHeadroom = 1 << 20;
+  ResourceLedger full{{1ULL << 32, 1ULL << 32, 0, 0}};
+  {
+    DiskStore store(full, d.path, UINT64_MAX);
+    assert(store.Entries().size() == kStored);
+    const auto used = full.Snapshot().ram_bytes;
+    // Stand-in for a RAM cache that already occupies the rest of the budget.
+    auto cache = full.Reserve(ResourceCategory::kMetadata,
+                              (1ULL << 32) - used - kHeadroom);
+    auto candidate = rows(kStored, 1);
+    const std::array<DiskWriteBuffer, 1> buffers{
+        {{false, file(kStored, 0), byte}}};
+    store.Publish(Id(2000), candidate, buffers);
+    assert(store.Open(candidate.checkpoint));
+    // The candidate is still checked against every stored checkpoint.
+    auto conflict = rows(kStored + 1, 1);
+    // Same bytes, so verification passes; a different lineage cannot share.
+    conflict.lineage = {4};
+    conflict.components[0].chunks[0].file = file(0, 0);
+    bool invalid = false;
+    try {
+      store.Publish(Id(2001), conflict, {});
+    } catch (const std::invalid_argument&) {
+      invalid = true;
+    }
+    assert(invalid && !store.Open(conflict.checkpoint));
+    auto duplicate = rows(kStored + 2, 1);
+    duplicate.checkpoint = {100};
+    duplicate.components[0].chunks[0].file = file(0, 0);
+    invalid = false;
+    try {
+      store.Publish(Id(2002), duplicate, {});
+    } catch (const std::invalid_argument&) {
+      invalid = true;
+    }
+    assert(invalid);
+  }
+  assert(full.Snapshot().total_bytes == 0);
+}
 int main() {
   Format();
   ChecksumReference();
@@ -671,6 +816,8 @@ int main() {
   RootSymlinks();
   ParentPathResolution();
   MetadataAdmission();
+  ValidationIndependentOfStoredReferences();
+  WindowFormat();
   assert(ledger.Snapshot().total_bytes == 0);
   std::cout << "disk format, ownership and metadata index passed\n";
 }

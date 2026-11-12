@@ -34,6 +34,7 @@ enum class TextGenerationErrorCode : std::uint8_t {
   kOutputBackpressure,
   kSchedulerStopping,
   kToolChoiceUnsatisfied,
+  kInsufficientMemory,
   kDeviceLost,
 };
 
@@ -43,10 +44,21 @@ inline constexpr const char* kDeviceLostMessage =
 
 class TextGenerationError final : public std::runtime_error {
 public:
-  TextGenerationError(TextGenerationErrorCode code, const std::string& message)
-      : std::runtime_error(message), code_(code) {}
+  TextGenerationError(TextGenerationErrorCode code, const std::string& message,
+                      std::optional<std::size_t> required_bytes = std::nullopt,
+                      std::optional<std::size_t> remaining_bytes = std::nullopt)
+      : std::runtime_error(message),
+        code_(code),
+        required_bytes_(required_bytes),
+        remaining_bytes_(remaining_bytes) {}
 
   [[nodiscard]] TextGenerationErrorCode code() const noexcept { return code_; }
+  [[nodiscard]] std::optional<std::size_t> required_bytes() const noexcept {
+    return required_bytes_;
+  }
+  [[nodiscard]] std::optional<std::size_t> remaining_bytes() const noexcept {
+    return remaining_bytes_;
+  }
   [[nodiscard]] int http_status() const noexcept {
     switch (code_) {
       case TextGenerationErrorCode::kQueueFull:
@@ -57,6 +69,7 @@ public:
       case TextGenerationErrorCode::kOutputLimit:
       case TextGenerationErrorCode::kOutputBackpressure:
       case TextGenerationErrorCode::kSchedulerStopping:
+      case TextGenerationErrorCode::kInsufficientMemory:
       case TextGenerationErrorCode::kDeviceLost:
         return 503;
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
@@ -80,6 +93,8 @@ public:
         return "scheduler_stopping";
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return "tool_choice_unsatisfied";
+      case TextGenerationErrorCode::kInsufficientMemory:
+        return "insufficient_memory";
       case TextGenerationErrorCode::kDeviceLost:
         return "device_lost";
     }
@@ -93,6 +108,8 @@ public:
 
 private:
   TextGenerationErrorCode code_;
+  std::optional<std::size_t> required_bytes_;
+  std::optional<std::size_t> remaining_bytes_;
 };
 
 using ChatRequest = ext::ChatRequest;
@@ -141,17 +158,20 @@ public:
   };
 
   using InitialOutputState = gufo::ext::InitialOutputState;
+  using ReasoningMarkup = gufo::ext::ReasoningMarkup;
 
   struct SamplingDefaults {
     /// Zero means generate until EOS or the remaining context is exhausted.
     std::size_t max_tokens{0};
     sampling::SamplingConfig sampling;
-    sampling::TextModelPreset model{sampling::TextModelPreset::kUnspecified};
+    /// Provider defaults; unset leaves unsupplied controls at `sampling`.
+    std::optional<sampling::TextSamplingDefaults> provider;
     sampling::SamplingOverrides supplied{sampling::SamplingOverrides::All()};
 
     [[nodiscard]] sampling::SamplingConfig Resolve(
         std::optional<bool> thinking) const {
-      return sampling::ResolveTextSampling(model, thinking, sampling, supplied);
+      return sampling::ResolveTextSampling(provider, thinking, sampling,
+                                           supplied);
     }
   };
 
@@ -166,8 +186,6 @@ public:
     std::size_t cache_snapshot_bytes{0};
     /// Bytes admitted to background persistence; completion is logged by cache.
     std::size_t cache_disk_queued_bytes{0};
-    std::size_t cache_shared_bytes{0};
-    /// Shared-prefix snapshots queued while prefilling this request.
     std::size_t completion_tokens{0};
     /// Generated reasoning tokens, excluding the closing template delimiter.
     std::size_t reasoning_tokens{0};
@@ -188,7 +206,11 @@ public:
     std::size_t active_decode_prefill_chunks{0};
     std::size_t max_prefill_chunk_tokens{0};
     std::size_t max_consecutive_active_prefill_chunks{0};
-    std::size_t configured_active_prefill_tokens{0};
+    /// Most layer groups the host asked one of this request's passes to be
+    /// split into; a runner may add a boundary where a pass would stall.
+    std::size_t max_prefill_layer_groups{1};
+    /// Decode rounds other sessions ran between those groups.
+    std::size_t prefill_yield_rounds{0};
     std::size_t queue_depth_at_submit{0};
     std::size_t client_queue_depth_at_submit{0};
     std::size_t resident_requests_at_admission{0};
@@ -246,6 +268,22 @@ public:
     ToolFormat() const {
       return std::nullopt;
     }
+    /// Tool dialect identity the response parsers select markers, closers
+    /// and the call parser by; stable for this admitted request. The default
+    /// is the built-in identity of ToolFormat(), and none keeps the legacy
+    /// detection. An identity that is neither built in nor registered
+    /// recognizes no calls.
+    [[nodiscard]] virtual std::optional<std::string> ToolDialectId() const {
+      const auto format = ToolFormat();
+      if (!format)
+        return std::nullopt;
+      return std::string(ext::BuiltinToolDialectId(*format));
+    }
+    /// Reasoning delimiters the response parsers use for this admitted
+    /// request. Backends without this metadata retain `<think>`/`</think>`.
+    [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const {
+      return {"<think>", "</think>"};
+    }
   };
 
   TextGenerationBackend() = default;
@@ -275,6 +313,17 @@ public:
   /// Live execution sessions; empty when the backend has no session pool.
   [[nodiscard]] virtual std::vector<SessionState> session_states() const {
     return {};
+  }
+
+  /// Host prompt-state admission budget, when the backend accounts for it.
+  struct PromptAdmissionBudget {
+    std::size_t budget_bytes{0};
+    std::size_t used_bytes{0};
+    std::size_t available_bytes{0};
+  };
+  [[nodiscard]] virtual std::optional<PromptAdmissionBudget>
+  prompt_admission_budget() const {
+    return std::nullopt;
   }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
@@ -369,6 +418,14 @@ public:
   /// template, before tokenization. Empty when the backend cannot tell.
   [[nodiscard]] virtual std::optional<std::string> render_chat_prompt(
       const ChatRequest&) const {
+    return std::nullopt;
+  }
+
+  /// Token ids of raw text as a raw prompt tokenizes: control-token spellings
+  /// become their special tokens and nothing is prepended. Empty when the
+  /// backend cannot tell.
+  [[nodiscard]] virtual std::optional<std::vector<std::uint32_t>> tokenize(
+      std::string_view) const {
     return std::nullopt;
   }
 };

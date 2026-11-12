@@ -250,6 +250,76 @@ void TestPresetsAndReports() {
         "telemetry records preview latency");
 }
 
+void TestKeyframeCanvas() {
+  // A 1664x928 keyframe (aspect 1.79) takes its own aspect at each preset's
+  // budget; the full-resolution preset matches the released rule (1376x768).
+  struct Case {
+    const char* preset;
+    int internal_width;
+    int internal_height;
+    int output_width;
+    int output_height;
+  };
+  constexpr Case kCases[] = {
+      {"exact", 672, 384, 672, 384}, {"exact-1344x768", 1376, 768, 1376, 768},
+      {"fast", 512, 288, 682, 384},  {"aggressive", 416, 224, 666, 358},
+      {"dev", 352, 192, 352, 192},
+  };
+  for (const Case& test : kCases) {
+    std::string error;
+    const auto preset = h3::ResolveGenerationPreset(test.preset, &error);
+    Check(preset.has_value(), "preset resolves for keyframe canvas");
+    if (!preset.has_value()) {
+      continue;
+    }
+    const auto resolved =
+        h3::ResolveKeyframeParameters(*preset, 1664, 928, &error);
+    Check(resolved.has_value(), "keyframe canvas resolves");
+    if (!resolved.has_value()) {
+      continue;
+    }
+    Check(resolved->internal_width == test.internal_width &&
+              resolved->internal_height == test.internal_height,
+          std::string("keyframe aspect sets the internal canvas for ") +
+              test.preset);
+    Check(resolved->output_width == test.output_width &&
+              resolved->output_height == test.output_height,
+          std::string("keyframe canvas keeps the output scale for ") +
+              test.preset);
+    Check(resolved->preset == preset->preset &&
+              resolved->frames == preset->frames &&
+              resolved->evaluations == preset->evaluations &&
+              resolved->active_blocks == preset->active_blocks &&
+              resolved->reuse_interval == preset->reuse_interval &&
+              resolved->mux == preset->mux &&
+              resolved->selected_frames == preset->selected_frames,
+          "keyframe canvas changes only the geometry");
+    Check(h3::ValidateGenerationParameters(*resolved, &error),
+          std::string("resolved keyframe canvas is a legal generation for ") +
+              test.preset);
+  }
+
+  std::string error;
+  const auto exact = h3::ResolveGenerationPreset("exact", &error);
+  const auto square = h3::ResolveKeyframeParameters(*exact, 900, 900, &error);
+  Check(square.has_value() && square->internal_width == 512 &&
+            square->internal_height == 512 && square->output_width == 512 &&
+            square->output_height == 512,
+        "a square keyframe keeps the square preset canvas");
+  const auto portrait =
+      h3::ResolveKeyframeParameters(*exact, 928, 1664, &error);
+  Check(portrait.has_value() && portrait->internal_width == 384 &&
+            portrait->internal_height == 672,
+        "a portrait keyframe resolves a portrait canvas");
+  Check(!h3::ResolveKeyframeParameters(*exact, 5000, 1000, &error).has_value(),
+        "keyframes beyond the released 4:1 aspect range are rejected");
+  // dev's 256x256 budget resolves a 3.7:1 keyframe to 480x128, which the
+  // released processor would upscale before the vision tower.
+  const auto dev = h3::ResolveGenerationPreset("dev", &error);
+  Check(!h3::ResolveKeyframeParameters(*dev, 1850, 500, &error).has_value(),
+        "keyframe canvases below the vision minimum are rejected");
+}
+
 void TestAtomicFrames() {
   const std::filesystem::path root =
       std::filesystem::temp_directory_path() /
@@ -362,6 +432,7 @@ int main() {
   TestDurations();
   TestGateRankedBlocks();
   TestPresetsAndReports();
+  TestKeyframeCanvas();
   TestAtomicFrames();
   TestAtomicLatents();
 #if !defined(ENGINE_ENABLE_HIP)

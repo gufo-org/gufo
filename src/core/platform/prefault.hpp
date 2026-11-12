@@ -147,7 +147,13 @@ inline void PrefaultMappedRange(const void* data, std::size_t bytes) {
 /// The mapping stays valid: a later read refaults the page from the file, so
 /// this is safe even if a host read remains. Never call it on a range that is
 /// hipHostRegister'ed, where the mapping is the GPU-visible weight memory.
-/// Best effort: failures are ignored, and it is a no-op on Windows.
+/// Best effort: failures are ignored.
+///
+/// Windows keeps every touched page of a file view in the working set until
+/// memory runs out (#829). VirtualUnlock on pages that are not locked removes
+/// them from the working set; they stay in the standby list, so a later read
+/// is a soft fault. Pages locked with VirtualLock are unlocked instead. The
+/// range must lie within one view.
 inline void ReleaseMappedPages(const void* data, std::size_t bytes) noexcept {
 #if !defined(__HIP_DEVICE_COMPILE__) && !defined(_WIN32)
   const long page_size = ::sysconf(_SC_PAGESIZE);
@@ -157,10 +163,40 @@ inline void ReleaseMappedPages(const void* data, std::size_t bytes) noexcept {
   const auto skip = address % static_cast<std::size_t>(page_size);
   (void)::madvise(reinterpret_cast<void*>(address - skip), bytes + skip,
                   MADV_DONTNEED);
+#elif !defined(__HIP_DEVICE_COMPILE__)
+  if (!data || bytes == 0)
+    return;
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const std::size_t page_size =
+      info.dwPageSize != 0 ? static_cast<std::size_t>(info.dwPageSize) : 4096U;
+  const auto address = reinterpret_cast<std::uintptr_t>(data);
+  const auto skip = address % page_size;
+  // Returns FALSE with ERROR_NOT_LOCKED after trimming the unlocked pages.
+  (void)VirtualUnlock(reinterpret_cast<void*>(address - skip), bytes + skip);
 #else
   static_cast<void>(data);
   static_cast<void>(bytes);
 #endif
+}
+
+/// ReleaseMappedPages for the part of [data, data + bytes) that lies inside
+/// the view [view, view + view_bytes); nothing for host memory outside it
+/// (heap copies are never trimmed).
+inline void ReleaseMappedRange(const void* view, std::size_t view_bytes,
+                               const void* data, std::size_t bytes) noexcept {
+  if (!view || !data || view_bytes == 0 || bytes == 0)
+    return;
+  const auto base = reinterpret_cast<std::uintptr_t>(view);
+  const auto address = reinterpret_cast<std::uintptr_t>(data);
+  const std::size_t skip = address < base ? base - address : 0;
+  if (skip >= bytes)
+    return;
+  const std::size_t offset = address + skip - base;
+  if (offset >= view_bytes)
+    return;
+  ReleaseMappedPages(reinterpret_cast<const void*>(address + skip),
+                     std::min(bytes - skip, view_bytes - offset));
 }
 
 }  // namespace gufo::platform

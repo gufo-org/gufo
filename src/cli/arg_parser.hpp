@@ -30,6 +30,9 @@ public:
     std::string description;
     std::string group;
     bool is_flag = false;
+    /// A flag that also accepts `--name=value`; its callback receives an
+    /// empty value for the bare spelling.
+    bool flag_value = false;
     mutable bool supplied = false;
     std::function<bool(std::string_view, std::string_view, std::string*)>
         parse_fn;
@@ -124,6 +127,24 @@ public:
     return *this;
   }
 
+  /// Register a flag that also accepts an inline value (`--name` or
+  /// `--name=value`). The callback receives an empty value for `--name`.
+  ArgParser& AddValueFlag(
+      std::string_view long_name, std::string_view description,
+      std::string_view group,
+      std::function<bool(std::string_view, std::string_view, std::string*)>
+          custom_parser) {
+    Option opt;
+    opt.long_name = std::string(long_name);
+    opt.description = std::string(description);
+    opt.group = std::string(group);
+    opt.is_flag = true;
+    opt.flag_value = true;
+    opt.parse_fn = std::move(custom_parser);
+    options_.push_back(std::move(opt));
+    return *this;
+  }
+
   /// Set the positional arguments receiver.
   ArgParser& SetPositionalHandler(
       std::function<bool(std::string_view, std::string*)> handler) {
@@ -183,7 +204,7 @@ public:
         const std::string_view val = arg.substr(equals + 1);
         const Option* inline_match = FindOption(name);
         if (inline_match != nullptr) {
-          if (inline_match->is_flag) {
+          if (inline_match->is_flag && !inline_match->flag_value) {
             if (error_msg != nullptr) {
               *error_msg =
                   "Option " + std::string(name) + " does not take a value";

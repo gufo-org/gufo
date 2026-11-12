@@ -23,11 +23,14 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | ICU | Linked; Unicode normalization/tokenization | `Unicode-3.0` | 78.3; flake.lock | [unicode-org/icu](https://github.com/unicode-org/icu) |
 | curl / libcurl | Linked; image HTTPS and evaluation client | `curl` | 8.21.0; flake.lock | [curl/curl](https://github.com/curl/curl) |
 | OpenSSL | Linked; cryptographic hashes and HTTPS dependency | `Apache-2.0` | 3.6.3; flake.lock | [openssl/openssl](https://github.com/openssl/openssl) |
-| libpng | Linked; image decoding | `libpng-2.0` | 1.6.58; flake.lock | [pnggroup/libpng](https://github.com/pnggroup/libpng) |
+| libpng | Linked; Qwen-Image PNG input decoding and output encoding | `libpng-2.0` | 1.6.58; flake.lock | [pnggroup/libpng](https://github.com/pnggroup/libpng) |
 | libjpeg-turbo | Linked; JPEG decoding | `IJG AND BSD-3-Clause AND Zlib` | 3.1.4.1; flake.lock | [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) |
 | libwebp | Linked; WebP decoding | `BSD-3-Clause` | 1.6.0; flake.lock | [webmproject/libwebp](https://chromium.googlesource.com/webm/libwebp) |
-| libsndfile | Linked; audio decoding | `LGPL-2.1-or-later` | 1.2.2; flake.lock | [libsndfile](https://github.com/libsndfile/libsndfile) |
-| libsoxr | Linked; audio resampling | `LGPL-2.1-or-later` | 0.1.3; flake.lock | [SoX Resampler](https://sourceforge.net/projects/soxr/) |
+| libopus | Linked; Ogg Opus audio decoding; [license text](licenses/libopus.txt) | `BSD-3-Clause` | 1.6.1; flake.lock | [xiph/opus](https://github.com/xiph/opus) |
+| httparse (Rust crate) | Statically linked; HTTP request heads | `MIT OR Apache-2.0` | 1.10.1; Cargo.lock | [seanmonstar/httparse](https://github.com/seanmonstar/httparse) |
+| png (Rust crate) | Statically linked; PNG decoding | `MIT OR Apache-2.0` | 0.18.1; Cargo.lock | [image-rs/image-png](https://github.com/image-rs/image-png) |
+| symphonia (Rust crates) | Statically linked, unmodified; audio decoding; [license text and source](licenses/rust.txt) | `MPL-2.0` | 0.6.1; Cargo.lock | [pdeljanov/Symphonia](https://github.com/pdeljanov/Symphonia) |
+| Rust standard library and crates | Statically linked into the Rust library; [license texts](licenses/rust.txt) | `MIT OR Apache-2.0` and per-crate terms | rustc in rust-toolchain.toml, with the crates its standard library bundles; crates in Cargo.lock | [rust-lang/rust](https://github.com/rust-lang/rust) |
 | FFmpeg | Linked libavformat/libavcodec/libavutil/libswscale for video embeddings; ffmpeg/ffprobe executables for media | `GPL-3.0-or-later` (Nix build with GPL/version3 components) | 9.0.2; flake.lock | [FFmpeg](https://github.com/FFmpeg/FFmpeg) |
 | LLVM OpenMP | Windows runtime built from upstream source; Microsoft-compatible DLL naming | `Apache-2.0 WITH LLVM-exception` | 18.1.8 (`3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff`) | [LLVM](https://github.com/llvm/llvm-project/tree/llvmorg-18.1.8/openmp); [license](licenses/llvm-openmp.txt) |
 | GNU C/C++/OpenMP runtimes | System runtime libraries; no Gufo source import | `LGPL-2.1-or-later AND (GPL-3.0-or-later WITH GCC-exception-3.1)` | glibc/GCC packages in flake.lock | [GNU](https://www.gnu.org/software/) |
@@ -47,7 +50,7 @@ adapted code. Model-private changes and import boundaries are recorded in the
 [DS4 provenance](src/models/deepseek_v4_flash/UPSTREAM.md),
 [DS4 HIP import](src/models/deepseek_v4_flash/kernels/rocm/mmq/VENDOR.md),
 [Flash-Next HIP import](src/models/qwen38_flash_next/kernels/rocm/mmq/VENDOR.md)
-and [H3 quality record](docs/models/minimax-h3/QUALITY.md).
+and [H3 quality record](docs/internal/models/minimax-h3/QUALITY.md).
 
 This software is based in part on the work of the Independent JPEG Group.
 
@@ -178,5 +181,5 @@ determination about a downstream operator.
 - **Relationship**: External model component within the operator-supplied H3
   checkpoint; not distributed by gufo
 
-See [the MiniMax H3 guide](docs/models/minimax-h3/README.md) for the acquisition, release, and
+See [the MiniMax H3 guide](docs/models/minimax-h3.md) for the acquisition, release, and
 runtime boundary.

@@ -1,0 +1,17 @@
+[package]
+name = "gufo-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+gufo-audio-decode = { path = "../audio_decode" }
+gufo-base64 = { path = "../base64" }
+gufo-http = { path = "../http" }
+gufo-png-decode = { path = "../png_decode" }
+gufo-websocket = { path = "../websocket" }

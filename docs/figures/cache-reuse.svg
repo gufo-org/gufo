@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="232" viewBox="0 0 760 232" role="img" aria-labelledby="cache-reuse-title">
+<title id="cache-reuse-title">The second request restores the shared prefix from the cache and prefills only its new turn.</title>
+<style>
+/* Canonical figure style. Every SVG under docs/ embeds this block verbatim
+   inside its style element; tools/ci/check-docs.py compares it. Colors match the
+   website (gufo.blog) tokens and the blog figure palette. Fonts read the
+   site's variables when the SVG is inlined there and fall back to system
+   fonts inside a GitHub image. */
+.fig-bg { fill: #eceee6; stroke: #c0c5b8; stroke-width: 1; }
+.fig-panel { fill: #f7f8f3; stroke: #c0c5b8; stroke-width: 1; }
+.fig-head { font: 10.5px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); letter-spacing: 0.06em; text-transform: uppercase; fill: #737a72; }
+.fig-title { font: 11px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); fill: #141714; }
+.fig-sub { font: italic 10.5px var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif); fill: #545a54; }
+.fig-note { font: italic 11px var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif); fill: #3a3f3a; }
+.fig-flow { fill: none; stroke: #545a54; stroke-width: 1.2; stroke-opacity: 0.6; }
+.fig-dash { fill: none; stroke: #545a54; stroke-width: 1.2; stroke-dasharray: 5 3; }
+.fig-arrowhead { fill: #545a54; }
+.fig-box { stroke-width: 1.4; }
+.fig-green { fill: #e8efea; stroke: #3f7a4f; }
+.fig-blue { fill: #eaf0f6; stroke: #4f86b8; }
+.fig-teal { fill: #e8f1f1; stroke: #3d8a8a; }
+.fig-amber { fill: #f8efe6; stroke: #c27a2c; }
+.fig-plum { fill: #f3ebf1; stroke: #9a5c8a; }
+.fig-rose { fill: #f6e7ed; stroke: #b8336a; }
+.fig-muted { fill: #e2e5db; stroke: #c0c5b8; }
+</style>
+<defs>
+  <marker id="cache-reuse-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M0 0 L8 4 L0 8 z" class="fig-arrowhead"/>
+  </marker>
+</defs>
+<rect x="0.5" y="0.5" width="759" height="231" rx="10" class="fig-bg"/>
+
+<text x="24" y="32" class="fig-head">Request 1</text>
+<rect x="24" y="44" width="440" height="44" rx="8" class="fig-box fig-blue"/>
+<text x="244" y="63" class="fig-title" text-anchor="middle">system prompt + conversation</text>
+<text x="244" y="79" class="fig-sub" text-anchor="middle">prefilled</text>
+<text x="484" y="70" class="fig-note">computed from scratch</text>
+
+<path d="M244 92 L244 132" class="fig-dash" marker-end="url(#cache-reuse-arrow)"/>
+<text x="256" y="117" class="fig-note">state kept in the cache</text>
+
+<text x="24" y="132" class="fig-head">Request 2</text>
+<rect x="24" y="144" width="440" height="44" rx="8" class="fig-box fig-muted"/>
+<text x="244" y="163" class="fig-title" text-anchor="middle">same prefix</text>
+<text x="244" y="179" class="fig-sub" text-anchor="middle">restored, not recomputed</text>
+<rect x="476" y="144" width="132" height="44" rx="8" class="fig-box fig-green"/>
+<text x="542" y="163" class="fig-title" text-anchor="middle">new turn</text>
+<text x="542" y="179" class="fig-sub" text-anchor="middle">prefilled</text>
+<text x="24" y="214" class="fig-note">The second request pays only for the tokens it adds.</text>
+</svg>

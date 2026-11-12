@@ -14,6 +14,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+PKG_CONFIG = (os.environ.get("GUFO_PKG_CONFIG_EXECUTABLE")
+              or shutil.which("pkg-config") or shutil.which("pkgconf"))
+
+
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.timings = {"configure": 0.0, "build": 0.0}
@@ -81,7 +85,7 @@ gufo_target_extensions(fixture EXTENSIONS ${{selected}})
     def add(self, name, depends=None, family=False, hip=False):
         directory = self.source / (f"src/families/test/{name}" if family else f"src/models/{name}")
         directory.mkdir(parents=True, exist_ok=True)
-        manifest = {"schema": 1, "name": name, "version": "1.2.3", "api_version": ">= 0.1.0",
+        manifest = {"schema": 1, "name": name, "version": "1.2.3", "api_version": ">= 0.3.0",
                     "depends": depends or [], "platforms": ["linux", "windows"],
                     "targets": {f"{name}_registration": {"requires": []}}}
         if family:
@@ -246,12 +250,69 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
         path = self.source / "src/models/beta/extension.json"
         original = json.loads(path.read_text())
         self.lock(["alpha", "base"])
-        for field in ("keys", "model_ids", "options"):
+        for field in ("keys", "model_ids"):
             data = copy.deepcopy(original)
-            if field == "options": data["options"][0]["name"] = "--alpha-path"
-            else: data["providers"][0][field] = ["gguf:alpha" if field == "keys" else "alpha-model"]
+            data["providers"][0][field] = ["gguf:alpha" if field == "keys" else "alpha-model"]
             path.write_text(json.dumps(data))
             self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error=f"{field} collision")
+
+    def test_shipped_unshipped_options_share_one_type(self):
+        path = self.source / "src/models/beta/extension.json"
+        data = json.loads(path.read_text())
+        self.lock(["alpha", "base"])
+        data["options"][0]["name"] = "--alpha-path"
+        path.write_text(json.dumps(data))
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON")
+        data["options"][0]["type"] = "string"
+        path.write_text(json.dumps(data))
+        self.configure("-DGUFO_EXTENSIONS_FROM_LOCK=ON", error="conflicting option types")
+
+    # The build passes its pkg-config, which Windows finds in vcpkg's tools.
+    @unittest.skipUnless(PKG_CONFIG, "needs pkg-config")
+    def test_selected_extension_packages(self):
+        # Only a selected extension requires its manifest's pkg-config modules,
+        # which it then links as PkgConfig::<module>.
+        flag = f"-DPKG_CONFIG_EXECUTABLE={PKG_CONFIG}"
+        pkgconfig = self.source / "pkgconfig"
+        pkgconfig.mkdir()
+        (pkgconfig / "gufo-fixture-pkg.pc").write_text(
+            "Name: gufo-fixture-pkg\nDescription: fixture\nVersion: 1.0\nCflags: -DGUFO_FIXTURE_PKG=1\n")
+        self.env["PKG_CONFIG_PATH"] = str(pkgconfig)
+        for name, module in (("alpha", "gufo-fixture-pkg"), ("beta", "gufo-missing-pkg")):
+            path = self.source / f"src/models/{name}/extension.json"
+            manifest = json.loads(path.read_text())
+            manifest["packages"] = [{"pkg_config": module}]
+            path.write_text(json.dumps(manifest))
+        alpha = self.source / "src/models/alpha/extension.cmake"
+        alpha.write_text(alpha.read_text().replace(
+            "LINK_LIBRARIES gufo_ext_runtime)\n",
+            "LINK_LIBRARIES gufo_ext_runtime PkgConfig::gufo-fixture-pkg)\n", 1)
+            # Results pkg_check_modules does not cache reach the extension too.
+            + 'if(NOT DEFINED gufo-fixture-pkg_LINK_LIBRARIES)\n'
+              '  message(FATAL_ERROR "gufo-fixture-pkg_LINK_LIBRARIES is not visible")\n'
+              'endif()\n')
+        (self.source / "src/models/alpha/registration.cpp").write_text(
+            '#include "gufo/ext/registry.hpp"\n'
+            "static_assert(GUFO_FIXTURE_PKG == 1);\n"
+            "void alpha_register(gufo::ext::Registry&) {}\n")
+        self.configure(flag, error="extension beta requires pkg-config module gufo-missing-pkg")
+        self.configure(flag, "-DGUFO_EXTENSIONS=alpha;base")
+        self.assertEqual([e["name"] for e in self.run_fixture()["builtExtensions"]], ["base", "alpha"])
+        # An extension cannot link a module only another extension declares.
+        beta_cmake = self.source / "src/models/beta/extension.cmake"
+        beta_cmake.write_text(beta_cmake.read_text().replace(
+            "NAME beta_registration SOURCES registration.cpp LINK_LIBRARIES gufo_ext_runtime)",
+            "NAME beta_registration SOURCES registration.cpp LINK_LIBRARIES gufo_ext_runtime PkgConfig::gufo-fixture-pkg)"))
+        beta = self.source / "src/models/beta/extension.json"
+        manifest = json.loads(beta.read_text())
+        manifest["packages"] = []
+        beta.write_text(json.dumps(manifest))
+        self.configure(flag, "-DGUFO_EXTENSIONS=alpha;base;beta",
+                       error="links PkgConfig::gufo-fixture-pkg, which extension beta does not declare")
+        # Two selected extensions may declare one module; it is checked once.
+        manifest["packages"] = [{"pkg_config": "gufo-fixture-pkg"}]
+        beta.write_text(json.dumps(manifest))
+        self.configure(flag, "-DGUFO_EXTENSIONS=alpha;base;beta")
 
     def test_disabled_target_dependency(self):
         path = self.source / "src/models/alpha/extension.cmake"
@@ -287,7 +348,7 @@ void {name}_provide(gufo::ext::Registry& r) {{ r.AddProvider(gufo::ext::generate
             "schema": 1,
             "name": "external_model",
             "version": "1.0.0",
-            "api_version": ">= 0.1.0",
+            "api_version": ">= 0.3.0",
             "entry": "external_model_register",
             "registration_target": "gufo_external_model",
             "depends": [],
@@ -321,6 +382,91 @@ void external_model_register(gufo::ext::Registry&) {}
         report = self.run_fixture()
         self.assertIn("external_model", [e["name"] for e in report["builtExtensions"]])
 
+    def external(self, name):
+        directory = Path(self.temporary.name) / name
+        (directory / "src").mkdir(parents=True)
+        manifest = {
+            "schema": 1, "name": name, "version": "1.0.0", "api_version": ">= 0.3.0",
+            "entry": f"{name}_register", "registration_target": f"gufo_{name}",
+            "depends": [], "platforms": ["linux", "windows"], "options": [],
+            "providers": [{"id": f"{name}-provider", "capability": "embeddings",
+                           "keys": [f"safetensors:{name}"], "model_ids": [f"{name}-model"],
+                           "target": f"gufo_{name}", "entry": f"{name}_provider_register"}],
+            "targets": {f"gufo_{name}": {"requires": []}},
+        }
+        (directory / "extension.json").write_text(json.dumps(manifest))
+        (directory / "src/external.cpp").write_text(f"""#include "gufo/ext/registry.hpp"
+void {name}_provider_register(gufo::ext::Registry&) {{}}
+void {name}_register(gufo::ext::Registry&) {{}}
+""")
+        (directory / "extension.cmake").write_text(
+            f"gufo_extension_target(NAME gufo_{name} SOURCES src/external.cpp LINK_LIBRARIES gufo_ext_runtime)\n")
+        return directory
+
+    def git(self, directory, *arguments):
+        return subprocess.check_output(
+            ["git", "-C", str(directory), "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+             "-c", "commit.gpgsign=false", *arguments], text=True, env=self.env).strip()
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    def test_external_extension_git_revision(self):
+        tracked = self.external("tracked_ext")
+        self.git(tracked, "init", "--quiet")
+        self.git(tracked, "add", ".")
+        self.git(tracked, "commit", "--quiet", "-m", "first")
+        self.configure(f"-DGUFO_EXTENSION_DIRS={tracked.as_posix()}")
+
+        def built():
+            return {e["name"]: e for e in self.run_fixture()["builtExtensions"]}
+        report = built()
+        self.assertEqual(report["tracked_ext"]["revision"], self.git(tracked, "rev-parse", "HEAD"))
+        self.assertIs(report["tracked_ext"]["dirty"], False)
+        # In-tree extensions share the revision of the tree they live in.
+        self.assertNotIn("revision", report["alpha"])
+        self.assertNotIn("dirty", report["alpha"])
+        # A new commit reaches the next build without another cmake -S command.
+        (tracked / "src/external.cpp").write_text((tracked / "src/external.cpp").read_text() + "// second\n")
+        self.git(tracked, "commit", "--quiet", "-am", "second")
+        report = built()
+        self.assertEqual(report["tracked_ext"]["revision"], self.git(tracked, "rev-parse", "HEAD"))
+        self.assertIs(report["tracked_ext"]["dirty"], False)
+        # So does staging a change, and so does an untracked file once
+        # configure runs again.
+        (tracked / "src/external.cpp").write_text((tracked / "src/external.cpp").read_text() + "// third\n")
+        self.git(tracked, "add", "src/external.cpp")
+        report = built()
+        self.assertEqual(report["tracked_ext"]["revision"], self.git(tracked, "rev-parse", "HEAD"))
+        self.assertIs(report["tracked_ext"]["dirty"], True)
+        self.git(tracked, "commit", "--quiet", "-m", "third")
+        self.assertIs(built()["tracked_ext"]["dirty"], False)
+        (tracked / "untracked.txt").write_text("new")
+        self.configure()
+        self.assertIs(built()["tracked_ext"]["dirty"], True)
+
+    def test_external_extension_declared_revision(self):
+        # A directory without Git metadata, such as a Nix store path, reports
+        # the revision the build declares for it, or "unknown".
+        first = self.external("plain_ext")
+        second = self.external("other_ext")
+        directories = f"-DGUFO_EXTENSION_DIRS={first.as_posix()};{second.as_posix()}"
+        self.configure(directories)
+
+        def built():
+            return {e["name"]: e for e in self.run_fixture()["builtExtensions"]}
+        report = built()
+        self.assertEqual((report["plain_ext"]["revision"], report["plain_ext"]["dirty"]), ("unknown", False))
+        self.configure(directories, "-DGUFO_EXTENSION_DIR_REVISIONS=0123abc-dirty;sha256-AbC+/=")
+        report = built()
+        self.assertEqual((report["plain_ext"]["revision"], report["plain_ext"]["dirty"]), ("0123abc", True))
+        self.assertEqual((report["other_ext"]["revision"], report["other_ext"]["dirty"]), ("sha256-AbC+/=", False))
+        self.configure(directories, "-DGUFO_EXTENSION_DIR_REVISIONS=0123abc;unknown")
+        self.assertEqual(built()["other_ext"]["revision"], "unknown")
+        self.configure(directories, "-DGUFO_EXTENSION_DIR_REVISIONS=0123abc",
+                       error="needs one entry per GUFO_EXTENSION_DIRS entry (2), got 1")
+        # A declared revision is free text, such as a tag name.
+        self.configure(directories, '-DGUFO_EXTENSION_DIR_REVISIONS=v1.0@a"b\\c;unknown')
+        self.assertEqual(built()["plain_ext"]["revision"], 'v1.0@a"b\\c')
+
     def test_external_extension_allowlist_violation(self):
         external_dir = Path(self.temporary.name) / "bad_ext"
         external_dir.mkdir(parents=True, exist_ok=True)
@@ -328,7 +474,7 @@ void external_model_register(gufo::ext::Registry&) {}
             "schema": 1,
             "name": "bad_ext",
             "version": "1.0.0",
-            "api_version": ">= 0.1.0",
+            "api_version": ">= 0.3.0",
             "entry": "bad_ext_register",
             "registration_target": "gufo_bad_ext",
             "depends": [],
@@ -405,6 +551,40 @@ target_link_libraries(gufo_bad_ext PRIVATE intermediate)
         for path in [external, *external.rglob("*")]:
             path.chmod(path.stat().st_mode | stat.S_IWUSR)
         return external
+
+    def test_external_public_link_targets(self):
+        external_dir = Path(self.temporary.name) / "linked_ext"
+        external_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema": 1, "name": "linked_ext", "version": "1.0.0", "api_version": ">= 0.3.0",
+            "entry": "linked_ext_register", "registration_target": "gufo_linked_ext",
+            "depends": [], "platforms": ["linux", "windows"], "options": [],
+            "providers": [{"id": "linked-provider", "capability": "embeddings",
+                           "keys": ["safetensors:linked"], "model_ids": ["linked-model"],
+                           "target": "gufo_linked_ext", "entry": "linked_ext_provider_register"}],
+            "targets": {"gufo_linked_ext": {"requires": []}},
+        }
+        (external_dir / "extension.json").write_text(json.dumps(manifest))
+        (external_dir / "linked.cpp").write_text("""extern "C" {
+void linked_ext_provider_register(void*) {}
+void linked_ext_register(void*) {}
+}
+""")
+        (external_dir / "extension.cmake").write_text("""gufo_extension_target(
+  NAME gufo_linked_ext
+  SOURCES linked.cpp
+  LINK_LIBRARIES gufo_ext_runtime gufo_ext_core gufo_ext_cache
+)
+""")
+        cmake = self.source / "CMakeLists.txt"
+        cmake.write_text(cmake.read_text().replace("gufo_build_discovered_extensions()", """add_library(gufo_core INTERFACE)
+add_library(gufo_cache INTERFACE)
+add_library(gufo_ext_core INTERFACE)
+target_link_libraries(gufo_ext_core INTERFACE $<LINK_ONLY:gufo_core>)
+add_library(gufo_ext_cache INTERFACE)
+target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
+gufo_build_discovered_extensions()"""))
+        self.configure(f"-DGUFO_EXTENSION_DIRS={external_dir.as_posix()}")
 
     def test_external_template_installs_license(self):
         external = self.template()

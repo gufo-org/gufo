@@ -22,7 +22,7 @@ inline bool ds4_dspark_serial_backoff(uint64_t steps, uint64_t drafted,
 }
 
 // Hundredths of an ordinary batch decode step, measured on gfx1151.
-// See docs/models/deepseek-v4-flash/artifacts/cost-calibration.json.
+// See docs/internal/models/deepseek-v4-flash/artifacts/cost-calibration.json.
 inline uint32_t ds4_dspark_cycle_cost(uint32_t depth, uint32_t tail,
                                       size_t concurrency) {
   using Costs = std::array<uint32_t, 3>;

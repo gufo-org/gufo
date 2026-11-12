@@ -9,3 +9,8 @@ tests/models/*/fixtures/continuation_identity/** text eol=lf
 *.webm binary
 # cmd.exe parses batch files reliably only with CRLF line endings.
 *.cmd text eol=crlf
+# Numeric and image model fixtures are binary payloads.
+*.f32 binary
+*.png binary
+# Model source manifests are hashed against a compiled SHA-256 at runtime.
+*.source-manifest.json text eol=lf

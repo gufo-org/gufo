@@ -19,15 +19,21 @@ using TokenId = std::uint32_t;
 /// sampler (#266). Tokens are counted after the reasoning start, including
 /// reasoning text already in the prompt. Once the budget is spent, and the
 /// last token completed its UTF-8 character, `forced` is emitted token by
-/// token. Any token in `ends` closes reasoning early. Later tokens are answer
+/// token. Any token in `ends` closes reasoning early, as does the request's
+/// constraint grammar leaving its reasoning phase. Later tokens are answer
 /// content, including literal reasoning tags, as in Gufo's response framing.
 struct ReasoningBudget {
   std::size_t tokens{0};
   std::vector<TokenId> forced;
   std::vector<TokenId> ends;
   std::vector<TokenId> prompt;
+  /// Set when the output opens reasoning itself: the budget starts after this
+  /// token, and never if anything but `blank` tokens precedes it.
+  std::optional<TokenId> opener;
   /// Indexed by token: its text ends inside a UTF-8 character.
   std::shared_ptr<const std::vector<bool>> partial_utf8;
+  /// Indexed by token: its text is only whitespace.
+  std::shared_ptr<const std::vector<bool>> blank;
 };
 
 /// Model-independent controls for selecting a token from a logit row.
@@ -48,7 +54,7 @@ struct SamplingConfig {
   float frequency_penalty{0.0F};
   float presence_penalty{0.0F};
   std::shared_ptr<const TokenConstraint> constraint;
-  /// Set only for requests that start in their reasoning phase.
+  /// Set only for requests whose output starts in, or may open, reasoning.
   std::shared_ptr<const ReasoningBudget> reasoning_budget;
 
   void Validate() const;
@@ -218,6 +224,7 @@ private:
   void FilterSelected(std::optional<std::size_t> top_p_keep = std::nullopt);
   [[nodiscard]] SamplingDistribution SelectedDistribution();
   void StartReasoning();
+  void OpenReasoning();
   void AdvanceReasoning(TokenId token);
 
   SamplingConfig config_;
@@ -232,6 +239,7 @@ private:
   std::optional<TokenId> pending_sample_;
   enum class ReasoningPhase : std::uint8_t {
     kOff,
+    kWaitingOpen,
     kCounting,
     kWaitingUtf8,
     kForcing,

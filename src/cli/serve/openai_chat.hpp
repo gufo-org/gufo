@@ -6,6 +6,9 @@
 
 namespace gufo::server {
 
+/// Shared pre-stream generation error, including admission byte details.
+HttpResponse TextGenerationErrorResponse(const TextGenerationError& error);
+
 /// Handles the supported OpenAI Chat Completions subset. Streaming responses
 /// consume scheduler-published token pieces from HttpResponse::streaming_body;
 /// socket writes never own or execute model state.

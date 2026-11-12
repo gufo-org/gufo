@@ -21,6 +21,10 @@ DRAFT_ROUNDS = "llamacpp:spec_decode_num_drafts_total"
 DRAFTS = "llamacpp:spec_decode_num_draft_tokens_total"
 ACCEPTED = "llamacpp:spec_decode_num_accepted_tokens_total"
 KV_USAGE = "llamacpp:kv_cache_usage_ratio"
+PROMPT_BUDGET = "gufo_prompt_state_budget_bytes"
+PROMPT_RESERVED = "gufo_prompt_state_reserved_bytes"
+PROMPT_AVAILABLE = "gufo_prompt_state_available_bytes"
+PROMPT_BUDGETS = (PROMPT_BUDGET, PROMPT_RESERVED, PROMPT_AVAILABLE)
 INTEGER_COUNTERS = (PROMPT, GENERATED, CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED)
 COUNTERS = (*INTEGER_COUNTERS, PROMPT_SECONDS, GENERATED_SECONDS)
 INTEGERS = (*INTEGER_COUNTERS, PROCESSING, DEFERRED)
@@ -30,12 +34,13 @@ TYPES = {name: "counter" if name in COUNTERS else "gauge"
 
 def parse_metrics(text):
     values, types, help_text = {}, {}, set()
+    known = {**TYPES, **dict.fromkeys(PROMPT_BUDGETS, "gauge")}
     for line in text.splitlines():
         parts = line.split()
         if not parts:
             continue
         if parts[0] == "#":
-            if len(parts) >= 4 and parts[2] in TYPES:
+            if len(parts) >= 4 and parts[2] in known:
                 if parts[1] == "TYPE":
                     if parts[2] in types:
                         raise ValueError(f"duplicate metric type: {parts[2]}")
@@ -44,23 +49,27 @@ def parse_metrics(text):
                     help_text.add(parts[2])
             continue
         name = parts[0]
-        if name not in TYPES:
+        if name not in known:
             continue
         if name in values or len(parts) != 2:
             raise ValueError(f"invalid/duplicate metric: {name}")
         value = float(parts[1])
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"invalid metric value: {name}={value}")
-        if name in INTEGERS:
+        if name in (*INTEGERS, *PROMPT_BUDGETS):
             if not value.is_integer():
                 raise ValueError(f"fractional integer metric: {name}")
             # Avoid rounding large process-lifetime counters through float.
             value = int(parts[1])
         values[name] = value
-    if set(values) != set(TYPES) or types != TYPES or help_text != set(TYPES):
+    expected = known if any(name in values for name in PROMPT_BUDGETS) else TYPES
+    if set(values) != set(expected) or types != expected or help_text != set(expected):
         raise ValueError("missing metric, HELP, or incorrect TYPE")
     if values[KV_USAGE] > 1:
         raise ValueError("invalid KV ratio")
+    if PROMPT_BUDGET in values and values[PROMPT_AVAILABLE] != max(
+            0, values[PROMPT_BUDGET] - values[PROMPT_RESERVED]):
+        raise ValueError("inconsistent prompt budget gauges")
     return values
 
 
@@ -218,4 +227,7 @@ class ServerMetrics:
             connection.close()
 
     def idle(self):
-        return self.wait(lambda m: m[PROCESSING] == m[DEFERRED] == 0, "idle")
+        result = self.wait(lambda m: m[PROCESSING] == m[DEFERRED] == 0, "idle")
+        if result.get(PROMPT_RESERVED, 0) != 0:
+            raise AssertionError(f"idle scheduler retains prompt reservations: {result}")
+        return result
