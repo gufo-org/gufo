@@ -157,8 +157,9 @@ diagnosis with a restricted `PATH`. The import check does not use the builder's
 installed DLLs, so developer tools cannot conceal an omitted dependency.
 On pull requests and manual dispatches, the
 [Windows validation workflow](.github/workflows/devlab-windows.yml) downloads
-the resulting bundle on Windows Strix Halo and runs `gufo diagnose`, weight-free
-GPU tests, and one small model per family through
+the resulting bundle on Windows Strix Halo and runs `gufo diagnose`, requiring
+the NPU check to pass, weight-free GPU tests, and one small model per family
+through
 [`tests/functional/family_smoke.py`](tests/functional/family_smoke.py):
 EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
 
