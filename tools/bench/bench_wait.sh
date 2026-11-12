@@ -52,6 +52,38 @@ while :; do
   echo "  [${el}s] ${last}"
   sleep 15
 done
+# Survivor sweep: a detached grandchild (e.g. a `gufo serve` started under
+# rocprofv3, which places its subject in a new session) escapes the
+# process-group kill above and stays resident with its whole model uploaded.
+# Respawning on top of it OOM-kills the 128 GiB UMA host, and the survivor's
+# port is not 8083, so the serving check below would not see it.
+survivors() {
+  local p comm
+  for p in $(pgrep -f gufo 2>/dev/null || true); do
+    comm="$(cat "/proc/$p/comm" 2>/dev/null)" || continue
+    case "$comm" in
+      gufo | gufo-[0-9]*) ;;
+      *) continue ;;
+    esac
+    if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' serve '; then
+      printf '%s\n' "$p"
+    fi
+  done
+}
+sweep="$(survivors)"
+if [ -n "$sweep" ]; then
+  echo "WATCHDOG sweeping surviving gufo serve (pid $sweep) $(date -Is)"
+  # shellcheck disable=SC2086
+  kill $sweep 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    [ -z "$(survivors)" ] && break
+    sleep 1
+  done
+  sweep="$(survivors)"
+  # shellcheck disable=SC2086
+  [ -n "$sweep" ] && kill -9 $sweep 2>/dev/null || true
+  sleep 2
+fi
 # bench_bg.sh ran with --no-respawn, so THIS foreground process brings the
 # resident server back. Skip if something is already serving (avoid a second
 # server on the port).

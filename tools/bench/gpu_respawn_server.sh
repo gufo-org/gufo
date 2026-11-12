@@ -68,6 +68,39 @@ done
 url="http://${host}:${port}/v1/models"
 log() { printf '\n=== [gpu_respawn] %s ===\n' "$*"; }
 
+# Refuse to launch while any gufo serve is resident or still loading (same
+# matcher as gpu_exclusive.sh). Two serve processes exceed Strix Halo UMA and
+# the kernel OOM-kills the whole host; a respawner woken during another run
+# must defer to the serve already on the GPU.
+# Even with no serve visible, the UMA may not be reclaimed yet (driver lag
+# after a kill, or a benchmark still holding it). MemAvailable is the only
+# global signal on Strix Halo; refuse to launch below this floor (46 GiB:
+# healthy idle hosts sit far above, any in-flight big-model run is far below).
+respawn_headroom_ok() {
+  local floor="${GUFO_RESPAWN_MIN_AVAIL_MIB:-47104}" avail
+  avail="$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo)"
+  avail=$((avail / 1024))
+  if [ "$avail" -lt "$floor" ]; then
+    log "only ${avail}MiB MemAvailable (< ${floor}MiB floor); another GPU job still holds UMA - not launching"
+    exit 0
+  fi
+}
+
+defer_to_existing_serve() {
+  local p comm
+  for p in $(pgrep -f gufo 2>/dev/null || true); do
+    comm="$(cat "/proc/$p/comm" 2>/dev/null)" || continue
+    case "$comm" in
+      gufo | gufo-[0-9]*) ;;
+      *) continue ;;
+    esac
+    if tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | grep -q ' serve '; then
+      log "another gufo serve is resident (pid $p); not launching to avoid UMA OOM"
+      exit 0
+    fi
+  done
+}
+
 # Idempotent: a caller racing another respawner across the respawn flock must
 # not start a second server on the port. If something already serves (and
 # matches --expect-model), return success without launching.
@@ -101,6 +134,8 @@ launch_captured() {
       continue
     fi
 
+    defer_to_existing_serve
+    respawn_headroom_ok
     log "respawning captured command (attempt $attempt/$launch_attempts, log: $respawn_log): ${argv[*]}"
     setsid "${argv[@]}" </dev/null >"$respawn_log" 2>&1 &
     pid=$!
@@ -128,6 +163,8 @@ launch_fallback() {
     log "ERROR: no captured command and launch script not executable: $launch_script"
     exit 1
   fi
+  defer_to_existing_serve
+  respawn_headroom_ok
   log "no captured command; falling back to $launch_script (log: $respawn_log)"
   setsid "$launch_script" </dev/null >"$respawn_log" 2>&1 &
   pid=$!

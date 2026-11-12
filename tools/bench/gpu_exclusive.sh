@@ -26,6 +26,15 @@
 #                          harness, e.g. bench_wait.sh, respawns instead)
 #   -h, --help             Show this help
 #
+# Environment:
+#   GUFO_BENCH_MIN_AVAIL_MIB  Refuse to start the benchmark unless MemAvailable
+#                          is at least this many MiB (Strix Halo UMA: GPU
+#                          allocations leave host RAM, so MemAvailable is the
+#                          only global headroom signal; rocm-smi only sees the
+#                          small visible window). Wait up to
+#                          300 s for a stopped server's memory to return,
+#                          then exit 75 instead of OOM-killing the host.
+#
 # Examples:
 #   tools/bench/gpu_exclusive.sh -- /tmp/attn_causal_bench
 #   tools/bench/gpu_exclusive.sh --expect-model Qwen3.8 -- \
@@ -155,9 +164,51 @@ stop_server() {
     kill -9 $pids 2>/dev/null || true
     sleep 2
   fi
-  # Let the driver reclaim VRAM before the benchmark allocates.
-  sleep 5
-  log "server stopped; VRAM released"
+  # A respawner (fallback respawn, launch script) can start a NEW serve while
+  # this wrapper is between stop and benchmark. Two serves exceed UMA and the
+  # kernel OOM-kills the host, so keep stopping any reappearing serve.
+  local round
+  for round in 1 2 3; do
+    sleep 5
+    pids="$(server_pids)"
+    [ -z "$pids" ] && break
+    log "serve reappeared during stop (round $round/3, pid $pids); stopping again"
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+  done
+  pids="$(server_pids)"
+  if [ -n "$pids" ]; then
+    echo "gpu_exclusive: ERROR: gufo serve keeps restarting (pid $pids);" >&2
+    echo "  refusing to run the benchmark against a contended GPU" >&2
+    exit 74
+  fi
+  log "server stopped"
+}
+
+# Strix Halo puts every GPU allocation in host RAM, so a *stopped* server can
+# still hold ~100 GiB until the driver reclaims it and free/rocm-smi show no
+# per-process GPU memory. MemAvailable is the only global signal: wait for it
+# to recover before the benchmark allocates, or fail instead of OOM-killing
+# the whole host. Skipped entirely when GUFO_BENCH_MIN_AVAIL_MIB is unset.
+require_headroom() {
+  [ -n "${GUFO_BENCH_MIN_AVAIL_MIB:-}" ] || return 0
+  local need="${GUFO_BENCH_MIN_AVAIL_MIB}" waited=0 avail
+  while :; do
+    avail="$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo)"
+    avail=$((avail / 1024))
+    if [ "$avail" -ge "$need" ]; then
+      log "memory headroom ok (MemAvailable ${avail}MiB >= ${need}MiB)"
+      return 0
+    fi
+    if [ "$waited" -ge 300 ]; then
+      echo "gpu_exclusive: ERROR: only ${avail}MiB available (< ${need}MiB" >&2
+      echo "  required); GPU memory was not reclaimed - not starting the" >&2
+      echo "  benchmark to avoid a host OOM" >&2
+      exit 75
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
 }
 
 respawn_server() {
@@ -187,6 +238,7 @@ restore() {
 trap restore EXIT INT TERM
 
 if [ "$do_kill" = 1 ]; then stop_server; fi
+require_headroom
 
 log "running benchmark: ${bench_cmd[*]}"
 "${bench_cmd[@]}"
