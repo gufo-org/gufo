@@ -30,6 +30,7 @@ public:
       std::size_t ram_bytes) const override {
     return layout_.BackingPlan(ram_bytes, model_->DecodeConcurrency());
   }
+  [[nodiscard]] std::optional<cache::CostEstimate> Cost() const override;
   [[nodiscard]] cache::Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override;

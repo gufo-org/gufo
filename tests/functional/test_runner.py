@@ -579,6 +579,9 @@ class FunctionalRunnerTest(unittest.TestCase):
         self.assertEqual(result["stored_tokens"], [2396, 5956])
         self.assertEqual(result["shared_boundary_tokens"], [3012])
         self.assertEqual(result["min_step_skips"], 5)
+        exempt = event(3, 2956).replace("payload_bytes=1", "spacing_exempt=1 payload_bytes=1")
+        learned = restored.replace("payload_bytes=1", "spacing_exempt=1 payload_bytes=1")
+        self.assertEqual(check_disk_spacing(grown + exempt, learned, report, restored_report)["stored_tokens"], [2396, 5956])
         # Ownership must still reject a real too-close fixture checkpoint and
         # duplicate publications. Foreign refusals cannot satisfy coverage.
         for bad in (grown + event(3, 2956), grown + event(1, 2396),

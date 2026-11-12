@@ -279,3 +279,20 @@ peaks at 39.14 GiB in both rows.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)
+
+## Cache cost calibration (November 12, 2026)
+
+Diagnostic least-squares fits of the retained single-user pp2048 depth sweeps
+above, using `tools/cache/fit_cost.py`. These reuse the dated measurements;
+they are not a new speed qualification. For interval `[a,b)`, seconds are
+`d*(b-a) + e*(b-a)*(b+a)/200000`. Policy thresholds remain unchanged.
+
+| Sweep | d (s/token) | e (s/token) | Maximum fit error |
+| --- | ---: | ---: | ---: |
+| [single-ar-q4](artifacts/cache-cost-single-ar-q4.csv) | 0.001546656847 | 0.001801318560 | 6.01% |
+| [single-dflash2-q4](artifacts/cache-cost-single-dflash2-q4.csv) | 0.001803122153 | 0.001717645411 | 5.52% |
+
+Restore estimates use the [measured 96 GB/s RAM control](../../design/cache-redesign/RFC.md#measured-constants)
+and the [3.3 GB/s disk observation](../../cache.md). Both are approximate hardware
+controls. Other quantizations, cold files and concurrent work can differ; inspect
+the `cost_estimate` event beside actual request timings before using the estimates.

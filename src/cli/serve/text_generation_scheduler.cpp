@@ -122,6 +122,9 @@ struct ScheduledRequest {
   bool cache_prompt{true};
   bool cache_persist{true};
   std::size_t cache_prefix_tokens{0};
+  // Align the prompt to a live frontier when admitted (#1154); the value
+  // says whether a chat template trimmed reply whitespace.
+  std::optional<bool> align_frontier;
   bool stop_at_eos{true};
   std::size_t token_limit{1};
   std::size_t prompt_state_bytes{0};
@@ -1135,6 +1138,23 @@ struct TextGenerationScheduler::Impl {
     return true;
   }
 
+  /// Aligns a replayed answer to the frontier that sampled it. Admission runs
+  /// after earlier requests on this scheduler committed their frontiers, so
+  /// an immediate retry after a cancelled stream sees the cancelled frontier
+  /// regardless of when its HTTP request arrived.
+  void AlignToLiveFrontier(ScheduledRequest& request) const {
+    const auto chat_template = std::exchange(request.align_frontier, {});
+    if (!chat_template ||
+        !runner_pool->AlignToLiveFrontier(
+            request.prompt, request.cache_prefix_tokens, *chat_template))
+      return;
+    // The aligned prompt stays below the context; keep its output room.
+    const auto context = runner_pool->runner().Descriptor().max_context;
+    request.result.prompt_tokens = request.prompt.size();
+    request.token_limit =
+        std::min(request.token_limit, context - request.prompt.size());
+  }
+
   /// A parked request resumes once its leader's checkpoint is retained, or
   /// once the leader can no longer publish it.
   [[nodiscard]] bool SharedPrefixSettled(
@@ -1254,6 +1274,7 @@ struct TextGenerationScheduler::Impl {
         if (CompleteIfStopped(request)) {
           continue;
         }
+        AlignToLiveFrontier(*request);
         if (WaitForSharedPrefix(request, residents, waiting.size())) {
           waiting.push_back(std::move(request));
           continue;
@@ -2496,13 +2517,6 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   if (prompt.empty()) {
     throw std::invalid_argument("text scheduler prompt must not be empty");
   }
-  // A client replays the previous answer as text, and the next prompt's
-  // tokenization of it need not match the sampled tokens (#1154). Comparing
-  // that text needs exact per-token decoding.
-  if (metadata.cache_prompt && metadata.prompt_context == nullptr &&
-      impl_->incremental_text_is_exact)
-    (void)impl_->runner_pool->AlignToLiveFrontier(
-        prompt, metadata.cache_prefix_tokens, metadata.chat_template);
   const auto context = impl_->runner_pool->runner().Descriptor().max_context;
   if (prompt.size() >= context) {
     throw std::length_error("prompt has " + std::to_string(prompt.size()) +
@@ -2548,6 +2562,12 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->cache_prompt = metadata.cache_prompt;
   request->cache_persist = metadata.cache_persist;
   request->cache_prefix_tokens = metadata.cache_prefix_tokens;
+  // A client replays the previous answer as text, and the next prompt's
+  // tokenization of it need not match the sampled tokens (#1154). Comparing
+  // that text needs exact per-token decoding.
+  if (metadata.cache_prompt && request->prompt_context == nullptr &&
+      impl_->incremental_text_is_exact)
+    request->align_frontier = metadata.chat_template;
   request->stop_at_eos = metadata.stop_at_eos;
   request->token_limit =
       max_tokens > 0 ? std::min(max_tokens, available) : available;

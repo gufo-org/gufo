@@ -87,12 +87,16 @@ gufo serve llm --model "$MODEL" \
   --cache-disk /var/cache/gufo/qwen --cache-disk-bytes 68719476736   # 64 GiB
 ```
 
-- `--cache-disk-bytes` caps the directory, 8 GiB by default. When it's full,
-  the entries used least recently go first.
+- `--cache-disk-bytes` caps the directory, 8 GiB by default. Under pressure,
+  superseded history leaves before conversation frontiers; access recency
+  includes each checkpoint's descendants.
 - One server owns a directory; a second server pointed at it fails at startup.
   Give each server its own.
-- Disk checkpoints are at least 2,048 tokens apart, so after a restart a
-  conversation resumes up to 2,048 tokens before where it stopped.
+- Finished requests retain their exact executed frontier when the budgets
+  allow it, including generated tokens. The disk tier writes that frontier
+  during idle work so it can survive RAM eviction and restarts.
+- Two recent covered turn ends stay eligible as edit fallbacks. Full budgets
+  or a full write queue can still leave you with an earlier checkpoint.
 
 As of October 2026, restoring a 24,866-token prompt from disk after a restart
 took 1.8 s, against about 50 s from scratch.
