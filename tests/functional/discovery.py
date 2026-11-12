@@ -20,8 +20,8 @@ def check_discovery(client, model, checks, context, input_modalities):
 
     for path, expected in (
         ("/health", {"status": "ok"}), ("/v1/health", {"status": "ok"}),
-        ("/ready", {"status": "ready", "model": model}),
-        ("/v1/ready", {"status": "ready", "model": model}),
+        ("/ready", {"status": "ready", "model": model, "capability": "text"}),
+        ("/v1/ready", {"status": "ready", "model": model, "capability": "text"}),
     ):
         response = client.get(client.base_url.copy_with(path=path), cast_to=httpx.Response)
         result = {"status": response.status_code, "body": response.json()}
