@@ -11,11 +11,15 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #include "src/core/platform/fs.hpp"
 
@@ -27,6 +31,9 @@ struct DiskAvailability {
 };
 }  // namespace detail
 namespace {
+// New payloads are synchronized in batches by concurrent threads.
+constexpr std::size_t kPayloadSyncBatch = 128;
+constexpr std::size_t kPayloadSyncThreads = 32;
 template<class F>
 struct Finally {
   F action;
@@ -238,6 +245,62 @@ private:
                           const std::error_code& ec) {
   throw std::runtime_error(message + ": " + ec.message());
 }
+// Synchronizes files on helper threads while the caller continues; Wait()
+// helps finish them. File systems commit concurrent synchronizations together,
+// while one at a time each small file waits for its own commit (#1180).
+class ConcurrentSync {
+public:
+  ConcurrentSync(std::span<const platform::PlatformFile> files,
+                 std::size_t threads)
+      : files_(files), begin_(std::chrono::steady_clock::now()) {
+    threads = std::min(threads, files.size());
+    workers_.reserve(threads);
+    for (std::size_t i = 0; i < threads; ++i) {
+      try {
+        workers_.emplace_back([this] { Work(); });
+      } catch (const std::system_error&) {
+        break;  // Wait() completes the remaining files.
+      }
+    }
+  }
+  ConcurrentSync(const ConcurrentSync&) = delete;
+  ConcurrentSync& operator=(const ConcurrentSync&) = delete;
+  ~ConcurrentSync() { Stop(); }
+  // Returns the first failure once every file has been attempted.
+  std::error_code Wait() {
+    Work();
+    Stop();
+    return failure_;
+  }
+  [[nodiscard]] std::size_t Files() const { return files_.size(); }
+  [[nodiscard]] std::uint64_t ElapsedNs() const {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(end_ - begin_)
+        .count();
+  }
+
+private:
+  void Work() {
+    for (std::size_t i; (i = next_.fetch_add(1)) < files_.size();) {
+      std::error_code ec;
+      if (!platform::SyncFile(files_[i], ec)) {
+        std::lock_guard guard(failure_mutex_);
+        if (!failure_)
+          failure_ = ec ? ec : std::make_error_code(std::errc::io_error);
+      }
+    }
+  }
+  void Stop() {
+    // Joining also orders the workers' failure writes before Wait() reads.
+    workers_.clear();
+    end_ = std::chrono::steady_clock::now();
+  }
+  std::span<const platform::PlatformFile> files_;
+  std::chrono::steady_clock::time_point begin_, end_;
+  std::atomic<std::size_t> next_{};
+  std::mutex failure_mutex_;
+  std::error_code failure_;
+  std::vector<std::jthread> workers_;
+};
 void SyncDirectoryFd(const platform::Directory& directory) {
   std::error_code ec;
   if (!platform::SyncDirectory(directory, ec))
@@ -840,6 +903,14 @@ struct DiskStore::Impl {
     if (!synced)
       IoError("sync cache file/directory", ec);
   }
+  // Waits for a concurrent sync and records its wall time from the start.
+  void Wait(ConcurrentSync& sync) {
+    const auto failure = sync.Wait();
+    publication_stats.fsync_calls += sync.Files();
+    publication_stats.fsync_ns += sync.ElapsedNs();
+    if (failure)
+      IoError("sync cache file/directory", failure);
+  }
   void Sync(const platform::Directory& directory) {
     auto begin = std::chrono::steady_clock::now();
     std::error_code ec;
@@ -1312,6 +1383,47 @@ struct DiskStore::Impl {
       // Candidate is invisible to pinned snapshots until committed. Reuse from
       // filesystem existence after validating claims, never from this
       // candidate.
+      // Each payload is renamed into place only after its own sync. A batch
+      // syncs on helper threads while the next one is written.
+      struct Written {
+        Fd fd;
+        const platform::Directory* directory;
+        std::string name;
+      };
+      std::vector<Written> written, syncing;
+      std::vector<platform::PlatformFile> syncing_files;
+      written.reserve(kPayloadSyncBatch);
+      syncing.reserve(kPayloadSyncBatch);
+      syncing_files.reserve(kPayloadSyncBatch);
+      // Declared after its files: destruction joins its threads first.
+      std::optional<ConcurrentSync> sync;
+      const auto finish_sync = [&] {
+        if (!sync)
+          return;
+        Wait(*sync);
+        sync.reset();
+        for (auto& w : syncing) {
+          {
+            // The payload is durable; drop its clean pages so multi-GB
+            // snapshots don't accumulate in the page cache.
+            CostTimer timer(publication_stats.filesystem_ns);
+            platform::Advise(w.fd.Get(), platform::AdviseHint::kDontNeed, 0, 0);
+          }
+          DISK_STEP(kPayloadSynced);
+          Rename(*w.directory, w.name);
+          DISK_STEP(kPayloadRenamed);
+        }
+        syncing.clear();
+      };
+      const auto start_sync = [&] {
+        finish_sync();
+        syncing.swap(written);
+        syncing_files.clear();
+        for (const auto& w : syncing)
+          syncing_files.push_back(w.fd.Get());
+        if (!syncing.empty())
+          sync.emplace(syncing_files, kPayloadSyncThreads);
+      };
       for (auto& [key, p] : dependencies) {
         const platform::Directory& dir = key.first ? private_files : chunks;
         auto payload_name = DiskFileName(p.file);
@@ -1365,17 +1477,12 @@ struct DiskStore::Impl {
           }
         }
         DISK_STEP(kPayloadWritten);
-        Sync(fd.Get());
-        {
-          // The payload is durable; drop its clean pages so multi-GB snapshots
-          // don't accumulate in the page cache.
-          CostTimer timer(publication_stats.filesystem_ns);
-          platform::Advise(fd.Get(), platform::AdviseHint::kDontNeed, 0, 0);
-        }
-        DISK_STEP(kPayloadSynced);
-        Rename(dir, payload_name);
-        DISK_STEP(kPayloadRenamed);
+        written.push_back({std::move(fd), &dir, std::move(payload_name)});
+        if (written.size() == kPayloadSyncBatch)
+          start_sync();
       }
+      start_sync();
+      finish_sync();
       Sync(temporary);
       DISK_STEP(kTemporaryDirectorySynced);
       Sync(chunks);
