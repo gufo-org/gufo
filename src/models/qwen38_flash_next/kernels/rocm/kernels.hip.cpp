@@ -8923,7 +8923,8 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                hipStream_t stream, std::uint32_t* lists, std::uint32_t* counts,
-               std::uint32_t list_capacity, std::uint32_t dense_extent) {
+               std::uint32_t list_capacity, std::uint32_t dense_extent,
+               bool merge) {
   if (d != 256) {
     return;  // the kernel is written for the model's 256-wide heads
   }
@@ -8958,10 +8959,17 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
   } else {
     launch(AttentionKernel<4>, 4);
   }
-  if (z > 1) {
-    hipLaunchKernelGGL(AttentionMergeKernel, dim3(heads, n_tokens),
-                       dim3(kThreads), 0, stream, partials, out, heads, d, z);
+  if (z > 1 && merge) {
+    AttentionMerge(partials, out, n_tokens, heads, d, z, stream);
   }
+}
+
+void AttentionMerge(const float* partials, float* out, std::uint32_t n_tokens,
+                    std::uint32_t heads, std::uint32_t d, std::uint32_t splits,
+                    hipStream_t stream) {
+  hipLaunchKernelGGL(AttentionMergeKernel, dim3(heads, n_tokens),
+                     dim3(kThreads), 0, stream, partials, out, heads, d,
+                     splits);
 }
 
 std::uint32_t WmmaCausalAttentionContextLimit(std::uint32_t heads,

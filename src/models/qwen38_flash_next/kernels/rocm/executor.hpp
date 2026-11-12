@@ -737,6 +737,14 @@ private:
   /// membership at the fork; eager/replay tests separately check the results.
   /// False on replay, which executes no host dispatch or membership queries.
   mutable bool capturing_{false};
+  /// Set by a batched decode pass around its per-session attention calls:
+  /// the pass has projected every row's indexer keys/queries into scratch,
+  /// and it merges the split-key partials (row-offset in attn_partials) and
+  /// applies the output gate once for all rows afterwards.
+  mutable bool attention_batched_{false};
+  /// Floats of one row's split-key attention partials.
+  [[nodiscard]] std::size_t AttentionPartialRow() const;
+  [[nodiscard]] static std::uint32_t AttentionSplits();
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;

@@ -688,16 +688,11 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
   const auto bytes = qfn_mmq_q8_1_bytes(padded, cols);
   if (bytes > Q8TiledBytes(options_.max_batch, model_->max_q8_cols()))
     return Fail(error, "batched projection exceeds activation scratch");
-  void* quantized = s_.x_q8t;
   q8t_src_ = nullptr;
-  if (padded != rows &&
-      !Check(
-          hipMemsetAsync(static_cast<std::uint8_t*>(quantized) +
-                             qfn_mmq_q8_1_bytes(rows, cols),
-                         0, qfn_mmq_q8_1_bytes(padded - rows, cols), stream_),
-          error))
-    return false;
-  return qfn_mmq_quantize_q8_1(x, quantized, rows, cols, stream_) == 0 ||
+  // The quantization writes the zero padding rows itself: a separate fill
+  // per projection cost more host time than the GPU work it fed.
+  return qfn_mmq_quantize_q8_1_padded(x, s_.x_q8t, rows, padded, cols,
+                                      stream_) == 0 ||
          Fail(error, "batched activation quantization failed");
 }
 
@@ -732,6 +727,11 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
           ? (w.cols == 2560 && w.rows >= 8192 && rows > 32 && rows <= 48 ? 48U
                                                                          : 32U)
           : kDecodeRows;
+  // Up to 16 rows of a long-K output projection (attention/SSM out, K 6144)
+  // run as two adjacent waves per weight row: the eight-row arithmetic per
+  // wave, one weight pass instead of a second pass for a short tail.
+  if (chunk == kDecodeRows && w.cols >= 4096 && rows <= 2 * kDecodeRows)
+    return project(0, rows);
   if (chunk == 32 && rows >= 64) {
     const auto full = rows / 32 * 32;
     return project(0, full) && (full == rows || project(full, rows - full));
@@ -784,9 +784,48 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     return false;
   RouterTopK(base.router, c.num_experts + 1, base.ids, base.weights, rows,
              c.num_experts, c.num_experts_used, stream_);
-  if (!GatedDenseBatch(l.shexp_up, l.shexp_gate, x, base.shexp_up, rows,
-                       error) ||
-      !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error))
+  // As in Moe's decode route, the Q8_0 shared expert runs on side_stream_
+  // beside the routed experts when Create measured the overlap to pay. It
+  // writes only its own scratch and the projection staging (s_.x_q8t),
+  // which the routed launches below do not use; the epilogue joins it.
+  const bool overlap = decode_overlap_ &&
+                       l.shexp_gate.type == core::GgmlType::kQ8_0 &&
+                       l.shexp_up.type == core::GgmlType::kQ8_0 &&
+                       l.shexp_down.type == core::GgmlType::kQ8_0;
+  const hipStream_t main = stream_;
+  if (overlap &&
+      (!Check(hipEventRecord(side_start_, main), error) ||
+       !Check(hipStreamWaitEvent(side_stream_, side_start_, 0), error)))
+    return false;
+  struct SideScope {
+    const Executor* executor;
+    hipStream_t main;
+    bool overlap;
+    bool finished{false};
+    void Finish() noexcept {
+      executor->stream_ = main;
+      if (finished || !overlap)
+        return;
+      finished = true;
+      if (hipEventRecord(executor->side_done_, executor->side_stream_) ==
+          hipSuccess)
+        executor->side_pending_ = true;
+      else
+        (void)hipStreamSynchronize(executor->side_stream_);
+    }
+    ~SideScope() {
+      Finish();
+      (void)executor->JoinSide(nullptr);
+    }
+  } side{this, main, overlap};
+  if (overlap)
+    stream_ = side_stream_;
+  const bool shared_ok =
+      GatedDenseBatch(l.shexp_up, l.shexp_gate, x, base.shexp_up, rows,
+                      error) &&
+      DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error);
+  side.Finish();
+  if (!shared_ok)
     return false;
   if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
@@ -802,11 +841,16 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
             base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
             rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
+    if (!JoinSide(error))
+      return false;
     MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
                 c.num_experts_used, c.hidden_size, stream_);
     return true;
   }
+  // Other expert formats may stage their inputs where the shared expert does.
+  if (!JoinSide(error))
+    return false;
   for (std::uint32_t r = 0; r < rows; r += kDecodeRows) {
     UseScratch(RowScratch(base, r));
     const bool ok = MoeExperts(l, x + std::size_t{r} * c.hidden_size,
@@ -1129,6 +1173,28 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
         }
       }
       std::uint32_t gdn_active = 0;
+      // Attention across requests: the indexer projections read their
+      // weights once for every row, and the split-key merge and output gate
+      // run once after the per-request kernels. Each row's arithmetic is the
+      // per-request call's.
+      const bool batch_attention = !l.linear && !wide && items.size() > 1;
+      std::uint32_t attention_skipped = 0;
+      struct BatchedAttention {
+        const Executor* executor;
+        ~BatchedAttention() { executor->attention_batched_ = false; }
+      } batched_attention{this};
+      if (batch_attention) {
+        UseScratch(base);
+        if (!l.indexer_k.empty() &&
+            !DenseBatch(l.indexer_k, base.mixed, base.ik, rows, error))
+          return false;
+        if (!l.indexer_q.empty() &&
+            std::any_of(sparse.begin(), sparse.begin() + items.size(),
+                        [](bool s) { return s; }) &&
+            !DenseBatch(l.indexer_q, base.mixed, base.iq, rows, error))
+          return false;
+        attention_batched_ = true;
+      }
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
         auto& session = *item.session;
@@ -1138,8 +1204,12 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
           view.qg = base.qg + static_cast<std::size_t>(offsets[i]) * 2 *
                                   c.AttentionQDim();
         }
+        if (batch_attention)
+          view.attn_partials += offsets[i] * AttentionPartialRow();
         UseScratch(view);
         if (!session.CheckCancellation(nullptr)) {
+          if (batch_attention)
+            attention_skipped |= 1U << i;
           auto* output = l.linear ? s_.gdn_out : s_.ctx;
           const auto width = l.linear ? c.SsmValueDim() : c.AttentionQDim();
           if (!Check(hipMemsetAsync(output, 0,
@@ -1227,6 +1297,26 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
                          sparse[i], error, false, true, false)) {
             return false;
           }
+        }
+      }
+      if (batch_attention) {
+        attention_batched_ = false;
+        UseScratch(base);
+        AttentionMerge(base.attn_partials, base.ctx, rows, c.num_heads,
+                       c.head_dim, AttentionSplits(), stream_);
+        SigmoidMul(base.ctx, base.attn_gate,
+                   std::size_t{rows} * c.AttentionQDim(), stream_);
+        // Skipped (cancelled) requests keep the zero rows they had before.
+        for (std::size_t i = 0; i < items.size(); ++i) {
+          if ((attention_skipped >> i & 1U) != 0 &&
+              !Check(
+                  hipMemsetAsync(
+                      base.ctx + std::size_t{offsets[i]} * c.AttentionQDim(), 0,
+                      items[i].tokens.size() * c.AttentionQDim() *
+                          sizeof(float),
+                      stream_),
+                  error))
+            return false;
         }
       }
       if (l.linear && batch_gdn && gdn_active != 0) {

@@ -571,7 +571,13 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
                hipStream_t stream, std::uint32_t* lists = nullptr,
                std::uint32_t* counts = nullptr, std::uint32_t list_capacity = 0,
-               std::uint32_t dense_extent = 0);
+               std::uint32_t dense_extent = 0, bool merge = true);
+
+/// Attention's split-key merge for `n_tokens` consecutive rows of
+/// `partials` (left unmerged by Attention with `merge` false).
+void AttentionMerge(const float* partials, float* out, std::uint32_t n_tokens,
+                    std::uint32_t heads, std::uint32_t d, std::uint32_t splits,
+                    hipStream_t stream);
 
 /// Maximum visible sparse context for this WMMA geometry, or zero when the
 /// geometry is unsupported. Checkpoint planning uses the same dispatch limit.

@@ -548,35 +548,40 @@ __launch_bounds__(64) static __global__
 }
 
 // Group equal experts across the complete request batch. Each distinct token
-// appears once; its mask retains duplicate output slots. The append order
-// affects scheduling only: no two groups write the same output element.
+// appears once; its mask retains duplicate output slots. Every anchor owns
+// its own entry, so the list needs no zeroed counter: anchors that do not
+// lead a group mark theirs skipped (-3). The entry order affects scheduling
+// only: no two groups write the same output element.
 static __global__ void group_moe_batch(const int32_t* ids, int32_t* storage,
                                        int tokens, int experts_used) {
   const int anchor = blockIdx.x * blockDim.x + threadIdx.x;
   if (anchor >= tokens * experts_used)
     return;
+  if (anchor == 0)
+    storage[0] = tokens * experts_used;
   const int expert = ids[anchor];
   const int first = anchor / experts_used;
   auto* groups = reinterpret_cast<MoeBatchGroup*>(storage + 1);
+  auto& group = groups[anchor];
   if (expert < 0) {
-    auto& group = groups[atomicAdd(storage, 1)];
     group.expert = -2;
     group.anchor = anchor;
     return;
   }
+  bool leads = true;
   for (int j = 0; j < anchor % experts_used; ++j)
-    if (ids[first * experts_used + j] == expert)
-      return;
+    leads &= ids[first * experts_used + j] != expert;
   int before = 0;
-  for (int t = 0; t < first; ++t) {
+  for (int t = 0; leads && t < first; ++t) {
     bool found = false;
     for (int j = 0; j < experts_used; ++j)
       found |= ids[t * experts_used + j] == expert;
     before += found;
   }
-  if (before % MMVQ_MAX_BATCH_SIZE != 0)
+  if (!leads || before % MMVQ_MAX_BATCH_SIZE != 0) {
+    group.expert = -3;
     return;
-  auto& group = groups[atomicAdd(storage, 1)];
+  }
   group.expert = expert;
   group.anchor = anchor;
   int count = 0;

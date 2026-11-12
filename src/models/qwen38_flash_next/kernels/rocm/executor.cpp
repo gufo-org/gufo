@@ -1159,8 +1159,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       std::max(kVecBatch * score_stride,
                std::min(std::size_t{5 * 1024 * 1024}, 512 * score_stride));
   s.scores = f32(e->select_score_floats_);
-  s.attn_partials = f32(static_cast<std::size_t>(kVecBatch) * c.num_heads *
-                        kAttnSplits * (c.head_dim + 2));
+  // A batched decode pass keeps every request row's partials for one merge.
+  s.attn_partials =
+      f32(std::max<std::size_t>(kVecBatch, std::min<std::size_t>(T, 64)) *
+          c.num_heads * kAttnSplits * (c.head_dim + 2));
   s.attn_lists = Alloc<std::uint32_t>(
       a, std::size_t{kVecBatch} * (c.indexer_top_k / c.compress_ratio),
       error_msg);
@@ -2883,6 +2885,15 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   return Dense(l.ssm_out, s_.gdn_out, out, n_tokens, error_msg);
 }
 
+std::size_t Executor::AttentionPartialRow() const {
+  const Config& c = config();
+  return std::size_t{c.num_heads} * kAttnSplits * (c.head_dim + 2);
+}
+
+std::uint32_t Executor::AttentionSplits() {
+  return kAttnSplits;
+}
+
 bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          const float* x, float* out, std::uint32_t n_tokens,
                          const std::uint32_t* pos,
@@ -2958,7 +2969,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // Raw keys survive only until pooling. The ring holds the initial
   // pre-budget backlog and a batch, independently for trunk and predictor.
   if (s.index_k != nullptr) {
-    if (!(projections_ready
+    if (!attention_batched_ &&
+        !(projections_ready
               ? DenseBatch(l.indexer_k, x, s_.ik, n_tokens, error_msg)
               : Dense(l.indexer_k, x, s_.ik, n_tokens, error_msg))) {
       return false;
@@ -2968,7 +2980,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   }
   const std::uint32_t* mask = nullptr;
   if (sparse) {
-    if (!Dense(l.indexer_q, x, s_.iq, n_tokens, error_msg)) {
+    if (!attention_batched_ &&
+        !Dense(l.indexer_q, x, s_.iq, n_tokens, error_msg)) {
       return false;
     }
     RmsNormRows(s_.iq, l.indexer_q_norm.f32(), s_.iq,
@@ -3076,13 +3089,19 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // Narrow batches split each row's key tiles over kAttnSplits blocks so a
   // decode step at depth fills the device.
   const bool split = !MatrixRows(n_tokens);
+  if (attention_batched_ && !split) {
+    AssignError(error_msg, "batched attention requires split decode rows");
+    return false;
+  }
   rocm::Attention(s_.q, s.k_cache, s.v_cache, mask, mask_words_, s_.ctx,
                   split ? s_.attn_partials : nullptr, kAttnSplits, n_tokens,
                   pos, c.num_heads, c.num_kv_heads, c.head_dim,
                   c.compress_ratio, stream_, split ? s_.attn_lists : nullptr,
                   split ? s_.attn_counts : nullptr,
                   c.compress_ratio > 0 ? c.indexer_top_k / c.compress_ratio : 0,
-                  c.indexer_top_k);
+                  c.indexer_top_k, !attention_batched_);
+  if (attention_batched_)
+    return true;  // the batched pass merges, gates and projects every row
   const std::uint32_t q_dim = c.AttentionQDim();
   const std::size_t ctx_count = static_cast<std::size_t>(n_tokens) * q_dim;
   // A decode batch's output projection reads the gate's Q8_1 rows.

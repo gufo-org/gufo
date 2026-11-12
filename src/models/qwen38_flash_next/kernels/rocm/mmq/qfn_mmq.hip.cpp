@@ -463,9 +463,6 @@ static int moe_vector_projection(int weight_type, const void* W,
 
   const int input_stride = ne10_padded / QK8_1;
   if (gated) {
-    if (n_tokens > MMVQ_MAX_BATCH_SIZE &&
-        hipMemsetAsync(groups, 0, sizeof(int32_t), stream) != hipSuccess)
-      return -2;
     mul_mat_vec_moe_gated(W, W_b, type, input, ids, groups, out_f32, K, M,
                           n_tokens, n_expert_used, input_stride, stream);
     err = hipGetLastError();
@@ -582,7 +579,13 @@ extern "C" size_t qfn_mmq_q8_1_bytes(int N, int K) {
 
 extern "C" int qfn_mmq_quantize_q8_1(
         const float * X_f32, void * X_q8, int N, int K, hipStream_t stream) {
-    if (!X_f32 || !X_q8 || N <= 0 || K <= 0 || K % 32 != 0) {
+    return qfn_mmq_quantize_q8_1_padded(X_f32, X_q8, N, N, K, stream);
+}
+
+extern "C" int qfn_mmq_quantize_q8_1_padded(
+        const float * X_f32, void * X_q8, int N, int padded, int K,
+        hipStream_t stream) {
+    if (!X_f32 || !X_q8 || N <= 0 || padded < N || K <= 0 || K % 32 != 0) {
         fprintf(stderr, "qfn_mmq_quantize_q8_1: bad arguments N=%d K=%d\n", N, K);
         return -1;
     }
@@ -590,7 +593,7 @@ extern "C" int qfn_mmq_quantize_q8_1(
     quantize_row_q8_1_hip(
         X_f32, nullptr, X_q8, GGML_TYPE_Q8_0, K,
         (int64_t)K, (int64_t)K * N, (int64_t)K * N,
-        ne10_padded, N, 1, 1, stream);
+        ne10_padded, padded, 1, 1, stream, N);
     return hipGetLastError() == hipSuccess ? 0 : -2;
 }
 
