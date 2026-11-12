@@ -1030,7 +1030,9 @@ void FailedSubmission() {
     failed = true;
   }
   assert(failed && disk.Entries().empty());
-  assert(costs.filesystem_ns && costs.fsync_ns && costs.bytes == 32);
+  // Payloads sync in batches, so a failure while writing the first batch
+  // records write costs before any sync.
+  assert(costs.filesystem_ns && costs.bytes == 32);
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
   disk.ReclaimOrphans();
   disk.WaitForReclamation();
