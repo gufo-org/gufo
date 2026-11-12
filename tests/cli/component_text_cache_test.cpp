@@ -2967,6 +2967,19 @@ void RetokenizedAnswerContinuesTheLiveFrontier() {
     Tokens edited{1, 2, 22, 34, 50, 6};
     assert(!cache.AlignToLiveFrontier(edited, stable, 4096, false));
   }
+  {
+    // An unchanged retry after the interrupted turn's continuation: the
+    // prompt's own tokens begin the newer frontier. Rewriting it to the
+    // interrupted frontier's tokens would change the identical request's
+    // sampled output.
+    ComponentTextCache cache(runner, 2, 0, {}, false, 0, false);
+    commit(cache, Tokens{1, 2, 20, 21, 50}, 2);
+    commit(cache, Tokens{1, 2, 22, 50, 6, 7}, 5);
+    Tokens retry{1, 2, 22, 50, 6};
+    std::size_t stable = 0;
+    assert(!cache.AlignToLiveFrontier(retry, stable, 4096, false));
+    assert((retry == Tokens{1, 2, 22, 50, 6}) && stable == 0);
+  }
   // The prompt the cache gives `prompt` after `frontier`, or nothing.
   const auto align = [&](const Tokens& frontier, Tokens prompt,
                          std::size_t reply = 1,

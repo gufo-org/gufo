@@ -1801,12 +1801,20 @@ bool ComponentTextCache::AlignToLiveFrontier(
   const std::lock_guard lock(impl_->mutex);
   std::span<const ContinuationToken> selected;
   std::size_t seam = 0, exact_depth = 0;
+  // The prompt's own tokens already begin a frontier, as an unchanged retry
+  // does. Rewriting it to an older frontier's tokens would only change what
+  // the identical request samples.
+  bool covered = false;
   // Tokens for the rest of a prompt token the frontier ends inside.
   std::vector<ContinuationToken> rest;
   const auto consider = [&](std::span<const ContinuationToken> frontier,
                             TrimEdges edges) {
     const auto common = static_cast<std::size_t>(
         std::ranges::mismatch(frontier, prompt).in1 - frontier.begin());
+    if (common == prompt.size()) {
+      covered = true;
+      return;
+    }
     if (common == frontier.size()) {
       exact_depth = std::max(exact_depth, frontier.size());
       return;
@@ -1852,7 +1860,7 @@ bool ComponentTextCache::AlignToLiveFrontier(
     // byte-identical text may be rewritten after a cold assignment/restart.
     consider(frontier, {});
   });
-  if (selected.empty() || exact_depth >= selected.size())
+  if (covered || selected.empty() || exact_depth >= selected.size())
     return false;
   if (Logger::Enabled(LogLevel::kDebug))
     Logger::Debug("cache",
