@@ -229,6 +229,11 @@ public:
   DiskStore(DiskStore&&) = delete;
   DiskStore& operator=(DiskStore&&) = delete;
   [[nodiscard]] std::span<const DurableEntry> Entries() const;
+  // Initialized, retained manifest vector storage included in the RAM ledger.
+  // For startup remaining-allocation accounting, not an RSS measurement.
+  // Excludes spare capacity, owner/index estimates, temporary validation,
+  // payloads and reservations. Use at quiescence with the host observation.
+  [[nodiscard]] std::size_t OwnedManifestBytes() const;
   [[nodiscard]] DiskStartupStats Stats() const;
   [[nodiscard]] DiskPublicationStats PublicationStats() const;
   void Publish(DiskFileId manifest_file, const DiskManifest&,

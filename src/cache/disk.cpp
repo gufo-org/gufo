@@ -1649,6 +1649,28 @@ DiskStore::~DiskStore() = default;
 std::span<const DurableEntry> DiskStore::Entries() const {
   return impl_->entries;
 }
+std::size_t DiskStore::OwnedManifestBytes() const {
+  const std::lock_guard guard(impl_->index_mutex);
+  std::size_t owned{};
+  for (const auto& entry : impl_->entries) {
+    const auto& manifest = entry.manifest_;
+    auto bytes = Add(manifest.input.size(),
+                     Multiply(manifest.tokens.size(), sizeof(Token)));
+    bytes =
+        Add(bytes, Multiply(manifest.components.size(), sizeof(DiskComponent)));
+    for (const auto& component : manifest.components)
+      bytes =
+          Add(bytes, Multiply(component.chunks.size(), sizeof(DiskPayload)));
+    // Decode initialized these elements before converting their admission.
+    // A converted estimate elsewhere in the ledger proves no such backing.
+    if (!entry.metadata_ || bytes > entry.metadata_.Info().bytes)
+      throw std::logic_error("manifest storage exceeds retained charge");
+    if (bytes > std::numeric_limits<std::size_t>::max() - owned)
+      throw std::overflow_error("owned manifest storage overflows");
+    owned += bytes;
+  }
+  return owned;
+}
 DiskStartupStats DiskStore::Stats() const {
   std::lock_guard guard(impl_->stats_mutex);
   return impl_->stats;
