@@ -11,7 +11,8 @@ namespace gufo::cache {
 // a successful use; startup ties and untouched publications use checkpoint ID.
 class DiskCatalog {
 public:
-  DiskCatalog(ResourceLedger&, DiskStore&, PrefixIndex&);
+  DiskCatalog(ResourceLedger&, DiskStore&, PrefixIndex&,
+              std::uint64_t turnover_bytes = UINT64_MAX);
   ~DiskCatalog();
   DiskCatalog(const DiskCatalog&) = delete;
   DiskCatalog& operator=(const DiskCatalog&) = delete;

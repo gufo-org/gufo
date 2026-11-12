@@ -266,6 +266,60 @@ void DiskUseHistorySurvivesCatalogRestart() {
   assert(recovered.EvictOne());
   assert(f.disk.Stats().managed_bytes == 0);
 }
+void DiskReuseExpiresAfterAByteTurnoverAndSurvivesRestart() {
+  for (const std::uint64_t turnover : {1U, 1U << 20}) {
+    TieredFixture f;
+    CheckpointId first, second;
+    {
+      DiskCatalog catalog(f.ledger, f.disk, f.index, turnover);
+      f.Append(8, 4);
+      auto a = f.Capture();
+      first = a->Id();
+      (void)f.Publish(*a, false);
+      catalog.Track(first);
+      catalog.Touch(first);
+      catalog.FlushUses();
+      assert(f.adapter.Invalidate(*f.slot));
+      auto other = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                          f.adapter.CompatibilityIdentity());
+      f.tokens.clear();
+      f.drafts.clear();
+      f.Append(8, 4);
+      auto b = other.Capture(
+          {f.tokens, InputIdentity(f.tokens.size()),
+           f.adapter.Positions(*f.slot), CheckpointPurpose::kPrompt, 1},
+          [&](const PayloadRequest& request) {
+            auto pool =
+                f.ledger.Reserve(ResourceCategory::kBackingFree, request.bytes)
+                    .Convert();
+            auto bytes =
+                std::make_shared<std::vector<std::byte>>(request.bytes);
+            auto assigned = pool.ReserveBacking(request.category);
+            auto completion =
+                request.category == ResourceCategory::kPrivateState
+                    ? f.adapter.CapturePrivate(*f.slot, request.component,
+                                               *bytes, f.stream)
+                    : f.adapter.CopyRowsOut(*f.slot, request.component,
+                                            request.first, request.end, *bytes,
+                                            f.stream);
+            assert(completion.Wait() == TransferResult::kSucceeded);
+            return Payload::Committed(assigned.Convert(), bytes);
+          });
+      second = b->Id();
+      (void)f.Publish(*b, false);
+      catalog.Track(second);
+      catalog.FlushUses();
+      const auto history = f.disk.UseHistory(first);
+      assert(history.reused_at && history.admitted_bytes > *history.reused_at);
+    }
+    DiskCatalog recovered(f.ledger, f.disk, f.index, turnover);
+    assert(recovered.EvictOne());
+    // A recent reused conversation outlives newer untouched admissions, but
+    // loses that protection after one budget of newly admitted unique bytes.
+    assert(bool(f.disk.Open(first)) == (turnover > 1));
+    assert(bool(f.disk.Open(second)) == (turnover == 1));
+  }
+}
 void AUsedFrontierIsNotAnOptionalVictim() {
   TieredFixture f;
   RetentionPolicy policy(f.ledger, f.index);
@@ -803,6 +857,7 @@ int main() {
   SupersededDiskTurnsLeaveBeforeAnotherConversation();
   PromptAnchorOutlivesCoveredAndLeafGeneratedFrontiers();
   DiskUseHistorySurvivesCatalogRestart();
+  DiskReuseExpiresAfterAByteTurnoverAndSurvivesRestart();
   AUsedFrontierIsNotAnOptionalVictim();
   DiskEvictionNeedsNoLedgerHeadroom();
   RecordPressureDropsUnusedFrontierBeforeRetry();

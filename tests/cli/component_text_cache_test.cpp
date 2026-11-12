@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -41,6 +42,7 @@ class Runner : public TextModelRunner {
 public:
   mutable FakeAdapter* adapter{};
   mutable std::size_t captures{};
+  std::function<void()> on_bind;
   bool defer_idle{};
   bool in_pass{};
   bool partial{};
@@ -106,6 +108,8 @@ public:
   }
   std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
+    if (on_bind)
+      on_bind();
     return std::make_unique<State>(dynamic_cast<FakeAdapter&>(adapter), slot);
   }
   void ReconcileComponentState(TextRunnerState& state,
@@ -1168,8 +1172,14 @@ void ReuseAndBranches() {
   assert(Generate(peer) == token);
   (void)peer.Commit();
   (void)retry.Commit();
-  runner->adapter->FailNextTransfer();
+  // Inject at the foreground bind, after optional idle frontier work settles.
+  const auto foreground = std::this_thread::get_id();
+  runner->on_bind = [&, foreground] {
+    if (std::this_thread::get_id() == foreground)
+      runner->adapter->FailNextTransfer();
+  };
   auto failed_restore = pool.Acquire(prompt);
+  runner->on_bind = {};
   assert(!failed_restore.cache_hit());
   Prefill(failed_restore);
   assert(Generate(failed_restore) == token);
@@ -1369,6 +1379,62 @@ void PromptCaptureReclaimsUnusedGeneratedStateFirst() {
   auto retry = cache.Acquire(prompt, {}, {}, true, 0, true);
   assert(retry->cached_tokens() == prompt.size());
   retry->Invalidate();
+}
+void IdleFrontierCaptureReturnsBeforeCopyAndAdmissionWaits() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  const std::vector<TextRunnerToken> frontier{1, 2, 3, 4, 5};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  (void)runner->Prefill(dynamic_cast<TextRunnerState&>(lease->state()), prompt,
+                        0, prompt.size());
+  runner->Advance(dynamic_cast<TextRunnerState&>(lease->state()), 4);
+  runner->Advance(dynamic_cast<TextRunnerState&>(lease->state()), 5);
+  std::binary_semaphore entered(0), finish(0);
+  std::atomic<unsigned> binds{};
+  runner->on_bind = [&] {
+    if (binds.fetch_add(1) == 0) {
+      entered.release();
+      finish.acquire();
+    }
+  };
+  (void)lease->Commit({}, {}, frontier);
+  // Commit returned even though its idle task cannot yet bind/copy the slot.
+  entered.acquire();
+  auto next = std::async(std::launch::async, [&] {
+    return cache.Acquire(std::vector<TextRunnerToken>{9}, {}, {}, true, 0,
+                         true);
+  });
+  const auto waiting = next.wait_for(std::chrono::milliseconds(20));
+  finish.release();
+  assert(waiting == std::future_status::timeout);
+  auto peer = next.get();
+  peer->Invalidate();
+  auto replay = cache.Acquire(frontier, {}, {}, true, 0, true);
+  assert(replay->cached_tokens() == frontier.size());
+  replay->Invalidate();
+}
+void IdleFrontierSetupRefusalKeepsTheCompletedLiveExecution() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  const std::vector<TextRunnerToken> frontier{1, 2, 3, 4};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, frontier, frontier);
+  const auto expected = runner->adapter->RecurrentHash(state.slot);
+  std::atomic<unsigned> binds{};
+  runner->on_bind = [&] {
+    if (binds.fetch_add(1) == 0)
+      throw cache::ResourceExhausted();
+  };
+  (void)lease->Commit({}, {}, frontier);
+  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
+  assert(next->cached_tokens() == frontier.size());
+  assert(next->restored_snapshot_bytes() == 0);
+  assert(runner->adapter->RecurrentHash(
+             dynamic_cast<State&>(next->state()).slot) == expected);
+  next->Invalidate();
 }
 void GeneratedFrontierSurvivesReassignmentAndRestart() {
   for (const bool disk_on : {false, true}) {
@@ -3406,6 +3472,8 @@ int main() {
   WarmTurnsAdvanceTheStableCheckpoint();
   GeneratedFrontierKeepsTheCurrentRetryUnderPressure();
   PromptCaptureReclaimsUnusedGeneratedStateFirst();
+  IdleFrontierSetupRefusalKeepsTheCompletedLiveExecution();
+  IdleFrontierCaptureReturnsBeforeCopyAndAdmissionWaits();
   GeneratedFrontierSurvivesReassignmentAndRestart();
   FullChatCheckpointRestoresWithoutSuffixPrefill();
   GeneratedFrontierForksBeforeMutation();

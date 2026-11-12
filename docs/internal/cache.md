@@ -564,10 +564,14 @@ disk like any other and survive restarts.
 
 Prompt checkpoints less than 2048 tokens past a stored prefix remain optional.
 Learned boundaries and exact generated frontiers bypass this spacing rule.
-A completed request captures its executed decode-end frontier before releasing
-the slot. Complete chunks share the execution history; private state and tails
-are copied while execution is exclusive, and borrowed rows use the existing
-idle preservation worker. The disk queue writes these copies during idle work.
+A completed request schedules its executed decode-end frontier on a bounded
+per-slot task when the device is idle. Admission waits for that task before
+reusing a slot, and teardown joins it before draining disk jobs. When another
+foreground lease is active, capture stays on the exclusive completion path.
+Complete chunks share the execution history; private state and tails copy under
+slot exclusivity, and borrowed rows use the existing idle preservation worker.
+Optional setup or admission refusal leaves the completed live execution valid.
+The disk queue writes these copies during idle work.
 A refused capture or full persistence queue can still leave an earlier fallback.
 Before their first restore, generated copies use free capacity or replace older
 unused frontiers. Prompt admission reclaims unused generated copies before exact
@@ -586,14 +590,19 @@ Grid checkpoints remain RAM-only.
 Disk eviction removes superseded history before another conversation's last
 frontier. A generated frontier supersedes covered entries only after three
 newer generated frontiers of the same lineage, leaving two recent turn ends
-for edits. Forks and learned boundaries are exempt. Remaining entries use the
-newest descendant's access recency, then covered entries, leaves and forks;
+for edits. Forks and learned boundaries are exempt. Other conversations whose
+checkpoint or descendant was restored within one disk budget of newly admitted
+unique payload bytes outlive unreused conversations. This protection expires
+at a byte turnover and survives a clean restart. Within each tier, entries use
+the newest descendant's access recency, then covered entries, leaves and forks;
 ties prefer the retirement that frees more unique payload bytes. Shared chunks
 are excluded from that estimate. A busy store refuses eviction immediately,
 and reader pins still protect their publication.
 
-Access history lives in independently checksummed 16-byte files under
+Access history lives in independently checksummed 40-byte files under
 `v2/uses`, counts against the disk budget, and is removed with its manifest.
+Legacy 16-byte recency records remain readable without a reuse stamp. New
+records also retain the admission-byte clock and last reuse coordinate.
 Lookup only marks access history dirty. Quiescent maintenance and catalog
 teardown flush updates; filesystem work never runs from ordinary lookup.
 An abrupt shutdown can lose these advisory updates. Missing or damaged history

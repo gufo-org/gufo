@@ -1700,42 +1700,57 @@ DiskReadStats DiskStore::ReadPayload(
     impl_->RememberVerified(key, identity);
   return stats;
 }
-std::uint64_t DiskStore::LastUse(CheckpointId id) const {
+DiskUseHistory DiskStore::UseHistory(CheckpointId id) const {
   std::lock_guard guard(impl_->mutex);
   const auto it =
       std::find_if(impl_->entries.begin(), impl_->entries.end(),
                    [&](const auto& e) { return e.manifest_.checkpoint == id; });
   if (it == impl_->entries.end())
-    return 0;
+    return {};
   std::error_code ec;
   const Fd file(platform::OpenAt(impl_->uses, DiskFileName(it->file_),
                                  platform::FileMode::kRead, ec));
   platform::FileInfo info{};
-  std::array<std::uint8_t, 16> bytes{};
+  std::array<std::uint8_t, 40> bytes{};
   if (!platform::FileValid(file.Get()) ||
       !platform::Stat(file.Get(), &info, ec) || !Regular(info) ||
-      info.size != bytes.size())
-    return 0;
+      (info.size != 16 && info.size != bytes.size()))
+    return {};
   std::size_t offset = 0;
-  while (offset < bytes.size()) {
+  while (offset < info.size) {
     const auto read = platform::Read(file.Get(), bytes.data() + offset,
-                                     bytes.size() - offset, ec);
+                                     info.size - offset, ec);
     if (!read) {
       if (ec == std::errc::interrupted)
         continue;
-      return 0;
+      return {};
     }
     offset += read;
   }
-  std::uint64_t used = 0, checksum = 0;
-  for (unsigned i = 0; i < 8; ++i) {
-    used |= std::uint64_t(bytes[i]) << (8 * i);
-    checksum |= std::uint64_t(bytes[8 + i]) << (8 * i);
-  }
-  return checksum == DiskChecksum(std::span(bytes).first(8), id.value) ? used
-                                                                       : 0;
+  const auto word = [&](std::size_t offset) {
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i)
+      value |= std::uint64_t(bytes[offset + i]) << (8 * i);
+    return value;
+  };
+  const auto payload = static_cast<std::size_t>(info.size) - 8;
+  if (word(payload) != DiskChecksum(std::span(bytes).first(payload), id.value))
+    return {};
+  if (info.size == 16)
+    return {word(0), 0, {}};
+  if (word(16) > 1 || (word(16) && word(24) > word(8)))
+    return {};
+  return {word(0), word(8), word(16) ? std::optional(word(24)) : std::nullopt};
+}
+std::uint64_t DiskStore::LastUse(CheckpointId id) const {
+  return UseHistory(id).last_used;
 }
 bool DiskStore::TryRecordUse(CheckpointId id, std::uint64_t used) {
+  return TryRecordUse(id, DiskUseHistory{used, 0, {}});
+}
+bool DiskStore::TryRecordUse(CheckpointId id, const DiskUseHistory& history) {
+  if (history.reused_at && *history.reused_at > history.admitted_bytes)
+    return false;
   std::unique_lock guard(impl_->mutex, std::try_to_lock);
   if (!guard.owns_lock() || impl_->recovery_required)
     return false;
@@ -1759,15 +1774,19 @@ bool DiskStore::TryRecordUse(CheckpointId id, std::uint64_t used) {
     const auto after_removal = impl_->stats.managed_bytes -
                                std::min(impl_->stats.managed_bytes, released);
     if (after_removal > impl_->budget_bytes ||
-        impl_->budget_bytes - after_removal < 16)
+        impl_->budget_bytes - after_removal < 40)
       return false;
   }
-  std::array<std::uint8_t, 16> bytes{};
+  std::array<std::uint8_t, 40> bytes{};
+  const std::array<std::uint64_t, 4> words{
+      history.last_used, history.admitted_bytes,
+      history.reused_at.has_value() ? 1U : 0U, history.reused_at.value_or(0)};
+  for (std::size_t word = 0; word < words.size(); ++word)
+    for (unsigned i = 0; i < 8; ++i)
+      bytes[word * 8 + i] = words[word] >> (8 * i);
+  const auto checksum = DiskChecksum(std::span(bytes).first(32), id.value);
   for (unsigned i = 0; i < 8; ++i)
-    bytes[i] = used >> (8 * i);
-  const auto checksum = DiskChecksum(std::span(bytes).first(8), id.value);
-  for (unsigned i = 0; i < 8; ++i)
-    bytes[8 + i] = checksum >> (8 * i);
+    bytes[32 + i] = checksum >> (8 * i);
   try {
     // Use history is advisory: unlinking an old record before replacement may
     // lose recency on a crash, but never changes restore eligibility.

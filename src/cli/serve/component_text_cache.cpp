@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -215,6 +216,8 @@ struct ComponentTextCache::Impl {
     // Acquisition order; cold assignment replaces the oldest live frontier.
     std::uint64_t used{};
     bool busy{};
+    bool frontier_active{};
+    std::thread frontier_worker;
   };
   std::shared_ptr<TextModelRunner> runner;
   cache::ResourceLedger ledger;
@@ -229,6 +232,7 @@ struct ComponentTextCache::Impl {
   cache::PrefixIndex index;
   cache::RetentionPolicy retention;
   mutable std::mutex mutex;
+  std::condition_variable frontier_ready;
   std::vector<std::unique_ptr<Entry>> entries;
   std::uint64_t clock{};
   std::unique_ptr<cache::DiskCatalog> catalog;
@@ -404,7 +408,8 @@ struct ComponentTextCache::Impl {
     }
     budget = ram_enabled ? ram : 0;
     if (options) {
-      catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index);
+      catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
+                                                     options->capacity_bytes);
       for (const auto& durable : disk->Entries()) {
         cache::ExecutionHistory::ObserveDurableId(
             durable.Manifest().checkpoint);
@@ -561,6 +566,9 @@ struct ComponentTextCache::Impl {
                      " disk_backing_bytes=" + std::to_string(disk_backing));
   }
   ~Impl() {
+    for (auto& entry : entries)
+      if (entry->frontier_worker.joinable())
+        entry->frontier_worker.join();
     retention.SetDemotion({});
     DrainDemotion();
     // Settle immutable-source readers before slots/resources/index unwind.
@@ -852,20 +860,22 @@ struct ComponentTextCache::Lease::Impl {
   ContinuationLookup lookup_result;
   ComponentCacheMetrics metrics;
   Impl(ComponentTextCache::Impl* cache, ComponentTextCache::Impl::Entry* entry,
-       cache::SlotLease slot, std::span<const cache::Token> prompt,
+       cache::SlotLease&& slot, std::span<const cache::Token> prompt,
        cache::InputIdentity input, std::size_t stable)
       : cache(cache),
         entry(entry),
-        slot(std::move(slot)),
-        state(cache->runner->BindComponentState(*cache->resources->adapter,
-                                                this->slot.Execution())),
         input(std::move(input)),
         prompt(prompt.begin(), prompt.end()),
         stable(stable),
         edit_metadata(cache->ledger
                           .Reserve(cache::ResourceCategory::kMetadata,
                                    sizeof(edit_boundaries))
-                          .Convert()) {}
+                          .Convert()) {
+    // Leave the caller's lease intact until all fallible setup is complete.
+    state = cache->runner->BindComponentState(*cache->resources->adapter,
+                                              slot.Execution());
+    this->slot = std::move(slot);
+  }
   cache::RetentionRequest Retain(
       std::span<const cache::Token> tokens,
       std::optional<std::size_t> new_payload_bytes = {}) const {
@@ -1171,7 +1181,13 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   std::vector<std::size_t> reply_starts, reply_ends;
   std::size_t common = 0;
   {
-    const std::lock_guard lock(impl_->mutex);
+    std::unique_lock lock(impl_->mutex);
+    impl_->frontier_ready.wait(lock, [&] {
+      return std::ranges::none_of(
+          impl_->entries, [](const auto& e) { return e->frontier_active; });
+    });
+    if (cancelled && cancelled())
+      return {};
     if (impl_->catalog)
       impl_->catalog->Reconcile();
     found =
@@ -1300,6 +1316,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   }
   std::unique_ptr<Lease> lease;
   try {
+    if (entry->frontier_worker.joinable())
+      entry->frontier_worker.join();
     auto slot = entry->slot->Acquire(live);
     lease = std::make_unique<Lease>(std::make_unique<Lease::Impl>(
         impl_.get(), entry, std::move(slot), prompt, input, stable));
@@ -2191,11 +2209,38 @@ std::size_t ComponentTextCache::Lease::Commit(
     Invalidate();
     return bytes;
   }
-  // Capture while execution is still exclusive. Complete chunks are shared;
-  // borrowed rows join the slot's existing idle preservation worker. Admission
-  // remains optional: inability to retain must never fail a completed request.
-  if (live.size() > impl_->prompt.size() &&
-      (impl_->cache->ram_enabled || (impl_->persist && impl_->cache->queue))) {
+  // Optional frontier capture runs after commit when the device is idle.
+  // Concurrent foreground leases keep the existing exclusive capture path;
+  // an idle task must never race their execution or a new slot admission.
+  bool async_frontier = false;
+  const bool capture_frontier =
+      live.size() > impl_->prompt.size() &&
+      (impl_->cache->ram_enabled || (impl_->persist && impl_->cache->queue));
+  // Clear admission's barrier even if commit bookkeeping fails before launch.
+  struct FrontierBarrier {
+    ComponentTextCache::Impl* cache;
+    ComponentTextCache::Impl::Entry* entry;
+    bool armed{};
+    ~FrontierBarrier() {
+      if (armed) {
+        const std::lock_guard lock(cache->mutex);
+        entry->frontier_active = false;
+        cache->frontier_ready.notify_all();
+      }
+    }
+  } barrier{impl_->cache, impl_->entry};
+  if (capture_frontier) {
+    const std::lock_guard lock(impl_->cache->mutex);
+    async_frontier =
+        std::ranges::none_of(impl_->cache->entries, [&](const auto& e) {
+          return e.get() != impl_->entry && (e->busy || e->frontier_active);
+        });
+    if (async_frontier) {
+      impl_->entry->frontier_active = true;
+      barrier.armed = true;
+    }
+  }
+  if (capture_frontier && !async_frontier) {
     try {
       impl_->generated_frontier = true;
       impl_->capture_tokens = live;
@@ -2233,6 +2278,62 @@ std::size_t ComponentTextCache::Lease::Commit(
     impl_->entry->busy = false;
   }
   impl_->active = false;
+  if (async_frontier) {
+    auto* cache = impl_->cache;
+    auto* entry = impl_->entry;
+    try {
+      // Publish the joinable handle before completion can wake admission.
+      const std::lock_guard launch_lock(cache->mutex);
+      // All task inputs are independent of the completed request facade.
+      // Teardown joins the bounded per-slot task before draining disk jobs.
+      entry->frontier_worker =
+          std::thread([cache, entry, location, input = impl_->input,
+                       prompt = impl_->prompt, stable = impl_->stable,
+                       cached = impl_->cached, source = impl_->source,
+                       persist = impl_->persist, live = entry->live_tokens] {
+            try {
+              auto slot = entry->slot->Acquire(location);
+              std::unique_ptr<Impl> request;
+              try {
+                request = std::make_unique<Impl>(cache, entry, std::move(slot),
+                                                 prompt, input, stable);
+              } catch (...) {
+                slot.Commit();
+                throw;
+              }
+              Lease task(std::move(request));
+              task.impl_->active = false;
+              try {
+                task.impl_->persist = persist;
+                task.impl_->cached = cached;
+                task.impl_->source = source;
+                task.impl_->generated_frontier = true;
+                task.impl_->capture_tokens = live;
+                task.impl_->capture_boundary = live.size();
+                if (auto frontier = task.Capture())
+                  (void)task.PublishSnapshot(live, std::move(frontier), false);
+              } catch (...) {
+                task.impl_->slot.Commit();
+                throw;
+              }
+              task.impl_->slot.Commit();
+            } catch (const std::exception& error) {
+              Logger::Info(
+                  "cache",
+                  std::string("event=frontier_capture_refused reason=") +
+                      error.what());
+            }
+            {
+              const std::lock_guard lock(cache->mutex);
+              entry->frontier_active = false;
+            }
+            cache->frontier_ready.notify_all();
+          });
+      barrier.armed = false;
+    } catch (...) {
+      // The barrier releases admission; the live frontier stays reusable.
+    }
+  }
   return bytes;
 }
 void ComponentTextCache::Lease::Invalidate() noexcept {
