@@ -40,6 +40,14 @@ __device__ __forceinline__ float RowSumDpp(float x) {
   return x;
 }
 
+// Eight-lane sum inside a DPP row: the scalar kernel's last three stages.
+__device__ __forceinline__ float HalfRowSumDpp(float x) {
+  x = XorAddDpp<4>(x);
+  x = XorAddDpp<2>(x);
+  x = XorAddDpp<1>(x);
+  return x;
+}
+
 struct SplitKPartition {
   std::size_t begin;
   std::size_t end;
@@ -110,12 +118,12 @@ __device__ __forceinline__ void UpdateHalf4(float4& output, const __half* value,
 }
 
 // One query head's state across a split: its query slice, output
-// accumulators and softmax statistics. Lanes is 32 (one head per wave32) or
-// 16 (two heads per wave32 or four per wave64); a 16-lane head keeps the
-// 32-lane element layout, so lane l holds the original lanes l and l + 16.
+// accumulators and softmax statistics. Lanes is 32 (one head per wave32),
+// 16 (two heads per wave32 or four per wave64) or 8. A narrower head keeps
+// the 32-lane element layout: lane l holds the original lanes l + k * Lanes.
 template<unsigned Lanes, bool MixedFma>
 struct SplitKAttentionHead {
-  static_assert(Lanes == 16 || Lanes == 32);
+  static_assert(Lanes == 8 || Lanes == 16 || Lanes == 32);
   static constexpr std::uint32_t kHeadDim = 256;
   static constexpr std::uint32_t kVectorWidth = kHeadDim / 4;
   static constexpr std::uint32_t kVectorsPerLane = kVectorWidth / Lanes;
@@ -155,6 +163,20 @@ struct SplitKAttentionHead {
                                key + Vector(lane, vector) * 4, negative_zero);
       }
       return score;
+    } else if constexpr (Lanes == 8) {
+      // Original lanes l, l + 8, l + 16 and l + 24: run the offset-16 and
+      // offset-8 stages in registers; HalfRowSumDpp finishes the tree.
+      float partial[4] = {};
+#pragma unroll
+      for (unsigned original = 0; original < 4; ++original) {
+#pragma unroll
+        for (unsigned vector = 0; vector < 2; ++vector) {
+          partial[original] += DotHalf4<MixedFma>(
+              query_values[original * 2 + vector],
+              key + Vector(lane, original * 2 + vector) * 4, negative_zero);
+        }
+      }
+      return (partial[0] + partial[2]) + (partial[1] + partial[3]);
     } else {
       // Keep both original lane partials independent until the original
       // offset-16 reduction stage.
@@ -180,6 +202,28 @@ struct SplitKAttentionHead {
     const float value_scale = expf(score - new_max);
     running_sum = (running_sum * previous_scale) + value_scale;
     running_max = new_max;
+#pragma unroll
+    for (std::uint32_t vector = 0; vector < kVectorsPerLane; ++vector) {
+      UpdateHalf4<MixedFma>(output_values[vector],
+                            value + Vector(lane, vector) * 4, previous_scale,
+                            value_scale, negative_zero);
+    }
+  }
+
+  // Accumulate with one exponential: of expf(running_max - new_max) and
+  // expf(score - new_max), one is expf(0) = 1 and the other is
+  // expf(-|running_max - score|). Negating a difference is exact, so both
+  // scales match Accumulate bit for bit, running_max = -inf included.
+  __device__ __forceinline__ void AccumulateOneExp(float score,
+                                                   const __half* value,
+                                                   std::uint32_t lane) {
+    const float difference = running_max - score;
+    const float ratio = expf(-fabsf(difference));
+    const bool new_maximum = difference < 0.0F;
+    const float previous_scale = new_maximum ? ratio : 1.0F;
+    const float value_scale = new_maximum ? 1.0F : ratio;
+    running_sum = (running_sum * previous_scale) + value_scale;
+    running_max = new_maximum ? score : running_max;
 #pragma unroll
     for (std::uint32_t vector = 0; vector < kVectorsPerLane; ++vector) {
       UpdateHalf4<MixedFma>(output_values[vector],
