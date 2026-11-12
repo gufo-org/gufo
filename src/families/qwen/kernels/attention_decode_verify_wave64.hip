@@ -143,8 +143,7 @@ __launch_bounds__(Rows * 6 * Lanes) __global__
   const std::size_t union_begin =
       SplitKDecodePartition(pos + first_row, split, split_count).begin;
   const std::size_t union_end =
-      SplitKDecodePartition(pos + first_row + Rows - 1, split, split_count)
-          .end;
+      SplitKDecodePartition(pos + first_row + Rows - 1, split, split_count).end;
 
   const std::size_t kv_width =
       static_cast<std::size_t>(num_kv_heads) * head_dim;

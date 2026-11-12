@@ -380,8 +380,8 @@ void TestVerificationAttentionMatchesScalarRows() {
   std::vector<__half> h_k(cache_elements), h_v(cache_elements);
   for (std::size_t index = 0; index < cache_elements; ++index) {
     const float key_scale = (index / head_dim) % 3 == 0 ? 2.5F : 0.5F;
-    h_k[index] = __float2half(key_scale *
-                              std::sin(static_cast<float>(index) * 0.011F));
+    h_k[index] =
+        __float2half(key_scale * std::sin(static_cast<float>(index) * 0.011F));
     h_v[index] = __float2half(std::cos(static_cast<float>(index) * 0.007F));
   }
 
@@ -419,16 +419,16 @@ void TestVerificationAttentionMatchesScalarRows() {
         gufo::hip::LaunchAttention(
             d_q + row * width, nullptr, nullptr, d_gate + row * width, nullptr,
             nullptr, d_k, d_v, d_scalar + row * width, layer, start + row,
-            max_context, num_heads, num_kv_heads, head_dim, nullptr,
-            d_scratch, true);
+            max_context, num_heads, num_kv_heads, head_dim, nullptr, d_scratch,
+            true);
       }
       gufo::hip::LaunchCausalDecodeAttention(
           d_q, d_gate, nullptr, nullptr, d_k, d_v, d_batched, layer, start,
           rows, max_context, num_heads, num_kv_heads, head_dim, nullptr,
           {d_scratch, scratch_elements});
       HIP_CHECK(hipDeviceSynchronize());
-      HIP_CHECK(hipMemcpy(scalar.data(), d_scalar,
-                          rows * width * sizeof(float), hipMemcpyDeviceToHost));
+      HIP_CHECK(hipMemcpy(scalar.data(), d_scalar, rows * width * sizeof(float),
+                          hipMemcpyDeviceToHost));
       HIP_CHECK(hipMemcpy(batched.data(), d_batched,
                           rows * width * sizeof(float), hipMemcpyDeviceToHost));
       if (std::memcmp(scalar.data(), batched.data(),
