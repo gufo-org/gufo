@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <semaphore>
@@ -688,6 +689,68 @@ void TestMeminfoAvailableExcludesFreeCma() {
       "free CMA beyond MemAvailable saturates at zero");
   Expect(!MeminfoAvailableBytes("MemTotal:  4000 kB\nCmaFree:  10 kB\n"),
          "missing MemAvailable keeps the caller's fallback");
+  Expect(!MeminfoAvailableBytes("MemAvailable: 18446744073709551615 kB\n"),
+         "unrepresentable available bytes cannot wrap into an admission limit");
+  Expect(MeminfoAvailableBytes("MemAvailable: 4000 kB\n"
+                               "CmaFree: 18446744073709551615 kB\n") == 0,
+         "unrepresentable CMA excludes all available memory conservatively");
+}
+
+void TestHostSnapshotMemoryAccounting() {
+  using gufo::ext::PlanHostSnapshotMemory;
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  const auto host = PlanHostSnapshotMemory(16 * gib, 3 * gib, std::nullopt);
+  Expect(
+      host.raw_available_bytes == 16 * gib && host.cma_free_bytes == 3 * gib &&
+          host.cma_excluded_bytes == 3 * gib && !host.cgroup_headroom_bytes &&
+          !host.cgroup_limited && host.available_bytes == 13 * gib &&
+          host.reserve_bytes == 4 * gib && host.ceiling_bytes == 9 * gib &&
+          host.automatic_budget_bytes == 13 * gib / 2,
+      "one snapshot distinguishes raw availability, CMA and the OS reserve");
+  const auto cgroup = PlanHostSnapshotMemory(16 * gib, 3 * gib, 8 * gib);
+  Expect(
+      cgroup.cgroup_headroom_bytes == 8 * gib && cgroup.cgroup_limited &&
+          cgroup.available_bytes == 8 * gib &&
+          cgroup.ceiling_bytes == 4 * gib &&
+          cgroup.automatic_budget_bytes == 4 * gib,
+      "smaller cgroup headroom limits the host before the unchanged reserve");
+  const auto wider_cgroup = PlanHostSnapshotMemory(16 * gib, 3 * gib, 20 * gib);
+  Expect(wider_cgroup.cgroup_headroom_bytes == 20 * gib &&
+             !wider_cgroup.cgroup_limited &&
+             wider_cgroup.ceiling_bytes == host.ceiling_bytes,
+         "larger cgroup limit cannot manufacture host capacity");
+  const auto tied = PlanHostSnapshotMemory(16 * gib, 3 * gib, 13 * gib);
+  Expect(!tied.cgroup_limited && tied.ceiling_bytes == host.ceiling_bytes,
+         "equal limits retain the host as the diagnostic limiter");
+  const auto boundary = PlanHostSnapshotMemory(4 * gib, 0, std::nullopt);
+  const auto one_byte = PlanHostSnapshotMemory(4 * gib + 1, 0, std::nullopt);
+  Expect(boundary.ceiling_bytes == 0 && one_byte.ceiling_bytes == 1,
+         "exact OS-reserve boundary saturates without dropping the reserve");
+  const auto excluded = PlanHostSnapshotMemory(2 * gib, 8 * gib, std::nullopt);
+  Expect(excluded.cma_excluded_bytes == 2 * gib &&
+             excluded.available_bytes == 0 && excluded.ceiling_bytes == 0,
+         "CMA exclusion never underflows raw available bytes");
+  const auto full = PlanHostSnapshotMemory(16 * gib, 0, 0);
+  Expect(full.cgroup_limited && full.available_bytes == 0 &&
+             full.ceiling_bytes == 0,
+         "exhausted cgroup headroom admits no additional allocation");
+  // Real observations already include loaded/committed allocation footprints.
+  // No allocation is added back here or subtracted for a second time.
+  const auto before = PlanHostSnapshotMemory(20 * gib, 2 * gib, std::nullopt);
+  const auto committed =
+      PlanHostSnapshotMemory(17 * gib, 2 * gib, std::nullopt);
+  Expect(before.ceiling_bytes - committed.ceiling_bytes == 3 * gib &&
+             committed.ceiling_bytes == 11 * gib,
+         "already committed allocation remains reflected in the observed free "
+         "memory");
+  const auto maximum = std::numeric_limits<std::uint64_t>::max();
+  const auto large = PlanHostSnapshotMemory(maximum, 0, maximum);
+  Expect(
+      large.available_bytes == maximum &&
+          large.ceiling_bytes ==
+              std::min<std::uint64_t>(maximum - 4 * gib,
+                                      std::numeric_limits<std::size_t>::max()),
+      "host ceiling arithmetic cannot overflow at the largest input");
 }
 
 void TestCgroupAvailableCountsReclaimableCache() {
@@ -1327,6 +1390,7 @@ int main() {
   TestResourceClaimsAreValidatedBeforeAllocation();
   TestRamCacheOptionParsing();
   TestMeminfoAvailableExcludesFreeCma();
+  TestHostSnapshotMemoryAccounting();
   TestCgroupAvailableCountsReclaimableCache();
   std::cout << "All text model runner tests passed\n";
   return 0;

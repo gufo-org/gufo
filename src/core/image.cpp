@@ -301,6 +301,205 @@ Image DecodeWebp(std::span<const std::uint8_t> bytes) {
 
 }  // namespace
 
+ImageDecodePlan InspectImage(std::span<const std::uint8_t> bytes) {
+  static_assert(kMaxEncodedImageBytes <= (20ULL << 20) &&
+                    kMaxImagePixels <= (32ULL << 20),
+                "review decoder bounds when raising image limits");
+  // Decoder workspace follows the supported codecs, not a compressed-size
+  // heuristic: png 0.18 (stream.rs/unfiltering_buffer.rs), libjpeg-turbo 3.1
+  // (jmemmgr.c/jdcoefct.c), and libwebp 1.6 (frame_dec.c/vp8l_dec.c and
+  // huffman_utils.c). Review these bounds when upgrading decoder storage.
+  if (bytes.empty() || bytes.size() > kMaxEncodedImageBytes) {
+    throw std::invalid_argument("image exceeds encoded byte limit or is empty");
+  }
+  // All input sizes are bounded before arithmetic or decoder entry. Use a
+  // wide accumulator even on targets with a narrower size_t.
+  const auto finish = [](ImageFormat format, std::uint32_t width,
+                         std::uint32_t height, unsigned orientation,
+                         std::uint64_t workspace) {
+    ValidateDimensions(width, height);
+    const std::uint64_t rgb = std::uint64_t{width} * height * 3;
+    const auto peak = workspace + rgb * (orientation == 1 ? 1 : 2);
+    if (peak > std::numeric_limits<std::size_t>::max())
+      throw std::length_error("image decode memory bound overflows");
+    return ImageDecodePlan{format,
+                           width,
+                           height,
+                           orientation >= 5 ? height : width,
+                           orientation >= 5 ? width : height,
+                           orientation,
+                           static_cast<std::size_t>(peak)};
+  };
+  constexpr std::array<std::uint8_t, 8> kPngSignature{0x89, 'P',  'N',  'G',
+                                                      '\r', '\n', 0x1a, '\n'};
+  if (bytes.size() >= kPngSignature.size() &&
+      std::memcmp(bytes.data(), kPngSignature.data(), kPngSignature.size()) ==
+          0) {
+    if (bytes.size() < 33 || bytes[8] || bytes[9] || bytes[10] ||
+        bytes[11] != 13 || std::memcmp(bytes.data() + 12, "IHDR", 4))
+      throw std::invalid_argument("invalid PNG header");
+    const auto u32 = [&](std::size_t at) {
+      return (std::uint32_t{bytes[at]} << 24) |
+             (std::uint32_t{bytes[at + 1]} << 16) |
+             (std::uint32_t{bytes[at + 2]} << 8) | bytes[at + 3];
+    };
+    const auto width = u32(16), height = u32(20);
+    ValidateDimensions(width, height);
+    if (width > 1000000 || height > 1000000 || bytes[26] != 0 ||
+        bytes[27] != 0 || bytes[28] > 1)
+      throw std::invalid_argument("invalid PNG geometry or compression");
+    const unsigned depth = bytes[24], color = bytes[25];
+    const unsigned channels = color == 0 || color == 3 ? 1
+                              : color == 2             ? 3
+                              : color == 4             ? 2
+                              : color == 6             ? 4
+                                                       : 0;
+    const bool valid_depth = depth == 8 || (depth == 16 && color != 3) ||
+                             ((depth == 1 || depth == 2 || depth == 4) &&
+                              (color == 0 || color == 3));
+    if (!channels || !valid_depth)
+      throw std::invalid_argument("invalid PNG color format");
+    const auto row = (std::uint64_t{width} * channels * depth + 7) / 8 + 1;
+    auto raw_frame = row * height;
+    if (bytes[28]) {
+      // Adam7 packs and filters each pass independently. Narrow/sub-byte
+      // passes can require more storage than one packed full-resolution row.
+      constexpr unsigned x_start[]{0, 4, 0, 2, 0, 1, 0};
+      constexpr unsigned y_start[]{0, 0, 4, 0, 2, 0, 1};
+      constexpr unsigned x_step[]{8, 8, 4, 4, 2, 2, 1};
+      constexpr unsigned y_step[]{8, 8, 8, 4, 4, 2, 2};
+      raw_frame = 0;
+      for (unsigned pass = 0; pass < 7; ++pass) {
+        if (width <= x_start[pass] || height <= y_start[pass])
+          continue;
+        const auto pw =
+            (width - x_start[pass] + x_step[pass] - 1) / x_step[pass];
+        const auto ph =
+            (height - y_start[pass] + y_step[pass] - 1) / y_step[pass];
+        raw_frame += ((std::uint64_t{pw} * channels * depth + 7) / 8 + 1) * ph;
+      }
+    }
+    // png 0.18 charges ancillary/transform storage to a 64 MiB limit. Some
+    // metadata clones are uncharged; with at most 20 MiB of encoded input,
+    // twice that limit covers clones and raw metadata vector replacement.
+    // Its streaming unfilter buffers are
+    // separate: three raw frames cover geometric vector growth/replacement,
+    // plus previous/current rows and Adam7 RGB.
+    // without_animation may also copy the bounded encoded input.
+    constexpr std::uint64_t ancillary_limit = 64ULL << 20;
+    constexpr std::uint64_t inflate_and_control = 1ULL << 20;
+    const auto workspace = 2 * ancillary_limit + inflate_and_control +
+                           3 * raw_frame + 4 * row + std::uint64_t{width} * 3 +
+                           bytes.size();
+    return finish(ImageFormat::kPng, width, height, PngOrientation(bytes),
+                  workspace);
+  }
+  if (bytes.size() >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8) {
+    std::uint32_t width = 0, height = 0;
+    unsigned components = 0;
+    // Unlike jpeg_read_header, this marker walk cannot allocate marker tables
+    // or coefficient state. Lengths always advance within the encoded limit.
+    for (std::size_t offset = 2; offset < bytes.size();) {
+      if (bytes[offset] != 0xff)
+        throw std::invalid_argument("invalid JPEG marker");
+      while (offset < bytes.size() && bytes[offset] == 0xff)
+        ++offset;
+      if (offset == bytes.size())
+        break;
+      const unsigned marker = bytes[offset++];
+      if (marker == 0xda || marker == 0xd9)
+        break;
+      if (marker == 0x01 || marker == 0xd8 ||
+          (marker >= 0xd0 && marker <= 0xd7))
+        continue;
+      if (bytes.size() - offset < 2)
+        throw std::invalid_argument("truncated JPEG marker");
+      const std::size_t length =
+          (std::size_t{bytes[offset]} << 8) | bytes[offset + 1];
+      if (length < 2 || length > bytes.size() - offset)
+        throw std::invalid_argument("invalid JPEG marker length");
+      const auto data = bytes.subspan(offset + 2, length - 2);
+      if (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 &&
+          marker != 0xc8 && marker != 0xcc) {
+        if (width || data.size() < 6 ||
+            (data[0] != 8 && !(marker == 0xc3 && data[0] >= 2 && data[0] < 8)))
+          throw std::invalid_argument("invalid JPEG frame header");
+        height = (std::uint32_t{data[1]} << 8) | data[2];
+        width = (std::uint32_t{data[3]} << 8) | data[4];
+        components = data[5];
+        if ((components != 1 && components != 3 && components != 4) ||
+            data.size() != 6 + 3 * components)
+          throw std::invalid_argument("unsupported JPEG component layout");
+        for (unsigned c = 0; c < components; ++c) {
+          const auto sampling = data[7 + 3 * c];
+          if (!(sampling >> 4) || (sampling >> 4) > MAX_SAMP_FACTOR ||
+              !(sampling & 15) || (sampling & 15) > MAX_SAMP_FACTOR)
+            throw std::invalid_argument("invalid JPEG sampling factor");
+        }
+        ValidateDimensions(width, height);
+      }
+      offset += length;
+    }
+    ValidateDimensions(width, height);
+    // Progressive JPEG can retain every DCT coefficient. Bound each accepted
+    // component at full resolution, padded to the largest 4x4 MCU (32x32),
+    // with two bytes/coefficient. 512 bytes per axis covers row-pointer arrays,
+    // IDCT/upsampling rows and CMYK conversion; 1 MiB covers control/tables and
+    // memory-manager pool slop. Lossless SOF3 keeps 8-bit sample planes and
+    // only sampling-factor rows of 32-bit differences, within the same bound.
+    // No scan-count-dependent storage is retained.
+    const std::uint64_t padded_width = (std::uint64_t{width} + 31) / 32 * 32;
+    const std::uint64_t padded_height = (std::uint64_t{height} + 31) / 32 * 32;
+    const auto workspace = padded_width * padded_height * components * 2 +
+                           (std::uint64_t{width} + height) * 512 + (1ULL << 20);
+    return finish(ImageFormat::kJpeg, width, height, JpegOrientation(bytes),
+                  workspace);
+  }
+  if (bytes.size() >= 12 && std::memcmp(bytes.data(), "RIFF", 4) == 0 &&
+      std::memcmp(bytes.data() + 8, "WEBP", 4) == 0) {
+    // WebPGetFeatures performs a bounded RIFF/frame-header walk without a
+    // decoder or pixel allocation, including VP8X/frame dimension agreement.
+    WebPBitstreamFeatures features{};
+    if (WebPGetFeatures(bytes.data(), bytes.size(), &features) !=
+            VP8_STATUS_OK ||
+        features.has_animation ||
+        (features.format != 1 && features.format != 2))
+      throw std::invalid_argument("invalid or animated WebP image");
+    const auto width = static_cast<std::uint32_t>(features.width);
+    const auto height = static_cast<std::uint32_t>(features.height);
+    ValidateDimensions(width, height);
+    const std::uint64_t pixels = std::uint64_t{width} * height;
+    // VP8 row caches, macroblocks and control. Alpha may use the VP8L decoder
+    // even when the color plane is lossy, so it needs the lossless bound too.
+    auto workspace = 512 * std::uint64_t{width} + pixels + (1ULL << 20);
+    if (features.format == 2 || features.has_alpha) {
+      // VP8L can keep four transforms, decoded ARGB and row caches. A
+      // 16-bit group index is compacted before allocating group tables when
+      // it exceeds 1000 or the pixel count. Otherwise unused groups remain.
+      const auto cells =
+          ((std::uint64_t{width} + 3) / 4) * ((std::uint64_t{height} + 3) / 4);
+      const auto groups = std::min<std::uint64_t>(
+          65536, std::max(std::min<std::uint64_t>(1000, pixels), cells));
+      // Do not treat libwebp's initial kTableSize allocation as a maximum.
+      // A 15-bit tree with an 8-bit root uses at most 33024 entries. Each
+      // complete second-level subtree of depth d<=7 has >=d+1 leaves, and
+      // 2^d<=16*(d+1). Thus alphabets 2328,256,256,256,40 need at most
+      // min(33024,256+16*A) entries each: 46976 entries per five-tree group.
+      // Invalid trees are rejected before table allocation. Segment growth
+      // leaves at most the next table's size unused; total capacity is
+      // bounded by twice the used entries plus the largest segment. Include
+      // 1024 bytes/group for packed tables, pointers and segment descriptors.
+      constexpr std::uint64_t entries_per_group = 46976;
+      const auto table_entries = 2 * entries_per_group * groups +
+                                 std::max<std::uint64_t>(5004 * groups, 33024);
+      workspace += 24 * pixels + 128 * std::uint64_t{width} +
+                   4 * table_entries + 1024 * groups;
+    }
+    return finish(ImageFormat::kWebp, width, height, 1, workspace);
+  }
+  throw std::invalid_argument("image must be PNG, JPEG or WebP");
+}
+
 Image DecodeImage(std::span<const std::uint8_t> bytes) {
   if (bytes.empty() || bytes.size() > kMaxEncodedImageBytes) {
     throw std::invalid_argument("image exceeds encoded byte limit or is empty");

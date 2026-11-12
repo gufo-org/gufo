@@ -3,6 +3,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -23,15 +24,18 @@
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
+#include "src/families/qwen/vision/admission.hpp"
 #include "src/families/qwen/vision/encoder.hpp"
 #include "src/families/qwen/vision/image_cache.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
+#include "src/models/qwen38_flash_next/cache_admission.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/probe.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
+#include "src/models/qwen38_flash_next/serving_vision.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
@@ -103,7 +107,8 @@ std::optional<std::string> RenderQwenPrompt(const ChatRequest& request,
 std::optional<std::size_t> CountQwenPromptTokens(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    const std::shared_ptr<qwen::vision::AdmissionBudget>& budget) {
   const auto options = QwenChatOptions(request, max_context);
   const auto tools =
       request.tool_choice == ChatRequest::ToolChoice::kNone
@@ -121,26 +126,27 @@ std::optional<std::size_t> CountQwenPromptTokens(
              tokenizer, request.messages, tools, options,
              encoder ? encoder->identity() : std::string_view{},
              std::numeric_limits<std::int32_t>::max(),
-             request.cache_prompt ? &image_cache : nullptr)
+             request.cache_prompt ? &image_cache : nullptr, budget)
       .tokens.size();
 }
 
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache) {
+    std::uint32_t max_context, models::qwen::vision::ImageCache& image_cache,
+    const std::shared_ptr<qwen::vision::AdmissionBudget>& budget) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
   const auto options = QwenChatOptions(request, max_context);
-  auto prompt = std::make_shared<models::qwen::vision::Prompt>(
-      models::qwen::vision::Prepare(
+  auto prompt =
+      std::make_shared<qwen::vision::Prompt>(models::qwen::vision::Prepare(
           tokenizer, request.messages,
           request.tool_choice == ChatRequest::ToolChoice::kNone
               ? std::span<const tokenization::ChatTool>{}
               : std::span<const tokenization::ChatTool>{request.tools},
           options,
           encoder && has_images ? encoder->identity() : std::string_view{},
-          max_context, request.cache_prompt ? &image_cache : nullptr));
+          max_context, request.cache_prompt ? &image_cache : nullptr, budget));
   const auto cache_prefix = prompt->stable_prefix_tokens;
   if (prompt->images.empty())
     return {std::move(prompt->tokens), {}, cache_prefix};
@@ -247,21 +253,86 @@ constexpr std::size_t kMaxPrefillLayerGroups = 8;
 // Every batched plan runs inside a layer hook (Executor::kHookParkedRows),
 // so each round decodes all decoders at once rather than one in turn.
 constexpr std::size_t kMaxBatchWidth = 8;
+// Keep the snapshot allocator's existing driver/dispatch margin outside both
+// text and vision budgets. It also covers opaque library workspace, the
+// existing 128 MiB preprocessing cache and bounded disk staging/metadata.
+constexpr std::size_t kVisionRuntimeMargin = 512ULL << 20;
+
+struct StartupMemorySnapshot {
+  ext::HostSnapshotMemory host;
+  hip::AdmissionMemory device;
+  qwen::vision::StartupCapacity capacity;
+  std::int64_t collection_us;
+};
+
+StartupMemorySnapshot CollectStartupMemory() {
+  const auto started = std::chrono::steady_clock::now();
+  const auto host = ext::QueryHostSnapshotMemory();
+  const auto device =
+      hip::QueryAdmissionMemoryUsingHost(host.raw_available_bytes);
+  if (!device)
+    throw core::ResourceAdmissionError(
+        "vision memory admission refused: reason=memory_query_failed");
+  return {host, *device,
+          qwen::vision::SelectStartupCapacity(device->free_bytes,
+                                              host.ceiling_bytes),
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - started)
+              .count()};
+}
+
+void LogVisionAdmission(const StartupMemorySnapshot& snapshot,
+                        const qwen::vision::StartupMemoryPlan& plan,
+                        std::size_t sessions, std::size_t cache_bytes) {
+  server::Logger::Info(
+      "loader",
+      "event=vision_admission policy=on-demand gate=device_state"
+      " hip_free_bytes=" +
+          std::to_string(snapshot.device.hip_free_bytes) +
+          " device_admission_bytes=" +
+          std::to_string(snapshot.device.free_bytes) +
+          " host_available_bytes=" +
+          std::to_string(snapshot.host.raw_available_bytes) +
+          " cma_excluded_bytes=" +
+          std::to_string(snapshot.host.cma_excluded_bytes) +
+          " cgroup_headroom_bytes=" +
+          (snapshot.host.cgroup_headroom_bytes
+               ? std::to_string(*snapshot.host.cgroup_headroom_bytes)
+               : "unknown") +
+          " host_reserve_bytes=" + std::to_string(snapshot.host.reserve_bytes) +
+          " host_ceiling_bytes=" + std::to_string(snapshot.host.ceiling_bytes) +
+          " runtime_limiter=" + snapshot.capacity.LimiterName() +
+          " snapshot_collection_us=" + std::to_string(snapshot.collection_us) +
+          " sessions=" + std::to_string(sessions) + " base_bytes=" +
+          std::to_string(plan.per_session_bytes) + " deferred_scratch_bytes=" +
+          std::to_string(plan.shared_reservation_bytes) +
+          " vision_startup_bytes=0 cache_backing=lazy cache_requested_bytes=" +
+          std::to_string(cache_bytes) + " state_capacity_bytes=" +
+          std::to_string(plan.state_capacity_bytes) + " deficit_bytes=" +
+          std::to_string(
+              plan.DeficitBytes(sessions, snapshot.device.free_bytes)) +
+          " result=" + (plan.Fits(sessions) ? "eligible" : "refused"));
+}
 
 class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
-  QwenFlashNextTextRunner(std::shared_ptr<QwenFlashNextModel> model,
-                          std::uint32_t max_context, bool use_mtp,
-                          std::uint32_t max_draft_tokens,
-                          std::string artifact_fingerprint = {},
-                          std::string mtp_fingerprint = {})
+  QwenFlashNextTextRunner(
+      std::shared_ptr<QwenFlashNextModel> model, std::uint32_t max_context,
+      bool use_mtp, std::uint32_t max_draft_tokens,
+      std::string artifact_fingerprint = {}, std::string mtp_fingerprint = {},
+      std::optional<ServingVisionAdmission> vision_admission = {})
       : model_(std::move(model)),
         max_context_(max_context),
         use_mtp_(use_mtp),
         max_draft_tokens_(max_draft_tokens) {
+    if (vision_admission) {
+      vision_plan_ = vision_admission->plan;
+      configured_text_bytes_ = vision_admission->configured_text_bytes;
+      vision_budget_ = std::move(vision_admission->budget);
+    }
     // The typed in-process API owns an immutable loaded model but need not
     // supply file fingerprints when disk caching is disabled. Its model
     // lifetime is an exact process-local identity; durable caches still
@@ -295,7 +366,9 @@ public:
   [[nodiscard]] std::unique_ptr<ComponentCacheResources> CreateCacheResources(
       cache::ResourceLedger& ledger, std::size_t ram,
       std::optional<hip::ComponentTransferPlan> transfers) const {
-    auto hooks = HipComponentCacheHooks();
+    if (vision_budget_)
+      vision_budget_->ClaimExecutionOwner();
+    auto hooks = VisionCacheHooks(HipComponentCacheHooks(), vision_budget_);
     if (transfers) {
       hooks.transfer_streams = transfers->native_streams;
       hooks.transfer_leases = transfers->leases;
@@ -356,17 +429,23 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    const auto session_bytes = model_->SessionBytes(
+    const auto legacy_session_bytes = model_->SessionBytes(
         use_mtp_ ? gufo::core::SessionMode::kSpeculative
                  : gufo::core::SessionMode::kAutoregressive,
         max_context_);
+    const auto session_bytes =
+        vision_plan_ ? vision_plan_->per_session_bytes : legacy_session_bytes;
+    const auto memory = gufo::hip::QueryAdmissionMemory();
     std::optional<std::size_t> capacity;
-    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
+    if (memory) {
       const auto deferred = model_->DeferredScratchBytes();
       capacity =
           memory->free_bytes > deferred ? memory->free_bytes - deferred : 0;
       gufo::hip::LogStateCapacity(*memory, *capacity, session_bytes, deferred);
     }
+    // Typed callers cannot exceed the configured pool's accepted obligations.
+    if (capacity && vision_budget_)
+      capacity = std::min(*capacity, configured_text_bytes_);
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.
     return {
@@ -430,14 +509,14 @@ public:
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->tokenizer(),
                              model_->VisionEncoder(), max_context_,
-                             image_cache_);
+                             image_cache_, vision_budget_);
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
       const ChatRequest& request) const override {
     return CountQwenPromptTokens(request, model_->tokenizer(),
                                  model_->VisionEncoder(), max_context_,
-                                 image_cache_);
+                                 image_cache_, vision_budget_);
   }
 
   [[nodiscard]] std::optional<std::string> RenderPrompt(
@@ -811,6 +890,9 @@ private:
   std::uint32_t max_context_;
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
+  std::size_t configured_text_bytes_{0};
+  std::optional<qwen::vision::StartupMemoryPlan> vision_plan_;
+  std::shared_ptr<qwen::vision::AdmissionBudget> vision_budget_;
   cache::Identity component_identity_;
 };
 
@@ -820,6 +902,9 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config,
     std::string artifact_fingerprint, std::string draft_artifact_fingerprint) {
+  // This factory does not own model loading or know a serving session count.
+  // Keep conservative estimates and reject reuse of another runner's model.
+  RequireUncoordinatedModel(*model);
   const bool use_mtp =
       speculative_config.backend == ext::TextSpeculativeBackend::kMtp;
   return std::make_shared<QwenFlashNextTextRunner>(
@@ -898,30 +983,50 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
       *error = "Failed to load Flash-Next model: " + load_error;
     return nullptr;
   }
+  const bool on_demand = model->VisionEncoder() != nullptr;
   try {
+    // Upload shared projector weights before the admission snapshot; no request
+    // pixels, embeddings or session state are allocated by this preparation.
     models::qwen::vision::PrepareForServing(model->VisionEncoder());
   } catch (const std::exception& e) {
     if (error)
       *error = e.what();
     return nullptr;
   }
+  // Keep the requested cache allowance for reporting, without imposing a
+  // second text startup gate or promising the eventual post-slot grant.
+  const auto cache_reserve =
+      !options.ram_cache.enabled
+          ? (options.disk_cache.directory.empty() ? 0 : std::size_t{512} << 20)
+          : (options.ram_cache.capacity_bytes
+                 ? options.ram_cache.capacity_bytes
+                 : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
+                            HostSnapshotBudgetBytes()));
   // Each eight rows of wide copy verification past the first reserve
   // rollback rows beside the sessions (ResourceClaim). Narrow the width
   // until the configured sessions fit, rather than refusing a session count
   // the ordinary verifier width fits.
-  if (std::size_t free_bytes = 0, total_bytes = 0;
-      use_mtp && hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-    const std::size_t sessions =
-        std::max<std::size_t>(options.session_count, 1);
-    for (std::uint32_t rows = rocm::Executor::kWideRows;; rows -= 8) {
-      model->LimitCopyRows(rows);
-      if (rows == 8 ||
-          sessions * model->SessionBytes(gufo::core::SessionMode::kSpeculative,
-                                         max_context) +
-                  model->DeferredScratchBytes() <=
-              free_bytes)
-        break;
+  try {
+    if (std::size_t free_bytes = 0, total_bytes = 0;
+        use_mtp && !on_demand &&
+        hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      const std::size_t sessions =
+          std::max<std::size_t>(options.session_count, 1);
+      for (std::uint32_t rows = rocm::Executor::kWideRows;; rows -= 8) {
+        model->LimitCopyRows(rows);
+        const auto mode = gufo::core::SessionMode::kSpeculative;
+        const auto plan = qwen::vision::PlanStartupMemory(
+            free_bytes, model->DeferredScratchBytes(),
+            model->TextSessionBytes(mode, max_context),
+            model->SessionBytes(mode, max_context));
+        if (rows == 8 || plan.Fits(sessions))
+          break;
+      }
     }
+  } catch (const std::exception& exception) {
+    if (error)
+      *error = exception.what();
+    return nullptr;
   }
   std::string model_fingerprint = options.disk_cache.model_artifact_fingerprint;
   if (!options.disk_cache.directory.empty() && model_fingerprint.empty()) {
@@ -955,9 +1060,52 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
       return nullptr;
     }
   }
-  return CreateQwenFlashNextTextRunner(std::move(model), max_context,
-                                       options.speculative, model_fingerprint,
-                                       draft_fingerprint);
+  try {
+    std::optional<StartupMemorySnapshot> startup_memory;
+    if (on_demand) {
+      // Fingerprinting's temporary MTP reader and hash buffers have finished.
+      // Final admission uses this collection, not an earlier load phase.
+      startup_memory = CollectStartupMemory();
+    }
+    auto admission = InitializeServingVision(
+        *model, max_context, use_mtp, options.session_count,
+        startup_memory ? startup_memory->device.free_bytes : 0, [] {
+          const auto snapshot = CollectStartupMemory();
+          const auto remaining = snapshot.capacity.available_bytes;
+          return remaining > kVisionRuntimeMargin
+                     ? remaining - kVisionRuntimeMargin
+                     : 0;
+        });
+    if (admission) {
+      LogVisionAdmission(*startup_memory, admission->plan,
+                         options.session_count, cache_reserve);
+      if (admission->copy_width) {
+        const auto& choice = *admission->copy_width;
+        server::Logger::Info(
+            "loader",
+            "event=copy_width_selection policy=on-demand rows=" +
+                std::to_string(choice.rows) + " reason=ordinary_verification" +
+                " device_capacity_bytes=" +
+                std::to_string(startup_memory->device.free_bytes) +
+                " runtime_capacity_bytes=" +
+                std::to_string(startup_memory->capacity.available_bytes) +
+                " cache_requested_bytes=" + std::to_string(cache_reserve) +
+                " runtime_margin_bytes=" +
+                std::to_string(kVisionRuntimeMargin) + " base_bytes=" +
+                std::to_string(choice.memory.per_session_bytes) +
+                " deferred_scratch_bytes=" +
+                std::to_string(choice.memory.deferred_bytes));
+      }
+    }
+    return std::make_shared<QwenFlashNextTextRunner>(
+        std::move(model), max_context, use_mtp,
+        options.speculative.max_draft_tokens, std::move(model_fingerprint),
+        std::move(draft_fingerprint), std::move(admission));
+  } catch (const std::exception& exception) {
+    if (error)
+      *error = exception.what();
+    return nullptr;
+  }
 }
 
 }  // namespace gufo::models::qwen38_flash_next

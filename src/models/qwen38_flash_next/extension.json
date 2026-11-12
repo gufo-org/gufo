@@ -154,6 +154,12 @@
       "windows_build": true
     },
     {
+      "target": "qwen38_flash_next_memory_test",
+      "ctest": "qwen38_flash_next\\.memory",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
       "target": "qwen38_flash_next_mtp_sampling_test",
       "ctest": "qwen38_flash_next\\.mtp_sampling",
       "check_pr": true,

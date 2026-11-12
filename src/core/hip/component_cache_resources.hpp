@@ -54,6 +54,9 @@ struct ComponentCacheHooks {
   // native resources on acquisition. Unsupported/unsized providers retain
   // their existing exclusive pool by leaving this zero.
   std::size_t transfer_leases{0};
+  // Only arriving backing segments reserve capacity. Retain the converted
+  // charge until registered pages and asynchronous users are released.
+  std::function<cache::ResourceReservation(std::size_t)> reserve_segment{};
 };
 
 // HIP component-cache backing for any adapter: pinned committed pages, a

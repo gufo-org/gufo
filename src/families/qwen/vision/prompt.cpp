@@ -5,6 +5,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
@@ -60,6 +61,7 @@ FilterBank Filters(std::uint32_t input, std::uint32_t output) {
                               static_cast<int>(center + support + 0.5));
     Filter filter{static_cast<std::uint32_t>(begin), {}};
     auto& weights = coefficients.emplace_back();
+    weights.reserve(end - begin);
     double sum = 0;
     for (int j = begin; j < end; ++j) {
       const double weight = Cubic((j + 0.5 - center) / antialias);
@@ -80,6 +82,7 @@ FilterBank Filters(std::uint32_t input, std::uint32_t output) {
       break;
   }
   for (std::size_t i = 0; i < coefficients.size(); ++i) {
+    filters.rows[i].weights.reserve(coefficients[i].size());
     for (const auto weight : coefficients[i]) {
       const double scaled = weight * (1U << filters.precision);
       filters.rows[i].weights.push_back(
@@ -153,6 +156,31 @@ std::span<const std::uint8_t> Prompt::IdentityForPrefix(
   return {};
 }
 
+void Prompt::RetainPixels(std::shared_ptr<const void> reservation,
+                          const std::shared_ptr<AdmissionBudget>& budget) {
+  if (!reservation)
+    throw std::invalid_argument("prepared pixels require a reservation owner");
+  struct Owner {
+    // Originals die before their ticket. The owner never retains Prompt or
+    // the new aliasing pixel pointers, so copies cannot create an ownership
+    // cycle.
+    std::shared_ptr<const void> reservation;
+    std::vector<std::shared_ptr<const core::Image>> originals;
+  };
+  auto owner = std::make_shared<Owner>();
+  owner->reservation = std::move(reservation);
+  owner->originals.reserve(images.size());
+  for (const auto& image : images)
+    if (image.pixels)
+      owner->originals.push_back(image.pixels);
+  // Every allocation above completes before any original pointer is replaced.
+  for (auto& image : images)
+    if (image.pixels)
+      image.pixels =
+          std::shared_ptr<const core::Image>(owner, image.pixels.get());
+  memory_admission = budget;
+}
+
 void RopeLayout::Validate(std::uint32_t max_context) const {
   // Every non-overlapping image occupies at least one context position.
   if (images.size() > max_context)
@@ -170,11 +198,11 @@ void RopeLayout::Validate(std::uint32_t max_context) const {
   }
 }
 
-core::Image ResizeImage(const core::Image& image,
-                        tokenization::ChatMessage::ImageDetail detail) {
+namespace {
+ImageDimensions ResizeDimensions(
+    ImageDimensions image, tokenization::ChatMessage::ImageDetail detail) {
   if (image.width == 0 || image.height == 0 ||
       std::uint64_t{image.width} * image.height > core::kMaxImagePixels ||
-      image.pixels.size() != std::size_t{image.width} * image.height * 3 ||
       static_cast<double>(std::max(image.width, image.height)) /
               std::min(image.width, image.height) >
           200) {
@@ -235,6 +263,30 @@ core::Image ResizeImage(const core::Image& image,
       }
     }
   }
+  return {width, height};
+}
+
+// Filters reserves each coefficient array to its exact tap count. During
+// construction both double coefficients and int16 weights coexist. Include
+// both axes' construction storage even though only one is built at a time.
+std::size_t FilterBytes(std::uint32_t input, std::uint32_t output) {
+  const auto support =
+      CheckedAdd(CheckedMultiply(4, input), output - 1) / output;
+  const auto taps = std::min<std::size_t>(
+      input, CheckedAdd(std::max<std::size_t>(4, support), 2));
+  const auto row =
+      CheckedAdd(sizeof(Filter) + sizeof(std::vector<double>),
+                 CheckedMultiply(taps, sizeof(double) + sizeof(std::int16_t)));
+  return CheckedMultiply(output, row);
+}
+}  // namespace
+
+core::Image ResizeImage(const core::Image& image,
+                        tokenization::ChatMessage::ImageDetail detail) {
+  const auto [width, height] =
+      ResizeDimensions({image.width, image.height}, detail);
+  if (image.pixels.size() != std::size_t{image.width} * image.height * 3)
+    throw std::invalid_argument("invalid image dimensions or aspect ratio");
   if (width == image.width && height == image.height)
     return image;
   const auto horizontal = Filters(image.width, width);
@@ -277,12 +329,33 @@ core::Image ResizeImage(const core::Image& image,
   return resized;
 }
 
+PreparationMemory PlanImagePreparation(
+    std::span<const std::uint8_t> encoded,
+    tokenization::ChatMessage::ImageDetail detail) {
+  const auto decoded = core::InspectImage(encoded);
+  const auto [width, height] =
+      ResizeDimensions({decoded.width, decoded.height}, detail);
+  const auto pixels = CheckedMultiply(CheckedMultiply(width, height), 3);
+  auto resize =
+      CheckedMultiply(CheckedMultiply(decoded.width, decoded.height), 3);
+  if (width != decoded.width || height != decoded.height) {
+    resize = CheckedAdd(
+        resize, CheckedMultiply(CheckedMultiply(width, decoded.height), 3));
+    resize = CheckedAdd(resize, FilterBytes(decoded.width, width));
+    resize = CheckedAdd(resize, FilterBytes(decoded.height, height));
+  }
+  const PreparationMemory memory{std::max(decoded.peak_bytes, resize), pixels};
+  (void)CheckedAdd(memory.scratch_bytes, memory.pixel_bytes);
+  return memory;
+}
+
 Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
                std::span<const tokenization::ChatMessage> messages,
                std::span<const tokenization::ChatTool> tools,
                const tokenization::ChatTemplateOptions& options,
                std::string_view encoder_identity, std::uint32_t max_context,
-               ImageCache* image_cache) {
+               ImageCache* image_cache,
+               const std::shared_ptr<AdmissionBudget>& budget) {
   std::vector<std::size_t> offsets;
   std::vector<tokenization::ContentSpan> content_spans;
   std::size_t stable_prefix_bytes = 0;
@@ -326,9 +399,8 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
         throw std::logic_error("image rendering lost a part");
       append(cursor, offsets[index]);
       auto pixels = image_cache
-                        ? image_cache->Get(image.bytes, image.detail)
-                        : std::make_shared<const core::Image>(ResizeImage(
-                              core::DecodeImage(*image.bytes), image.detail));
+                        ? image_cache->Get(image.bytes, image.detail, budget)
+                        : PrepareImage(image.bytes, image.detail, budget);
       const ImageGrid grid{static_cast<std::uint32_t>(prompt.tokens.size()),
                            pixels->height / kResizeFactor,
                            pixels->width / kResizeFactor};
@@ -362,6 +434,7 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
     const auto digest = identity.Finish();
     prompt.cache_identity.assign(digest.begin(), digest.end());
   }
+  prompt.memory_admission = budget;
   return prompt;
 }
 }  // namespace gufo::models::qwen::vision

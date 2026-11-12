@@ -75,6 +75,21 @@ Gufo finds `mmproj-BF16.gguf` next to the target; pass `--mmproj PATH` to use
 another location. Images work the same way as for
 [Qwen3.8 27B](qwen3.8-27b.md#images), with AR and MTP.
 
+With a projector loaded, serving reserves image memory when a request arrives.
+This applies to both discovered projectors and those selected with `--mmproj`.
+Text sessions keep their text/MTP state requirements; image processing can
+return a `503 resource_exhausted` response when capacity is insufficient.
+
+The on-demand policy also checks host headroom and outstanding reservations for
+image preparation, retained history, optional snapshots and lazy cache growth.
+It preserves ordinary cache sizing and pressure warnings; passing text admission
+does not guarantee a full cache grant or a later image request. Preparation uses
+the original image dimensions and decoder workspace, including orientation and
+resize buffers; a small final resolution alone does not guarantee admission.
+Projector-enabled serving uses ordinary eight-row copied-token verification to
+leave capacity for later requests. This can reduce copy acceleration without
+changing the neural MTP draft limit or context.
+
 ## Performance
 
 As of October 18, 2026, on Strix Halo:

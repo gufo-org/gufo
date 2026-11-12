@@ -27,6 +27,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
+#include "src/core/resource_error.hpp"
 #include "src/sched/policy.hpp"
 
 namespace gufo::server {
@@ -966,6 +967,9 @@ struct TextGenerationScheduler::Impl {
         std::rethrow_exception(failure);
       } catch (const TextGenerationError&) {
         return failure;
+      } catch (const core::ResourceAdmissionError& error) {
+        return std::make_exception_ptr(TextGenerationError(
+            TextGenerationErrorCode::kResourceExhausted, error.what()));
       } catch (const std::exception& error) {
         reason = error.what();
       } catch (...) {

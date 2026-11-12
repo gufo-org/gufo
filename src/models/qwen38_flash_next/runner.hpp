@@ -21,6 +21,9 @@ inline constexpr std::uint32_t DecodeConcurrencyForSessions(
 std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     const ext::TextRunnerOptions& options, std::string* error);
 
+/// Model-backed callers keep conservative state estimates: this factory does
+/// not own loading or a configured serving session count. A model already
+/// attached to a serving admission coordinator is rejected.
 std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config = {},

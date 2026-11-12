@@ -301,6 +301,30 @@ std::size_t Model::DeferredScratchBytes() const {
   return executor_->DeferredScratchBytes();
 }
 
+std::size_t Model::TextSessionBytes(core::SessionMode mode,
+                                    std::uint32_t context) const noexcept {
+  return TextSessionMemory(mode, context).TotalBytes();
+}
+
+SessionMemoryBreakdown Model::TextSessionMemory(
+    core::SessionMode mode, std::uint32_t context) const noexcept {
+  auto result = executor_->SessionMemory(mode, context,
+                                         mode == core::SessionMode::kSpeculative
+                                             ? executor_->max_speculative() - 1
+                                             : 0);
+  result.vision_descriptor_bytes = vision_ ? 64 : 0;
+  return result;
+}
+
+void Model::SetVisionMemoryBudget(
+    std::shared_ptr<qwen::vision::AdmissionBudget> budget) {
+  executor_->SetVisionMemoryBudget(std::move(budget));
+}
+
+bool Model::HasVisionMemoryBudget() const noexcept {
+  return executor_->HasVisionMemoryBudget();
+}
+
 void Model::LimitCopyRows(std::uint32_t rows) noexcept {
   executor_->LimitCopyRows(rows);
 }

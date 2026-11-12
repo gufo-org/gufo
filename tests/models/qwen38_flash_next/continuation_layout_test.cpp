@@ -183,12 +183,36 @@ void CheckBacking(bool mtp, std::uint32_t context, std::uint32_t concurrency,
   Reject([&] { (void)layout.BackingPlan(ram, 0); });
   Reject([&] { (void)layout.BackingPlan(ram, 9); });
 }
+void CacheBackingPlanBoundaries() {
+  const qfn::ContinuationLayout layout(ProductionGeometry(), true, 262144, 8);
+  struct Expected {
+    std::size_t grant, blocks, payload, metadata;
+  };
+  for (const auto expected :
+       {Expected{4294967296ULL, 58018, 3802267648ULL, 59414528ULL},
+        Expected{3810430976ULL, 51466, 3372875776ULL, 52705280ULL}}) {
+    const auto plan = layout.BackingPlan(expected.grant, 4);
+    Require(plan.size() == 1 && plan.front().block_bytes == 65536 &&
+                plan.front().blocks == expected.blocks &&
+                plan.front().blocks * plan.front().block_bytes ==
+                    expected.payload &&
+                plan.front().metadata_bytes == expected.metadata,
+            "cache grants use production payload and metadata plans");
+    Require(
+        expected.payload + expected.metadata < expected.grant,
+        "retention grant includes nonpayload headroom, not four GiB of pages");
+    Require(259522560ULL < expected.payload,
+            "observed partial backing is distinct from both grant and planned "
+            "payload");
+  }
+}
 }  // namespace
 
 int main() {
   try {
     Check(false);
     Check(true);
+    CacheBackingPlanBoundaries();
     for (const auto mtp : {false, true}) {
       CheckExtendedContext(mtp);
       CheckBacking(mtp, 32768, 2, 8ULL << 30, 32, 2 * 32768);

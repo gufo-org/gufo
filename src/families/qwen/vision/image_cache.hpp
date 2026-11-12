@@ -14,8 +14,18 @@
 
 namespace gufo::models::qwen::vision {
 
+class AdmissionBudget;
+
 inline constexpr std::string_view kImagePreprocessingVersion =
     "qwen38-image-bicubic-rgb8-bf16-v1";
+
+/// Admit decode/resize before allocating pixels. The returned immutable image
+/// retains its committed pixel charge; transient scratch ends before return.
+/// An empty budget preserves ordinary preprocessing without admission.
+[[nodiscard]] std::shared_ptr<const core::Image> PrepareImage(
+    const std::shared_ptr<const std::vector<std::uint8_t>>& encoded,
+    tokenization::ChatMessage::ImageDetail detail,
+    const std::shared_ptr<AdmissionBudget>& budget = {});
 
 /// Backend-owned CPU preprocessing reuse, independent of continuation state.
 /// Only the encoded bytes and the image detail affect the RGB pixels. The
@@ -23,7 +33,7 @@ inline constexpr std::string_view kImagePreprocessingVersion =
 /// The budget counts retained RGB and encoded vector capacity; entry metadata
 /// is bounded too because every resized image contains at least 65536 pixels.
 /// Eviction drops cache ownership; in-flight prompts keep their immutable
-/// pixels alive.
+/// pixels and their admission charge alive. Reuse never crosses budgets.
 class ImageCache {
 public:
   static constexpr std::size_t kDefaultCapacityBytes = 128 * 1024 * 1024;
@@ -41,13 +51,15 @@ public:
 
   [[nodiscard]] std::shared_ptr<const core::Image> Get(
       const std::shared_ptr<const std::vector<std::uint8_t>>& encoded,
-      tokenization::ChatMessage::ImageDetail detail);
+      tokenization::ChatMessage::ImageDetail detail,
+      const std::shared_ptr<AdmissionBudget>& budget = {});
   [[nodiscard]] Stats GetStats() const;
 
 private:
   struct Entry {
     std::size_t key;
     tokenization::ChatMessage::ImageDetail detail;
+    std::shared_ptr<AdmissionBudget> budget;
     // Exact comparison makes lookup-hash collisions harmless. Including these
     // bytes in the budget bounds reuse even for poorly compressible uploads.
     std::shared_ptr<const std::vector<std::uint8_t>> encoded;

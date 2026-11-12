@@ -3,7 +3,7 @@
 
 #include <cstddef>
 
-// Only the CPU transfer-pool target sees these declarations. Physical
+// Only the CPU cache transfer/backing tests see these declarations. Physical
 // payloads are small host pages; registration, streams and events are
 // simulated.
 using hipStream_t = void*;

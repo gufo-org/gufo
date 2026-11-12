@@ -22,6 +22,26 @@ struct Image {
   std::vector<std::uint8_t> pixels;
 };
 
+enum class ImageFormat { kPng, kJpeg, kWebp };
+
+struct ImageDecodePlan {
+  ImageFormat format;
+  std::uint32_t original_width;
+  std::uint32_t original_height;
+  std::uint32_t width;
+  std::uint32_t height;
+  unsigned orientation;
+  /// Conservative live bytes for decoding, including RGB and orientation
+  /// replacement. Encoded input is already owned by the caller. Resize and
+  /// retained output from other images are additional obligations.
+  std::size_t peak_bytes;
+};
+
+/// Inspects bounded encoded input without allocating image/decoder storage.
+/// This is an admission bound, not full validation; DecodeImage still checks
+/// the compressed stream. Input must remain unchanged through decoding.
+[[nodiscard]] ImageDecodePlan InspectImage(std::span<const std::uint8_t> bytes);
+
 /// PNG, JPEG and WebP. Decoding checks dimensions before allocating pixels.
 [[nodiscard]] Image DecodeImage(std::span<const std::uint8_t> bytes);
 [[nodiscard]] std::vector<std::uint8_t> ReadImageFile(
