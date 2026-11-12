@@ -761,10 +761,13 @@ void ContinuationAdapter::CopyNativeKeys(
   copy(static_cast<__half*>(staging));
   const auto copied = hipMemcpyAsync(bytes.data(), staging, bytes.size(),
                                      hipMemcpyDeviceToHost, stream);
-  const auto settled = hipStreamSynchronize(stream);
+  // Only this transfer must settle before its staging allocation is freed.
+  // The native FIFO stream may also carry unrelated cache transfers.
+  const auto settled = transfer.Synchronize();
   (void)hipFree(staging);
   Check(copied);
-  Check(settled);
+  if (settled != TransferResult::kSucceeded)
+    throw std::runtime_error("Flash-Next key capture synchronization failed");
 }
 std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
     const cache::Slot& slot, cache::ComponentId id, Rows first,

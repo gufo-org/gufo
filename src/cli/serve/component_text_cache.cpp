@@ -257,7 +257,8 @@ struct ComponentTextCache::Impl {
           const auto unlimited = std::numeric_limits<std::size_t>::max();
           return {unlimited, unlimited, staging, kDiskOnlyBackingBytes};
         }()),
-        resources(this->runner->CreateComponentCacheResources(ledger, ram)),
+        resources(this->runner->CreateComponentCacheResourcesForSessions(
+            ledger, ram, count)),
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
         retention(ledger, index, &events),

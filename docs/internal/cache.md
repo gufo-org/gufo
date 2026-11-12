@@ -546,6 +546,22 @@ page cache that holds recent disk checkpoints, so a restore soon after a
 restart reads them from memory. A cache that has filled keeps its footprint; the advice above on explicit budgets for co-resident servers
 still applies.
 
+### Native transfer resources
+
+Flash-Next preallocates `sessions + 1` native HIP streams and
+`18 * sessions + 1` independent event leases. Each exclusively leased session
+can hold a preservation lease, a foreground batch of up to 16 transfers and
+one submitted idle piece; the serialized disk staging transfer adds one lease.
+For four sessions this is five native streams and 73 event leases.
+
+Several leases may submit to one FIFO stream. Completion waits stop at the
+lease's system-visible event fence, retaining the stream and source owners
+until submitted work settles. Failures quarantine the affected native lane;
+exhaustion after quarantine terminates instead of waiting for lost capacity.
+All native handles exist before cache sizing, so acquisition cannot introduce
+an unaccounted later stream allocation. Other providers keep their existing
+exclusive-stream policy unless they opt into the session-aware factory.
+
 ## The disk tier
 
 `--cache-disk DIR` adds a second tier that survives restarts. A checkpoint

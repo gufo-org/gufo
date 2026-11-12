@@ -556,6 +556,16 @@ public:
   /// after restoring rows into its slot at the given position.
   [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const = 0;
+  /// Actual serving-slot count, including typed callers. Providers may use it
+  /// to size eager transfer resources before slot construction/cache grants.
+  /// An unchanged provider retains its existing resource policy via fallback.
+  [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResourcesForSessions(cache::ResourceLedger& ledger,
+                                           std::size_t ram_bytes,
+                                           std::size_t sessions) const {
+    (void)sessions;
+    return CreateComponentCacheResources(ledger, ram_bytes);
+  }
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter&, cache::Slot&) const = 0;
   virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const = 0;
