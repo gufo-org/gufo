@@ -15,8 +15,10 @@ fixture = Path(__file__).resolve().parent / "module_fixture"
 
 
 def gufo(*args, check=True):
+    # An empty pipe is explicitly non-interactive on Windows too; the CRT may
+    # classify the NUL character device as a terminal.
     result = subprocess.run([binary, *args], text=True, capture_output=True,
-                            stdin=subprocess.DEVNULL, env=env)
+                            input="", env=env)
     if check and result.returncode != 0:
         raise AssertionError(f"gufo {' '.join(args)} failed:\n{result.stdout}\n{result.stderr}")
     return result

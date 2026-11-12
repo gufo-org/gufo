@@ -27,6 +27,9 @@ struct DiskCatalog::Impl {
     std::uint64_t used{};
     bool invalid{};
     bool use_dirty{};
+    // Prepaid with the catalog record so eviction can reclaim under a full
+    // ledger without admitting a temporary candidate table.
+    std::array<std::uint64_t, 5> eviction_order{};
   };
   struct Bucket {
     ResourceCharge metadata;
@@ -53,9 +56,15 @@ struct DiskCatalog::Impl {
       Erase(records.begin());
   }
   void FlushUses() noexcept {
-    for (auto& [id, record] : records)
-      if (record.use_dirty && store->TryRecordUse({id}, record.used))
-        record.use_dirty = false;
+    for (auto& [id, record] : records) {
+      try {
+        if (record.use_dirty && store->TryRecordUse({id}, record.used))
+          record.use_dirty = false;
+      } catch (...) {
+        // Advisory use history must not fail serving or teardown when a
+        // path allocation or host I/O setup fails before the store's write.
+      }
+    }
   }
   std::uint64_t Tick() {
     if (clock == UINT64_MAX)
@@ -219,7 +228,6 @@ void DiskCatalog::Track(CheckpointId id) {
     record->second.metadata = admission.Convert();
     if (!impl_->loading) {
       record->second.use_dirty = true;
-      impl_->FlushUses();
     }
   } catch (...) {
     impl_->Erase(record);
@@ -244,24 +252,29 @@ void DiskCatalog::Touch(CheckpointId id) {
   it->second.used = used;
   impl_->lru.insert(std::move(node));
   it->second.use_dirty = true;
+}
+void DiskCatalog::FlushUses() {
   impl_->FlushUses();
 }
 bool DiskCatalog::EvictOne() {
   Reconcile();
-  impl_->FlushUses();
-  struct Candidate {
-    decltype(impl_->records)::iterator record;
-    std::array<std::uint64_t, 5> order;
-  };
-  auto admission = impl_->ledger->Reserve(
-      ResourceCategory::kMetadata, impl_->records.size() * sizeof(Candidate));
-  std::vector<Candidate> candidates;
-  candidates.reserve(impl_->records.size());
-  for (auto it = impl_->records.begin(); it != impl_->records.end(); ++it)
-    candidates.push_back({it, impl_->Order(it->second)});
-  std::ranges::sort(candidates, {}, &Candidate::order);
-  for (const auto& candidate : candidates) {
-    auto record = candidate.record;
+  for (auto& [id, record] : impl_->records) {
+    (void)id;
+    record.eviction_order = impl_->Order(record);
+  }
+  while (true) {
+    auto record = impl_->records.end();
+    for (auto it = impl_->records.begin(); it != impl_->records.end(); ++it) {
+      if (it->second.eviction_order[0] == UINT64_MAX)
+        continue;
+      if (record == impl_->records.end() ||
+          it->second.eviction_order < record->second.eviction_order)
+        record = it;
+    }
+    if (record == impl_->records.end())
+      return false;
+    // Mark reader-pinned candidates as tried without allocating a side table.
+    record->second.eviction_order.fill(UINT64_MAX);
     const auto& description = *record->second.description;
     auto result = impl_->store->TryRetire(description.Manifest().checkpoint,
                                           description.Epoch());
@@ -274,7 +287,6 @@ bool DiskCatalog::EvictOne() {
     if (result == DiskRetireResult::kRetired)
       return true;
   }
-  return false;
 }
 void DiskCatalog::Invalidate(bool private_file, DiskFileId file) {
   impl_->store->InvalidateDependency(private_file, file);

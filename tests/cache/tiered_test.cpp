@@ -254,13 +254,79 @@ void DiskUseHistorySurvivesCatalogRestart() {
   f.Append(4, 4);
   auto second = f.Capture();
   (void)f.Publish(*second);
+  f.catalog.FlushUses();
+  const auto before = f.disk.LastUse(first->Id());
   f.catalog.Touch(first->Id());
+  assert(f.disk.LastUse(first->Id()) == before);
+  f.catalog.FlushUses();
   assert(f.disk.LastUse(first->Id()) > f.disk.LastUse(second->Id()));
   DiskCatalog recovered(f.ledger, f.disk, f.index);
   assert(recovered.EvictOne());
   assert(f.disk.Open(first->Id()) && !f.disk.Open(second->Id()));
   assert(recovered.EvictOne());
   assert(f.disk.Stats().managed_bytes == 0);
+}
+void AUsedFrontierIsNotAnOptionalVictim() {
+  TieredFixture f;
+  RetentionPolicy policy(f.ledger, f.index);
+  f.Append(8, 8);
+  auto first = f.Capture(CheckpointPurpose::kGenerated);
+  RetentionRequest request{f.tokens, f.adapter.CompatibilityIdentity(), {}};
+  assert(policy.Admit(request, [&] { return first; }));
+  assert(policy.Rank(first->Id()) == 0);
+  policy.Touch(first->Id());
+  assert(policy.Rank(first->Id()) == 3);
+  request.optional_frontier = true;
+  assert(!policy.Reclaim(request));
+  f.Append(4, 4);
+  auto second = f.Capture(CheckpointPurpose::kGenerated);
+  request.tokens = f.tokens;
+  assert(policy.Admit(request, [&] { return second; }));
+  assert(policy.Rank(second->Id()) == 0);
+  assert(policy.Reclaim(request));
+  assert(policy.Size() == 1 && policy.Rank(first->Id()) == 3);
+}
+void DiskEvictionNeedsNoLedgerHeadroom() {
+  TieredFixture f;
+  f.Append(8, 4);
+  const auto checkpoint = f.Capture();
+  (void)f.Publish(*checkpoint);
+  const auto spare =
+      f.ledger.Limits().ram_bytes - f.ledger.Snapshot().ram_bytes;
+  auto occupied =
+      f.ledger.Reserve(ResourceCategory::kMetadata, spare).Convert();
+  assert(f.ledger.Snapshot().ram_bytes == f.ledger.Limits().ram_bytes);
+  assert(f.catalog.EvictOne());
+  assert(f.catalog.Size() == 0 && f.disk.Stats().managed_bytes == 0);
+}
+void RecordPressureDropsUnusedFrontierBeforeRetry() {
+  TieredFixture f;
+  RetentionPolicy policy(f.ledger, f.index, nullptr, 3);
+  f.Append(8, 4);
+  auto stable = f.Capture();
+  assert(policy.Admit({f.tokens, f.adapter.CompatibilityIdentity(), {}},
+                      [&] { return stable; }));
+  f.Append(4, 4);
+  auto retry = f.Capture();
+  RetentionRequest request{f.tokens,
+                           f.adapter.CompatibilityIdentity(),
+                           {},
+                           RetentionPurpose::kRetry,
+                           8};
+  assert(policy.Admit(request, [&] { return retry; }));
+  f.Append(4, 4);
+  auto frontier = f.Capture(CheckpointPurpose::kGenerated);
+  request.tokens = f.tokens;
+  request.purpose = RetentionPurpose::kContinuation;
+  assert(policy.Admit(request, [&] { return frontier; }));
+  f.Append(4, 4);
+  auto next = f.Capture();
+  request.tokens = f.tokens;
+  request.purpose = RetentionPurpose::kRetry;
+  assert(policy.Admit(request, [&] { return next; }));
+  assert(f.index.CachedPrefixTokens(
+             {f.adapter.CompatibilityIdentity(), retry->Tokens(),
+              InputIdentity(retry->Boundary())}) == retry->Boundary());
 }
 void MixedSourcesAndCompatibility() {
   TieredFixture f;
@@ -737,6 +803,9 @@ int main() {
   SupersededDiskTurnsLeaveBeforeAnotherConversation();
   PromptAnchorOutlivesCoveredAndLeafGeneratedFrontiers();
   DiskUseHistorySurvivesCatalogRestart();
+  AUsedFrontierIsNotAnOptionalVictim();
+  DiskEvictionNeedsNoLedgerHeadroom();
+  RecordPressureDropsUnusedFrontierBeforeRetry();
   MixedSourcesAndCompatibility();
   PublicationCorruptionQuarantinesImmediately();
   RepublishedQuarantineCannotRehabilitateOldRAM();

@@ -639,6 +639,7 @@ struct PersistenceQueue::Impl {
   std::unique_ptr<PersistenceJob> active;
   PersistenceQueueStats stats;
   bool stopped{};
+  std::size_t discard_callbacks{};
   std::uint64_t sequence{};
   std::jthread worker;
   Impl(ResourceReservation reservation, StreamedStore& streams,
@@ -830,6 +831,13 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
     ++impl_->stats.skipped;
     return false;
   }
+  if (job.manifest_.purpose == CheckpointPurpose::kGenerated &&
+      job.pinned_bytes_ >
+          frontier_budget -
+              std::min(frontier_budget, impl_->stats.pinned_bytes - released)) {
+    ++impl_->stats.skipped;
+    return false;
+  }
   std::optional<CheckpointId> superseded;
   bool accepted = false;
   try {
@@ -871,9 +879,42 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
   impl_->wake.notify_all();
   return accepted;
 }
+bool PersistenceQueue::DiscardPending(CheckpointId id) {
+  std::unique_ptr<PersistenceJob> discarded;
+  {
+    std::lock_guard guard(impl_->mutex);
+    for (auto& job : impl_->pending) {
+      if (!job || job->manifest_.checkpoint != id)
+        continue;
+      impl_->stats.pinned_bytes -= job->pinned_bytes_;
+      --impl_->stats.pending;
+      ++impl_->stats.superseded;
+      ++impl_->discard_callbacks;
+      discarded = std::move(job);
+      break;
+    }
+  }
+  if (!discarded)
+    return false;
+  discarded.reset();
+  if (impl_->completed) {
+    try {
+      impl_->completed(id, false);
+    } catch (...) {
+    }
+  }
+  {
+    std::lock_guard guard(impl_->mutex);
+    --impl_->discard_callbacks;
+  }
+  impl_->wake.notify_all();
+  return true;
+}
 void PersistenceQueue::Drain() {
   std::unique_lock guard(impl_->mutex);
-  impl_->wake.wait(guard, [&] { return impl_->stats.pending == 0; });
+  impl_->wake.wait(guard, [&] {
+    return impl_->stats.pending == 0 && impl_->discard_callbacks == 0;
+  });
 }
 void PersistenceQueue::Stop() {
   // Joining a jthread is not concurrently safe. Keep lifecycle serialization

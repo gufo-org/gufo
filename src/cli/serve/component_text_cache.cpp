@@ -722,6 +722,35 @@ struct ComponentTextCache::Impl {
     }
     return bytes;
   }
+  void DiscardUnusedFrontierWrites() {
+    if (!queue)
+      return;
+    // Select under serving serialization, but discard/callback outside it.
+    // An active write is left alone; foreground work never drains disk I/O.
+    const auto discard = [&](const auto& jobs, const auto& select) {
+      for (std::size_t i = 0; i < jobs.size(); ++i) {
+        cache::CheckpointId id{};
+        {
+          const std::lock_guard lock(mutex);
+          if (jobs[i])
+            id = select(*jobs[i]);
+        }
+        if (id.value)
+          (void)queue->DiscardPending(id);
+      }
+    };
+    discard(pending, [&](const auto& checkpoint) {
+      return retention.IsUnusedFrontier(checkpoint.Id())
+                 ? checkpoint.Id()
+                 : cache::CheckpointId{};
+    });
+    discard(pending_durable, [](const auto& capture) {
+      return capture.manifest.purpose == cache::CheckpointPurpose::kGenerated
+                 ? capture.manifest.checkpoint
+                 : cache::CheckpointId{};
+    });
+  }
+
   void DrainDemotion() noexcept {
     std::shared_ptr<const cache::Checkpoint> checkpoint;
     {
@@ -858,7 +887,8 @@ struct ComponentTextCache::Lease::Impl {
         .reused = cached != 0,
         .reused_tokens = cached,
         .turn = entry->used,
-        .persistable = persist};
+        .persistable = persist,
+        .optional_frontier = generated_frontier};
   }
   std::unique_ptr<ContinuationSnapshot> CaptureDurable();
 };
@@ -1057,6 +1087,7 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
     } catch (const cache::ResourceExhausted&) {
       for (auto& copy : copies)
         copy.buffer = {};
+      cache->DiscardUnusedFrontierWrites();
       bool reclaimed;
       {
         const std::lock_guard lock(cache->mutex);
@@ -1934,6 +1965,7 @@ std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
     }
   }
   const auto reclaim = [&] {
+    cache.DiscardUnusedFrontierWrites();
     bool reclaimed;
     {
       const std::lock_guard lock(cache.mutex);

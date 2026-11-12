@@ -831,6 +831,99 @@ void GeneratedJobsYieldToPromptAnchors() {
     assert(bool(disk.Open({4})) == (depth == 3));
   }
 }
+void CoalescingKeepsFrontierHeadroom() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture active(ledger, 1, 100, 40), anchor(ledger, 2, 200, 32),
+      prior(ledger, 3, 300, 48), next(ledger, 4, 400, 56),
+      latest(ledger, 5, 500, 64);
+  active.manifest.compatibility[1] = 1;
+  for (auto* fixture : {&prior, &next, &latest})
+    fixture->manifest.purpose = CheckpointPurpose::kGenerated;
+  std::atomic<bool> idle{}, started{};
+  PersistenceQueue queue(
+      ledger, streams, 4, 3000,
+      [&] {
+        started = true;
+        return idle.load();
+      },
+      {}, {}, std::chrono::hours(1));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!started && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  assert(started);
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1001), anchor.manifest, anchor.Sources())));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1002), prior.manifest, prior.Sources())));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1003), next.manifest, next.Sources())));
+  const auto before = queue.Stats().pinned_bytes;
+  assert(before <= 1500);
+  // Replacing the older generated job would stay below max_bytes but cross
+  // the half-budget headroom that generated writes must also obey.
+  assert(!queue.TrySubmit(
+      PersistenceJob(ledger, Id(1004), latest.manifest, latest.Sources())));
+  assert(queue.Stats().pinned_bytes == before && !queue.Stats().superseded);
+  idle = true;
+  queue.Drain();
+  assert(disk.Open({2}) && disk.Open({3}) && disk.Open({4}) && !disk.Open({5}));
+}
+void DiscardPendingReleasesPinsAndDrainWaitsForItsCallback() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture active(ledger, 1, 100), pending(ledger, 2, 200);
+  std::atomic<bool> idle{}, started{};
+  std::promise<void> entered, release;
+  auto unblock = release.get_future().share();
+  PersistenceQueue queue(
+      ledger, streams, 2, 8192,
+      [&] {
+        started = true;
+        return idle.load();
+      },
+      [&](CheckpointId id, bool success) {
+        if (id.value == 2) {
+          assert(!success);
+          entered.set_value();
+          unblock.wait();
+        }
+      },
+      {}, std::chrono::hours(1));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!started && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  assert(started && !queue.DiscardPending({1}));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1001), pending.manifest, pending.Sources())));
+  auto discarded =
+      std::async(std::launch::async, [&] { return queue.DiscardPending({2}); });
+  entered.get_future().get();
+  idle = true;
+  auto drained = std::async(std::launch::async, [&] { queue.Drain(); });
+  const auto settle =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (queue.Stats().pending && std::chrono::steady_clock::now() < settle)
+    std::this_thread::yield();
+  assert(!queue.Stats().pending);
+  assert(drained.wait_for(std::chrono::milliseconds(0)) ==
+         std::future_status::timeout);
+  release.set_value();
+  assert(discarded.get());
+  drained.get();
+  assert(queue.Stats().superseded == 1 && queue.Stats().pinned_bytes == 0);
+  assert(!queue.DiscardPending({2}) && disk.Open({1}) && !disk.Open({2}));
+}
 void FirstPendingAnchorSurvivesCoalescing() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
@@ -1162,6 +1255,8 @@ int main() {
   NewestPendingFrontierSurvives();
   FirstPendingAnchorSurvivesCoalescing();
   GeneratedJobsYieldToPromptAnchors();
+  CoalescingKeepsFrontierHeadroom();
+  DiscardPendingReleasesPinsAndDrainWaitsForItsCallback();
   AdmissionFailures();
   FailedSubmission();
   RestorePreemptsYield();

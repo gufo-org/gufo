@@ -1307,6 +1307,69 @@ void WarmTurnsAdvanceTheStableCheckpoint() {
          "successive rewritten turns resume from the latest boundary");
   (void)fourth.Cancel();
 }
+void GeneratedFrontierKeepsTheCurrentRetryUnderPressure() {
+  auto runner = std::make_shared<Runner>();
+  runner->private_blocks = 1;
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  const auto expected = runner->adapter->RecurrentHash(state.slot);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kRetry));
+  assert(lease->PublishSnapshot(prompt, lease->Capture()));
+  const std::vector<TextRunnerToken> output{50, 51, 52, 53};
+  runner->adapter->Append(state.slot, output, output);
+  auto frontier = prompt;
+  frontier.insert(frontier.end(), output.begin(), output.end());
+  (void)lease->Commit({}, {}, frontier);
+  auto peer =
+      cache.Acquire(std::vector<TextRunnerToken>{90}, {}, {}, true, 0, true);
+  peer->Invalidate();
+  auto retry = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(retry->cached_tokens() == prompt.size());
+  assert(runner->adapter->RecurrentHash(
+             dynamic_cast<State&>(retry->state()).slot) == expected);
+  // Reusing the exact checkpoint does not publish a new prompt snapshot.
+  // It still needs the same protection when this retry finishes generating.
+  runner->adapter->Append(dynamic_cast<State&>(retry->state()).slot, output,
+                          output);
+  (void)retry->Commit({}, {}, frontier);
+  peer = cache.Acquire(std::vector<TextRunnerToken>{91}, {}, {}, true, 0, true);
+  peer->Invalidate();
+  auto repeated = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(repeated->cached_tokens() == prompt.size());
+  repeated->Invalidate();
+}
+void PromptCaptureReclaimsUnusedGeneratedStateFirst() {
+  auto runner = std::make_shared<Runner>();
+  runner->private_blocks = 2;
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 4};
+  auto first = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(first->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(first->TryReserveSnapshot(first->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kRetry));
+  assert(first->PublishSnapshot(prompt, first->Capture()));
+  const std::vector<TextRunnerToken> output{50, 51, 52, 53};
+  runner->adapter->Append(state.slot, output, output);
+  auto frontier = prompt;
+  frontier.insert(frontier.end(), output.begin(), output.end());
+  (void)first->Commit({}, {}, frontier);
+  const std::vector<TextRunnerToken> other{90, 91, 92, 93};
+  auto peer = cache.Acquire(other, {}, {}, true, 0, true);
+  runner->adapter->Append(dynamic_cast<State&>(peer->state()).slot, other,
+                          other);
+  assert(peer->TryReserveSnapshot(peer->CaptureBytes(), other.size(), false,
+                                  SnapshotPurpose::kRetry));
+  assert(peer->PublishSnapshot(other, peer->Capture()));
+  peer->Invalidate();
+  auto retry = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(retry->cached_tokens() == prompt.size());
+  retry->Invalidate();
+}
 void GeneratedFrontierSurvivesReassignmentAndRestart() {
   for (const bool disk_on : {false, true}) {
     const TemporaryDirectory temp("gufo-generated-frontier");
@@ -3341,6 +3404,8 @@ int main() {
   PromptReuseCanBeDisabledPerRequest();
   StableChatPrefixSurvivesInterruptedFraming();
   WarmTurnsAdvanceTheStableCheckpoint();
+  GeneratedFrontierKeepsTheCurrentRetryUnderPressure();
+  PromptCaptureReclaimsUnusedGeneratedStateFirst();
   GeneratedFrontierSurvivesReassignmentAndRestart();
   FullChatCheckpointRestoresWithoutSuffixPrefill();
   GeneratedFrontierForksBeforeMutation();

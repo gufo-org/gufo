@@ -18,6 +18,9 @@ public:
   void Track(CheckpointId);
   [[nodiscard]] std::shared_ptr<const DiskDescription> Find(CheckpointId) const;
   void Touch(CheckpointId);
+  // Quiescent maintenance/shutdown only: persist dirty advisory access history.
+  // May perform filesystem I/O. Track and Touch only update in-memory history.
+  void FlushUses();
   // Evict an unpinned entry, superseded history before conversation frontiers.
   // Busy writers cause an immediate false result;
   // capacity is credited only after DiskStore's durable retirement succeeds.

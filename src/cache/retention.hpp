@@ -113,6 +113,8 @@ struct RetentionRequest {
   std::uint64_t turn{};
   // A request that opted out of disk must also stay off disk on demotion.
   bool persistable{true};
+  // A speculative generated copy may replace only another unused frontier.
+  bool optional_frontier{false};
 };
 // Caller serializes policy, index and history operations. Ledger and index
 // outlive this object; sink, if present, does too. Callbacks/sinks cannot
@@ -125,7 +127,8 @@ struct RetentionRequest {
 // record is rank-eligible, an optional retry/history copy takes the least
 // recently used conversation that it and its retained descendants have not
 // used within one record-table turnover (the record limit in uses). Byte
-// pressure removes, in order: retry copies; cheap checkpoints, whose private
+// pressure removes, in order: unused generated copies; retry copies; cheap
+// checkpoints, whose private
 // state exceeds eight times the rows they restore; conversations not reused
 // within one RAM-budget turnover, least recently used first; then reused
 // ones. A conversation's recency includes its retained descendants. An
@@ -157,6 +160,7 @@ public:
   // Called under caller serialization, before pressure removes a RAM-only
   // record. The callback may pin one bounded demotion; it must not reenter.
   void SetDemotion(std::function<void(std::shared_ptr<const Checkpoint>)>);
+  [[nodiscard]] bool IsUnusedFrontier(CheckpointId) const;
   void Touch(CheckpointId);
   void Remove(CheckpointId);
   [[nodiscard]] std::uint32_t Rank(CheckpointId) const;
@@ -175,7 +179,8 @@ private:
     // Two continuations once extended this record directly.
     std::uint64_t forked : 1 {false};
     std::uint64_t persistable : 1 {true};
-    std::uint64_t turn : 62 {};
+    std::uint64_t frontier_used : 1 {false};
+    std::uint64_t turn : 61 {};
     // Retained records extending this one, by slot.
     std::bitset<kRecordLimit> below;
   };

@@ -852,16 +852,16 @@ struct DiskStore::Impl {
     if (!synced)
       IoError("sync cache file/directory", ec);
   }
-  void Remove(const platform::Directory& directory, const std::string& name) {
+  bool Remove(const platform::Directory& directory, const std::string& name) {
     platform::FileInfo st{};
     std::error_code ec;
     if (!platform::StatAt(directory, name, false, &st, ec)) {
       if (ec == std::errc::no_such_file_or_directory)
-        return;
+        return false;
       IoError("stat cache removal", ec);
     }
     if (!Regular(st))
-      return;
+      return false;
     if (&directory == &chunks || &directory == &private_files)
       if (auto id = ParseName(name))
         ForgetVerified({&directory == &private_files, *id});
@@ -871,6 +871,7 @@ struct DiskStore::Impl {
       std::lock_guard guard(stats_mutex);
       stats.managed_bytes -= st.size;
     }
+    return true;
   }
   bool Referenced(const platform::Directory& directory, DiskFileId id) const {
     for (const auto& entry : entries) {
@@ -1822,7 +1823,8 @@ DiskRetireResult DiskStore::Impl::Retire(CheckpointId id, std::uint64_t epoch) {
         if (p && !Referenced(private_files, p->file))
           Remove(private_files, DiskFileName(p->file));
     }
-    Remove(uses, DiskFileName(retired.file_));
+    if (Remove(uses, DiskFileName(retired.file_)))
+      Sync(uses);
     Sync(chunks);
     Sync(private_files);
     return DiskRetireResult::kRetired;

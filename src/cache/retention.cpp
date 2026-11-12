@@ -146,6 +146,11 @@ std::uint32_t RetentionPolicy::Priority(
   const auto& e = records_[candidate];
   if (Branch(candidate))
     return 3;
+  // Before its first restore a generated copy is speculative extra state.
+  // Let prompt captures reclaim it before losing an exact retry checkpoint.
+  if (e.checkpoint->Purpose() == CheckpointPurpose::kGenerated &&
+      !e.frontier_used && !e.forked)
+    return 0;
   if (incoming && Continuation(incoming->purpose) &&
       e.checkpoint->Compatibility() == incoming->compatibility &&
       e.checkpoint->Input() == incoming->input &&
@@ -210,7 +215,12 @@ std::array<std::uint64_t, 5> RetentionPolicy::PressureOrder(
     std::size_t i, const RetentionRequest& r, std::uint32_t priority) const {
   const auto& e = records_[i];
   if (!priority)
-    return {0, 0, e.last_used, 0, 0};
+    return {0,
+            e.checkpoint->Purpose() == CheckpointPurpose::kGenerated &&
+                    !e.frontier_used
+                ? 0U
+                : 1U,
+            e.last_used, 0, 0};
   std::size_t rows = 0, state = 0;
   for (const auto& c : e.checkpoint->Components())
     if (c.descriptor.kind == ComponentKind::kPrivateState)
@@ -405,6 +415,16 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
       value = Priority(i, &r);
     return *value;
   };
+  const auto record_order = [&](std::size_t i) {
+    const auto level = priority(i);
+    return std::array<std::uint64_t, 3>{
+        level,
+        level == 0 && records_[i].checkpoint->Purpose() ==
+                          CheckpointPurpose::kGenerated
+            ? 0U
+            : 1U,
+        records_[i].last_used};
+  };
   // An unchanged retry's full-prompt copy may replace the checkpoint it was
   // restored from when only the assistant framing separates them: the copy
   // covers every prompt the source did except an edit inside those few
@@ -451,6 +471,10 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
             r.protected_checkpoints.end())
       return false;
     const auto level = priority(i);
+    if (r.optional_frontier &&
+        (records_[i].checkpoint->Purpose() != CheckpointPurpose::kGenerated ||
+         records_[i].frontier_used || records_[i].forked || Branch(i)))
+      return false;
     if (level <= maximum)
       return true;
     const auto& checkpoint = *records_[i].checkpoint;
@@ -515,9 +539,7 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
         target = i;
         order = candidate;
       }
-    } else if (target == limit_ || priority(i) < priority(target) ||
-               (priority(i) == priority(target) &&
-                records_[i].last_used < records_[target].last_used)) {
+    } else if (target == limit_ || record_order(i) < record_order(target)) {
       target = i;
     }
   }
@@ -568,7 +590,7 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
   const auto boundary = e.checkpoint->Boundary();
   const auto purpose = e.purpose;
   const auto used = e.last_used;
-  if (demote_ && e.persistable &&
+  if (demote_ && e.persistable && !IsUnusedFrontier(e.checkpoint->Id()) &&
       (reason == RetentionReason::kByteCapacity ||
        reason == RetentionReason::kRecordCapacity) &&
       !index_.IsDurable(e.entry)) {
@@ -637,6 +659,11 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
     return refuse(RetentionReason::kRecordCapacity);
   // An exact replacement keeps its conversation's reuse.
   std::optional<std::uint64_t> reused_at;
+  bool frontier_used = false;
+  if (exact != limit_) {
+    reused_at = records_[exact].reused_at;
+    frontier_used = records_[exact].frontier_used;
+  }
   while (true) {
     if (r.stop.stop_requested())
       return refuse(RetentionReason::kCancelled);
@@ -660,6 +687,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
           index_.Insert(checkpoint, std::move(available), r.stable);
       if (exact != limit_ && records_[exact].checkpoint) {
         reused_at = records_[exact].reused_at;
+        frontier_used = records_[exact].frontier_used;
         Erase(exact, RetentionReason::kExactReplacement, Priority(exact, &r));
       } else if (size_ == limit_) {
         const auto victim = Victim(r, true);
@@ -681,6 +709,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_};
       e.turn = r.turn ? r.turn : clock_;
       e.persistable = r.persistable;
+      e.frontier_used = frontier_used;
       ++size_;
       // Keep each event's exact total without recounting every retained
       // checkpoint after each individual eviction or insertion.
@@ -787,12 +816,19 @@ void RetentionPolicy::SetDemotion(
     std::function<void(std::shared_ptr<const Checkpoint>)> demote) {
   demote_ = std::move(demote);
 }
+bool RetentionPolicy::IsUnusedFrontier(CheckpointId id) const {
+  const auto i = Find(id);
+  return i != limit_ &&
+         records_[i].checkpoint->Purpose() == CheckpointPurpose::kGenerated &&
+         !records_[i].frontier_used && !records_[i].forked && !Branch(i);
+}
 void RetentionPolicy::Touch(CheckpointId id) {
   const auto i = Find(id);
   if (i == limit_)
     throw std::invalid_argument("unknown retained checkpoint");
   auto& e = records_[i];
   e.last_used = ++clock_;
+  e.frontier_used = true;
   e.reused_at = admitted_bytes_;
   Emit(RetentionAction::kTouched, RetentionReason::kExplicit, id,
        e.checkpoint->Boundary(), e.purpose, Priority(i), e.last_used);

@@ -569,6 +569,11 @@ the slot. Complete chunks share the execution history; private state and tails
 are copied while execution is exclusive, and borrowed rows use the existing
 idle preservation worker. The disk queue writes these copies during idle work.
 A refused capture or full persistence queue can still leave an earlier fallback.
+Before their first restore, generated copies use free capacity or replace older
+unused frontiers. Prompt admission reclaims unused generated copies before exact
+retries, including their queued disk writes; active writes are left alone.
+Once a generated checkpoint restores a request it competes normally. Unused
+generated victims are dropped rather than requeued for demotion.
 
 When RAM pressure removes a checkpoint with a complete usable disk publication,
 it prefers that copy within its pressure tier. Publication quarantine or
@@ -589,8 +594,10 @@ and reader pins still protect their publication.
 
 Access history lives in independently checksummed 16-byte files under
 `v2/uses`, counts against the disk budget, and is removed with its manifest.
-A busy store defers an advisory update; pending updates retry at later catalog
-operations and teardown. Missing or damaged history falls back to checkpoint ID.
+Lookup only marks access history dirty. Quiescent maintenance and catalog
+teardown flush updates; filesystem work never runs from ordinary lookup.
+An abrupt shutdown can lose these advisory updates. Missing or damaged history
+falls back to checkpoint ID.
 It never changes whether a checkpoint can restore.
 
 RAM byte pressure also delays preferential eviction of the two newest covered
