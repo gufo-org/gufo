@@ -19,8 +19,18 @@ NPU:
 - `DispatchLibrary`: loads an IRON design's `dispatch_generate` library (up to
   16 int32 scalars) and generates its instruction streams.
 
+Speech providers receive their declared options, so an NPU switch such as
+`--npu` reaches them as it reaches text providers:
+- `AsrRunnerOptions::provider_options` and `TtsRunnerOptions::provider_options`
+  (`ParsedOptions`): the explicit values of the options the provider declares
+  in its manifest for `serve asr` / `serve tts` (manifest commands `serve` or
+  the full subcommand). `gufo serve asr` and `gufo serve tts --help` list them
+  under "Provider options". Runners built through `create_with_options` get
+  them; an option that was not given is absent.
+
 Public CMake contract: Gufo requires XRT (`XRT::xrt_coreutil`), found through
 `XRT_DIR`, `XILINX_XRT` or `/opt/xilinx/xrt`.
 
-Compatibility: additive. Existing extensions need no change. The header names
+Compatibility: additive. Existing extensions need no change (the new fields
+default to empty). The header names
 no XRT type, so extensions build without XRT headers.
