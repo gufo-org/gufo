@@ -2273,6 +2273,13 @@ void TestMetricsDuringCacheAdmission() {
     auto next = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F);
     Expect(entered.try_acquire_for(kTestTimeout),
            "continuation admission captures its live checkpoint");
+    // The capture may be the first request's idle frontier task, entered
+    // before the scheduler pops this request; admission then waits for it.
+    const auto admitted_deadline =
+        std::chrono::steady_clock::now() + kTestTimeout;
+    while (metrics::RequestsProcessing().load() != processing_before + 1 &&
+           std::chrono::steady_clock::now() < admitted_deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     Expect(metrics::RequestsProcessing().load() == processing_before + 1 &&
                metrics::RequestsDeferred().load() == deferred_before,
            "cache preparation remains visible as processing");
