@@ -208,13 +208,12 @@ stdenv.mkDerivation {
   postFixup = ''
     # HIP loads ROCr transitively. Select the patched ABI-compatible runtime
     # without rebuilding the unchanged HIP/BLAS compiler and kernel libraries.
+    # XRT finds its amdxdna plugin under XILINX_XRT. One wrapper keeps the
+    # ROCr selection in bin/gufo, which the Linux artifact packer reads;
+    # gufo-server is a symlink to it.
     wrapProgram "$out/bin/gufo" \
-      --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"
-  '' + lib.optionalString (xrt != null) ''
-    # XRT finds its amdxdna plugin under XILINX_XRT.
-    for program in gufo gufo-server; do
-      wrapProgram "$out/bin/$program" --set-default XILINX_XRT "${xrt}/opt/xilinx/xrt"
-    done
+      --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"${lib.optionalString (xrt != null) '' \
+      --set-default XILINX_XRT "${xrt}/opt/xilinx/xrt"''}
   '';
   installCheckPhase = ''
     runHook preInstallCheck

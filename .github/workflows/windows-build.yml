@@ -249,7 +249,7 @@ jobs:
           & $env:VCPKG_ROOT\vcpkg.exe install --classic --triplet x64-windows-static `
             boost-filesystem boost-program-options boost-property-tree boost-format `
             boost-algorithm boost-interprocess boost-optional boost-tokenizer boost-range `
-            boost-endian boost-uuid boost-regex boost-lexical-cast opencl
+            boost-endian boost-uuid boost-regex boost-lexical-cast boost-process boost-tuple boost-any opencl
           if ($LASTEXITCODE -ne 0) { throw 'cannot install Boost and OpenCL for XRT' }
           Pop-Location
           # XRT's Windows build always compiles its OpenCL layer, which reads
