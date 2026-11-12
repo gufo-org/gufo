@@ -13,6 +13,9 @@ kernel directories beside it. Bundles include an LLVM OpenMP runtime built
 from upstream LLVM 18.1.8 source under Apache-2.0 with LLVM exceptions, using
 `libomp140.x86_64.dll` as required by the SDK. The license is included under
 `llvm-openmp-LICENSE.txt`, with source provenance in `llvm-openmp-version.txt`.
+The NPU runtime uses XRT from AMD's NPU driver, which the bundle does not
+ship; without the driver, `gufo diagnose` warns `No XDNA NPU found` and the
+GPU paths work as before.
 
 The v0.24.0 ZIP omitted this DLL ([#801](https://github.com/gufo-org/gufo/issues/801)).
 If it exits silently, including for `--help`, with status `0xC0000135`, the
@@ -64,6 +67,22 @@ release packaging builds the upstream runtime instead.
   slower. The `windows-base` preset chain-loads
   `cmake/toolchains/windows-therock.cmake`, which takes `clang-cl` and the
   runtime from `HIP_PATH`.
+- **XRT Windows SDK 2.21**, Xilinx's
+  [`xrt_windows_sdk.zip`](https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip)
+  (sha256 `ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295`),
+  extracted to `C:\xrt`, where configure finds it:
+
+  ```cmd
+  mkdir C:\xrt
+  tar -xf xrt_windows_sdk.zip -C C:\xrt
+  ```
+
+  The NPU runtime compiles against its headers and import library. At run
+  time Gufo uses the `xrt_coreutil.dll` that AMD's NPU driver installs in
+  System32 (the driver ships XRT 2.21 too); without the driver it runs on the
+  GPU only. Elsewhere, pass `-DXRT_DIR=<dir>/xrt_sdk/xrt/share/cmake/XRT`. Do
+  not set `XILINX_XRT`: the driver's XRT then looks for its device plugin
+  there and finds no NPU.
 
 ## 2. Patch the SDK's HIP headers (once, and after every SDK reinstall)
 
@@ -138,8 +157,9 @@ diagnosis with a restricted `PATH`. The import check does not use the builder's
 installed DLLs, so developer tools cannot conceal an omitted dependency.
 On pull requests and manual dispatches, the
 [Windows validation workflow](.github/workflows/devlab-windows.yml) downloads
-the resulting bundle on Windows Strix Halo and runs `gufo diagnose`, weight-free
-GPU tests, and one small model per family through
+the resulting bundle on Windows Strix Halo and runs `gufo diagnose`, requiring
+the NPU check to pass, weight-free GPU tests, and one small model per family
+through
 [`tests/functional/family_smoke.py`](tests/functional/family_smoke.py):
 EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
 
@@ -151,8 +171,34 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
   to the executable, ahead of the older `amdhip64` the AMD driver installs in
   System32; copy the whole folder (`gufo.exe`, the DLLs, `rocblas\` and
   `hipblaslt\`).
+- If configure fails with `Could not find a package configuration file
+  provided by "XRT"`, extract the XRT SDK to `C:\xrt` (step 1) or pass
+  `-DXRT_DIR`.
+- If `gufo diagnose` warns `No XDNA NPU found` on a machine with the NPU
+  driver, unset `XILINX_XRT` and remove any `xrt_coreutil.dll` beside
+  `gufo.exe`.
 - After reinstalling or upgrading the SDK, rerun the patch in step 2 and
   rebuild into a fresh build directory so the runtime stages again.
+
+## NPU device test (developers)
+
+Building and running Gufo needs no Python for the NPU. Only compiling the
+in-tree NPU designs does: they are IRON (mlir-aie) programs, compiled by
+Python packages. Install the Windows wheels of the versions
+[`.devops/nix/iron`](.devops/nix/iron/default.nix) pins, then build and run
+`npu_device_test`; aiecc needs the SDK's `xclbinutil` on `PATH`:
+
+```cmd
+py -3.12 -m venv C:\src\iron-venv
+C:\src\iron-venv\Scripts\python -m pip install numpy ml-dtypes cloudpickle https://github.com/Xilinx/mlir-aie/releases/download/v1.4.5/mlir_aie-1.4.5-cp312-cp312-win_amd64.whl https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026111101%2B81af12b7-py3-none-win_amd64.whl
+set PEANO_INSTALL_DIR=C:\src\iron-venv\Lib\site-packages\llvm-aie
+set PATH=C:\xrt\xrt_sdk\xrt;%PATH%
+tools\windows\vs-env.cmd cmake --preset windows-release -B build\npu-test -DBUILD_TESTING=ON -DGUFO_IRON_PYTHON=C:\src\iron-venv\Scripts\python.exe
+tools\windows\vs-env.cmd cmake --build build\npu-test --target npu_device_test
+build\npu-test\npu_device_test.exe build\npu-test\npu\q8gemm
+```
+
+It prints each product's error relative to a double reference (about 3e-5).
 
 ## External source extensions
 

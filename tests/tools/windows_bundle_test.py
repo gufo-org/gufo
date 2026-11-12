@@ -107,6 +107,32 @@ class WindowsBundleTest(unittest.TestCase):
             reader.return_value.__enter__.return_value = pe
             with patch.object(pe, "parse_data_directories", create=True):
                 self.assertEqual(bundle.imported_dlls(Path("gufo.exe")), {"kernel32.dll", "missing.dll"})
+                self.assertEqual(bundle.imported_dlls(Path("gufo.exe"), delayed_only=True),
+                                 {"missing.dll"})
+
+    def test_driver_libraries_must_be_delay_loaded_and_not_bundled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gufo.exe").touch()
+            imports = {"gufo.exe": {"xrt_coreutil.dll", "kernel32.dll"}}
+            delayed = {"gufo.exe": set()}
+
+            def fake(path, delayed_only=False):
+                return (delayed if delayed_only else imports)[path.name]
+
+            with patch.object(bundle, "imported_dlls", side_effect=fake):
+                self.assertEqual(
+                    bundle.check_bundle(root),
+                    ["gufo.exe must delay-load driver library xrt_coreutil.dll"],
+                )
+                delayed["gufo.exe"] = {"xrt_coreutil.dll"}
+                self.assertEqual(bundle.check_bundle(root), [])
+                imports["xrt_coreutil.dll"] = {"kernel32.dll"}
+                (root / "xrt_coreutil.dll").touch()
+                self.assertEqual(
+                    bundle.check_bundle(root),
+                    ["bundle ships xrt_coreutil.dll, which must come from its driver"],
+                )
 
     def test_missing_executable_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

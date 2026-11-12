@@ -10,6 +10,7 @@
 #include <exception>
 
 #include "src/core/npu/npu.hpp"
+#include "src/core/npu/xrt_load.hpp"
 
 namespace gufo::npu {
 namespace {
@@ -81,6 +82,10 @@ Device::Device(Device&&) noexcept = default;
 Device& Device::operator=(Device&&) noexcept = default;
 
 Device Device::Open(unsigned index) {
+  if (!LoadXrt())
+    throw Error(
+        "cannot open the NPU: XRT (xrt_coreutil.dll from the AMD NPU "
+        "driver) is not installed");
   return Wrap("cannot open the NPU", [&] {
     Device out;
     out.impl_ = std::make_shared<Impl>(Impl{xrt::device(index)});

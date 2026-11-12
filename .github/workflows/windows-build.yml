@@ -57,9 +57,11 @@ jobs:
       SDK_SHA256: 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38
       # Forward slashes: CMake reads backslashes in -D values as escapes.
       SDK_ROOT: C:/TheRock/build
-      # XRT for the NPU runtime: the commit Linux pins (.devops/nix/xrt), as
-      # xdna-driver pins it. The NPU driver supplies the device plugin.
-      XRT_REV: 06c43a7f93fee129d32def1d372e17a8e69c05d2
+      # Xilinx's Windows XRT SDK: headers and import library for the NPU
+      # runtime. XRT 2.21, the version the AMD NPU driver ships; at run time
+      # Gufo uses the driver's xrt_coreutil.dll.
+      XRT_SDK_URL: https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip
+      XRT_SDK_SHA256: ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295
       XRT_ROOT: C:/xrt
       GUFO_PACKAGING_ROOT: ${{ github.workspace }}
     steps:
@@ -231,57 +233,20 @@ jobs:
           New-Item -ItemType Directory -Force build/windows-release | Out-Null
           Copy-Item $runtime build/windows-release
 
-      - name: Restore XRT
-        id: xrt-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: C:\xrt
-          key: gufo-windows-xrt-v1-${{ env.XRT_REV }}
-
-      # XRT's Windows build links static Boost with the hybrid CRT, as AMD's
-      # own XRT does; it exports only C++ types whose memory the shared UCRT
-      # owns, so /MD Gufo can use it.
-      - name: Build XRT
-        id: xrt
-        if: steps.xrt-cache.outputs.cache-hit != 'true'
+      # Gufo delay-loads xrt_coreutil.dll and uses the NPU driver's copy
+      # (System32): a copy beside gufo.exe cannot find the driver's device
+      # shim. Nothing from the SDK is staged; check_bundle.py rejects it.
+      - name: Install the XRT SDK
         run: |
-          Push-Location $env:RUNNER_TEMP
-          & $env:VCPKG_ROOT\vcpkg.exe install --classic --triplet x64-windows-static `
-            boost-filesystem boost-program-options boost-property-tree boost-format `
-            boost-algorithm boost-interprocess boost-optional boost-tokenizer boost-range `
-            boost-endian boost-uuid boost-regex boost-lexical-cast boost-process boost-tuple boost-any opencl
-          if ($LASTEXITCODE -ne 0) { throw 'cannot install Boost and OpenCL for XRT' }
-          Pop-Location
-          # XRT's Windows build always compiles its OpenCL layer, which reads
-          # the Khronos headers and loader from KHRONOS.
-          $static = "$($env:VCPKG_ROOT -replace '\\', '/')/installed/x64-windows-static"
-          git init build/xrt-src
-          git -C build/xrt-src remote add origin https://github.com/Xilinx/XRT.git
-          git -C build/xrt-src fetch --depth 1 origin $env:XRT_REV
-          if ($LASTEXITCODE -ne 0) { throw 'cannot fetch XRT' }
-          git -C build/xrt-src checkout FETCH_HEAD
-          git -C build/xrt-src submodule update --init --recursive --depth 1
-          if ($LASTEXITCODE -ne 0) { throw 'cannot fetch XRT submodules' }
-          cmake -S build/xrt-src/src -B build/xrt -G Ninja -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DXRT_NPU=1 -DDISABLE_ABI_CHECK=1 `
-            "-DBOOST_ROOT=$static" "-DKHRONOS=$static" "-DCMAKE_INSTALL_PREFIX=$env:XRT_ROOT"
-          if ($LASTEXITCODE -ne 0) { throw 'XRT configure failed' }
-          cmake --build build/xrt --parallel $env:NUMBER_OF_PROCESSORS
-          if ($LASTEXITCODE -ne 0) { throw 'XRT build failed' }
-          cmake --install build/xrt
-          if ($LASTEXITCODE -ne 0) { throw 'XRT install failed' }
-          Copy-Item build/xrt-src/LICENSE "$env:XRT_ROOT/LICENSE"
-
-      - name: Stage XRT
-        run: |
-          $config = Get-ChildItem $env:XRT_ROOT -Recurse -Filter xrt-config.cmake | Select-Object -First 1
-          if (-not $config) { throw 'XRT CMake config missing' }
-          "XRT_DIR=$($config.DirectoryName -replace '\\', '/')" >> $env:GITHUB_ENV
-          New-Item -ItemType Directory -Force build/windows-release | Out-Null
-          # Gufo imports only xrt_coreutil; the NPU driver supplies the device shim.
-          $coreutil = Get-ChildItem $env:XRT_ROOT -Recurse -Filter 'xrt_coreutil.dll' | Select-Object -First 1
-          if (-not $coreutil) { throw 'xrt_coreutil.dll missing' }
-          Copy-Item $coreutil.FullName build/windows-release
+          $archive = "$env:RUNNER_TEMP\xrt_windows_sdk.zip"
+          curl.exe --fail --location --retry 3 --no-progress-meter --output $archive $env:XRT_SDK_URL
+          if ($LASTEXITCODE -ne 0) { throw 'cannot download the XRT SDK' }
+          $sha = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($sha -ne $env:XRT_SDK_SHA256) { throw "XRT SDK has sha256 $sha, expected $env:XRT_SDK_SHA256" }
+          New-Item -ItemType Directory -Force $env:XRT_ROOT | Out-Null
+          tar -xf $archive -C $env:XRT_ROOT
+          if ($LASTEXITCODE -ne 0) { throw 'cannot unpack the XRT SDK' }
+          "XRT_DIR=$env:XRT_ROOT/xrt_sdk/xrt/share/cmake/XRT" >> $env:GITHUB_ENV
 
       - name: Check out external extension
         if: ${{ inputs.extension-repo != '' }}
@@ -376,8 +341,8 @@ jobs:
             Copy-Item $videoTest.FullName $dist
           }
           Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
-          Copy-Item "$env:XRT_ROOT/LICENSE" "$dist/xrt-LICENSE.txt"
-          "XRT $env:XRT_REV, source: https://github.com/Xilinx/XRT/tree/$env:XRT_REV; Apache-2.0; built with XRT_NPU=1." |
+          Copy-Item "$env:XRT_ROOT/xrt_sdk/xrt/license/LICENSE" "$dist/xrt-LICENSE.txt"
+          "XRT 2.21 Windows SDK headers, source: $env:XRT_SDK_URL (sha256 $env:XRT_SDK_SHA256); Apache-2.0. Gufo is linked against its headers and import library; xrt_coreutil.dll comes from the AMD NPU driver." |
             Set-Content "$dist/xrt-version.txt" -Encoding ascii
           'LLVM OpenMP 18.1.8, source: https://github.com/llvm/llvm-project/tree/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/openmp; Apache-2.0 WITH LLVM-exception; built with OPENMP_MSVC_NAME_SCHEME=ON.' |
             Set-Content "$dist/llvm-openmp-version.txt" -Encoding ascii
@@ -530,13 +495,6 @@ jobs:
             build/windows-release/vcpkg-manifest-install.log
           retention-days: 7
           if-no-files-found: ignore
-
-      - name: Save XRT
-        if: always() && steps.xrt.outcome == 'success'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: C:\xrt
-          key: gufo-windows-xrt-v1-${{ env.XRT_REV }}
 
       - name: Save TheRock SDK archive
         if: always() && steps.therock-cache.outputs.cache-hit != 'true' && steps.sdk.outputs.archive == 'ready'

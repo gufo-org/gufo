@@ -118,7 +118,9 @@ DispatchLibrary DispatchLibrary::Open(const std::filesystem::path& library,
     throw Error("dispatch libraries take at most 16 scalars");
   DispatchLibrary out;
   try {
-    out.impl_ = std::make_unique<Impl>(library);
+    // Windows loads with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, which rejects
+    // relative paths.
+    out.impl_ = std::make_unique<Impl>(std::filesystem::absolute(library));
     out.impl_->symbol = out.impl_->library.Symbol(symbol);
   } catch (const std::exception& e) {
     throw Error(library.string() + ": " + e.what());
