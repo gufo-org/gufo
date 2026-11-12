@@ -42,7 +42,8 @@ can't see the state of a server that is already running; use `/health` and
 - In a container, pass `--device /dev/accel/accel0`.
 - On Windows, install AMD's NPU driver; it supplies XRT
   (`xrt_coreutil.dll` in System32). Remove any `xrt_coreutil.dll` beside
-  `gufo.exe`: that copy cannot find the driver's device plugin.
+  `gufo.exe` and unset `XILINX_XRT`: either makes XRT look for the driver's
+  device plugin in the wrong folder.
 
 ## The server stops with `device_lost`
 

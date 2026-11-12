@@ -67,6 +67,22 @@ release packaging builds the upstream runtime instead.
   slower. The `windows-base` preset chain-loads
   `cmake/toolchains/windows-therock.cmake`, which takes `clang-cl` and the
   runtime from `HIP_PATH`.
+- **XRT Windows SDK 2.21**, Xilinx's
+  [`xrt_windows_sdk.zip`](https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip)
+  (sha256 `ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295`),
+  extracted to `C:\xrt`, where configure finds it:
+
+  ```cmd
+  mkdir C:\xrt
+  tar -xf xrt_windows_sdk.zip -C C:\xrt
+  ```
+
+  The NPU runtime compiles against its headers and import library. At run
+  time Gufo uses the `xrt_coreutil.dll` that AMD's NPU driver installs in
+  System32 (the driver ships XRT 2.21 too); without the driver it runs on the
+  GPU only. Elsewhere, pass `-DXRT_DIR=<dir>/xrt_sdk/xrt/share/cmake/XRT`. Do
+  not set `XILINX_XRT`: the driver's XRT then looks for its device plugin
+  there and finds no NPU.
 
 ## 2. Patch the SDK's HIP headers (once, and after every SDK reinstall)
 
@@ -78,41 +94,10 @@ unpatched:
 python tools\windows\patch_sdk_math.py %HIP_PATH%
 ```
 
-## 3. Build XRT (once)
-
-The NPU runtime (`src/core/npu`) links XRT's `xrt_coreutil`, and configure
-stops at `find_package(XRT)` without it. XRT has no Windows package; build it
-from source at the commit CI pins (`XRT_REV` in
-[`windows-build.yml`](.github/workflows/windows-build.yml)), against static
-Boost and OpenCL headers from vcpkg:
+## 3. Configure and build
 
 ```cmd
-%VCPKG_ROOT%\vcpkg install --classic --triplet x64-windows-static boost-filesystem boost-program-options boost-property-tree boost-format boost-algorithm boost-interprocess boost-optional boost-tokenizer boost-range boost-endian boost-uuid boost-regex boost-lexical-cast boost-process boost-tuple boost-any opencl
-git init C:\src\xrt-src
-git -C C:\src\xrt-src remote add origin https://github.com/Xilinx/XRT.git
-git -C C:\src\xrt-src fetch --depth 1 origin 06c43a7f93fee129d32def1d372e17a8e69c05d2
-git -C C:\src\xrt-src checkout FETCH_HEAD
-git -C C:\src\xrt-src submodule update --init --recursive --depth 1
-tools\windows\vs-env.cmd cmake -S C:\src\xrt-src\src -B C:\src\xrt-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DXRT_NPU=1 -DDISABLE_ABI_CHECK=1 -DBOOST_ROOT=%VCPKG_ROOT%/installed/x64-windows-static -DKHRONOS=%VCPKG_ROOT%/installed/x64-windows-static -DCMAKE_INSTALL_PREFIX=C:/xrt
-tools\windows\vs-env.cmd cmake --build C:\src\xrt-build
-tools\windows\vs-env.cmd cmake --install C:\src\xrt-build
-```
-
-This installs `C:\xrt\share\cmake\XRT\xrt-config.cmake`, the import library
-Gufo links, and `C:\xrt\xrt_coreutil.dll`. When CI bumps `XRT_REV`, rebuild
-at the new commit.
-
-Do not copy that DLL beside `gufo.exe`. Gufo delay-loads `xrt_coreutil.dll`
-and uses the one AMD's NPU driver installs in System32. The source-built DLL
-loads the device shim (`xrt_core.dll`) from its own directory, but the driver
-keeps the shim in its DriverStore folder, so with a copy beside `gufo.exe`,
-`gufo diagnose --section npu` warns `No XDNA NPU found` even with the driver
-installed. Without the NPU driver, Gufo starts and runs on the GPU only.
-
-## 4. Configure and build
-
-```cmd
-tools\windows\vs-env.cmd cmake --preset windows-release -DXRT_DIR=C:/xrt/share/cmake/XRT
+tools\windows\vs-env.cmd cmake --preset windows-release
 tools\windows\vs-env.cmd cmake --build --preset windows-release
 ```
 
@@ -122,43 +107,18 @@ calling script stops after it. The first configure builds the dependencies
 through vcpkg (ICU and OpenSSL take several minutes). The build produces
 `build\windows-release\gufo.exe` and `gufo-server.exe`, with the TheRock
 runtime DLLs and the `rocblas\` and `hipblaslt\` kernel libraries staged
-beside them; `xrt_coreutil.dll` comes from the NPU driver (step 3). Build
-trees configured before XRT became required need one reconfigure with
-`-DXRT_DIR`.
+beside them.
 
 For the host test suite, which needs no GPU:
 
 ```cmd
-tools\windows\vs-env.cmd cmake --preset windows-cpu-test -DXRT_DIR=C:/xrt/share/cmake/XRT
+tools\windows\vs-env.cmd cmake --preset windows-cpu-test
 tools\windows\vs-env.cmd cmake --build --preset windows-cpu-test --target check-pr
 ```
 
 Some host suites stay Linux-only (they simulate `RLIMIT_FSIZE`, fork
 themselves or fault libc symbols); their targets are off on Windows and the
 Linux CI runs them.
-
-**NPU designs (optional):** to compile the in-tree IRON designs and run
-`npu_device_test` on the NPU, install the Windows wheels of the versions
-[`.devops/nix/iron`](.devops/nix/iron/default.nix) pins (mlir-aie 1.4.5 and
-Peano `peanoVersion`) into a Python 3.12 or 3.13 venv. aiecc packages the
-design with XRT's `xclbinutil`, so put `C:\xrt\unwrapped` on `PATH`:
-
-```cmd
-py -3.12 -m venv C:\src\iron-venv
-C:\src\iron-venv\Scripts\python -m pip install numpy ml-dtypes cloudpickle https://github.com/Xilinx/mlir-aie/releases/download/v1.4.5/mlir_aie-1.4.5-cp312-cp312-win_amd64.whl https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026111101%2B81af12b7-py3-none-win_amd64.whl
-set GUFO_IRON_PYTHON=C:\src\iron-venv\Scripts\python.exe
-set PEANO_INSTALL_DIR=C:\src\iron-venv\Lib\site-packages\llvm-aie
-set PATH=C:\xrt\unwrapped;%PATH%
-tools\windows\vs-env.cmd cmake --preset windows-release -B build\npu-test -DBUILD_TESTING=ON -DXRT_DIR=C:/xrt/share/cmake/XRT
-tools\windows\vs-env.cmd cmake --build build\npu-test --target npu_device_test
-set PATH=%CD%\build\windows-release;%PATH%
-build\npu-test\npu_device_test.exe build\npu-test\npu\q8gemm
-```
-
-It prints the relative error of each product against a double reference
-(about 3e-5). The design's `q8gemm_dispatch.so` is a Windows DLL despite its
-name. `npu_test` needs permission to create symbolic links (Developer Mode or
-an elevated shell) for its sysfs fixture.
 
 **Faster rebuilds:** with `ccache` on `PATH`, CMake compiles C, C++ and HIP
 through it. Configure with embedded debug information, because ccache cannot
@@ -168,7 +128,7 @@ cache objects that share a `/Zi` PDB:
 tools\windows\vs-env.cmd cmake --preset windows-release -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
 ```
 
-## 5. Verify
+## 4. Verify
 
 ```cmd
 build\windows-release\gufo.exe diagnose
@@ -211,9 +171,33 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
   System32; copy the whole folder (`gufo.exe`, the DLLs, `rocblas\` and
   `hipblaslt\`).
 - If configure fails with `Could not find a package configuration file
-  provided by "XRT"`, build XRT (step 3) and pass `-DXRT_DIR`.
+  provided by "XRT"`, extract the XRT SDK to `C:\xrt` (step 1) or pass
+  `-DXRT_DIR`.
+- If `gufo diagnose` warns `No XDNA NPU found` on a machine with the NPU
+  driver, unset `XILINX_XRT` and remove any `xrt_coreutil.dll` beside
+  `gufo.exe`.
 - After reinstalling or upgrading the SDK, rerun the patch in step 2 and
   rebuild into a fresh build directory so the runtime stages again.
+
+## NPU device test (developers)
+
+Building and running Gufo needs no Python for the NPU. Only compiling the
+in-tree NPU designs does: they are IRON (mlir-aie) programs, compiled by
+Python packages. Install the Windows wheels of the versions
+[`.devops/nix/iron`](.devops/nix/iron/default.nix) pins, then build and run
+`npu_device_test`; aiecc needs the SDK's `xclbinutil` on `PATH`:
+
+```cmd
+py -3.12 -m venv C:\src\iron-venv
+C:\src\iron-venv\Scripts\python -m pip install numpy ml-dtypes cloudpickle https://github.com/Xilinx/mlir-aie/releases/download/v1.4.5/mlir_aie-1.4.5-cp312-cp312-win_amd64.whl https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026111101%2B81af12b7-py3-none-win_amd64.whl
+set PEANO_INSTALL_DIR=C:\src\iron-venv\Lib\site-packages\llvm-aie
+set PATH=C:\xrt\xrt_sdk\xrt;%PATH%
+tools\windows\vs-env.cmd cmake --preset windows-release -B build\npu-test -DBUILD_TESTING=ON -DGUFO_IRON_PYTHON=C:\src\iron-venv\Scripts\python.exe
+tools\windows\vs-env.cmd cmake --build build\npu-test --target npu_device_test
+build\npu-test\npu_device_test.exe build\npu-test\npu\q8gemm
+```
+
+It prints each product's error relative to a double reference (about 3e-5).
 
 ## External source extensions
 
