@@ -206,11 +206,11 @@ void RetentionPolicy::Relate(std::size_t added) {
           !records_[j].below[added])
         records_[parent].forked = true;
 }
-std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
+std::array<std::uint64_t, 5> RetentionPolicy::PressureOrder(
     std::size_t i, const RetentionRequest& r, std::uint32_t priority) const {
   const auto& e = records_[i];
   if (!priority)
-    return {0, e.last_used, 0, 0};
+    return {0, 0, e.last_used, 0, 0};
   std::size_t rows = 0, state = 0;
   for (const auto& c : e.checkpoint->Components())
     if (c.descriptor.kind == ComponentKind::kPrivateState)
@@ -238,7 +238,7 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
                              Prefix(e.checkpoint->Tokens(), r.tokens);
   const bool cheap = rows * 8 < state && !shared_prefix;
   if (cheap && !fresh(e))
-    return {1, e.last_used, 0, 0};
+    return {1, 0, e.last_used, 0, 0};
   bool rooted = false, reused = fresh(e);
   auto recency = e.last_used;
   const bool covered = e.below.any();
@@ -257,9 +257,28 @@ std::array<std::uint64_t, 4> RetentionPolicy::PressureOrder(
                                 e.purpose == RetentionPurpose::kBranchPoint));
   const auto depth =
       std::numeric_limits<std::uint64_t>::max() - e.checkpoint->Boundary();
-  if (reused && !cheap)
-    return {3, fork ? 2U : covered ? 0U : 1U, recency, depth};
-  return {2, recency, shared ? 2U : covered ? 0U : 1U, depth};
+  const std::uint64_t durable = index_.IsDurable(e.entry) ? 0 : 1;
+  if (reused && !cheap) {
+    // Count turns, not captures: prompt, stable and generated checkpoints of
+    // one request must not age its predecessor several times. Retain the two
+    // newest covered turns ahead of older covered history under pressure.
+    std::array<std::uint64_t, kRecordLimit> turns{};
+    std::size_t count = 0;
+    for (std::size_t j = 0; j < limit_ && count < 3; ++j) {
+      const auto& peer = records_[j];
+      if (!e.below[j] || !Continuation(peer.purpose) || peer.turn <= e.turn ||
+          std::find(turns.begin(), turns.begin() + count, peer.turn) !=
+              turns.begin() + count)
+        continue;
+      turns[count++] = peer.turn;
+    }
+    return {3, durable,
+            fork      ? 3U
+            : covered ? (count < 3 ? 1U : 0U)
+                      : 2U,
+            recency, depth};
+  }
+  return {2, durable, recency, shared ? 2U : covered ? 0U : 1U, depth};
 }
 std::size_t RetentionPolicy::UniqueBytes(std::size_t i) const {
   const auto components = records_[i].checkpoint->Components();
@@ -482,7 +501,7 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
     return clock_ - recency >= limit_;
   };
   std::size_t target = limit_;
-  std::array<std::uint64_t, 4> order{};
+  std::array<std::uint64_t, 5> order{};
   // Byte pressure may select a last copy while covered records remain. The
   // redundant source still advances only when every candidate is a last copy.
   std::uint32_t lowest = 3;
@@ -549,6 +568,16 @@ void RetentionPolicy::Erase(std::size_t i, RetentionReason reason,
   const auto boundary = e.checkpoint->Boundary();
   const auto purpose = e.purpose;
   const auto used = e.last_used;
+  if (demote_ && e.persistable &&
+      (reason == RetentionReason::kByteCapacity ||
+       reason == RetentionReason::kRecordCapacity) &&
+      !index_.IsDurable(e.entry)) {
+    try {
+      demote_(e.checkpoint);
+    } catch (...) {
+      // Demotion is optional; pressure still releases the resident record.
+    }
+  }
   index_.DropResident(e.entry);
   e = {};
   for (auto& peer : records_)
@@ -650,6 +679,8 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
         ++target;
       auto& e = records_[target];
       e = {std::move(checkpoint), entry, purpose, r.stable, ++clock_};
+      e.turn = r.turn ? r.turn : clock_;
+      e.persistable = r.persistable;
       ++size_;
       // Keep each event's exact total without recounting every retained
       // checkpoint after each individual eviction or insertion.
@@ -751,6 +782,10 @@ std::size_t RetentionPolicy::RetainedPayloadBytes() const noexcept {
   }
   retained_payload_bytes_ = bytes;
   return bytes;
+}
+void RetentionPolicy::SetDemotion(
+    std::function<void(std::shared_ptr<const Checkpoint>)> demote) {
+  demote_ = std::move(demote);
 }
 void RetentionPolicy::Touch(CheckpointId id) {
   const auto i = Find(id);

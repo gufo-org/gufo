@@ -1,5 +1,8 @@
 #include "src/cache/disk_catalog.hpp"
 
+#include <algorithm>
+#include <array>
+#include <limits>
 #include <map>
 #include <stdexcept>
 
@@ -23,6 +26,7 @@ struct DiskCatalog::Impl {
     std::shared_ptr<const DiskDescription> description;
     std::uint64_t used{};
     bool invalid{};
+    bool use_dirty{};
   };
   struct Bucket {
     ResourceCharge metadata;
@@ -44,8 +48,14 @@ struct DiskCatalog::Impl {
         index(&prefixes),
         metadata(reservation.Convert()) {}
   ~Impl() {
+    FlushUses();
     while (!records.empty())
       Erase(records.begin());
+  }
+  void FlushUses() noexcept {
+    for (auto& [id, record] : records)
+      if (record.use_dirty && store->TryRecordUse({id}, record.used))
+        record.use_dirty = false;
   }
   std::uint64_t Tick() {
     if (clock == UINT64_MAX)
@@ -94,6 +104,66 @@ struct DiskCatalog::Impl {
       auto node = reverse.extract(bucket);
     }
   }
+  static bool Below(const DiskManifest& a, const DiskManifest& b) {
+    return a.compatibility == b.compatibility &&
+           (a.input == b.input || a.lineage == b.lineage) &&
+           a.tokens.size() < b.tokens.size() &&
+           std::equal(a.tokens.begin(), a.tokens.end(), b.tokens.begin());
+  }
+  std::uint64_t UniqueBytes(const DiskManifest& manifest) const {
+    std::uint64_t bytes = 0;
+    const auto add = [&](bool priv, const DiskPayload& payload) {
+      const auto found = reverse.find({priv, payload.file});
+      if (found != reverse.end() && found->second.checkpoints.size() == 1)
+        bytes += payload.bytes;
+    };
+    for (const auto& component : manifest.components) {
+      for (const auto& chunk : component.chunks)
+        add(false, chunk);
+      for (const auto& payload : {component.tail, component.private_state})
+        if (payload)
+          add(true, *payload);
+    }
+    return bytes;
+  }
+  std::array<std::uint64_t, 5> Order(const Record& record) const {
+    const auto& manifest = record.description->Manifest();
+    auto recency = record.used;
+    bool covered = false, rooted = false,
+         fork = manifest.purpose == CheckpointPurpose::kLearned;
+    std::optional<Token> next;
+    std::size_t newer = 0;
+    for (const auto& [id, peer] : records) {
+      (void)id;
+      if (peer.invalid)
+        continue;
+      const auto& peer_manifest = peer.description->Manifest();
+      if (Below(peer_manifest, manifest))
+        rooted = true;
+      if (!Below(manifest, peer_manifest))
+        continue;
+      covered = true;
+      recency = std::max(recency, peer.used);
+      const auto token = peer_manifest.tokens[manifest.tokens.size()];
+      fork |= next && *next != token;
+      next = token;
+      newer += peer_manifest.lineage == manifest.lineage &&
+               peer_manifest.purpose == CheckpointPurpose::kGenerated;
+    }
+    const bool superseded = manifest.purpose == CheckpointPurpose::kGenerated &&
+                            !fork && newer >= 3;
+    const bool shared = fork || (covered && !rooted);
+    // Superseded intermediates leave before any conversation's last frontier.
+    // Within each conversation keep its leaves, then learned/shared forks.
+    // Prefer a retirement that actually releases more unique payload when
+    // recency and role tie; shared chunks are never credited twice.
+    return {superseded ? 0U : 1U, superseded ? 0 : recency,
+            shared    ? 2U
+            : covered ? 0U
+                      : 1U,
+            std::numeric_limits<std::uint64_t>::max() - UniqueBytes(manifest),
+            manifest.checkpoint.value};
+  }
   void Erase(decltype(records)::iterator it) {
     const auto id = it->first;
     Dependencies(it->second.description->Manifest(), [&](bool priv, auto file) {
@@ -129,7 +199,8 @@ void DiskCatalog::Track(CheckpointId id) {
             existing->second.description->Quarantined());
     impl_->Erase(existing);
   }
-  const auto used = impl_->loading ? 0 : impl_->Tick();
+  const auto used = impl_->loading ? impl_->store->LastUse(id) : impl_->Tick();
+  impl_->clock = std::max(impl_->clock, used);
   auto admission = impl_->ledger->Reserve(
       ResourceCategory::kMetadata,
       sizeof(decltype(impl_->records)::value_type) +
@@ -146,6 +217,10 @@ void DiskCatalog::Track(CheckpointId id) {
                    impl_->AddDependency({priv, file}, id.value);
                  });
     record->second.metadata = admission.Convert();
+    if (!impl_->loading) {
+      record->second.use_dirty = true;
+      impl_->FlushUses();
+    }
   } catch (...) {
     impl_->Erase(record);
     throw;
@@ -168,12 +243,25 @@ void DiskCatalog::Touch(CheckpointId id) {
   node.key() = {used, id.value};
   it->second.used = used;
   impl_->lru.insert(std::move(node));
+  it->second.use_dirty = true;
+  impl_->FlushUses();
 }
 bool DiskCatalog::EvictOne() {
   Reconcile();
-  for (auto it = impl_->lru.begin(); it != impl_->lru.end();) {
-    auto record = impl_->records.find(it->second);
-    ++it;
+  impl_->FlushUses();
+  struct Candidate {
+    decltype(impl_->records)::iterator record;
+    std::array<std::uint64_t, 5> order;
+  };
+  auto admission = impl_->ledger->Reserve(
+      ResourceCategory::kMetadata, impl_->records.size() * sizeof(Candidate));
+  std::vector<Candidate> candidates;
+  candidates.reserve(impl_->records.size());
+  for (auto it = impl_->records.begin(); it != impl_->records.end(); ++it)
+    candidates.push_back({it, impl_->Order(it->second)});
+  std::ranges::sort(candidates, {}, &Candidate::order);
+  for (const auto& candidate : candidates) {
+    auto record = candidate.record;
     const auto& description = *record->second.description;
     auto result = impl_->store->TryRetire(description.Manifest().checkpoint,
                                           description.Epoch());

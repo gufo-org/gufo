@@ -16,7 +16,7 @@ fixture = Path(__file__).resolve().parent / "module_fixture"
 
 def gufo(*args, check=True):
     result = subprocess.run([binary, *args], text=True, capture_output=True,
-                            env=env)
+                            stdin=subprocess.DEVNULL, env=env)
     if check and result.returncode != 0:
         raise AssertionError(f"gufo {' '.join(args)} failed:\n{result.stdout}\n{result.stderr}")
     return result

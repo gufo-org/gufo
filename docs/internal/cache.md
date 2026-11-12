@@ -490,7 +490,7 @@ Qwen27B and Flash-Next use the same options with these meanings:
 | Option | Meaning |
 | --- | --- |
 | `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
-| `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints by creation order: use history does not survive a restart. |
+| `--cache-disk-bytes` | Counts referenced, temporary, orphaned and access-history files. A lower budget at startup removes temporaries and orphans, then applies the same lineage-aware eviction order as runtime, using persisted access history when available. |
 | `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed, and a larger value only took pinned RAM and device heap. |
 | `--cache-disk DIR` | Owned by one server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory.  model's server sharing it. |
 
@@ -562,28 +562,45 @@ dm-crypt)**.
 Learned divergence points (see above) are ordinary checkpoints, so they reach
 disk like any other and survive restarts.
 
-**Disk checkpoints are spaced at least 2048 tokens apart.** A conversation
-advances a few hundred tokens per turn, so writing every turn serialises, fsyncs
-and retains a nearly identical snapshot. A checkpoint less than 2048 tokens past
-the longest stored entry that is still a prefix of it is skipped and logged as
-`min_step`; the RAM tier still retains it. When RAM does not retain it either,
-the device state is not copied at all, so a skipped checkpoint costs no capture
-time on the request path. Learned shared-prefix boundaries are
-exempt, because they sit close to a deeper entry by construction. On a
-Qwen3.8-27B functional run this cut disk writes from 31 to 5 and written bytes
-from 6.97 GiB to 1.37 GiB **(measured)**.
+Prompt checkpoints less than 2048 tokens past a stored prefix remain optional.
+Learned boundaries and exact generated frontiers bypass this spacing rule.
+A completed request captures its executed decode-end frontier before releasing
+the slot. Complete chunks share the execution history; private state and tails
+are copied while execution is exclusive, and borrowed rows use the existing
+idle preservation worker. The disk queue writes these copies during idle work.
+A refused capture or full persistence queue can still leave an earlier fallback.
 
-The trade-off is what a disk-only restore resumes from. After a restart, or
-once RAM evicted the conversation, a request restores the nearest stored entry
-and re-prefills up to 2048 tokens plus its own turn, instead of resuming
-exactly at the previous frontier. Greedy output is unchanged. Sampled output can
-differ from the pre-restart response, because the re-prefilled gap follows
-different chunk shapes, as with any partial hit. Plain continuation from RAM is
-unaffected.
+When RAM pressure removes a checkpoint with a complete usable disk publication,
+it prefers that copy within its pressure tier. Publication quarantine or
+retirement immediately removes that preference. A RAM-only victim can be
+queued for demotion from its retained payload, bypassing prompt spacing. Only
+one demotion can pin payload after logical removal; while it is occupied,
+further victims are dropped. Demotion remains optional and never waits for disk.
+Grid checkpoints remain RAM-only.
 
-Disk entries are evicted by global LRU on last access, so one active run whose
-checkpoints are all recent will displace every other conversation in age order
-**(measured)**.
+Disk eviction removes superseded history before another conversation's last
+frontier. A generated frontier supersedes covered entries only after three
+newer generated frontiers of the same lineage, leaving two recent turn ends
+for edits. Forks and learned boundaries are exempt. Remaining entries use the
+newest descendant's access recency, then covered entries, leaves and forks;
+ties prefer the retirement that frees more unique payload bytes. Shared chunks
+are excluded from that estimate. A busy store refuses eviction immediately,
+and reader pins still protect their publication.
+
+Access history lives in independently checksummed 16-byte files under
+`v2/uses`, counts against the disk budget, and is removed with its manifest.
+A busy store defers an advisory update; pending updates retry at later catalog
+operations and teardown. Missing or damaged history falls back to checkpoint ID.
+It never changes whether a checkpoint can restore.
+
+RAM byte pressure also delays preferential eviction of the two newest covered
+turns in a reused conversation. Multiple captures in one serving turn count
+once. These edit fallbacks still leave before leaves and forks under pressure.
+
+Adapters can provide fixed prefill and restore cost estimates. The
+`cost_estimate` event logs estimated milliseconds for the selected interval
+beside actual request metrics. The model benchmark pages hold the calibrations;
+these estimates do not change capture thresholds or enable cost-per-byte ranking.
 
 ## What invalidates reuse
 
@@ -629,7 +646,7 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory. Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration |
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
-| `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints (creation order) to fit a lowered `--cache-disk-bytes` |
+| `schema=component-cache-v1 event=disk_evicted reason=budget` | Startup applied lineage and persisted access ordering to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |

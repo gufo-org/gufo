@@ -792,6 +792,45 @@ void NewestPendingFrontierSurvives() {
     }
   }
 }
+void GeneratedJobsYieldToPromptAnchors() {
+  for (const std::size_t depth : {2U, 3U}) {
+    Directory dir;
+    ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+    DiskStore disk(ledger, dir.path, 1 << 20);
+    StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+    Fixture active(ledger, 1, 120), anchor(ledger, 2, 30),
+        generated(ledger, 3, 60, 48), latest(ledger, 4, 90, 56);
+    active.manifest.compatibility[1] = 1;
+    generated.manifest.purpose = CheckpointPurpose::kGenerated;
+    std::atomic<bool> idle{}, started{};
+    PersistenceQueue queue(
+        ledger, streams, depth, 8192,
+        [&] {
+          started = true;
+          return idle.load();
+        },
+        {}, {}, std::chrono::hours(1));
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!started && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    assert(started);
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(1001), anchor.manifest, anchor.Sources())));
+    const bool accepted = queue.TrySubmit(PersistenceJob(
+        ledger, Id(1002), generated.manifest, generated.Sources()));
+    assert(accepted == (depth == 3));
+    if (depth == 3)
+      assert(queue.TrySubmit(
+          PersistenceJob(ledger, Id(1003), latest.manifest, latest.Sources())));
+    idle = true;
+    queue.Drain();
+    assert(disk.Open({1}) && disk.Open({2}) && !disk.Open({3}));
+    assert(bool(disk.Open({4})) == (depth == 3));
+  }
+}
 void FirstPendingAnchorSurvivesCoalescing() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
@@ -1122,6 +1161,7 @@ int main() {
   BusyModelYieldIsBounded();
   NewestPendingFrontierSurvives();
   FirstPendingAnchorSurvivesCoalescing();
+  GeneratedJobsYieldToPromptAnchors();
   AdmissionFailures();
   FailedSubmission();
   RestorePreemptsYield();

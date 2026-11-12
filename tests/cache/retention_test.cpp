@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -307,9 +308,10 @@ struct PressureFixture {
   // reclaims through the byte-pressure order when the ledger is full.
   CheckpointId Add(std::vector<Token> tokens,
                    RetentionPurpose purpose = RetentionPurpose::kContinuation,
-                   bool reused = false) {
+                   bool reused = false, std::uint64_t turn = 0) {
     RetentionRequest request{tokens, {1}, {}, purpose};
     request.reused = reused;
+    request.turn = turn;
     assert(policy.Admit(request, [&] {
       return IndexCheckpoint(ledger, tokens, {1}, {}, kPressureComponents);
     }));
@@ -1254,7 +1256,67 @@ void RecordTurnoverAdmitsOptionalCopies() {
     assert(f.policy.Size() == 4);
   }
 }
+void RecentCoveredTurnsSurviveOlderHistory() {
+  PressureFixture f;
+  const auto whole = Conversation(1, 32);
+  const auto add = [&](std::size_t n, std::uint64_t turn) {
+    return f.Add({whole.begin(), whole.begin() + n},
+                 RetentionPurpose::kContinuation, true, turn);
+  };
+  const auto old = add(8, 1);
+  // Three captures within one turn do not expire the preceding edit fallback.
+  const auto previous = add(12, 2);
+  add(16, 3);
+  add(20, 3);
+  add(24, 3);
+  assert(f.Reclaim() != previous);
+  // Another completed turn supersedes turn 1, before the two recent turns.
+  add(28, 4);
+  assert(f.Reclaim() == old);
+  auto edit = whole;
+  edit[13] += 1;
+  assert(f.Cached(edit) == 12);
+}
+void PressureDemotionRespectsDiskOptOut() {
+  PressureFixture f;
+  const auto tokens = Conversation(1, 16);
+  RetentionRequest request{tokens, {1}, {}};
+  request.persistable = false;
+  assert(f.policy.Admit(request, [&] {
+    return IndexCheckpoint(f.ledger, tokens, {1}, {}, kPressureComponents);
+  }));
+  const auto opted_out = f.log.events.back().checkpoint;
+  const auto allowed = f.Add(Conversation(2, 16));
+  std::shared_ptr<const Checkpoint> demoted;
+  f.policy.SetDemotion(
+      [&](auto checkpoint) { demoted = std::move(checkpoint); });
+  assert(f.Reclaim() == opted_out && !demoted);
+  assert(f.Reclaim() == allowed && demoted && demoted->Id() == allowed);
+  assert(f.Cached(Conversation(2, 16)) == 0);
+  demoted.reset();
+}
+void CostIntervals() {
+  const CostEstimate cost{0.001, 0.002, 96e9, 3.3e9};
+  const auto first = cost.PrefillSeconds(0, 50000);
+  const auto second = cost.PrefillSeconds(50000, 100000);
+  assert(std::abs(first - 75) < 1e-12);
+  assert(std::abs(second - 125) < 1e-12);
+  assert(cost.PrefillSeconds(0, 100000) == first + second);
+  assert(cost.PrefillSeconds(100000, 100000) == 0);
+  assert(cost.RestoreSeconds(3300000000ULL, true) == 1);
+  assert(cost.RestoreSeconds(96000000000ULL, false) == 1);
+  bool rejected = false;
+  try {
+    (void)cost.PrefillSeconds(9, 8);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+}
 int main() {
+  CostIntervals();
+  PressureDemotionRespectsDiskOptOut();
+  RecentCoveredTurnsSurviveOlderHistory();
   Planning();
   Branches();
   RanksAndSources();

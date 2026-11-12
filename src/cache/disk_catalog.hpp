@@ -4,11 +4,11 @@
 #include "src/cache/prefix_index.hpp"
 
 namespace gufo::cache {
-// One global LRU catalog per store, including identities not currently loaded.
-// Construct at quiescence after startup discovery; Track every successful new
-// publication before exposing it through lookup. Operations are caller
-// serialized. Store, index and ledger outlive the catalog. Touch records a
-// successful use; startup ties and untouched publications use checkpoint ID.
+// One lineage-aware catalog per store, including identities not currently
+// loaded. Construct at quiescence after startup discovery; Track every
+// successful new publication before exposing it through lookup. Operations are
+// caller serialized. Store, index and ledger outlive the catalog. Touch records
+// a successful use; startup ties and untouched publications use checkpoint ID.
 class DiskCatalog {
 public:
   DiskCatalog(ResourceLedger&, DiskStore&, PrefixIndex&);
@@ -18,7 +18,8 @@ public:
   void Track(CheckpointId);
   [[nodiscard]] std::shared_ptr<const DiskDescription> Find(CheckpointId) const;
   void Touch(CheckpointId);
-  // Evict oldest unpinned entry. Busy writers cause an immediate false result;
+  // Evict an unpinned entry, superseded history before conversation frontiers.
+  // Busy writers cause an immediate false result;
   // capacity is credited only after DiskStore's durable retirement succeeds.
   bool EvictOne();
   // Reverse dependency quarantine is immediate, with no I/O-lock wait. Retire

@@ -3,10 +3,12 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
 
+#include "src/cache/cost.hpp"
 #include "src/cache/identity.hpp"
 #include "src/cache/stream.hpp"
 #include "src/cache/types.hpp"
@@ -73,6 +75,10 @@ public:
       std::size_t) const {
     return {};
   }
+  // Optional fixed model/mode estimate. Unknown adapters retain the existing
+  // token-based behavior; estimates are diagnostic until independently
+  // qualified.
+  [[nodiscard]] virtual std::optional<CostEstimate> Cost() const { return {}; }
   [[nodiscard]] virtual Capabilities GetCapabilities() const = 0;
   // Descriptors are stable for the adapter lifetime; each ID is unique.
   //

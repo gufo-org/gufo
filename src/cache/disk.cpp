@@ -531,7 +531,8 @@ struct DiskStore::Impl {
   ResourceCharge metadata, entry_capacity;
   platform::Directory root;
   Fd lock;
-  platform::Directory version, manifests, chunks, private_files, temporary;
+  platform::Directory version, manifests, chunks, private_files, temporary,
+      uses;
   DiskStartupStats stats;
   std::vector<DurableEntry> entries;
   std::uint64_t budget_bytes;
@@ -616,6 +617,7 @@ struct DiskStore::Impl {
         chunks(DirectoryAt(version, "chunks")),
         private_files(DirectoryAt(version, "private")),
         temporary(DirectoryAt(version, "tmp")),
+        uses(DirectoryAt(version, "uses")),
         budget_bytes(budget) {
     // Persist the layout, including a newly created root and ancestors, before
     // any checkpoint can rely on these directory entries.
@@ -626,7 +628,7 @@ struct DiskStore::Impl {
       IoError("sync cache ancestors", ec);
     std::size_t manifest_count{};
     for (const platform::Directory* directory :
-         {&manifests, &chunks, &private_files})
+         {&manifests, &chunks, &private_files, &uses})
       Scan(*directory,
            [&](const std::string& name, const platform::FileInfo& st) {
              if (ParseName(name)) {
@@ -872,7 +874,8 @@ struct DiskStore::Impl {
   }
   bool Referenced(const platform::Directory& directory, DiskFileId id) const {
     for (const auto& entry : entries) {
-      if (&directory == &manifests && entry.file_ == id)
+      if ((&directory == &manifests || &directory == &uses) &&
+          entry.file_ == id)
         return true;
       for (const auto& c : entry.manifest_.components) {
         if (&directory == &chunks)
@@ -906,7 +909,7 @@ struct DiskStore::Impl {
     });
     Sync(manifests);
     for (const platform::Directory* directory :
-         {&chunks, &private_files, &temporary}) {
+         {&chunks, &private_files, &temporary, &uses}) {
       Scan(*directory, [&](const auto& name, const auto&) {
         auto id = ParseName(name);
         if (id && !Referenced(*directory, *id))
@@ -918,7 +921,7 @@ struct DiskStore::Impl {
     // conservative charge with the actual namespace after successful cleanup.
     std::uint64_t managed{};
     for (const platform::Directory* directory :
-         {&manifests, &chunks, &private_files, &temporary})
+         {&manifests, &chunks, &private_files, &temporary, &uses})
       Scan(*directory, [&](const auto& name, const auto& st) {
         if (ParseName(name))
           managed = Add(managed, st.size);
@@ -1696,6 +1699,90 @@ DiskReadStats DiskStore::ReadPayload(
     impl_->RememberVerified(key, identity);
   return stats;
 }
+std::uint64_t DiskStore::LastUse(CheckpointId id) const {
+  std::lock_guard guard(impl_->mutex);
+  const auto it =
+      std::find_if(impl_->entries.begin(), impl_->entries.end(),
+                   [&](const auto& e) { return e.manifest_.checkpoint == id; });
+  if (it == impl_->entries.end())
+    return 0;
+  std::error_code ec;
+  const Fd file(platform::OpenAt(impl_->uses, DiskFileName(it->file_),
+                                 platform::FileMode::kRead, ec));
+  platform::FileInfo info{};
+  std::array<std::uint8_t, 16> bytes{};
+  if (!platform::FileValid(file.Get()) ||
+      !platform::Stat(file.Get(), &info, ec) || !Regular(info) ||
+      info.size != bytes.size())
+    return 0;
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const auto read = platform::Read(file.Get(), bytes.data() + offset,
+                                     bytes.size() - offset, ec);
+    if (!read) {
+      if (ec == std::errc::interrupted)
+        continue;
+      return 0;
+    }
+    offset += read;
+  }
+  std::uint64_t used = 0, checksum = 0;
+  for (unsigned i = 0; i < 8; ++i) {
+    used |= std::uint64_t(bytes[i]) << (8 * i);
+    checksum |= std::uint64_t(bytes[8 + i]) << (8 * i);
+  }
+  return checksum == DiskChecksum(std::span(bytes).first(8), id.value) ? used
+                                                                       : 0;
+}
+bool DiskStore::TryRecordUse(CheckpointId id, std::uint64_t used) {
+  std::unique_lock guard(impl_->mutex, std::try_to_lock);
+  if (!guard.owns_lock() || impl_->recovery_required)
+    return false;
+  std::unique_lock index_guard(impl_->index_mutex);
+  const auto it = std::find_if(
+      impl_->entries.begin(), impl_->entries.end(), [&](const auto& e) {
+        return e.durable_ && e.available_ && e.manifest_.checkpoint == id;
+      });
+  if (it == impl_->entries.end())
+    return false;
+  const auto name = DiskFileName(it->file_);
+  index_guard.unlock();
+  platform::FileInfo prior{};
+  std::error_code ec;
+  const auto released =
+      platform::StatAt(impl_->uses, name, false, &prior, ec) && Regular(prior)
+          ? prior.size
+          : 0;
+  {
+    const std::lock_guard stats_guard(impl_->stats_mutex);
+    const auto after_removal = impl_->stats.managed_bytes -
+                               std::min(impl_->stats.managed_bytes, released);
+    if (after_removal > impl_->budget_bytes ||
+        impl_->budget_bytes - after_removal < 16)
+      return false;
+  }
+  std::array<std::uint8_t, 16> bytes{};
+  for (unsigned i = 0; i < 8; ++i)
+    bytes[i] = used >> (8 * i);
+  const auto checksum = DiskChecksum(std::span(bytes).first(8), id.value);
+  for (unsigned i = 0; i < 8; ++i)
+    bytes[8 + i] = checksum >> (8 * i);
+  try {
+    // Use history is advisory: unlinking an old record before replacement may
+    // lose recency on a crash, but never changes restore eligibility.
+    impl_->Remove(impl_->uses, name);
+    impl_->Remove(impl_->temporary, name);
+    auto file = impl_->Create(name);
+    impl_->WriteFile(file.Get(), bytes);
+    impl_->Sync(file.Get());
+    impl_->Rename(impl_->uses, name);
+    impl_->Sync(impl_->uses);
+    return true;
+  } catch (...) {
+    // Account partial files as orphans; normal recovery reclaims them.
+    return false;
+  }
+}
 DiskReadPin DiskStore::Pin(CheckpointId id, std::uint64_t epoch) const {
   std::lock_guard guard(impl_->index_mutex);
   DiskReadPin pin;
@@ -1735,6 +1822,7 @@ DiskRetireResult DiskStore::Impl::Retire(CheckpointId id, std::uint64_t epoch) {
         if (p && !Referenced(private_files, p->file))
           Remove(private_files, DiskFileName(p->file));
     }
+    Remove(uses, DiskFileName(retired.file_));
     Sync(chunks);
     Sync(private_files);
     return DiskRetireResult::kRetired;

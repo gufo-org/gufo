@@ -298,6 +298,13 @@ void ContinuationAdapter::PrefillThrough(
                                             next))
     throw std::runtime_error("component in-pass prefill failed: " + error);
 }
+std::optional<cache::CostEstimate> ContinuationAdapter::Cost() const {
+  // Fixed least-squares fit of the retained gfx1151 depth sweep; see this
+  // model's BENCHMARKS.md. Restore rates are shared measured hardware controls.
+  return mode_ == core::SessionMode::kSpeculative
+             ? cache::CostEstimate{0.000591766466, 0.000067029640, 96e9, 3.3e9}
+             : cache::CostEstimate{0.000573457239, 0.000058015348, 96e9, 3.3e9};
+}
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
 }

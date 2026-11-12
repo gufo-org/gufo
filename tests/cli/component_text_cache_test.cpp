@@ -1307,6 +1307,55 @@ void WarmTurnsAdvanceTheStableCheckpoint() {
          "successive rewritten turns resume from the latest boundary");
   (void)fourth.Cancel();
 }
+void GeneratedFrontierSurvivesReassignmentAndRestart() {
+  for (const bool disk_on : {false, true}) {
+    const TemporaryDirectory temp("gufo-generated-frontier");
+    const auto disk = disk_on ? std::optional<TextRunnerDiskCacheOptions>(
+                                    {.directory = temp.path().string(),
+                                     .capacity_bytes = 1 << 20,
+                                     .min_checkpoint_step_tokens = 2048})
+                              : std::nullopt;
+    auto runner = std::make_shared<Runner>();
+    runner->alignment = 4;
+    const std::vector<TextRunnerToken> prompt{1, 2, 3, 4};
+    const std::vector<TextRunnerToken> frontier{1, 2, 3, 4, 50, 51, 52};
+    auto continuation = frontier;
+    continuation.push_back(60);
+    std::uint64_t expected{};
+    {
+      ComponentTextCache cache(runner, 1, 1 << 22, disk);
+      auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+      auto& state = dynamic_cast<State&>(lease->state());
+      runner->adapter->Append(state.slot, prompt, prompt);
+      assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size()));
+      assert(lease->PublishSnapshot(prompt, lease->Capture()));
+      const auto generated = std::span(frontier).subspan(prompt.size());
+      runner->adapter->Append(state.slot, generated, generated);
+      expected = runner->adapter->RecurrentHash(state.slot);
+      (void)lease->Commit({}, {}, frontier);
+      lease.reset();
+      // With one slot this destroys the live frontier. Its retained copy must
+      // still include the output, even though it is below the disk step.
+      auto peer = cache.Acquire(std::vector<TextRunnerToken>{90, 91}, {}, {},
+                                true, 0, true);
+      peer->Invalidate();
+      auto resumed = cache.Acquire(continuation, {}, {}, true, 0, true);
+      assert(resumed->cached_tokens() == frontier.size());
+      auto& restored = dynamic_cast<State&>(resumed->state());
+      assert(runner->adapter->RecurrentHash(restored.slot) == expected);
+      resumed->Invalidate();
+    }
+    if (disk_on) {
+      ComponentTextCache cache(runner, 1, 1 << 22, disk);
+      auto resumed = cache.Acquire(continuation, {}, {}, true, 0, true);
+      assert(resumed->restored_from_disk());
+      assert(resumed->cached_tokens() == frontier.size());
+      auto& restored = dynamic_cast<State&>(resumed->state());
+      assert(runner->adapter->RecurrentHash(restored.slot) == expected);
+      resumed->Invalidate();
+    }
+  }
+}
 void FullChatCheckpointRestoresWithoutSuffixPrefill() {
   const TemporaryDirectory temp("gufo-component-full-test");
   const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
@@ -1359,16 +1408,15 @@ void GeneratedFrontierForksBeforeMutation() {
   right.push_back(6);
   auto first = pool.Acquire(left);
   auto second = pool.Acquire(right);
-  // The live frontier serves one fork. No checkpoint covers the generated
-  // token, so the peer restores the prompt and prefills that token again.
+  // One fork continues live; its peer restores the exact generated frontier.
   Expect(first.cached_prompt_tokens() == root.size() &&
              first.cache_restore_bytes() == 0,
          "the first fork continues the live generated frontier");
-  Expect(second.cached_prompt_tokens() == root.size() - 1 &&
+  Expect(second.cached_prompt_tokens() == root.size() &&
              second.cache_restore_bytes() > 0,
-         "the peer restores the retained prompt");
+         "the peer restores the retained generated frontier");
   Expect(first.Prefill(64).consumed_tokens == 1 &&
-             second.Prefill(64).consumed_tokens == 2,
+             second.Prefill(64).consumed_tokens == 1,
          "each fork prefills only what its frontier lacks");
   first.Invalidate();
   second.Invalidate();
@@ -1748,18 +1796,21 @@ void DiskBudgetEvictsAnUnpinnedConversation() {
   const std::vector<TextRunnerToken> first{10, 11, 12, 13, 14, 15, 16, 17, 18};
   auto second = first;
   second.front() = 999;
+  auto second_frontier = second;
   for (const auto& prompt : {first, second}) {
     auto runner = std::make_shared<Runner>();
     TextRunnerPool pool(runner, 1, disk);
     auto request = pool.Acquire(prompt);
     Prefill(request);
-    (void)Generate(request);
+    const auto generated = Generate(request);
+    if (prompt == second)
+      second_frontier.push_back(generated);
     assert(request.Commit().disk_queued_bytes > 0);
   }
   {
     auto runner = std::make_shared<Runner>();
     TextRunnerPool pool(runner, 1, disk);
-    auto retained = pool.Acquire(second);
+    auto retained = pool.Acquire(second_frontier);
     assert(retained.cache_disk_hit());
     retained.Invalidate();
     auto evicted = pool.Acquire(first);
@@ -1876,7 +1927,7 @@ void LoweredDiskBudgetEvictsOldestAtStartup() {
   }
   // Restarting below the retained bytes keeps the budget's meaning: the
   // oldest conversation leaves at startup instead of failing to start.
-  disk.capacity_bytes = ManagedBytes(directory) - 1;
+  disk.capacity_bytes = ManagedBytes(directory) / 2;
   {
     auto runner = std::make_shared<Runner>();
     TextRunnerPool pool(runner, 1, disk);
@@ -2720,6 +2771,22 @@ void RetokenizedAnswerContinuesTheLiveFrontier() {
     runner->adapter->Append(state.slot, frontier, frontier);
     (void)lease->Commit({}, {}, frontier);
   };
+  {
+    ComponentTextCache cache(runner, 1, 1 << 22, {});
+    const Tokens frontier{1, 2, 20, 21, 50};
+    commit(cache, frontier, 2);
+    auto peer = cache.Acquire(Tokens{90, 91}, {}, {}, true, 0, true);
+    peer->Invalidate();
+    Tokens prompt{1, 2, 22, 50, 6};
+    std::size_t stable = 0;
+    assert(cache.AlignToLiveFrontier(prompt, stable, 4096, false));
+    assert((prompt == Tokens{1, 2, 20, 21, 50, 6}));
+    auto resumed = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(resumed->cached_tokens() == frontier.size());
+    resumed->Invalidate();
+    Tokens edited{1, 2, 22, 34, 50, 6};
+    assert(!cache.AlignToLiveFrontier(edited, stable, 4096, false));
+  }
   // The prompt the cache gives `prompt` after `frontier`, or nothing.
   const auto align = [&](const Tokens& frontier, Tokens prompt,
                          std::size_t reply = 1,
@@ -3274,6 +3341,7 @@ int main() {
   PromptReuseCanBeDisabledPerRequest();
   StableChatPrefixSurvivesInterruptedFraming();
   WarmTurnsAdvanceTheStableCheckpoint();
+  GeneratedFrontierSurvivesReassignmentAndRestart();
   FullChatCheckpointRestoresWithoutSuffixPrefill();
   GeneratedFrontierForksBeforeMutation();
   InterruptedPrefillRetainsOnlyItsEntryFrontier();

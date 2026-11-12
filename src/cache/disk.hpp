@@ -251,6 +251,11 @@ public:
           consume,
       DiskReadStats* observation = nullptr);
   [[nodiscard]] DiskReadPin Pin(CheckpointId, std::uint64_t epoch = 0) const;
+  // Advisory use history, independently checksummed and budgeted. Invalid or
+  // absent history returns zero. Writing never waits for a busy store; failure
+  // leaves the checkpoint and its immutable dependencies unchanged.
+  [[nodiscard]] std::uint64_t LastUse(CheckpointId) const;
+  [[nodiscard]] bool TryRecordUse(CheckpointId, std::uint64_t);
   // Short logical quarantine; keeps filesystem references until retirement.
   void Invalidate(CheckpointId, std::uint64_t epoch);
   // Includes provisional writers, without acquiring the I/O lock. New claims

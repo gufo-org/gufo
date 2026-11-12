@@ -1,0 +1,105 @@
+--- a/src/cache/retention.cpp
++++ b/src/cache/retention.cpp
+@@ -1,11 +1,22 @@
+ #include "src/cache/retention.hpp"
+ 
+ #include <algorithm>
++#include <bit>
++#include <map>
+ #include <limits>
+ #include <stdexcept>
+ 
+ namespace gufo::cache {
+ namespace {
++// EXPERIMENT ONLY: bookkeeping is deliberately outside the ledger, making this
++// an optimistic bound for GDS. This is never compiled into production Gufo.
++double gds_watermark{};
++std::map<std::uint64_t, double> gds_stamps;
++double GdsValue(CheckpointId id, Rows fallback, Rows boundary, std::size_t bytes) {
++  return gds_stamps[id.value] +
++         CostEstimate{0.000573457239, 0.000058015348, 96e9, 3.3e9}
++                 .PrefillSeconds(fallback, boundary) / std::max<std::size_t>(1, bytes);
++}
+ bool Prefix(std::span<const Token> a, std::span<const Token> b) {
+   return a.size() <= b.size() && std::equal(a.begin(), a.end(), b.begin());
+ }
+@@ -209,8 +220,18 @@
+ std::array<std::uint64_t, 5> RetentionPolicy::PressureOrder(
+     std::size_t i, const RetentionRequest& r, std::uint32_t priority) const {
+   const auto& e = records_[i];
++  Rows fallback = 0;
++  for (std::size_t j = 0; j < limit_; ++j)
++    if (records_[j].below[i])
++      fallback = std::max(fallback, records_[j].checkpoint->Boundary());
++  const auto value = GdsValue(e.checkpoint->Id(), fallback,
++                              e.checkpoint->Boundary(), UniquePayloadBytes(i));
++  const auto ranked = [&](std::array<std::uint64_t, 5> order, std::size_t recency) {
++    order[recency] = std::bit_cast<std::uint64_t>(value);
++    return order;
++  };
+   if (!priority)
+-    return {0, 0, e.last_used, 0, 0};
++    return ranked({0, 0, e.last_used, 0, 0}, 2);
+   std::size_t rows = 0, state = 0;
+   for (const auto& c : e.checkpoint->Components())
+     if (c.descriptor.kind == ComponentKind::kPrivateState)
+@@ -236,9 +257,9 @@
+                              e.checkpoint->Input() == r.input &&
+                              e.checkpoint->Boundary() < r.tokens.size() &&
+                              Prefix(e.checkpoint->Tokens(), r.tokens);
+-  const bool cheap = rows * 8 < state && !shared_prefix;
++  const bool cheap = value <= gds_watermark && !shared_prefix;
+   if (cheap && !fresh(e))
+-    return {1, 0, e.last_used, 0, 0};
++    return ranked({1, 0, e.last_used, 0, 0}, 2);
+   bool rooted = false, reused = fresh(e);
+   auto recency = e.last_used;
+   const bool covered = e.below.any();
+@@ -272,13 +293,13 @@
+         continue;
+       turns[count++] = peer.turn;
+     }
+-    return {3, durable,
++    return ranked({3, durable,
+             fork      ? 3U
+             : covered ? (count < 3 ? 1U : 0U)
+                       : 2U,
+-            recency, depth};
++            recency, depth}, 3);
+   }
+-  return {2, durable, recency, shared ? 2U : covered ? 0U : 1U, depth};
++  return ranked({2, durable, recency, shared ? 2U : covered ? 0U : 1U, depth}, 2);
+ }
+ std::size_t RetentionPolicy::UniqueBytes(std::size_t i) const {
+   const auto components = records_[i].checkpoint->Components();
+@@ -578,6 +599,14 @@
+       // Demotion is optional; pressure still releases the resident record.
+     }
+   }
++  if (reason == RetentionReason::kByteCapacity || reason == RetentionReason::kRecordCapacity) {
++    Rows fallback = 0;
++    for (std::size_t j = 0; j < limit_; ++j)
++      if (records_[j].below[i])
++        fallback = std::max(fallback, records_[j].checkpoint->Boundary());
++    gds_watermark = std::max(gds_watermark, GdsValue(id, fallback, boundary, UniquePayloadBytes(i)));
++  }
++  gds_stamps.erase(id.value);
+   index_.DropResident(e.entry);
+   e = {};
+   for (auto& peer : records_)
+@@ -690,6 +719,7 @@
+       Relate(target);
+       if (r.reused || reused_at)
+         e.reused_at = r.reused ? admitted_bytes_ : reused_at;
++      gds_stamps[e.checkpoint->Id().value] = gds_watermark;
+       Emit(RetentionAction::kAdmitted, RetentionReason::kCaptured,
+            e.checkpoint->Id(), e.checkpoint->Boundary(), purpose,
+            Priority(target), e.last_used);
+@@ -793,6 +823,7 @@
+     throw std::invalid_argument("unknown retained checkpoint");
+   auto& e = records_[i];
+   e.last_used = ++clock_;
++  gds_stamps[id.value] = gds_watermark;
+   e.reused_at = admitted_bytes_;
+   Emit(RetentionAction::kTouched, RetentionReason::kExplicit, id,
+        e.checkpoint->Boundary(), e.purpose, Priority(i), e.last_used);

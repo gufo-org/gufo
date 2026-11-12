@@ -2857,9 +2857,12 @@ void TestFirstTokenPrecedesSnapshotAndPreservesBudget() {
     control->multi_token_decode = multi;
     control->preview_first_token = true;
     std::binary_semaphore captured(0), release(0);
+    std::atomic<unsigned> captures{0};
     control->snapshot_callback = [&] {
-      captured.release();
-      release.acquire();
+      if (captures.fetch_add(1) == 0) {
+        captured.release();
+        release.acquire();
+      }
     };
     auto scheduler = MakeScheduler(control, 1);
     auto request = scheduler->Submit({1, 10}, 7, 0.0F, {}, true);
