@@ -2980,6 +2980,73 @@ void RetokenizedAnswerContinuesTheLiveFrontier() {
     assert(!cache.AlignToLiveFrontier(retry, stable, 4096, false));
     assert((retry == Tokens{1, 2, 22, 50, 6}) && stable == 0);
   }
+  {
+    // An unchanged retry of an aligned prompt: the live frontier now ends
+    // after the retried reply, and a checkpoint retains the aligned prompt.
+    // A fresh tokenization would diverge from it and change sampled output.
+    ComponentTextCache cache(runner, 1, 1 << 22, {});
+    const Tokens aligned{1, 2, 20, 21, 50, 6};
+    auto lease = cache.Acquire(aligned, {}, {}, true, 5, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    lease->PreparePrefill(aligned.size());
+    runner->adapter->Append(state.slot, aligned, aligned);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), aligned.size(),
+                                     false, SnapshotPurpose::kRetry, aligned));
+    assert(lease->PublishSnapshot(aligned, lease->Capture(), false));
+    const Tokens reply{7};
+    runner->adapter->Append(state.slot, reply, reply);
+    Tokens frontier = aligned;
+    frontier.push_back(7);
+    (void)lease->Commit({}, {}, frontier);
+    // The stable boundary before the user turn moves with the rewrite.
+    Tokens retry{1, 2, 22, 50, 6};
+    std::size_t stable = 4;
+    assert(cache.AlignToLiveFrontier(retry, stable, 4096, true));
+    assert(retry == aligned && stable == 5);
+    auto again = cache.Acquire(retry, {}, {}, true, stable, true);
+    assert(again->cache_hit());
+    again->Invalidate();
+    // "ský" ends at the same text as the frontier's "sk" "ý".
+    retry = {1, 2, 22, 50, 6};
+    stable = 3;
+    assert(cache.AlignToLiveFrontier(retry, stable, 4096, true));
+    assert(retry == aligned && stable == 4);
+    // Without that checkpoint a prompt ending inside the frontier stays.
+    Tokens shorter{1, 2, 22, 50};
+    stable = 0;
+    assert(!cache.AlignToLiveFrontier(shorter, stable, 4096, true));
+    assert((shorter == Tokens{1, 2, 22, 50}));
+  }
+  {
+    // The aligned prompt restored whitespace the template trimmed from a
+    // reply's end. Its unchanged retry trims it again and must align too.
+    ComponentTextCache cache(runner, 1, 1 << 22, {});
+    commit(cache, {1, 40, 42, 50}, 1);
+    Tokens prompt{1, 40, 50, 6};
+    std::size_t stable = 0;
+    assert(cache.AlignToLiveFrontier(prompt, stable, 4096, true));
+    const Tokens aligned{1, 40, 42, 50, 6};
+    assert(prompt == aligned);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    lease->PreparePrefill(prompt.size());
+    const Tokens user{6};
+    runner->adapter->Append(state.slot, user, user);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), aligned.size(),
+                                     false, SnapshotPurpose::kRetry, aligned));
+    assert(lease->PublishSnapshot(aligned, lease->Capture(), false));
+    const Tokens reply{7};
+    runner->adapter->Append(state.slot, reply, reply);
+    (void)lease->Commit({}, {}, Tokens{1, 40, 42, 50, 6, 7});
+    // The stable boundary after the trimmed edge maps across it.
+    Tokens retry{1, 40, 50, 6};
+    stable = 3;
+    assert(cache.AlignToLiveFrontier(retry, stable, 4096, true));
+    assert(retry == aligned && stable == 4);
+    auto again = cache.Acquire(retry, {}, {}, true, 0, true);
+    assert(again->cache_hit() && again->cached_tokens() == aligned.size());
+    again->Invalidate();
+  }
   // The prompt the cache gives `prompt` after `frontier`, or nothing.
   const auto align = [&](const Tokens& frontier, Tokens prompt,
                          std::size_t reply = 1,

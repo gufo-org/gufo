@@ -1714,6 +1714,10 @@ struct FrontierEnd {
   // Bytes of the last of them past the frontier's end, when it ends inside
   // one, as a reply cut off by the token limit can.
   std::string partial;
+  // Frontier tokens whose text the prompt covers: all of them, or fewer when
+  // the whole prompt is byte-identical text ending at a frontier token
+  // boundary (an unchanged retry of a prompt that was itself aligned).
+  std::size_t frontier{};
 };
 
 // Where a chat template may have trimmed whitespace from a reply in
@@ -1724,8 +1728,10 @@ struct TrimEdges {
 };
 
 // Where the text of all of `frontier` ends in `prompt`, or nothing when the
-// texts differ first. Only tokens past an ID mismatch are decoded; equal IDs
-// at a shared boundary are skipped as they are. The template trims whitespace
+// texts differ first. A prompt whose whole text exactly equals a longer prefix
+// of the frontier, ending at one of its token boundaries, covers that prefix.
+// Only tokens past an ID mismatch are decoded; equal IDs at a shared boundary
+// are skipped as they are. The template trims whitespace
 // around message content, so frontier whitespace the prompt lacks matches
 // only at the edges of a reply, where the frontier ends or both continue with
 // the same token. Whitespace a client removed elsewhere is an edit.
@@ -1740,17 +1746,25 @@ std::optional<FrontierEnd> FrontierTextEnd(
   // Bytes one side has consumed past the other's last token boundary.
   std::string ahead;
   bool frontier_ahead = false;
+  // Whitespace was just dropped at a reply edge. A prompt ending there would
+  // gain whitespace it never had, unless later text follows the edge.
+  bool trimmed = false;
   for (;;) {
     if (ahead.empty()) {
       if (f == frontier.size())
-        return FrontierEnd{p, {}};
-      if (p == prompt.size())
-        return std::nullopt;
+        return FrontierEnd{p, {}, f};
+      if (p == prompt.size()) {
+        if (trimmed || f == common)
+          return std::nullopt;
+        return FrontierEnd{p, {}, f};
+      }
       if (frontier[f] == prompt[p]) {
         ++f;
         ++p;
+        trimmed = false;
         continue;
       }
+      trimmed = false;
       ahead = piece(frontier[f++]);
       frontier_ahead = true;
       if (ahead.empty())
@@ -1761,7 +1775,7 @@ std::optional<FrontierEnd> FrontierTextEnd(
     if (at == lagging.size()) {
       if (frontier_ahead)
         return std::nullopt;
-      return FrontierEnd{p, std::move(ahead)};
+      return FrontierEnd{p, std::move(ahead), f};
     }
     const auto next = piece(lagging[at++]);
     const auto n = std::min(ahead.size(), next.size());
@@ -1782,6 +1796,7 @@ std::optional<FrontierEnd> FrontierTextEnd(
           (!whole ||
            std::ranges::find(edges.starts, first) == edges.starts.end()))
         return std::nullopt;
+      trimmed = true;
       ahead.clear();
       continue;
     }
@@ -1800,7 +1815,7 @@ bool ComponentTextCache::AlignToLiveFrontier(
     std::size_t max_tokens, bool trimmed) const {
   const std::lock_guard lock(impl_->mutex);
   std::span<const ContinuationToken> selected;
-  std::size_t seam = 0, exact_depth = 0;
+  std::size_t seam = 0, exact_depth = 0, aligned_stable = 0;
   // The prompt's own tokens already begin a frontier, as an unchanged retry
   // does. Rewriting it to an older frontier's tokens would only change what
   // the identical request samples.
@@ -1824,8 +1839,37 @@ bool ComponentTextCache::AlignToLiveFrontier(
         frontier.size() <= exact_depth)
       return;
     auto end = FrontierTextEnd(frontier, prompt, common, *impl_->runner, edges);
-    if (!end || (stable != 0 && stable < end->prompt))
+    if (!end)
       return;
+    std::size_t mapped = 0;
+    if (end->frontier < frontier.size()) {
+      // A prompt ending inside the frontier gains only from a checkpoint
+      // exactly at that end: an unchanged retry of an aligned prompt, whose
+      // fresh tokenization would otherwise diverge from the retained one.
+      frontier = frontier.first(end->frontier);
+      const cache::PrefixQuery query{impl_->identity, frontier,
+                                     Inputs(frontier.size(), nullptr)};
+      if (impl_->index.CachedPrefixTokens(query) != frontier.size())
+        return;
+      // The whole prompt is rewritten, so its stable boundary moves to the
+      // frontier token boundary ending the same text, if there is one.
+      mapped = stable;
+      if (stable > common) {
+        const auto at =
+            FrontierTextEnd(frontier, std::span(prompt).first(stable), common,
+                            *impl_->runner, edges);
+        if (!at || !at->partial.empty() || at->prompt != stable)
+          return;
+        mapped = at->frontier;
+      }
+      if ((!selected.empty() && frontier.size() <= selected.size()) ||
+          frontier.size() <= exact_depth)
+        return;
+    } else if (stable != 0 && stable < end->prompt) {
+      return;
+    } else if (stable != 0) {
+      mapped = stable - end->prompt + frontier.size();
+    }
     std::vector<ContinuationToken> tail;
     if (!end->partial.empty()) {
       // A fragment that does not tokenize back to its own bytes (a split
@@ -1843,6 +1887,7 @@ bool ComponentTextCache::AlignToLiveFrontier(
       return;
     selected = frontier;
     seam = end->prompt;
+    aligned_stable = stable != 0 ? mapped + tail.size() : 0;
     rest = std::move(tail);
   };
   for (const auto& entry : impl_->entries) {
@@ -1869,8 +1914,7 @@ bool ComponentTextCache::AlignToLiveFrontier(
                       " prompt_seam=" + std::to_string(seam) +
                       " split_tokens=" + std::to_string(rest.size()) +
                       " prompt_tokens=" + std::to_string(prompt.size()));
-  if (stable != 0)
-    stable = stable - seam + selected.size() + rest.size();
+  stable = aligned_stable;
   std::vector<ContinuationToken> aligned;
   aligned.reserve(selected.size() + rest.size() + prompt.size() - seam);
   aligned.assign(selected.begin(), selected.end());
