@@ -63,6 +63,12 @@ anything:
 - `targets[].requires`: what a library needs to build, such as `hip` or
   `testing`. Test libraries use `role: "test"`.
 - `options`: command-line options your providers add, with their types.
+- `models`: the weights `gufo model` can install, one entry per model. Each
+  component names its role, the option its path fills (one fills `--model`),
+  whether `install` treats it as `required`, `default` or `optional`, a
+  pinned Hugging Face `source` and `include`/`exclude` globs. Run
+  `python3 tools/models/lock.py <extension-dir>` to pin every file's size and
+  SHA-256 in `models.lock.json`; `gufo model` installs only locked files.
 - `packages`, `licenses`, `install_data`, `runtime_libraries`: what the build
   needs and what an install must ship. `packages[].pkg_config` names a
   pkg-config module, which the build then provides as `PkgConfig::<module>`.

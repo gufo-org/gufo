@@ -16,21 +16,17 @@ Pick one target. Each request also needs memory for its context, and the draft
 and image projector add their own weights.
 
 ```sh
-hf download unsloth/Qwen3.8-27B-GGUF \
-  Qwen3.8-27B-UD-Q4_K_XL.gguf mmproj-BF16.gguf \
-  --revision ce331efc48d5722b4b8041f72793e530eae18d9b \
-  --local-dir models/qwen3.8-27b
-hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
-  Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
-  --revision 2d9571f8ce46e151f61c6499c99dee6079e1d610 \
-  --local-dir models/qwen3.8-27b
+gufo model install qwen27-q4    # or qwen27-q8
 ```
+
+It installs the target, the image projector and the DFlash2 draft, and prints
+the draft's path.
 
 ## Run
 
 ```sh
-MODEL=models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
-DRAFT=models/qwen3.8-27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
+MODEL=qwen27-q4
+DRAFT=~/.local/share/gufo/models/qwen27-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 gufo chat --model "$MODEL"
 gufo serve llm --model "$MODEL" --speculative dflash2 \
   --dflash-model "$DRAFT" --sessions 2 --context 32768

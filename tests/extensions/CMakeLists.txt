@@ -50,6 +50,22 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     # The provenance contract covers this build, not the user's installed modules.
     set_tests_properties(extension_cli_provenance_test PROPERTIES LABELS "cpu;extensions"
       ENVIRONMENT "GUFO_EXTENSIONS_DIR=${CMAKE_CURRENT_BINARY_DIR}/empty-extension-store")
+    add_test(NAME extension_model_cli_test COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_LIST_DIR}/model_cli_test.py $<TARGET_FILE:gufo>)
+    set_tests_properties(extension_model_cli_test PROPERTIES
+      LABELS "cpu;extensions" TIMEOUT 120)
+    file(GLOB model_lock_extensions LIST_DIRECTORIES true
+      "${PROJECT_SOURCE_DIR}/src/models/*" "${PROJECT_SOURCE_DIR}/src/families/*/*")
+    set(model_lock_dirs)
+    foreach(dir IN LISTS model_lock_extensions)
+      if(EXISTS "${dir}/extension.json")
+        list(APPEND model_lock_dirs "${dir}")
+      endif()
+    endforeach()
+    add_test(NAME extension_model_locks_test COMMAND ${Python3_EXECUTABLE}
+      ${PROJECT_SOURCE_DIR}/tools/models/lock.py --check ${model_lock_dirs})
+    set_tests_properties(extension_model_locks_test PROPERTIES
+      LABELS "cpu;extensions" TIMEOUT 30)
     add_test(NAME extension_module_cli_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/module_cli_test.py $<TARGET_FILE:gufo>)
     set_tests_properties(extension_module_cli_test PROPERTIES

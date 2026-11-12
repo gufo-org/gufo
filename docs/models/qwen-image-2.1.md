@@ -13,14 +13,14 @@ Images API.
 The checkpoint is about 33.1 GB:
 
 ```sh
-MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1 \
-  --revision b3179ad355be050328e483a9dfdd9e60cd62adfa)
+gufo model install qwen-image-2.1
+MODEL=qwen-image-2.1
 ```
 
 ## Run
 
 ```sh
-gufo serve image --model "$MODEL_DIR" \
+gufo serve image --model "$MODEL" \
   --served-model-name Qwen-Image-2.1 --port 8080
 curl --fail-with-body http://127.0.0.1:8080/v1/images/generations \
   -H 'Content-Type: application/json' \
@@ -64,9 +64,9 @@ Turbo is a separately trained checkpoint (about 32.5 GB, same license) that
 always uses eight steps. It runs on the same server, API and editing paths:
 
 ```sh
-MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1-Turbo \
-  --revision fc13ba1986fcb905854dc8de2f52eee395f49b5b --exclude 'assets/*')
-gufo serve image --model "$MODEL_DIR" \
+gufo model install qwen-image-2.1-turbo
+MODEL=qwen-image-2.1-turbo
+gufo serve image --model "$MODEL" \
   --served-model-name Qwen-Image-2.1-Turbo --port 8080
 ```
 
@@ -91,7 +91,7 @@ Register LoRA safetensors published for `Qwen/Qwen-Image-2.1` at startup and
 select them per request by name:
 
 ```sh
-gufo serve image --model "$MODEL_DIR"   --lora voxel=/models/loras/Qwen-Image-2.1-Voxel-Style-3000.safetensors   --lora-default voxel:0.8
+gufo serve image --model "$MODEL"   --lora voxel=/models/loras/Qwen-Image-2.1-Voxel-Style-3000.safetensors   --lora-default voxel:0.8
 ```
 
 Generation JSON and edit forms accept `"loras": [{"name": "voxel", "scale":

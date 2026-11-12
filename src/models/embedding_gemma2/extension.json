@@ -25,6 +25,26 @@
       "entry": "embedding_gemma2_provider_register"
     }
   ],
+  "models": [
+    {
+      "id": "embeddinggemma-2",
+      "provider": "embeddinggemma-2",
+      "license": "apache-2.0",
+      "description": "EmbeddingGemma 2, BF16 safetensors",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "google/embeddinggemma-2",
+            "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b"
+          }
+        }
+      ]
+    }
+  ],
   "options": [
     {
       "name": "--default-prompt-name",
@@ -79,7 +99,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",
