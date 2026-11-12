@@ -16,12 +16,12 @@ struct CanonicalFingerprint {
   std::uint32_t cpu_logical_cores{0};
   std::uint32_t cpu_physical_cores{0};
   std::uint64_t memory_total_bytes{0};
-  std::string memory_type{"LPDDR5X (Unified)"};
+  std::string memory_type;
   std::string gpu_name;
-  std::string gpu_architecture{"gfx1151"};
+  std::string gpu_architecture;
   std::uint32_t gpu_compute_units{0};
   std::string gpu_driver{"amdgpu"};
-  std::string gpu_pci_id{"1002:1586"};
+  std::string gpu_pci_id;
   std::string kernel_release;
   std::string rocm_version{"7.2.3"};
   std::string cxx_compiler{"GCC 15.3.0"};

@@ -1,6 +1,7 @@
 # Install
 
-Gufo runs on Linux x86-64 with an AMD Strix Halo GPU (`gfx1151`). This page
+Gufo runs on Linux x86-64 with an AMD RDNA 3.5 GPU (`gfx1151` Strix Halo or
+`gfx1150` Strix Point). This page
 covers the container, the Debian package, Nix, a build from source and the
 Windows ZIP.
 
@@ -107,6 +108,8 @@ cmake --install build/release
 - Add `-DGUFO_EXTENSIONS_FROM_LOCK=ON` to build only the official extensions,
   as releases do, or `-DGUFO_EXTENSIONS=<list>` to choose; each extension
   needs only its own libraries.
+- On Strix Point (`gfx1150`), add `-DCMAKE_HIP_ARCHITECTURES=gfx1150`; the
+  default targets Strix Halo.
 - If CMake can't find ROCm, pass `-DCMAKE_PREFIX_PATH=/opt/rocm`, and
   `-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++` if it picks a system Clang.
 - The Nix build applies a [ROCm runtime patch](../.devops/nix/patches/rocr-fixed-cwsr-rocm10.patch)

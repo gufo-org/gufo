@@ -1,8 +1,8 @@
 # Development
 
 How the repository is laid out, how to build and test it, and the conventions
-for adding code. Production targets Linux x86-64 on AMD Strix Halo
-(`gfx1151`); CMake owns compiler flags, dependencies and installation, and Nix
+for adding code. Production targets Linux x86-64 on an AMD RDNA 3.5 integrated
+GPU (`gfx1151` Strix Halo or `gfx1150` Strix Point); CMake owns compiler flags, dependencies and installation, and Nix
 supplies the pinned toolchain. Dependencies and versions are in
 [install](../install.md#build-from-source); repository rules for agents and
 contributors are in [AGENTS.md](../../AGENTS.md).
@@ -89,7 +89,7 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `ENGINE_ENABLE_HIP` | `ON` | Build the gfx1151 HIP backend; only `gfx1151` is accepted |
+| `ENGINE_ENABLE_HIP` | `ON` | Build the RDNA 3.5 HIP backend; `CMAKE_HIP_ARCHITECTURES` must be `gfx1151` or `gfx1150` |
 | `BUILD_TESTING` | `OFF` | Build correctness tests |
 | `GUFO_BUILD_TOOLS` | `OFF` | Build kernel benchmarks and tuning executables |
 | `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |

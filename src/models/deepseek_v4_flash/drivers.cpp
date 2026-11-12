@@ -738,7 +738,7 @@ static int GenerateDeepSeekResponse(
   session.BeginRequest();
 
   if (opt.verbose) {
-    std::cout << "[Engine]: DeepSeek V4 Flash ROCm (gfx1151)\n"
+    std::cout << "[Engine]: DeepSeek V4 Flash ROCm (RDNA 3.5)\n"
               << "Model: " << model->ModelName() << '\n'
               << "Prompt tokens: " << prompt_tokens.size() << '\n'
               << "Max tokens: " << opt.max_tokens << '\n'

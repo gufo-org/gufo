@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <gufo/ext/experimental/arch.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
 #include <gufo/ext/mapped_prefetch.hpp>
 #include <initializer_list>
@@ -478,10 +479,11 @@ struct SpeechDecoderHipRuntime::Impl {
     hipDeviceProp_t properties{};
     RequireHip(hipGetDeviceProperties(&properties, device),
                "hipGetDeviceProperties");
-    if (!std::string_view(properties.gcnArchName).starts_with("gfx1151") ||
+    if (!gufo::hip::IsRdna35(properties.gcnArchName) ||
         properties.integrated == 0) {
       throw std::runtime_error(
-          "Qwen3-TTS speech decoder supports integrated gfx1151 Strix Halo");
+          "Qwen3-TTS speech decoder supports integrated RDNA 3.5 APUs "
+          "(gfx1151 Strix Halo, gfx1150 Strix Point)");
     }
     const auto decoder_regions = model.RegionsFor("decoder.");
     if (decoder_regions.size() != 1) {

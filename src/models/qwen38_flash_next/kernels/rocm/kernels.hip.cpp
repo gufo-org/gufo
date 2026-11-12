@@ -43,12 +43,13 @@ __device__ __forceinline__ float Materialize(float v) {
 }
 
 /// Lane i receives lane (i ^ offset)'s value, as __shfl_xor(v, offset) does
-/// across a wave32. On gfx1151 it is a DPP row_xmask (offsets below 16) or
-/// v_permlanex16 (16): a register move instead of an LDS crossbar round trip
-/// (ds_bpermute). Only the transport differs, so reductions stay bitwise;
-/// every lane must be active, as the shuffle's callers already require.
+/// across a wave32. On RDNA 3.5 (gfx1151 Strix Halo, gfx1150 Strix Point) it
+/// is a DPP row_xmask (offsets below 16) or v_permlanex16 (16): a register
+/// move instead of an LDS crossbar round trip (ds_bpermute). Only the
+/// transport differs, so reductions stay bitwise; every lane must be active,
+/// as the shuffle's callers already require.
 __device__ __forceinline__ int XorLane(int v, int offset) {
-#if defined(__gfx1151__)
+#if defined(__gfx1150__) || defined(__gfx1151__)
   switch (offset) {
     case 1:
       return __builtin_amdgcn_update_dpp(0, v, 0x161, 0xF, 0xF, false);

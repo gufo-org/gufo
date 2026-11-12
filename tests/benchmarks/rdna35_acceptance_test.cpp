@@ -40,6 +40,6 @@ void TestHardwareAcceptanceAccounting() {
 
 int main() {
   TestHardwareAcceptanceAccounting();
-  std::cout << "Hardware acceptance baseline tests passed on gfx1151.\n";
+  std::cout << "Hardware acceptance baseline tests passed on RDNA 3.5.\n";
   return 0;
 }

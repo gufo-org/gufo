@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/hip/arch.hpp"
 #include "src/models/minimax_h3/attention.hip.hpp"
 #include "src/models/minimax_h3/dense.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"
@@ -981,18 +982,18 @@ void CheckNativeAttention(std::uint32_t rows, float query_scale = 1.7F,
   CHECK(relative_max < 0.01);
 }
 
-bool HasGfx1151() {
+bool HasRdna35() {
   int device = 0;
   hipDeviceProp_t properties{};
   return hipGetDevice(&device) == hipSuccess &&
          hipGetDeviceProperties(&properties, device) == hipSuccess &&
-         std::string_view(properties.gcnArchName).starts_with("gfx1151") &&
+         gufo::hip::IsRdna35(properties.gcnArchName) &&
          properties.integrated != 0;
 }
 
 int CheckAnalytic() {
-  if (!HasGfx1151()) {
-    std::cout << "SKIP: integrated gfx1151 is unavailable\n";
+  if (!HasRdna35()) {
+    std::cout << "SKIP: integrated RDNA 3.5 GPU is unavailable\n";
     return 77;
   }
   CheckCastsElementwiseAndNorms();
@@ -1022,8 +1023,8 @@ int CheckAnalytic() {
 }
 
 int CheckFocusedOps() {
-  if (!HasGfx1151()) {
-    std::cout << "SKIP: integrated gfx1151 is unavailable\n";
+  if (!HasRdna35()) {
+    std::cout << "SKIP: integrated RDNA 3.5 GPU is unavailable\n";
     return 77;
   }
   CheckAdaLnGateAndSwiGlu();
@@ -1111,8 +1112,8 @@ bool CheckBoundary(std::string_view name, std::span<const std::uint16_t> got,
 }
 
 int CheckReal() {
-  if (!HasGfx1151()) {
-    std::cout << "SKIP: integrated gfx1151 is unavailable\n";
+  if (!HasRdna35()) {
+    std::cout << "SKIP: integrated RDNA 3.5 GPU is unavailable\n";
     return 77;
   }
   const char* root_value = std::getenv("GUFO_H3_MODEL_ROOT");
@@ -1243,8 +1244,8 @@ int CheckReal() {
 }
 
 int ProfileBlock(std::size_t rows, bool row_parallel) {
-  if (!HasGfx1151()) {
-    std::cout << "SKIP: integrated gfx1151 is unavailable\n";
+  if (!HasRdna35()) {
+    std::cout << "SKIP: integrated RDNA 3.5 GPU is unavailable\n";
     return 77;
   }
   const char* root_value = std::getenv("GUFO_H3_MODEL_ROOT");

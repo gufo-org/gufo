@@ -231,6 +231,8 @@ stdenv.mkDerivation {
     };
     toolchain = {
       targetPlatform = "x86_64-linux";
+      # Default build target. gfx1150 (Strix Point) builds with
+      # -DCMAKE_HIP_ARCHITECTURES=gfx1150.
       targetGpu = "gfx1151";
       cxxCompiler = stdenv.cc.name;
       rocmVersion = rocmPackages.clr.version;
@@ -239,7 +241,7 @@ stdenv.mkDerivation {
   };
 
   meta = with lib; {
-    description = "Gufo Engine — local inference runtime for AMD Strix Halo (gfx1151 GPU)";
+    description = "Gufo Engine — local inference runtime for AMD RDNA 3.5 APUs (gfx1151 Strix Halo, gfx1150 Strix Point)";
     homepage = "https://github.com/gufo-org/gufo";
     license = licenses.mit;
     platforms = [ "x86_64-linux" ];
