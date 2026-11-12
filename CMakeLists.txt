@@ -1047,7 +1047,7 @@ endfunction()
   add_executable(component_text_cache_test
     tests/cli/component_text_cache_test.cpp)
   target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake
-    gufo_serving)
+    gufo_serving gufo_qwen_vision)
   add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
   # Start the long persistence suite early while other contracts fill the
   # remaining CTest slots. Costs order tests; they do not change timeouts.

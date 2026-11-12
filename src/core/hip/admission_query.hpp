@@ -73,10 +73,9 @@ QueryDeviceLocalBudget() {
 
 }  // namespace detail
 
-/// Reads the memory a state-capacity check admits against, on the current
-/// device. Returns nullopt only when hipMemGetInfo fails, as the check did
-/// before; a later failure leaves HIP's own figure in `free_bytes`.
-[[nodiscard]] inline std::optional<AdmissionMemory> QueryAdmissionMemory() {
+namespace detail {
+[[nodiscard]] inline std::optional<AdmissionMemory> CollectAdmissionMemory(
+    std::optional<std::uint64_t> host_available) {
   std::size_t free_bytes = 0;
   std::size_t total_bytes = 0;
   if (hipMemGetInfo(&free_bytes, &total_bytes) != hipSuccess)
@@ -85,13 +84,31 @@ QueryDeviceLocalBudget() {
   memory.hip_free_bytes = free_bytes;
   memory.local = detail::QueryDeviceLocalBudget();
   if (memory.local.has_value()) {
-    if (const auto host = platform::QueryHostMemory())
+    if (host_available)
+      memory.host_available_bytes = host_available;
+    else if (const auto host = platform::QueryHostMemory())
       memory.host_available_bytes = host->available_bytes;
   }
   memory.free_bytes = AdmissionFreeBytes(memory.hip_free_bytes, memory.local,
                                          memory.host_available_bytes,
                                          kAdmissionHostMarginBytes);
   return memory;
+}
+}  // namespace detail
+
+/// Reads the memory a state-capacity check admits against, on the current
+/// device. Returns nullopt only when hipMemGetInfo fails; a later failure
+/// leaves HIP's own figure in `free_bytes`.
+[[nodiscard]] inline std::optional<AdmissionMemory> QueryAdmissionMemory() {
+  return detail::CollectAdmissionMemory(std::nullopt);
+}
+
+/// Reuses raw host availability already collected by the caller. The device
+/// budget and host ceiling can then share one host observation, including on
+/// integrated GPUs where the OS budget calculation also uses host headroom.
+[[nodiscard]] inline std::optional<AdmissionMemory>
+QueryAdmissionMemoryUsingHost(std::uint64_t host_available) {
+  return detail::CollectAdmissionMemory(host_available);
 }
 
 /// Writes event=state_capacity for one state-capacity check, since a refusal

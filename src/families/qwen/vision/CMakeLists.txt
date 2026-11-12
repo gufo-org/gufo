@@ -3,10 +3,12 @@
 # only shape placeholders and cache identity), so they build without HIP; the
 # encoder and device input need the backend.
 add_library(gufo_qwen_vision STATIC
+  admission.cpp
   image_cache.cpp
   prompt.cpp)
 target_include_directories(gufo_qwen_vision PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen_vision PUBLIC
+  gufo_cache
   gufo_core
   gufo_qwen_hip_common
   gufo_qwen_text
@@ -14,6 +16,7 @@ target_link_libraries(gufo_qwen_vision PUBLIC
 
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen_vision PRIVATE
+    device_input.cpp
     encoder.hip
     device_input.hip)
   target_include_directories(gufo_qwen_vision SYSTEM PUBLIC

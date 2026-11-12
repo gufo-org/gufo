@@ -34,6 +34,17 @@
   ],
   "options": [
     {
+      "name": "--vision-memory-policy",
+      "type": "string",
+      "commands": [
+        "serve"
+      ],
+      "providers": [
+        "flash-next-q4"
+      ],
+      "help": "Vision admission: conservative (default) or on-demand; on-demand reserves image memory only for actual requests"
+    },
+    {
       "name": "--mtp-model",
       "type": "path",
       "commands": [
@@ -102,6 +113,12 @@
     {
       "target": "qwen38_flash_next_config_test",
       "ctest": "qwen38_flash_next\\.config",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen38_flash_next_memory_test",
+      "ctest": "qwen38_flash_next\\.memory",
       "check_pr": true,
       "windows_build": true
     },

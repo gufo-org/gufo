@@ -21,6 +21,7 @@
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
+#include "src/families/qwen/vision/admission.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
 #include "tests/support/temporary_directory.hpp"
@@ -2616,6 +2617,162 @@ void OverRamCaptureStagesPrivateStateUnderPressure(bool protect) {
   assert(log.find("event=capture_failed") == std::string::npos);
   std::filesystem::remove_all(directory);
 }
+void ImageAdmissionAcrossRamAndDiskRestore() {
+  namespace vision = models::qwen::vision;
+  struct ImageContext final : TextPromptContext {
+    std::size_t memory_bytes{64};
+  };
+  class ImageAdapter final : public FakeAdapter {
+  public:
+    struct Storage {
+      explicit Storage(std::shared_ptr<vision::AdmissionBudget> budget)
+          : claim(std::move(budget)) {}
+      // Physical storage dies before its reservation, including shutdown.
+      vision::AdmissionLease claim;
+      std::vector<std::byte> bytes;
+      std::size_t requested{};
+    };
+    explicit ImageAdapter(std::shared_ptr<vision::AdmissionBudget> budget)
+        : budget(std::move(budget)) {}
+    std::shared_ptr<vision::AdmissionBudget> budget;
+    std::map<const cache::Slot*, Storage> storage;
+    std::size_t restores{};
+    bool fail_allocation{};
+    std::unique_ptr<cache::Slot> CreateSlot(
+        cache::MutationGuard& guard) override {
+      auto slot = FakeAdapter::CreateSlot(guard);
+      storage.try_emplace(slot.get(), budget);
+      return slot;
+    }
+    void Attach(cache::Slot& slot, std::size_t bytes) {
+      auto& allocation = storage.at(&slot);
+      allocation.claim.Grow(bytes);
+      assert(budget->Outstanding() >= bytes);
+      if (std::exchange(fail_allocation, false))
+        throw std::bad_alloc();
+      allocation.bytes.resize(bytes);
+      allocation.requested = bytes;
+    }
+    void BeginRestore(
+        cache::Slot& slot,
+        std::span<const cache::ComponentPosition> positions) override {
+      const auto& allocation = storage.at(&slot);
+      assert(allocation.claim.Bytes() >= allocation.requested);
+      assert(allocation.bytes.size() == allocation.requested);
+      assert(budget->Outstanding() >= allocation.requested);
+      ++restores;
+      FakeAdapter::BeginRestore(slot, positions);
+    }
+    bool Invalidate(cache::Slot& slot) noexcept override {
+      if (!FakeAdapter::Invalidate(slot))
+        return false;
+      auto& allocation = storage.at(&slot);
+      std::vector<std::byte>().swap(allocation.bytes);
+      allocation.requested = 0;
+      allocation.claim.Clear();
+      return true;
+    }
+  };
+  class ImageRunner final : public Runner {
+  public:
+    explicit ImageRunner(std::shared_ptr<vision::AdmissionBudget> budget)
+        : budget(std::move(budget)) {}
+    std::shared_ptr<vision::AdmissionBudget> budget;
+    mutable ImageAdapter* images{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t) const override {
+      auto owned = std::make_unique<ImageAdapter>(budget);
+      adapter = images = owned.get();
+      return server::testing::MakeFakeCacheResources(ledger, std::move(owned));
+    }
+    void SetPromptContext(
+        TextRunnerState& state,
+        std::shared_ptr<const TextPromptContext> context) const override {
+      const auto* image = dynamic_cast<const ImageContext*>(context.get());
+      images->Attach(dynamic_cast<State&>(state).slot,
+                     image ? image->memory_bytes : 0);
+    }
+  };
+
+  const TemporaryDirectory temp("gufo-vision-admission-cache-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path(),
+                                        .capacity_bytes = 1 << 20};
+  const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17};
+  auto history = prompt;
+  history.push_back(18);
+  auto image = std::make_shared<ImageContext>();
+  image->cache_identity = {1, 2, 3};
+  image->cache_prefixes.push_back({4, {}});
+  auto budget = std::make_shared<vision::AdmissionBudget>([] { return 128; });
+  std::uint64_t hash{};
+  {
+    auto runner = std::make_shared<ImageRunner>(budget);
+    ComponentTextCache cache(runner, 2, 1 << 22, disk);
+    auto first = cache.Acquire(prompt, {}, image, true, 0, true);
+    assert(budget->Outstanding() == 64);
+    auto& state = dynamic_cast<State&>(first->state());
+    runner->adapter->Append(state.slot, prompt, prompt);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    assert(first->TryReserveSnapshot(first->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     {}));
+    assert(first->PublishSnapshot(prompt, first->Capture(), false));
+    // Keep the source live so the image-history continuation must restore
+    // target, MTP draft and private state into the other execution session.
+    auto second = cache.Acquire(history, {}, image, true, 0, true);
+    assert(second->cached_tokens() == prompt.size());
+    assert(second->restored_snapshot_bytes() > 0);
+    assert(!second->restored_from_disk());
+    assert(runner->images->restores == 1 && budget->Outstanding() == 128);
+    auto& restored = dynamic_cast<State&>(second->state());
+    assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+    second->Invalidate();
+    assert(budget->Outstanding() == 64);
+    (void)first->Commit({}, {}, prompt);
+    assert(budget->Outstanding() == 64);  // idle live buffers remain charged
+    auto reuse = cache.Acquire(history, {}, image, true, 0, true);
+    assert(reuse->cached_tokens() == prompt.size());
+    assert(budget->Outstanding() ==
+           64);  // repeated attachment does not charge twice
+    reuse->Invalidate();
+    assert(budget->Outstanding() == 0);
+  }  // Drains disk publication before restart.
+  assert(budget->Outstanding() == 0);
+  {
+    auto runner = std::make_shared<ImageRunner>(budget);
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+    auto oversized = std::make_shared<ImageContext>(*image);
+    oversized->memory_bytes = 129;
+    bool refused = false;
+    try {
+      (void)cache.Acquire(history, {}, oversized, true, 0, true);
+    } catch (const core::ResourceAdmissionError&) {
+      refused = true;
+    }
+    assert(refused && budget->Outstanding() == 0 &&
+           runner->images->restores == 0);
+    runner->images->fail_allocation = true;
+    bool failed = false;
+    try {
+      (void)cache.Acquire(history, {}, image, true, 0, true);
+    } catch (const std::bad_alloc&) {
+      failed = true;
+    }
+    assert(failed && budget->Outstanding() == 0);
+    auto text = cache.Acquire({prompt.data(), 2}, {}, {}, false, 0, true);
+    assert(text && budget->Outstanding() == 0);
+    text->Invalidate();
+    auto disk_restore = cache.Acquire(history, {}, image, true, 0, true);
+    assert(disk_restore->restored_from_disk());
+    assert(disk_restore->cached_tokens() == prompt.size());
+    assert(runner->images->restores == 1 && budget->Outstanding() == 64);
+    assert(runner->adapter->RecurrentHash(
+               dynamic_cast<State&>(disk_restore->state()).slot) == hash);
+    disk_restore->Invalidate();
+    assert(budget->Outstanding() == 0);
+  }
+  assert(budget->Outstanding() == 0);
+}
 }  // namespace
 // An off RAM cache commits no backing, grows none before prefill and takes no
 // capture, yet a session keeps its own live frontier and its metrics stay
@@ -3269,6 +3426,7 @@ void IndivisibleInputsAreNotSplit() {
   }
 }
 int main() {
+  ImageAdmissionAcrossRamAndDiskRestore();
   RamCacheOffAllowsLargeDiskIndexMetadata();
   IndivisibleInputsAreNotSplit();
   PromptReuseCanBeDisabledPerRequest();

@@ -14,6 +14,7 @@
 namespace gufo::models::qwen::vision {
 
 class ImageCache;
+class AdmissionBudget;
 
 inline constexpr std::uint32_t kImageToken = 248056;
 inline constexpr std::uint32_t kPatchSize = 16;
@@ -57,6 +58,14 @@ struct Prompt {
   /// SHA-256 covers decoded pixels, grid placement, preprocessing version,
   /// and the model-specific encoder identity. Tokens remain a separate key.
   std::vector<std::uint8_t> cache_identity;
+  /// Prepared pixel pointers share ownership with their reservation, including
+  /// when a prompt or individual image is copied. DeviceInput may omit that
+  /// duplicate charge only for this same budget.
+  std::weak_ptr<AdmissionBudget> memory_admission;
+  /// Attach an existing reservation to every pixel pointer. Copies and value
+  /// assignment then preserve accounting independently of the Prompt owner.
+  void RetainPixels(std::shared_ptr<const void> reservation,
+                    const std::shared_ptr<AdmissionBudget>& budget);
   [[nodiscard]] std::span<const std::uint8_t> IdentityForPrefix(
       std::size_t token_count) const;
 };

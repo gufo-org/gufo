@@ -5,6 +5,7 @@
   "kind": "static",
   "purpose": "Qwen3.8-Flash-Next CPU reference and ROCm runtime, including the continuation layout and the ngram draft model.",
   "consumers": [
-    "bench_cli_test"
+    "bench_cli_test",
+    "cache_backing_admission_test"
   ]
 }
