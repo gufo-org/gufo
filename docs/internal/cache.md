@@ -630,6 +630,29 @@ Adapters can provide fixed prefill and restore cost estimates. The
 beside actual request metrics. The model benchmark pages hold the calibrations;
 these estimates do not change capture thresholds or enable cost-per-byte ranking.
 
+### Recovery metadata validation
+
+Cold recovery reads manifests and checks each distinct payload identity once
+per namespace. The temporary validation map stores actual file type and size,
+then reuses its nodes for canonical reference geometry. Borrowed manifest
+fields and fixed-size geometry avoid per-reference owner/geometry vectors;
+two bounded arrays track rejected owners and duplicate checkpoint IDs.
+
+Unavailable dependencies exclude their owners before conflict validation.
+Every complete owner involved in incompatible shared geometry, private aliasing
+or a duplicate checkpoint ID is rejected, regardless of enumeration order.
+Allocation failure aborts recovery and releases its charges and directory lock;
+it is not treated as evidence of corrupt data.
+
+`DiskStartupStats` separates decoded `dependency_references`,
+`distinct_dependency_files` and actual `dependency_stats`. These counters
+exclude the directory scans, which still inspect every managed file to account
+for referenced, temporary and orphaned bytes. Reusing dependency observations
+reduces repeated work; it does not remove the distinct-file filesystem metadata
+working set or establish a reduction in system memory use. Observations expire
+at the end of recovery. Restore still checks the opened file, identity and
+payload checksum before making state executable.
+
 ## What invalidates reuse
 
 Anything that changes the token prefix. In practice:
