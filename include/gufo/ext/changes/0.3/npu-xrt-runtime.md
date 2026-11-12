@@ -3,10 +3,10 @@
 Experimental NPU runtime (`include/gufo/ext/experimental/npu.hpp`, namespace
 `gufo::npu`) for runners that execute mlir-aie (IRON) designs on the AMD XDNA
 NPU:
-- `ProbeDevices()`: the `amdxdna` accel nodes in sysfs (`DeviceInfo`), without
-  XRT or device access. `RuntimeAvailable()`: whether the build has XRT.
-- `Device::Open(index)`: opens an XRT device; throws `npu::Error` without XRT
-  or a usable NPU.
+- `ProbeDevices()`: the NPUs present (`DeviceInfo`), from the `amdxdna` accel
+  nodes in sysfs on Linux and from XRT on Windows.
+- `Device::Open(index)`: opens an XRT device; throws `npu::Error` without a
+  usable NPU.
 - `Program::Load(device, xclbin, kernel_prefix)`: one xclbin as a hardware
   context and its kernel. `Allocate`/`LoadBuffer` create `Buffer`s in a kernel
   argument's memory group, `AllocateInstructions`/`LoadInstructions` create
@@ -19,9 +19,8 @@ NPU:
 - `DispatchLibrary`: loads an IRON design's `dispatch_generate` library (up to
   16 int32 scalars) and generates its instruction streams.
 
-Public CMake contract: `GUFO_ENABLE_XRT` (Linux, default `OFF`) builds the
-runtime on XRT's `XRT::xrt_coreutil`. Without it the API is unchanged, and
-`Device::Open` and `Program::Load` throw `npu::Error`.
+Public CMake contract: Gufo requires XRT (`XRT::xrt_coreutil`), found through
+`XRT_DIR`, `XILINX_XRT` or `/opt/xilinx/xrt`.
 
 Compatibility: additive. Existing extensions need no change. The header names
 no XRT type, so extensions build without XRT headers.

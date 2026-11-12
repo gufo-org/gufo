@@ -20,8 +20,8 @@
   rustPlatform,
   rocmPackages,
   libuuid,
-  # XRT with the amdxdna plugin (.devops/nix/xrt) builds the NPU runtime.
-  # Null only for revisions that predate it (the CI timing baseline).
+  # XRT with the amdxdna plugin (.devops/nix/xrt): the NPU runtime. Null
+  # only for revisions that predate it (the CI timing baseline).
   xrt ? null,
   releaseVersion ? null,
   extensionsFromLock ? false,
@@ -170,10 +170,8 @@ stdenv.mkDerivation {
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
-  ] ++ lib.optionals (xrt != null) [
-    "-DGUFO_ENABLE_XRT=ON"
-    "-DXRT_DIR=${xrt}/opt/xilinx/xrt/share/cmake/XRT"
-  ] ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
+  ] ++ lib.optional (xrt != null) "-DXRT_DIR=${xrt}/opt/xilinx/xrt/share/cmake/XRT"
+  ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
   ++ lib.optionals (extensions != [ ]) [
     "-DGUFO_EXTENSION_DIRS=${lib.concatMapStringsSep ";" (ext: "${ext}") extensions}"
     "-DGUFO_EXTENSION_DIR_REVISIONS=${lib.concatMapStringsSep ";" extensionRevision extensions}"

@@ -34,6 +34,13 @@ can't see the state of a server that is already running; use `/health` and
   lets every container on the host use the devices passed to it; review that
   scope before enabling it.
 
+## The NPU isn't found
+
+- Check that the kernel's `amdxdna` driver created the node:
+  `ls -l /dev/accel/accel0`. Your user needs access to it, usually through
+  the `render` group.
+- In a container, pass `--device /dev/accel/accel0`.
+
 ## The server stops with `device_lost`
 
 A GPU reset leaves the process unable to use the GPU again. Gufo returns 503

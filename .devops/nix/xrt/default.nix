@@ -2,8 +2,7 @@
 # commit it pins as a submodule. The derivations started from robcohen/nixpkgs
 # (`vitis-ai` branch, MIT); the pins and the plugin patch are Gufo's.
 #
-# The Gufo package builds with GUFO_ENABLE_XRT=ON against `combined`
-# (docs/extension-api.md#npu-programs).
+# Gufo links `combined` on Linux (docs/extension-api.md#npu-programs).
 {
   lib,
   callPackage,

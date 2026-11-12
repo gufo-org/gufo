@@ -1,4 +1,4 @@
-// The NPU runtime on XRT (built with GUFO_ENABLE_XRT=ON).
+// The NPU runtime on XRT.
 
 #include <xrt/xrt_bo.h>
 #include <xrt/xrt_device.h>
@@ -51,10 +51,6 @@ void ReadFile(const std::filesystem::path& file, std::byte* dst,
 }
 
 }  // namespace
-
-bool RuntimeAvailable() noexcept {
-  return true;
-}
 
 struct Device::Impl {
   xrt::device device;

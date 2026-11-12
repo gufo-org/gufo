@@ -209,8 +209,6 @@ with `DispatchLibrary::Open` and generate streams. If only a few address words
 change, `DiffInstructions` turns two generated streams into patches for
 `Instructions::Apply`.
 
-The header has no XRT types, so your extension builds without XRT. The Linux
-package ships the runtime. A build without XRT (`GUFO_ENABLE_XRT=OFF`, the
-CMake default) keeps the API, and `Device::Open` throws `npu::Error`. Call
-`ProbeDevices()` to see whether the machine has an NPU before you register the
-NPU path.
+The header has no XRT types, so your extension builds without XRT headers;
+Gufo links XRT itself. On a machine without an NPU, `Device::Open` throws
+`npu::Error`. Call `ProbeDevices()` before you register an NPU path.

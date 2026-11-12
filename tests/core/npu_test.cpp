@@ -107,9 +107,9 @@ void DispatchAndPatch(const fs::path& library) {
          "streams of different length were diffed");
 }
 
-// Without XRT, or with XRT and no NPU, Open reports an npu::Error.
+// Without an NPU, Open reports an npu::Error.
 void OpenWithoutNpu() {
-  if (npu::RuntimeAvailable() && !npu::ProbeDevices().empty())
+  if (!npu::ProbeDevices().empty())
     return;
   Expect(Throws([] { (void)npu::Device::Open(); }),
          "opened an NPU on a machine without one");

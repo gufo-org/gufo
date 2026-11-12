@@ -6,12 +6,15 @@ Windows ZIP.
 
 ## Prepare the host
 
-Gufo needs a recent kernel and firmware, and access to the GPU devices:
+Gufo needs a recent kernel and firmware, and access to the GPU and NPU
+devices:
 
 ```sh
 sudo usermod -aG video,render "$USER"   # then log out and back in
-ls -l /dev/kfd /dev/dri/renderD*
+ls -l /dev/kfd /dev/dri/renderD* /dev/accel/accel0
 ```
+
+`/dev/accel/accel0` is the XDNA NPU, from the kernel's `amdxdna` driver.
 
 As of November 2026, use Linux 6.18.4 or newer and linux-firmware 20260110 or
 newer. The [host configuration guide](https://github.com/gufo-org/toolboxes/blob/main/docs/host-configuration.md)
@@ -28,8 +31,8 @@ the newest release, `X.Y.Z` to pin one, or `edge` to follow development.
 podman pull ghcr.io/gufo-org/toolboxes/gufo-runtime:latest
 podman run --rm \
   --userns=keep-id:uid=1000,gid=1000 \
-  --device /dev/kfd --device /dev/dri --group-add keep-groups \
-  --ulimit memlock=-1 \
+  --device /dev/kfd --device /dev/dri --device /dev/accel/accel0 \
+  --group-add keep-groups --ulimit memlock=-1 \
   -p 8080:8080 -v ./models:/models:ro \
   -v gufo-extensions:/home/gufo/.local/share/gufo/extensions \
   ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
@@ -83,6 +86,7 @@ toolchain: GCC 16.2 and ROCm 10.1.0. Without Nix, install these first:
 | --- | --- |
 | C++20 compiler, CMake 3.21+, Ninja, pkg-config | Building |
 | ROCm HIP, hipBLAS, hipBLASLt, rocBLAS, hipCUB, rocPRIM, rocWMMA | GPU execution |
+| XRT with the amdxdna plugin | NPU execution |
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing, images |
 | Rust 1.88 or newer, libopus | PNG, WAV and audio decoding |
 | FFmpeg libraries | EmbeddingGemma 2 only |
@@ -107,6 +111,10 @@ cmake --install build/release
 - Add `-DGUFO_EXTENSIONS_FROM_LOCK=ON` to build only the official extensions,
   as releases do, or `-DGUFO_EXTENSIONS=<list>` to choose; each extension
   needs only its own libraries.
+- XRT has no distribution package. Build it with its plugin from
+  [xdna-driver](https://github.com/amd/xdna-driver), which installs to
+  `/opt/xilinx/xrt`; for another prefix, set `XILINX_XRT` to it. The Nix
+  build pins the pair in [`.devops/nix/xrt`](../.devops/nix/xrt/default.nix).
 - If CMake can't find ROCm, pass `-DCMAKE_PREFIX_PATH=/opt/rocm`, and
   `-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++` if it picks a system Clang.
 - The Nix build applies a [ROCm runtime patch](../.devops/nix/patches/rocr-fixed-cwsr-rocm10.patch)

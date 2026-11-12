@@ -465,10 +465,14 @@
               rustToolchain
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
+              # The NPU runtime links XRT on Linux.
+              gufoPackages.${system}.xrt-amdxdna
+              pkgsSys.libuuid
             ];
             src = testSource;
           } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
+            export XILINX_XRT=${gufoPackages.${system}.xrt-amdxdna}/opt/xilinx/xrt
             set -euo pipefail
 
             # The store source name changes on every revision. base_dir alone
@@ -802,6 +806,8 @@
             ];
             env = {
               TORCH_HOME = "${alexnetTorchHome system}";
+              # CMake finds XRT here, and XRT its amdxdna plugin.
+              XILINX_XRT = "${gufoPackages.${system}.xrt-amdxdna}/opt/xilinx/xrt";
               # CMake links HIP binaries against the patched ROCr.
               GUFO_ROCR_LIBRARY_DIR = "${self.packages.${system}.default.rocmRuntime}/lib";
               LD_LIBRARY_PATH = pkgs.${system}.lib.makeLibraryPath [

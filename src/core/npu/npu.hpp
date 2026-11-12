@@ -9,8 +9,7 @@
 //
 //   kernel(3, instructions, word_count, argument 3, argument 4, ...)
 //
-// The header names no XRT type. Builds without XRT (`GUFO_ENABLE_XRT=OFF`)
-// keep the same API: `RuntimeAvailable()` is false and `Device::Open` throws.
+// The header names no XRT type, so code using it builds without XRT headers.
 
 #include <cstddef>
 #include <cstdint>
@@ -38,14 +37,12 @@ struct DeviceInfo {
   std::string firmware;  ///< firmware version when the driver reports one
 };
 
-/// XDNA nodes present on this machine, in node order.
+/// XDNA NPUs present on this machine, in node order. Linux reads sysfs;
+/// Windows asks XRT, so its entries carry only `node` and `driver`.
 [[nodiscard]] std::vector<DeviceInfo> ProbeDevices();
-/// Same, under another sysfs root (tests).
+/// The `amdxdna` nodes under a sysfs root.
 [[nodiscard]] std::vector<DeviceInfo> ProbeDevices(
     const std::filesystem::path& sysfs_root);
-
-/// True when Gufo was built with XRT.
-[[nodiscard]] bool RuntimeAvailable() noexcept;
 
 /// Where a buffer lives. The NPU reads host memory either way.
 enum class Memory {

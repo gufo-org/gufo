@@ -78,6 +78,10 @@ pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 # Extension-only libraries come from each selected extension's manifest
 # `packages` (gufo_build_discovered_extensions).
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+# The NPU runtime (src/core/npu): XRT_DIR, XILINX_XRT or /opt/xilinx/xrt.
+find_package(XRT REQUIRED CONFIG
+  HINTS "$ENV{XILINX_XRT}/share/cmake/XRT"
+  PATHS /opt/xilinx/xrt/share/cmake/XRT)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
@@ -85,12 +89,6 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
 
 # CPU-only builds exist for host checks; production targets gfx1151 only.
 option(ENGINE_ENABLE_HIP "Build the gfx1151 HIP backend" ON)
-# The XDNA NPU runtime through XRT (src/core/npu). Off: the NPU API stays,
-# and no device opens.
-option(GUFO_ENABLE_XRT "Build the XDNA NPU runtime on XRT" OFF)
-if (GUFO_ENABLE_XRT AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  message(FATAL_ERROR "GUFO_ENABLE_XRT supports Linux only")
-endif()
 include(cmake/GufoExtensionDiscovery.cmake)
 gufo_discover_extensions()
 set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")

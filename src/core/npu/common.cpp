@@ -62,10 +62,6 @@ std::vector<DeviceInfo> ProbeDevices(const std::filesystem::path& sysfs_root) {
   return out;
 }
 
-std::vector<DeviceInfo> ProbeDevices() {
-  return ProbeDevices("/sys");
-}
-
 void Instructions::Assign(std::span<const std::uint32_t> words) {
   if (words.size() > capacity()) {
     throw Error("instruction stream of " + std::to_string(words.size()) +
