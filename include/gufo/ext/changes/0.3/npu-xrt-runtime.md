@@ -18,6 +18,13 @@ NPU:
   patch words that change linearly with a run-time value.
 - `DispatchLibrary`: loads an IRON design's `dispatch_generate` library (up to
   16 int32 scalars) and generates its instruction streams.
+- `Q8Gemm` (`src/core/npu/q8_gemm.hpp`, included by the same header): Q8_0
+  matrix products `y = W x` for any row count on the NPU. `Open(device, dir)`
+  loads the IRON design in `src/core/npu/kernels/q8gemm` (`q8gemm.xclbin`,
+  `q8gemm_dispatch.so`); `Upload` packs a matrix into the weight arena; `Run`
+  executes one or several products in one dispatch. Rows are quantized to
+  int16 per row and block scales are applied in integer arithmetic, so results
+  match f32 activations to about 5e-5.
 
 Speech providers receive their declared options, so an NPU switch such as
 `--npu` reaches them as it reaches text providers:

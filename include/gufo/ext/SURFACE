@@ -102,6 +102,7 @@ src/core/lora/adapter.hpp
 src/core/mapped_prefetch.hpp
 src/core/model_config.hpp
 src/core/npu/npu.hpp
+src/core/npu/q8_gemm.hpp
 src/core/platform/fs.hpp
 src/core/platform/gpu_budget.hpp
 src/core/platform/library.hpp

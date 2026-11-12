@@ -209,6 +209,16 @@ with `DispatchLibrary::Open` and generate streams. If only a few address words
 change, `DiffInstructions` turns two generated streams into patches for
 `Instructions::Apply`.
 
+`npu::Q8Gemm` runs Q8_0 matrix products on the NPU for any row count, with
+the weights resident in one arena. It loads the IRON design in
+`src/core/npu/kernels/q8gemm`, which `q8gemm.py <dir>` compiles:
+
+```cpp
+npu::Q8Gemm gemm = npu::Q8Gemm::Open(device, dir);
+int w = gemm.Upload(rows, cols, codes, scales);  // Q8_0 codes and block scales
+gemm.Run(w, x, batch, y);                        // y [batch][rows] = x W^T
+```
+
 The header has no XRT types, so your extension builds without XRT headers;
 Gufo links XRT itself. On a machine without an NPU, `Device::Open` throws
 `npu::Error`. Call `ProbeDevices()` before you register an NPU path.
