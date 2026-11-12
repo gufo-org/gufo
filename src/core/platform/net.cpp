@@ -218,6 +218,14 @@ bool SetExclusiveListenerReuse(Socket socket) noexcept {
 #endif
 }
 
+bool IsAddressInUseError(int error) noexcept {
+#if defined(_WIN32)
+  return error == WSAEADDRINUSE;
+#else
+  return error == EADDRINUSE;
+#endif
+}
+
 bool ClearIpv6Only(Socket socket) noexcept {
   int opt = 0;
   return ::setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY,

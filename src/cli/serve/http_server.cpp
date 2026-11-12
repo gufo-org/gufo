@@ -2029,7 +2029,10 @@ bool HttpServer::start(std::string* error) {
       *error = "socket() failed";
     return false;
   }
-  (void)net::SetReuseAddr(listen_fd_);
+  // Exclusive on Windows, where SO_REUSEADDR alone lets a second server bind
+  // a port this one still serves; its bind() fails instead. POSIX keeps
+  // SO_REUSEADDR, so a restart binds through TIME_WAIT as before.
+  (void)net::SetExclusiveListenerReuse(listen_fd_);
   // `::` serves IPv4 clients too. Set it explicitly: the kernel default
   // follows net.ipv6.bindv6only, which differs between hosts.
   if (addr.ss_family == AF_INET6 && !net::ClearIpv6Only(listen_fd_)) {
@@ -2041,8 +2044,14 @@ bool HttpServer::start(std::string* error) {
   }
 
   if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0) {
+    const int code = net::LastSocketError();
     if (error != nullptr) {
-      *error = "bind() failed on " + host_ + ":" + std::to_string(port_);
+      *error = "bind() failed on " + host_ + ":" + std::to_string(port_) +
+               " (error " + std::to_string(code) + ")";
+      if (net::IsAddressInUseError(code))
+        *error +=
+            ": the port is already in use, another server (gufo?) "
+            "listens on it";
     }
     net::CloseSocket(listen_fd_);
     listen_fd_ = -1;
