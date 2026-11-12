@@ -249,9 +249,12 @@ jobs:
           & $env:VCPKG_ROOT\vcpkg.exe install --classic --triplet x64-windows-static `
             boost-filesystem boost-program-options boost-property-tree boost-format `
             boost-algorithm boost-interprocess boost-optional boost-tokenizer boost-range `
-            boost-endian boost-uuid boost-regex boost-lexical-cast
-          if ($LASTEXITCODE -ne 0) { throw 'cannot install Boost for XRT' }
+            boost-endian boost-uuid boost-regex boost-lexical-cast opencl
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install Boost and OpenCL for XRT' }
           Pop-Location
+          # XRT's Windows build always compiles its OpenCL layer, which reads
+          # the Khronos headers and loader from KHRONOS.
+          $static = "$($env:VCPKG_ROOT -replace '\\', '/')/installed/x64-windows-static"
           git init build/xrt-src
           git -C build/xrt-src remote add origin https://github.com/Xilinx/XRT.git
           git -C build/xrt-src fetch --depth 1 origin $env:XRT_REV
@@ -261,8 +264,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'cannot fetch XRT submodules' }
           cmake -S build/xrt-src/src -B build/xrt -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DXRT_NPU=1 -DDISABLE_ABI_CHECK=1 `
-            "-DBOOST_ROOT=$($env:VCPKG_ROOT -replace '\\', '/')/installed/x64-windows-static" `
-            "-DCMAKE_INSTALL_PREFIX=$env:XRT_ROOT"
+            "-DBOOST_ROOT=$static" "-DKHRONOS=$static" "-DCMAKE_INSTALL_PREFIX=$env:XRT_ROOT"
           if ($LASTEXITCODE -ne 0) { throw 'XRT configure failed' }
           cmake --build build/xrt --parallel $env:NUMBER_OF_PROCESSORS
           if ($LASTEXITCODE -ne 0) { throw 'XRT build failed' }
@@ -276,9 +278,10 @@ jobs:
           if (-not $config) { throw 'XRT CMake config missing' }
           "XRT_DIR=$($config.DirectoryName -replace '\\', '/')" >> $env:GITHUB_ENV
           New-Item -ItemType Directory -Force build/windows-release | Out-Null
-          $dlls = Get-ChildItem $env:XRT_ROOT -Recurse -Filter '*.dll'
-          if (-not $dlls) { throw 'XRT DLLs missing' }
-          $dlls | ForEach-Object { Copy-Item $_.FullName build/windows-release }
+          # Gufo imports only xrt_coreutil; the NPU driver supplies the device shim.
+          $coreutil = Get-ChildItem $env:XRT_ROOT -Recurse -Filter 'xrt_coreutil.dll' | Select-Object -First 1
+          if (-not $coreutil) { throw 'xrt_coreutil.dll missing' }
+          Copy-Item $coreutil.FullName build/windows-release
 
       - name: Check out external extension
         if: ${{ inputs.extension-repo != '' }}
