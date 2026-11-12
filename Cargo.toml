@@ -3,7 +3,7 @@
 # links, so the standard library and shared crates are built once.
 [workspace]
 resolver = "3"
-members = ["src/core/rust", "src/core/audio_decode", "src/core/base64", "src/core/http", "src/core/png_decode", "src/core/resample", "src/core/wav_decode", "src/core/websocket"]
+members = ["src/core/ffi", "src/core/rust", "src/core/audio_decode", "src/core/base64", "src/core/http", "src/core/png_decode", "src/core/resample", "src/core/wav_decode", "src/core/websocket"]
 
 [workspace.package]
 version = "0.0.0"

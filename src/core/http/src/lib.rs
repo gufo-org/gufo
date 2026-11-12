@@ -1,13 +1,10 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(panic = "abort")]
-compile_error!("the C functions catch panics at the boundary, so build with panic = \"unwind\"");
-
 mod request;
 
+use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use request::{Lookup, Parsed};
 
@@ -63,19 +60,6 @@ pub type GufoHttpFieldFn = unsafe extern "C" fn(
 /// Takes bytes valid during the call only.
 pub type GufoHttpBytesFn = unsafe extern "C" fn(context: *mut c_void, data: *const u8, len: usize);
 
-/// # Safety
-/// `data` points to `len` readable bytes, or `len` is 0.
-#[allow(unsafe_code)]
-unsafe fn input<'a>(data: *const u8, len: usize) -> Option<&'a [u8]> {
-    match (data.is_null(), len) {
-        (_, 0) => Some(&[]),
-        (true, _) => None,
-        // SAFETY: the caller guarantees `len` readable bytes at a non-null
-        // `data`.
-        (false, _) => Some(unsafe { std::slice::from_raw_parts(data, len) }),
-    }
-}
-
 /// Parses the request head at the start of `buffer`. `known_partial` is a
 /// length of the same buffer that already parsed as `Partial` (0 at first),
 /// so that only the new bytes are searched for the end of the head. On
@@ -96,9 +80,9 @@ pub unsafe extern "C" fn gufo_http_parse_head(
     field: Option<GufoHttpFieldFn>,
     context: *mut c_void,
 ) -> GufoHttpParse {
-    catch_unwind(AssertUnwindSafe(|| {
+    guard(GufoHttpParse::Internal, || {
         // SAFETY: the caller guarantees `len` readable bytes.
-        let Some(buffer) = (unsafe { input(buffer, len) }) else {
+        let Some(buffer) = (unsafe { gufo_ffi::input(buffer, len) }) else {
             return GufoHttpParse::Internal;
         };
         // SAFETY: the caller passes a writable `head`; `as_mut` rejects null.
@@ -139,8 +123,7 @@ pub unsafe extern "C" fn gufo_http_parse_head(
             expect_continue: c_int::from(parsed.expect_continue),
         };
         GufoHttpParse::Complete
-    }))
-    .unwrap_or(GufoHttpParse::Internal)
+    })
 }
 
 /// Finds the first parameter of `query` whose decoded name is `key`, hands
@@ -160,13 +143,13 @@ pub unsafe extern "C" fn gufo_http_query_param(
     sink: Option<GufoHttpBytesFn>,
     context: *mut c_void,
 ) -> c_int {
-    catch_unwind(AssertUnwindSafe(|| {
+    guard(-1, || {
         // SAFETY: the caller guarantees `query_len` readable bytes.
-        let Some(query) = (unsafe { input(query, query_len) }) else {
+        let Some(query) = (unsafe { gufo_ffi::input(query, query_len) }) else {
             return -1;
         };
         // SAFETY: the caller guarantees `key_len` readable bytes.
-        let (Some(key), Some(sink)) = (unsafe { input(key, key_len) }, sink) else {
+        let (Some(key), Some(sink)) = (unsafe { gufo_ffi::input(key, key_len) }, sink) else {
             return -1;
         };
         match request::query_param(query, key) {
@@ -179,8 +162,7 @@ pub unsafe extern "C" fn gufo_http_query_param(
             Lookup::Missing => 0,
             Lookup::NoMemory => -1,
         }
-    }))
-    .unwrap_or(-1)
+    })
 }
 
 /// 1 if the comma-separated `value` lists the lowercase `token`, ignoring
@@ -198,18 +180,17 @@ pub unsafe extern "C" fn gufo_http_has_token(
     token: *const u8,
     token_len: usize,
 ) -> c_int {
-    catch_unwind(|| {
+    guard(-1, || {
         // SAFETY: the caller guarantees `value_len` readable bytes.
-        let Some(value) = (unsafe { input(value, value_len) }) else {
+        let Some(value) = (unsafe { gufo_ffi::input(value, value_len) }) else {
             return -1;
         };
         // SAFETY: the caller guarantees `token_len` readable bytes.
-        let Some(token) = (unsafe { input(token, token_len) }) else {
+        let Some(token) = (unsafe { gufo_ffi::input(token, token_len) }) else {
             return -1;
         };
         c_int::from(request::has_token(value, token))
     })
-    .unwrap_or(-1)
 }
 
 #[cfg(test)]

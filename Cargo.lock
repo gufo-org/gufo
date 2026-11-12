@@ -71,6 +71,7 @@ dependencies = [
 name = "gufo-audio-decode"
 version = "0.0.0"
 dependencies = [
+ "gufo-ffi",
  "gufo-resample",
  "gufo-wav-decode",
  "symphonia",
@@ -79,11 +80,19 @@ dependencies = [
 [[package]]
 name = "gufo-base64"
 version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+]
+
+[[package]]
+name = "gufo-ffi"
+version = "0.0.0"
 
 [[package]]
 name = "gufo-http"
 version = "0.0.0"
 dependencies = [
+ "gufo-ffi",
  "httparse",
 ]
 
@@ -91,6 +100,7 @@ dependencies = [
 name = "gufo-png-decode"
 version = "0.0.0"
 dependencies = [
+ "gufo-ffi",
  "png",
 ]
 
@@ -116,6 +126,9 @@ version = "0.0.0"
 [[package]]
 name = "gufo-websocket"
 version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+]
 
 [[package]]
 name = "httparse"

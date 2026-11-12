@@ -46,13 +46,14 @@ Each Rust component is a crate in the Cargo workspace of the root
 `Cargo.toml`, with a small C ABI. The `gufo-rust` crate in `src/core/rust`
 links them into the one static library C++ links, so the standard library is
 linked once. The workspace uses the toolchain pinned in `rust-toolchain.toml`.
-`nix build .#checks.x86_64-linux.rust` checks rustfmt and clippy offline, and
-`nix flake check` includes it; the CMake `check-pr` target does not lint Rust.
+`nix build .#checks.x86_64-linux.rust` checks rustfmt, clippy and all workspace
+unit tests offline. `nix flake check` includes it; the CMake `check-pr` target does not lint Rust.
 Outside Nix, run:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+cargo test --workspace --locked --offline
 ```
 
 CMake Debug builds use Cargo's development profile. RelWithDebInfo uses an
@@ -65,24 +66,17 @@ configured `rustc` reports for its standard library. The C++
 sanitizer preset does not instrument the Rust library; it uses the development
 profile when configured as Debug.
 
-`png_decode_test` decodes generated PNGs and chunk edits with `DecodeImage` and
-with a frozen copy of the libpng decoder from 0.28.1 in
-`tests/core/png_reference.cpp`. The pixels, or the exception type and message,
-must match unless the case is in `kKnownDeviations`. It runs in `check-pr`.
+`png_decode_test` checks expected RGB bytes across color types, sample depths,
+transparency, Adam7 interlacing and EXIF orientations. It fixes the PNG port's intentional framing
+behavior: missing Adler trailers and unknown non-letter chunks are accepted;
+bad IEND CRCs, nonempty IEND and stray IDAT after text are rejected.
+APNG metadata is ignored while decoding the default image. Libpng only
+writes fixtures; no frozen decoder remains.
 
-`png_decode_test --corpus DIR... [--repeat N]` runs the same comparison over
-the `.png` files under each directory and prints the median decode time of both
-decoders per file. CTest does not run this mode.
-
-`wav_decode_test` decodes generated WAVs with `core::DecodeAudio`'s strict
-PCM WAV path, under the limits and status messages of each caller (server,
-Qwen3-ASR, Qwen3-TTS), and with frozen copies of the three C++ decoders from
-0.32.0 in `tests/core/wav_reference.cpp`. The cases cover a grid of formats,
-sample widths, channel counts and sample rates, extreme sample values, chunk
-layouts, the length limits and 8,000 random mutations. The samples must match
-bit for bit, or the messages must match. It runs in `check-pr`.
-`wav_decode_test --time [--repeat N]` prints the median decode time of both
-decoders for long inputs; CTest does not run this mode.
+`wav_decode_test` checks PCM16 values, the strict caller's status mapping,
+truncation and limits, and propagation of C++ callback exceptions. Rust WAV
+unit tests cover wider sample formats, float clamping, chunk layouts and limits.
+Both C++ tests run in `check-pr`.
 
 `audio_decode_test` tests `core::DecodeAudio`, `DownmixMono` and `Resample`
 on generated audio: the float value of each WAV encoding (8- to 32-bit PCM,
@@ -92,7 +86,7 @@ clamping, the channel mean, also while decoding (`downmix_mono`), sines through 
 (passband error below 1e-4, stopband rms below 1e-5, soxr's output length),
 small Ogg Opus and MP3 fixtures, and the status of each rejection. It runs in
 `check-pr`. The resampler and audio decoder crates also have Rust unit tests
-(`cargo test -p gufo-resample -p gufo-audio-decode`), which CI does not run.
+covered by the workspace command above.
 The decoder's tests compare its direct WAV sample conversion with symphonia's
 PCM decoder bit for bit.
 `embedding_gemma2_audio_decoder_test` compares EmbeddingGemma 2's decoder with
@@ -101,41 +95,41 @@ resampled probes within 0.02 at the first sample, where soxr starts a
 two-stage stream differently, and within 1e-3 and -55 dB of error energy
 after it.
 
-`base64_test` compares base64 through each caller with frozen copies of the
-0.33.0 code in `tests/core/base64_reference.cpp`: media data URLs
-(`core::ReadImageUrl`), TTS reference audio (`server::DecodeBase64Wav`), audio
-streams and the WebSocket key (`server::DecodeAudioBase64`), and the encoders.
-The cases cover every quad over a set of digits, padding and other bytes, round
-trips of every length up to 300 bytes with mutations, decoded-size limits and a
-1 MiB payload. The decoded bytes, or the result and message, must match. It
-runs in `check-pr`. `base64_test --time [--repeat N]` prints the median time of
-both implementations for a 20 MiB payload; CTest does not run this mode. The
-codec's own Rust unit tests (`cargo test -p gufo-base64`) do not run in CI.
+`base64_test` checks RFC 4648 vectors through the codec and audio callers,
+round trips, canonical padding, decoded-size limits, data URLs and invalid
+reference audio. Rust unit tests cover error ordering and the codec itself.
 
-`http_request_test` compares the Rust HTTP request parser with frozen copies of
-the 0.33.0 parsing in `tests/cli/http_request_reference.cpp`. Request heads
-that follow RFC 9112 strictly must parse identically: fields, body length,
-`Expect` and head length. Every other difference must be a documented one:
-loose whitespace in the request line, non-token methods, control bytes or
-ill-formed UTF-8 in the target, control bytes in field values and more than
-100 fields are rejected, and bare LF line ends and one empty line before the
-request line are accepted. The heads cover a grid of request lines, fields and
-framing values, 99 to 1,000 fields and 6,000 random mutations; each is also fed
-one byte at a time. Query parameters and header token lists must decode
-identically. It runs in `check-pr`; `http_server_test` checks the same rules
-over a socket. The parser's Rust unit tests (`cargo test -p gufo-http`),
-including its C functions' answers to caller errors, do not run in CI.
+`http_request_test` checks expected head fields and framing through the C ABI,
+both at once and one byte at a time. It fixes each intentional difference of
+the port: strict request-line whitespace, token methods, valid UTF-8 targets,
+no control bytes in targets or values, a 100-field limit, bare LF line ends
+and one leading empty line. Rust tests also check query parameters, header
+lists and caller errors. `http_server_test` checks parsing over a socket.
 
-`websocket_frame_test` compares the Rust WebSocket frame reader, driven as
-`WebSocket::ReadLoop` drives it, with a frozen copy of the 0.33.0 `ReadLoop` in
-`tests/cli/websocket_frame_reference.cpp`, which reads from a byte stream
-instead of a socket. The cases cover every length encoding and the message
-limit, a grid of opcode, FIN, RSV and mask bits, every close code from 0 to
-5100, UTF-8 within and across fragments, the message queue's limits, a stream
-cut at every byte and 4,000 random streams and mutations. The frames sent back
-and the messages queued must match. It runs in `check-pr`;
-`audio_websocket_test` covers the socket side. The reader's Rust unit tests
-(`cargo test -p gufo-websocket`) do not run in CI.
+`websocket_frame_test` checks expected queued messages and reply frames through
+the C ABI: fragments, pings, close codes, UTF-8, length encodings, truncation
+and queue limits. Rust tests cover protocol rejections and buffer reuse;
+`audio_websocket_test` covers sockets. All three parser caller tests run in
+`check-pr`. The frozen C++ decoders were retired after their ports shipped in
+v0.34.0 or earlier. The audio decoder has no frozen C++ oracle; its independent
+symphonia PCM and numerical resampler checks remain.
+
+The hosted Rust check uses Cargo's default test profile, with overflow checks
+and debug assertions enabled. The Windows job builds the Rust library and C++
+callers but does not run `cargo test`. A workspace registration check runs in
+the Rust gate; it verifies every component manifest, linkage through the static
+library, direct `extern crate` declarations and CMake header directories.
+
+Hosted checks restore `/tmp/gufo-rust-cache` for sccache, separately from Cargo's
+offline vendored sources and C++ ccache. Each Nix derivation runs its own server
+against a private snapshot, then publishes complete immutable objects with atomic
+renames. Shared entries are readable and writable by different Nix build users;
+concurrent servers never write to the same local sccache directory. Keys include the pinned toolchain and
+Nix inputs, prefer the same lockfile, and fall back to compatible older lockfiles.
+Every run saves a fresh Actions cache key. Test executables still run on every
+rebuilt check; an unchanged successful derivation reuses Nix's result cache.
+[Validation and timings](rust-ci-validation/README.md) record the cold, warm
+and deliberately broken-test checks.
 
 ## Hosted versus local checks
 
