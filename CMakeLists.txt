@@ -1481,6 +1481,20 @@ endfunction()
     "$<TARGET_FILE:npu_dispatch_fixture>" "${CMAKE_CURRENT_BINARY_DIR}/tests/core/npu-sysfs")
   set_tests_properties(npu_test PROPERTIES LABELS "cpu;npu")
 
+  # On-device NPU check: the in-tree Q8_0 GEMM design (compiled with IRON when
+  # available) against a double reference; skipped without an NPU.
+  include(cmake/GufoNpuDesigns.cmake)
+  gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
+    SOURCES src/core/npu/kernels/q8gemm/q8gemm.cc)
+  if(GUFO_NPU_DESIGNS_AVAILABLE)
+    add_executable(npu_device_test tests/core/npu_device_test.cpp)
+    target_include_directories(npu_device_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(npu_device_test PRIVATE gufo_npu)
+    add_dependencies(npu_device_test npu_design_q8gemm)
+    add_test(NAME npu_device_test COMMAND npu_device_test "${q8gemm_NPU_DIR}")
+    set_tests_properties(npu_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
+  endif()
+
   # the publish suite drives descriptors through dup2
   if (NOT WIN32)
   add_executable(platform_publish_test

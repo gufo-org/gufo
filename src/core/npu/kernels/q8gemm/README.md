@@ -7,8 +7,9 @@ The IRON design behind `gufo::npu::Q8Gemm` (`src/core/npu/q8_gemm.hpp`):
 python3 q8gemm.py <dir>  # writes <dir>/q8gemm.xclbin and <dir>/q8gemm_dispatch.so
 ```
 
-Compiling needs an mlir-aie (IRON) Python with Peano; `Q8Gemm::Open(device,
-<dir>)` loads the result.
+Compiling needs an mlir-aie (IRON) Python with Peano (`nix develop` has them);
+with one, CMake builds it into `build/<preset>/npu/q8gemm`
+(`cmake/GufoNpuDesigns.cmake`). `Q8Gemm::Open(device, <dir>)` loads the result.
 
 - `q8gemm.py`: the 16 shim streams broadcast each to two cores, and each column joins its four cores' outputs.
 - `q8gemm.cc`: the cores' arithmetic. x is int16 with one scale per row. For each 32-code block, the int32 dot is multiplied by the block scale's int16 fraction of the output's largest scale and accumulated in acc64.

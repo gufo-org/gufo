@@ -7,7 +7,7 @@ the common failures, and what to include in a bug report.
 
 ```sh
 gufo diagnose
-gufo diagnose --section gpu        # platform, gpu, inventory or extensions
+gufo diagnose --section gpu        # platform, gpu, npu, inventory or extensions
 gufo diagnose --json               # for scripts and bug reports
 ```
 

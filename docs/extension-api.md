@@ -219,6 +219,10 @@ int w = gemm.Upload(rows, cols, codes, scales);  // Q8_0 codes and block scales
 gemm.Run(w, x, batch, y);                        // y [batch][rows] = x W^T
 ```
 
+To compile your own designs, the dev shell has the IRON toolchain
+(`GUFO_IRON_PYTHON`, `PEANO_INSTALL_DIR`); `gufo diagnose --section npu`
+checks the device.
+
 The header has no XRT types, so your extension builds without XRT headers;
 Gufo links XRT itself. On a machine without an NPU, `Device::Open` throws
 `npu::Error`. Call `ProbeDevices()` before you register an NPU path.

@@ -22,6 +22,11 @@ symlinkJoin {
     pluginLib="${xrt-plugin-amdxdna}/opt/xilinx/xrt/lib"
     ln -sf "$pluginLib/libxrt_driver_xdna.so.2" .
     ln -sf "$pluginLib/libxrt_driver_xdna.so.${xrt-plugin-amdxdna.pluginVersion}" .
+    # The tool wrappers in bin/ (xclbinutil, xrt-smi) run unwrapped/loader
+    # beside themselves.
+    if [ ! -e "$out/bin/unwrapped" ]; then
+      ln -s "$out/opt/xilinx/xrt/bin/unwrapped" "$out/bin/unwrapped"
+    fi
   '';
 
   meta = {
