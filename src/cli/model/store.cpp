@@ -152,7 +152,8 @@ fs::path EntryPath(const fs::path& store, const Installed& model,
   const auto directory = ModelDirectory(store, model.id);
   if (component.entry == ".")
     return directory;
-  return directory / fs::path(component.entry);
+  // Lock paths use '/'; give commands the platform's separator.
+  return (directory / fs::path(component.entry)).make_preferred();
 }
 
 void Materialize(const fs::path& store, const Installed& model) {
