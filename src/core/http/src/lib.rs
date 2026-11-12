@@ -276,6 +276,7 @@ pub unsafe extern "C" fn gufo_multipart_parse(
         };
         match result {
             Ok(()) => GufoMultipartParse::Complete,
+            Err(Failure::NoMemory) => GufoMultipartParse::Internal,
             Err(Failure::NotFormData) => GufoMultipartParse::NotFormData,
             Err(Failure::Boundary) => GufoMultipartParse::BadBoundary,
             Err(Failure::TooManyFields) => GufoMultipartParse::TooManyFields,
@@ -326,6 +327,109 @@ mod tests {
         unsafe {
             (*context.cast::<Vec<u8>>()).extend_from_slice(std::slice::from_raw_parts(data, len))
         };
+    }
+
+    unsafe extern "C" fn multipart_field(
+        context: *mut c_void,
+        field: *const GufoMultipartField,
+    ) -> c_int {
+        // SAFETY: the test passes a Vec and the parser lends a field for the call.
+        unsafe {
+            let field = &*field;
+            (*context.cast::<Vec<u8>>()).extend_from_slice(std::slice::from_raw_parts(
+                field.content.data,
+                field.content.len,
+            ));
+        }
+        0
+    }
+
+    unsafe extern "C" fn multipart_stop(
+        _context: *mut c_void,
+        _field: *const GufoMultipartField,
+    ) -> c_int {
+        1
+    }
+
+    #[test]
+    fn multipart_results_and_caller_errors() {
+        let content_type = b"multipart/form-data; boundary=b";
+        let body = b"--b\r\nContent-Disposition: form-data; name=a\r\n\r\nv\r\n--b--";
+        let mut value = Vec::<u8>::new();
+        let mut call = |data: *const u8, len, input: *const u8, input_len, limit, field, error| {
+            value.clear();
+            // SAFETY: inputs are valid borrowed buffers or deliberate null-pointer
+            // errors; callbacks use the live Vec passed as their context.
+            let result = unsafe {
+                gufo_multipart_parse(
+                    data,
+                    len,
+                    input,
+                    input_len,
+                    limit,
+                    1,
+                    field,
+                    error,
+                    (&raw mut value).cast(),
+                )
+            };
+            (result, value.clone())
+        };
+        let run = |field, error, limit| {
+            (
+                content_type.as_ptr(),
+                content_type.len(),
+                body.as_ptr(),
+                body.len(),
+                limit,
+                field,
+                error,
+            )
+        };
+        let (ty, ty_len, input, len, limit, field, error) = run(
+            Some(multipart_field as GufoMultipartFieldFn),
+            Some(keep_bytes as GufoHttpBytesFn),
+            1,
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, field, error),
+            (GufoMultipartParse::Complete, b"v".to_vec())
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, 0, field, error).0,
+            GufoMultipartParse::TooManyFields
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, Some(multipart_stop), error).0,
+            GufoMultipartParse::Stopped
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, None, error).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(ty, ty_len, input, len, limit, field, None).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(std::ptr::null(), 1, input, len, limit, field, error).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(ty, ty_len, std::ptr::null(), 1, limit, field, error).0,
+            GufoMultipartParse::Internal
+        );
+        assert_eq!(
+            call(ty, ty_len, std::ptr::null(), 0, limit, field, error),
+            (
+                GufoMultipartParse::Malformed,
+                b"multipart body has no opening boundary".to_vec()
+            )
+        );
+        assert_eq!(
+            call(std::ptr::null(), 0, input, len, limit, field, error).0,
+            GufoMultipartParse::NotFormData
+        );
     }
 
     fn parse(

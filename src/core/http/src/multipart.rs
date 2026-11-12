@@ -4,6 +4,8 @@
 //! limit and whether field names must be unique; what a field means stays
 //! with the API.
 
+use std::borrow::Cow;
+
 /// RFC 2046 5.1.1.
 const MAXIMUM_BOUNDARY: usize = 70;
 /// A part's header lines, without the empty line that ends them.
@@ -45,6 +47,8 @@ pub enum Failure {
     Duplicate(Vec<u8>),
     /// The caller stopped at a field.
     Stopped,
+    /// An allocation could not be reserved.
+    NoMemory,
 }
 
 /// One field of a form.
@@ -70,7 +74,10 @@ pub fn parse(
 ) -> Result<(), Failure> {
     let boundary = boundary(content_type)?;
     // CRLF "--" boundary; the first delimiter lacks the CRLF.
-    let delimiter_bytes = [b"\r\n--", &boundary[..]].concat();
+    let mut delimiter_buffer = [0u8; MAXIMUM_BOUNDARY + 4];
+    delimiter_buffer[..4].copy_from_slice(b"\r\n--");
+    delimiter_buffer[4..4 + boundary.len()].copy_from_slice(&boundary);
+    let delimiter_bytes = &delimiter_buffer[..4 + boundary.len()];
     let mut delimiter = Delimiter {
         start: 0,
         part: delimiter_at(body, &delimiter_bytes[2..], 0).ok_or(Failure::Malformed(NO_OPENING))?,
@@ -82,7 +89,7 @@ pub fn parse(
         let content_begin = part + headers_len;
         // The CRLF that ends the headers may also start the next delimiter:
         // a part without content (RFC 2046 body-part).
-        let next = next_delimiter(body, &delimiter_bytes, content_begin - 2)
+        let next = next_delimiter(body, delimiter_bytes, content_begin - 2)
             .ok_or(Failure::Malformed(NO_CLOSING))?;
         let content = &body[content_begin.min(next.start)..next.start];
         fields += 1;
@@ -93,7 +100,7 @@ pub fn parse(
             if names.contains(&name) {
                 return Err(Failure::Duplicate(name));
             }
-            names.push(name.clone());
+            names.try_reserve(1).map_err(|_| Failure::NoMemory)?;
         }
         let field = Field {
             name: &name,
@@ -102,6 +109,9 @@ pub fn parse(
         };
         if !on_field(field) {
             return Err(Failure::Stopped);
+        }
+        if limits.unique_names {
+            names.push(name);
         }
         delimiter = next;
     }
@@ -117,12 +127,14 @@ struct Delimiter {
 }
 
 /// The delimiter line whose `--boundary` starts at `at`: the close delimiter
-/// (`--` follows; an epilogue may come after it), or a delimiter followed by
-/// transport padding and CRLF.
+/// (`--`, transport padding and a line end or EOF follow), or a delimiter
+/// followed by transport padding and CRLF. An epilogue may follow CRLF.
 fn delimiter_at(body: &[u8], dash_boundary: &[u8], at: usize) -> Option<Option<usize>> {
     let rest = body.get(at..)?.strip_prefix(dash_boundary)?;
-    if rest.starts_with(b"--") {
-        return Some(None);
+    if let Some(after) = rest.strip_prefix(b"--") {
+        // Only SP/HTAB are transport padding, not arbitrary ASCII whitespace.
+        let padding = after_padding(after);
+        return (padding.is_empty() || padding.starts_with(b"\r\n")).then_some(None);
     }
     let padding = rest
         .iter()
@@ -131,6 +143,11 @@ fn delimiter_at(body: &[u8], dash_boundary: &[u8], at: usize) -> Option<Option<u
     rest[padding..]
         .starts_with(b"\r\n")
         .then_some(Some(at + dash_boundary.len() + padding + 2))
+}
+
+fn after_padding(bytes: &[u8]) -> &[u8] {
+    let len = bytes.iter().take_while(|&&byte| is_blank(byte)).count();
+    &bytes[len..]
 }
 
 /// The first delimiter (`delimiter_bytes`, CRLF "--" boundary) at or after
@@ -170,8 +187,10 @@ fn part_headers(part: &[u8]) -> Result<(usize, Vec<u8>, bool), Failure> {
     let (Some(disposition), None) = (dispositions.next(), dispositions.next()) else {
         return Err(Failure::Malformed(ONE_DISPOSITION));
     };
-    let (kind, parameters) =
-        parameters(disposition.value).ok_or(Failure::Malformed(DISPOSITION))?;
+    let (kind, parameters) = parameters(disposition.value).map_err(|error| match error {
+        ParameterError::Malformed => Failure::Malformed(DISPOSITION),
+        ParameterError::NoMemory => Failure::NoMemory,
+    })?;
     if !kind.eq_ignore_ascii_case(b"form-data") {
         return Err(Failure::Malformed(DISPOSITION));
     }
@@ -180,29 +199,30 @@ fn part_headers(part: &[u8]) -> Result<(usize, Vec<u8>, bool), Failure> {
         .ok_or(Failure::Malformed(NO_NAME))?;
     let has_filename =
         lookup(&parameters, b"filename").is_some() || lookup(&parameters, b"filename*").is_some();
-    Ok((len, name.to_vec(), has_filename))
+    Ok((
+        len,
+        copy_bytes(name).map_err(|_| Failure::NoMemory)?,
+        has_filename,
+    ))
 }
 
 /// The boundary of a `multipart/form-data` Content-Type.
 fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Failure> {
-    let Some((media_type, parameters)) = parameters(content_type) else {
-        let media_type = content_type
-            .split(|&byte| byte == b';')
-            .next()
-            .unwrap_or_default();
-        return Err(
-            if trim(media_type).eq_ignore_ascii_case(b"multipart/form-data") {
-                Failure::Boundary
-            } else {
-                Failure::NotFormData
-            },
-        );
-    };
-    if !media_type.eq_ignore_ascii_case(b"multipart/form-data") {
+    let media_type = content_type
+        .split(|&byte| byte == b';')
+        .next()
+        .unwrap_or_default();
+    if !trim(media_type).eq_ignore_ascii_case(b"multipart/form-data") {
         return Err(Failure::NotFormData);
     }
+    let (_, parameters) = parameters(content_type).map_err(|error| match error {
+        ParameterError::Malformed => Failure::Boundary,
+        ParameterError::NoMemory => Failure::NoMemory,
+    })?;
     match lookup(&parameters, b"boundary") {
-        Some(boundary) if is_boundary(boundary) => Ok(boundary.to_vec()),
+        Some(boundary) if is_boundary(boundary) => {
+            copy_bytes(boundary).map_err(|_| Failure::NoMemory)
+        }
         _ => Err(Failure::Boundary),
     }
 }
@@ -217,7 +237,7 @@ fn is_boundary(boundary: &[u8]) -> bool {
 }
 
 /// Parameter names with their values.
-type Parameters<'a> = Vec<(&'a [u8], Vec<u8>)>;
+type Parameters<'a> = Vec<(&'a [u8], Cow<'a, [u8]>)>;
 
 fn lookup<'a>(parameters: &'a Parameters<'_>, name: &[u8]) -> Option<&'a [u8]> {
     parameters
@@ -253,23 +273,46 @@ fn is_tchar(byte: u8) -> bool {
 /// `;`. Parameter names ignore ASCII case and appear at most once, and there
 /// are at most `MAXIMUM_PARAMETERS` parameters. As the
 /// parsers before this one did, spaces around `=` are allowed and empty
-/// parameters and names without a value are skipped. `None` if it is
-/// malformed.
-fn parameters(value: &[u8]) -> Option<(&[u8], Parameters<'_>)> {
+/// parameters and names without a value are skipped. Syntax and allocation
+/// failures are reported separately.
+#[derive(Debug)]
+enum ParameterError {
+    Malformed,
+    NoMemory,
+}
+
+impl From<std::collections::TryReserveError> for ParameterError {
+    fn from(_: std::collections::TryReserveError) -> Self {
+        Self::NoMemory
+    }
+}
+
+fn copy_bytes(bytes: &[u8]) -> Result<Vec<u8>, ParameterError> {
+    let mut result = Vec::new();
+    result.try_reserve_exact(bytes.len())?;
+    result.extend_from_slice(bytes);
+    Ok(result)
+}
+
+fn parameters(value: &[u8]) -> Result<(&[u8], Parameters<'_>), ParameterError> {
     let type_end = value
         .iter()
         .position(|&byte| byte == b';')
         .unwrap_or(value.len());
     let kind = trim(&value[..type_end]);
     if kind.is_empty() {
-        return None;
+        return Err(ParameterError::Malformed);
     }
     let mut rest = &value[type_end..];
     let mut parameters: Parameters<'_> = Vec::new();
     loop {
         rest = trim(rest);
         let Some(after) = rest.strip_prefix(b";") else {
-            return rest.is_empty().then_some((kind, parameters));
+            return if rest.is_empty() {
+                Ok((kind, parameters))
+            } else {
+                Err(ParameterError::Malformed)
+            };
         };
         rest = trim(after);
         if rest.is_empty() || rest[0] == b';' {
@@ -279,14 +322,14 @@ fn parameters(value: &[u8]) -> Option<(&[u8], Parameters<'_>)> {
         let name = &rest[..name_len];
         rest = trim(&rest[name_len..]);
         if name.is_empty() {
-            return None;
+            return Err(ParameterError::Malformed);
         }
         if rest.is_empty() || rest[0] == b';' {
             continue;
         }
-        rest = trim(rest.strip_prefix(b"=")?);
+        rest = trim(rest.strip_prefix(b"=").ok_or(ParameterError::Malformed)?);
         if parameters.len() == MAXIMUM_PARAMETERS || lookup(&parameters, name).is_some() {
-            return None;
+            return Err(ParameterError::Malformed);
         }
         let value = if let Some(quoted) = rest.strip_prefix(b"\"") {
             let (value, len) = quoted_string(quoted)?;
@@ -303,38 +346,50 @@ fn parameters(value: &[u8]) -> Option<(&[u8], Parameters<'_>)> {
                     .iter()
                     .any(|&byte| byte == b'"' || byte < 0x21 || byte == 0x7f)
             {
-                return None;
+                return Err(ParameterError::Malformed);
             }
             rest = &rest[len..];
-            token.to_vec()
+            Cow::Borrowed(token)
         };
+        parameters.try_reserve(1)?;
         parameters.push((name, value));
     }
 }
 
-/// The content of a quoted string after its opening quote, and the bytes it
-/// took with the closing quote (RFC 9110 5.6.4): no control bytes but HTAB,
-/// and `\` escapes the next byte.
-fn quoted_string(text: &[u8]) -> Option<(Vec<u8>, usize)> {
+/// Borrow ordinary quoted values; allocate only to remove backslash escapes.
+fn quoted_string(text: &[u8]) -> Result<(Cow<'_, [u8]>, usize), ParameterError> {
     let allowed = |byte: u8| byte == b'\t' || (byte >= 0x20 && byte != 0x7f);
-    let mut value = Vec::new();
+    let mut value: Option<Vec<u8>> = None;
     let mut index = 0;
     loop {
-        match *text.get(index)? {
-            b'"' => return Some((value, index + 1)),
+        match *text.get(index).ok_or(ParameterError::Malformed)? {
+            b'"' => {
+                return Ok((
+                    value.map_or(Cow::Borrowed(&text[..index]), Cow::Owned),
+                    index + 1,
+                ));
+            }
             b'\\' => {
-                let escaped = *text.get(index + 1)?;
+                let escaped = *text.get(index + 1).ok_or(ParameterError::Malformed)?;
                 if !allowed(escaped) {
-                    return None;
+                    return Err(ParameterError::Malformed);
                 }
-                value.push(escaped);
+                if value.is_none() {
+                    value = Some(copy_bytes(&text[..index])?);
+                }
+                let output = value.as_mut().ok_or(ParameterError::Malformed)?;
+                output.try_reserve(1)?;
+                output.push(escaped);
                 index += 2;
             }
             byte if allowed(byte) => {
-                value.push(byte);
+                if let Some(output) = value.as_mut() {
+                    output.try_reserve(1)?;
+                    output.push(byte);
+                }
                 index += 1;
             }
-            _ => return None,
+            _ => return Err(ParameterError::Malformed),
         }
     }
 }
@@ -440,7 +495,7 @@ mod tests {
         for body in [
             format!("{core}--b--"),
             format!("{core}--b--\r\nepilogue"),
-            format!("{core}--b-- trailing"),
+            format!("{core}--b-- \t\r\ntrailing"),
             "--b \t\r\nContent-Disposition: form-data; name=a\r\n\r\n1\r\n--b--".into(),
         ] {
             assert_eq!(
@@ -517,6 +572,31 @@ mod tests {
                 read(CONTENT_TYPE, body.as_bytes(), ANY),
                 Err(Failure::Malformed(message)),
                 "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_delimiters_need_a_line_end() {
+        for content in ["before\r\n--b--junk\r\nafter", "before\r\n--b-- \tjunk"] {
+            let body = format!("{}--b--\r\nepilogue", part("form-data; name=f", content));
+            assert_eq!(
+                read(CONTENT_TYPE, body.as_bytes(), ANY),
+                Ok(vec![field("f", false, content)])
+            );
+        }
+        for ending in ["--b--junk", "--b-- \tjunk", "--b--\n"] {
+            let body = format!("{}{ending}", part("form-data; name=f", "v"));
+            assert_eq!(
+                read(CONTENT_TYPE, body.as_bytes(), ANY),
+                Err(Failure::Malformed(NO_CLOSING))
+            );
+        }
+        for ending in ["--b--", "--b-- \t", "--b-- \t\r\nepilogue"] {
+            let body = format!("{}{ending}", part("form-data; name=f", "v"));
+            assert_eq!(
+                read(CONTENT_TYPE, body.as_bytes(), ANY),
+                Ok(vec![field("f", false, "v")])
             );
         }
     }

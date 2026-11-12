@@ -29,7 +29,8 @@ MultipartResult ParseMultipart(
     const std::function<bool(const MultipartField&)>& on_field) {
   Context context{&on_field, {}, {}};
   // No exception may cross the Rust frames; it is rethrown below.
-  const auto field = [](void* opaque, const GufoMultipartField* parsed) noexcept {
+  const auto field = [](void* opaque,
+                        const GufoMultipartField* parsed) noexcept {
     auto& context = *static_cast<Context*>(opaque);
     return context.failure.Guard(1, [&] {
       return (*context.on_field)({.name = View(parsed->name),

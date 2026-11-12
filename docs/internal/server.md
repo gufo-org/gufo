@@ -34,8 +34,9 @@ most 16 per header field), tolerating spaces around `=` and
 parameters without a value; exactly one `form-data` `Content-Disposition` with
 a `name` per part; part header lines ending in CRLF, at most 16 KiB and 16
 fields per part; the first boundary at the start of the body, a delimiter only
-where `--`, or optional spaces and tabs and CRLF, follow it, and anything after
-the last boundary ignored. Each API sets its field limit (ASR 12, video 16, image 32)
+where optional spaces and tabs and CRLF follow it (or `--` followed by
+padding and CRLF or EOF for the close delimiter). An epilogue after the final
+CRLF is ignored. Each API sets its field limit (ASR 12, video 16, image 32)
 and whether names must be unique (ASR and video). Chat Completions, Responses and Messages stream with Server-Sent
 Events; closing the socket cancels the request in the scheduler. JSON parsing
 rejects duplicate keys, invalid numbers and nesting beyond 128 containers.
