@@ -121,6 +121,21 @@ std::size_t RetentionPolicy::Find(CheckpointId id) const {
 }
 bool RetentionPolicy::Branch(std::size_t candidate) const {
   const auto& e = records_[candidate];
+  if (e.forked) {
+    // A shared fallback can precede the actual divergence by hundreds of
+    // tokens. Its immediate next token then agrees on both branches. Use
+    // the recorded prefix relation to protect it while both branches live.
+    auto deepest = limit_;
+    for (std::size_t i = 0; i < limit_; ++i) {
+      if (!e.below[i] || !records_[i].checkpoint ||
+          !Continuation(records_[i].purpose))
+        continue;
+      if (deepest == limit_ || records_[deepest].below[i])
+        deepest = i;
+      else if (!records_[i].below[deepest])
+        return true;
+    }
+  }
   if (!Continuation(e.purpose))
     return false;
   bool learned = e.purpose == RetentionPurpose::kBranchPoint;
@@ -440,7 +455,7 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
       Prefix(records_[source].checkpoint->Tokens(), r.tokens);
   const bool replaces_source =
       !record_pressure && r.purpose == RetentionPurpose::kRetry &&
-      source != limit_ && !Persisting(source) &&
+      source != limit_ && !Branch(source) && !Persisting(source) &&
       std::ranges::find(r.protected_checkpoints,
                         records_[source].checkpoint->Id()) ==
           r.protected_checkpoints.end() &&

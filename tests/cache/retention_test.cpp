@@ -191,6 +191,28 @@ void RanksAndSources() {
     assert(g.policy.Rank(a) == 3);  // image identities never cover each other
   }
 }
+void SharedGridBeforeTheActualDivergenceIsAFork() {
+  Fixture f;
+  const std::vector<Token> root(8, 7);
+  const auto grid = f.Add(root, RetentionPurpose::kHistory);
+  auto left = root;
+  left.insert(left.end(), 8, 8);
+  auto right = left;
+  left.push_back(9);
+  right.push_back(10);
+  const auto a = f.Add(left);
+  const auto b = f.Add(right);
+  assert(f.policy.Rank(grid) == 3);
+  // A normal retry cannot remove the only common fallback for compaction.
+  RetentionRequest retry{left, {1}, {}, RetentionPurpose::kRetry};
+  retry.reused = true;
+  retry.reused_tokens = root.size();
+  retry.source = grid;
+  assert(!f.policy.Reclaim(retry));
+  f.policy.Remove(a);
+  assert(f.policy.Rank(grid) == 1);
+  f.policy.Remove(b);
+}
 void LongPrefixRelationsAfterReplacement() {
   Fixture f(4);
   const std::vector<Token> prefix(131072, 7);
@@ -1320,6 +1342,7 @@ int main() {
   Planning();
   Branches();
   RanksAndSources();
+  SharedGridBeforeTheActualDivergenceIsAFork();
   LongPrefixRelationsAfterReplacement();
   ShortPeersDoNotCoverHistory();
   HistoryBytePressureCanReplaceOldFamilies();
