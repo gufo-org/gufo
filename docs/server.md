@@ -177,7 +177,12 @@ A stream that fails after it started ends with an error event instead.
 ## Health and restarts
 
 `/health` says the process is alive and `/ready` that the model can serve.
-Neither does GPU work when polled.
+Neither does GPU work when polled. Every answer carries a top-level `status`:
+`ready` (with `model` and `capability`: `text`, `audio_tts`, `audio_asr`,
+`embedding`, `image`, `video` or `decision`), `loading` while the model loads,
+`not_ready` when a service failed to start, and `device_lost` (below). The 503
+answers also keep the usual `error` object, so a scheduler in front of several
+servers reads one key for every state.
 
 When the GPU driver resets, the process can't recover. Gufo answers 503
 `device_lost`, logs `event=device_lost`, and exits with status 75. Run it under

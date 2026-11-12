@@ -352,17 +352,25 @@ HttpResponse Err(int status, const char* reason, const char* message,
   return {.status = status, .reason = reason, .body = e.dump()};
 }
 
-// Health, readiness and generation share one body once the device is lost:
-// `status` matches the health/readiness shape and `error` the API error shape.
-HttpResponse DeviceLost() {
+// A 503 the probes share with the API: `status` matches the health/readiness
+// shape (`loading`, `not_ready`, `device_lost`), so a poller reads one key for
+// every state, and `error` keeps the API error shape.
+HttpResponse Unavailable(const char* status, const char* message,
+                         const char* type, const char* code) {
   json::Value error = json::Value::object();
-  error["message"] = kDeviceLostMessage;
-  error["type"] = "server_error";
-  error["code"] = "device_lost";
+  error["message"] = message;
+  error["type"] = type;
+  error["code"] = code;
   json::Value body = json::Value::object();
-  body["status"] = "device_lost";
+  body["status"] = status;
   body["error"] = std::move(error);
   return {.status = 503, .reason = "Service Unavailable", .body = body.dump()};
+}
+
+// Health, readiness and generation share one body once the device is lost.
+HttpResponse DeviceLost() {
+  return Unavailable("device_lost", kDeviceLostMessage, "server_error",
+                     "device_lost");
 }
 
 HttpResponse NotImplemented(const HttpRequest&, TextGenerationBackend&) {
@@ -1834,8 +1842,8 @@ void LoadingResponder::stop() {
 }
 
 void LoadingResponder::serve() {
-  HttpResponse loading = Err(503, "Service Unavailable", "Loading model",
-                             "unavailable_error", "loading");
+  HttpResponse loading =
+      Unavailable("loading", "Loading model", "unavailable_error", "loading");
   loading.headers.emplace_back("Retry-After", "1");
   const std::string reply = BuildResponse(loading);
   // One connection at a time is enough for probes. Read the request head
@@ -2237,25 +2245,34 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                        (embeddings_ != nullptr && embeddings_->ready()) ||
                        images_ != nullptr || decisions_ != nullptr;
     if (!ready) {
-      return Err(503, "Service Unavailable", "model service is not ready",
-                 "server_error", "not_ready");
+      return Unavailable("not_ready", "model service is not ready",
+                         "server_error", "not_ready");
     }
+    // `capability` uses the `/v1/models` vocabulary, so a scheduler that
+    // fronts several servers learns the kind from the probe it polls anyway.
     json::Value body = json::Value::object();
     body["status"] = "ready";
     if (backend_ != nullptr && backend_->ready()) {
       body["model"] = backend_->model_id();
+      body["capability"] = "text";
     } else if (asr_ != nullptr && asr_->ready()) {
       body["model"] = asr_->model_id();
+      body["capability"] = "audio_asr";
     } else if (tts_ != nullptr && tts_->ready()) {
       body["model"] = tts_->model_id();
+      body["capability"] = "audio_tts";
     } else if (embeddings_ != nullptr && embeddings_->ready()) {
       body["model"] = embeddings_->model_id();
+      body["capability"] = "embedding";
     } else if (decisions_ != nullptr) {
       body["model"] = decisions_->model_id;
+      body["capability"] = "decision";
     } else if (images_ != nullptr) {
       body["model"] = images_->model_id();
+      body["capability"] = "image";
     } else {
       body["model"] = "minimax-h3";
+      body["capability"] = "video";
     }
     return Ok(body);
   }

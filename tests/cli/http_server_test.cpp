@@ -2312,7 +2312,10 @@ void TestDeviceLoss() {
   ExpectStatus(failed, 500);
   assert(failed.find("\"code\":\"server_exception\"") != std::string::npos);
   ExpectStatus(server.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
-  ExpectStatus(server.Send("GET /ready HTTP/1.1\r\n\r\n"), 200);
+  const auto ready = server.Send("GET /ready HTTP/1.1\r\n\r\n");
+  ExpectStatus(ready, 200);
+  assert(ready.find("\"status\":\"ready\"") != std::string::npos);
+  assert(ready.find("\"capability\":\"text\"") != std::string::npos);
   assert(hook_calls == 0);
 
   // A stream has committed its status; the terminal event names the loss.
@@ -2550,8 +2553,8 @@ void ExpectLoading(const std::string& response) {
   assert(response.find("\r\nRetry-After: 1\r\n") != std::string::npos);
   const auto body = response.substr(response.find("\r\n\r\n") + 4);
   assert(body ==
-         R"({"error":{"message":"Loading model","type":"unavailable_error",)"
-         R"("code":"loading"}})");
+         R"({"status":"loading","error":{"message":"Loading model",)"
+         R"("type":"unavailable_error","code":"loading"}})");
 }
 
 void TestLoadingResponder() {
@@ -3531,6 +3534,7 @@ void TestEmbeddingService() {
         SendParts("127.0.0.1", port, {"GET /ready HTTP/1.1\r\n\r\n"});
     ExpectStatus(ready, 200);
     assert(ready.find("\"model\":\"embedding-test\"") != std::string::npos);
+    assert(ready.find("\"capability\":\"embedding\"") != std::string::npos);
     // Routes of other modalities stay absent.
     ExpectStatus(SendParts("127.0.0.1", port,
                            {"POST /v1/chat/completions HTTP/1.1\r\n"
@@ -3553,8 +3557,11 @@ void TestEmbeddingService() {
     ExpectStatus(response, 503);
     assert(response.find("\"code\":\"embedding_service_unavailable\"") !=
            std::string::npos);
-    ExpectStatus(SendParts("127.0.0.1", port, {"GET /ready HTTP/1.1\r\n\r\n"}),
-                 503);
+    const auto not_ready =
+        SendParts("127.0.0.1", port, {"GET /ready HTTP/1.1\r\n\r\n"});
+    ExpectStatus(not_ready, 503);
+    assert(not_ready.find("\"status\":\"not_ready\"") != std::string::npos);
+    assert(not_ready.find("\"code\":\"not_ready\"") != std::string::npos);
     const auto models =
         SendParts("127.0.0.1", port, {"GET /v1/models HTTP/1.1\r\n\r\n"});
     assert(models.find("embedding-test") == std::string::npos);
