@@ -2639,6 +2639,18 @@ void TestLoadingResponder() {
     ExpectStatus(owner.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
   }
 
+  // A second server on a port one already serves fails at bind() and names
+  // the port; on Windows SO_REUSEADDR alone would let it share the listener.
+  {
+    RunningServer owner;
+    HttpServer second("127.0.0.1", owner.server.port(), nullptr);
+    std::string why;
+    assert(!second.start(&why));
+    assert(why.find(std::to_string(owner.server.port())) != std::string::npos);
+    assert(why.find("already in use") != std::string::npos);
+    ExpectStatus(owner.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
+  }
+
   if (!HasIpv6Loopback()) {
     std::cout << "IPv6 loopback unavailable; skipping IPv6 loading checks.\n";
     return;
