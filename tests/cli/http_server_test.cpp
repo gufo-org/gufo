@@ -2552,9 +2552,8 @@ void ExpectLoading(const std::string& response) {
   ExpectStatus(response, 503);
   assert(response.find("\r\nRetry-After: 1\r\n") != std::string::npos);
   const auto body = response.substr(response.find("\r\n\r\n") + 4);
-  assert(body ==
-         R"({"status":"loading","error":{"message":"Loading model",)"
-         R"("type":"unavailable_error","code":"loading"}})");
+  assert(body == R"({"status":"loading","error":{"message":"Loading model",)"
+                 R"("type":"unavailable_error","code":"loading"}})");
 }
 
 void TestLoadingResponder() {
