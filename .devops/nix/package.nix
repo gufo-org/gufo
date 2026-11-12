@@ -23,6 +23,9 @@
   # XRT with the amdxdna plugin (.devops/nix/xrt): the NPU runtime. Null
   # only for revisions that predate it (the CI timing baseline).
   xrt ? null,
+  # The IRON toolchain (.devops/nix/iron), passed through for development
+  # images that compile NPU designs; the package itself never uses it.
+  iron ? null,
   releaseVersion ? null,
   extensionsFromLock ? false,
   extensions ? [ ],
@@ -238,7 +241,7 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock xrt;
+    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock xrt iron;
     extensionMetadata = import ./extension-metadata.nix {
       inherit lib sourceRoot extensions extensionsFromLock;
     };

@@ -15,6 +15,7 @@ lib.makeScope newScope (self: {
   gufo = self.callPackage ./package.nix {
     inherit releaseVersion revision rocmPackages rustToolchain;
     xrt = self.xrt-amdxdna;
+    inherit (self) iron;
   };
   mkServe = self.callPackage ./mk-serve.nix { };
   extensionModules = self.callPackage ./extension-modules.nix { };
