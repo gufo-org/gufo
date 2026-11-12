@@ -191,6 +191,18 @@ void RanksAndSources() {
     assert(g.policy.Rank(a) == 3);  // image identities never cover each other
   }
 }
+void ReusedExactRetryOutlivesAnUnrelatedColdRetry() {
+  Fixture f;
+  f.Add({1, 2, 3});
+  const auto retry = f.Add({1, 2, 3, 4}, RetentionPurpose::kRetry, 3);
+  assert(f.policy.Rank(retry) == 0);
+  f.policy.Touch(retry);
+  assert(f.policy.Rank(retry) == 3);
+  const std::vector<Token> other{9, 10, 11};
+  RetentionRequest request{other, {1}, {}, RetentionPurpose::kRetry};
+  assert(!f.policy.Reclaim(request));
+  assert(f.Cached({1, 2, 3, 4}) == 4);
+}
 void SharedGridBeforeTheActualDivergenceIsAFork() {
   Fixture f;
   const std::vector<Token> root(8, 7);
@@ -1342,6 +1354,7 @@ int main() {
   Planning();
   Branches();
   RanksAndSources();
+  ReusedExactRetryOutlivesAnUnrelatedColdRetry();
   SharedGridBeforeTheActualDivergenceIsAFork();
   LongPrefixRelationsAfterReplacement();
   ShortPeersDoNotCoverHistory();

@@ -174,6 +174,13 @@ std::uint32_t RetentionPolicy::Priority(
     return e.purpose == RetentionPurpose::kRetry     ? 0
            : e.purpose == RetentionPurpose::kHistory ? 1
                                                      : 2;
+  // An exact prompt that was actually restored is no longer a disposable
+  // retry copy. Unrelated cold retries must not evict it immediately merely
+  // because its earlier stable prefix is also retained. Advancing the same
+  // history above still permits replacement; reuse protection ages by bytes.
+  if (e.purpose == RetentionPurpose::kRetry && e.reused_at &&
+      admitted_bytes_ - *e.reused_at < ledger_.Limits().ram_bytes)
+    return 3;
   for (std::size_t i = 0; i < limit_; ++i) {
     const auto& peer = records_[i];
     if (i == candidate || !peer.checkpoint || !Continuation(peer.purpose))
