@@ -20,12 +20,21 @@ if (ENGINE_ENABLE_HIP)
   # -ffast-math is deliberately omitted so the decode math stays bit-faithful
   # to src/core/quant/ggml_dequant.cpp.
   add_library(gufo_glm5_next_kernels STATIC
+    kernels/rocm/dense_wmma.hip.cpp
     kernels/rocm/gemv.hip.cpp
     kernels/rocm/ops.hip.cpp
+    kernels/rocm/routed_compact.hip.cpp
+    kernels/rocm/routed_wmma.hip.cpp
     kernels/rocm/attention.hip.cpp)
+  set_source_files_properties(kernels/rocm/dense_wmma.hip.cpp
+    PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/gemv.hip.cpp
     PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/ops.hip.cpp
+    PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(kernels/rocm/routed_compact.hip.cpp
+    PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(kernels/rocm/routed_wmma.hip.cpp
     PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/attention.hip.cpp
     PROPERTIES LANGUAGE HIP)

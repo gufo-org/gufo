@@ -54,14 +54,29 @@ void Gemv(const void* base, GemvType type, std::uint32_t rows,
 
 /// Multi-row variant of Gemv for the speculative verify pass:
 /// out[o*out_stride + r] = sum_k W[r][k] * x[o*x_stride + k] for o in
-/// [0, tokens). `tokens` must be in [2, 5]. One wave owns an output row and
-/// dots the weight row against all activation rows in a single walk, so the
-/// matrix is read once for the whole token block. Each per-row dot is
-/// bit-identical to the matching Gemv call.
+/// [0, tokens). `tokens` must be in [2, 16]; a width the tier has no
+/// instantiation for runs as descending power-of-two slices. One wave owns
+/// an output row and dots the weight row against all activation rows in a
+/// single walk, so the matrix is read once for the whole token block. Each
+/// per-row dot is bit-identical to the matching Gemv call.
 void GemvRows(const void* base, GemvType type, std::uint32_t tokens,
               std::uint32_t rows, std::uint32_t cols, std::size_t row_bytes,
               const float* x, std::uint32_t x_stride, float* out,
               std::uint32_t out_stride, hipStream_t stream);
+
+/// Grouped multi-row variant: the weight rows are `groups` stacked sub-matrices
+/// of `group_rows` rows each (a per-head loop over a stacked expert tensor run
+/// as one launch). For row r the activation base advances by
+/// `(r / group_rows) * group_advance` floats, reproducing the per-head call
+/// that passed `x + head * group_advance` as the base; every per-row dot is
+/// bit-identical to that loop. out and strides follow GemvRows with
+/// `groups * group_rows` rows.
+void GemvRowsGrouped(const void* base, GemvType type, std::uint32_t tokens,
+                     std::uint32_t groups, std::uint32_t group_rows,
+                     std::uint32_t cols, std::size_t row_bytes, const float* x,
+                     std::uint32_t x_stride, std::uint32_t group_advance,
+                     float* out, std::uint32_t out_stride,
+                     hipStream_t stream);
 
 /// Grouped decode GEMV over a stacked expert matrix. For slot s in [0, used)
 /// with expert id ids[s]: out[s*rows + r] = sum_k W[e][r][k] *
@@ -76,6 +91,21 @@ void GemvGrouped(const void* base, GemvType type, std::size_t expert_stride,
                  std::uint32_t slots_per_row, std::uint32_t rows,
                  std::uint32_t cols, const float* x, std::uint32_t x_stride,
                  float* out, hipStream_t stream);
+
+/// Bucketed tile GEMV over a stacked expert matrix: the wide-chunk form of
+/// GemvGrouped. `tiles` (BuildRoutedTiles) lists `capacity` tile entries
+/// `expert | tile << 16` (dead beyond the last, skipped), `pad_bounds` /
+/// `rows_slot` the 16-row padded bucket layout (RoutedCompact). One wave
+/// decodes its (expert, row) once and dots it against all up to 16 bucket
+/// slots, writing out[slot*rows + r] for each; every per-slot dot is
+/// bit-identical to GemvGrouped's for the same routing. Covers the
+/// 256-block super-codec types (IQ2_XXS/IQ1_M/IQ3_XXS/IQ4_XS/Q2_K/Q3_K).
+void GemvRoutedTiles(const void* base, GemvType type, std::size_t expert_stride,
+                     const std::int32_t* tiles, std::uint32_t capacity,
+                     const std::int32_t* pad_bounds,
+                     const std::int32_t* rows_slot, std::uint32_t slots_per_row,
+                     std::uint32_t rows, std::uint32_t cols, const float* x,
+                     std::uint32_t x_stride, float* out, hipStream_t stream);
 
 /// out[i] = W[row][i] for i in [0, cols): dequantizes a single row of a
 /// row-major [rows x cols] matrix stored in `type` (the token-embedding

@@ -14,29 +14,55 @@ comparisons require the full contract in `docs/COMMON_OPTIMIZATION_STRIX_HALO.md
 
 | test | llama.cpp t/s | gufo t/s |
 | --- | --- | --- |
-| pp2048 | 189.44 ± 5.11 | 21.07 ± 0.26 |
-| tg32 | 16.80 ± 0.02 | 12.12 ± 0.06 |
+| pp2048 | 189.44 ± 5.11 | 67.89 ± 0.61 |
+| tg32 | 16.80 ± 0.02 | 11.45 ± 0.06 |
 
-Gufo column captured 2026-11-10 on `build/gpu-test/gufo` through
+Gufo column captured 2026-11-12 on `build/gpu-test/gufo` (P6 dense Q5_K
+WMMA tier over the P5 fixed + widened WMMA routed tier) through
 `gufo serve` over HTTP with server-reported `timings`, greedy (seed 1),
 `--think off`, `--prefill-chunk 2048`, fresh request per sample, one warmup
-then two timed samples, GPU-exclusive (bench_bg/bench_wait). Phase-3 gate
-(pp2048 ≥ 0.9×, tg32 ≥ 1.0×) is **not met**: 0.11× on pp2048, 0.72× on tg32.
+then two timed samples, GPU-exclusive (bench_bg/bench_wait). These captures
+ran with the default (native, 1M-token) `--context`; since 2026-11-11 all
+gates, A/Bs and lever runs pin `--context 131072` (see
+[staging/models/glm5_next/AGENTS.md](../../../staging/models/glm5_next/AGENTS.md)),
+so re-measure controls at 131072 before comparing against the rows above.
+The matched
+three-point session (`/tmp/opencode/glm5_bench_ab3.sh`, same session):
+baseline (`kChunk = 4`, slot-order grouped MoE) 20.69 ± 0.18 pp2048 /
+12.14 ± 0.08 tg32 → bucket-compacted routed tier 38.56 ± 0.53 → WMMA
+IQ1_M gate/up tier 42.21 ± 0.01 / 12.24 ± 0.00 — later found numerically
+invalid (row-offset bug; see the P4 correction in
+[EXPERIMENTS.md](EXPERIMENTS.md)). The fixed kernel with widened tier
+coverage (IQ1_M + IQ2_XXS gate/up, IQ3_XXS `down`, P5) measures in a
+fresh alternating session (control = `gufo_rows16`,
+`/tmp/opencode/glm5_ab.sh`): pp2048 **51.65 ± 0.17 / 51.65 ± 0.31** vs
+  control 42.69 / 42.35 (**+21.4 %**), tg32 flat (11.30/11.48 vs
+  11.51/11.12); at ~8.4K prompt the tier keeps **+17.2 %** (43.6 avg vs
+  37.2 avg). Phase-3 gate
+  (pp2048 ≥ 0.9×, tg32 ≥ 1.0×) is still **not met**: 0.27× on pp2048,
+  0.68× on tg32.
+  P6 (same day, same protocol, `/tmp/opencode/glm5_ab_p6.sh` with
+  control = `gufo_p5`): the dense Q5_K WMMA tier adds **+32.6 %** —
+  candidate pp2048 68.03 / 67.89 / 67.83 vs control 51.12 / 51.32,
+  cumulative **+59.7 %** over the `gufo_rows16` control (42.52) — tg32
+  flat (11.22 / 11.45 vs 11.26 / 11.31). At ~8.4K prompt the tier keeps
+  **+28 %** (55.8 avg vs 43.6 avg control,
+  `/tmp/opencode/glm5_ab8k_p6.sh`). Gate attainment is now
+  **0.40×** on pp2048 (67.9 vs ≥ 170.5) and 0.68× on tg32.
 
-Root cause of the pp2048 gap is structural, not kernel tuning: the executor
-prefills with the same `kChunk = 4` GEMV path as decode, so all weights are
-re-read every 4 tokens (~185 ms/chunk ≈ 527 GB/s effective, ~21× below the
-llama.cpp batched-GEMM prefill). tg32 implies ~59.5 ms/token ≈ 42 GB/s
-effective expert-weight traffic against a ~2.53 GB/token routed read, i.e.
-heavily below the measured memory ceiling — the fused IQ-expert MoE decode
-kernel and a wide-batch prefill kernel are the Phase-3 headroom.
+The bucket-reuse saturation probe (`kChunk = 512`, flat within noise)
+shows the remaining pp2048 gap is expert-decode efficiency at ~42 GB/s
+effective, not weight re-reads. Both GEMV families are now on the
+tensor-core tier (routed experts +21.4 % under P5, dense Q5_K +32.6 %
+under P6); the remaining tensor-core-scale candidates are the MLA
+GatherScore pass (13.1 % of pp) and the KDA chunked scan (9.3 %).
 
 Gufo reproduce:
 
 ```sh
-setsid tools/bench/bench_bg.sh glm5gate 600 /tmp/opencode/glm5_bench_gates.sh & disown
+setsid tools/bench/bench_bg.sh p6ab 4500 /tmp/opencode/glm5_ab_p6.sh & disown
 sleep 2
-tools/bench/bench_wait.sh glm5gate 660 90
+tools/bench/bench_wait.sh p6ab 5400 90
 ```
 
 Reproduce:

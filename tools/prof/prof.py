@@ -43,6 +43,35 @@ from dataclasses import dataclass, field
 
 # Kernel-name substring -> pipeline stage. First match wins, so order matters.
 STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
+    "glm5": [
+        ("RoutedGateUpWmma", "moe: wmma gate/up"),
+        ("GemvRoutedSuper256", "moe: routed IQ GEMV"),
+        ("GemvGrouped", "moe: grouped IQ GEMV"),
+        ("MoERoute", "moe: route"),
+        ("ExpertCounts", "moe: bucket compaction"),
+        ("RoutedPadBounds", "moe: bucket compaction"),
+        ("RoutedScatter", "moe: bucket compaction"),
+        ("SwigluClamp", "swiglu"),
+        ("WeightedSumAdd", "moe: combine"),
+        ("Kda", "attention: KDA"),
+        ("Mla", "attention: MLA"),
+        ("IdxScore", "attention: indexer"),
+        ("BuildSel", "attention: indexer select"),
+        ("Bitonic", "attention: indexer sort"),
+        ("L2NormHeads", "attention: head norm"),
+        ("HcInputs", "mhc"),
+        ("HcCoeffs", "mhc"),
+        ("HcWriteback", "mhc"),
+        ("EmbedRow", "embed"),
+        ("GemvRows", "dense GEMV (multi-row)"),
+        ("Gemv", "dense GEMV"),
+        ("RmsNorm", "norm"),
+        ("LayerNorm", "norm"),
+        ("F32ToHalf", "convert"),
+        ("Sigmoid", "elementwise"),
+        ("ScaleKernel", "elementwise"),
+        ("AddBias", "elementwise"),
+    ],
     "h3": [
         ("WmmaAttention", "attention"),
         ("ShortAttention", "attention"),
@@ -340,15 +369,30 @@ def split_passes(rows: list[tuple], gap_ns: float) -> list[list[tuple]]:
     return passes
 
 
+def resolve_table(conn: sqlite3.Connection, base: str) -> str:
+    """Returns the table name for `base`. Some rocprofv3 versions suffix
+    every table with the traced process id (`rocpd_kernel_dispatch_<uuid>`);
+    accept either spelling."""
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    if base in names:
+        return base
+    cands = sorted(n for n in names if n.startswith(base + "_"))
+    if not cands:
+        raise SystemExit(f"database has no {base} table")
+    return f'"{cands[0]}"'
+
+
 def load(db_path: str, pass_gap_ms: float | None = None, pass_index: int | None = None) -> Profile:
     conn = sqlite3.connect(db_path)
+    dispatch = resolve_table(conn, "rocpd_kernel_dispatch")
+    symbol = resolve_table(conn, "rocpd_info_kernel_symbol")
     rows = conn.execute(
-        """
+        f"""
         SELECT ks.display_name, kd.start, kd.end,
                kd.grid_size_x, kd.grid_size_y, kd.grid_size_z,
                kd.workgroup_size_x, kd.workgroup_size_y, kd.workgroup_size_z
-        FROM rocpd_kernel_dispatch kd
-        JOIN rocpd_info_kernel_symbol ks ON ks.id = kd.kernel_id
+        FROM {dispatch} kd
+        JOIN {symbol} ks ON ks.id = kd.kernel_id
         ORDER BY kd.start
         """
     ).fetchall()

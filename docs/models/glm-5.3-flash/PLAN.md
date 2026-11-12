@@ -68,21 +68,69 @@ Phase-1 CPU parity fixtures still hold after each kernel switch.
 
 Objective: approach the ~90–95 tok/s ceiling from the README's traffic math.
 
-Status 2026-11-10: serve registration landed and gate benchmarked
-([BENCHMARKS.md](BENCHMARKS.md) gufo column): pp2048 21.07 t/s (0.11×),
-tg32 12.12 t/s (0.72×) — gate not met. Beyond the decode items below, close
-the structural prefill gap: the executor prefill reuses the decode
-`kChunk = 4` GEMV, re-reading all weights per 4 tokens; a wide-batch
-prefill path is required for the pp2048 gate.
+Status 2026-11-10: serve registration landed; gate benchmarked
+([BENCHMARKS.md](BENCHMARKS.md), [EXPERIMENTS.md](EXPERIMENTS.md)). First
+phase-3 prefill steps shipped — wide power-of-two `GemvRows` slices,
+`kChunk = 128`, bucket-compacted `GemvRoutedTiles` expert tier — doubling
+prefill to pp2048 41.61 t/s (0.22×), tg32 12.36 t/s (0.74×); gate not met.
+`kChunk = 512` was flat, so the remaining pp gap is IQ-expert decode
+efficiency, not re-reads. The per-component prefill profile (see
+EXPERIMENTS.md P3d) measured pp GPU time as moe routed IQ GEMV 34 %,
+dense multi-row GEMV 32 %, MLA 12 %, KDA 9 % — both GEMV families run at
+~15-25 % of measured LPDDR peak (weight-decode bound, never DRAM bound).
+P3e collapsed the per-head `attn_k_b`/`attn_v_b` loops into one grouped
+`GemvRows` launch (bit-identical parity) and measured pp-neutral in a
+matched A/B: launch grain was wave ramp, not dispatch gap, so only the
+decode-throughput half of the dense stage counts. P5 (routed IQ WMMA,
++21.4 %) and P6 (dense Q5_K WMMA, +32.6 %, cumulative +59.7 % over
+`gufo_rows16`) took pp2048 to 67.9 t/s — gate attainment 0.40× — and
+both GEMV families at the center of the profile now run on the tensor
+cores. Items below are in measured-share order.
 
-1. Retune MMVQ for IQ1_M/I-quant decode rows on gfx1151 (N, nrow, wave
+1. (Shipped P5 2026-11-12, +21.4 % pp2048 matched) Tensor-core/WMMA tier
+   for the stacked IQ experts (Phase-2 mapping row "Routed MoE" — IQ
+   dequant after LDS read → F16 fragments →
+   `wmma_f32_16x16x16_f16_w32`, flint `mmq` style): the 34 % MoE stage
+   and the measured llama.cpp-level lever for pp *and* tg.
+2. (Shipped P6 2026-11-12, +32.6 % pp2048 matched — `kernels/rocm/
+   dense_wmma`, gated at `GemvN` on Q5_K with `tokens >= 16` and
+   `cols % 256 == 0`; contract `glm5_next.rocm_dense_wmma` NMSE
+   ~3e-08, ctest 9/9) Wider/tensor-core shapes for the Q5_K MLA
+   projections (`GemvRows<16u>`,
+   single largest kernel at 22 % of the capture): launch grain measured
+   out by P3e; decode throughput only. Upstream references
+   (survey 2026-11-12): qwen38 `DenseF16GEMMKernel`
+   (`src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp:7680`)
+   decodes Q8 codes to F16 once per LDS stage
+   (`CodesToHalves` :5416) and wmma-accumulates with F16 acts; the
+   mid-width int8 `W8A8BlockedWmmaGEMMKernel` (:5056, `w8a8_wave64.hip`)
+   is the alternative; ds4 adds token-tile `sharedx` staging and a
+   `wmma_4w` tier at n_tok≥256
+   (`src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_q8.hip.hpp:56,127`)
+   under a per-shape bit policy
+   (`ds4_rocm_matmul.hip.hpp:949-1013`). GLM-5 prefill chunks (128 tok)
+   sit inside ds4's igemm window (n_tok≥32); decode rows 1-8 keep the
+   scalar tier. The glm5 `RoutedWmmaKernel` already carries the
+   proven gfx1151 decode→F16→wmma + C-fragment epilogue machinery.
+3. MLA `GatherScore` rewrite (12 %) and KDA per-token sequential scan
+   (9 %, ~1 M launches of ~26 us) as the follow-up wave. References:
+   ds4 scores 16 heads inside one wave's registers with
+   `permlanex16`/DPP butterfly reduction and 32 keys/block
+   (`ds4_rocm_indexer_score.hip.hpp:49-104`), prefill
+   `indexer_scores_wmma128_kernel` over packed F16 q/k in 128-key tiles
+   (:151); qwen38 compacts selection before scoring (`SelectMarkKernel`
+   `kernels.hip.cpp:2860`, `CompactSelectionKernel` :3058). For KDA,
+   qwen38 `GdnPrefillKernel` (:1984) runs 4-token windows, two rows per
+   wave, eight waves, double-buffered LDS with windows-ahead prefetch —
+   the template for collapsing the 128 sequential Conv/EGate/FoldSk/
+   UpdateOut rounds (`executor.cpp:415-460`). Both rewrites change
+   accumulation order; plan for the P5-style NMSE contract + golden
+   re-approval instead of bit-exact parity.
+4. Retune MMVQ for IQ1_M/I-quant decode rows on gfx1151 (N, nrow, wave
    count — the upstream 6/5–6 tables are legacy defaults).
-2. `GemvMulti` over the 8 routed experts of a block (one activation x,
-   heterogeneous quant types per tensor) + fused shared-expert pairing;
-   target ≥1 launch per expert-tensor currently 3.
-3. lm_head Q4_K GEMV at the 231 GB/s reference shape; output is 154,880
+5. lm_head Q4_K GEMV at the 231 GB/s reference shape; output is 154,880
    rows.
-4. Verify byte-exact logits (temp 0) after each fusion; ABBA + 55 °C
+6. Verify byte-exact logits (temp 0) after each fusion; ABBA + 55 °C
    cooldown protocol, 16K-first, then 65K/100K confirmation.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with

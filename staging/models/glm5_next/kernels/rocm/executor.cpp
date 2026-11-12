@@ -12,8 +12,11 @@
 #include <vector>
 
 #include "staging/models/glm5_next/kernels/rocm/attention.hpp"
+#include "staging/models/glm5_next/kernels/rocm/dense_wmma.hpp"
 #include "staging/models/glm5_next/kernels/rocm/gemv.hpp"
 #include "staging/models/glm5_next/kernels/rocm/ops.hpp"
+#include "staging/models/glm5_next/kernels/rocm/routed_compact.hpp"
+#include "staging/models/glm5_next/kernels/rocm/routed_wmma.hpp"
 
 namespace gufo::models::glm5_next::rocm {
 namespace {
@@ -72,6 +75,21 @@ GemvType OfType(core::GgmlType t) {
   return type;
 }
 
+// Expert stack types the bucketed tile tier launches (GemvRoutedTiles).
+bool IsRoutedTier(GemvType type) {
+  switch (type) {
+    case GemvType::kIQ2_XXS:
+    case GemvType::kIQ1_M:
+    case GemvType::kIQ3_XXS:
+    case GemvType::kIQ4_XS:
+    case GemvType::kQ2_K:
+    case GemvType::kQ3_K:
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool Alloc(std::vector<void*>* pool, void** p, std::size_t bytes) {
   if (hipMalloc(p, bytes) != hipSuccess) {
     return false;
@@ -88,7 +106,10 @@ bool AllocT(std::vector<void*>* pool, T** p, std::size_t count) {
 // Chunk-friendly GEMV dispatch: n == 1 stays on the plain tier, n > 1 walks
 // the weights once for all rows through the Rows tier, whose per-row dots
 // are bit-identical to the matching plain calls (and to each other across
-// chunk widths, since each accumulator runs the same j-sequence).
+// chunk widths, since each accumulator runs the same j-sequence). Dense
+// Q5_K tiles of 16+ tokens take the WMMA tensor-core tier instead; its
+// accumulation order differs from the scalar dot, so the quality contract
+// lives in the dense_wmma test, not bit-equality.
 void GemvN(std::uint32_t tokens, const DeviceTensor& t, const float* x,
            std::uint32_t x_stride, float* out, std::uint32_t out_stride) {
   if (tokens <= 1) {
@@ -96,6 +117,11 @@ void GemvN(std::uint32_t tokens, const DeviceTensor& t, const float* x,
     return;
   }
   assert(tokens <= Executor::kChunk);
+  if (DenseWmmaSupports(OfType(t.type)) && tokens >= 16 && t.cols % 256 == 0U) {
+    DenseWmma(t.data, OfType(t.type), t.rows, t.cols, x, x_stride, out,
+              out_stride, tokens, nullptr);
+    return;
+  }
   GemvRows(t.data, OfType(t.type), tokens, t.rows, t.cols, t.row_bytes, x,
            x_stride, out, out_stride, nullptr);
 }
@@ -178,6 +204,14 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   };
   const std::size_t inner_n = static_cast<std::size_t>(nc) * inner;
   const std::size_t used_n = static_cast<std::size_t>(nc) * c.num_experts_used;
+  // 16-slot bucket tiles: every bucket is a whole number of 16-row tiles
+  // and the padded buckets occupy at most `slots + 15 * experts` rows.
+  e->tiles_cap_ =
+      static_cast<std::uint32_t>((used_n + 15U * c.num_experts + 15U) / 16U);
+  // 32-slot tiles for the fused WMMA gate/up tier: the same bound with a
+  // 32-row tile height.
+  e->tiles_wide_cap_ = static_cast<std::uint32_t>(
+      (used_n + 31U * c.num_experts + 31U) / 32U);
   if (!f(&e->w_, static_cast<std::size_t>(hc) * h) ||
       !f(&e->mean4_, hc) ||
       !f(&e->s0_, static_cast<std::size_t>(nc) * hc * h) ||
@@ -219,6 +253,15 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       !f(&e->logits_, c.vocab_size) ||
       !AllocT(&pool, &e->overflow_, 1) ||
       !AllocT(&pool, &e->ids_, used_n) ||
+      !AllocT(&pool, &e->expert_counts_, c.num_experts) ||
+      !AllocT(&pool, &e->pad_bounds_, c.num_experts + 1) ||
+      !AllocT(&pool, &e->cursors_, c.num_experts) ||
+      !AllocT(&pool, &e->rows_slot_,
+              RoutedCompactRows(used_n, c.num_experts)) ||
+      !AllocT(&pool, &e->tiles_, e->tiles_cap_) ||
+      !AllocT(&pool, &e->tiles_wide_, e->tiles_wide_cap_) ||
+      !AllocT(&pool, &e->x_half_, static_cast<std::size_t>(nc) * h) ||
+      !AllocT(&pool, &e->moe_inter_half_, used_n * c.expert_ff) ||
       !AllocT(&pool, &e->head_ids_, static_cast<std::size_t>(nc) * heads)) {
     return fail("Executor scratch allocation failed");
   }
@@ -493,20 +536,22 @@ void Executor::DsaLayer(const DeviceLayer& l, std::uint32_t slot,
   GemvN(n, l.attn_q_b, qr_, c.q_lora_rank, q_, c.MlaQSize());
   GemvN(n, l.idx_q_b, qr_, c.q_lora_rank, iq_, iq_n);
   GemvN(n, l.idx_proj, x, c.hidden_size, iw_, c.indexer_heads);
-  // Per-head k/v absorption runs one plain GEMV per head over the stacked
-  // Expert() slice (Q8_0 heads have no grouped kernel). Slots are the
+  // Per-head k absorption runs one plain GEMV per head over the stacked
+  // Expert() slice (Q8_0 heads have no grouped kernel); the multi-token
+  // pass stacks all heads into one grouped launch. Slots are the
   // (token, head) pairs: token r sits at x + r * x_stride.
-  for (std::uint32_t hd = 0; hd < heads; ++hd) {
-    if (n == 1) {
+  if (n == 1) {
+    for (std::uint32_t hd = 0; hd < heads; ++hd) {
       Gemv(l.attn_k_b.Expert(hd), OfType(l.attn_k_b.type), l.attn_k_b.rows,
            l.attn_k_b.cols, l.attn_k_b.row_bytes, q_ + hd * l.attn_k_b.cols,
            q_abs_ + hd * latent, nullptr);
-    } else {
-      GemvRows(l.attn_k_b.Expert(hd), OfType(l.attn_k_b.type), n,
-               l.attn_k_b.rows, l.attn_k_b.cols, l.attn_k_b.row_bytes,
-               q_ + hd * l.attn_k_b.cols, c.MlaQSize(),
-               q_abs_ + hd * latent, heads * latent, nullptr);
     }
+  } else {
+    assert(l.attn_k_b.rows == latent);
+    GemvRowsGrouped(l.attn_k_b.Expert(0), OfType(l.attn_k_b.type), n, heads,
+                    l.attn_k_b.rows, l.attn_k_b.cols, l.attn_k_b.row_bytes, q_,
+                    c.MlaQSize(), l.attn_k_b.cols, q_abs_, heads * latent,
+                    nullptr);
   }
   // The reference softmax scale is 1/sqrt(n_embd_head_k_mla) (llama-graph
   // build_attn_mha kq_scale, glm5-next.cpp); folding it into the absorbed q
@@ -547,19 +592,20 @@ void Executor::DsaLayer(const DeviceLayer& l, std::uint32_t slot,
                      nullptr);
   }
 
-  // Per-head value maps (same head loop shape as the k absorption) and
-  // the chunked output projection.
-  for (std::uint32_t hd = 0; hd < heads; ++hd) {
-    if (n == 1) {
+  // Per-head value maps (same head loop shape as the k absorption, same
+  // grouped multi-token launch) and the chunked output projection.
+  if (n == 1) {
+    for (std::uint32_t hd = 0; hd < heads; ++hd) {
       Gemv(l.attn_v_b.Expert(hd), OfType(l.attn_v_b.type), l.attn_v_b.rows,
            l.attn_v_b.cols, l.attn_v_b.row_bytes, dsa_latent_ + hd * latent,
            head_out_ + hd * l.attn_v_b.rows, nullptr);
-    } else {
-      GemvRows(l.attn_v_b.Expert(hd), OfType(l.attn_v_b.type), n,
-               l.attn_v_b.rows, l.attn_v_b.cols, l.attn_v_b.row_bytes,
-               dsa_latent_ + hd * latent, heads * latent,
-               head_out_ + hd * l.attn_v_b.rows, c.MlaVSize(), nullptr);
     }
+  } else {
+    assert(heads * l.attn_v_b.rows == c.MlaVSize());
+    GemvRowsGrouped(l.attn_v_b.Expert(0), OfType(l.attn_v_b.type), n, heads,
+                    l.attn_v_b.rows, l.attn_v_b.cols, l.attn_v_b.row_bytes,
+                    dsa_latent_, heads * latent, latent, head_out_,
+                    c.MlaVSize(), nullptr);
   }
   GemvN(n, l.attn_out, head_out_, c.MlaVSize(), y, c.hidden_size);
 
@@ -602,25 +648,100 @@ void Executor::Ffn(const DeviceLayer& l, std::uint32_t il, const float* x,
              ids_ + static_cast<std::size_t>(r) * used, nullptr);
   }
 
-  // One grouped sweep over all N * used expert slots. The gate/up gemms
-  // share the hidden-state row of each token (slots_per_row = used); the
-  // down gemm consumes the own activation row of every slot
-  // (slots_per_row = 1).
-  GemvGrouped(l.ffn_gate_exps.data, OfType(l.ffn_gate_exps.type),
-              l.ffn_gate_exps.row_bytes * l.ffn_gate_exps.rows, ids_,
-              n * used, used, l.ffn_gate_exps.rows, l.ffn_gate_exps.cols, x, h,
-              moe_gate_, nullptr);
-  GemvGrouped(l.ffn_up_exps.data, OfType(l.ffn_up_exps.type),
-              l.ffn_up_exps.row_bytes * l.ffn_up_exps.rows, ids_, n * used,
-              used, l.ffn_up_exps.rows, l.ffn_up_exps.cols, x, h, moe_up_,
-              nullptr);
+  // One sweep over all N * used expert slots, weight row per tile. Below
+  // `kBucketMinRows` the grouped sweep follows the slot order directly;
+  // from there the slots are compacted into 16-row padded expert buckets
+  // and each decode of a weight row serves up to 16 slot rows of the same
+  // expert. The gate/up gemms share the hidden-state row of each token
+  // (slots_per_row = used); the down gemm consumes the own activation row
+  // of every slot (slots_per_row = 1). Per-slot dots and stores are the
+  // same order as the grouped tier, so the outputs are bit-identical.
+  const std::uint32_t slots = n * used;
+  const bool bucketed = n >= kBucketMinRows &&
+                        IsRoutedTier(OfType(l.ffn_gate_exps.type)) &&
+                        IsRoutedTier(OfType(l.ffn_up_exps.type)) &&
+                        IsRoutedTier(OfType(l.ffn_down_exps.type));
+  // Over low-bit IQ stacks the wide chunk additionally takes the WMMA
+  // tensor-core tier: one launch dots the 32-slot expert tiles against an
+  // F16 copy of the activations. IQ1_M/IQ2_XXS gate/up replace both gate/up
+  // GEMVs and the clamp pass (fused swiglu); IQ3_XXS down replaces the down
+  // GEMV on the F16 copy of moe_inter. Tensor-core accumulation order
+  // differs from the scalar dot, so tier quality is held by the routed_wmma
+  // contract, not bit-equality.
+  const GemvType gu_type = OfType(l.ffn_gate_exps.type);
+  const bool gu_wmma =
+      bucketed && gu_type == OfType(l.ffn_up_exps.type) &&
+      (gu_type == GemvType::kIQ1_M || gu_type == GemvType::kIQ2_XXS);
+  const bool down_wmma =
+      bucketed && OfType(l.ffn_down_exps.type) == GemvType::kIQ3_XXS;
+  const bool tier_wide = gu_wmma || down_wmma;
   const float clamp = c.SwigluClampExp(il);
-  SwigluClamp(moe_gate_, moe_up_, moe_inter_, n * used, c.expert_ff,
-              c.expert_ff, c.expert_ff, c.expert_ff, clamp, clamp, nullptr);
-  GemvGrouped(l.ffn_down_exps.data, OfType(l.ffn_down_exps.type),
-              l.ffn_down_exps.row_bytes * l.ffn_down_exps.rows, ids_,
-              n * used, 1U, l.ffn_down_exps.rows, l.ffn_down_exps.cols,
-              moe_inter_, c.expert_ff, moe_down_, nullptr);
+  if (bucketed) {
+    ExpertCounts(ids_, slots, c.num_experts, expert_counts_, nullptr);
+    BuildRoutedTiles(expert_counts_, c.num_experts, 16U, tiles_cap_, tiles_,
+                     tier_wide ? 32U : 16U, tiles_wide_cap_,
+                     tier_wide ? tiles_wide_ : tiles_, nullptr);
+    RoutedCompact(ids_, expert_counts_, pad_bounds_, cursors_, rows_slot_, n,
+                  used, c.num_experts, nullptr);
+  }
+  if (gu_wmma) {
+    ConvertF32ToHalf(x, x_half_, static_cast<std::size_t>(n) * h, overflow_,
+                     nullptr);
+    RoutedGateUpWmma(gu_type, l.ffn_gate_exps.data, l.ffn_up_exps.data,
+                     l.ffn_gate_exps.row_bytes * l.ffn_gate_exps.rows,
+                     static_cast<std::size_t>(c.num_experts) *
+                         l.ffn_gate_exps.row_bytes * l.ffn_gate_exps.rows,
+                     x_half_, h, tiles_wide_, tiles_wide_cap_, pad_bounds_,
+                     rows_slot_, used, l.ffn_gate_exps.rows,
+                     l.ffn_gate_exps.cols, clamp, moe_inter_, nullptr);
+  } else if (bucketed) {
+    GemvRoutedTiles(l.ffn_gate_exps.data, OfType(l.ffn_gate_exps.type),
+                    l.ffn_gate_exps.row_bytes * l.ffn_gate_exps.rows, tiles_,
+                    tiles_cap_, pad_bounds_, rows_slot_, used,
+                    l.ffn_gate_exps.rows, l.ffn_gate_exps.cols, x, h, moe_gate_,
+                    nullptr);
+    GemvRoutedTiles(l.ffn_up_exps.data, OfType(l.ffn_up_exps.type),
+                    l.ffn_up_exps.row_bytes * l.ffn_up_exps.rows, tiles_,
+                    tiles_cap_, pad_bounds_, rows_slot_, used,
+                    l.ffn_up_exps.rows, l.ffn_up_exps.cols, x, h, moe_up_,
+                    nullptr);
+  } else {
+    GemvGrouped(l.ffn_gate_exps.data, OfType(l.ffn_gate_exps.type),
+                l.ffn_gate_exps.row_bytes * l.ffn_gate_exps.rows, ids_,
+                n * used, used, l.ffn_gate_exps.rows, l.ffn_gate_exps.cols, x,
+                h, moe_gate_, nullptr);
+    GemvGrouped(l.ffn_up_exps.data, OfType(l.ffn_up_exps.type),
+                l.ffn_up_exps.row_bytes * l.ffn_up_exps.rows, ids_, n * used,
+                used, l.ffn_up_exps.rows, l.ffn_up_exps.cols, x, h, moe_up_,
+                nullptr);
+  }
+  if (!gu_wmma) {
+    SwigluClamp(moe_gate_, moe_up_, moe_inter_, n * used, c.expert_ff,
+                c.expert_ff, c.expert_ff, c.expert_ff, clamp, clamp, nullptr);
+  }
+  if (down_wmma) {
+    ConvertF32ToHalf(moe_inter_, moe_inter_half_,
+                     static_cast<std::size_t>(slots) * c.expert_ff, overflow_,
+                     nullptr);
+    RoutedDownWmma(OfType(l.ffn_down_exps.type), l.ffn_down_exps.data,
+                   l.ffn_down_exps.row_bytes * l.ffn_down_exps.rows,
+                   static_cast<std::size_t>(c.num_experts) *
+                       l.ffn_down_exps.row_bytes * l.ffn_down_exps.rows,
+                   moe_inter_half_, c.expert_ff, tiles_wide_, tiles_wide_cap_,
+                   pad_bounds_, rows_slot_, l.ffn_down_exps.rows,
+                   l.ffn_down_exps.cols, moe_down_, nullptr);
+  } else if (bucketed) {
+    GemvRoutedTiles(l.ffn_down_exps.data, OfType(l.ffn_down_exps.type),
+                    l.ffn_down_exps.row_bytes * l.ffn_down_exps.rows, tiles_,
+                    tiles_cap_, pad_bounds_, rows_slot_, 1U,
+                    l.ffn_down_exps.rows, l.ffn_down_exps.cols, moe_inter_,
+                    c.expert_ff, moe_down_, nullptr);
+  } else {
+    GemvGrouped(l.ffn_down_exps.data, OfType(l.ffn_down_exps.type),
+                l.ffn_down_exps.row_bytes * l.ffn_down_exps.rows, ids_,
+                n * used, 1U, l.ffn_down_exps.rows, l.ffn_down_exps.cols,
+                moe_inter_, c.expert_ff, moe_down_, nullptr);
+  }
 
   // Shared expert into y, then the weighted routed experts fold in.
   GemvN(n, l.shexp_gate, x, h, f_gate_, c.shared_expert_ff);

@@ -14,6 +14,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "staging/models/glm5_next/kernels/rocm/gemv.hpp"
+#include "staging/models/glm5_next/kernels/rocm/routed_compact.hpp"
 #include "staging/tests/models/glm5_next/hip_test.hpp"
 
 // GEMV tier checks for glm5_next. Synthetic random-byte matrices (with the
@@ -207,6 +208,56 @@ bool TestRowsBits(const TypeSpec& spec) {
   return ok;
 }
 
+// Stacking the per-head GEMV loop into one grouped launch must reproduce
+// the per-head calls bit-for-bit.
+bool TestRowsGroupedBits(const TypeSpec& spec) {
+  constexpr std::uint32_t kGroups = 3U;
+  constexpr std::uint32_t kTokens = 2U;
+  const auto w = MakeMatrix(
+      spec, kGroups * kRows,
+      0x9e370007U + static_cast<std::uint32_t>(spec.row_bytes));
+  const auto x =
+      t::MakeValues(static_cast<std::size_t>(kTokens) * kGroups * kCols,
+                    0x44556677U, 1.0F);
+  t::HipBuffer<std::uint8_t> d_w(w.size());
+  t::CheckHip(hipMemcpy(d_w.get(), w.data(), w.size(), hipMemcpyHostToDevice),
+              "upload weights");
+  t::HipBuffer<float> d_x(x.size());
+  t::Upload(&d_x, x);
+  const std::size_t total = static_cast<std::size_t>(kTokens) * kGroups * kRows;
+  t::HipBuffer<float> d_multi(total);
+  q::GemvRowsGrouped(d_w.get(), spec.type, kTokens, kGroups, kRows, kCols,
+                     spec.row_bytes, d_x.get(), kGroups * kCols, kCols,
+                     d_multi.get(), kGroups * kRows, nullptr);
+  const auto multi = t::Download(&d_multi, total);
+  bool ok = true;
+  for (std::uint32_t hd = 0; hd < kGroups; ++hd) {
+    t::HipBuffer<float> d_single(total);
+    q::GemvRows(d_w.get() + static_cast<std::size_t>(hd) * kRows *
+                                   spec.row_bytes,
+                spec.type, kTokens, kRows, kCols, spec.row_bytes,
+                d_x.get() + static_cast<std::size_t>(hd) * kCols,
+                kGroups * kCols, d_single.get(), kGroups * kRows, nullptr);
+    const auto single = t::Download(&d_single, total);
+    double diff = 0.0;
+    for (std::uint32_t o = 0; o < kTokens; ++o) {
+      for (std::uint32_t r = 0; r < kRows; ++r) {
+        const std::size_t base =
+            static_cast<std::size_t>(o) * kGroups * kRows;
+        diff = std::max(
+            diff, static_cast<double>(
+                      std::bit_cast<std::int32_t>(multi[base + hd * kRows +
+                                                        r]) !=
+                      std::bit_cast<std::int32_t>(single[base + r])));
+      }
+    }
+    ok &=
+        Check((std::string("gemv_rows_grouped ") + spec.name).c_str(), diff,
+              0.0);
+  }
+  return ok;
+}
+
 // Grouped expert decode: random ids over a stacked matrix against the CPU
 // dot of each selected expert row.
 bool TestGrouped(q::GemvType type, std::size_t expert_stride,
@@ -264,6 +315,84 @@ bool TestGrouped(q::GemvType type, std::size_t expert_stride,
   }
   const std::string label = std::string("grouped ") + spec->name;
   return Check(label.c_str(), t::WorstRelative(ref, got), 2e-3);
+}
+
+// Bucketed tile-tier parity: over the same random routing (tokens x used
+// slots over stacked experts), the slot-order GemvGrouped and the
+// compacted 16-row bucket tier (ExpertCounts / BuildRoutedTiles /
+// RoutedCompact + GemvRoutedTiles) must produce bit-identical output for
+// both Ffn layouts: gate/up sharing one hidden row per token
+// (slots_per_row = used) and down with one activation row per slot
+// (slots_per_row = 1).
+bool TestRouted(q::GemvType type, std::size_t expert_stride,
+                const std::vector<std::uint8_t>& stack,
+                std::uint32_t slots_per_row) {
+  constexpr std::uint32_t kExperts = 9;
+  constexpr std::uint32_t kStackRows = 6;
+  constexpr std::uint32_t kTokens = 33;
+  constexpr std::uint32_t kUsed = 8;
+  const std::uint32_t slots = kTokens * kUsed;
+  std::vector<std::int32_t> ids(slots);
+  std::uint32_t rng = 0x9e3779b9U + slots_per_row;
+  for (std::int32_t& id : ids) {
+    id = static_cast<std::int32_t>(t::NextRandom(&rng) % kExperts);
+  }
+  const std::size_t x_rows = slots_per_row == 1U ? slots : kTokens;
+  const auto x = t::MakeValues(x_rows * kCols, 0xfeedfaceU, 1.0F);
+  t::HipBuffer<std::uint8_t> d_w(stack.size());
+  t::CheckHip(
+      hipMemcpy(d_w.get(), stack.data(), stack.size(), hipMemcpyHostToDevice),
+      "upload stack");
+  t::HipBuffer<std::int32_t> d_ids(slots);
+  t::CheckHip(
+      hipMemcpy(d_ids.get(), ids.data(), ids.size() * sizeof(std::int32_t),
+                hipMemcpyHostToDevice),
+      "upload ids");
+  t::HipBuffer<float> d_x(x.size());
+  t::Upload(&d_x, x);
+  t::HipBuffer<float> d_ref(static_cast<std::size_t>(slots) * kStackRows);
+  q::GemvGrouped(d_w.get(), type, expert_stride, d_ids.get(), slots,
+                 slots_per_row, kStackRows, kCols, d_x.get(), kCols,
+                 d_ref.get(), nullptr);
+  constexpr std::uint32_t kTileRows = 16U;
+  const std::uint32_t cap =
+      q::RoutedTileCapacity(slots, kExperts, kTileRows);
+  t::HipBuffer<std::uint32_t> d_counts(kExperts);
+  t::HipBuffer<std::int32_t> d_pad(kExperts + 1);
+  t::HipBuffer<std::int32_t> d_cur(kExperts);
+  t::HipBuffer<std::int32_t> d_slot(
+      q::RoutedCompactRows(slots, kExperts));
+  t::HipBuffer<std::int32_t> d_tiles(cap);
+  q::ExpertCounts(d_ids.get(), slots, kExperts, d_counts.get(), nullptr);
+  q::BuildRoutedTiles(d_counts.get(), kExperts, kTileRows, cap, d_tiles.get(),
+                      kTileRows, cap, d_tiles.get(), nullptr);
+  q::RoutedCompact(d_ids.get(), d_counts.get(), d_pad.get(), d_cur.get(),
+                   d_slot.get(), kTokens, kUsed, kExperts, nullptr);
+  t::HipBuffer<float> d_out(static_cast<std::size_t>(slots) * kStackRows);
+  q::GemvRoutedTiles(d_w.get(), type, expert_stride, d_tiles.get(), cap,
+                     d_pad.get(), d_slot.get(), slots_per_row, kStackRows,
+                     kCols, d_x.get(), kCols, d_out.get(), nullptr);
+  const auto ref =
+      t::Download(&d_ref, static_cast<std::size_t>(slots) * kStackRows);
+  const auto got =
+      t::Download(&d_out, static_cast<std::size_t>(slots) * kStackRows);
+  std::size_t diff = 0;
+  for (std::size_t i = 0; i < ref.size(); ++i) {
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    std::memcpy(&a, &ref[i], sizeof(a));
+    std::memcpy(&b, &got[i], sizeof(b));
+    diff += a != b;
+  }
+  const TypeSpec* spec = nullptr;
+  for (const auto& candidate : kTypes) {
+    if (candidate.type == type) {
+      spec = &candidate;
+    }
+  }
+  const std::string label = std::string("routed==grouped ") + spec->name +
+                            (slots_per_row == 1U ? " down" : " gate");
+  return Check(label.c_str(), static_cast<double>(diff), 0.0);
 }
 
 bool TestF32ToHalf() {
@@ -333,6 +462,7 @@ int main() {
         continue;
       }
       ok &= TestRowsBits(spec);
+      ok &= TestRowsGroupedBits(spec);
     }
     // Grouped tier over stacked IQ + low-bit matrices and F32.
     for (q::GemvType type :
@@ -353,6 +483,26 @@ int main() {
                     w.data(), w.size());
       }
       ok &= TestGrouped(type, w.size(), stack);
+    }
+    // Routed tier: 9 replicated experts and a wide random routing, both
+    // Ffn layouts bit-identical to the grouped tier.
+    for (q::GemvType type : {q::GemvType::kIQ2_XXS, q::GemvType::kIQ1_M,
+                             q::GemvType::kIQ3_XXS, q::GemvType::kIQ4_XS,
+                             q::GemvType::kQ2_K, q::GemvType::kQ3_K}) {
+      const TypeSpec* spec = nullptr;
+      for (const auto& candidate : kTypes) {
+        if (candidate.type == type) {
+          spec = &candidate;
+        }
+      }
+      const auto w = MakeMatrix(*spec, 6, 0x24681357U);
+      std::vector<std::uint8_t> stack(w.size() * 9);
+      for (std::uint32_t e = 0; e < 9; ++e) {
+        std::memcpy(stack.data() + static_cast<std::size_t>(e) * w.size(),
+                    w.data(), w.size());
+      }
+      ok &= TestRouted(type, w.size(), stack, 8U);
+      ok &= TestRouted(type, w.size(), stack, 1U);
     }
     ok &= TestF32ToHalf();
   } catch (const std::exception& error) {

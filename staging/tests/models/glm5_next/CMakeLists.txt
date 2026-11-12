@@ -26,6 +26,22 @@ if(ENGINE_ENABLE_HIP)
   set_tests_properties(glm5_next.rocm_gemv PROPERTIES
     LABELS "glm5_next;hip;gpu;gfx1151")
 
+  add_executable(glm5_next_routed_wmma_test EXCLUDE_FROM_ALL
+    routed_wmma_test.cpp)
+  target_link_libraries(glm5_next_routed_wmma_test PRIVATE
+    gufo_glm5_next_kernels)
+  add_test(NAME glm5_next.rocm_routed_wmma COMMAND glm5_next_routed_wmma_test)
+  set_tests_properties(glm5_next.rocm_routed_wmma PROPERTIES
+    LABELS "glm5_next;hip;gpu;gfx1151")
+
+  add_executable(glm5_next_dense_wmma_test EXCLUDE_FROM_ALL
+    dense_wmma_test.cpp)
+  target_link_libraries(glm5_next_dense_wmma_test PRIVATE
+    gufo_glm5_next_kernels)
+  add_test(NAME glm5_next.rocm_dense_wmma COMMAND glm5_next_dense_wmma_test)
+  set_tests_properties(glm5_next.rocm_dense_wmma PROPERTIES
+    LABELS "glm5_next;hip;gpu;gfx1151")
+
   add_executable(glm5_next_rocm_ops_test EXCLUDE_FROM_ALL
     rocm_ops_test.cpp)
   target_link_libraries(glm5_next_rocm_ops_test PRIVATE
@@ -63,6 +79,7 @@ if(ENGINE_ENABLE_HIP)
     LABELS "glm5_next;hip;gpu;gfx1151")
 
   add_dependencies(glm5_next_tests glm5_next_rocm_gemv_test
+    glm5_next_routed_wmma_test glm5_next_dense_wmma_test
     glm5_next_rocm_ops_test glm5_next_rocm_attention_test
     glm5_next_rocm_device_model_test glm5_next_rocm_forward_test)
 endif()

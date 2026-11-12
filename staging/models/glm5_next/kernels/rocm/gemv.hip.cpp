@@ -662,14 +662,25 @@ __global__ void F32ToHalfKernel(const float* __restrict__ src,
 // runs the identical j-sequence as Gemv, so results are bit-identical.
 // ---------------------------------------------------------------------------
 
+// Grouped heads: when group_rows is non-zero the rows are `heads` contiguous
+// stacked slices (attention heads); wave r uses activation base x plus
+// (r / group_rows) * group_advance floats. Every per-row dot is the same
+// address sequence as the matching per-head call, so results are bit-
+// identical to the host loop.
+
 template<std::uint32_t Rows>
 __global__ void GemvRowsQ8_0(const Q8_0Block* __restrict__ w,
                              const float* __restrict__ x, std::uint32_t xs,
                              float* __restrict__ out, std::uint32_t os,
-                             std::uint32_t rows, std::uint32_t cols) {
+                             std::uint32_t rows, std::uint32_t cols,
+                             std::uint32_t group_rows,
+                             std::uint32_t group_advance) {
   const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
   if (r >= rows) {
     return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r / group_rows) * group_advance;
   }
   const Q8_0Block* __restrict__ row =
       w + static_cast<std::size_t>(r) * (cols / 32U);
@@ -700,10 +711,15 @@ template<std::uint32_t Rows>
 __global__ void GemvRowsQ4K(const Q4KBlock* __restrict__ w,
                             const float* __restrict__ x, std::uint32_t xs,
                             float* __restrict__ out, std::uint32_t os,
-                            std::uint32_t rows, std::uint32_t cols) {
+                            std::uint32_t rows, std::uint32_t cols,
+                            std::uint32_t group_rows,
+                            std::uint32_t group_advance) {
   const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
   if (r >= rows) {
     return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r / group_rows) * group_advance;
   }
   const std::uint32_t nblocks = cols / 256;
   const Q4KBlock* __restrict__ row = w + static_cast<std::size_t>(r) * nblocks;
@@ -753,10 +769,15 @@ template<std::uint32_t Rows>
 __global__ void GemvRowsQ5K(const Q5KBlock* __restrict__ w,
                             const float* __restrict__ x, std::uint32_t xs,
                             float* __restrict__ out, std::uint32_t os,
-                            std::uint32_t rows, std::uint32_t cols) {
+                            std::uint32_t rows, std::uint32_t cols,
+                            std::uint32_t group_rows,
+                            std::uint32_t group_advance) {
   const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
   if (r >= rows) {
     return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r / group_rows) * group_advance;
   }
   const std::uint32_t nblocks = cols / 256;
   const Q5KBlock* __restrict__ row = w + static_cast<std::size_t>(r) * nblocks;
@@ -808,10 +829,15 @@ template<std::uint32_t Rows>
 __global__ void GemvRowsQ6K(const Q6KBlock* __restrict__ w,
                             const float* __restrict__ x, std::uint32_t xs,
                             float* __restrict__ out, std::uint32_t os,
-                            std::uint32_t rows, std::uint32_t cols) {
+                            std::uint32_t rows, std::uint32_t cols,
+                            std::uint32_t group_rows,
+                            std::uint32_t group_advance) {
   const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
   if (r >= rows) {
     return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r / group_rows) * group_advance;
   }
   const std::uint32_t nblocks = cols / 256;
   const Q6KBlock* __restrict__ row = w + static_cast<std::size_t>(r) * nblocks;
@@ -858,10 +884,15 @@ template<std::uint32_t Rows>
 __global__ void GemvRowsF32(const float* __restrict__ w,
                             const float* __restrict__ x, std::uint32_t xs,
                             float* __restrict__ out, std::uint32_t os,
-                            std::uint32_t rows, std::uint32_t cols) {
+                            std::uint32_t rows, std::uint32_t cols,
+                            std::uint32_t group_rows,
+                            std::uint32_t group_advance) {
   const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
   if (r >= rows) {
     return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r / group_rows) * group_advance;
   }
   const float* __restrict__ row = w + static_cast<std::size_t>(r) * cols;
   const std::uint32_t lane = threadIdx.x & 31U;
@@ -890,10 +921,15 @@ template<std::uint32_t Rows>
 __global__ void GemvRowsF16(const __half* __restrict__ w,
                             const float* __restrict__ x, std::uint32_t xs,
                             float* __restrict__ out, std::uint32_t os,
-                            std::uint32_t rows, std::uint32_t cols) {
+                            std::uint32_t rows, std::uint32_t cols,
+                            std::uint32_t group_rows,
+                            std::uint32_t group_advance) {
   const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
   if (r >= rows) {
     return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r / group_rows) * group_advance;
   }
   const __half* __restrict__ row = w + static_cast<std::size_t>(r) * cols;
   const std::uint32_t lane = threadIdx.x & 31U;
@@ -924,10 +960,15 @@ __global__ void GemvRowsSuper256(const std::uint8_t* __restrict__ w,
                                  std::size_t block_bytes,
                                  const float* __restrict__ x, std::uint32_t xs,
                                  float* __restrict__ out, std::uint32_t os,
-                                 std::uint32_t rows, std::uint32_t cols) {
+                                 std::uint32_t rows, std::uint32_t cols,
+                                 std::uint32_t group_rows,
+                                 std::uint32_t group_advance) {
   const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
   if (r >= rows) {
     return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r / group_rows) * group_advance;
   }
   const std::uint32_t nblocks = cols / 256;
   const std::uint8_t* __restrict__ row =
@@ -1029,6 +1070,67 @@ __global__ void GemvGroupedF32(const float* __restrict__ w,
 }
 
 // ---------------------------------------------------------------------------
+// Bucketed tile tier: one wave per (16-row expert bucket, row). The wave
+// decodes its weight row once and dots it against every slot of the
+// bucket, so a shared expert weight is read once for up to 16 slots
+// instead of once per slot. Each per-slot dot runs the exact grouped
+// sequence (b ascending, j ascending, one warp reduce at the end), so the
+// bucketed MoE output is bit-identical to GemvGrouped.
+// ---------------------------------------------------------------------------
+
+template<void (*DecodeFn)(const std::uint8_t*, std::uint32_t, float*)>
+__global__ void GemvRoutedSuper256(
+    const std::uint8_t* __restrict__ w, std::size_t block_bytes,
+    std::size_t expert_stride, const std::int32_t* __restrict__ tiles,
+    const std::int32_t* __restrict__ pad_bounds,
+    const std::int32_t* __restrict__ rows_slot, std::uint32_t slots_per_row,
+    std::uint32_t rows, std::uint32_t cols, const float* __restrict__ x,
+    std::uint32_t xs, float* __restrict__ out) {
+  const std::int32_t entry = tiles[blockIdx.y];
+  const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
+  if ((entry >> 16) == 0x7FFF || r >= rows) {
+    return;
+  }
+  const std::uint32_t lane = threadIdx.x & 31U;
+  const std::uint32_t e = static_cast<std::uint32_t>(entry) & 0xFFFFU;
+  const std::int32_t start =
+      pad_bounds[e] + static_cast<std::int32_t>(entry >> 16) * 16;
+  std::int32_t slot[16];
+#pragma unroll
+  for (int k = 0; k < 16; ++k) {
+    slot[k] = rows_slot[start + k];
+  }
+  const std::uint32_t nblocks = cols / 256;
+  const std::uint8_t* row = w + static_cast<std::size_t>(e) * expert_stride +
+                            static_cast<std::size_t>(r) * nblocks * block_bytes;
+  float acc[16] = {};
+  for (std::uint32_t b = 0; b < nblocks; ++b) {
+    float v[8];
+    DecodeFn(row + static_cast<std::size_t>(b) * block_bytes, lane, v);
+    const float* xb = x + static_cast<std::size_t>(b) * 256 + 8 * lane;
+#pragma unroll
+    for (int k = 0; k < 16; ++k) {
+      if (slot[k] < 0) {
+        continue;
+      }
+      const float* xrow =
+          xb + static_cast<std::size_t>(slot[k] / slots_per_row) * xs;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        acc[k] += v[j] * xrow[j];
+      }
+    }
+  }
+#pragma unroll
+  for (int k = 0; k < 16; ++k) {
+    const float total = WarpReduceSum(acc[k]);
+    if (lane == 0 && slot[k] >= 0) {
+      out[static_cast<std::size_t>(slot[k]) * rows + r] = total;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Host dispatch.
 // ---------------------------------------------------------------------------
 
@@ -1045,62 +1147,69 @@ template<std::uint32_t Rows>
 void LaunchRows(const void* base, GemvType type, std::uint32_t rows,
                 std::uint32_t cols, std::size_t row_bytes, const float* x,
                 std::uint32_t xs, float* out, std::uint32_t os,
+                std::uint32_t group_rows, std::uint32_t group_advance,
                 hipStream_t stream) {
   const std::uint32_t grid = RowGrid(rows);
   switch (type) {
     case GemvType::kQ8_0:
       GemvRowsQ8_0<Rows><<<grid, 128, 0, stream>>>(
-          static_cast<const Q8_0Block*>(base), x, xs, out, os, rows, cols);
+          static_cast<const Q8_0Block*>(base), x, xs, out, os, rows, cols,
+          group_rows, group_advance);
       break;
     case GemvType::kQ4_K:
       GemvRowsQ4K<Rows><<<grid, 128, 0, stream>>>(
-          static_cast<const Q4KBlock*>(base), x, xs, out, os, rows, cols);
+          static_cast<const Q4KBlock*>(base), x, xs, out, os, rows, cols,
+          group_rows, group_advance);
       break;
     case GemvType::kQ5_K:
       GemvRowsQ5K<Rows><<<grid, 128, 0, stream>>>(
-          static_cast<const Q5KBlock*>(base), x, xs, out, os, rows, cols);
+          static_cast<const Q5KBlock*>(base), x, xs, out, os, rows, cols,
+          group_rows, group_advance);
       break;
     case GemvType::kQ6_K:
       GemvRowsQ6K<Rows><<<grid, 128, 0, stream>>>(
-          static_cast<const Q6KBlock*>(base), x, xs, out, os, rows, cols);
+          static_cast<const Q6KBlock*>(base), x, xs, out, os, rows, cols,
+          group_rows, group_advance);
       break;
     case GemvType::kQ2_K:
       GemvRowsSuper256<Rows, DecodeQ2K8><<<grid, 128, 0, stream>>>(
           static_cast<const std::uint8_t*>(base), row_bytes / (cols / 256), x,
-          xs, out, os, rows, cols);
+          xs, out, os, rows, cols, group_rows, group_advance);
       break;
     case GemvType::kQ3_K:
       GemvRowsSuper256<Rows, DecodeQ3K8><<<grid, 128, 0, stream>>>(
           static_cast<const std::uint8_t*>(base), row_bytes / (cols / 256), x,
-          xs, out, os, rows, cols);
+          xs, out, os, rows, cols, group_rows, group_advance);
       break;
     case GemvType::kIQ2_XXS:
-      GemvRowsSuper256<Rows, DecodeIq2Xxs8>
-          <<<grid, 128, 0, stream>>>(static_cast<const std::uint8_t*>(base),
-                                     kIq2XxsBytes, x, xs, out, os, rows, cols);
+      GemvRowsSuper256<Rows, DecodeIq2Xxs8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq2XxsBytes, x, xs, out, os,
+          rows, cols, group_rows, group_advance);
       break;
     case GemvType::kIQ1_M:
-      GemvRowsSuper256<Rows, DecodeIq1M8>
-          <<<grid, 128, 0, stream>>>(static_cast<const std::uint8_t*>(base),
-                                     kIq1MBytes, x, xs, out, os, rows, cols);
+      GemvRowsSuper256<Rows, DecodeIq1M8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq1MBytes, x, xs, out, os,
+          rows, cols, group_rows, group_advance);
       break;
     case GemvType::kIQ3_XXS:
-      GemvRowsSuper256<Rows, DecodeIq3Xxs8>
-          <<<grid, 128, 0, stream>>>(static_cast<const std::uint8_t*>(base),
-                                     kIq3XxsBytes, x, xs, out, os, rows, cols);
+      GemvRowsSuper256<Rows, DecodeIq3Xxs8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq3XxsBytes, x, xs, out, os,
+          rows, cols, group_rows, group_advance);
       break;
     case GemvType::kIQ4_XS:
-      GemvRowsSuper256<Rows, DecodeIq4Xs8>
-          <<<grid, 128, 0, stream>>>(static_cast<const std::uint8_t*>(base),
-                                     kIq4XsBytes, x, xs, out, os, rows, cols);
+      GemvRowsSuper256<Rows, DecodeIq4Xs8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq4XsBytes, x, xs, out, os,
+          rows, cols, group_rows, group_advance);
       break;
     case GemvType::kF32:
       GemvRowsF32<Rows><<<grid, 128, 0, stream>>>(
-          static_cast<const float*>(base), x, xs, out, os, rows, cols);
+          static_cast<const float*>(base), x, xs, out, os, rows, cols,
+          group_rows, group_advance);
       break;
     case GemvType::kF16:
       GemvRowsF16<Rows><<<grid, 128, 0, stream>>>(
-          static_cast<const __half*>(base), x, xs, out, os, rows, cols);
+          static_cast<const __half*>(base), x, xs, out, os, rows, cols,
+          group_rows, group_advance);
       break;
   }
 }
@@ -1210,28 +1319,76 @@ void Gemv(const void* base, GemvType type, std::uint32_t rows,
   }
 }
 
+namespace {
+
+// Widening token slices past 16 was measured and rejected: 32 spills
+// nothing on the Q/K quants (VGPR<=180) yet runs 2.3x slower at pp2048
+// (18.6 vs 42.5 t/s, matched A/B) on activation traffic; 64 additionally
+// spills (scratch up to 596 B/lane) and runs 3.2x slower.
+constexpr std::uint32_t kMaxRows = 16U;
+
+void LaunchRowsSlices(const void* base, GemvType type, std::uint32_t tokens,
+                      std::uint32_t rows, std::uint32_t cols,
+                      std::size_t row_bytes, const float* x,
+                      std::uint32_t x_stride, float* out,
+                      std::uint32_t out_stride, std::uint32_t group_rows,
+                      std::uint32_t group_advance, hipStream_t stream) {
+  // Any width decomposes into descending power-of-two slices; each slice is
+  // an independent contiguous row block, so every per-row dot keeps its
+  // exact sequence and only the launch factorization changes.
+  std::uint32_t done = 0;
+  while (done < tokens) {
+    const std::uint32_t rem = tokens - done;
+    std::uint32_t slice = 1U;
+    while (slice * 2U <= rem && slice < kMaxRows) {
+      slice *= 2U;
+    }
+    const float* xs = x + static_cast<std::size_t>(done) * x_stride;
+    float* os = out + static_cast<std::size_t>(done) * out_stride;
+    switch (slice) {
+      case 1:
+        LaunchRows<1>(base, type, rows, cols, row_bytes, xs, x_stride, os,
+                      out_stride, group_rows, group_advance, stream);
+        break;
+      case 2:
+        LaunchRows<2>(base, type, rows, cols, row_bytes, xs, x_stride, os,
+                      out_stride, group_rows, group_advance, stream);
+        break;
+      case 4:
+        LaunchRows<4>(base, type, rows, cols, row_bytes, xs, x_stride, os,
+                      out_stride, group_rows, group_advance, stream);
+        break;
+      case 8:
+        LaunchRows<8>(base, type, rows, cols, row_bytes, xs, x_stride, os,
+                      out_stride, group_rows, group_advance, stream);
+        break;
+      case 16:
+        LaunchRows<16>(base, type, rows, cols, row_bytes, xs, x_stride, os,
+                       out_stride, group_rows, group_advance, stream);
+        break;
+    }
+    done += slice;
+  }
+}
+
+}  // namespace
+
 void GemvRows(const void* base, GemvType type, std::uint32_t tokens,
               std::uint32_t rows, std::uint32_t cols, std::size_t row_bytes,
               const float* x, std::uint32_t x_stride, float* out,
               std::uint32_t out_stride, hipStream_t stream) {
-  switch (tokens) {
-    case 2:
-      LaunchRows<2>(base, type, rows, cols, row_bytes, x, x_stride, out,
-                    out_stride, stream);
-      break;
-    case 3:
-      LaunchRows<3>(base, type, rows, cols, row_bytes, x, x_stride, out,
-                    out_stride, stream);
-      break;
-    case 4:
-      LaunchRows<4>(base, type, rows, cols, row_bytes, x, x_stride, out,
-                    out_stride, stream);
-      break;
-    default:
-      LaunchRows<5>(base, type, rows, cols, row_bytes, x, x_stride, out,
-                    out_stride, stream);
-      break;
-  }
+  LaunchRowsSlices(base, type, tokens, rows, cols, row_bytes, x, x_stride, out,
+                   out_stride, 0U, 0U, stream);
+}
+
+void GemvRowsGrouped(const void* base, GemvType type, std::uint32_t tokens,
+                     std::uint32_t groups, std::uint32_t group_rows,
+                     std::uint32_t cols, std::size_t row_bytes, const float* x,
+                     std::uint32_t x_stride, std::uint32_t group_advance,
+                     float* out, std::uint32_t out_stride, hipStream_t stream) {
+  LaunchRowsSlices(base, type, tokens, groups * group_rows, cols, row_bytes, x,
+                   x_stride, out, out_stride, group_rows, group_advance,
+                   stream);
 }
 
 void GemvGrouped(const void* base, GemvType type, std::size_t expert_stride,
@@ -1277,6 +1434,57 @@ void GemvGrouped(const void* base, GemvType type, std::size_t expert_stride,
       GemvGroupedF32<<<grid, 128, 0, stream>>>(
           static_cast<const float*>(base), expert_stride, ids, used,
           slots_per_row, rows, cols, x, x_stride, out);
+      break;
+    default:
+      break;
+  }
+}
+
+void GemvRoutedTiles(const void* base, GemvType type, std::size_t expert_stride,
+                     const std::int32_t* tiles, std::uint32_t capacity,
+                     const std::int32_t* pad_bounds,
+                     const std::int32_t* rows_slot, std::uint32_t slots_per_row,
+                     std::uint32_t rows, std::uint32_t cols, const float* x,
+                     std::uint32_t x_stride, float* out, hipStream_t stream) {
+  const dim3 grid((rows + 3U) / 4U, capacity);
+  switch (type) {
+    case GemvType::kIQ2_XXS:
+      GemvRoutedSuper256<DecodeIq2Xxs8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq2XxsBytes, expert_stride,
+          tiles, pad_bounds, rows_slot, slots_per_row, rows, cols, x, x_stride,
+          out);
+      break;
+    case GemvType::kIQ1_M:
+      GemvRoutedSuper256<DecodeIq1M8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq1MBytes, expert_stride,
+          tiles, pad_bounds, rows_slot, slots_per_row, rows, cols, x, x_stride,
+          out);
+      break;
+    case GemvType::kIQ3_XXS:
+      GemvRoutedSuper256<DecodeIq3Xxs8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq3XxsBytes, expert_stride,
+          tiles, pad_bounds, rows_slot, slots_per_row, rows, cols, x, x_stride,
+          out);
+      break;
+    case GemvType::kIQ4_XS:
+      GemvRoutedSuper256<DecodeIq4Xs8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base), kIq4XsBytes, expert_stride,
+          tiles, pad_bounds, rows_slot, slots_per_row, rows, cols, x, x_stride,
+          out);
+      break;
+    case GemvType::kQ2_K:
+      GemvRoutedSuper256<DecodeQ2K8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base),
+          RowBytesFor(GemvType::kQ2_K, cols) / (cols / 256), expert_stride,
+          tiles, pad_bounds, rows_slot, slots_per_row, rows, cols, x, x_stride,
+          out);
+      break;
+    case GemvType::kQ3_K:
+      GemvRoutedSuper256<DecodeQ3K8><<<grid, 128, 0, stream>>>(
+          static_cast<const std::uint8_t*>(base),
+          RowBytesFor(GemvType::kQ3_K, cols) / (cols / 256), expert_stride,
+          tiles, pad_bounds, rows_slot, slots_per_row, rows, cols, x, x_stride,
+          out);
       break;
     default:
       break;

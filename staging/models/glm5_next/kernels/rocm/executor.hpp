@@ -92,8 +92,13 @@ class Executor {
   [[nodiscard]] std::unique_ptr<Session> CreateSession(
       std::uint32_t capacity, std::string* error_msg = nullptr) const;
 
-  /// Chunk width of `Prefill` (the multi-row GEMV tier's row cap).
-  static constexpr std::uint32_t kChunk = 4;
+  /// Chunk width of `Prefill`. The multi-row tier walks any width as
+  /// power-of-two slices; the bucketed MoE tier covers the wide chunks.
+  static constexpr std::uint32_t kChunk = 128;
+
+  /// Chunks of at least this many tokens take the bucketed routed MoE
+  /// tier; narrower ones (and every `Step`) stay on the grouped tier.
+  static constexpr std::uint32_t kBucketMinRows = 32;
 
   /// Runs one decode token at position `session.position() + 1` and returns
   /// the device pointer holding the `vocab_size` logits (valid until the
@@ -190,6 +195,23 @@ class Executor {
   float* f_inter_{nullptr};    // [NC][max(dense_ff, shared_ff)]
   float* router_{nullptr};     // [NC][experts]
   std::int32_t* ids_{nullptr};  // [NC][used]
+  // Bucket-compaction scratch for the wide-chunk routed tier (sized for
+  // kChunk slots; the n >= kBucketMinRows path rebuilds it per layer).
+  std::uint32_t* expert_counts_{nullptr};  // [experts]
+  std::int32_t* pad_bounds_{nullptr};      // [experts + 1]
+  std::int32_t* cursors_{nullptr};         // [experts]
+  std::int32_t* rows_slot_{nullptr};  // [RoutedCompactRows(kChunk * used, e)]
+  // 16-slot bucket tiles (`expert | tile << 16`); the tile list is shared
+  // by all three GEMM heights, which vary only in rows/cols.
+  std::int32_t* tiles_{nullptr};
+  std::uint32_t tiles_cap_{0};
+  // 32-row tiles for the WMMA tier (second tile height of the same
+  // BuildRoutedTiles call), its F16 copy of the kChunk hidden-state rows and
+  // the F16 copy of the routed intermediate for the WMMA down tier.
+  std::int32_t* tiles_wide_{nullptr};
+  std::uint32_t tiles_wide_cap_{0};
+  __half* x_half_{nullptr};  // [kChunk][H]
+  __half* moe_inter_half_{nullptr};  // [kChunk * used][expert_ff]
   float* h_{nullptr};           // [NC][H] collapsed stream
   float* logits_{nullptr};      // [vocab]
 };
