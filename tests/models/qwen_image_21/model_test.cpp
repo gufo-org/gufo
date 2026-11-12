@@ -1,11 +1,13 @@
 #include "src/models/qwen_image_21/model.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
 #include <iostream>
 #include <memory>
 
+#include "src/core/base64.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen_image_21/tokenizer.hpp"
 #include "src/models/qwen_image_21/weights.hpp"
@@ -483,5 +485,180 @@ int main(int argc, char** argv) {
     }
     assert(rejected);
   }
+  // Image to image: the start image binds its own noise stream.
+  assert(InitialNoiseSeed(42, {}, &image) != 42);
+  assert(InitialNoiseSeed(42, {}, &image) != edit_seed);
+  assert(InitialNoiseSeed(42, references, &image) !=
+         InitialNoiseSeed(42, {}, &image));
+  // ComfyUI denoise: the last steps + 1 sigmas of int(steps / strength).
+  assert(DenoiseSigmas(40, 1.0, 4096) == schedule);
+  const auto full80 = DenoiseSigmas(80, 1.0, 4096);
+  const auto half = DenoiseSigmas(40, 0.5, 4096);
+  assert(half.size() == 41 && half.back() == 0);
+  assert(std::equal(half.begin(), half.end(), full80.end() - 41));
+  assert(DenoiseSigmas(25, 0.6, 1024).size() == 26);
+  assert(DenoiseSigmas(25, 0.6, 1024).front() ==
+         DenoiseSigmas(41, 1.0, 1024)[16]);
+  assert(base.DenoiseSigmas(0, 0.5, 4096) == half);
+  assert(turbo.DenoiseSigmas(0, 1.0, 256) == expected_turbo);
+  bool turbo_rejected = false;
+  try {
+    (void)turbo.DenoiseSigmas(8, 0.5, 256);
+  } catch (const std::invalid_argument&) {
+    turbo_rejected = true;
+  }
+  assert(turbo_rejected);
+  // A negative prompt alone guides at the Diffusers default scale.
+  assert(ResolveGuidance(Request{.prompt = "", .images = {}}) == 1);
+  assert(ResolveGuidance(Request{
+             .prompt = "", .images = {}, .negative_prompt = "blurry"}) ==
+         kDefaultGuidanceScale);
+  assert(ResolveGuidance(Request{
+             .prompt = "", .images = {}, .guidance_scale = 2.5F}) == 2.5F);
+  for (const auto& invalid :
+       {Request{.prompt = "", .images = {}, .guidance_scale = 21.0F},
+        Request{.prompt = "", .images = {}, .guidance_scale = 0.5F},
+        Request{.prompt = "", .images = {}, .guidance_scale = NAN},
+        Request{.prompt = "", .images = {}, .strength = 0.5},
+        Request{.prompt = "", .images = {}, .strength = 0}}) {
+    bool rejected = false;
+    try {
+      ValidateRequest(invalid);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+  ValidateRequest(Request{
+      .prompt = "", .images = {}, .init_image = image, .strength = 0.5});
+  static_assert(kCapabilities.guidance && kCapabilities.image_to_image);
+
+  // Flat request fields (#885): the same names on JSON generations and
+  // multipart edits, as SDK `extra_body` sends them.
+  Request captured;
+  gufo::server::ImageService guided(
+      qwen_runner([&](const Request& request, const CancellationCheck&) {
+        captured = request;
+        return Result{.image = image, .metrics = {}};
+      }),
+      "image-test");
+  http.method = "POST";
+  http.path = "/v1/images/generations";
+  http.headers = {{"Content-Type", "application/json"}};
+  // Defaults stay the unguided full-strength generation.
+  http.body = R"({"prompt":"a red cube","size":"256x256","seed":1})";
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
+  assert(!captured.guidance_scale && captured.negative_prompt.empty() &&
+         captured.strength == 1 && !captured.init_image);
+  // Unknown members stay ignored, including the earlier nested form.
+  http.body =
+      R"({"prompt":"a red cube","size":"256x256","negative_prompt":"blurry","guidance_scale":2.5,"cfg_scale":7,"gufo":{"guidance":9}})";
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
+  assert(captured.guidance_scale == 2.5F &&
+         captured.negative_prompt == "blurry");
+  http.body = R"({"prompt":"a red cube","negative_prompt":"blurry"})";
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
+  assert(!captured.guidance_scale &&
+         ResolveGuidance(captured) == kDefaultGuidanceScale);
+  // A base64 start image on generations; size auto keeps its canvas.
+  const auto encoded = gufo::core::EncodeBase64(png);
+  for (const auto& source :
+       {encoded, std::string("data:image/png;base64,") + encoded}) {
+    http.body =
+        R"({"prompt":"a red cube","strength":0.5,"image":")" + source + R"("})";
+    assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
+    assert(captured.strength == 0.5 && captured.init_image &&
+           captured.init_image->rgba == image.rgba && captured.images.empty());
+    // A 2x2 start image rounds to the smallest 32-pixel canvas.
+    assert(captured.width == 32 && captured.height == 32);
+  }
+  for (const auto* body :
+       {R"({"prompt":"a","guidance_scale":"2"})",
+        R"({"prompt":"a","guidance_scale":0.5})",
+        R"({"prompt":"a","guidance_scale":21})",
+        R"({"prompt":"a","negative_prompt":3})",
+        R"({"prompt":"a","strength":0.5})", R"({"prompt":"a","strength":0})",
+        R"({"prompt":"a","strength":0.5,"image":"https://example.com/x.png"})",
+        R"({"prompt":"a","strength":0.5,"image":"not base64"})"}) {
+    http.body = body;
+    assert(gufo::server::HandleImageApiRequest(http, guided).status == 400);
+  }
+  // Multipart: with strength below 1 the first uploaded image is the start
+  // image; scalar fields arrive as plain form fields.
+  using Fields = std::vector<std::pair<std::string, std::string>>;
+  const auto edit_form = [&](int images, const Fields& fields) {
+    std::string body;
+    for (int i = 0; i < images; ++i) {
+      body +=
+          "--boundary\r\nContent-Disposition: form-data; name=\"image\"; "
+          "filename=\"x.png\"\r\nContent-Type: image/png\r\n\r\n";
+      body.append(reinterpret_cast<const char*>(png.data()), png.size());
+      body += "\r\n";
+    }
+    for (const auto& [name, value] : fields)
+      body += "--boundary\r\nContent-Disposition: form-data; name=\"" + name +
+              "\"\r\n\r\n" + value + "\r\n";
+    return body + "--boundary--\r\n";
+  };
+  http.path = "/v1/images/edits";
+  http.headers = {
+      {"Content-Type", "multipart/form-data; boundary=\"boundary\""}};
+  http.body = edit_form(1, {{"prompt", "a red cube"},
+                            {"size", "256x256"},
+                            {"strength", "0.5"},
+                            {"guidance_scale", "3"},
+                            {"negative_prompt", "blurry"},
+                            {"style", "vivid"}});
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
+  assert(captured.strength == 0.5 && captured.init_image &&
+         captured.images.empty() && captured.guidance_scale == 3.0F &&
+         captured.negative_prompt == "blurry" && captured.width == 256);
+  // At full strength the image stays a reference.
+  http.body = edit_form(
+      1, {{"prompt", "a red cube"}, {"size", "256x256"}, {"strength", "1"}});
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
+  assert(captured.images.size() == 1 && !captured.init_image);
+  // Start image and references together: below full strength the first
+  // image starts the denoise, the others stay references, and size auto
+  // keeps the start image's canvas.
+  http.body = edit_form(3, {{"prompt", "a"},
+                            {"strength", "0.6"},
+                            {"negative_prompt", "blurry"}});
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
+  assert(captured.strength == 0.6 && captured.init_image &&
+         captured.images.size() == 2 && captured.width == 32 &&
+         captured.height == 32 && captured.negative_prompt == "blurry");
+  http.body = edit_form(0, {{"prompt", "a"}, {"strength", "0.5"}});
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 400);
+  http.body = edit_form(1, {{"prompt", "a"}, {"guidance_scale", "x"}});
+  assert(gufo::server::HandleImageApiRequest(http, guided).status == 400);
+  // A provider without the capabilities refuses the fields instead of
+  // dropping them; one that runs out of device memory answers 503.
+  gufo::server::ImageService plain(
+      std::make_shared<gufo::server::CallbackImageRunner>(
+          [&](const Request&, const CancellationCheck&) {
+            return Result{.image = image, .metrics = {}};
+          },
+          gufo::ext::ImageCapabilities{.edits = true}),
+      "image-test");
+  http.body = edit_form(1, {{"prompt", "a"}, {"strength", "0.5"}});
+  assert(gufo::server::HandleImageApiRequest(http, plain).status == 400);
+  http.path = "/v1/images/generations";
+  http.headers = {{"Content-Type", "application/json"}};
+  for (const auto* body : {R"({"prompt":"a","negative_prompt":"blurry"})",
+                           R"({"prompt":"a","guidance_scale":2})"}) {
+    http.body = body;
+    assert(gufo::server::HandleImageApiRequest(http, plain).status == 400);
+  }
+  http.body = R"({"prompt":"a","guidance_scale":1,"size":"256x256"})";
+  assert(gufo::server::HandleImageApiRequest(http, plain).status == 200);
+  gufo::server::ImageService exhausted(
+      qwen_runner([&](const Request&, const CancellationCheck&) -> Result {
+        throw gufo::ext::ImageResourceError("out of GPU memory");
+      }),
+      "image-test");
+  const auto refused = gufo::server::HandleImageApiRequest(http, exhausted);
+  assert(refused.status == 503 &&
+         refused.body.find("insufficient_gpu_memory") != std::string::npos);
   std::cout << "Qwen-Image image and schedule contracts passed\n";
 }

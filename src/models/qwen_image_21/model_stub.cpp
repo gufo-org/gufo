@@ -24,4 +24,7 @@ LoraInfo Model::AddLora(const std::string&, const std::filesystem::path&) {
 std::vector<Lora> Model::ActiveLoras() const {
   return {};
 }
+bool Model::DeviceLost() const {
+  return false;
+}
 }  // namespace gufo::models::qwen_image_21
