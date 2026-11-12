@@ -679,6 +679,45 @@ Reading them:
 - A large `cache_common_prefix_tokens` on a miss means a long prefix agreed and
   could not be resumed from: a mid-history edit, or an evicted checkpoint.
 
+## GGUF identity cache
+
+GGUF identities hash every byte of every shard, including metadata and tensor
+padding. The private digest cache keys the open file by device, inode, size,
+mtime and ctime. Equal metadata alone cannot distinguish writes within the
+filesystem's timestamp interval.
+
+A reusable digest must come from a full scan that **started** with both
+positive timestamps strictly more than two seconds behind the wall clock.
+Recent files are hashed without publishing a reusable record. Aging during
+that scan does not qualify it: a later lookup must scan again before caching.
+Records retain the scan-start time, so a suspicious record cannot become
+trusted merely by aging. Stable files subsequently reuse the digest without
+reading the full model.
+
+The identity scheme and directory remain `gguf-sha256-v1`. Cache records use
+`gguf-sha256-cache-v2`; legacy digest-only records lack a trustworthy scan time
+and require one full eligible scan before reuse. Correct checkpoint identities
+remain compatible. Alternating old and new versions can repeat these scans.
+
+The policy assumes coherent local file timestamps and a common wall-clock
+base, with timestamp granularity plus update lag strictly below two seconds.
+Keep model files immutable while loading and using them. Arbitrary changes
+that preserve all metadata, undetected clock rollback, restored snapshots and
+incoherent remote filesystems require a full read or a reliable change signal;
+metadata equality cannot establish unconditional integrity. The Windows
+FAT/exFAT last-write fallback lacks an independent change timestamp and falls
+outside this guarantee.
+
+Open-file checks, private cache permissions, no-follow opens and atomic record
+publication remain enforced. Observed metadata changes reject lookup. A clock
+rollback invalidates reusable records; failure to remove an unsafe record is
+an explicit error rather than allowing it to regain trust later.
+
+`gguf_identity_test` exercises production hashing and record handling with
+synthetic files and controlled clocks/metadata. It checks collisions,
+reopening, aging, migration, malformed records and concurrent changes, and
+counts hashed bytes to verify that stable files use the fast path.
+
 ## Verifying changes
 
 - `tests/functional/` covers rotation through independent conversations, a long
