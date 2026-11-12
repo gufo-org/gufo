@@ -19,8 +19,8 @@
 
 namespace gufo::hip {
 
-// Defined in kernels/ssm_recurrence.hip and hip/batched_ssm.hip respectively;
-// the row-split route shares the convolution and post-normalization kernels.
+// Defined in ssm_recurrence.hip; the row-split route shares the convolution
+// and post-normalization kernels.
 __global__ void BatchedSSMConvKernel(const float* __restrict__ qkv_in,
                                      const float* __restrict__ conv_weights,
                                      const float* __restrict__ conv_state,
