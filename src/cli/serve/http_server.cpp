@@ -2049,8 +2049,9 @@ bool HttpServer::start(std::string* error) {
       *error = "bind() failed on " + host_ + ":" + std::to_string(port_) +
                " (error " + std::to_string(code) + ")";
       if (net::IsAddressInUseError(code))
-        *error += ": the port is already in use, another server (gufo?) "
-                  "listens on it";
+        *error +=
+            ": the port is already in use, another server (gufo?) "
+            "listens on it";
     }
     net::CloseSocket(listen_fd_);
     listen_fd_ = -1;
