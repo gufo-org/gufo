@@ -811,8 +811,7 @@ endfunction()
   # The test writes its PNG cases with zlib directly.
   find_package(ZLIB REQUIRED)
   add_executable(png_decode_test
-    tests/core/png_decode_test.cpp
-    tests/core/png_reference.cpp)
+    tests/core/png_decode_test.cpp)
   target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
   add_test(NAME png_decode_test COMMAND png_decode_test)
   set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
@@ -825,8 +824,7 @@ endfunction()
   set_tests_properties(audio_decode_test PROPERTIES LABELS "cpu;audio;correctness")
 
   add_executable(wav_decode_test
-    tests/core/wav_decode_test.cpp
-    tests/core/wav_reference.cpp)
+    tests/core/wav_decode_test.cpp)
   target_link_libraries(wav_decode_test PRIVATE gufo_core)
   add_test(NAME wav_decode_test COMMAND wav_decode_test)
   set_tests_properties(wav_decode_test PROPERTIES LABELS "cpu;audio;correctness")
@@ -884,23 +882,20 @@ endfunction()
   endif()
 
   add_executable(base64_test
-    tests/core/base64_test.cpp
-    tests/core/base64_reference.cpp)
+    tests/core/base64_test.cpp)
   target_link_libraries(base64_test PRIVATE gufo_http)
   add_test(NAME base64_test COMMAND base64_test)
   set_tests_properties(base64_test PROPERTIES LABELS "cpu;server;correctness")
 
   add_executable(websocket_frame_test
-    tests/cli/websocket_frame_test.cpp
-    tests/cli/websocket_frame_reference.cpp)
+    tests/cli/websocket_frame_test.cpp)
   target_link_libraries(websocket_frame_test PRIVATE gufo_core)
   add_test(NAME websocket_frame_test COMMAND websocket_frame_test)
   set_tests_properties(websocket_frame_test PROPERTIES
     LABELS "cpu;server;correctness")
 
   add_executable(http_request_test
-    tests/cli/http_request_test.cpp
-    tests/cli/http_request_reference.cpp)
+    tests/cli/http_request_test.cpp)
   target_link_libraries(http_request_test PRIVATE gufo_core)
   add_test(NAME http_request_test COMMAND http_request_test)
   set_tests_properties(http_request_test PROPERTIES

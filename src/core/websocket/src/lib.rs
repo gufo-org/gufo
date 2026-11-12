@@ -1,13 +1,10 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(panic = "abort")]
-compile_error!("the C functions catch panics at the boundary, so build with panic = \"unwind\"");
-
 mod frames;
 
+use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use frames::{Event, Reader};
 
@@ -47,7 +44,9 @@ pub type GufoWsReadFn =
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn gufo_ws_reader_new(max_message: usize) -> *mut GufoWsReader {
-    catch_unwind(|| try_box(GufoWsReader(Reader::new(max_message)))).unwrap_or(std::ptr::null_mut())
+    guard(std::ptr::null_mut(), || {
+        try_box(GufoWsReader(Reader::new(max_message)))
+    })
 }
 
 /// Moves `value` to the heap like `Box::new`, but returns null when memory
@@ -70,11 +69,13 @@ fn try_box<T>(value: T) -> *mut T {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_ws_reader_free(reader: *mut GufoWsReader) {
-    if !reader.is_null() {
-        // SAFETY: the caller passes a reader from `gufo_ws_reader_new` once,
-        // allocated by the global allocator with the layout of the reader.
-        drop(unsafe { Box::from_raw(reader) });
-    }
+    guard((), || {
+        if !reader.is_null() {
+            // SAFETY: the caller passes a reader from `gufo_ws_reader_new` once,
+            // allocated by the global allocator with the layout of the reader.
+            drop(unsafe { Box::from_raw(reader) });
+        }
+    });
 }
 
 /// Reads the next event through `read` into `*event`. Pongs are skipped and
@@ -107,7 +108,7 @@ pub unsafe extern "C" fn gufo_ws_reader_next(
     let (Some(reader), Some(read)) = (unsafe { reader.as_mut() }, read) else {
         return;
     };
-    let result = catch_unwind(AssertUnwindSafe(|| {
+    let next = guard(*event, || {
         // SAFETY: the caller allows calling `read` with `context` here, and
         // the buffer is writable for its length.
         let mut read =
@@ -125,8 +126,6 @@ pub unsafe extern "C" fn gufo_ws_reader_next(
             data: bytes.as_ptr(),
             len: bytes.len(),
         }
-    }));
-    if let Ok(next) = result {
-        *event = next;
-    }
+    });
+    *event = next;
 }

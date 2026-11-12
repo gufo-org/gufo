@@ -1,15 +1,12 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(panic = "abort")]
-compile_error!("guarded() catches panics at the C boundary, so build with panic = \"unwind\"");
-
 mod decode;
 mod opus;
 mod pcm;
 
+use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use decode::{Error, Formats, Info, Limits};
 
@@ -88,25 +85,6 @@ fn c_info(info: &Info) -> GufoAudioInfo {
     }
 }
 
-/// A panic must not unwind into C++; the decoders have no known panics, so
-/// one here is a bug and reports `Internal`.
-fn guarded(call: impl FnOnce() -> GufoAudioStatus) -> GufoAudioStatus {
-    catch_unwind(AssertUnwindSafe(call)).unwrap_or(GufoAudioStatus::Internal)
-}
-
-/// # Safety
-/// `data` points to `len` readable values, or `len` is 0.
-#[allow(unsafe_code)]
-unsafe fn input<'a, T>(data: *const T, len: usize) -> Option<&'a [T]> {
-    match (data.is_null(), len) {
-        (_, 0) => Some(&[]),
-        (true, _) => None,
-        // SAFETY: the caller guarantees `len` readable values at a non-null
-        // `data`.
-        (false, _) => Some(unsafe { std::slice::from_raw_parts(data, len) }),
-    }
-}
-
 /// Decodes `bytes` and hands the interleaved samples to `sink` in order.
 /// On an error, the samples already handed over are to be discarded.
 ///
@@ -124,13 +102,13 @@ pub unsafe extern "C" fn gufo_audio_decode(
     sink: Option<GufoAudioSinkFn>,
     context: *mut c_void,
 ) -> GufoAudioStatus {
-    guarded(|| {
+    guard(GufoAudioStatus::Internal, || {
         // SAFETY: the caller upholds the contract above; `as_ref` rejects null.
         let (Some(limits), Some(sink)) = (unsafe { limits.as_ref() }, sink) else {
             return GufoAudioStatus::Internal;
         };
         // SAFETY: the caller guarantees `len` readable bytes.
-        let Some(bytes) = (unsafe { input(bytes, len) }) else {
+        let Some(bytes) = (unsafe { gufo_ffi::input(bytes, len) }) else {
             return GufoAudioStatus::Internal;
         };
         let formats = match limits.formats {
@@ -182,12 +160,12 @@ pub unsafe extern "C" fn gufo_audio_resample(
     sink: Option<GufoAudioSinkFn>,
     context: *mut c_void,
 ) -> GufoAudioStatus {
-    guarded(|| {
+    guard(GufoAudioStatus::Internal, || {
         let Some(sink) = sink else {
             return GufoAudioStatus::Internal;
         };
         // SAFETY: the caller guarantees `len` readable floats.
-        let Some(samples) = (unsafe { input(samples, len) }) else {
+        let Some(samples) = (unsafe { gufo_ffi::input(samples, len) }) else {
             return GufoAudioStatus::Internal;
         };
         let Ok(output) = gufo_resample::resample(samples, from_rate, to_rate) else {

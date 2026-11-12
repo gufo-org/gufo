@@ -259,34 +259,58 @@
             inherit (pkgsSys) lib rustPlatform;
           };
 
+          # sccache's local storage supports one server. Build in a private
+          # snapshot, then publish immutable entries atomically with rsync.
+          # Shared files must be accessible to different Nix build users.
+          rustCacheSetup = ''
+            if [[ -d /tmp/gufo-rust-cache && -w /tmp/gufo-rust-cache ]]; then
+              rust_shared_cache=/tmp/gufo-rust-cache/objects-v1
+              (umask 000; mkdir -p "$rust_shared_cache")
+              export SCCACHE_DIR="$TMPDIR/rust-cache"
+              mkdir -p "$SCCACHE_DIR"
+              rsync -r --exclude='.*' "$rust_shared_cache/" "$SCCACHE_DIR/"
+              export SCCACHE_SERVER_UDS="$TMPDIR/sccache.sock"
+              export CARGO_INCREMENTAL=0
+              export RUSTC_WRAPPER=${pkgsSys.sccache}/bin/sccache
+              save_rust_cache() {
+                sccache --stop-server || true
+                # rsync renames complete temporary files into place. Never
+                # replace another builder's entry for the same compiler key.
+                (umask 000; rsync -r --ignore-existing --chmod=ugo=rwX \
+                  "$SCCACHE_DIR/" "$rust_shared_cache/") || true
+              }
+              trap save_rust_cache EXIT
+            fi
+          '';
+
           rustCheck = pkgsSys.runCommand "check-rust" {
-            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc ];
+            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc pkgsSys.pkg-config pkgsSys.python3 pkgsSys.sccache pkgsSys.rsync ];
+            buildInputs = [ pkgsSys.libopus ];
             src = mkFilteredSource {
-              directories = [
-                "src/core/rust"
-                "src/core/audio_decode"
-                "src/core/base64"
-                "src/core/http"
-                "src/core/png_decode"
-                "src/core/resample"
-                "src/core/wav_decode"
-                "src/core/websocket"
-              ];
+              # One source list: a new workspace member cannot silently miss CI.
+              directories = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.members;
               files = [
                 "rust-toolchain.toml"
                 "Cargo.toml"
                 "Cargo.lock"
-              ];
+                "tools/ci/check-rust-workspace.py"
+                "tests/tools/check_rust_workspace_test.py"
+              ] ++ map (name: "src/core/${name}/Cargo.toml") (builtins.filter
+                (name: builtins.pathExists (./src/core + "/${name}/Cargo.toml"))
+                (builtins.attrNames (builtins.readDir ./src/core)));
             };
-          } (cargoSetup + ''
+          } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
             cp -r "$src" source
             chmod -R u+w source
             cd source
+            python3 tools/ci/check-rust-workspace.py
+            python3 tests/tools/check_rust_workspace_test.py
             cargo fmt --all --check
             cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+            cargo test --workspace --locked --offline
             mkdir -p $out
-            echo "PASS: Rust formatting and clippy clean" > $out/result.txt
+            echo "PASS: Rust formatting, clippy and unit tests clean" > $out/result.txt
           '');
 
           formatCheck = pkgsSys.runCommand "check-format" {
@@ -424,6 +448,8 @@
             nativeBuildInputs = [
               pkgsSys.stdenv.cc
               pkgsSys.ccache
+              pkgsSys.sccache
+              pkgsSys.rsync
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
@@ -441,7 +467,7 @@
               pkgsSys.openssl
             ];
             src = testSource;
-          } (cargoSetup + ''
+          } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
             set -euo pipefail
 
