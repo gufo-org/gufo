@@ -95,18 +95,23 @@ tools\windows\vs-env.cmd cmake --build C:\src\xrt-build
 tools\windows\vs-env.cmd cmake --install C:\src\xrt-build
 ```
 
-This installs `C:\xrt\share\cmake\XRT\xrt-config.cmake` and
-`C:\xrt\xrt_coreutil.dll`. When CI bumps `XRT_REV`, rebuild at the new commit.
-Running on the NPU also needs AMD's NPU driver, which supplies the device
-plugin; without it Gufo runs on the GPU and `diagnose` warns
-`No XDNA NPU found`.
+This installs `C:\xrt\share\cmake\XRT\xrt-config.cmake`, the import library
+Gufo links, and `C:\xrt\xrt_coreutil.dll`. When CI bumps `XRT_REV`, rebuild
+at the new commit.
+
+At run time, use the `xrt_coreutil.dll` that AMD's NPU driver installs in
+System32, not this one. The source-built DLL loads the device shim
+(`xrt_core.dll`) from its own directory, and the driver keeps the shim in its
+DriverStore folder. With the source-built DLL beside `gufo.exe`, `gufo
+diagnose --section npu` warns `No XDNA NPU found` even with the driver
+installed. On a machine without the NPU driver, copy the source-built DLL
+beside `gufo.exe` so that it starts; Gufo then runs on the GPU only.
 
 ## 4. Configure and build
 
 ```cmd
 tools\windows\vs-env.cmd cmake --preset windows-release -DXRT_DIR=C:/xrt/share/cmake/XRT
 tools\windows\vs-env.cmd cmake --build --preset windows-release
-copy C:\xrt\xrt_coreutil.dll build\windows-release\
 ```
 
 `vs-env.cmd` finds Visual Studio with `vswhere`, loads the x64 environment and
@@ -115,9 +120,10 @@ calling script stops after it. The first configure builds the dependencies
 through vcpkg (ICU and OpenSSL take several minutes). The build produces
 `build\windows-release\gufo.exe` and `gufo-server.exe`, with the TheRock
 runtime DLLs and the `rocblas\` and `hipblaslt\` kernel libraries staged
-beside them. The build does not stage `xrt_coreutil.dll`; without the copy,
-`gufo.exe` exits silently with status `0xC0000135`. Build trees configured
-before XRT became required need one reconfigure with `-DXRT_DIR`.
+beside them. The build does not stage `xrt_coreutil.dll` (see step 3); if
+neither the driver's nor a copied one is found, `gufo.exe` exits silently
+with status `0xC0000135`. Build trees configured before XRT became required
+need one reconfigure with `-DXRT_DIR`.
 
 For the host test suite, which needs no GPU:
 
