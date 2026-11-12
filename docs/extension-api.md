@@ -181,3 +181,48 @@ A GGUF whose tensors use a type or shape Gufo doesn't know, such as your own
 quantization, still opens: those tensors have `sized == false`. Only a provider
 that sets `accepts_unsized_tensors` is asked to probe such a file, and it reads
 those tensors itself.
+
+## NPU programs
+
+`gufo/ext/experimental/npu.hpp` runs mlir-aie (IRON) designs on the Strix Halo
+XDNA NPU through XRT. An **NPU program** is one xclbin and the instruction
+streams built for it:
+
+```cpp
+namespace npu = gufo::npu;
+npu::Device device = npu::Device::Open();
+npu::Program prefill = npu::Program::Load(device, dir / "prefill.xclbin");
+npu::Instructions insts = prefill.LoadInstructions(dir / "prefill.insts");
+npu::Buffer weights = prefill.LoadBuffer(dir / "weights.bin", 4);
+npu::Buffer state = prefill.Allocate(state_bytes, 3);
+npu::Run run = prefill.Start(insts, {&state, &weights});
+run.Wait();
+state.FromDevice(0, logits_bytes);
+```
+
+Buffers are kernel arguments 3 and up and work in every program of the device.
+`Start` returns at once, so you can sample while the NPU runs the next step.
+Switching programs costs milliseconds; keep a prefill or a decode step in one.
+
+For a design with run-time values (token, position), open its dispatch library
+with `DispatchLibrary::Open` and generate streams. If only a few address words
+change, `DiffInstructions` turns two generated streams into patches for
+`Instructions::Apply`.
+
+`npu::Q8Gemm` runs Q8_0 matrix products on the NPU for any row count, with
+the weights resident in one arena. It loads the IRON design in
+`src/core/npu/kernels/q8gemm`, which `q8gemm.py <dir>` compiles:
+
+```cpp
+npu::Q8Gemm gemm = npu::Q8Gemm::Open(device, dir);
+int w = gemm.Upload(rows, cols, codes, scales);  // Q8_0 codes and block scales
+gemm.Run(w, x, batch, y);                        // y [batch][rows] = x W^T
+```
+
+To compile your own designs, the dev shell has the IRON toolchain
+(`GUFO_IRON_PYTHON`, `PEANO_INSTALL_DIR`); `gufo diagnose --section npu`
+checks the device.
+
+The header has no XRT types, so your extension builds without XRT headers;
+Gufo links XRT itself. On a machine without an NPU, `Device::Open` throws
+`npu::Error`. Call `ProbeDevices()` before you register an NPU path.

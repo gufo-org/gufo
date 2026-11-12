@@ -36,7 +36,11 @@ def copy_runtime(source, root):
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.is_symlink():
-        target = runtime_path(source.resolve(strict=True), root)
+        # Bundle the target too: a lib/ link may point outside every scanned
+        # lib/ directory (XRT installs under opt/xilinx/xrt/lib).
+        resolved = source.resolve(strict=True)
+        copy_runtime(resolved, root)
+        target = runtime_path(resolved, root)
         destination.symlink_to(os.path.relpath(target, destination.parent))
     else:
         shutil.copyfile(source, destination)
@@ -98,16 +102,33 @@ def pack(package, revision, destination):
     if not patched:
         raise ValueError('Production package does not select its patched ROCr runtime')
     preferred = runtime_path(Path(patched[1]), root).relative_to(root).as_posix()
-    directories = sorted({path.parent.relative_to(root).as_posix()
-                          for path in (root / 'runtime').rglob('*')
-                          if path.is_file() and '.so' in path.name
-                          and any(path.is_relative_to(runtime_path(dep, root)) for dep in closure)})
-    libraries = [preferred] + [path for path in directories if path != preferred]
     loaders = sorted({(dep / 'lib/ld-linux-x86-64.so.2').resolve() for dep in closure
                       if (dep / 'lib/ld-linux-x86-64.so.2').is_file()})
     if len(loaders) != 1:
         raise ValueError('Expected one pinned glibc ELF loader')
     loader = runtime_path(loaders[0], root).relative_to(root).as_posix()
+    # Libraries the executable's RUNPATH finds outside a lib/ directory keep
+    # their directory and its precedence. XRT locates its device shim and
+    # driver plugins beside the path libxrt_coreutil was loaded from.
+    linked = []
+    for line in output(str(loaders[0]), '--list', str(executable)).splitlines():
+        found = re.search(r'=> (/nix/store/\S+)', line)
+        if not found:
+            continue
+        directory = Path(found[1]).parent
+        if directory.parent.parent == STORE or directory in linked:
+            continue
+        linked.append(directory)
+        for library in directory.iterdir():
+            if (library.is_file() or library.is_symlink()) and runtime_file(library):
+                copy_runtime(library, root)
+    linked = [runtime_path(path, root).relative_to(root).as_posix() for path in linked]
+    directories = sorted({path.parent.relative_to(root).as_posix()
+                          for path in (root / 'runtime').rglob('*')
+                          if path.is_file() and '.so' in path.name
+                          and any(path.is_relative_to(runtime_path(dep, root)) for dep in closure)})
+    libraries = [preferred] + [path for path in linked if path != preferred]
+    libraries += [path for path in directories if path not in libraries]
     environment = {}
     for dependency in closure:
         # HIPBLASLT_TENSILE_LIBPATH stays unset. hipBLASLt finds its gfx1151

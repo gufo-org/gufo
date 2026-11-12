@@ -628,6 +628,11 @@ void PrintServeHelp(std::string_view program_name,
     AddDecisionOptions(parser, &model, &mmproj, &names, &context);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    ProviderOptions provider_options(registry, "serve decision",
+                                     ext::Capability::kDecision);
+    provider_options.Register(parser);
     parser.PrintHelp();
     return;
   }
@@ -700,6 +705,13 @@ void PrintServeHelp(std::string_view program_name,
     AddSpeechOptions(parser, tts, &options);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    ProviderOptions provider_options(registry,
+                                     "serve " + std::string(subcommand),
+                                     tts ? ext::Capability::kSpeechSynthesis
+                                         : ext::Capability::kSpeechRecognition);
+    provider_options.Register(parser);
     parser.PrintHelp();
     return;
   }
@@ -1091,6 +1103,9 @@ int RunServe(std::span<const char* const> args) {
                      "Serve decision models (/v1/systemone).");
     AddDecisionOptions(parser, &model, &mmproj, &names, &context);
     add_server_options(parser, false);
+    ProviderOptions declared_options(registry, "serve decision",
+                                     ext::Capability::kDecision);
+    declared_options.Register(parser);
     if (!parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
@@ -1098,6 +1113,13 @@ int RunServe(std::span<const char* const> args) {
     if (parser.IsHelpRequested()) {
       PrintServeHelp("gufo", "decision");
       return 0;
+    }
+    ext::ParsedOptions provider_options;
+    try {
+      provider_options = declared_options.Parse();
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
     }
     if (!prepare_server_options())
       return 2;
@@ -1111,7 +1133,8 @@ int RunServe(std::span<const char* const> args) {
     decisions =
         server::CreateDecisionService({.model_root = model.string(),
                                        .projector_path = mmproj.string(),
-                                       .maximum_context_tokens = context},
+                                       .maximum_context_tokens = context,
+                                       .provider_options = provider_options},
                                       PrimaryModelName(names), &error);
     if (!decisions) {
       std::cerr << "Error loading decision model: " << error << '\n';
@@ -1332,6 +1355,11 @@ int RunServe(std::span<const char* const> args) {
                             : "Serve Qwen3-ASR transcription.");
     AddSpeechOptions(parser, is_tts, &options);
     add_server_options(parser, false);
+    ProviderOptions declared_options(registry, "serve " + subcommand,
+                                     is_tts
+                                         ? ext::Capability::kSpeechSynthesis
+                                         : ext::Capability::kSpeechRecognition);
+    declared_options.Register(parser);
     if (!parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
@@ -1339,6 +1367,13 @@ int RunServe(std::span<const char* const> args) {
     if (parser.IsHelpRequested()) {
       PrintServeHelp("gufo", subcommand);
       return 0;
+    }
+    ext::ParsedOptions provider_options;
+    try {
+      provider_options = declared_options.Parse();
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
     }
     if (!prepare_server_options())
       return 2;
@@ -1365,6 +1400,7 @@ int RunServe(std::span<const char* const> args) {
         tts = std::make_shared<server::TtsService>(server::TtsServiceOptions{
             .model_root = options.model,
             .projector_path = options.mmproj,
+            .provider_options = provider_options,
             .native_context_tokens = options.context,
             .validate_model = true,
             .model_id = PrimaryModelName(options.served_model_names),
@@ -1390,6 +1426,7 @@ int RunServe(std::span<const char* const> args) {
         asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{
             .model_root = options.model,
             .projector_path = options.mmproj,
+            .provider_options = provider_options,
             .native_context_tokens = options.context,
             .validate_model = true,
             .model_id = PrimaryModelName(options.served_model_names),

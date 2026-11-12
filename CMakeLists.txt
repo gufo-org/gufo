@@ -78,6 +78,10 @@ pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 # Extension-only libraries come from each selected extension's manifest
 # `packages` (gufo_build_discovered_extensions).
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+# The NPU runtime (src/core/npu): XRT_DIR, XILINX_XRT or /opt/xilinx/xrt.
+find_package(XRT REQUIRED CONFIG
+  HINTS "$ENV{XILINX_XRT}/share/cmake/XRT"
+  PATHS /opt/xilinx/xrt/share/cmake/XRT)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
@@ -291,6 +295,7 @@ endif()
 
 add_subdirectory(src/core/platform)
 add_subdirectory(src/core/rust)
+add_subdirectory(src/core/npu)
 
 add_library(gufo_core STATIC
   src/core/base64.cpp
@@ -310,7 +315,7 @@ add_library(gufo_core STATIC
   src/core/audio.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
+target_link_libraries(gufo_core PUBLIC gufo_platform gufo_npu ICU::uc ICU::i18n
   Threads::Threads gufo_rust JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
@@ -1461,6 +1466,33 @@ endfunction()
     set_tests_properties(platform_library_relocated_test PROPERTIES
       LABELS "cpu;platform"
       ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:platform_library_fixture>")
+  endif()
+
+  add_library(npu_dispatch_fixture SHARED tests/core/npu_dispatch_fixture.cpp)
+  set_target_properties(npu_dispatch_fixture PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/core"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/core")
+  add_executable(npu_test tests/core/npu_test.cpp)
+  target_include_directories(npu_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(npu_test PRIVATE gufo_npu)
+  add_dependencies(npu_test npu_dispatch_fixture)
+  add_test(NAME npu_test COMMAND npu_test
+    "$<TARGET_FILE:npu_dispatch_fixture>" "${CMAKE_CURRENT_BINARY_DIR}/tests/core/npu-sysfs")
+  set_tests_properties(npu_test PROPERTIES LABELS "cpu;npu")
+
+  # On-device NPU check: the in-tree Q8_0 GEMM design (compiled with IRON when
+  # available) against a double reference; skipped without an NPU.
+  include(cmake/GufoNpuDesigns.cmake)
+  gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
+    SOURCES src/core/npu/kernels/q8gemm/q8gemm.cc)
+  if(GUFO_NPU_DESIGNS_AVAILABLE)
+    add_executable(npu_device_test tests/core/npu_device_test.cpp)
+    target_include_directories(npu_device_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(npu_device_test PRIVATE gufo_npu)
+    add_dependencies(npu_device_test npu_design_q8gemm)
+    add_test(NAME npu_device_test COMMAND npu_device_test "${q8gemm_NPU_DIR}")
+    set_tests_properties(npu_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
   endif()
 
   # the publish suite drives descriptors through dup2

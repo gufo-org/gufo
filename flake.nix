@@ -465,10 +465,14 @@
               rustToolchain
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
+              # The NPU runtime links XRT on Linux.
+              gufoPackages.${system}.xrt-amdxdna
+              pkgsSys.libuuid
             ];
             src = testSource;
           } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
+            export XILINX_XRT=${gufoPackages.${system}.xrt-amdxdna}/opt/xilinx/xrt
             set -euo pipefail
 
             # The store source name changes on every revision. base_dir alone
@@ -768,6 +772,9 @@
             gufo = base;
             hrx = self.packages.${system}.hrx;
           };
+          # XRT with its amdxdna plugin, as the Gufo package links it.
+          xrt-amdxdna = gufoPackages.${system}.xrt-amdxdna;
+          iron = gufoPackages.${system}.iron;
         }
       );
 
@@ -794,12 +801,19 @@
               # Compiler cache for the local loop; CMake attaches it as the C
               # and C++ launcher when it is on PATH, as the CPU checks do.
               pkgs.${system}.ccache
+              # NPU designs: IRON (mlir-aie) and Peano; CMake compiles the
+              # in-tree designs with it (cmake/GufoNpuDesigns.cmake).
+              gufoPackages.${system}.iron
               (audio-cpp.packages.${system}.rocm-gfx1151.override {
                 rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
               })
             ];
             env = {
               TORCH_HOME = "${alexnetTorchHome system}";
+              # CMake finds XRT here, and XRT its amdxdna plugin.
+              XILINX_XRT = "${gufoPackages.${system}.xrt-amdxdna}/opt/xilinx/xrt";
+              PEANO_INSTALL_DIR = gufoPackages.${system}.iron.peano;
+              GUFO_IRON_PYTHON = "${gufoPackages.${system}.iron}/bin/python3";
               # CMake links HIP binaries against the patched ROCr.
               GUFO_ROCR_LIBRARY_DIR = "${self.packages.${system}.default.rocmRuntime}/lib";
               LD_LIBRARY_PATH = pkgs.${system}.lib.makeLibraryPath [

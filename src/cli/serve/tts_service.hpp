@@ -43,6 +43,8 @@ struct TtsServiceOptions {
   std::filesystem::path model_root;
   /// Explicit model sidecar, such as an audio mmproj GGUF.
   std::filesystem::path projector_path;
+  /// Values of the options the selected provider declares for this command.
+  ext::ParsedOptions provider_options;
   std::size_t native_context_tokens{4096};
   bool validate_model{true};
   std::uint32_t sample_rate{24000};

@@ -8,6 +8,7 @@
 
 set(GUFO_LINK_GRAPH_PROTECTED
   gufo_platform
+  gufo_npu
   gufo_logging
   gufo_hip_host
   gufo_cache
@@ -23,7 +24,7 @@ set(GUFO_LINK_GRAPH_FORBIDDEN gufo_serving gufo_http)
 # platform leaf's and the Rust library's own lists join it, so a new OS
 # library stays classified.
 set(GUFO_LINK_GRAPH_SYSTEM_LIBS
-  dl m pthread rt atomic stdc++ gcc_s
+  dl m pthread rt atomic stdc++ gcc_s uuid
   ws2_32 iphlpapi bcrypt advapi32)
 if (DEFINED GUFO_PLATFORM_LIBS)
   list(APPEND GUFO_LINK_GRAPH_SYSTEM_LIBS ${GUFO_PLATFORM_LIBS})

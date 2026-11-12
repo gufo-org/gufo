@@ -203,6 +203,21 @@ Qwen27B also checks exact restoration after cancellation between layers.
 Use the [HTTP continuation check](server.md#hip-execution)
 for cancellation, thinking controls and disk restart.
 
+## NPU device checks
+
+The dev shell carries the IRON toolchain (`.#iron`: mlir-aie and Peano) and
+sets `GUFO_IRON_PYTHON`. CMake then compiles the in-tree NPU designs
+(`src/core/npu/kernels`, `cmake/GufoNpuDesigns.cmake`) and adds
+`npu_device_test`, which runs `npu::Q8Gemm` against a double reference. It
+exits as skipped without an NPU. `gufo diagnose --section npu` reports the
+accel node, driver, firmware and whether XRT opens the device.
+
+```sh
+nix develop -c cmake --preset cpu-test
+nix develop -c cmake --build --preset cpu-test --target npu_device_test
+nix develop -c ctest --preset cpu-test -R '^npu_device_test$' --output-on-failure
+```
+
 ## Boundary and link-graph gates
 
 Three repository gates describe who may reach the serving tier; all three are

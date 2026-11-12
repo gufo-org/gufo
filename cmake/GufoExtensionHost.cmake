@@ -5,7 +5,7 @@ include_guard(GLOBAL)
 function(gufo_extension_host target)
   # Keep every object of the libraries behind the public extension surface,
   # including ones no built-in extension uses.
-  set(libraries gufo_ext_runtime gufo_logging gufo_platform gufo_core gufo_cache)
+  set(libraries gufo_ext_runtime gufo_logging gufo_platform gufo_npu gufo_core gufo_cache)
   if(ENGINE_ENABLE_HIP)
     list(APPEND libraries gufo_cache_hip gufo_hip_host)
   endif()

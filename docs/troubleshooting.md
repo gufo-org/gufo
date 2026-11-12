@@ -7,7 +7,7 @@ the common failures, and what to include in a bug report.
 
 ```sh
 gufo diagnose
-gufo diagnose --section gpu        # platform, gpu, inventory or extensions
+gufo diagnose --section gpu        # platform, gpu, npu, inventory or extensions
 gufo diagnose --json               # for scripts and bug reports
 ```
 
@@ -33,6 +33,13 @@ can't see the state of a server that is already running; use `/health` and
   Podman's documented fix, `sudo setsebool -P container_use_devices true`,
   lets every container on the host use the devices passed to it; review that
   scope before enabling it.
+
+## The NPU isn't found
+
+- Check that the kernel's `amdxdna` driver created the node:
+  `ls -l /dev/accel/accel0`. Your user needs access to it, usually through
+  the `render` group.
+- In a container, pass `--device /dev/accel/accel0`.
 
 ## The server stops with `device_lost`
 
