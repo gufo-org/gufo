@@ -591,9 +591,7 @@ struct TextGenerationScheduler::Impl {
           "text generation scheduler runner pool must not be null");
     }
     sessions = std::make_shared<SessionTable>(runner_pool->capacity());
-    if (scheduler_policy.max_pending_requests == 0 ||
-        scheduler_policy.max_pending_requests_per_client == 0 ||
-        scheduler_policy.max_pending_requests_per_client >
+    if (scheduler_policy.max_pending_requests_per_client >
             scheduler_policy.max_pending_requests ||
         scheduler_policy.max_output_bytes_per_request == 0 ||
         scheduler_policy.max_buffered_output_bytes_per_request == 0 ||
@@ -735,6 +733,14 @@ struct TextGenerationScheduler::Impl {
             static_cast<std::int64_t>(queued_count),
         std::memory_order_relaxed);
     queued_count = count;
+  }
+
+  /// Sessions no admitted request holds. Lock order: queue_mutex, then
+  /// sessions->mutex, as in PopQueued.
+  [[nodiscard]] std::size_t FreeSessions() const {
+    const std::lock_guard<std::mutex> lock(sessions->mutex);
+    return static_cast<std::size_t>(std::count(
+        sessions->requests.begin(), sessions->requests.end(), nullptr));
   }
 
   [[nodiscard]] std::shared_ptr<ScheduledRequest> PopQueued() {
@@ -2652,7 +2658,12 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
       throw TextGenerationError(TextGenerationErrorCode::kDeviceLost,
                                 kDeviceLostMessage);
     }
-    if (impl_->queued_count >= impl_->scheduler_policy.max_pending_requests) {
+    // Queued requests first claim the free sessions; only the rest wait, so
+    // only they count against the pending limits. `--max-pending 0` thus
+    // admits work for a free session and refuses everything else (#1206).
+    const std::size_t free_sessions = impl_->FreeSessions();
+    if (impl_->queued_count >=
+        impl_->scheduler_policy.max_pending_requests + free_sessions) {
       refused = true;
       refusal_code = TextGenerationErrorCode::kQueueFull;
       refusal_message = "text generation pending queue is full";
@@ -2664,15 +2675,17 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
           [&](const PendingClient& pending) {
             return pending.client_id == request->client_id;
           });
-      if (client != impl_->queued_clients.end() &&
-          client->requests.size() >=
-              impl_->scheduler_policy.max_pending_requests_per_client) {
+      const std::size_t client_queued =
+          client != impl_->queued_clients.end() ? client->requests.size() : 0;
+      if (client_queued >=
+          impl_->scheduler_policy.max_pending_requests_per_client +
+              free_sessions) {
         refused = true;
         refusal_code = TextGenerationErrorCode::kClientQueueFull;
         refusal_message = "text generation client pending queue is full";
         refusal_reason = "client_quota";
         decision_queued = impl_->queued_count;
-        decision_client_queued = client->requests.size();
+        decision_client_queued = client_queued;
       } else if (prompt_state_bytes.has_value() && !reserve_prompt()) {
         refused = true;
         refusal_code = TextGenerationErrorCode::kInsufficientMemory;

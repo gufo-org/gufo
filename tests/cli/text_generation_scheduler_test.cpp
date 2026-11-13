@@ -1882,6 +1882,43 @@ void TestPendingLimitsRejectBeforeStateAdmission() {
          "accepted work survives a queue rejection");
 }
 
+void TestZeroPendingLimitsAdmitOnlyFreeSessions() {
+  auto control = std::make_shared<FakeControl>();
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {},
+                                 {
+                                     .max_pending_requests = 0,
+                                     .max_pending_requests_per_client = 0,
+                                 });
+
+  auto active =
+      scheduler->Submit({1}, 4, 0.0F, {}, false, ClientMetadata("client"));
+  control->WaitForAdvance(1);
+  // The second session is free, so the client's next request runs there even
+  // though neither limit allows anything to wait.
+  auto second =
+      scheduler->Submit({2}, 1, 0.0F, {}, false, ClientMetadata("client"));
+
+  bool rejected = false;
+  try {
+    (void)scheduler->Submit({3}, 1, 0.0F, {}, false,
+                            ClientMetadata("third-client"));
+  } catch (const TextGenerationError& error) {
+    rejected = error.code() == TextGenerationErrorCode::kQueueFull;
+  }
+  Expect(rejected, "a zero pending limit rejects once every session is taken");
+
+  control->ReleaseAdvance();
+  Expect(active.Wait().tokens == ExpectedTokens(1, 4) &&
+             second.Wait().tokens == ExpectedTokens(2, 1),
+         "a zero pending limit still admits work for free sessions");
+  Expect(
+      scheduler->Submit({4}, 1, 0.0F, {}, false, ClientMetadata("third-client"))
+              .Wait()
+              .tokens == ExpectedTokens(4, 1),
+      "freed sessions admit new work again");
+}
+
 void TestPendingClientsAreRoundRobinAndIndividuallyBounded() {
   auto control = std::make_shared<FakeControl>();
   control->block_advance_label = 1;
@@ -3831,6 +3868,7 @@ int main() {
   TestPromptCancelledInsideYield();
   TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();
+  TestZeroPendingLimitsAdmitOnlyFreeSessions();
   TestPromptStateAdmissionBudget();
   TestPromptAdmissionTracksLiveHeadroom();
   TestPromptAdmissionRollsBackFailedEnqueue();
