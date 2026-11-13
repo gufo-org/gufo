@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
   dec.SetHead(head.bf.data(), kHead, fnorm.data());
 
   // A cache of P earlier positions (random, as prefill would have stored).
-  const int P = 37;
+  const int P = argc > 3 ? std::atoi(argv[3]) : 37;
   std::normal_distribution<float> nd(0.0f, 1.0f);
   std::vector<std::vector<std::vector<double>>> K(D::kLayers), V(D::kLayers);
   for (int l = 0; l < D::kLayers; ++l)
