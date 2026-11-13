@@ -18,6 +18,8 @@
 #include "gufo/ext/experimental/npu.hpp"
 #include "src/models/embedding_gemma2/config.hpp"
 #include "src/models/embedding_gemma2/loader.hpp"
+#include "src/models/embedding_gemma2/npu/audio_npu.hpp"
+#include "src/models/embedding_gemma2/npu/vision_npu.hpp"
 #include "src/models/embedding_gemma2/tensor.hpp"
 
 namespace gufo::models::embedding_gemma2::npu {
@@ -68,7 +70,10 @@ struct Encoder::Impl {
   std::vector<Layer> layers;
   std::mutex mutex;
   bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
-  ModelConfig text_only;
+  ModelConfig text_only;  // the checkpoint's configuration
+  std::string model_root;
+  std::unique_ptr<VisionTower> vision;
+  std::unique_ptr<AudioTower> audio;
 
   const Tensor& Find(const std::string& name) const {
     const Tensor* t = loaded.store->Find(std::string(kTextTensorPrefix) + name);
@@ -117,11 +122,11 @@ struct Encoder::Impl {
       throw std::runtime_error(loaded.error);
     config = &loaded.config.text;
     text_only = loaded.config;
-    text_only.supported_vision = text_only.supported_video =
-        text_only.supported_audio = false;
+    model_root = model_dir;
     device = gufo::npu::Device::Open();
-    gemm = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
-                                    std::size_t(1400) << 20);
+    gemm = gufo::npu::BfpGemm::Open(
+        device, gufo::npu::FindDesign("bfpgemm"),
+        std::size_t(2048) << 20);  // the design's maximum: room for the towers
     for (auto& scratch : scratches)
       scratch = gemm.NewScratch(std::size_t(192) << 20);
     embed = reinterpret_cast<const std::uint16_t*>(
@@ -364,6 +369,12 @@ struct Encoder::Impl {
     std::vector<float> state, qkv[2], context, projected;
     std::vector<std::uint16_t> qkv16[2];
     std::vector<std::uint16_t> normed16, context16, act16, ple16, tmp16;
+    // Image, video and audio soft tokens: rows [row, row + values / 512).
+    struct Media {
+      std::size_t row;
+      std::vector<float> values;
+    };
+    std::vector<Media> media;
   };
   Work work;  // reused by every request (they run one at a time)
 
@@ -515,6 +526,48 @@ struct Encoder::Impl {
     return out;
   }
 
+  // Overwrites the media placeholder rows of [r0, r1) with the towers' soft
+  // tokens, before the per-layer inputs are projected (as the GPU path
+  // inserts them into the state and the per-layer-input source).
+  static void SpliceMedia(const Work& wk, std::size_t r0, std::size_t r1,
+                          float* state) {
+    for (const Work::Media& m : wk.media) {
+      const std::size_t count = m.values.size() / 512;
+      const std::size_t lo = std::max(m.row, r0),
+                        hi = std::min(m.row + count, r1);
+      for (std::size_t r = lo; r < hi; ++r)
+        std::memcpy(state + (r - r0) * 512, m.values.data() + (r - m.row) * 512,
+                    512 * sizeof(float));
+    }
+  }
+
+  // The towers' soft tokens of every sequence's images, video frames and
+  // audio clips, loading each tower on first use.
+  void EncodeMedia(const std::vector<EncoderSequence>& sequences,
+                   const std::vector<std::size_t>& starts,
+                   const std::function<bool()>& cancelled) {
+    work.media.clear();
+    for (std::size_t q = 0; q < sequences.size(); ++q) {
+      const EncoderSequence& s = sequences[q];
+      const auto& stop = s.is_cancelled ? s.is_cancelled : cancelled;
+      for (const auto& image : s.images) {
+        if (!vision)
+          vision = std::make_unique<VisionTower>(gemm, model_root);
+        work.media.push_back(
+            {starts[q] + image.offset, vision->Run(image.patches, stop)});
+      }
+      for (const auto& clip : s.audio) {
+        if (!audio)
+          audio = std::make_unique<AudioTower>(gemm, model_root);
+        work.media.push_back(
+            {starts[q] + clip.offset, audio->Run(clip.features, stop)});
+      }
+    }
+    for (const Work::Media& m : work.media)
+      if (m.row + m.values.size() / 512 > starts.back())
+        throw std::runtime_error("media soft tokens past their sequence");
+  }
+
   // The encoder over rows [r0, r1) of `wk`, through the final projection.
   void RunPart(Work& wk, std::size_t r0, std::size_t r1, int lane,
                std::barrier<>* sync, const std::function<bool()>& cancelled,
@@ -544,6 +597,7 @@ struct Encoder::Impl {
         std::copy(row.begin(), row.end(), state + r * hidden);
       }
     });
+    SpliceMedia(wk, r0, r1, state);
     using Epilogue = gufo::npu::BfpGemm::Epilogue;
     // Output tiles copied into bf16 rows of width out_w.
     auto copy_to = [](std::uint16_t* out, std::size_t out_w) {
@@ -783,11 +837,6 @@ bool Encoder::EmbedMultimodal(const std::vector<EncoderSequence>& sequences,
   std::vector<std::uint32_t> tokens;
   std::vector<std::size_t> starts{0};
   for (const EncoderSequence& s : sequences) {
-    if (!s.images.empty() || !s.audio.empty()) {
-      if (error)
-        *error = "embedding_gemma2: --npu embeds text only";
-      return false;
-    }
     if (s.tokens.empty()) {
       if (error)
         *error = "embedding_gemma2: empty sequence";
@@ -804,6 +853,7 @@ bool Encoder::EmbedMultimodal(const std::vector<EncoderSequence>& sequences,
   }
   std::lock_guard lock(impl_->mutex);
   try {
+    impl_->EncodeMedia(sequences, starts, is_cancelled);
     auto out = impl_->RunSplit(tokens, starts, is_cancelled);
     if (out.size() != sequences.size()) {
       if (error)
