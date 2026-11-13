@@ -833,7 +833,8 @@ void PrintServeHelp(std::string_view program_name,
         "Deprecated and ignored: prompts beside decoders are split by layers",
         "Scheduling", &prefill_chunk_tokens);
     parser.AddOption("", "--max-pending", "N",
-                     "Maximum queued generation requests (default: 16)",
+                     "Maximum queued generation requests; 0 rejects when every "
+                     "session is busy (default: 16)",
                      "Scheduling", &max_pending_requests);
     parser.AddOption(
         "", "--max-pending-per-client", "N",
@@ -1573,9 +1574,11 @@ int RunServe(std::span<const char* const> args) {
         "", "--prefill-chunk", "N",
         "Deprecated and ignored: prompts beside decoders are split by layers",
         "Scheduling", &prefill_chunk_tokens);
-    llm_parser.AddOption("", "--max-pending", "N",
-                         "Maximum queued generation requests (default: 16)",
-                         "Scheduling", &max_pending_requests);
+    llm_parser.AddOption(
+        "", "--max-pending", "N",
+        "Maximum queued generation requests; 0 rejects when every "
+        "session is busy (default: 16)",
+        "Scheduling", &max_pending_requests);
     llm_parser.AddOption(
         "", "--max-pending-per-client", "N",
         "Maximum queued requests per client IP (default: --max-pending)",
@@ -1684,7 +1687,6 @@ int RunServe(std::span<const char* const> args) {
         json::Value::object(), sampling_config, &validated_sampling);
     if (max_tokens < -1 || max_tokens == 0 ||
         max_tokens > std::numeric_limits<std::uint32_t>::max() ||
-        max_pending_requests == 0 || max_pending_requests_per_client == 0 ||
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
         max_buffered_output_bytes_total == 0 ||

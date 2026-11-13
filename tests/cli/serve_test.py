@@ -229,16 +229,19 @@ def main():
               "sampling and scheduling limits are invalid")
     # The per-client cap defaults to --max-pending, so lowering the global
     # queue alone is valid. An explicit per-client value is still bounded by it.
+    # 0 turns the queue off: work only runs on a free session (#1206).
     assert ("Maximum queued requests per client IP (default: --max-pending)"
             in help_text)
     for args in (["--max-pending", "2"], ["--max-pending", "1"],
+                 ["--max-pending", "0"], ["--max-pending-per-client", "0"],
+                 ["--max-pending", "0", "--max-pending-per-client", "0"],
                  ["--max-pending", "2", "--max-pending-per-client", "2"],
                  ["--max-pending-per-client", "16"]):
         check(["serve", "llm", "--model", "missing.gguf", *args], 1,
               "Error loading model")
     for args in (["--max-pending", "2", "--max-pending-per-client", "3"],
                  ["--max-pending-per-client", "17"],
-                 ["--max-pending-per-client", "0"], ["--max-pending", "0"]):
+                 ["--max-pending", "0", "--max-pending-per-client", "1"]):
         check(["serve", "llm", *args], 2,
               "sampling and scheduling limits are invalid")
     for value in ("0", "60000"):
