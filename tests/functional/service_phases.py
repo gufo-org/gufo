@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired main/PR server timings for embedding, ASR and TTS workloads."""
+"""Paired main/PR server timings for embedding, ASR, TTS and image workloads."""
 
 import argparse
 import hashlib
@@ -15,13 +15,18 @@ from metrics import NOISE_MS, SLOWDOWN
 
 
 REQUESTS = {'short': 'Short input', 'second': 'Second input', 'repeat': 'Warm replay'}
+# Eight steps: Turbo accepts no other count, and it bounds the full checkpoint.
+IMAGE_STEPS = 8
+# The server loads image weights on the first request, not at startup.
+# A second prompt at the same size adds no phase the warm replay lacks.
+IMAGE_REQUESTS = {'short': 'First 512×512 image (loads weights)', 'repeat': 'Warm 512×512 replay'}
 
 
-def completed_log(path, request_id):
+def completed_log(path, request_id, event='completed'):
     for line in path.read_text().splitlines():
-        if f'request={request_id} ' in line and 'event=completed ' in line:
+        if f'request={request_id} ' in line and f'event={event} ' in line:
             return dict(re.findall(r'(\w+)=([^\s]+)', line))
-    raise ValueError('Missing server completion metrics: ' + request_id)
+    raise ValueError(f'Missing server {event} metrics: ' + request_id)
 
 
 def number(value, name):
@@ -44,7 +49,7 @@ def measure_arm(model_id, binary, assets, output, audio_root):
         server.start(600)
         startup = server.startup()
         url = f'http://127.0.0.1:{server.port}/v1'
-        for label in REQUESTS:
+        for label in IMAGE_REQUESTS if model['category'] == 'image' else REQUESTS:
             if model['category'] == 'embedding':
                 text = 'The river flows past the garden.' if label != 'second' else ' '.join(['river stone garden'] * 100)
                 payload = evidence.json(url + '/embeddings', label=label,
@@ -58,6 +63,13 @@ def measure_arm(model_id, binary, assets, output, audio_root):
                     files={'file': ('speech.wav', (audio_root / 'clear-english-voice.wav').read_bytes(), 'audio/wav')})
                 assert payload['text'].strip(), payload
                 work = {'text_sha256': hashlib.sha256(payload['text'].encode()).hexdigest()}
+            elif model['category'] == 'image':
+                payload = evidence.json(url + '/images/generations', label=label, json={
+                    'model': 'phases', 'prompt': 'A small red cottage beside a lake at sunset',
+                    'size': '512x512', 'steps': IMAGE_STEPS, 'seed': 7})
+                assert len(payload['data']) == 1 and payload['data'][0]['b64_json'], payload.keys()
+                # Kernel changes may move pixels; the work is the size and step count.
+                work = {}
             else:
                 text = ('The little brown dog ran across the garden.' if label != 'second'
                         else 'Please bring a glass of water to the table.')
@@ -94,6 +106,11 @@ def measure_arm(model_id, binary, assets, output, audio_root):
             row['metrics']['synthesis_ms'] = number(log['synthesis_ms'], 'synthesis_ms')
             for key in ('codec_steps', 'audio_ms'):
                 row['work'][key] = number(log[key], key)
+        elif category == 'image':
+            generated = completed_log(output / 'server.log', row['request_id'], 'generated')
+            for phase in ('prompt', 'denoise', 'vae'):
+                row['metrics'][phase + '_ms'] = number(generated[phase + '_ms'], phase + '_ms')
+            row['work'].update(size=generated['size'], steps=number(generated['steps'], 'steps'))
         else:
             for key in ('prompt_tokens', 'inputs', 'dimensions'):
                 row['work'][key] = number(log[key], key)
@@ -106,7 +123,7 @@ def summarize(arms):
     if len(by['base']) != len(by['head']) or len(by['base']) < 2:
         raise ValueError('Missing paired repeats')
     phases, diverged = [], []
-    for label in REQUESTS:
+    for label in by['base'][0]['requests']:
         comparable = all(base['requests'][label]['work'] == head['requests'][label]['work']
                          for base, head in zip(by['base'], by['head']))
         if not comparable:
@@ -161,10 +178,11 @@ def main():
             # Retain completed arms even if a later arm fails.
             args.output.write_text(json.dumps({'status': 'incomplete', 'arms': arms}, indent=2) + '\n')
     phases, diverged = summarize(arms)
+    image = registry()['models'][args.model_id]['category'] == 'image'
     result = {'schema': 1, 'status': 'passed', 'model': args.model_id,
               'revisions': {'base': args.base_revision, 'head': args.head_revision},
               'settings': {'repeats': args.repeats, 'slowdown': SLOWDOWN, 'noise_ms': NOISE_MS,
-                           'requests': REQUESTS, 'idle_temp_c': idle},
+                           'requests': IMAGE_REQUESTS if image else REQUESTS, 'idle_temp_c': idle},
               'wall_s': time.monotonic() - started, 'arms': arms,
               'phases': phases, 'diverged': diverged}
     args.output.write_text(json.dumps(result, indent=2) + '\n')

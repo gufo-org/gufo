@@ -66,7 +66,10 @@ release packaging builds the upstream runtime instead.
   correct kernels that stall on this GPU, with decode up to hundreds of times
   slower. The `windows-base` preset chain-loads
   `cmake/toolchains/windows-therock.cmake`, which takes `clang-cl` and the
-  runtime from `HIP_PATH`.
+  runtime from `HIP_PATH`. `clang-cl` ignores GCC-style options such as
+  `-ffast-math`, `-ffp-contract=off` or `-fno-slp-vectorize`, with only a
+  `-Wunknown-argument` warning; CMake files spell them
+  `${GUFO_CLANG_OPTION}-ffast-math`, which adds the `/clang:` prefix there.
 - **XRT Windows SDK 2.21**, Xilinx's
   [`xrt_windows_sdk.zip`](https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip)
   (sha256 `ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295`),

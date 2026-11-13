@@ -46,7 +46,7 @@ std::size_t CountReasoningTokens(
     const ext::ReasoningMarkup& reasoning,
     const std::function<std::string(tokenization::TokenId)>& decode) {
   using State = TextGenerationBackend::InitialOutputState;
-  if (initial == State::kContent || reasoning.close.empty() ||
+  if (TextGenerationBackend::IsContent(initial) || reasoning.close.empty() ||
       (initial == State::kAuto && reasoning.open.empty()))
     return 0;
   // The parsers match delimiters in text, and tokens at their edges can merge
@@ -594,7 +594,7 @@ InferenceBackend::Result InferenceBackend::chat(
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial != TextGenerationBackend::InitialOutputState::kContent)
+      !TextGenerationBackend::IsContent(initial))
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
             *request.reasoning.budget_tokens, prompt->tokens, initial);
@@ -685,7 +685,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial != TextGenerationBackend::InitialOutputState::kContent)
+      !TextGenerationBackend::IsContent(initial))
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
             *request.reasoning.budget_tokens, prompt->tokens, initial);

@@ -302,6 +302,8 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
         "tts-base",
         "tts-custom",
         "tts-design",
+        "image-turbo",
+        "image",
     ]
     ordered_assets = {}
     for k in ASSET_ORDER:
@@ -320,6 +322,8 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
         "qwen3-tts-base",
         "qwen3-tts-custom",
         "qwen3-tts-design",
+        "qwen-image-turbo",
+        "qwen-image",
         "embedding-gemma2-npu",
         "qwen3-asr-npu",
         "qwen3-tts-custom-npu",
@@ -335,7 +339,7 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
     # Combine rules:
     # 1. documentation (from core)
     # 2. outside-current-scope (from core)
-    # 3. model rules (qwen27, flash-next, deepseek, embedding, asr, tts)
+    # 3. model rules (qwen27, flash-next, deepseek, embedding, asr, tts, image)
     # 4. shared rules (shared-audio, service-harness, shared-qwen, shared-text, functional-text, hosted-checks, shared-infrastructure, devlab-orchestration)
     RULE_ORDER = [
         "documentation",
@@ -346,6 +350,7 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
         "embedding",
         "asr",
         "tts",
+        "image",
         "shared-audio",
         "npu",
         "service-harness",

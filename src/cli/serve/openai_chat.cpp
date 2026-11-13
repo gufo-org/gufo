@@ -1917,7 +1917,14 @@ ParsedGeneration ParseGeneration(
       SetParsedText(parsed, content, raw, track_text);
     }
   } else {
-    SetParsedText(parsed, content, raw, track_text);
+    // After reasoning the prompt closed, the model writes the separator.
+    SetParsedText(parsed,
+                  initial_output_state ==
+                          TextGenerationBackend::InitialOutputState::
+                              kContentAfterReasoning
+                      ? AfterReasoningSeparator(content, markup)
+                      : content,
+                  raw, track_text);
   }
 
   quotes.Reset(parsed.text);
@@ -2064,6 +2071,9 @@ ParsedGeneration ParseStructuredGeneration(
       raw.remove_prefix(end + reasoning.close.size());
       raw = AfterReasoningSeparator(raw, markup);
     }
+  } else if (initial == TextGenerationBackend::InitialOutputState::
+                            kContentAfterReasoning) {
+    raw = AfterReasoningSeparator(raw, markup);
   }
   const auto trimmed = Trim(raw);
   const bool held_opener = choice == ChatRequest::ToolChoice::kRequired &&
@@ -2323,9 +2333,12 @@ public:
         TextGenerationBackend::InitialOutputState::kReasoning) {
       state_ = State::kThinking;
       reasoning_start_ = true;
-    } else if (initial_output_state ==
-               TextGenerationBackend::InitialOutputState::kContent) {
+    } else if (TextGenerationBackend::IsContent(initial_output_state)) {
       state_ = State::kContent;
+      // The prompt closed reasoning: the model writes the separator.
+      trim_reasoning_separator_ =
+          initial_output_state ==
+          TextGenerationBackend::InitialOutputState::kContentAfterReasoning;
     }
   }
 

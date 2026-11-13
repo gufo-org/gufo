@@ -30,6 +30,9 @@ struct ImageMetrics {
   std::size_t resident_weight_bytes{0};
   int steps{0};       // Denoising steps executed after resolving the default.
   double lora_ms{0};  // Adapter switch, before prompt encoding.
+  /// Classifier-free guidance scale applied after resolving the default
+  /// (at most 1 is unguided); nullopt when the runner does not report it.
+  std::optional<float> guidance_scale{};
 };
 
 /// A LoRA adapter registered with ImageRunner::AddLora, selected by name; the

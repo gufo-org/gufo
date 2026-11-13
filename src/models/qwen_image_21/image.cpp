@@ -296,8 +296,7 @@ void ValidateRequest(const Request& request) {
 }
 
 float ResolveGuidance(const Request& request) {
-  return request.guidance_scale.value_or(
-      request.negative_prompt.empty() ? 1.0F : kDefaultGuidanceScale);
+  return request.guidance_scale.value_or(1.0F);
 }
 
 std::string ConditionPrompt(std::string_view prompt,

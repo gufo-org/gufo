@@ -1059,6 +1059,7 @@ Result Model::Generate(const Request& request,
     result.metrics.total_ms = Milliseconds(total_start);
     result.metrics.resident_weight_bytes = rt.WeightBytes();
     result.metrics.steps = run_steps;
+    result.metrics.guidance_scale = guidance;
     return result;
   } catch (const std::exception& error) {
     // All launches on this request's stream must finish before temporary

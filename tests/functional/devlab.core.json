@@ -5,7 +5,8 @@
     "llm": "flash-next-q4",
     "embedding": "embedding-gemma2",
     "asr": "qwen3-asr",
-    "tts": "qwen3-tts-base"
+    "tts": "qwen3-tts-base",
+    "image": "qwen-image-turbo"
   },
   "rules": [
     {
@@ -26,13 +27,10 @@
       "id": "outside-current-scope",
       "priority": 20,
       "paths": [
-        "src/models/qwen_image_21/**",
         "src/models/minimax_h3/**",
-        "tests/models/qwen_image_21/**",
         "tests/models/minimax_h3*",
         "tools/h3/**",
         "tools/gufo/h3*",
-        "tools/models/qwen_image_21/**",
         "tests/cli/video*"
       ],
       "owners": []
@@ -82,6 +80,7 @@
         "embedding",
         "asr",
         "tts",
+        "image",
         "embedding-gemma2-npu",
         "qwen3-asr-npu",
         "qwen3-tts-custom-npu"
@@ -184,7 +183,8 @@
         "llm",
         "embedding",
         "asr",
-        "tts"
+        "tts",
+        "image"
       ]
     },
     {
@@ -202,6 +202,7 @@
         "embedding",
         "asr",
         "tts",
+        "image",
         "embedding-gemma2-npu",
         "qwen3-asr-npu",
         "qwen3-tts-custom-npu"

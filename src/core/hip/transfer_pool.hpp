@@ -16,10 +16,13 @@ struct TransferLease;
 
 enum class CopyDirection { kDeviceToHost, kHostToDevice };
 
-// One stream/event pair per transfer. Caller orders access to this object;
-// different leases may run concurrently. Sources must already be ready and
-// stay immutable; retain all buffers until completion settles. A lease accepts
-// one completion only. Complete seals Native submissions too.
+// One event per transfer; a pool may share native FIFO streams between leases.
+// Caller orders access to this object; different leases may run concurrently.
+// Sources must already be ready and stay immutable; retain all buffers until
+// completion settles. A lease accepts one completion only. Complete seals
+// Native submissions too. With shared streams, Native submissions must not
+// wait for work whose submission depends on another lease completing: the
+// native streams impose FIFO ordering between leases.
 class TransferStream final : public cache::Stream {
 public:
   ~TransferStream() override;
@@ -27,6 +30,8 @@ public:
   // the pool's stream. Retain its owner until both this lease and completion
   // are released; synchronization and error draining use the bound stream.
   void BindTo(hipStream_t, std::shared_ptr<void> owner);
+  // Synchronize does not seal this handle; it may be reused until Complete or
+  // failure. No further submissions through a saved handle after Complete.
   [[nodiscard]] hipStream_t Native() const;
   [[nodiscard]] cache::TransferResult Synchronize() noexcept override;
   [[nodiscard]] cache::Completion Complete();
@@ -44,9 +49,18 @@ class TransferPool {
 public:
   // Creates all nonblocking streams and timing-disabled events at startup.
   explicit TransferPool(std::size_t capacity);
+  // Keep capacity independent event leases over fewer eager native streams.
+  // Native FIFO streams are shared when native_streams < capacity. Successful
+  // waits stop at this lease's event, with system-scope visibility;
+  // a native stream failure quarantines every lease mapped to that stream.
+  // Both counts must be nonzero, with native_streams <= capacity. Equal counts
+  // retain the one-argument constructor's exclusive stream behavior.
+  TransferPool(std::size_t capacity, std::size_t native_streams);
   // Returns null on exhaustion. No HIP allocation/stream/event creation here.
-  // A pair returns only after BOTH stream and completion release their lease.
-  // Failed pairs are quarantined rather than reused.
+  // An event returns only after BOTH stream and completion release their lease.
+  // Failed resources are quarantined rather than reused. A shared pool throws
+  // when exhausted after any quarantine: its consumers must not wait for lost
+  // capacity to return. Exclusive pools retain null on exhaustion.
   [[nodiscard]] std::unique_ptr<TransferStream> TryAcquire();
 
 private:

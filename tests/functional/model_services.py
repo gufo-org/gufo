@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run bounded embedding/ASR/TTS HTTP checks against an owned production server.
+"""Run bounded embedding/ASR/TTS/image HTTP checks against an owned production server.
 
 No downloads. Each invocation creates a fresh evidence directory and retains
 request bodies, model identity, configuration, timings and server logs.
@@ -28,8 +28,9 @@ NPU_REFERENCE_COSINE = 0.998
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('service', choices=('embedding', 'asr', 'tts'))
+    parser.add_argument('service', choices=('embedding', 'asr', 'tts', 'image'))
     parser.add_argument('--embedding-suite', choices=('smoke', 'full'), default='smoke')
+    parser.add_argument('--image-suite', choices=('smoke', 'full'), default='full')
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
@@ -38,6 +39,10 @@ def main():
     parser.add_argument('--voice', help='Defaults to narrator, ryan, or voice-design by variant')
     parser.add_argument('--asr-binary', type=Path, help='Explicit pinned evaluator for TTS intelligibility')
     parser.add_argument('--asr-model', type=Path)
+    parser.add_argument('--lora', action='append', default=[], metavar='NAME=PATH',
+                        help='Image: register an adapter (repeat for two)')
+    parser.add_argument('--lora-default', metavar='NAME:SCALE',
+                        help='Image: --lora-default for requests that omit adapters')
     parser.add_argument('--startup-timeout', type=float, default=300)
     parser.add_argument('--npu', action='store_true',
                         help='Serve on the XDNA NPU (--npu); embeddings use the NPU cosine gate')
@@ -48,8 +53,19 @@ def main():
         parser.error('--startup-timeout must be positive')
     args.binary, args.model, args.audio_root = (path.resolve() for path in
                                                (args.binary, args.model, args.audio_root))
-    if not args.binary.is_file() or not (args.model / 'config.json').is_file():
-        parser.error('binary and model/config.json must exist; missing weights are not a pass')
+    # A snapshot directory with its config, or one model file such as a GGUF.
+    config = 'model_index.json' if args.service == 'image' else 'config.json'
+    model_file = args.model.is_file()
+    if not args.binary.is_file() or not (model_file or (args.model / config).is_file()):
+        parser.error(f'binary and a model file or model/{config} must exist; '
+                     'missing weights are not a pass')
+    loras = dict(item.split('=', 1) for item in args.lora)
+    if args.service != 'image' and (loras or args.lora_default):
+        parser.error('--lora and --lora-default apply to image only')
+    if any(not Path(path).is_file() for path in loras.values()):
+        parser.error('every --lora file must exist; missing adapters are not a pass')
+    if args.lora_default and args.lora_default.split(':')[0] not in loras:
+        parser.error('--lora-default must name a --lora adapter')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     with socket.socket() as reserve:
@@ -61,14 +77,21 @@ def main():
     if args.npu:
         command += ['--npu']
     voice = args.voice or {'base': 'narrator', 'custom': 'ryan', 'design': 'voice-design'}[args.variant]
+    for name, path in loras.items():
+        command += ['--lora', f'{name}={Path(path).resolve()}']
+    if args.lora_default:
+        command += ['--lora-default', args.lora_default]
     if args.service == 'tts' and args.variant == 'base':
         command += ['--voice', f'{voice}={args.audio_root / "clear-english-voice.wav"}',
                     '--voice-text', f'{voice}={args.audio_root / "clear-english-voice.txt"}']
     identity = {}
-    for name in ('config.json', 'tokenizer_config.json', 'preprocessor_config.json'):
+    for name in ('config.json', 'tokenizer_config.json', 'preprocessor_config.json',
+                 'model_index.json'):
         path = args.model / name
         if path.is_file():
             identity[name] = sha256(path)
+    # A single file is itself the weights.
+    weights = [args.model] if model_file else sorted(args.model.rglob('*.safetensors'))
     report = {**provenance(), 'schema': 1, 'service': args.service, 'status': 'running',
               'command': command, 'model_configuration_sha256': identity,
               'source_revision': subprocess.check_output(
@@ -76,12 +99,13 @@ def main():
               'model_download_metadata': {str(path.relative_to(args.model)): path.read_text()
                   for path in sorted((args.model / '.cache/huggingface/download').rglob('*.metadata'))},
               'weights': [{'path': str(path), 'bytes': path.stat().st_size,
-                           'mtime_ns': path.stat().st_mtime_ns} for path in sorted(args.model.rglob('*.safetensors'))],
+                           'mtime_ns': path.stat().st_mtime_ns} for path in weights],
               'binary_sha256': sha256(args.binary), 'variant': args.variant if args.service == 'tts' else None,
               'npu': args.npu,
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
                   ('model_services.py', 'service_http.py', 'asr_service.py', 'tts_service.py',
+                   'image_service.py',
                    'embeddings.py', 'embedding_images.py', 'embedding_audio.py', 'embedding_video.py')}}
     evidence = Evidence(output, report)
     evidence.save()
@@ -111,6 +135,20 @@ def main():
                         with (output / (script + '.log')).open('w') as log:
                             result = subprocess.run(launch, stdout=log, stderr=subprocess.STDOUT, timeout=600)
                         assert result.returncode == 0, f'see {script}.log'
+            elif args.service == 'image':
+                import image_service
+                report['loras'] = {name: sha256(path) for name, path in loras.items()}
+                default = args.lora_default.split(':') if args.lora_default else None
+                image_service.run(evidence, url, public_model, loras, default,
+                                  smoke=args.image_suite == 'smoke')
+                with evidence.case('server-log-modes'):
+                    log = (output / 'server.log').read_text()
+                    modes = ('generate', 'txt2img', 'edit') if args.image_suite == 'smoke' else (
+                        'generate', 'txt2img', 'edit', 'img2img')
+                    for mode in modes:
+                        assert f'event=generated mode={mode} ' in log, mode
+                    assert all(' references=1 ' in line for line in log.splitlines()
+                               if 'event=generated mode=edit ' in line), 'edits use one reference'
             elif args.service == 'asr':
                 import asr_service
                 asr_service.run(evidence, url, args.audio_root, public_model)

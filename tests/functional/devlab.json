@@ -5,7 +5,8 @@
     "llm": "flash-next-q4",
     "embedding": "embedding-gemma2",
     "asr": "qwen3-asr",
-    "tts": "qwen3-tts-base"
+    "tts": "qwen3-tts-base",
+    "image": "qwen-image-turbo"
   },
   "assets": {
     "flash-next": {
@@ -154,6 +155,41 @@
         "speech_tokenizer/config.json",
         "speech_tokenizer/model.safetensors"
       ]
+    },
+    "image-turbo": {
+      "repo": "Qwen/Qwen-Image-2.1-Turbo",
+      "revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.jinja",
+        "LICENSE",
+        "README.md"
+      ],
+      "required": [
+        "model_index.json",
+        "transformer/diffusion_pytorch_model.safetensors.index.json",
+        "text_encoder/config.json",
+        "vae/config.json"
+      ]
+    },
+    "image": {
+      "repo": "Qwen/Qwen-Image-2.1",
+      "revision": "b3179ad355be050328e483a9dfdd9e60cd62adfa",
+      "patterns": [
+        "*.json",
+        "*.safetensors",
+        "*.txt",
+        "*.jinja",
+        "LICENSE",
+        "README.md"
+      ],
+      "required": [
+        "model_index.json",
+        "transformer/diffusion_pytorch_model.safetensors.index.json",
+        "text_encoder/model.safetensors.index.json",
+        "vae/diffusion_pytorch_model.safetensors"
+      ]
     }
   },
   "models": {
@@ -243,6 +279,18 @@
       "service": "tts",
       "variant": "design"
     },
+    "qwen-image-turbo": {
+      "title": "Qwen-Image-2.1-Turbo",
+      "category": "image",
+      "asset": "image-turbo",
+      "service": "image"
+    },
+    "qwen-image": {
+      "title": "Qwen-Image-2.1",
+      "category": "image",
+      "asset": "image",
+      "service": "image"
+    },
     "embedding-gemma2-npu": {
       "title": "EmbeddingGemma 2 NPU",
       "category": "embedding",
@@ -285,13 +333,10 @@
       "id": "outside-current-scope",
       "priority": 20,
       "paths": [
-        "src/models/qwen_image_21/**",
         "src/models/minimax_h3/**",
-        "tests/models/qwen_image_21/**",
         "tests/models/minimax_h3*",
         "tools/h3/**",
         "tools/gufo/h3*",
-        "tools/models/qwen_image_21/**",
         "tests/cli/video*"
       ],
       "owners": []
@@ -380,6 +425,20 @@
       ]
     },
     {
+      "id": "image",
+      "priority": 20,
+      "paths": [
+        "src/models/qwen_image_21/**",
+        "tests/models/qwen_image_21/**",
+        "tools/models/qwen_image_21/**",
+        "src/cli/serve/image*",
+        "tests/functional/image_service.py"
+      ],
+      "owners": [
+        "image"
+      ]
+    },
+    {
       "id": "shared-audio",
       "priority": 20,
       "paths": [
@@ -424,6 +483,7 @@
         "embedding",
         "asr",
         "tts",
+        "image",
         "embedding-gemma2-npu",
         "qwen3-asr-npu",
         "qwen3-tts-custom-npu"
@@ -526,7 +586,8 @@
         "llm",
         "embedding",
         "asr",
-        "tts"
+        "tts",
+        "image"
       ]
     },
     {
@@ -544,6 +605,7 @@
         "embedding",
         "asr",
         "tts",
+        "image",
         "embedding-gemma2-npu",
         "qwen3-asr-npu",
         "qwen3-tts-custom-npu"

@@ -3,6 +3,7 @@
 set(gufo_pr_targets
   cache_adapter_test
   cache_adapter_lifecycle_test
+  cache_transfer_pool_test
   cache_ledger_test
   cache_checkpoint_test
   cache_prefix_index_test
@@ -24,7 +25,7 @@ set(gufo_pr_targets
   platform_publish_test platform_prefault_test platform_mapped_file_test
   platform_fs_test platform_library_test npu_test npu_host_ops_test
   logit_sampler_test ggml_dequant_test
-  quote_tracker_test logprobs_test sampling_test image_api_test
+  quote_tracker_test logprobs_test sampling_test image_api_test sdapi_test
   openai_chat_test http_server_test http_server_signals_test trace_test
   audio_websocket_test
   text_generation_scheduler_test layered_prefill_conformance_test

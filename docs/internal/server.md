@@ -494,7 +494,10 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/systemone` | A decision model is configured with `gufo serve decision` |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
-| `GET` | `/sdapi/v1/loras` | Qwen-Image-2.1 image serving is configured; lists `--lora` adapters. A text server answers 501 |
+| `POST` | `/sdapi/v1/txt2img`, `/sdapi/v1/img2img` | Image serving is configured; the [A1111 image API](#a1111-image-api). A text server answers 501 |
+| `GET` | `/sdapi/v1/loras` | Image serving is configured; lists `--lora` adapters. A text server answers 501 |
+| `GET` | `/sdapi/v1/options`, `/sdapi/v1/sd-models`, `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, `/sdapi/v1/upscalers`, `/sdapi/v1/latent-upscale-modes`, `/sdapi/v1/progress` | Image serving is configured; A1111 discovery |
+| `POST` | `/sdapi/v1/options` | Image serving is configured; accepts the loaded `sd_model_checkpoint` |
 | `POST` | `/v1/videos` | A validated operator-supplied MiniMax H3 checkpoint is configured |
 | `GET` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
@@ -688,6 +691,87 @@ request memory, persists only its SHA-256 digest, and wipes both source and
 active string storage after transfer and completion. Completed MP4s are probed
 for H.264/AAC codec, geometry, rates, duration, and A/V synchronization before
 atomic publication.
+
+## A1111 image API
+
+`gufo serve image` also speaks the AUTOMATIC1111 Stable Diffusion WebUI API
+(`/sdapi/v1/*`) in the dialect of stable-diffusion.cpp's server
+(`examples/server/routes_sdapi.cpp`), so A1111 clients such as Open WebUI
+(image engine "Automatic1111"), SillyTavern ("Stable Diffusion WebUI") and
+llama-swap setups written for sd.cpp work unchanged. It is a separate API
+layer (`src/cli/serve/sdapi.cpp`) with its own schema, responses and errors;
+it shares only the `ImageService` (`image_service.cpp`) and its generation
+loop with the OpenAI routes (`image_api.cpp`). Neither API reads the other's
+fields: `cfg_scale` or `lora` on `/v1/images/*`, and `guidance_scale`,
+`loras` or `size` on `/sdapi/v1/*`, are unknown fields and ignored.
+
+`txt2img` and `img2img` take JSON. Defaults are the model's, not A1111's
+processing defaults; `null` counts as omitted.
+
+| Field | Behavior |
+| --- | --- |
+| `prompt` | Required; empty answers `400 {"error": "prompt required"}`. `<lora:...>` tags stay literal text |
+| `negative_prompt` | Default `""`; forwarded |
+| `cfg_scale` | Forwarded as given (A1111 clients send 7), 0 to 100. Omitted uses the model default (1, unguided, for Qwen-Image-2.1 and Turbo, so a negative prompt alone has no effect) |
+| `steps` | 2 to 100; omitted uses the checkpoint default (40; Turbo accepts only 8) |
+| `seed` | Integer; negative or omitted is random. Batch images use consecutive seeds |
+| `width`, `height` | Positive; multiples of 32, at most 4096 per side and 4 megapixels. `txt2img` default 1024 × 1024 |
+| `batch_size` | Image count, 1 to 10 (default 1). `n_iter` is ignored |
+| `lora` | Adapter list; see below |
+| `init_images` | `img2img` only, required: the first entry, as base64 or a base64 data URL; URLs are not fetched |
+| `denoising_strength` | `img2img` only: clamped to 0.01–1; omitted or negative is 0.75, as in sd.cpp and A1111. Ignored by `txt2img` |
+| `mask` | `img2img`: refused with 400 (no inpainting) |
+| `sampler_name`, `scheduler`, `clip_skip`, `enable_hr`, `hr_*`, `alwayson_scripts`, other fields | Ignored |
+
+Without `width` and `height`, `img2img` uses the init image's size on the
+32-pixel grid, scaled down to the size limits; one given side keeps its aspect
+ratio. As in stable-diffusion.cpp, `steps` is the schedule length and
+`denoising_strength` selects how much of it runs (the last `steps × strength`
+steps), without A1111's step-count rewrite.
+
+The response is `{"images": [base64 PNG, ...], "parameters": <request echo>,
+"info": "<JSON string>"}`. `info` follows sd.cpp's `prepare_info_field`:
+`prompt`, `negative_prompt`, `seed`, `cfg_scale`, `width`, `height`, `steps`,
+`sampler_name` (`Euler`), `version` (`gufo`), `denoising_strength` for
+`img2img`, and the per-image arrays `infotexts` (A1111 parameter text),
+`all_prompts`, `all_negative_prompts`, `all_seeds` and `generation_info`
+(`seed`, `steps_run`, `loras`, `total_ms`). An omitted `cfg_scale` reports the
+scale the runner applied (`ImageMetrics::guidance_scale`), or `null` if the
+runner does not report it; an omitted `steps` is `null` below full strength,
+where the schedule length is not visible to the host.
+
+`lora` follows sd.cpp: `[{"path": ..., "multiplier": 1, "is_high_noise":
+false}]`, where `path` is a `path` from `GET /sdapi/v1/loras`. An array
+(including `[]`) replaces the `--lora-default` set; omitted or a non-array
+value keeps it. Non-object entries are skipped; repeated paths sum their
+multipliers. An unknown path answers `400 {"error": "invalid lora path:
+..."}` and a missing one `lora.path required`. `is_high_noise` entries select
+the second stage of two-stage models; single-stage Qwen-Image validates and
+skips them. Gufo's bounds apply: at most 16 adapters and summed multipliers at
+most 10 in magnitude.
+
+Errors are `{"error": message}`: 400 for invalid requests, 405 for the wrong
+method, 404 for other `/sdapi/v1/` paths, 503 when the request does not fit
+into free GPU memory and 500 for generation failures.
+
+Discovery answers what A1111 clients read before generating:
+`GET /sdapi/v1/options` returns `{"samples_format": "png",
+"sd_model_checkpoint": <served model>}`; `POST` accepts the served model or an
+alias as `sd_model_checkpoint` (400 otherwise) and ignores other settings.
+`sd-models` lists the served model (`title`, `model_name`, `filename`, with
+`hash`, `sha256` and `config` null). `samplers`, `schedulers` and `upscalers`
+list the single choice each (`Euler`, `default`, `None`) and
+`latent-upscale-modes` is empty. `progress` reports no step progress or
+preview: `state.job_count` counts generations running or waiting, so clients
+that wait for an idle server do not wait forever.
+
+Deliberate differences from stable-diffusion.cpp: no `sd_cpp_extra_args`,
+`<lora:...>` tags, `mask`, `extra_images`, highres fix, ADetailer, previews or
+interrupt; samplers, schedulers and `clip_skip` are ignored; an omitted
+`cfg_scale` is the model's default instead of sd.cpp's engine-wide 7; URL init
+images are never fetched (A1111's `api_enable_requests` setting has no
+equivalent); `img2img` requires `init_images`; wrong field types answer 400
+instead of 500; batch and adapter bounds are Gufo's.
 
 ## Embeddings
 

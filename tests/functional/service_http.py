@@ -36,7 +36,11 @@ def word_error_rate(actual, expected):
     return previous[-1] / len(reference)
 
 
-def pcm_wav(pcm, rate=24000):
+# TtsRunner::SampleRate() may declare any rate up to this (src/ext/tts.hpp).
+MAXIMUM_SAMPLE_RATE = 192000
+
+
+def pcm_wav(pcm, rate):
     result = io.BytesIO()
     with wave.open(result, 'wb') as audio:
         audio.setnchannels(1)
@@ -46,22 +50,32 @@ def pcm_wav(pcm, rate=24000):
     return result.getvalue()
 
 
-def audio_check(data, wav=True):
+def audio_check(data, wav=True, rate=None):
+    """Check mono 16-bit speech; a WAV states its rate, raw PCM needs `rate`.
+
+    With a WAV, a given `rate` must match its header.
+    """
     if wav:
         with wave.open(io.BytesIO(data)) as audio:
-            assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (1, 2, 24000)
+            shape = audio.getnchannels(), audio.getsampwidth()
+            assert shape == (1, 2), ('WAV format', shape)
+            assert rate in (None, audio.getframerate()), ('sample rate', audio.getframerate(), rate)
+            rate = audio.getframerate()
             frames = audio.getnframes()
             pcm = audio.readframes(frames)
             assert len(pcm) == frames * 2, 'truncated WAV payload'
     else:
+        if rate is None:
+            raise ValueError('raw PCM needs the sample rate of the WAV output')
         pcm = data
+    assert 1 <= rate <= MAXIMUM_SAMPLE_RATE, ('sample rate', rate)
     assert len(pcm) % 2 == 0 and pcm, 'empty or partial PCM samples'
     samples = struct.unpack('<' + 'h' * (len(pcm) // 2), pcm)
-    duration = len(samples) / 24000
+    duration = len(samples) / rate
     rms = math.sqrt(sum((sample / 32768) ** 2 for sample in samples) / len(samples))
     assert .3 <= duration <= 20, ('audio duration', duration)
     assert rms > .001, ('silent audio', rms)
-    return pcm, {'duration_seconds': duration, 'rms': rms,
+    return pcm, {'sample_rate': rate, 'duration_seconds': duration, 'rms': rms,
                  'sha256': hashlib.sha256(pcm).hexdigest()}
 
 
