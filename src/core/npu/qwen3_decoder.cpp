@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -89,6 +92,11 @@ struct Qwen3Decoder::Impl {
   std::vector<std::uint32_t> next;
   int next_pos{-1};
   Run pending;
+  // GUFO_NPU_PROFILE: start-to-done and readback times, every 32 tokens.
+  bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
+  std::chrono::steady_clock::time_point started;
+  double npu_ms{}, read_ms{}, start_ms{};
+  int timed{};
 
   std::size_t At(const std::string& key) const {
     auto it = lay.find(key);
@@ -314,7 +322,11 @@ void Qwen3Decoder::Start(const float* row, int pos) {
     m.ins.Assign(m.next);
   else
     m.ins.Assign(m.Generate(pos));
+  const auto t0 = std::chrono::steady_clock::now();
   m.pending = m.program.Start(m.ins, {&m.s, &m.w});
+  m.started = std::chrono::steady_clock::now();
+  m.start_ms +=
+      std::chrono::duration<double, std::milli>(m.started - t0).count();
   // The next position's stream, on the host while the NPU runs.
   if (pos + 1 < capacity()) {
     m.next = m.Generate(pos + 1);
@@ -328,9 +340,22 @@ void Qwen3Decoder::Wait() {
     return;
   m.pending.Wait();
   m.pending = Run();
+  const auto t1 = std::chrono::steady_clock::now();
   const std::size_t at = m.At("logits");
   m.s.FromDevice(at, std::size_t(m.head_rows) * 4);
   std::memcpy(m.logits.data(), m.S(at), std::size_t(m.head_rows) * 4);
+  if (m.profile) {
+    using Ms = std::chrono::duration<double, std::milli>;
+    m.npu_ms += Ms(t1 - m.started).count();
+    m.read_ms += Ms(std::chrono::steady_clock::now() - t1).count();
+    if (++m.timed == 32) {
+      std::fprintf(stderr,
+                   "qwen3dec: per token start %.2f npu %.2f readback %.2f ms\n",
+                   m.start_ms / 32, m.npu_ms / 32, m.read_ms / 32);
+      m.timed = 0;
+      m.npu_ms = m.read_ms = m.start_ms = 0;
+    }
+  }
 }
 
 std::span<const float> Qwen3Decoder::logits() {
