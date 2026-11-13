@@ -26,6 +26,9 @@ namespace {
 // Sequences at least this long run attention products on the NPU.
 constexpr std::size_t kNpuAttentionRows = 128;
 constexpr std::size_t kMaxHeads = 16;
+// Concurrent parts of a batch (BfpGemm has as many staging lanes).
+constexpr std::size_t kParts = 4;
+constexpr std::size_t kGateBlock = 64;  // gate rows per interleaved tile
 
 struct Layer {
   int qkv, o, gate_up, down, ple_gate, ple_proj;
@@ -48,7 +51,7 @@ struct Encoder::Impl {
   gufo::npu::Device device;
   gufo::npu::BfpGemm gemm;
   // One per concurrent half batch (attention keys and values).
-  gufo::npu::BfpGemm::Scratch scratches[2];
+  gufo::npu::BfpGemm::Scratch scratches[kParts];
   LoadResult loaded;
   const TextConfig* config{};
   const std::uint16_t* embed{};
@@ -82,6 +85,24 @@ struct Encoder::Impl {
     return gemm.UploadBf16(n, k, rows);
   }
 
+  // [gate; up] with each 128-output tile holding 64 gate rows and the 64 up
+  // rows of the same channels, so one output tile yields 64 activations.
+  int UploadInterleaved(const std::string& gate, const std::string& up) {
+    const Tensor& g = Find(gate);
+    const Tensor& u = Find(up);
+    const std::size_t n = g.shape[0], k = g.shape[1];
+    const auto* gp = reinterpret_cast<const std::uint16_t*>(g.data);
+    const auto* up_p = reinterpret_cast<const std::uint16_t*>(u.data);
+    std::vector<std::uint16_t> rows(2 * n * k);
+    for (std::size_t b = 0; b < n / kGateBlock; ++b) {
+      std::memcpy(&rows[(2 * b) * kGateBlock * k], gp + b * kGateBlock * k,
+                  kGateBlock * k * 2);
+      std::memcpy(&rows[(2 * b + 1) * kGateBlock * k],
+                  up_p + b * kGateBlock * k, kGateBlock * k * 2);
+    }
+    return gemm.UploadBf16(int(2 * n), int(k), rows);
+  }
+
   void Load(const std::string& model_dir) {
     loaded = LoadModelDirectory(model_dir, false, false);
     if (!loaded.ok)
@@ -92,9 +113,9 @@ struct Encoder::Impl {
         text_only.supported_audio = false;
     device = gufo::npu::Device::Open();
     gemm = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
-                                    std::size_t(1100) << 20);
+                                    std::size_t(1400) << 20);
     for (auto& scratch : scratches)
-      scratch = gemm.NewScratch(std::size_t(448) << 20);
+      scratch = gemm.NewScratch(std::size_t(288) << 20);
     embed = reinterpret_cast<const std::uint16_t*>(
         Find("embed_tokens.weight").data);
     ple_model = Upload({"ple.per_layer_model_projection.weight"});
@@ -108,8 +129,8 @@ struct Encoder::Impl {
           Upload({p + "self_attn.q_proj.weight", p + "self_attn.k_proj.weight",
                   p + "self_attn.v_proj.weight"});
       layer.o = Upload({p + "self_attn.o_proj.weight"});
-      layer.gate_up =
-          Upload({p + "mlp.gate_proj.weight", p + "mlp.up_proj.weight"});
+      layer.gate_up = UploadInterleaved(p + "mlp.gate_proj.weight",
+                                        p + "mlp.up_proj.weight");
       layer.down = Upload({p + "mlp.down_proj.weight"});
       layer.ple_gate = Upload({p + "ple_block.per_layer_input_gate.weight"});
       layer.ple_proj = Upload({p + "ple_block.per_layer_projection.weight"});
@@ -135,7 +156,7 @@ struct Encoder::Impl {
                     std::size_t row_w, std::size_t heads, std::size_t kv,
                     std::size_t hd, const std::vector<std::size_t>& starts,
                     const std::vector<char>& long_seq, const Visible& visible,
-                    float* context, std::size_t qw) {
+                    std::uint16_t* context16, std::size_t qw) {
     constexpr std::size_t kBandRows = 512;
     struct Span {
       std::size_t seq, q0, q1, k0, k1;         // absolute rows
@@ -144,7 +165,7 @@ struct Encoder::Impl {
     struct Item {
       const Span* span;
       std::size_t head;
-      std::vector<float> q, scores, out;
+      std::vector<std::uint16_t> q, scores;  // bf16
     };
     std::vector<Span> spans;
     for (std::size_t s = 0; s + 1 < starts.size(); ++s) {
@@ -180,156 +201,215 @@ struct Encoder::Impl {
     // group of keys (full attention over long sequences) share one upload
     // per KV head instead.
     const std::size_t group_heads = heads / kv;
-    std::map<std::pair<std::size_t, std::size_t>, const Span*> shared[2];
+    // Specs in upload order; slot[i] is where spec i's id goes. Long spans
+    // with the same keys reuse the first one's ids (`alias`).
+    using Spec = gufo::npu::BfpGemm::Scratch::Spec;
+    std::vector<Spec> specs;
+    std::vector<int*> slot;
+    std::vector<std::pair<int*, int*>> alias;  // (target, source) after upload
+    std::map<std::pair<std::size_t, std::size_t>, Span*> shared[2];
     for (int pass = 0; pass < 2; ++pass)
       for (Span& sp : spans) {
         const std::size_t n = sp.k1 - sp.k0;
         const float* base = qkv + sp.k0 * row_w + qw;
+        int* ids = pass == 0 ? sp.keys : sp.values;
         const bool long_span = n > 1024;
         if (long_span) {
           if (auto it = shared[pass].find({sp.k0, sp.k1});
               it != shared[pass].end()) {
-            int* dst = pass == 0 ? sp.keys : sp.values;
-            const int* src = pass == 0 ? it->second->keys : it->second->values;
-            std::copy(src, src + heads, dst);
+            int* src = pass == 0 ? it->second->keys : it->second->values;
+            for (std::size_t h = 0; h < heads; ++h)
+              alias.push_back({&ids[h], &src[h]});
             continue;
           }
+          shared[pass][{sp.k0, sp.k1}] = &sp;
         }
         for (std::size_t h = 0; h < heads; ++h) {
           const std::size_t kh = h / group_heads;
-          if (long_span && h % group_heads != 0) {
-            (pass == 0 ? sp.keys : sp.values)[h] =
-                (pass == 0 ? sp.keys : sp.values)[h - 1];
+          if (h % group_heads != 0) {
+            // A query head sharing its KV head: the same matrix, copied so
+            // the calls stay evenly spaced (long spans reuse it).
+            if (long_span) {
+              alias.push_back({&ids[h], &ids[h - 1]});
+            } else {
+              Spec copy = specs.back();
+              copy.same_as = int(specs.size()) - 1;
+              specs.push_back(copy);
+              slot.push_back(&ids[h]);
+            }
             continue;
           }
           if (pass == 0)
-            sp.keys[h] =
-                scratch.Upload(int(n), int(hd), base + kh * hd, row_w, 1);
+            specs.push_back({int(n), int(hd), base + kh * hd, row_w, 1});
           else
-            sp.values[h] = scratch.Upload(int(hd), int(n),
-                                          base + kv * hd + kh * hd, 1, row_w);
+            specs.push_back(
+                {int(hd), int(n), base + kv * hd + kh * hd, 1, row_w});
+          slot.push_back(&ids[h]);
         }
-        if (long_span)
-          shared[pass][{sp.k0, sp.k1}] = &sp;
       }
+    const std::vector<int> uploaded = scratch.UploadMany(specs);
+    for (std::size_t i = 0; i < uploaded.size(); ++i)
+      *slot[i] = uploaded[i];
+    for (const auto& [target, source] : alias)
+      *target = *source;
     t_upload = ms(t);
     t = Clock::now();
     std::vector<Item> items;
     for (const Span& sp : spans)
       for (std::size_t h = 0; h < heads; ++h)
-        items.push_back({&sp, h, {}, {}, {}});
+        items.push_back({&sp, h, {}, {}});
+    // Queries and scores stay bf16 (the NPU rounds them to bf16 anyway).
     host::ParallelFor(items.size(), 1, [&](std::size_t b, std::size_t e) {
       for (std::size_t i = b; i < e; ++i) {
         Item& it = items[i];
         const std::size_t rows = it.span->q1 - it.span->q0;
         it.q.resize(rows * hd);
         for (std::size_t r = 0; r < rows; ++r)
-          std::memcpy(it.q.data() + r * hd,
-                      qkv + (it.span->q0 + r) * row_w + it.head * hd,
-                      hd * sizeof(float));
+          host::FloatToBf16(qkv + (it.span->q0 + r) * row_w + it.head * hd,
+                            it.q.data() + r * hd, hd);
         it.scores.resize(rows * (it.span->k1 - it.span->k0));
-        it.out.resize(rows * hd);
       }
     });
+    std::vector<gufo::npu::BfpGemm::Epilogue> epilogues;
+    epilogues.reserve(items.size());
+    for (Item& it : items) {
+      std::uint16_t* scores = it.scores.data();
+      const std::size_t n = it.span->k1 - it.span->k0;
+      epilogues.push_back([scores, n](int r0, int n_rows, int n0, int w,
+                                      const std::uint16_t* tile) {
+        for (int i = 0; i < n_rows; ++i)
+          std::memcpy(scores + std::size_t(r0 + i) * n + std::size_t(n0),
+                      tile + std::size_t(i) * 128, std::size_t(w) * 2);
+      });
+    }
     std::vector<gufo::npu::BfpGemm::Call> calls;
-    for (Item& it : items)
-      calls.push_back({it.span->keys[it.head], it.q.data(),
-                       int(it.span->q1 - it.span->q0), it.scores.data()});
+    for (std::size_t i = 0; i < items.size(); ++i)
+      calls.push_back({items[i].span->keys[items[i].head], nullptr,
+                       int(items[i].span->q1 - items[i].span->q0), nullptr,
+                       items[i].q.data(), &epilogues[i]});
     gemm.Run(calls);
     t_qk = ms(t);
     t = Clock::now();
     host::ParallelFor(items.size() * 16, 1, [&](std::size_t b, std::size_t e) {
+      std::vector<float> row;
       for (std::size_t w = b; w < e; ++w) {
         Item& it = items[w / 16];
         const Span& sp = *it.span;
         const std::size_t rows = sp.q1 - sp.q0, n = sp.k1 - sp.k0;
         const std::size_t part = w % 16;
+        row.resize(n);
         for (std::size_t r = rows * part / 16; r < rows * (part + 1) / 16;
              ++r) {
           std::size_t lo, hi;
           visible(sp.q0 + r, sp.k0, sp.k1, &lo, &hi);
           lo -= sp.k0;
           hi -= sp.k0;
-          float* row = it.scores.data() + r * n;
+          std::uint16_t* s16 = it.scores.data() + r * n;
+          host::Bf16ToFloat(s16 + lo, row.data() + lo, hi - lo);
           float top = -INFINITY;
           for (std::size_t t = lo; t < hi; ++t)
             top = std::max(top, row[t]);
-          std::fill(row, row + lo, 0.0f);
-          std::fill(row + hi, row + n, 0.0f);
+          std::fill(row.begin(), row.begin() + std::ptrdiff_t(lo), 0.0f);
+          std::fill(row.begin() + std::ptrdiff_t(hi), row.end(), 0.0f);
           float sum = 0;
-          host::ExpInPlace(row + lo, hi - lo, top, &sum);
+          host::ExpInPlace(row.data() + lo, hi - lo, top, &sum);
           const float inv = 1.0f / sum;
           for (std::size_t t = lo; t < hi; ++t)
             row[t] *= inv;
+          host::FloatToBf16(row.data(), s16, n);
         }
       }
     });
     t_soft = ms(t);
     t = Clock::now();
     calls.clear();
-    for (Item& it : items)
-      calls.push_back({it.span->values[it.head], it.scores.data(),
-                       int(it.span->q1 - it.span->q0), it.out.data()});
+    // PV tiles go straight to the bf16 context rows.
+    std::vector<gufo::npu::BfpGemm::Epilogue> pv_epilogues;
+    pv_epilogues.reserve(items.size());
+    for (Item& it : items) {
+      const std::size_t q0 = it.span->q0, col = it.head * hd;
+      pv_epilogues.push_back(
+          [context16, q0, col, qw](int r0, int n_rows, int n0, int w,
+                                   const std::uint16_t* tile) {
+            for (int i = 0; i < n_rows; ++i)
+              std::memcpy(context16 + (q0 + std::size_t(r0 + i)) * qw + col +
+                              std::size_t(n0),
+                          tile + std::size_t(i) * 128, std::size_t(w) * 2);
+          });
+    }
+    for (std::size_t i = 0; i < items.size(); ++i)
+      calls.push_back({items[i].span->values[items[i].head], nullptr,
+                       int(items[i].span->q1 - items[i].span->q0), nullptr,
+                       items[i].scores.data(), &pv_epilogues[i]});
     gemm.Run(calls);
     if (profile)
       std::fprintf(stderr,
                    "attention: upload %.2f qk %.2f softmax %.2f pv %.2f ms\n",
                    t_upload, t_qk, t_soft, ms(t));
-    host::ParallelFor(items.size(), 1, [&](std::size_t b, std::size_t e) {
-      for (std::size_t i = b; i < e; ++i) {
-        const Item& it = items[i];
-        for (std::size_t r = it.span->q0; r < it.span->q1; ++r)
-          std::memcpy(context + r * qw + it.head * hd,
-                      it.out.data() + (r - it.span->q0) * hd,
-                      hd * sizeof(float));
-      }
-    });
   }
 
   // Splits the sequences into two halves of similar token counts that run on
   // two threads, so one half's CPU work overlaps the other's NPU work.
+  // Splits the sequences into up to kParts parts of similar token counts
+  // that run on their own threads, each with a share of the CPU threads and
+  // its own NPU staging lane, so the parts' CPU stages overlap each other's
+  // NPU work.
   std::vector<std::vector<float>> RunSplit(
       const std::vector<std::uint32_t>& tokens,
       const std::vector<std::size_t>& starts,
       const std::function<bool()>& cancelled) {
     const std::size_t seqs = starts.size() - 1, rows = tokens.size();
-    if (seqs < 2 || rows < 256)
+    const std::size_t parts = std::min<std::size_t>(
+        {kParts, seqs, std::max<std::size_t>(1, rows / 256)});
+    if (parts < 2)
       return Run(tokens, starts, cancelled, 0);
-    std::size_t cut = 1;
-    while (cut + 1 < seqs && starts[cut] * 2 < rows)
-      ++cut;
-    auto part = [&](std::size_t s0, std::size_t s1, int lane) {
-      std::vector<std::uint32_t> t(tokens.begin() + std::ptrdiff_t(starts[s0]),
-                                   tokens.begin() + std::ptrdiff_t(starts[s1]));
-      std::vector<std::size_t> st;
-      for (std::size_t s = s0; s <= s1; ++s)
-        st.push_back(starts[s] - starts[s0]);
-      return Run(t, st, cancelled, lane);
-    };
-    std::vector<std::vector<float>> second;
-    std::exception_ptr failure;
-    std::thread other([&] {
-      try {
-        second = part(cut, seqs, 1);
-      } catch (...) {
-        failure = std::current_exception();
-      }
-    });
-    std::vector<std::vector<float>> first;
-    try {
-      first = part(0, cut, 0);
-    } catch (...) {
-      other.join();
-      throw;
+    std::vector<std::size_t> cuts{0};
+    for (std::size_t p = 1; p < parts; ++p) {
+      std::size_t c = cuts.back() + 1;
+      while (c + (parts - p) < seqs && starts[c] * parts < rows * p)
+        ++c;
+      cuts.push_back(c);
     }
-    other.join();
-    if (failure)
-      std::rethrow_exception(failure);
-    if (first.empty() || second.empty())
-      return {};
-    for (auto& e : second)
-      first.push_back(std::move(e));
-    return first;
+    cuts.push_back(seqs);
+    std::vector<std::vector<std::vector<float>>> out(parts);
+    std::vector<std::exception_ptr> failure(parts);
+    auto part = [&](std::size_t p) {
+      try {
+        const gufo::npu::host::SharePool share(unsigned(p), unsigned(parts));
+        const std::size_t s0 = cuts[p], s1 = cuts[p + 1];
+        std::vector<std::uint32_t> t(
+            tokens.begin() + std::ptrdiff_t(starts[s0]),
+            tokens.begin() + std::ptrdiff_t(starts[s1]));
+        std::vector<std::size_t> st;
+        for (std::size_t s = s0; s <= s1; ++s)
+          st.push_back(starts[s] - starts[s0]);
+        out[p] = Run(t, st, cancelled, int(p));
+      } catch (...) {
+        failure[p] = std::current_exception();
+      }
+    };
+    std::vector<std::thread> threads;
+    for (std::size_t p = 1; p < parts; ++p)
+      threads.emplace_back(part, p);
+    part(0);
+    for (auto& th : threads)
+      th.join();
+    for (auto& f : failure)
+      if (f)
+        std::rethrow_exception(f);
+    if (profile)
+      std::fprintf(
+          stderr,
+          "embedding_gemma2 npu: split request in %zu, NPU busy %.1f ms\n",
+          parts, gemm.TakeBusyMs());
+    std::vector<std::vector<float>> all;
+    for (auto& o : out) {
+      if (o.empty())
+        return {};
+      for (auto& e : o)
+        all.push_back(std::move(e));
+    }
+    return all;
   }
 
   std::vector<std::vector<float>> Run(const std::vector<std::uint32_t>& tokens,
@@ -386,9 +466,35 @@ struct Encoder::Impl {
           std::max<std::size_t>(max_kv, g.num_key_value_heads * g.head_dim);
       max_hd = std::max<std::size_t>(max_hd, g.head_dim);
     }
-    std::vector<float> normed(rows * hidden), qkv(rows * (max_q + 2 * max_kv)),
-        context(rows * max_q), tmp(rows * hidden), gate_up(rows * 2 * inner),
-        act(rows * std::max(inner, per_layer));
+    std::vector<float> qkv(rows * (max_q + 2 * max_kv)), context(rows * max_q),
+        tmp(rows * hidden);
+    // bf16 inputs of the next product, written by norms and epilogues.
+    std::vector<std::uint16_t> normed16(rows * hidden), context16(rows * max_q),
+        act16(rows * std::max(inner, per_layer));
+    using Epilogue = gufo::npu::BfpGemm::Epilogue;
+    // act(gate) * up of an interleaved [gate 64 | up 64] tile, as bf16.
+    auto gated = [&](std::uint16_t* out, std::size_t out_w, const float* add,
+                     std::size_t add_stride) {
+      return [=](int r0, int n_rows, int n0, int w, const std::uint16_t* tile) {
+        float buf[128], res[kGateBlock];
+        for (int i = 0; i < n_rows; ++i) {
+          const std::size_t r = std::size_t(r0 + i);
+          host::Bf16ToFloat(tile + std::size_t(i) * 128, buf, std::size_t(w));
+          if (add) {  // ple: act(gate tile) * ple row slice
+            host::GatedRows(buf, 0, add + r * add_stride + std::size_t(n0), 0,
+                            res, 0, 1, std::size_t(w),
+                            host::Activation::kGeluTanh);
+            host::FloatToBf16(res, out + r * out_w + std::size_t(n0),
+                              std::size_t(w));
+          } else {
+            host::GatedRows(buf, 0, buf + kGateBlock, 0, res, 0, 1, kGateBlock,
+                            host::Activation::kGeluTanh);
+            host::FloatToBf16(res, out + r * out_w + std::size_t(n0) / 2,
+                              kGateBlock);
+          }
+        }
+      };
+    };
 
     for (std::size_t l = 0; l < layers_n; ++l) {
       if (cancelled && cancelled())
@@ -397,9 +503,12 @@ struct Encoder::Impl {
       const LayerGeometry& g = c.layers[l];
       const std::size_t hd = g.head_dim, kv = g.num_key_value_heads;
       const std::size_t qw = heads * hd, kw = kv * hd, row_w = qw + 2 * kw;
-      host::RmsNormRows(state.data(), normed.data(), rows, hidden,
-                        w.input_norm.data(), eps);
-      timed([&] { gemm.Run(w.qkv, normed.data(), int(rows), qkv.data()); });
+      host::RmsNormRowsBf16(state.data(), normed16.data(), rows, hidden,
+                            w.input_norm.data(), eps);
+      timed([&] {
+        gemm.Run(gufo::npu::BfpGemm::Call{w.qkv, nullptr, int(rows), qkv.data(),
+                                          normed16.data(), nullptr});
+      });
       host::ParallelFor(rows, 16, [&](std::size_t b, std::size_t e) {
         for (std::size_t r = b; r < e; ++r) {
           float* q = qkv.data() + r * row_w;
@@ -425,7 +534,7 @@ struct Encoder::Impl {
       // Long sequences: QK^T and PV on the NPU, the softmax on the CPU.
       timed([&] {
         NpuAttention(scratches[lane], qkv.data(), row_w, heads, kv, hd, starts,
-                     long_seq, visible, context.data(), qw);
+                     long_seq, visible, context16.data(), qw);
       });
       host::Attention(
           {.q = qkv.data(),
@@ -451,35 +560,47 @@ struct Encoder::Impl {
             visible(r, starts[s], starts[s + 1], b, e);
           },
           /*skip_empty=*/true);
-      timed([&] { gemm.Run(w.o, context.data(), int(rows), tmp.data()); });
-      host::RmsNormRows(tmp.data(), tmp.data(), rows, hidden,
-                        w.post_attn_norm.data(), eps);
-      for (std::size_t i = 0; i < state.size(); ++i)
-        state[i] += tmp[i];
-
-      host::RmsNormRows(state.data(), normed.data(), rows, hidden,
-                        w.pre_ffn_norm.data(), eps);
-      timed([&] {
-        gemm.Run(w.gate_up, normed.data(), int(rows), gate_up.data());
+      // CPU-attention rows (short sequences) join the bf16 context.
+      host::ParallelFor(rows, 64, [&](std::size_t b, std::size_t e) {
+        for (std::size_t r = b; r < e; ++r)
+          if (!long_seq[seq_of[r]])
+            host::FloatToBf16(context.data() + r * qw,
+                              context16.data() + r * qw, qw);
       });
-      host::GatedRows(gate_up.data(), 2 * inner, gate_up.data() + inner,
-                      2 * inner, act.data(), inner, rows, inner,
-                      host::Activation::kGeluTanh);
-      timed([&] { gemm.Run(w.down, act.data(), int(rows), tmp.data()); });
-      host::RmsNormRows(tmp.data(), tmp.data(), rows, hidden,
-                        w.post_ffn_norm.data(), eps);
-      for (std::size_t i = 0; i < state.size(); ++i)
-        state[i] += tmp[i];
+      timed([&] {
+        gemm.Run(gufo::npu::BfpGemm::Call{w.o, nullptr, int(rows), tmp.data(),
+                                          context16.data(), nullptr});
+      });
+      host::AddNormRows(state.data(), tmp.data(), rows, hidden,
+                        w.post_attn_norm.data(), eps, 1.0f);
 
-      timed([&] { gemm.Run(w.ple_gate, state.data(), int(rows), act.data()); });
-      host::GatedRows(act.data(), per_layer, ple.data() + l * per_layer,
-                      layers_n * per_layer, act.data(), per_layer, rows,
-                      per_layer, host::Activation::kGeluTanh);
-      timed([&] { gemm.Run(w.ple_proj, act.data(), int(rows), tmp.data()); });
-      host::RmsNormRows(tmp.data(), tmp.data(), rows, hidden, w.ple_norm.data(),
-                        eps);
-      for (std::size_t i = 0; i < state.size(); ++i)
-        state[i] = (state[i] + tmp[i]) * w.scalar;
+      host::RmsNormRowsBf16(state.data(), normed16.data(), rows, hidden,
+                            w.pre_ffn_norm.data(), eps);
+      const Epilogue ffn = gated(act16.data(), inner, nullptr, 0);
+      timed([&] {
+        gemm.Run(gufo::npu::BfpGemm::Call{w.gate_up, nullptr, int(rows),
+                                          nullptr, normed16.data(), &ffn});
+      });
+      timed([&] {
+        gemm.Run(gufo::npu::BfpGemm::Call{w.down, nullptr, int(rows),
+                                          tmp.data(), act16.data(), nullptr});
+      });
+      host::AddNormRows(state.data(), tmp.data(), rows, hidden,
+                        w.post_ffn_norm.data(), eps, 1.0f);
+
+      const Epilogue ple_gate =
+          gated(act16.data(), per_layer, ple.data() + l * per_layer,
+                layers_n * per_layer);
+      timed([&] {
+        gemm.Run(gufo::npu::BfpGemm::Call{w.ple_gate, state.data(), int(rows),
+                                          nullptr, nullptr, &ple_gate});
+      });
+      timed([&] {
+        gemm.Run(gufo::npu::BfpGemm::Call{w.ple_proj, nullptr, int(rows),
+                                          tmp.data(), act16.data(), nullptr});
+      });
+      host::AddNormRows(state.data(), tmp.data(), rows, hidden,
+                        w.ple_norm.data(), eps, w.scalar);
     }
     host::RmsNormRows(state.data(), state.data(), rows, hidden,
                       final_norm.data(), eps);

@@ -41,7 +41,7 @@ constexpr std::size_t kABytes = std::size_t(64) << 20, kCBytes = std::size_t(64)
                                                                  << 20;
 constexpr unsigned kArgA = 3, kArgW = 4, kArgC = 5;
 constexpr std::size_t kLaneWords = std::size_t(1) << 18;
-constexpr int kLanes = 2;
+constexpr int kLanes = 4;
 constexpr std::size_t kMaxArenaBytes = std::size_t(512) << 22;  // bfpgemm.py W
 constexpr int kScratchIds = 1 << 16;  // ids per scratch region
 // Scalars: ng nb kb tiles nb*kc ng*kb b_rep a_base a_row b_base b_col c_base
@@ -110,16 +110,7 @@ float FromBf16(std::uint16_t h) {
 }  // namespace
 
 void BfpGemm::EncodeBlock(const float* values, std::uint8_t* out) {
-  int e = 0;
-  for (int i = 0; i < 8; ++i)
-    e = std::max(e,
-                 int((std::bit_cast<std::uint32_t>(values[i]) >> 23) & 0xff));
-  const float inv = std::ldexp(1.0f, 127 + 6 - e);  // 64 / 2^(e - 127)
-  out[0] = std::uint8_t(e);
-  for (int i = 0; i < 8; ++i) {
-    const float t = std::nearbyint(values[i] * inv);
-    out[1 + i] = std::uint8_t(std::int8_t(std::clamp(t, -128.0f, 127.0f)));
-  }
+  host::EncodeBfp16Block(values, out);
 }
 
 struct BfpGemm::Impl {
@@ -142,48 +133,86 @@ struct BfpGemm::Impl {
   std::mutex lane_mutex;
   std::condition_variable lane_free;
   bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
+  // NPU busy time: the union of in-flight dispatches (profile only).
+  std::mutex busy_mutex;
+  int inflight{};
+  std::chrono::steady_clock::time_point busy_since;
+  double busy_us{};
+  void Begin() {
+    std::lock_guard lock(busy_mutex);
+    if (inflight++ == 0)
+      busy_since = std::chrono::steady_clock::now();
+  }
+  void End() {
+    std::lock_guard lock(busy_mutex);
+    if (--inflight == 0)
+      busy_us += std::chrono::duration<double, std::micro>(
+                     std::chrono::steady_clock::now() - busy_since)
+                     .count();
+  }
 
-  // Packs matrix `m` (placed at m.b_words) from get(o, i) into the arena.
-  template<typename Get>
-  void Encode(const Matrix& m, Get get) {
+  // Packs matrix `m` (placed at m.b_words) from row-major f32 rows
+  // w[o * ld + i] into the arena.
+  // Encodes tile t (of 8 groups kb) of matrix `m` from rows w[o * ld + i].
+  void EncodeTile(const Matrix& m, const float* w, std::size_t ld,
+                  std::size_t t, std::uint8_t* tile) {
     const int kb = m.kp / kKb;
+    const int lr = int(t % std::size_t(kb));
+    const int cg = int(t / std::size_t(kb));
+    const int col = cg / m.groups, g = cg % m.groups;
+    const int lc = 8 * g + col;
     auto* base = reinterpret_cast<std::uint8_t*>(arena.data()) + m.b_words * 4;
-    host::ParallelFor(
-        std::size_t(8) * std::size_t(m.groups) * std::size_t(kb), 4,
-        [&](std::size_t lo, std::size_t hi) {
-          std::vector<std::uint8_t> tile(kTileWords * 4);
-          float v[8];
-          for (std::size_t t = lo; t < hi; ++t) {
-            const int lr = int(t % std::size_t(kb));
-            const int cg = int(t / std::size_t(kb));
-            const int col = cg / m.groups, g = cg % m.groups;
-            const int lc = 8 * g + col;
-            std::uint8_t* dst = tile.data();
-            // [superblock 8][block row 8][b 2][c 8]: 8 consecutive k at one n.
-            for (int sb = 0; sb < 8; ++sb)
-              for (int br = 0; br < 8; ++br)
-                for (int b = 0; b < 2; ++b)
-                  for (int cc = 0; cc < 8; ++cc, dst += 9) {
-                    const int nn = lc * 128 + sb * 16 + b * 8 + cc;
-                    const int k0 = lr * kKb + br * 8;
-                    for (int r = 0; r < 8; ++r)
-                      v[r] =
-                          (nn < m.n && k0 + r < m.k) ? get(nn, k0 + r) : 0.0f;
-                    EncodeBlock(v, dst);
-                  }
-            std::memcpy(base + ((std::size_t(col) * std::size_t(m.groups) +
-                                 std::size_t(g)) *
-                                    std::size_t(kb) +
-                                std::size_t(lr)) *
-                                   kTileWords * 4,
-                        tile.data(), tile.size());
+    std::uint8_t* out =
+        base + ((std::size_t(col) * std::size_t(m.groups) + std::size_t(g)) *
+                    std::size_t(kb) +
+                std::size_t(lr)) *
+                   kTileWords * 4;
+    if (lc * 128 >= m.n || lr * kKb >= m.k) {  // all padding
+      std::memset(out, 0, kTileWords * 4);
+      return;
+    }
+    std::uint8_t* dst = tile;
+    float v[8];
+    // [superblock 8][block row 8][b 2][c 8]: 8 consecutive k at one n.
+    for (int sb = 0; sb < 8; ++sb)
+      for (int br = 0; br < 8; ++br) {
+        const int k0 = lr * kKb + br * 8;
+        for (int b = 0; b < 2; ++b)
+          for (int cc = 0; cc < 8; ++cc, dst += 9) {
+            const int nn = lc * 128 + sb * 16 + b * 8 + cc;
+            const float* src = w + std::size_t(nn) * ld + std::size_t(k0);
+            if (nn < m.n && k0 + 8 <= m.k) {
+              EncodeBlock(src, dst);
+              continue;
+            }
+            if (nn >= m.n || k0 >= m.k) {
+              std::memset(dst, 0, 9);
+              continue;
+            }
+            for (int r = 0; r < 8; ++r)
+              v[r] = (nn < m.n && k0 + r < m.k) ? src[r] : 0.0f;
+            EncodeBlock(v, dst);
           }
-        });
+      }
+    std::memcpy(out, tile, kTileWords * 4);
+  }
+
+  static std::size_t Tiles(const Matrix& m) {
+    return std::size_t(8) * std::size_t(m.groups) * std::size_t(m.kp / kKb);
+  }
+
+  // Packs matrix `m` (placed at m.b_words) from row-major f32 rows
+  // w[o * ld + i] into the arena.
+  void Encode(const Matrix& m, const float* w, std::size_t ld) {
+    host::ParallelFor(Tiles(m), 4, [&](std::size_t lo, std::size_t hi) {
+      std::vector<std::uint8_t> tile(kTileWords * 4);
+      for (std::size_t t = lo; t < hi; ++t)
+        EncodeTile(m, w, ld, t, tile.data());
+    });
     arena.ToDevice(m.b_words * 4, Words(m) * 4);
   }
 
-  template<typename Get>
-  int Upload(int n, int k, Get get) {
+  int Upload(int n, int k, const float* w, std::size_t ld) {
     if (n <= 0 || k <= 0)
       throw Error("BfpGemm: empty matrix");
     Matrix m = Shape(n, k);
@@ -201,7 +230,7 @@ struct BfpGemm::Impl {
       matrices.push_back(m);
       id = int(matrices.size()) - 1;
     }
-    Encode(m, get);
+    Encode(m, w, ld);
     return id;
   }
 
@@ -421,7 +450,10 @@ struct BfpGemm::Impl {
         std::uint16_t* base = a16 + b.a_words * 2;
         for (int i = it.i0; i < it.i1; ++i) {
           const std::size_t r = std::size_t(i) / 128, ii = std::size_t(i) % 128;
-          if (i < src.nr)
+          if (i < src.nr && call.x16)
+            std::memcpy(row.data(), call.x16 + std::size_t(src.r0 + i) * k,
+                        k * 2);
+          else if (i < src.nr)
             host::FloatToBf16(call.x + std::size_t(src.r0 + i) * k, row.data(),
                               k);
           else
@@ -483,6 +515,10 @@ struct BfpGemm::Impl {
                 128;
         const std::size_t rows = std::size_t(it.r1 - it.r0);
         std::memcpy(tile.data(), p, rows * 128 * 2);
+        if (call.epilogue) {
+          (*call.epilogue)(src.r0 + it.r0, int(rows), n0, w, tile.data());
+          continue;
+        }
         for (std::size_t i = 0; i < rows; ++i)
           host::Bf16ToFloat(
               tile.data() + i * 128,
@@ -561,7 +597,11 @@ struct BfpGemm::Impl {
       lane->a.ToDevice(0, d.a_end * 4);
       const double t_pack = us(t);
       t = Clock::now();
+      if (profile)
+        Begin();
       program.Start(lane->ins, {&lane->a, &arena, &lane->c}).Wait();
+      if (profile)
+        End();
       const double t_npu = us(t);
       t = Clock::now();
       lane->c.FromDevice(0, d.c_end * 4);
@@ -600,18 +640,19 @@ BfpGemm& BfpGemm::operator=(BfpGemm&&) noexcept = default;
 int BfpGemm::Upload(int n, int k, std::span<const float> weights) {
   if (weights.size() < std::size_t(n) * std::size_t(k))
     throw Error("BfpGemm: too few weights");
-  return impl_->Upload(n, k, [&](int nn, int kk) {
-    return weights[std::size_t(nn) * std::size_t(k) + std::size_t(kk)];
-  });
+  return impl_->Upload(n, k, weights.data(), std::size_t(k));
 }
 
 int BfpGemm::UploadBf16(int n, int k, std::span<const std::uint16_t> weights) {
   if (weights.size() < std::size_t(n) * std::size_t(k))
     throw Error("BfpGemm: too few weights");
-  return impl_->Upload(n, k, [&](int nn, int kk) {
-    return FromBf16(
-        weights[std::size_t(nn) * std::size_t(k) + std::size_t(kk)]);
+  std::vector<float> rows(std::size_t(n) * std::size_t(k));
+  host::ParallelFor(std::size_t(n), 16, [&](std::size_t lo, std::size_t hi) {
+    host::Bf16ToFloat(weights.data() + lo * std::size_t(k),
+                      rows.data() + lo * std::size_t(k),
+                      (hi - lo) * std::size_t(k));
   });
+  return impl_->Upload(n, k, rows.data(), std::size_t(k));
 }
 
 BfpGemm::Scratch BfpGemm::NewScratch(std::size_t bytes) {
@@ -651,10 +692,119 @@ int BfpGemm::Scratch::Upload(int n, int k, const float* weights,
     r.matrices.push_back(mat);
     id = -(1 + index_ * kScratchIds + int(r.matrices.size()) - 1);
   }
-  m.Encode(mat, [&](int nn, int kk) {
-    return weights[std::size_t(nn) * row_stride + std::size_t(kk) * col_stride];
-  });
+  if (col_stride == 1) {
+    m.Encode(mat, weights, row_stride);
+  } else {
+    // A transposed view: gather it into rows first.
+    std::vector<float> rows(std::size_t(n) * std::size_t(k));
+    host::ParallelFor(std::size_t(k), 64, [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i)
+        for (std::size_t o = 0; o < std::size_t(n); ++o)
+          rows[o * std::size_t(k) + i] =
+              weights[o * row_stride + i * col_stride];
+    });
+    m.Encode(mat, rows.data(), std::size_t(k));
+  }
   return id;
+}
+
+std::vector<int> BfpGemm::Scratch::UploadMany(std::span<const Spec> specs) {
+  auto& m = *owner_->impl_;
+  std::vector<Matrix> mats;
+  std::vector<int> ids;
+  std::size_t first = 0, last = 0;
+  {
+    std::lock_guard lock(m.mutex);
+    Region& r = m.regions.at(std::size_t(index_));
+    first = r.cursor;
+    for (const Spec& sp : specs) {
+      if (sp.n <= 0 || sp.k <= 0)
+        throw Error("BfpGemm: empty matrix");
+      Matrix mat = Shape(sp.n, sp.k);
+      if (r.cursor + Words(mat) > r.end ||
+          r.matrices.size() >= std::size_t(kScratchIds))
+        throw Error("BfpGemm: the scratch region is full (" +
+                    std::to_string((r.cursor - r.begin) * 4 >> 20) + " of " +
+                    std::to_string((r.end - r.begin) * 4 >> 20) + " MiB)");
+      mat.b_words = r.cursor;
+      r.cursor += Words(mat);
+      r.matrices.push_back(mat);
+      ids.push_back(-(1 + index_ * kScratchIds + int(r.matrices.size()) - 1));
+      mats.push_back(mat);
+    }
+    last = r.cursor;
+  }
+  // Transposed views are gathered into rows first.
+  std::vector<std::vector<float>> rows(specs.size());
+  std::vector<std::size_t> transposed;
+  for (std::size_t i = 0; i < specs.size(); ++i)
+    if (specs[i].col_stride != 1 && specs[i].same_as < 0)
+      transposed.push_back(i);
+  host::ParallelFor(transposed.size(), 1, [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t t = lo; t < hi; ++t) {
+      const Spec& sp = specs[transposed[t]];
+      auto& out = rows[transposed[t]];
+      out.resize(std::size_t(sp.n) * std::size_t(sp.k));
+      for (std::size_t i = 0; i < std::size_t(sp.k); ++i)
+        for (std::size_t o = 0; o < std::size_t(sp.n); ++o)
+          out[o * std::size_t(sp.k) + i] =
+              sp.weights[o * sp.row_stride + i * sp.col_stride];
+    }
+  });
+  std::vector<std::size_t> start(specs.size() + 1, 0);
+  for (std::size_t i = 0; i < specs.size(); ++i)
+    start[i + 1] = start[i] + (specs[i].same_as < 0 ? Impl::Tiles(mats[i]) : 0);
+  host::ParallelFor(start.back(), 8, [&](std::size_t lo, std::size_t hi) {
+    std::vector<std::uint8_t> tile(kTileWords * 4);
+    std::size_t i = std::size_t(
+        std::upper_bound(start.begin(), start.end(), lo) - start.begin() - 1);
+    for (std::size_t t = lo; t < hi; ++t) {
+      while (t >= start[i + 1])
+        ++i;
+      const Spec& sp = specs[i];
+      const bool tr = sp.col_stride != 1;
+      m.EncodeTile(mats[i], tr ? rows[i].data() : sp.weights,
+                   tr ? std::size_t(sp.k) : sp.row_stride, t - start[i],
+                   tile.data());
+    }
+  });
+  auto* base = reinterpret_cast<std::uint8_t*>(m.arena.data());
+  for (std::size_t i = 0; i < specs.size(); ++i) {
+    const int src = specs[i].same_as;
+    if (src < 0)
+      continue;
+    if (std::size_t(src) >= i ||
+        Words(mats[std::size_t(src)]) != Words(mats[i]))
+      throw Error("BfpGemm: same_as must name an earlier matrix of one shape");
+    std::memcpy(base + mats[i].b_words * 4,
+                base + mats[std::size_t(src)].b_words * 4, Words(mats[i]) * 4);
+  }
+  if (last > first)
+    m.arena.ToDevice(first * 4, (last - first) * 4);
+  return ids;
+}
+
+int BfpGemm::Scratch::Duplicate(int id) {
+  auto& m = *owner_->impl_;
+  Matrix mat;
+  int copy;
+  {
+    std::lock_guard lock(m.mutex);
+    const Matrix src = m.Resolve(id);
+    Region& r = m.regions.at(std::size_t(index_));
+    if (r.cursor + Words(src) > r.end ||
+        r.matrices.size() >= std::size_t(kScratchIds))
+      throw Error("BfpGemm: the scratch region is full");
+    mat = src;
+    mat.b_words = r.cursor;
+    r.cursor += Words(mat);
+    r.matrices.push_back(mat);
+    copy = -(1 + index_ * kScratchIds + int(r.matrices.size()) - 1);
+    auto* base = reinterpret_cast<std::uint8_t*>(m.arena.data());
+    std::memcpy(base + mat.b_words * 4, base + src.b_words * 4, Words(mat) * 4);
+  }
+  m.arena.ToDevice(mat.b_words * 4, Words(mat) * 4);
+  return copy;
 }
 
 void BfpGemm::Scratch::Reset() {
@@ -667,6 +817,13 @@ void BfpGemm::Scratch::Reset() {
 
 void BfpGemm::Run(std::span<const Call> calls) {
   impl_->Run(calls);
+}
+
+double BfpGemm::TakeBusyMs() {
+  std::lock_guard lock(impl_->busy_mutex);
+  const double ms = impl_->busy_us / 1e3;
+  impl_->busy_us = 0;
+  return ms;
 }
 
 }  // namespace gufo::npu

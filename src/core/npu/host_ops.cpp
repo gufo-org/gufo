@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -74,8 +75,8 @@ inline bool Activate8(Activation a, __m256 x, __m256* out) {
 // worker late for one job only ever sees that job's exhausted counter.
 class Pool {
 public:
-  Pool() {
-    const unsigned n = std::max(1u, std::thread::hardware_concurrency());
+  explicit Pool(unsigned n) {
+    n = std::max(1u, n);
     for (unsigned i = 1; i < n; ++i)
       workers_.emplace_back([this] { Work(); });
   }
@@ -159,12 +160,35 @@ private:
 
 thread_local bool Pool::inside = false;
 
-Pool& ThePool() {
-  static Pool pool;
+// The pool of the calling thread: a share of the hardware threads under a
+// SharePool scope, else all of them.
+thread_local Pool* current = nullptr;
+
+Pool& FullPool() {
+  static Pool pool(std::thread::hardware_concurrency());
   return pool;
 }
 
+Pool& ThePool() {
+  return current ? *current : FullPool();
+}
+
 }  // namespace
+
+SharePool::SharePool(unsigned index, unsigned count) : previous_(current) {
+  static std::mutex mutex;
+  static std::map<std::pair<unsigned, unsigned>, std::unique_ptr<Pool>> pools;
+  std::lock_guard lock(mutex);
+  auto& pool = pools[{index, count}];
+  if (!pool)
+    pool = std::make_unique<Pool>(std::max(
+        1u, std::thread::hardware_concurrency() / std::max(1u, count)));
+  current = pool.get();
+}
+
+SharePool::~SharePool() {
+  current = static_cast<Pool*>(previous_);
+}
 
 std::size_t Threads() {
   return ThePool().size();
@@ -272,6 +296,47 @@ void ExpInPlace(float* x, std::size_t n, float shift, float* sum) {
     *sum = total;
 }
 
+void EncodeBfp16Block(const float* values, std::uint8_t* out) {
+  int e = 0;
+#ifdef GUFO_NPU_HOST_AVX2
+  const __m256 x = _mm256_loadu_ps(values);
+  __m256i ex = _mm256_and_si256(_mm256_srli_epi32(_mm256_castps_si256(x), 23),
+                                _mm256_set1_epi32(0xff));
+  ex = _mm256_max_epi32(ex, _mm256_permute2x128_si256(ex, ex, 1));
+  ex = _mm256_max_epi32(ex, _mm256_shuffle_epi32(ex, 0x4e));
+  ex = _mm256_max_epi32(ex, _mm256_shuffle_epi32(ex, 0xb1));
+  e = _mm256_cvtsi256_si32(ex);
+  if (e >= 6) {
+    // 64 / 2^(e - 127) = 2^(133 - e), a normal float for e >= 6.
+    const __m256 inv = _mm256_castsi256_ps(_mm256_set1_epi32((260 - e) << 23));
+    __m256 y = _mm256_round_ps(_mm256_mul_ps(x, inv),
+                               _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    y = _mm256_min_ps(_mm256_max_ps(y, _mm256_set1_ps(-128.0f)),
+                      _mm256_set1_ps(127.0f));
+    alignas(32) std::int32_t q[8];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(q), _mm256_cvtps_epi32(y));
+    out[0] = std::uint8_t(e);
+    for (int i = 0; i < 8; ++i)
+      out[1 + i] = std::uint8_t(std::int8_t(q[i]));
+    return;
+  }
+#else
+  for (int i = 0; i < 8; ++i)
+    e = std::max(e,
+                 int((std::bit_cast<std::uint32_t>(values[i]) >> 23) & 0xff));
+#endif
+  out[0] = std::uint8_t(e);
+  if (e < 6) {  // below 2^-121: encodes as zero
+    std::fill(out + 1, out + 9, std::uint8_t(0));
+    return;
+  }
+  const float inv = std::ldexp(1.0f, 127 + 6 - e);
+  for (int i = 0; i < 8; ++i) {
+    const float t = std::nearbyint(values[i] * inv);
+    out[1 + i] = std::uint8_t(std::int8_t(std::clamp(t, -128.0f, 127.0f)));
+  }
+}
+
 float Dot(const float* a, const float* b, std::size_t n) {
   std::size_t i = 0;
   float s = 0;
@@ -323,6 +388,39 @@ void RmsNormRows(const float* x, float* y, std::size_t rows, std::size_t dim,
                   else
                     for (std::size_t i = 0; i < dim; ++i)
                       yr[i] = xr[i] * inv;
+                }
+              });
+}
+
+void RmsNormRowsBf16(const float* x, std::uint16_t* y, std::size_t rows,
+                     std::size_t dim, const float* weight, float eps) {
+  ParallelFor(rows,
+              std::max<std::size_t>(1, 16384 / std::max<std::size_t>(dim, 1)),
+              [&](std::size_t b, std::size_t e) {
+                std::vector<float> row(dim);
+                for (std::size_t r = b; r < e; ++r) {
+                  const float* xr = x + r * dim;
+                  const float inv =
+                      1.0f / std::sqrt(Dot(xr, xr, dim) / float(dim) + eps);
+                  for (std::size_t i = 0; i < dim; ++i)
+                    row[i] = xr[i] * inv * (weight ? weight[i] : 1.0f);
+                  FloatToBf16(row.data(), y + r * dim, dim);
+                }
+              });
+}
+
+void AddNormRows(float* state, const float* x, std::size_t rows,
+                 std::size_t dim, const float* weight, float eps, float scale) {
+  ParallelFor(rows,
+              std::max<std::size_t>(1, 16384 / std::max<std::size_t>(dim, 1)),
+              [&](std::size_t b, std::size_t e) {
+                for (std::size_t r = b; r < e; ++r) {
+                  const float* xr = x + r * dim;
+                  float* sr = state + r * dim;
+                  const float inv =
+                      1.0f / std::sqrt(Dot(xr, xr, dim) / float(dim) + eps);
+                  for (std::size_t i = 0; i < dim; ++i)
+                    sr[i] = (sr[i] + xr[i] * inv * weight[i]) * scale;
                 }
               });
 }
