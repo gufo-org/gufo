@@ -192,6 +192,14 @@ std::filesystem::path FindDesign(std::string_view name) {
     std::error_code ec;
     if (std::filesystem::is_regular_file(dir / file, ec))
       return dir;
+    // Designs with several programs: <name>_<variant>.xclbin.
+    if (std::filesystem::is_directory(dir, ec))
+      for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string f = entry.path().filename().string();
+        if (f.size() > file.size() &&
+            f.rfind(std::string(name) + "_", 0) == 0 && f.ends_with(".xclbin"))
+          return dir;
+      }
     tried += (tried.empty() ? "" : ", ") + dir.string();
   }
   throw Error("NPU design " + std::string(name) + " not found (tried " + tried +
