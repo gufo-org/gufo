@@ -113,6 +113,10 @@ public:
 
   private:
     friend class TextGenerationScheduler;
+#ifdef GUFO_CACHE_TESTING
+    // The fixture pauses the scheduler before observing its capture future.
+    friend bool SnapshotPendingForTesting(const Request& request);
+#endif
     struct Impl;
 
     explicit Request(std::unique_ptr<Impl> impl);
