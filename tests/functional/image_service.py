@@ -16,6 +16,7 @@ from PIL import Image
 
 PROMPT = 'A small red cottage beside a lake at sunset, detailed illustration'
 NEGATIVE = 'blurry, low quality'
+EDIT = 'The same cottage in winter, covered in snow'
 # Eight steps at 512 x 512 keep each image to seconds; Turbo accepts only 8.
 SIZE, STEPS, SEED = 512, 8, 7
 
@@ -34,9 +35,11 @@ def varied(encoded):
     return size
 
 
-def run(evidence, url, model, loras, lora_default):
+def run(evidence, url, model, loras, lora_default, smoke=False):
     """`loras` maps adapter names to file paths; `lora_default` is a
-    (name, scale) pair registered as --lora-default, or None."""
+    (name, scale) pair registered as --lora-default, or None. `smoke` stops
+    after discovery, API parity, seeded replay, a reference edit and error
+    recovery."""
     sdapi = url + '/sdapi/v1/'
     report = evidence.report
     sdk = openai.OpenAI(base_url=url + '/v1', api_key='unused', max_retries=0,
@@ -107,6 +110,32 @@ def run(evidence, url, model, loras, lora_default):
         # The runner reports its default; Qwen-Image samples unguided.
         assert info['cfg_scale'] == 1, info
         same(generate('txt2img-replay')[0], reference, 'seeded replay')
+
+    with evidence.case('edit'):
+        # An uploaded reference conditions the prompt through the vision path.
+        # One edit costs about three plain images; generation covers replay.
+        upload = ('cottage.png', base64.b64decode(reference[0]), 'image/png')
+        edited = evidence.json(url + '/v1/images/edits', label='edit', data={
+            'model': model, 'prompt': EDIT, 'size': f'{SIZE}x{SIZE}',
+            'steps': str(STEPS), 'seed': str(SEED)}, files={'image[]': upload})['data']
+        assert len(edited) == 1 and varied(edited[0]['b64_json']) == (SIZE, SIZE)
+        assert pixels(edited[0]['b64_json']) != pixels(reference[0]), 'the edit changes the image'
+
+    with evidence.case('errors'):
+        error('empty-prompt', 'txt2img', {'prompt': ''}, 400, 'prompt required')
+        error('bad-size', 'txt2img', {'prompt': PROMPT, 'width': 500}, 400,
+              'multiples of 32')
+        error('get-txt2img', 'txt2img', None, 405, 'POST', method='GET')
+        error('unknown-route', 'interrupt', {}, 404, 'no sdapi route')
+        evidence.reject(url + '/v1/images/generations', 'invalid_request',
+                        label='openai-bad-size',
+                        json={'model': model, 'prompt': PROMPT, 'size': '500x500'})
+        # The server still generates after the rejections.
+        same(generate('after-errors')[0], reference, 'recovery')
+
+    if smoke:
+        report['image_suite'] = 'smoke'
+        return
 
     with evidence.case('guidance'):
         guided = openai_json('openai-cfg', negative_prompt=NEGATIVE,
@@ -221,15 +250,3 @@ def run(evidence, url, model, loras, lora_default):
              reference, 'sdapi ignores guidance_scale, loras, n and size')
         images, info = generate('lora-tag-literal', prompt=PROMPT + ' <lora:x:1>')
         assert info['prompt'].endswith('<lora:x:1>'), info
-
-    with evidence.case('errors'):
-        error('empty-prompt', 'txt2img', {'prompt': ''}, 400, 'prompt required')
-        error('bad-size', 'txt2img', {'prompt': PROMPT, 'width': 500}, 400,
-              'multiples of 32')
-        error('get-txt2img', 'txt2img', None, 405, 'POST', method='GET')
-        error('unknown-route', 'interrupt', {}, 404, 'no sdapi route')
-        evidence.reject(url + '/v1/images/generations', 'invalid_request',
-                        label='openai-bad-size',
-                        json={'model': model, 'prompt': PROMPT, 'size': '500x500'})
-        # The server still generates after the rejections.
-        same(generate('after-errors')[0], reference, 'recovery')
