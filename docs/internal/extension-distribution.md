@@ -69,165 +69,30 @@ binary's own output, not another `gufo` from `PATH`:
 
 ## Running third-party extensions
 
-An unreviewed extension gets everything the server process gets, so give that
-process only what inference needs: no network, no writable files and no devices
-other than the GPU. Both setups below keep Gufo on its default `127.0.0.1` bind,
-inside a network namespace that has no other interface. The extension can't
-open a connection out, and clients arrive through one forwarded socket.
+An unreviewed extension gets everything the server process gets. Whatever
+service manager or container runtime you use, give that process only what
+inference needs:
+
+- **Network:** none. Gufo binds `127.0.0.1` by default and serves from a network
+  namespace that has only `lo`; forward one socket into it for clients.
+- **Devices:** `/dev/kfd` and the DRM nodes under `/dev/dri`, with the `video`
+  and `render` groups. Both are needed: without the DRM nodes the kernel logs
+  `amdgpu: no gpu node! Cannot create KFD process` and Gufo reports no ROCm
+  device.
+- **Files:** read-only models, binary and extension store. Only `/tmp` and a
+  [`--cache-disk`](../cache.md#disk) directory need to be writable.
+- **Privileges:** no capabilities and no new privileges; an unlimited
+  `memlock` limit, as in [install](../install.md#container).
+
+Install or build the extension in a separate step, with network access but no
+devices or models, and pin an exact commit. Gufo has no authentication, so
+remote clients need a reverse proxy with TLS and access control; see
+[exposure](../server.md#exposure).
 
 > **Warning:** This limits what an extension can reach; it isn't a sandbox. The
-> process still drives the GPU through `/dev/kfd` and `/dev/dri`, reads every
-> mounted model and sees every request. The extension's build scripts run
-> earlier, when it is installed or compiled in: build with no devices and no
-> models mounted, and pin an exact commit.
-
-### Container
-
-The image runs as user `gufo` (uid 1000), so keep the extension store in a host
-directory that uid owns. Build the module with network access, but with nothing
-else mounted. The image doesn't point OpenSSL at its CA bundle, so set
-`SSL_CERT_FILE` and `GIT_SSL_CAINFO` or the fetch fails certificate checks:
-
-```sh
-sudo install -d -o 1000 -g 1000 /srv/gufo/extensions
-docker run --rm \
-  -e SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt \
-  -e GIT_SSL_CAINFO=/etc/ssl/certs/ca-bundle.crt \
-  -v /srv/gufo/extensions:/home/gufo/.local/share/gufo/extensions \
-  ghcr.io/gufo-org/toolboxes/gufo-runtime:<version> \
-  gufo extension install https://github.com/<owner>/<extension>@<commit> --yes
-```
-
-Then serve with the network removed and every mount read-only:
-
-```sh
-docker run -d --name gufo \
-  --network none --read-only --tmpfs /tmp \
-  --cap-drop ALL --security-opt no-new-privileges \
-  --device /dev/kfd --device /dev/dri \
-  --group-add "$(getent group video | cut -d: -f3)" \
-  --group-add "$(getent group render | cut -d: -f3)" \
-  --ulimit memlock=-1 \
-  -v /srv/models:/models:ro \
-  -v /srv/gufo/extensions:/home/gufo/.local/share/gufo/extensions:ro \
-  ghcr.io/gufo-org/toolboxes/gufo-runtime:<version> \
-  gufo serve --port 8080 llm --model /models/model.gguf
-```
-
-- `--network none` leaves the container a loopback interface and nothing else.
-- `--read-only` covers the image, Gufo included, and leaves `/tmp` as the only
-  writable path. A binary you built yourself mounts the same way as the models:
-  `-v /opt/gufo:/opt/gufo:ro`.
-- [`--cache-disk`](../cache.md#disk) is the one option that writes;
-  give it its own host directory owned by uid 1000, `-v /srv/gufo/cache:/cache`,
-  and nothing else.
-- Rootless Podman takes the same options plus the user and group flags from
-  [install](../install.md#container): `--userns=keep-id:uid=1000,gid=1000
-  --group-add keep-groups`. Under `keep-id` a named volume such as
-  `-v gufo-extensions:/home/gufo/.local/share/gufo/extensions` is owned by the
-  right user, so the host directory isn't needed. The build step still needs
-  `SSL_CERT_FILE` and `GIT_SSL_CAINFO`.
-
-A forwarder that joins the same namespace turns the loopback port into a Unix
-socket on the host:
-
-```sh
-sudo install -d -o "$USER" -m 0750 /run/gufo
-docker run -d --name gufo-socket --network container:gufo \
-  --read-only --cap-drop ALL --security-opt no-new-privileges \
-  --user "$(id -u):$(id -g)" -v /run/gufo:/run/gufo \
-  alpine/socat UNIX-LISTEN:/run/gufo/gufo.sock,fork,mode=0660 TCP:127.0.0.1:8080
-curl --unix-socket /run/gufo/gufo.sock http://gufo/ready
-```
-
-Check what the server container can reach:
-
-```sh
-docker inspect --format '{{.HostConfig.NetworkMode}} {{.HostConfig.ReadonlyRootfs}}' gufo
-sudo nsenter --net --target "$(docker inspect --format '{{.State.Pid}}' gufo)" ip -brief addr
-docker exec gufo gufo diagnose --section extensions
-```
-
-The first prints `none true`, the second lists only `lo`, and the third shows
-the module as `module:<path>`.
-
-### systemd
-
-For Gufo installed on the host from the Debian package, `PrivateNetwork=`
-gives the service the same empty namespace, and `systemd-socket-proxyd`
-forwards one host socket into it.
-
-`/etc/systemd/system/gufo.service`:
-
-```ini
-[Service]
-ExecStart=/usr/bin/gufo serve --port 8080 llm --model /srv/models/model.gguf
-Environment=GUFO_EXTENSIONS_DIR=/var/lib/gufo/extensions
-User=gufo
-SupplementaryGroups=video render
-LimitMEMLOCK=infinity
-PrivateNetwork=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-NoNewPrivileges=yes
-CapabilityBoundingSet=
-DevicePolicy=closed
-DeviceAllow=/dev/kfd rw
-DeviceAllow=char-drm rw
-```
-
-`/etc/systemd/system/gufo-proxy.socket` and `gufo-proxy.service`:
-
-```ini
-[Socket]
-ListenStream=127.0.0.1:8080
-
-[Install]
-WantedBy=sockets.target
-```
-
-```ini
-[Unit]
-Requires=gufo.service gufo-proxy.socket
-After=gufo.service gufo-proxy.socket
-JoinsNamespaceOf=gufo.service
-
-[Service]
-ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8080
-PrivateNetwork=yes
-```
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now gufo-proxy.socket
-curl -s http://127.0.0.1:8080/ready
-```
-
-- `ProtectSystem=strict` mounts the file system read-only for the service, the
-  models and the extension store included. Add `ReadWritePaths=` only for a
-  `--cache-disk` directory.
-- Both `DeviceAllow=` lines are needed. Without the DRM nodes the kernel
-  refuses to create a KFD process (`amdgpu: no gpu node! Cannot create KFD
-  process`), and Gufo reports no ROCm device.
-- If systemd can't create the namespace, for example inside a container that
-  shares the host network, it logs `PrivateNetwork=yes is configured, but ...
-  proceeding without` and starts the service on the host network. Check that
-  the service's namespace has only `lo`:
-
-  ```sh
-  sudo nsenter --net --target "$(systemctl show -p MainPID --value gufo.service)" ip -brief addr
-  ```
-
-- `gufo extension install` on a host install needs the toolchain the package was
-  built with, which the Debian package doesn't include. The container setup above
-  is the tested way to build and run a module.
-
-### Remote clients
-
-Gufo has no authentication, so the forwarded socket is as open as the port
-was. For clients on other machines, put a reverse proxy with TLS and access
-control in front of the Unix socket. See [exposure](../server.md#exposure).
+> process still drives the GPU, reads every mounted model and sees every
+> request, and the extension's build scripts run when it is installed or
+> compiled in.
 
 ## Modules
 
