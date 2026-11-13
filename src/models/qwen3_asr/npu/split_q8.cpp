@@ -172,12 +172,6 @@ void SplitQ8::Run(Lane& lane, const float* x, float* y) const {
 }
 
 int NpuRows(int n, int k) {
-  static const bool cpu = [] {
-    const char* v = std::getenv("GUFO_NPU_DECODE_CPU");
-    return !(v && std::string(v) == "0");
-  }();
-  if (!cpu)
-    return n;
   // Measured on Strix Halo: an NPU dispatch costs about 95 us plus 17.5 us
   // per MB of Q8_0 weights; the CPU about 25 us plus 10 us per MB.
   const double mb = double(n) * k * (1.0 + 4.0 / 32.0) / 1e6;

@@ -61,9 +61,8 @@ private:
 };
 
 /// The NPU's share of a matrix's rows that finishes both sides together
-/// (rounded to 8 rows), from measured per-dispatch and per-byte costs; the
-/// `GUFO_NPU_DECODE_CPU` environment variable set to 0 keeps every row on
-/// the NPU.
+/// (rounded to 8 rows), from measured per-dispatch and per-byte costs. Used
+/// only when the fused decode program cannot hold the context.
 int NpuRows(int n, int k);
 
 }  // namespace gufo::models::qwen3_asr::npu

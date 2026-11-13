@@ -169,9 +169,9 @@ struct Runtime::Impl {
     embed = reinterpret_cast<const std::uint16_t*>(
         Find("thinker.model.embed_tokens.weight").data);
     using Fused = gufo::npu::Qwen3Decoder;
-    const char* fused_env = std::getenv("GUFO_NPU_FUSED");
+    // Decode runs on the fused program when the model and the context fit
+    // it; otherwise decode products split between the NPU and the CPU.
     const bool fits =
-        fused_env && std::string(fused_env) == "1" &&
         text->num_hidden_layers == std::uint32_t(Fused::kLayers) &&
         text->hidden_size == std::uint32_t(Fused::kHidden) &&
         text->num_attention_heads == std::uint32_t(Fused::kHeads) &&

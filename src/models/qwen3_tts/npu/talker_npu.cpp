@@ -341,9 +341,6 @@ struct TalkerNpuRuntime::Impl {
   template<typename Config>
   void OpenFused(const Config& tc) {
     using Fused = gufo::npu::Qwen3Decoder;
-    const char* env = std::getenv("GUFO_NPU_FUSED");
-    if (!(env && std::string(env) == "1"))
-      return;
     if (tc.num_hidden_layers != std::uint32_t(Fused::kLayers) ||
         tc.hidden_size != std::uint32_t(Fused::kHidden) ||
         tc.num_attention_heads != std::uint32_t(Fused::kHeads) ||
