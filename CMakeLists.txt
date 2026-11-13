@@ -309,7 +309,8 @@ gufo_npu_design(qwen3dec SCRIPT src/core/npu/kernels/qwen3dec/qwen3dec.py
 gufo_npu_design(bfpgemm SCRIPT src/core/npu/kernels/bfpgemm/bfpgemm.py
   SOURCES src/core/npu/kernels/bfpgemm/bfpgemm.cc
           src/core/npu/kernels/bfpgemm/vendor/aie_kernel_utils.h
-          src/core/npu/kernels/bfpgemm/vendor/aie_arch.h)
+          src/core/npu/kernels/bfpgemm/vendor/aie_arch.h
+  PROGRAMS bfpgemm bfpgemm_s)
 
 add_library(gufo_core STATIC
   src/core/base64.cpp

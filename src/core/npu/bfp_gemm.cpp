@@ -34,19 +34,26 @@
 namespace gufo::npu {
 namespace {
 
-constexpr int kBand = 512, kGroup = 1024, kKc = 512, kKb = 64;
+constexpr int kGroup = 1024, kKc = 512, kKb = 64;
+// Rows per band of the two programs: bfpgemm (512) and bfpgemm_s (128).
+constexpr int kBands[2] = {512, 128};
+// Runs whose calls all have at most this many rows use bfpgemm_s.
+constexpr int kSmallRows = 128;
 constexpr int kMaxRepeat = 64, kMaxWrap = 1023;  // shim BD limits
-constexpr std::size_t kTileWords = 2304, kStripWords = 128 * kKc / 2;
+constexpr std::size_t kTileWords = 2304;
 constexpr std::size_t kABytes = std::size_t(64) << 20, kCBytes = std::size_t(64)
                                                                  << 20;
 constexpr unsigned kArgA = 3, kArgW = 4, kArgC = 5;
 constexpr std::size_t kLaneWords = std::size_t(1) << 18;
-constexpr int kLanes = 2;
+constexpr int kLanes = 4;
 constexpr std::size_t kMaxArenaBytes = std::size_t(512) << 22;  // bfpgemm.py W
 constexpr int kScratchIds = 1 << 16;  // ids per scratch region
 // Scalars: ng nb kb tiles nb*kc ng*kb b_rep a_base a_row b_base b_col c_base
-// c_col.
-constexpr int kScalars = 13;
+// c_col t1 t2 t3. t1, t2, t3: the tiles core columns 2-3, 4-5 and 6-7
+// compute and drain: all of them, or 1 when those columns have no outputs in
+// the job (they then only pass the other tiles' A and B objects and drain one
+// unused tile, since DMA sizes cannot be 0).
+constexpr int kScalars = 16;
 constexpr int kVar[3] = {7, 9, 11};  // the offsets; the rest is the shape
 
 struct Matrix {
@@ -71,6 +78,14 @@ struct Job {
   int g0, ng, b0, nb;
   std::size_t b_rep;  // arena words between the matrices of consecutive bands
   std::size_t c_words;
+  int Tiles() const { return ng * nb; }
+  // Where tile t of core column col lands: group, band (in the block) and
+  // first output.
+  void Place(int t, int col, int* g, int* band, int* n0) const {
+    *g = g0 + (nb == 1 ? t : 0);
+    *band = b0 + (nb == 1 ? 0 : t);
+    *n0 = (*g * 8 + col) * 128;
+  }
 };
 
 struct Dispatch {
@@ -82,7 +97,7 @@ struct Dispatch {
 // Staging buffers of one thread's dispatches.
 struct Lane {
   Buffer a, c;
-  Instructions ins;  // the current dispatch's stream
+  Instructions ins[2];  // the current dispatch's stream, per program
   // Rows last written per band of each staged block slot (word offset), with
   // the block's kc: padding rows only need zeroing where an earlier block
   // wrote.
@@ -110,80 +125,140 @@ float FromBf16(std::uint16_t h) {
 }  // namespace
 
 void BfpGemm::EncodeBlock(const float* values, std::uint8_t* out) {
-  int e = 0;
-  for (int i = 0; i < 8; ++i)
-    e = std::max(e,
-                 int((std::bit_cast<std::uint32_t>(values[i]) >> 23) & 0xff));
-  const float inv = std::ldexp(1.0f, 127 + 6 - e);  // 64 / 2^(e - 127)
-  out[0] = std::uint8_t(e);
-  for (int i = 0; i < 8; ++i) {
-    const float t = std::nearbyint(values[i] * inv);
-    out[1 + i] = std::uint8_t(std::int8_t(std::clamp(t, -128.0f, 127.0f)));
-  }
+  host::EncodeBfp16Block(values, out);
 }
 
 struct BfpGemm::Impl {
-  Program program;
-  DispatchLibrary generate;
-  Buffer arena;
-  // Guards the matrix tables, the arena cursor, the regions and templates.
-  std::mutex mutex;
-  std::size_t arena_used{};
-  std::deque<Matrix> matrices;
-  std::deque<Region> regions;
   // Per job shape: the stream at zero offsets and how its words change with
   // the A, W and C offsets (dispatch_generate is linear in them).
   struct Template {
     std::vector<std::uint32_t> words;
     std::vector<Instructions::Patch> patches[3];
   };
-  std::map<std::array<std::int32_t, kScalars - 3>, Template> templates;
+  // One program: bfpgemm (512-row bands) or bfpgemm_s (128-row bands). Both
+  // read the same weight arena and staging buffers.
+  struct Mode {
+    Program program;
+    DispatchLibrary generate;
+    std::map<std::array<std::int32_t, kScalars - 3>, Template> templates;
+    int band{};           // rows per band
+    std::size_t strip{};  // words of one core row's 512-wide K chunk of A
+    bool loaded{};
+  };
+  Mode modes[2];
+  Buffer arena;
+  // Switching programs costs about 2.3 ms, so bfpgemm_s takes over only after
+  // kSmallStreak consecutive short Runs and hands back at the first long one.
+  std::mutex mode_mutex;
+  int current_mode{}, small_streak{};
+  static constexpr int kSmallStreak = 4;
+
+  Mode& Choose(int max_rows) {
+    std::lock_guard lock(mode_mutex);
+    if (!modes[1].loaded || max_rows > kSmallRows) {
+      small_streak = 0;
+      current_mode = 0;
+    } else if (current_mode == 1 || ++small_streak >= kSmallStreak) {
+      current_mode = 1;
+    }
+    return modes[current_mode];
+  }
+  // Guards the matrix tables, the arena cursor, the regions and templates.
+  std::mutex mutex;
+  std::size_t arena_used{};
+  std::deque<Matrix> matrices;
+  std::deque<Region> regions;
   Lane lanes[kLanes];
   std::mutex lane_mutex;
   std::condition_variable lane_free;
   bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
+  // NPU busy time: the union of in-flight dispatches (profile only).
+  std::mutex busy_mutex;
+  int inflight{};
+  std::chrono::steady_clock::time_point busy_since;
+  double busy_us{};
+  void Begin() {
+    std::lock_guard lock(busy_mutex);
+    if (inflight++ == 0)
+      busy_since = std::chrono::steady_clock::now();
+  }
+  void End() {
+    std::lock_guard lock(busy_mutex);
+    if (--inflight == 0)
+      busy_us += std::chrono::duration<double, std::micro>(
+                     std::chrono::steady_clock::now() - busy_since)
+                     .count();
+  }
 
-  // Packs matrix `m` (placed at m.b_words) from get(o, i) into the arena.
-  template<typename Get>
-  void Encode(const Matrix& m, Get get) {
+  // Packs matrix `m` (placed at m.b_words) from row-major f32 rows
+  // w[o * ld + i] into the arena.
+  // Encodes tile t (of 8 groups kb) of matrix `m` from rows w[o * ld + i].
+  void EncodeTile(const Matrix& m, const float* w, std::size_t ld,
+                  std::size_t t, std::uint8_t* tile) {
     const int kb = m.kp / kKb;
+    const int lr = int(t % std::size_t(kb));
+    const int cg = int(t / std::size_t(kb));
+    const int col = cg / m.groups, g = cg % m.groups;
+    const int lc = 8 * g + col;
     auto* base = reinterpret_cast<std::uint8_t*>(arena.data()) + m.b_words * 4;
-    host::ParallelFor(
-        std::size_t(8) * std::size_t(m.groups) * std::size_t(kb), 4,
-        [&](std::size_t lo, std::size_t hi) {
-          std::vector<std::uint8_t> tile(kTileWords * 4);
-          float v[8];
-          for (std::size_t t = lo; t < hi; ++t) {
-            const int lr = int(t % std::size_t(kb));
-            const int cg = int(t / std::size_t(kb));
-            const int col = cg / m.groups, g = cg % m.groups;
-            const int lc = 8 * g + col;
-            std::uint8_t* dst = tile.data();
-            // [superblock 8][block row 8][b 2][c 8]: 8 consecutive k at one n.
-            for (int sb = 0; sb < 8; ++sb)
-              for (int br = 0; br < 8; ++br)
-                for (int b = 0; b < 2; ++b)
-                  for (int cc = 0; cc < 8; ++cc, dst += 9) {
-                    const int nn = lc * 128 + sb * 16 + b * 8 + cc;
-                    const int k0 = lr * kKb + br * 8;
-                    for (int r = 0; r < 8; ++r)
-                      v[r] =
-                          (nn < m.n && k0 + r < m.k) ? get(nn, k0 + r) : 0.0f;
-                    EncodeBlock(v, dst);
-                  }
-            std::memcpy(base + ((std::size_t(col) * std::size_t(m.groups) +
-                                 std::size_t(g)) *
-                                    std::size_t(kb) +
-                                std::size_t(lr)) *
-                                   kTileWords * 4,
-                        tile.data(), tile.size());
+    std::uint8_t* out =
+        base + ((std::size_t(col) * std::size_t(m.groups) + std::size_t(g)) *
+                    std::size_t(kb) +
+                std::size_t(lr)) *
+                   kTileWords * 4;
+    if (lc * 128 >= m.n || lr * kKb >= m.k) {  // all padding
+      std::memset(out, 0, kTileWords * 4);
+      return;
+    }
+    std::uint8_t* dst = tile;
+    float v[8];
+    // [superblock 8][block row 8][b 2][c 8]: 8 consecutive k at one n.
+    for (int sb = 0; sb < 8; ++sb)
+      for (int br = 0; br < 8; ++br) {
+        const int k0 = lr * kKb + br * 8;
+        const int nn0 = lc * 128 + sb * 16;
+        if (nn0 + 16 <= m.n && k0 + 8 <= m.k) {  // 16 full blocks, one per row
+          host::EncodeBfp16Blocks(w + std::size_t(nn0) * ld + std::size_t(k0),
+                                  16, dst, 9, ld);
+          dst += 16 * 9;
+          continue;
+        }
+        for (int b = 0; b < 2; ++b)
+          for (int cc = 0; cc < 8; ++cc, dst += 9) {
+            const int nn = lc * 128 + sb * 16 + b * 8 + cc;
+            const float* src = w + std::size_t(nn) * ld + std::size_t(k0);
+            if (nn < m.n && k0 + 8 <= m.k) {
+              EncodeBlock(src, dst);
+              continue;
+            }
+            if (nn >= m.n || k0 >= m.k) {
+              std::memset(dst, 0, 9);
+              continue;
+            }
+            for (int r = 0; r < 8; ++r)
+              v[r] = (nn < m.n && k0 + r < m.k) ? src[r] : 0.0f;
+            EncodeBlock(v, dst);
           }
-        });
+      }
+    std::memcpy(out, tile, kTileWords * 4);
+  }
+
+  static std::size_t Tiles(const Matrix& m) {
+    return std::size_t(8) * std::size_t(m.groups) * std::size_t(m.kp / kKb);
+  }
+
+  // Packs matrix `m` (placed at m.b_words) from row-major f32 rows
+  // w[o * ld + i] into the arena.
+  void Encode(const Matrix& m, const float* w, std::size_t ld) {
+    host::ParallelFor(Tiles(m), 4, [&](std::size_t lo, std::size_t hi) {
+      std::vector<std::uint8_t> tile(kTileWords * 4);
+      for (std::size_t t = lo; t < hi; ++t)
+        EncodeTile(m, w, ld, t, tile.data());
+    });
     arena.ToDevice(m.b_words * 4, Words(m) * 4);
   }
 
-  template<typename Get>
-  int Upload(int n, int k, Get get) {
+  int Upload(int n, int k, const float* w, std::size_t ld) {
     if (n <= 0 || k <= 0)
       throw Error("BfpGemm: empty matrix");
     Matrix m = Shape(n, k);
@@ -201,7 +276,7 @@ struct BfpGemm::Impl {
       matrices.push_back(m);
       id = int(matrices.size()) - 1;
     }
-    Encode(m, get);
+    Encode(m, w, ld);
     return id;
   }
 
@@ -215,16 +290,16 @@ struct BfpGemm::Impl {
 
   // Appends `block` and its jobs to the plan. A job that no longer fits
   // the C buffer starts a new dispatch, which stages the block again.
-  static void Add(std::vector<Dispatch>& plan, const Block& block,
-                  const std::vector<Job>& jobs) {
+  static void Add(const Mode& md, std::vector<Dispatch>& plan,
+                  const Block& block, const std::vector<Job>& jobs) {
     const std::size_t a_words =
-        block.bands.size() * 4 * std::size_t(block.kc) * kStripWords;
+        block.bands.size() * 4 * std::size_t(block.kc) * md.strip;
     if (a_words * 4 > kABytes)
       throw Error("BfpGemm: one block exceeds the staging buffers");
     bool staged = false;
     for (Job j : jobs) {
       const std::size_t words =
-          std::size_t(j.ng) * std::size_t(j.nb) * 8 * std::size_t(kBand) * 64;
+          std::size_t(j.Tiles()) * 8 * std::size_t(md.band) * 64;
       if (words * 4 > kCBytes)
         throw Error("BfpGemm: one job exceeds the staging buffers");
       Dispatch* d = &plan.back();
@@ -251,8 +326,9 @@ struct BfpGemm::Impl {
     }
   }
 
-  std::vector<Dispatch> Plan(std::span<const Call> calls,
+  std::vector<Dispatch> Plan(const Mode& md, std::span<const Call> calls,
                              const std::vector<Matrix>& resolved) const {
+    const int kBand = md.band;
     std::vector<Dispatch> plan(1);
     for (std::size_t i = 0; i < calls.size();) {
       const Matrix& m = resolved[i];
@@ -263,7 +339,7 @@ struct BfpGemm::Impl {
       if (calls[i].rows <= kBand && m.groups == 1) {
         const std::size_t batch_max = std::min<std::size_t>(
             kMaxRepeat,
-            kABytes / (std::size_t(4) * std::size_t(kc) * kStripWords * 4));
+            kABytes / (std::size_t(4) * std::size_t(kc) * md.strip * 4));
         while (end < calls.size() && end - i < batch_max &&
                std::size_t(kc) * (end - i + 1) <= std::size_t(kMaxWrap)) {
           const Matrix& e = resolved[end];
@@ -284,7 +360,8 @@ struct BfpGemm::Impl {
         Job job{
             m, 0, 0, 1, 0, int(end - i), resolved[i + 1].b_words - m.b_words,
             0};
-        Add(plan, block, {job});
+        std::vector<Job> jobs{job};
+        Add(md, plan, block, jobs);
         i = end;
         continue;
       }
@@ -293,9 +370,10 @@ struct BfpGemm::Impl {
       const int bands_max = std::max(
           1, std::min<int>(kMaxRepeat,
                            int(kABytes / (std::size_t(4) * std::size_t(kc) *
-                                          kStripWords * 4))));
-      for (int bb = 0; bb < bands_total; bb += bands_max) {
-        const int bands = std::min(bands_max, bands_total - bb);
+                                          md.strip * 4))));
+      const int bands_cap = bands_max;
+      for (int bb = 0; bb < bands_total; bb += bands_cap) {
+        const int bands = std::min(bands_cap, bands_total - bb);
         Block block{{}, kc, 0};
         for (int b = 0; b < bands; ++b) {
           const int r0 = (bb + b) * kBand;
@@ -304,7 +382,7 @@ struct BfpGemm::Impl {
         // One band by many groups, or one group by many bands: whichever
         // takes fewer jobs.
         std::vector<Job> jobs;
-        if (bands == 1 || m.groups < bands) {
+        if (bands == 1 || bands <= m.groups) {
           const int ng_max = std::max(1, std::min(kMaxRepeat, kMaxWrap / kb));
           for (int b = 0; b < bands; ++b)
             for (int g0 = 0; g0 < m.groups; g0 += ng_max)
@@ -314,60 +392,68 @@ struct BfpGemm::Impl {
           for (int g = 0; g < m.groups; ++g)
             jobs.push_back(Job{m, 0, g, 1, 0, bands, 0, 0});
         }
-        Add(plan, block, jobs);
+        Add(md, plan, block, jobs);
       }
       ++i;
     }
     return plan;
   }
 
-  std::vector<std::uint32_t> Generate(const std::int32_t* s) const {
-    const auto w =
-        generate.Generate(std::span<const std::int32_t>(s, kScalars));
-    if (w.size() <= 4)
-      throw Error("BfpGemm: instruction generation failed");
-    return {w.begin(), w.end()};
+  std::vector<std::uint32_t> Generate(const Mode& md,
+                                      const std::int32_t* s) const {
+    try {
+      const auto w =
+          md.generate.Generate(std::span<const std::int32_t>(s, kScalars));
+      if (w.size() > 4)
+        return {w.begin(), w.end()};
+    } catch (const Error&) {
+    }
+    std::string list;
+    for (int i = 0; i < kScalars; ++i)
+      list += (i ? " " : "") + std::to_string(s[i]);
+    throw Error("BfpGemm: instruction generation failed for " + list);
   }
 
   // Under `mutex`: the template of one job's shape, checked against a direct
   // generation at its first offsets.
-  const Template& TemplateFor(const std::int32_t* s) {
+  const Template& TemplateFor(Mode& md, const std::int32_t* s) {
     std::array<std::int32_t, kScalars - 3> key{};
     for (int i = 0, j = 0; i < kScalars; ++i)
       if (i != kVar[0] && i != kVar[1] && i != kVar[2])
         key[std::size_t(j++)] = s[i];
-    if (auto it = templates.find(key); it != templates.end())
+    if (auto it = md.templates.find(key); it != md.templates.end())
       return it->second;
     std::int32_t z[kScalars];
     std::copy(s, s + kScalars, z);
     for (int v : kVar)
       z[v] = 0;
     Template t;
-    t.words = Generate(z);
+    t.words = Generate(md, z);
     for (int i = 0; i < 3; ++i) {
       std::int32_t one[kScalars];
       std::copy(z, z + kScalars, one);
       one[kVar[i]] = 1;
-      t.patches[i] = DiffInstructions(t.words, Generate(one));
+      t.patches[i] = DiffInstructions(t.words, Generate(md, one));
     }
     std::vector<std::uint32_t> check = t.words;
     for (int i = 0; i < 3; ++i)
       for (const auto& p : t.patches[i])
         check[p.index] += std::uint32_t(s[kVar[i]]) * p.delta;
-    if (check != Generate(s))
+    if (check != Generate(md, s))
       throw Error("BfpGemm: instruction streams are not linear in offsets");
-    return templates.emplace(key, std::move(t)).first->second;
+    return md.templates.emplace(key, std::move(t)).first->second;
   }
 
   // Writes the concatenated stream of a dispatch's jobs into the lane.
-  void Stream(Lane& lane, const std::vector<std::int32_t>& scalars) {
+  void Stream(Mode& md, Instructions& ins,
+              const std::vector<std::int32_t>& scalars) {
     std::vector<std::uint32_t> txn(4, 0);
     std::uint32_t ops = 0;
     {
       std::lock_guard lock(mutex);
       for (std::size_t i = 0; i < scalars.size(); i += kScalars) {
         const std::int32_t* s = scalars.data() + i;
-        const Template& t = TemplateFor(s);
+        const Template& t = TemplateFor(md, s);
         const std::size_t at = txn.size();
         txn.insert(txn.end(), t.words.begin() + 4, t.words.end());
         for (int v = 0; v < 3; ++v)
@@ -380,13 +466,20 @@ struct BfpGemm::Impl {
     }
     txn[2] = ops;
     txn[3] = std::uint32_t(txn.size() * 4);
-    if (txn.size() > lane.ins.capacity())
-      lane.ins = program.AllocateInstructions(txn.size() * 2);
-    lane.ins.Assign(txn);
+    if (txn.size() > ins.capacity())
+      ins = md.program.AllocateInstructions(txn.size() * 2);
+    ins.Assign(txn);
   }
 
-  void Pack(Lane& lane, const Dispatch& d, std::span<const Call> calls,
-            const std::vector<Matrix>& resolved) {
+  // Stages the blocks' rows as bfp16 in the order the cores read them: per
+  // core row r (128 rows), band and 512-wide K chunk, 32 sub-tile objects
+  // [k block 8][32-row sub-tile 4] of 2304 bytes, each [row pair 2][column
+  // block 8][half 2][row 8] groups of 8 k values.
+  void Pack(const Mode& md, Lane& lane, const Dispatch& d,
+            std::span<const Call> calls, const std::vector<Matrix>& resolved) {
+    const int kBand = md.band;
+    const std::size_t core_rows = std::size_t(md.band) / 4,
+                      subs = core_rows / 32;
     struct Item {
       const Block* block;
       int band, i0, i1;
@@ -407,9 +500,9 @@ struct BfpGemm::Impl {
       }
       lane.a_rows[b.a_words] = {b.kc, std::move(rows)};
     }
-    auto* a16 = reinterpret_cast<std::uint16_t*>(lane.a.data());
+    auto* a8 = reinterpret_cast<std::uint8_t*>(lane.a.data());
     host::ParallelFor(items.size(), 1, [&](std::size_t lo, std::size_t hi) {
-      std::vector<std::uint16_t> row;
+      float pad[kKb];
       for (std::size_t t = lo; t < hi; ++t) {
         const Item& it = items[t];
         const Block& b = *it.block;
@@ -417,31 +510,52 @@ struct BfpGemm::Impl {
         const Call& call = calls[src.call];
         const std::size_t k = std::size_t(resolved[src.call].k);
         const std::size_t bands = b.bands.size(), kc = std::size_t(b.kc);
-        row.assign(kc * kKc, 0);
-        std::uint16_t* base = a16 + b.a_words * 2;
         for (int i = it.i0; i < it.i1; ++i) {
-          const std::size_t r = std::size_t(i) / 128, ii = std::size_t(i) % 128;
-          if (i < src.nr)
-            host::FloatToBf16(call.x + std::size_t(src.r0 + i) * k, row.data(),
-                              k);
-          else
-            std::fill(row.begin(), row.end(), std::uint16_t(0));
-          for (std::size_t q = 0; q < kc; ++q)
-            std::memcpy(
-                base +
-                    (((r * bands + std::size_t(it.band)) * kc + q) * 128 + ii) *
-                        kKc,
-                row.data() + q * kKc, kKc * 2);
+          const std::size_t r = std::size_t(i) / core_rows,
+                            ri = std::size_t(i) % core_rows;
+          const std::size_t sub = ri / 32, rs = ri % 32;
+          const std::size_t rp = rs / 16, half = (rs % 16) / 8, rr = rs % 8;
+          const bool live = i < src.nr;
+          const std::size_t at = std::size_t(src.r0 + i) * k;
+          for (std::size_t q = 0; q < kc; ++q) {
+            std::uint8_t* chunk =
+                a8 +
+                (b.a_words +
+                 ((r * bands + std::size_t(it.band)) * kc + q) * md.strip) *
+                    4;
+            for (std::size_t kb = 0; kb < 8; ++kb) {
+              // 8 blocks of this row's k block, 144 bytes apart.
+              std::uint8_t* out = chunk + (kb * subs + sub) * 2304 +
+                                  (rp * 16 + half) * 72 + rr * 9;
+              const std::size_t k0 = q * kKc + kb * kKb;
+              if (live && k0 + kKb <= k) {
+                if (call.x16)
+                  host::EncodeBfp16BlocksBf16(call.x16 + at + k0, 8, out, 144);
+                else
+                  host::EncodeBfp16Blocks(call.x + at + k0, 8, out, 144);
+                continue;
+              }
+              for (std::size_t j = 0; j < std::size_t(kKb); ++j) {
+                const std::size_t kk = k0 + j;
+                pad[j] = !live || kk >= k ? 0.0f
+                         : call.x16       ? host::Bf16ToFloat(call.x16[at + kk])
+                                          : call.x[at + kk];
+              }
+              host::EncodeBfp16Blocks(pad, 8, out, 144);
+            }
+          }
         }
       }
     });
   }
 
   // Copies the jobs' output tiles into their calls' rows: one work item per
-  // (job, column, tile) and block of 64 rows. The buffer is uncached, so each
-  // item copies its rows out once before converting.
-  void Unpack(Lane& lane, const Dispatch& d, std::span<const Call> calls,
+  // (job, column, tile) and block of 64 rows, read in place (host_only
+  // buffers are cached host memory).
+  void Unpack(const Mode& md, Lane& lane, const Dispatch& d,
+              std::span<const Call> calls,
               const std::vector<Matrix>& resolved) {
+    const int kBand = md.band;
     struct Item {
       const Job* job;
       int col, tile, r0, r1;
@@ -450,11 +564,13 @@ struct BfpGemm::Impl {
     for (const Job& j : d.jobs) {
       const Block& b = d.blocks[j.block];
       for (int col = 0; col < 8; ++col)
-        for (int t = 0; t < j.ng * j.nb; ++t) {
-          const int g = j.g0 + (j.nb == 1 ? t : 0);
-          const int band = j.b0 + (j.nb == 1 ? 0 : t);
+        for (int t = 0; t < j.Tiles(); ++t) {
+          int g, band, n0;
+          j.Place(t, col, &g, &band, &n0);
+          if (band >= int(b.bands.size()) || b.bands[std::size_t(band)].nr == 0)
+            continue;
           const BandSrc& src = b.bands[std::size_t(band)];
-          if ((g * 8 + col) * 128 >= resolved[src.call].n)
+          if (n0 >= resolved[src.call].n)
             continue;
           const int rows = src.nr;
           for (int r0 = 0; r0 < rows; r0 += 64)
@@ -463,29 +579,31 @@ struct BfpGemm::Impl {
     }
     const auto* base = reinterpret_cast<const std::uint16_t*>(lane.c.data());
     host::ParallelFor(items.size(), 1, [&](std::size_t lo, std::size_t hi) {
-      std::vector<std::uint16_t> tile(std::size_t(64) * 128);
       for (std::size_t t = lo; t < hi; ++t) {
         const Item& it = items[t];
         const Job& j = *it.job;
         const Block& b = d.blocks[j.block];
-        const int g = j.g0 + (j.nb == 1 ? it.tile : 0);
-        const int band = j.b0 + (j.nb == 1 ? 0 : it.tile);
+        int g, band, n0;
+        j.Place(it.tile, it.col, &g, &band, &n0);
         const BandSrc& src = b.bands[std::size_t(band)];
         const Call& call = calls[src.call];
-        const int n = resolved[src.call].n, n0 = (g * 8 + it.col) * 128;
+        const int n = resolved[src.call].n;
         const int w = std::min(128, n - n0);
         const std::uint16_t* p =
             base + j.c_words * 2 +
-            ((std::size_t(it.col) * std::size_t(j.ng * j.nb) +
+            ((std::size_t(it.col) * std::size_t(j.Tiles()) +
               std::size_t(it.tile)) *
                  kBand +
              std::size_t(it.r0)) *
                 128;
         const std::size_t rows = std::size_t(it.r1 - it.r0);
-        std::memcpy(tile.data(), p, rows * 128 * 2);
+        if (call.epilogue) {
+          (*call.epilogue)(src.r0 + it.r0, int(rows), n0, w, p);
+          continue;
+        }
         for (std::size_t i = 0; i < rows; ++i)
           host::Bf16ToFloat(
-              tile.data() + i * 128,
+              p + i * 128,
               call.y + std::size_t(src.r0 + it.r0 + int(i)) * std::size_t(n) +
                   std::size_t(n0),
               std::size_t(w));
@@ -500,7 +618,12 @@ struct BfpGemm::Impl {
       for (const Call& call : calls)
         resolved.push_back(Resolve(call.id));
     }
-    const std::vector<Dispatch> plan = Plan(calls, resolved);
+    int max_rows = 0;
+    for (const Call& call : calls)
+      max_rows = std::max(max_rows, call.rows);
+    Mode& md = Choose(max_rows);
+    const int kBand = md.band;
+    const std::vector<Dispatch> plan = Plan(md, calls, resolved);
     Lane* lane;
     {
       std::unique_lock lock(lane_mutex);
@@ -536,36 +659,59 @@ struct BfpGemm::Impl {
       for (const Job& j : d.jobs) {
         const Block& b = d.blocks[j.block];
         const int kc = j.m.kp / kKc, kb = j.m.kp / kKb;
+        // Columns past the job's widest output range idle (no C drained).
+        int width = 0;
+        for (int t = 0; t < j.nb; ++t)
+          if (b.bands[std::size_t(j.b0 + t)].nr > 0)
+            width = std::max(width,
+                             resolved[b.bands[std::size_t(j.b0 + t)].call].n);
+        const int tiles = j.Tiles();
+        const std::size_t a_row = b.bands.size() * std::size_t(kc) * md.strip,
+                          b_col = std::size_t(j.m.groups) * std::size_t(kb) *
+                                  kTileWords;
+        const int cols =
+            j.ng > 1 ? 8
+                     : std::clamp((width - j.g0 * kGroup + 127) / 128, 1, 8);
+        const int t1 = cols > 2 ? tiles : 1, t2 = cols > 4 ? tiles : 1,
+                  t3 = cols > 6 ? tiles : 1;
+        const int iters = j.nb;  // B repeats (iteration)
         const std::int32_t s[kScalars] = {
             j.ng,
-            j.nb,
+            iters,
             kb,
-            j.ng * j.nb,
-            j.nb * kc,
+            tiles,
+            iters * kc,
             j.ng * kb,
             std::int32_t(j.b_rep),
             std::int32_t(b.a_words +
-                         std::size_t(j.b0) * std::size_t(kc) * kStripWords),
-            std::int32_t(b.bands.size() * std::size_t(kc) * kStripWords),
+                         std::size_t(j.b0) * std::size_t(kc) * md.strip),
+            std::int32_t(a_row),
             std::int32_t(j.m.b_words +
                          std::size_t(j.g0) * std::size_t(kb) * kTileWords),
-            std::int32_t(std::size_t(j.m.groups) * std::size_t(kb) *
-                         kTileWords),
+            std::int32_t(b_col),
             std::int32_t(j.c_words),
-            j.ng * j.nb * kBand * 128 / 2};
+            tiles * kBand * 128 / 2,
+            t1,
+            t2,
+            t3};
         scalars.insert(scalars.end(), s, s + kScalars);
       }
       auto t = Clock::now();
-      Pack(*lane, d, calls, resolved);
-      Stream(*lane, scalars);
+      Pack(md, *lane, d, calls, resolved);
+      Instructions& ins = lane->ins[&md - modes];
+      Stream(md, ins, scalars);
       lane->a.ToDevice(0, d.a_end * 4);
       const double t_pack = us(t);
       t = Clock::now();
-      program.Start(lane->ins, {&lane->a, &arena, &lane->c}).Wait();
+      if (profile)
+        Begin();
+      md.program.Start(ins, {&lane->a, &arena, &lane->c}).Wait();
+      if (profile)
+        End();
       const double t_npu = us(t);
       t = Clock::now();
       lane->c.FromDevice(0, d.c_end * 4);
-      Unpack(*lane, d, calls, resolved);
+      Unpack(md, *lane, d, calls, resolved);
       if (profile)
         std::fprintf(stderr,
                      "bfpgemm: %zu jobs, pack %.1f npu %.1f unpack %.1f us\n",
@@ -579,16 +725,30 @@ BfpGemm BfpGemm::Open(Device& device, const std::filesystem::path& dir,
   BfpGemm g;
   g.impl_ = std::make_unique<Impl>();
   auto& m = *g.impl_;
-  m.program = Program::Load(device, dir / "bfpgemm.xclbin");
-  m.generate = DispatchLibrary::Open(dir / "bfpgemm_dispatch.so", kScalars);
+  // bfpgemm_s (128-row bands) is optional: designs built before it only have
+  // bfpgemm.
+  for (int i = 0; i < 2; ++i) {
+    const std::string name = i == 0 ? "bfpgemm" : "bfpgemm_s";
+    if (i == 1 && !std::filesystem::is_regular_file(dir / (name + ".xclbin")))
+      break;
+    Impl::Mode& md = m.modes[i];
+    md.program = Program::Load(device, dir / (name + ".xclbin"));
+    md.generate =
+        DispatchLibrary::Open(dir / (name + "_dispatch.so"), kScalars);
+    md.band = kBands[i];
+    md.strip = std::size_t(kBands[i] / 4) * kKc / 8 * 9 / 4;
+    md.loaded = true;
+  }
   for (Lane& lane : m.lanes) {
-    lane.a = m.program.Allocate(kABytes, kArgA);
-    lane.c = m.program.Allocate(kCBytes, kArgC);
-    lane.ins = m.program.AllocateInstructions(kLaneWords);
+    lane.a = m.modes[0].program.Allocate(kABytes, kArgA);
+    lane.c = m.modes[0].program.Allocate(kCBytes, kArgC);
+    for (int i = 0; i < 2; ++i)
+      if (m.modes[i].loaded)
+        lane.ins[i] = m.modes[i].program.AllocateInstructions(kLaneWords);
   }
   if (arena_bytes > kMaxArenaBytes)
     throw Error("BfpGemm: the weight arena exceeds the design's 2 GiB");
-  m.arena = m.program.Allocate(arena_bytes, kArgW);
+  m.arena = m.modes[0].program.Allocate(arena_bytes, kArgW);
   return g;
 }
 
@@ -600,18 +760,19 @@ BfpGemm& BfpGemm::operator=(BfpGemm&&) noexcept = default;
 int BfpGemm::Upload(int n, int k, std::span<const float> weights) {
   if (weights.size() < std::size_t(n) * std::size_t(k))
     throw Error("BfpGemm: too few weights");
-  return impl_->Upload(n, k, [&](int nn, int kk) {
-    return weights[std::size_t(nn) * std::size_t(k) + std::size_t(kk)];
-  });
+  return impl_->Upload(n, k, weights.data(), std::size_t(k));
 }
 
 int BfpGemm::UploadBf16(int n, int k, std::span<const std::uint16_t> weights) {
   if (weights.size() < std::size_t(n) * std::size_t(k))
     throw Error("BfpGemm: too few weights");
-  return impl_->Upload(n, k, [&](int nn, int kk) {
-    return FromBf16(
-        weights[std::size_t(nn) * std::size_t(k) + std::size_t(kk)]);
+  std::vector<float> rows(std::size_t(n) * std::size_t(k));
+  host::ParallelFor(std::size_t(n), 16, [&](std::size_t lo, std::size_t hi) {
+    host::Bf16ToFloat(weights.data() + lo * std::size_t(k),
+                      rows.data() + lo * std::size_t(k),
+                      (hi - lo) * std::size_t(k));
   });
+  return impl_->Upload(n, k, rows.data(), std::size_t(k));
 }
 
 BfpGemm::Scratch BfpGemm::NewScratch(std::size_t bytes) {
@@ -651,10 +812,119 @@ int BfpGemm::Scratch::Upload(int n, int k, const float* weights,
     r.matrices.push_back(mat);
     id = -(1 + index_ * kScratchIds + int(r.matrices.size()) - 1);
   }
-  m.Encode(mat, [&](int nn, int kk) {
-    return weights[std::size_t(nn) * row_stride + std::size_t(kk) * col_stride];
-  });
+  if (col_stride == 1) {
+    m.Encode(mat, weights, row_stride);
+  } else {
+    // A transposed view: gather it into rows first.
+    std::vector<float> rows(std::size_t(n) * std::size_t(k));
+    host::ParallelFor(std::size_t(k), 64, [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i)
+        for (std::size_t o = 0; o < std::size_t(n); ++o)
+          rows[o * std::size_t(k) + i] =
+              weights[o * row_stride + i * col_stride];
+    });
+    m.Encode(mat, rows.data(), std::size_t(k));
+  }
   return id;
+}
+
+std::vector<int> BfpGemm::Scratch::UploadMany(std::span<const Spec> specs) {
+  auto& m = *owner_->impl_;
+  std::vector<Matrix> mats;
+  std::vector<int> ids;
+  std::size_t first = 0, last = 0;
+  {
+    std::lock_guard lock(m.mutex);
+    Region& r = m.regions.at(std::size_t(index_));
+    first = r.cursor;
+    for (const Spec& sp : specs) {
+      if (sp.n <= 0 || sp.k <= 0)
+        throw Error("BfpGemm: empty matrix");
+      Matrix mat = Shape(sp.n, sp.k);
+      if (r.cursor + Words(mat) > r.end ||
+          r.matrices.size() >= std::size_t(kScratchIds))
+        throw Error("BfpGemm: the scratch region is full (" +
+                    std::to_string((r.cursor - r.begin) * 4 >> 20) + " of " +
+                    std::to_string((r.end - r.begin) * 4 >> 20) + " MiB)");
+      mat.b_words = r.cursor;
+      r.cursor += Words(mat);
+      r.matrices.push_back(mat);
+      ids.push_back(-(1 + index_ * kScratchIds + int(r.matrices.size()) - 1));
+      mats.push_back(mat);
+    }
+    last = r.cursor;
+  }
+  // Transposed views are gathered into rows first.
+  std::vector<std::vector<float>> rows(specs.size());
+  std::vector<std::size_t> transposed;
+  for (std::size_t i = 0; i < specs.size(); ++i)
+    if (specs[i].col_stride != 1 && specs[i].same_as < 0)
+      transposed.push_back(i);
+  host::ParallelFor(transposed.size(), 1, [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t t = lo; t < hi; ++t) {
+      const Spec& sp = specs[transposed[t]];
+      auto& out = rows[transposed[t]];
+      out.resize(std::size_t(sp.n) * std::size_t(sp.k));
+      for (std::size_t i = 0; i < std::size_t(sp.k); ++i)
+        for (std::size_t o = 0; o < std::size_t(sp.n); ++o)
+          out[o * std::size_t(sp.k) + i] =
+              sp.weights[o * sp.row_stride + i * sp.col_stride];
+    }
+  });
+  std::vector<std::size_t> start(specs.size() + 1, 0);
+  for (std::size_t i = 0; i < specs.size(); ++i)
+    start[i + 1] = start[i] + (specs[i].same_as < 0 ? Impl::Tiles(mats[i]) : 0);
+  host::ParallelFor(start.back(), 8, [&](std::size_t lo, std::size_t hi) {
+    std::vector<std::uint8_t> tile(kTileWords * 4);
+    std::size_t i = std::size_t(
+        std::upper_bound(start.begin(), start.end(), lo) - start.begin() - 1);
+    for (std::size_t t = lo; t < hi; ++t) {
+      while (t >= start[i + 1])
+        ++i;
+      const Spec& sp = specs[i];
+      const bool tr = sp.col_stride != 1;
+      m.EncodeTile(mats[i], tr ? rows[i].data() : sp.weights,
+                   tr ? std::size_t(sp.k) : sp.row_stride, t - start[i],
+                   tile.data());
+    }
+  });
+  auto* base = reinterpret_cast<std::uint8_t*>(m.arena.data());
+  for (std::size_t i = 0; i < specs.size(); ++i) {
+    const int src = specs[i].same_as;
+    if (src < 0)
+      continue;
+    if (std::size_t(src) >= i ||
+        Words(mats[std::size_t(src)]) != Words(mats[i]))
+      throw Error("BfpGemm: same_as must name an earlier matrix of one shape");
+    std::memcpy(base + mats[i].b_words * 4,
+                base + mats[std::size_t(src)].b_words * 4, Words(mats[i]) * 4);
+  }
+  if (last > first)
+    m.arena.ToDevice(first * 4, (last - first) * 4);
+  return ids;
+}
+
+int BfpGemm::Scratch::Duplicate(int id) {
+  auto& m = *owner_->impl_;
+  Matrix mat;
+  int copy;
+  {
+    std::lock_guard lock(m.mutex);
+    const Matrix src = m.Resolve(id);
+    Region& r = m.regions.at(std::size_t(index_));
+    if (r.cursor + Words(src) > r.end ||
+        r.matrices.size() >= std::size_t(kScratchIds))
+      throw Error("BfpGemm: the scratch region is full");
+    mat = src;
+    mat.b_words = r.cursor;
+    r.cursor += Words(mat);
+    r.matrices.push_back(mat);
+    copy = -(1 + index_ * kScratchIds + int(r.matrices.size()) - 1);
+    auto* base = reinterpret_cast<std::uint8_t*>(m.arena.data());
+    std::memcpy(base + mat.b_words * 4, base + src.b_words * 4, Words(mat) * 4);
+  }
+  m.arena.ToDevice(mat.b_words * 4, Words(mat) * 4);
+  return copy;
 }
 
 void BfpGemm::Scratch::Reset() {
@@ -667,6 +937,13 @@ void BfpGemm::Scratch::Reset() {
 
 void BfpGemm::Run(std::span<const Call> calls) {
   impl_->Run(calls);
+}
+
+double BfpGemm::TakeBusyMs() {
+  std::lock_guard lock(impl_->busy_mutex);
+  const double ms = impl_->busy_us / 1e3;
+  impl_->busy_us = 0;
+  return ms;
 }
 
 }  // namespace gufo::npu

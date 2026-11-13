@@ -15,6 +15,20 @@ namespace gufo::npu::host {
 /// run inline.
 void ParallelFor(std::size_t n, std::size_t grain,
                  const std::function<void(std::size_t, std::size_t)>& fn);
+/// Within its scope, the calling thread's ParallelFor runs on pool `index`
+/// of `count` pools that share the hardware threads, so `count` threads can
+/// run parallel host work at once without queueing behind each other.
+class SharePool {
+public:
+  SharePool(unsigned index, unsigned count);
+  ~SharePool();
+  SharePool(const SharePool&) = delete;
+  SharePool& operator=(const SharePool&) = delete;
+
+private:
+  void* previous_;
+};
+
 /// The pool's thread count (the hardware's, at least 1).
 [[nodiscard]] std::size_t Threads();
 
@@ -29,6 +43,13 @@ void FloatToBf16(const float* src, std::uint16_t* dst, std::size_t n);
 /// added to the weight, e.g. 1 for (1 + w) norms). x and y may alias.
 void RmsNormRows(const float* x, float* y, std::size_t rows, std::size_t dim,
                  const float* weight, float eps, float offset = 0.0f);
+/// As RmsNormRows, written as bf16 (round to nearest even).
+void RmsNormRowsBf16(const float* x, std::uint16_t* y, std::size_t rows,
+                     std::size_t dim, const float* weight, float eps);
+/// state = (state + RmsNorm(x) * weight) * scale per row: a normed residual
+/// add.
+void AddNormRows(float* state, const float* x, std::size_t rows,
+                 std::size_t dim, const float* weight, float eps, float scale);
 /// y = (x - mean) / sqrt(var + eps) * weight + bias per row (either null).
 void LayerNormRows(const float* x, float* y, std::size_t rows, std::size_t dim,
                    const float* weight, const float* bias, float eps);
@@ -74,6 +95,18 @@ struct AttentionArgs {
 /// `skip_empty` (rows another path computes).
 void Attention(const AttentionArgs& args, const KeyRange& keys,
                bool skip_empty = false);
+
+/// bfp16ebs8 encoding of 8 values: [shared exponent byte][8 int8 mantissas],
+/// value = mantissa * 2^(exponent - 127) / 64, rounded to nearest even.
+void EncodeBfp16Block(const float* values, std::uint8_t* out);
+/// EncodeBfp16Block of `blocks` groups of 8 values, the i-th read from
+/// values + i * src_stride and written at out + i * stride.
+void EncodeBfp16Blocks(const float* values, std::size_t blocks,
+                       std::uint8_t* out, std::size_t stride,
+                       std::size_t src_stride = 8);
+/// As EncodeBfp16Blocks, from bf16 values.
+void EncodeBfp16BlocksBf16(const std::uint16_t* values, std::size_t blocks,
+                           std::uint8_t* out, std::size_t stride);
 
 /// x[i] = exp(x[i] - shift); *sum (when set) gets the total. Vectorized.
 void ExpInPlace(float* x, std::size_t n, float shift, float* sum = nullptr);

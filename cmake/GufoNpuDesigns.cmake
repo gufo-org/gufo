@@ -17,13 +17,17 @@ if(GUFO_IRON_PYTHON)
   endif()
 endif()
 
-# gufo_npu_design(<name> SCRIPT <design.py> [SOURCES <files>...]): runs
-# `<python> <design.py> <dir>` into ${CMAKE_BINARY_DIR}/npu/<name> and adds the
-# target npu_design_<name> (built by default). The design writes
-# <name>.xclbin and its dispatch library there; both install to
+# gufo_npu_design(<name> SCRIPT <design.py> [SOURCES <files>...]
+#                 [PROGRAMS <names>...]): runs `<python> <design.py> <dir>` into
+# ${CMAKE_BINARY_DIR}/npu/<name> and adds the target npu_design_<name> (built
+# by default). The design writes <program>.xclbin and <program>_dispatch.so
+# there for each program (default: just <name>); all install to
 # share/gufo/npu/<name>. Sets <name>_NPU_DIR in the caller's scope.
 function(gufo_npu_design name)
-  cmake_parse_arguments(ARG "" "SCRIPT" "SOURCES" ${ARGN})
+  cmake_parse_arguments(ARG "" "SCRIPT" "SOURCES;PROGRAMS" ${ARGN})
+  if(NOT ARG_PROGRAMS)
+    set(ARG_PROGRAMS "${name}")
+  endif()
   set(dir "${CMAKE_BINARY_DIR}/npu/${name}")
   set(${name}_NPU_DIR "${dir}" PARENT_SCOPE)
   if(NOT GUFO_NPU_DESIGNS_AVAILABLE)
@@ -33,8 +37,12 @@ function(gufo_npu_design name)
   get_filename_component(script_dir "${script}" DIRECTORY)
   # IRON caches compiled kernel objects under NPU_CACHE_HOME; keep them in
   # the build tree (sandboxed builds have no writable home).
+  set(outputs)
+  foreach(program IN LISTS ARG_PROGRAMS)
+    list(APPEND outputs "${dir}/${program}.xclbin" "${dir}/${program}_dispatch.so")
+  endforeach()
   add_custom_command(
-    OUTPUT "${dir}/${name}.xclbin" "${dir}/${name}_dispatch.so"
+    OUTPUT ${outputs}
     COMMAND ${CMAKE_COMMAND} -E env "PEANO_INSTALL_DIR=$ENV{PEANO_INSTALL_DIR}"
             "NPU_CACHE_HOME=${CMAKE_BINARY_DIR}/npu/.cache"
             "${GUFO_IRON_PYTHON}" "${script}" "${dir}"
@@ -42,11 +50,12 @@ function(gufo_npu_design name)
     DEPENDS "${script}" ${ARG_SOURCES}
     COMMENT "Compiling NPU design ${name}"
     VERBATIM)
-  add_custom_target(npu_design_${name} ALL DEPENDS "${dir}/${name}.xclbin")
+  add_custom_target(npu_design_${name} ALL DEPENDS ${outputs})
   if(NOT WIN32)
-    # The xclbin, its dispatch library and any host-side layout files.
+    # Each program's xclbin and dispatch library, and any host-side layout
+    # files (<name>_*.txt).
+    install(FILES ${outputs} DESTINATION "share/gufo/npu/${name}")
     install(DIRECTORY "${dir}/" DESTINATION "share/gufo/npu/${name}"
-      FILES_MATCHING PATTERN "${name}.xclbin" PATTERN "${name}_dispatch.so"
-      PATTERN "${name}_*.txt" PATTERN "*.prj" EXCLUDE)
+      FILES_MATCHING PATTERN "${name}_*.txt" PATTERN "*.prj" EXCLUDE)
   endif()
 endfunction()
