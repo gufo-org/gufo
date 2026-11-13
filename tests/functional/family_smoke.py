@@ -124,7 +124,8 @@ def check_embedding(args):
     golden = json.loads((FIXTURES / "embedding_gemma2" / "embedding_golden.json")
                         .read_text(encoding="utf-8"))
     cases = list(golden["cases"])
-    with server(args.binary, "embedding", args.model, ["--served-model-name", "embeddinggemma-2"],
+    extra = ["--served-model-name", "embeddinggemma-2"] + (["--npu"] if args.npu else [])
+    with server(args.binary, "embedding", args.model, extra,
                 args.log_dir / "embedding-server.log", args.startup_timeout) as url:
         result = request(url + "/v1/embeddings", {
             "model": "embeddinggemma-2", "input": [case["text"] for case in cases],
@@ -171,7 +172,8 @@ def check_asr(args):
     body, content_type = multipart({"model": "qwen3-asr", "language": "English",
                                     "max_tokens": "128"},
                                    "file", "speech.wav", audio.read_bytes(), "audio/wav")
-    with server(args.binary, "asr", args.model, ["--served-model-name", "qwen3-asr"],
+    extra = ["--served-model-name", "qwen3-asr"] + (["--npu"] if args.npu else [])
+    with server(args.binary, "asr", args.model, extra,
                 args.log_dir / "asr-server.log", args.startup_timeout) as url:
         result = request(url + "/v1/audio/transcriptions", body=body, content_type=content_type)
     wer = word_error_rate(result["text"], expected)
@@ -184,6 +186,7 @@ def check_tts(args):
     reference = AUDIO / "clear-english-voice.wav"
     voice = ["--served-model-name", "qwen3-tts", "--voice", f"narrator={reference}",
              "--voice-text", f"narrator={reference.with_suffix('.txt')}"]
+    voice += ["--npu"] if args.npu else []
     with server(args.binary, "tts", args.model, voice, args.log_dir / "tts-server.log",
                 args.startup_timeout) as url:
         data = request(url + "/v1/audio/speech", {
@@ -243,9 +246,12 @@ def main():
     parser.add_argument("--model", type=Path, required=True,
                         help="Model directory, or the GGUF file for llm")
     parser.add_argument("--asr-model", type=Path, help="tts: Qwen3-ASR directory for a round trip")
+    parser.add_argument("--npu", action="store_true", help="Run embedding, ASR or TTS on the NPU")
     parser.add_argument("--startup-timeout", type=int, default=900)
     parser.add_argument("--log-dir", type=Path, default=Path("."))
     args = parser.parse_args()
+    if args.npu and args.family == "llm":
+        parser.error("--npu is supported only for embedding, asr and tts")
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.monotonic()

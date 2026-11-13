@@ -252,20 +252,31 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $assets = Get-Content "$env:RUNNER_TEMP\functional-assets.json" -Raw | ConvertFrom-Json
           $smoke = 'windows-gufo\tests\functional\family_smoke.py'
-          $common = @('--binary', 'windows-gufo\gufo.exe', '--log-dir', "$env:RUNNER_TEMP\smoke-logs")
+          $common = @('--binary', 'windows-gufo\gufo.exe')
           $checks = [ordered]@{
             embedding = @('embedding', '--model', $assets.embedding)
             asr       = @('asr', '--model', $assets.asr)
             tts       = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr)
+            'embedding-npu' = @('embedding', '--model', $assets.embedding, '--npu')
+            'asr-npu' = @('asr', '--model', $assets.asr, '--npu')
+            'tts-npu' = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr, '--npu')
             qwen27    = @('llm', '--model', (Join-Path $assets.qwen27 'Qwen3.8-27B-UD-Q4_K_XL.gguf'))
           }
           $failed = @()
           foreach ($name in $checks.Keys) {
             "=== $name"
-            python $smoke @($checks[$name]) @common
+            python $smoke @($checks[$name]) @common --log-dir "$env:RUNNER_TEMP\smoke-logs\$name"
             if ($LASTEXITCODE -ne 0) { $failed += $name }
           }
           if ($failed) { throw "smoke checks failed: $($failed -join ', ')" }
+
+      - name: Upload model smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-smoke-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-logs
+          if-no-files-found: ignore
 
       - name: Remove temporary bundle and environments
         if: always()
