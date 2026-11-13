@@ -1,6 +1,8 @@
 #include "src/models/embedding_gemma2/npu/encoder_npu.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -26,6 +28,8 @@ namespace {
 // Sequences at least this long run attention products on the NPU.
 constexpr std::size_t kNpuAttentionRows = 128;
 constexpr std::size_t kMaxHeads = 16;
+// Rows per NPU band (BfpGemm), the unit of attention spans and row parts.
+constexpr std::size_t kBandRows = 512;
 // Concurrent parts of a batch (BfpGemm has as many staging lanes).
 constexpr std::size_t kParts = 4;
 constexpr std::size_t kGateBlock = 64;  // gate rows per interleaved tile
@@ -155,9 +159,9 @@ struct Encoder::Impl {
   void NpuAttention(gufo::npu::BfpGemm::Scratch& scratch, const float* qkv,
                     std::size_t row_w, std::size_t heads, std::size_t kv,
                     std::size_t hd, const std::vector<std::size_t>& starts,
-                    const std::vector<char>& long_seq, const Visible& visible,
+                    const std::vector<char>& long_seq, std::size_t row0,
+                    std::size_t row1, const Visible& visible,
                     std::uint16_t* context16, std::size_t qw) {
-    constexpr std::size_t kBandRows = 512;
     struct Span {
       std::size_t seq, q0, q1, k0, k1;         // absolute rows
       int keys[kMaxHeads], values[kMaxHeads];  // per query head
@@ -172,6 +176,8 @@ struct Encoder::Impl {
       if (!long_seq[s])
         continue;
       for (std::size_t q0 = starts[s]; q0 < starts[s + 1]; q0 += kBandRows) {
+        if (q0 < row0 || q0 >= row1)  // another part's queries
+          continue;
         const std::size_t q1 = std::min(starts[s + 1], q0 + kBandRows);
         std::size_t k0 = starts[s + 1], k1 = starts[s];
         for (std::size_t r : {q0, q1 - 1}) {
@@ -350,42 +356,118 @@ struct Encoder::Impl {
 
   // Splits the sequences into two halves of similar token counts that run on
   // two threads, so one half's CPU work overlaps the other's NPU work.
-  // Splits the sequences into up to kParts parts of similar token counts
-  // that run on their own threads, each with a share of the CPU threads and
-  // its own NPU staging lane, so the parts' CPU stages overlap each other's
-  // NPU work.
+  template<typename T>
+  static void Grow(std::vector<T>& v, std::size_t n) {
+    if (v.size() < n)
+      v.resize(n);
+  }
+
+  // One request's state, shared by its parts: each part owns a range of
+  // rows and only reads other rows' keys and values (qkv, double-buffered by
+  // layer parity so a part can start the next layer while another still
+  // attends to this one).
+  struct Work {
+    const std::uint32_t* tokens{};
+    std::vector<std::size_t> starts;
+    std::vector<std::int32_t> positions;
+    std::vector<std::size_t> seq_of;
+    std::vector<char> long_seq;
+    std::vector<float> state, ple, qkv[2], context, tmp, projected;
+    std::vector<std::uint16_t> normed16, context16, act16;
+  };
+  Work work;  // reused by every request (they run one at a time)
+
+  // Splits the request into up to kParts parts of rows that run on their own
+  // threads, each with a share of the CPU threads and its own NPU staging
+  // lane, so the parts' CPU stages overlap each other's NPU work. Parts cut
+  // at sequence boundaries when there are several sequences; a single long
+  // sequence cuts at 512-row bands, and its parts meet once per layer, after
+  // every part has its keys and values.
   std::vector<std::vector<float>> RunSplit(
       const std::vector<std::uint32_t>& tokens,
       const std::vector<std::size_t>& starts,
       const std::function<bool()>& cancelled) {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+    const TextConfig& c = *config;
     const std::size_t seqs = starts.size() - 1, rows = tokens.size();
-    const std::size_t parts = std::min<std::size_t>(
-        {kParts, seqs, std::max<std::size_t>(1, rows / 256)});
-    if (parts < 2)
-      return Run(tokens, starts, cancelled, 0);
-    std::vector<std::size_t> cuts{0};
-    for (std::size_t p = 1; p < parts; ++p) {
-      std::size_t c = cuts.back() + 1;
-      while (c + (parts - p) < seqs && starts[c] * parts < rows * p)
-        ++c;
-      cuts.push_back(c);
+    const std::size_t hidden = c.hidden_size,
+                      per_layer = c.hidden_size_per_layer_input,
+                      layers_n = c.num_hidden_layers,
+                      heads = c.num_attention_heads,
+                      inner = c.intermediate_size;
+    Work& wk = work;  // kept across requests: no fresh pages to fault in
+    wk.tokens = tokens.data();
+    wk.starts = starts;
+    wk.positions.resize(rows);
+    wk.seq_of.resize(rows);
+    for (std::size_t q = 0; q < seqs; ++q)
+      for (std::size_t r = starts[q]; r < starts[q + 1]; ++r) {
+        wk.positions[r] = std::int32_t(r - starts[q]);
+        wk.seq_of[r] = q;
+      }
+    wk.long_seq.assign(seqs, 0);
+    for (std::size_t q = 0; q < seqs; ++q)
+      wk.long_seq[q] = starts[q + 1] - starts[q] >= kNpuAttentionRows;
+    std::size_t max_q = 0, max_kv = 0;
+    for (const auto& g : c.layers) {
+      max_q = std::max<std::size_t>(max_q, heads * g.head_dim);
+      max_kv =
+          std::max<std::size_t>(max_kv, g.num_key_value_heads * g.head_dim);
     }
-    cuts.push_back(seqs);
-    std::vector<std::vector<std::vector<float>>> out(parts);
+    Grow(wk.state, rows * hidden);
+    Grow(wk.ple, rows * layers_n * per_layer);
+    for (auto& q : wk.qkv)
+      Grow(q, rows * (max_q + 2 * max_kv));
+    Grow(wk.context, rows * max_q);
+    Grow(wk.tmp, rows * hidden);
+    Grow(wk.projected, rows * c.embedding_dim);
+    Grow(wk.normed16, rows * hidden);
+    Grow(wk.context16, rows * max_q);
+    Grow(wk.act16, rows * std::max(inner, per_layer));
+
+    // Row cuts.
+    std::vector<std::size_t> cuts{0};
+    bool coupled = false;
+    if (seqs >= 2 && rows >= 256) {
+      const std::size_t parts = std::min<std::size_t>(
+          {kParts, seqs, std::max<std::size_t>(1, rows / 256)});
+      for (std::size_t p = 1; p < parts; ++p) {
+        std::size_t q = 1;
+        while (q < seqs && starts[q] * parts < rows * p)
+          ++q;
+        if (starts[q] > cuts.back() && starts[q] < rows)
+          cuts.push_back(starts[q]);
+      }
+    } else if (seqs == 1) {
+      const std::size_t bands = (rows + kBandRows - 1) / kBandRows;
+      const std::size_t parts = std::min<std::size_t>(kParts, bands);
+      for (std::size_t p = 1; p < parts; ++p)
+        cuts.push_back(bands * p / parts * kBandRows);
+      coupled = parts > 1;
+    }
+    cuts.push_back(rows);
+    const std::size_t parts = cuts.size() - 1;
+    std::barrier sync(std::ptrdiff_t(coupled ? parts : 1));
     std::vector<std::exception_ptr> failure(parts);
+    std::atomic<bool> stop{false};
     auto part = [&](std::size_t p) {
       try {
         const gufo::npu::host::SharePool share(unsigned(p), unsigned(parts));
-        const std::size_t s0 = cuts[p], s1 = cuts[p + 1];
-        std::vector<std::uint32_t> t(
-            tokens.begin() + std::ptrdiff_t(starts[s0]),
-            tokens.begin() + std::ptrdiff_t(starts[s1]));
-        std::vector<std::size_t> st;
-        for (std::size_t s = s0; s <= s1; ++s)
-          st.push_back(starts[s] - starts[s0]);
-        out[p] = Run(t, st, cancelled, int(p));
+        const auto tp = Clock::now();
+        RunPart(wk, cuts[p], cuts[p + 1], int(p), coupled ? &sync : nullptr,
+                cancelled, stop);
+        if (profile)
+          std::fprintf(
+              stderr, "embedding_gemma2 npu: part %zu rows %zu-%zu %.1f ms\n",
+              p, cuts[p], cuts[p + 1],
+              std::chrono::duration<double, std::milli>(Clock::now() - tp)
+                  .count());
       } catch (...) {
         failure[p] = std::current_exception();
+        stop = true;
+        if (coupled)
+          sync.arrive_and_drop();
       }
     };
     std::vector<std::thread> threads;
@@ -397,88 +479,84 @@ struct Encoder::Impl {
     for (auto& f : failure)
       if (f)
         std::rethrow_exception(f);
+    if (stop)
+      return {};
+    const std::size_t dim = c.embedding_dim;
+    std::vector<std::vector<float>> out(seqs);
+    host::ParallelFor(seqs, 1, [&](std::size_t b, std::size_t e) {
+      std::vector<double> sum(dim);
+      for (std::size_t q = b; q < e; ++q) {
+        std::fill(sum.begin(), sum.end(), 0.0);
+        for (std::size_t r = starts[q]; r < starts[q + 1]; ++r)
+          for (std::size_t i = 0; i < dim; ++i)
+            sum[i] += wk.projected[r * dim + i];
+        double norm = 0;
+        for (double v : sum)
+          norm += v * v;
+        const double inv = norm > 0 ? 1.0 / std::sqrt(norm) : 0.0;
+        out[q].resize(dim);
+        for (std::size_t i = 0; i < dim; ++i)
+          out[q][i] = float(sum[i] * inv);
+      }
+    });
     if (profile)
       std::fprintf(
           stderr,
-          "embedding_gemma2 npu: split request in %zu, NPU busy %.1f ms\n",
-          parts, gemm.TakeBusyMs());
-    std::vector<std::vector<float>> all;
-    for (auto& o : out) {
-      if (o.empty())
-        return {};
-      for (auto& e : o)
-        all.push_back(std::move(e));
-    }
-    return all;
+          "embedding_gemma2 npu: %zu tokens in %zu parts, %.2f ms, NPU busy "
+          "%.1f ms\n",
+          rows, parts,
+          std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+          gemm.TakeBusyMs());
+    return out;
   }
 
-  std::vector<std::vector<float>> Run(const std::vector<std::uint32_t>& tokens,
-                                      const std::vector<std::size_t>& starts,
-                                      const std::function<bool()>& cancelled,
-                                      int lane) {
-    using Clock = std::chrono::steady_clock;
-    const auto t0 = Clock::now();
-    double gemm_ms = 0;
-    auto timed = [&](auto&& fn) {
-      const auto a = Clock::now();
-      fn();
-      gemm_ms +=
-          std::chrono::duration<double, std::milli>(Clock::now() - a).count();
-    };
+  // The encoder over rows [r0, r1) of `wk`, through the final projection.
+  void RunPart(Work& wk, std::size_t r0, std::size_t r1, int lane,
+               std::barrier<>* sync, const std::function<bool()>& cancelled,
+               std::atomic<bool>& stop) {
     const TextConfig& c = *config;
-    const std::size_t rows = tokens.size(), hidden = c.hidden_size,
+    const std::size_t rows = r1 - r0, hidden = c.hidden_size,
                       per_layer = c.hidden_size_per_layer_input,
                       layers_n = c.num_hidden_layers,
                       heads = c.num_attention_heads,
                       inner = c.intermediate_size;
     const float eps = c.rms_norm_eps;
-    std::vector<std::int32_t> positions(rows);
-    std::vector<std::size_t> seq_of(rows);
-    for (std::size_t s = 0; s + 1 < starts.size(); ++s)
-      for (std::size_t r = starts[s]; r < starts[s + 1]; ++r) {
-        positions[r] = std::int32_t(r - starts[s]);
-        seq_of[r] = s;
+    const auto& starts = wk.starts;
+    float* state = wk.state.data() + r0 * hidden;
+    float* ple = wk.ple.data() + r0 * layers_n * per_layer;
+    float* tmp = wk.tmp.data() + r0 * hidden;
+    std::uint16_t* normed16 = wk.normed16.data() + r0 * hidden;
+    std::uint16_t* act16 = wk.act16.data() + r0 * std::max(inner, per_layer);
+
+    host::ParallelFor(rows, 16, [&](std::size_t b, std::size_t e) {
+      std::vector<float> row(hidden);
+      for (std::size_t r = b; r < e; ++r) {
+        host::Bf16ToFloat(embed + std::size_t(wk.tokens[r0 + r]) * hidden,
+                          row.data(), hidden);
+        for (std::size_t i = 0; i < hidden; ++i)
+          row[i] *= kEmbedScale;
+        host::RoundBf16(row.data(), hidden);
+        std::copy(row.begin(), row.end(), state + r * hidden);
       }
-
-    std::vector<char> long_seq(starts.size() - 1, 0);
-    for (std::size_t q = 0; q + 1 < starts.size(); ++q)
-      long_seq[q] = starts[q + 1] - starts[q] >= kNpuAttentionRows;
-
-    std::vector<float> state(rows * hidden);
-    for (std::size_t r = 0; r < rows; ++r)
-      for (std::size_t i = 0; i < hidden; ++i)
-        state[r * hidden + i] = host::Bf16ToFloat(host::FloatToBf16(
-            host::Bf16ToFloat(embed[std::size_t(tokens[r]) * hidden + i]) *
-            kEmbedScale));
-
-    std::vector<float> ple(rows * layers_n * per_layer);
-    timed([&] { gemm.Run(ple_model, state.data(), int(rows), ple.data()); });
+    });
+    gemm.Run(ple_model, state, int(rows), ple);
     const float ple_scale = 1.0f / std::sqrt(float(hidden));
-    for (float& v : ple)
-      v *= ple_scale;
-    host::RmsNormRows(ple.data(), ple.data(), rows * layers_n, per_layer,
-                      ple_norm.data(), eps);
+    host::ParallelFor(rows * layers_n, 64, [&](std::size_t b, std::size_t e) {
+      for (std::size_t i = b * per_layer; i < e * per_layer; ++i)
+        ple[i] *= ple_scale;
+    });
+    host::RmsNormRows(ple, ple, rows * layers_n, per_layer, ple_norm.data(),
+                      eps);
 
-    std::size_t max_q = 0, max_kv = 0, max_hd = 0;
-    for (const auto& g : c.layers) {
-      max_q = std::max<std::size_t>(max_q, heads * g.head_dim);
-      max_kv =
-          std::max<std::size_t>(max_kv, g.num_key_value_heads * g.head_dim);
-      max_hd = std::max<std::size_t>(max_hd, g.head_dim);
-    }
-    std::vector<float> qkv(rows * (max_q + 2 * max_kv)), context(rows * max_q),
-        tmp(rows * hidden);
-    // bf16 inputs of the next product, written by norms and epilogues.
-    std::vector<std::uint16_t> normed16(rows * hidden), context16(rows * max_q),
-        act16(rows * std::max(inner, per_layer));
     using Epilogue = gufo::npu::BfpGemm::Epilogue;
-    // act(gate) * up of an interleaved [gate 64 | up 64] tile, as bf16.
+    // act(gate) * up of an interleaved [gate 64 | up 64] tile, as bf16 (rows
+    // relative to this part).
     auto gated = [&](std::uint16_t* out, std::size_t out_w, const float* add,
                      std::size_t add_stride) {
-      return [=](int r0, int n_rows, int n0, int w, const std::uint16_t* tile) {
+      return [=](int t0, int n_rows, int n0, int w, const std::uint16_t* tile) {
         float buf[128], res[kGateBlock];
         for (int i = 0; i < n_rows; ++i) {
-          const std::size_t r = std::size_t(r0 + i);
+          const std::size_t r = std::size_t(t0 + i);
           host::Bf16ToFloat(tile + std::size_t(i) * 128, buf, std::size_t(w));
           if (add) {  // ple: act(gate tile) * ple row slice
             host::GatedRows(buf, 0, add + r * add_stride + std::size_t(n0), 0,
@@ -497,29 +575,39 @@ struct Encoder::Impl {
     };
 
     for (std::size_t l = 0; l < layers_n; ++l) {
-      if (cancelled && cancelled())
-        return {};
+      if ((cancelled && cancelled()) || stop) {
+        stop = true;
+        if (sync)
+          sync->arrive_and_drop();
+        return;
+      }
       const Layer& w = layers[l];
       const LayerGeometry& g = c.layers[l];
       const std::size_t hd = g.head_dim, kv = g.num_key_value_heads;
       const std::size_t qw = heads * hd, kw = kv * hd, row_w = qw + 2 * kw;
-      host::RmsNormRowsBf16(state.data(), normed16.data(), rows, hidden,
-                            w.input_norm.data(), eps);
-      timed([&] {
-        gemm.Run(gufo::npu::BfpGemm::Call{w.qkv, nullptr, int(rows), qkv.data(),
-                                          normed16.data(), nullptr});
-      });
+      float* qkv_all = wk.qkv[l % 2].data();
+      float* qkv = qkv_all + r0 * row_w;
+      float* context = wk.context.data() + r0 * qw;
+      std::uint16_t* context16 = wk.context16.data() + r0 * qw;
+      host::RmsNormRowsBf16(state, normed16, rows, hidden, w.input_norm.data(),
+                            eps);
+      gemm.Run(gufo::npu::BfpGemm::Call{w.qkv, nullptr, int(rows), qkv,
+                                        normed16, nullptr});
       host::ParallelFor(rows, 16, [&](std::size_t b, std::size_t e) {
         for (std::size_t r = b; r < e; ++r) {
-          float* q = qkv.data() + r * row_w;
+          float* q = qkv + r * row_w;
           host::RmsNormRows(q, q, heads, hd, w.q_norm.data(), eps);
           host::RmsNormRows(q + qw, q + qw, kv, hd, w.k_norm.data(), eps);
           host::RmsNormRows(q + qw + kw, q + qw + kw, kv, hd, nullptr, eps);
         }
       });
       // Rotary embeddings on q and k: k heads follow q heads in each row.
-      host::RopeNeox(qkv.data(), rows, row_w, heads + kv, hd, hd,
-                     positions.data(), g.rope_theta);
+      host::RopeNeox(qkv, rows, row_w, heads + kv, hd, hd,
+                     wk.positions.data() + r0, g.rope_theta);
+      if (sync)
+        sync->arrive_and_wait();  // every part's keys and values are ready
+      if (stop)
+        return;
       const bool windowed = g.type == LayerType::kSlidingAttention;
       const std::size_t window = c.sliding_window;
       auto visible = [&](std::size_t r, std::size_t lo, std::size_t hi,
@@ -532,18 +620,16 @@ struct Encoder::Impl {
         *e = hi;
       };
       // Long sequences: QK^T and PV on the NPU, the softmax on the CPU.
-      timed([&] {
-        NpuAttention(scratches[lane], qkv.data(), row_w, heads, kv, hd, starts,
-                     long_seq, visible, context16.data(), qw);
-      });
+      NpuAttention(scratches[lane], qkv_all, row_w, heads, kv, hd, starts,
+                   wk.long_seq, r0, r1, visible, wk.context16.data(), qw);
       host::Attention(
-          {.q = qkv.data(),
+          {.q = qkv,
            .q_stride = row_w,
-           .k = qkv.data() + qw,
+           .k = qkv_all + qw,
            .k_stride = row_w,
-           .v = qkv.data() + qw + kw,
+           .v = qkv_all + qw + kw,
            .v_stride = row_w,
-           .out = context.data(),
+           .out = context,
            .out_stride = qw,
            .rows = rows,
            .heads = heads,
@@ -552,85 +638,47 @@ struct Encoder::Impl {
            .dim_v = hd,
            .scale = 1.0f},
           [&](std::size_t r, std::size_t* b, std::size_t* e) {
-            const std::size_t s = seq_of[r];
-            if (long_seq[s]) {
+            const std::size_t q = wk.seq_of[r0 + r];
+            if (wk.long_seq[q]) {
               *b = *e = 0;  // done on the NPU; leave its rows
               return;
             }
-            visible(r, starts[s], starts[s + 1], b, e);
+            visible(r0 + r, starts[q], starts[q + 1], b, e);
           },
           /*skip_empty=*/true);
       // CPU-attention rows (short sequences) join the bf16 context.
       host::ParallelFor(rows, 64, [&](std::size_t b, std::size_t e) {
         for (std::size_t r = b; r < e; ++r)
-          if (!long_seq[seq_of[r]])
-            host::FloatToBf16(context.data() + r * qw,
-                              context16.data() + r * qw, qw);
+          if (!wk.long_seq[wk.seq_of[r0 + r]])
+            host::FloatToBf16(context + r * qw, context16 + r * qw, qw);
       });
-      timed([&] {
-        gemm.Run(gufo::npu::BfpGemm::Call{w.o, nullptr, int(rows), tmp.data(),
-                                          context16.data(), nullptr});
-      });
-      host::AddNormRows(state.data(), tmp.data(), rows, hidden,
-                        w.post_attn_norm.data(), eps, 1.0f);
+      gemm.Run(gufo::npu::BfpGemm::Call{w.o, nullptr, int(rows), tmp, context16,
+                                        nullptr});
+      host::AddNormRows(state, tmp, rows, hidden, w.post_attn_norm.data(), eps,
+                        1.0f);
 
-      host::RmsNormRowsBf16(state.data(), normed16.data(), rows, hidden,
+      host::RmsNormRowsBf16(state, normed16, rows, hidden,
                             w.pre_ffn_norm.data(), eps);
-      const Epilogue ffn = gated(act16.data(), inner, nullptr, 0);
-      timed([&] {
-        gemm.Run(gufo::npu::BfpGemm::Call{w.gate_up, nullptr, int(rows),
-                                          nullptr, normed16.data(), &ffn});
-      });
-      timed([&] {
-        gemm.Run(gufo::npu::BfpGemm::Call{w.down, nullptr, int(rows),
-                                          tmp.data(), act16.data(), nullptr});
-      });
-      host::AddNormRows(state.data(), tmp.data(), rows, hidden,
-                        w.post_ffn_norm.data(), eps, 1.0f);
+      const Epilogue ffn = gated(act16, inner, nullptr, 0);
+      gemm.Run(gufo::npu::BfpGemm::Call{w.gate_up, nullptr, int(rows), nullptr,
+                                        normed16, &ffn});
+      gemm.Run(gufo::npu::BfpGemm::Call{w.down, nullptr, int(rows), tmp, act16,
+                                        nullptr});
+      host::AddNormRows(state, tmp, rows, hidden, w.post_ffn_norm.data(), eps,
+                        1.0f);
 
       const Epilogue ple_gate =
-          gated(act16.data(), per_layer, ple.data() + l * per_layer,
-                layers_n * per_layer);
-      timed([&] {
-        gemm.Run(gufo::npu::BfpGemm::Call{w.ple_gate, state.data(), int(rows),
-                                          nullptr, nullptr, &ple_gate});
-      });
-      timed([&] {
-        gemm.Run(gufo::npu::BfpGemm::Call{w.ple_proj, nullptr, int(rows),
-                                          tmp.data(), act16.data(), nullptr});
-      });
-      host::AddNormRows(state.data(), tmp.data(), rows, hidden,
-                        w.ple_norm.data(), eps, w.scalar);
+          gated(act16, per_layer, ple + l * per_layer, layers_n * per_layer);
+      gemm.Run(gufo::npu::BfpGemm::Call{w.ple_gate, state, int(rows), nullptr,
+                                        nullptr, &ple_gate});
+      gemm.Run(gufo::npu::BfpGemm::Call{w.ple_proj, nullptr, int(rows), tmp,
+                                        act16, nullptr});
+      host::AddNormRows(state, tmp, rows, hidden, w.ple_norm.data(), eps,
+                        w.scalar);
     }
-    host::RmsNormRows(state.data(), state.data(), rows, hidden,
-                      final_norm.data(), eps);
-    const std::size_t dim = c.embedding_dim;
-    std::vector<float> projected(rows * dim);
-    timed([&] {
-      gemm.Run(projection, state.data(), int(rows), projected.data());
-    });
-    std::vector<std::vector<float>> out;
-    for (std::size_t s = 0; s + 1 < starts.size(); ++s) {
-      std::vector<double> sum(dim, 0.0);
-      for (std::size_t r = starts[s]; r < starts[s + 1]; ++r)
-        for (std::size_t i = 0; i < dim; ++i)
-          sum[i] += projected[r * dim + i];
-      double norm = 0;
-      for (double v : sum)
-        norm += v * v;
-      const double inv = norm > 0 ? 1.0 / std::sqrt(norm) : 0.0;
-      std::vector<float> e(dim);
-      for (std::size_t i = 0; i < dim; ++i)
-        e[i] = float(sum[i] * inv);
-      out.push_back(std::move(e));
-    }
-    if (profile)
-      std::fprintf(
-          stderr, "embedding_gemma2 npu: %zu tokens, %.2f ms (gemm %.2f ms)\n",
-          rows,
-          std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
-          gemm_ms);
-    return out;
+    host::RmsNormRows(state, state, rows, hidden, final_norm.data(), eps);
+    gemm.Run(projection, state, int(rows),
+             wk.projected.data() + r0 * c.embedding_dim);
   }
 };
 
