@@ -25,6 +25,7 @@ namespace {
 
 // Sequences at least this long run attention products on the NPU.
 constexpr std::size_t kNpuAttentionRows = 128;
+constexpr std::size_t kMaxHeads = 16;
 
 struct Layer {
   int qkv, o, gate_up, down, ple_gate, ple_proj;
@@ -91,9 +92,9 @@ struct Encoder::Impl {
         text_only.supported_audio = false;
     device = gufo::npu::Device::Open();
     gemm = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
-                                    std::size_t(768) << 20);
+                                    std::size_t(1100) << 20);
     for (auto& scratch : scratches)
-      scratch = gemm.NewScratch(std::size_t(192) << 20);
+      scratch = gemm.NewScratch(std::size_t(448) << 20);
     embed = reinterpret_cast<const std::uint16_t*>(
         Find("embed_tokens.weight").data);
     ple_model = Upload({"ple.per_layer_model_projection.weight"});
@@ -137,8 +138,8 @@ struct Encoder::Impl {
                     float* context, std::size_t qw) {
     constexpr std::size_t kBandRows = 512;
     struct Span {
-      std::size_t seq, q0, q1, k0, k1;  // absolute rows
-      int keys[4], values[4];           // per kv head
+      std::size_t seq, q0, q1, k0, k1;         // absolute rows
+      int keys[kMaxHeads], values[kMaxHeads];  // per query head
     };
     struct Item {
       const Span* span;
@@ -163,28 +164,56 @@ struct Encoder::Impl {
     }
     if (spans.empty())
       return;
-    if (kv > 4)
-      throw std::runtime_error("NPU attention: more than 4 KV heads");
+    if (heads > kMaxHeads)
+      throw std::runtime_error("NPU attention: too many heads");
+    using Clock = std::chrono::steady_clock;
+    auto ms = [](Clock::time_point a) {
+      return std::chrono::duration<double, std::milli>(Clock::now() - a)
+          .count();
+    };
+    auto t = Clock::now();
+    double t_upload, t_qk, t_soft;
     scratch.Reset();
-    // Bands with the same key span (full attention) share its uploads.
-    std::map<std::pair<std::size_t, std::size_t>, const Span*> uploaded;
-    for (Span& sp : spans) {
-      if (auto it = uploaded.find({sp.k0, sp.k1}); it != uploaded.end()) {
-        std::copy(std::begin(it->second->keys), std::end(it->second->keys),
-                  std::begin(sp.keys));
-        std::copy(std::begin(it->second->values), std::end(it->second->values),
-                  std::begin(sp.values));
-        continue;
+    // Keys, then values, per span and query head in item order, so that the
+    // products of one layer batch into few NPU jobs (BfpGemm batches calls
+    // whose matrices lie at a constant stride). Spans longer than one output
+    // group of keys (full attention over long sequences) share one upload
+    // per KV head instead.
+    const std::size_t group_heads = heads / kv;
+    std::map<std::pair<std::size_t, std::size_t>, const Span*> shared[2];
+    for (int pass = 0; pass < 2; ++pass)
+      for (Span& sp : spans) {
+        const std::size_t n = sp.k1 - sp.k0;
+        const float* base = qkv + sp.k0 * row_w + qw;
+        const bool long_span = n > 1024;
+        if (long_span) {
+          if (auto it = shared[pass].find({sp.k0, sp.k1});
+              it != shared[pass].end()) {
+            int* dst = pass == 0 ? sp.keys : sp.values;
+            const int* src = pass == 0 ? it->second->keys : it->second->values;
+            std::copy(src, src + heads, dst);
+            continue;
+          }
+        }
+        for (std::size_t h = 0; h < heads; ++h) {
+          const std::size_t kh = h / group_heads;
+          if (long_span && h % group_heads != 0) {
+            (pass == 0 ? sp.keys : sp.values)[h] =
+                (pass == 0 ? sp.keys : sp.values)[h - 1];
+            continue;
+          }
+          if (pass == 0)
+            sp.keys[h] =
+                scratch.Upload(int(n), int(hd), base + kh * hd, row_w, 1);
+          else
+            sp.values[h] = scratch.Upload(int(hd), int(n),
+                                          base + kv * hd + kh * hd, 1, row_w);
+        }
+        if (long_span)
+          shared[pass][{sp.k0, sp.k1}] = &sp;
       }
-      const std::size_t n = sp.k1 - sp.k0;
-      const float* base = qkv + sp.k0 * row_w + qw;
-      for (std::size_t h = 0; h < kv; ++h) {
-        sp.keys[h] = scratch.Upload(int(n), int(hd), base + h * hd, row_w, 1);
-        sp.values[h] =
-            scratch.Upload(int(hd), int(n), base + kv * hd + h * hd, 1, row_w);
-      }
-      uploaded[{sp.k0, sp.k1}] = &sp;
-    }
+    t_upload = ms(t);
+    t = Clock::now();
     std::vector<Item> items;
     for (const Span& sp : spans)
       for (std::size_t h = 0; h < heads; ++h)
@@ -202,12 +231,13 @@ struct Encoder::Impl {
         it.out.resize(rows * hd);
       }
     });
-    const std::size_t group = heads / kv;
     std::vector<gufo::npu::BfpGemm::Call> calls;
     for (Item& it : items)
-      calls.push_back({it.span->keys[it.head / group], it.q.data(),
+      calls.push_back({it.span->keys[it.head], it.q.data(),
                        int(it.span->q1 - it.span->q0), it.scores.data()});
     gemm.Run(calls);
+    t_qk = ms(t);
+    t = Clock::now();
     host::ParallelFor(items.size() * 16, 1, [&](std::size_t b, std::size_t e) {
       for (std::size_t w = b; w < e; ++w) {
         Item& it = items[w / 16];
@@ -234,11 +264,17 @@ struct Encoder::Impl {
         }
       }
     });
+    t_soft = ms(t);
+    t = Clock::now();
     calls.clear();
     for (Item& it : items)
-      calls.push_back({it.span->values[it.head / group], it.scores.data(),
+      calls.push_back({it.span->values[it.head], it.scores.data(),
                        int(it.span->q1 - it.span->q0), it.out.data()});
     gemm.Run(calls);
+    if (profile)
+      std::fprintf(stderr,
+                   "attention: upload %.2f qk %.2f softmax %.2f pv %.2f ms\n",
+                   t_upload, t_qk, t_soft, ms(t));
     host::ParallelFor(items.size(), 1, [&](std::size_t b, std::size_t e) {
       for (std::size_t i = b; i < e; ++i) {
         const Item& it = items[i];

@@ -53,7 +53,7 @@ def tap(total, offset, sizes, strides):
 @iron.jit(aiecc_flags=["--dynamic-objFifos"])
 def bfpgemm(A: In, W: In, C: InOut, *, ng: DispatchTime[np.int32], nb: DispatchTime[np.int32],
             kb: DispatchTime[np.int32], tiles: DispatchTime[np.int32], nbkc: DispatchTime[np.int32],
-            ngkb: DispatchTime[np.int32], a_base: DispatchTime[np.int32], a_row: DispatchTime[np.int32],
+            ngkb: DispatchTime[np.int32], b_rep: DispatchTime[np.int32], a_base: DispatchTime[np.int32], a_row: DispatchTime[np.int32],
             b_base: DispatchTime[np.int32], b_col: DispatchTime[np.int32], c_base: DispatchTime[np.int32],
             c_col: DispatchTime[np.int32]):
     a_l2_ty = np.ndarray[(M_T, MTK), np.dtype[bfloat16]]
@@ -118,7 +118,7 @@ def bfpgemm(A: In, W: In, C: InOut, *, ng: DispatchTime[np.int32], nb: DispatchT
     w_ty = np.ndarray[(W_WORDS,), np.dtype[np.int32]]
     c_ty = np.ndarray[(C_WORDS,), np.dtype[np.int32]]
 
-    def sequence(A, W, C, ng, nb, kb, tiles, nbkc, ngkb, a_base, a_row, b_base, b_col, c_base, c_col, ah, bh, ch):
+    def sequence(A, W, C, ng, nb, kb, tiles, nbkc, ngkb, b_rep, a_base, a_row, b_base, b_col, c_base, c_col, ah, bh, ch):
         for k in keys:
             rtps[k][0] = tiles
             rtps[k][1] = kb
@@ -129,14 +129,14 @@ def bfpgemm(A: In, W: In, C: InOut, *, ng: DispatchTime[np.int32], nb: DispatchT
             ah[r].fill(A, tap(A_WORDS, a_base + a_row * r, [ng, nbkc, M_T, MTK // 2], [0, M_T * MTK // 2, MTK // 2, 1]),
                        group=tg)
         for c in range(COLS):
-            bh[c].fill(W, tap(W_WORDS, b_base + b_col * c, [nb, ngkb, 9, B_TILE_WORDS // 9], [0, B_TILE_WORDS, B_TILE_WORDS // 9, 1]),
+            bh[c].fill(W, tap(W_WORDS, b_base + b_col * c, [nb, ngkb, 9, B_TILE_WORDS // 9], [b_rep, B_TILE_WORDS, B_TILE_WORDS // 9, 1]),
                        group=tg)
         for c in range(COLS):
             ch[c].drain(C, tap(C_WORDS, c_base + c_col * c, [1, tiles, ROWS * M_T, N_T // 2], [0, ROWS * M_T * N_T // 2, N_T // 2, 1]),
                         wait=True, group=tg)
         tg.finish()
 
-    rt = Runtime(sequence, [a_ty, w_ty, c_ty, ng, nb, kb, tiles, nbkc, ngkb, a_base, a_row, b_base, b_col, c_base,
+    rt = Runtime(sequence, [a_ty, w_ty, c_ty, ng, nb, kb, tiles, nbkc, ngkb, b_rep, a_base, a_row, b_base, b_col, c_base,
                             c_col,
                             [f.prod() for f in a_fifos], [f.prod() for f in b_fifos], [f.cons() for f in c_fifos]])
     return Program(from_name("npu2", n_cols=None), rt, workers=workers).resolve_program()

@@ -99,6 +99,43 @@ int main(int argc, char** argv) {
     if (!(err < 2e-2))
       ++failures;
   }
+  // A batch: one job over same-shaped calls of consecutive matrices.
+  {
+    const int k = 256;
+    std::vector<int> ids, ns{300, 512, 1000, 450, 77, 1024},
+        rows{100, 512, 7, 333, 64, 200};
+    std::vector<std::vector<float>> ws, xs, ys;
+    for (std::size_t i = 0; i < ns.size(); ++i) {
+      ws.emplace_back(std::size_t(ns[i]) * k);
+      xs.emplace_back(std::size_t(rows[i]) * k);
+      for (float& v : ws.back())
+        v = normal(rng) * 0.05f;
+      for (float& v : xs.back())
+        v = normal(rng);
+      ids.push_back(gemm.Upload(ns[i], k, ws.back()));
+      ys.emplace_back(std::size_t(rows[i]) * ns[i]);
+    }
+    std::vector<npu::BfpGemm::Call> calls;
+    for (std::size_t i = 0; i < ns.size(); ++i)
+      calls.push_back({ids[i], xs[i].data(), rows[i], ys[i].data()});
+    gemm.Run(calls);
+    double worst = 0;
+    for (std::size_t c = 0; c < ns.size(); ++c) {
+      std::vector<double> ref(ys[c].size());
+      for (int r = 0; r < rows[c]; ++r)
+        for (int o = 0; o < ns[c]; ++o) {
+          double acc = 0;
+          for (int i = 0; i < k; ++i)
+            acc += double(xs[c][std::size_t(r) * k + i]) *
+                   ws[c][std::size_t(o) * k + i];
+          ref[std::size_t(r) * ns[c] + o] = acc;
+        }
+      worst = std::max(worst, RelativeError(ys[c], ref));
+    }
+    std::printf("batch of %zu calls: relative error %.2e\n", ns.size(), worst);
+    if (!(worst < 2e-2))
+      ++failures;
+  }
   // Timing: prefill-sized products (Qwen3 1.7B layer shapes).
   struct Timed {
     int n, k, rows;
