@@ -432,9 +432,11 @@ void Qwen3Decoder::Start(const float* row, int pos) {
   m.start_ms +=
       std::chrono::duration<double, std::milli>(m.started - t0).count();
   // The next position's stream, on the host while the NPU runs.
-  // A multi-head stack (the predictor) moves to the next head each step.
+  // A multi-head stack (the predictor) moves to the next head each step after
+  // its first two positions (0 and 1 both read head 0).
   if (pos + 1 < capacity()) {
-    m.next_head = m.heads > 1 ? std::min(m.head + 1, m.heads - 1) : m.head;
+    m.next_head =
+        m.heads > 1 && pos > 0 ? std::min(m.head + 1, m.heads - 1) : m.head;
     m.next = m.Generate(pos + 1, m.next_head);
     m.next_pos = pos + 1;
   }

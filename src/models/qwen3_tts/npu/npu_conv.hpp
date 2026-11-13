@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -56,6 +57,13 @@ struct NpuConv {
     return n;
   }
 
+  // y [rows][out or k out] = bf16 rows x16 [rows][k] times the weights.
+  void Run16(gufo::npu::BfpGemm& gemm, const std::uint16_t* x16,
+             std::size_t rows, float* y) const {
+    const gufo::npu::BfpGemm::Call call{id, nullptr, int(rows), y, x16};
+    gemm.Run(std::span<const gufo::npu::BfpGemm::Call>(&call, 1));
+  }
+
   [[nodiscard]] std::size_t Keep() const {
     return transpose ? (kernel - 1) / stride : (kernel - 1) * dilation;
   }
@@ -79,20 +87,20 @@ struct NpuConv {
         t = t < 0 ? -t : 2 * n - t - 2;
       return t;
     };
-    std::vector<float> cols(out_length * kernel * in);
+    std::vector<std::uint16_t> cols(out_length * kernel * in);
     host::ParallelFor(out_length, 16, [&](std::size_t b, std::size_t e) {
       for (std::size_t t = b; t < e; ++t)
         for (std::size_t j = 0; j < kernel; ++j) {
           const std::int64_t s = source(std::int64_t(t * step + j * dilation) -
                                         std::int64_t(left));
-          float* dst = cols.data() + (t * kernel + j) * in;
+          std::uint16_t* dst = cols.data() + (t * kernel + j) * in;
           if (s < 0)
-            std::fill_n(dst, in, 0.0f);
+            std::fill_n(dst, in, std::uint16_t(0));
           else
-            std::copy_n(x + std::size_t(s) * in, in, dst);
+            host::FloatToBf16(x + std::size_t(s) * in, dst, in);
         }
     });
-    gemm.Run(id, cols.data(), int(out_length), y);
+    Run16(gemm, cols.data(), out_length, y);
     if (!bias.empty())
       host::ParallelFor(out_length, 64, [&](std::size_t b, std::size_t e) {
         for (std::size_t t = b; t < e; ++t)
@@ -106,22 +114,23 @@ struct NpuConv {
            float* y) const {
     namespace host = gufo::npu::host;
     if (!transpose) {
-      // Receptive fields: row t holds x[t - (k - 1) d + j d] for taps j.
-      std::vector<float> cols(length * kernel * in);
+      // Receptive fields (bf16, as the NPU reads them): row t holds
+      // x[t - (k - 1) d + j d] for taps j.
+      std::vector<std::uint16_t> cols(length * kernel * in);
       host::ParallelFor(length, 16, [&](std::size_t b, std::size_t e) {
         for (std::size_t t = b; t < e; ++t)
           for (std::size_t j = 0; j < kernel; ++j) {
             const std::int64_t s = std::int64_t(t) -
                                    std::int64_t((kernel - 1) * dilation) +
                                    std::int64_t(j * dilation);
-            float* dst = cols.data() + (t * kernel + j) * in;
+            std::uint16_t* dst = cols.data() + (t * kernel + j) * in;
             if (s < 0)
-              std::fill_n(dst, in, 0.0f);
+              std::fill_n(dst, in, std::uint16_t(0));
             else
-              std::copy_n(x + std::size_t(s) * in, in, dst);
+              host::FloatToBf16(x + std::size_t(s) * in, dst, in);
           }
       });
-      gemm.Run(id, cols.data(), int(length), y);
+      Run16(gemm, cols.data(), length, y);
       if (!bias.empty())
         host::ParallelFor(length, 64, [&](std::size_t b, std::size_t e) {
           for (std::size_t t = b; t < e; ++t)

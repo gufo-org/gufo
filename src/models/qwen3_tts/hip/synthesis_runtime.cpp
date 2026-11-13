@@ -167,9 +167,12 @@ private:
     return true;
   }
 
-  /// Buffered synthesis on the NPU: 16-frame chunks decode on a worker
-  /// thread (on the CPU and the NPU) while the talker keeps generating. The
-  /// incremental decoder keeps every convolution and attention history, so
+  /// Buffered synthesis on the NPU: each 16-frame chunk decodes as soon as
+  /// it is generated, between frames. Every model step runs on the NPU, and
+  /// the talker/predictor program and the decoder's are separate hardware
+  /// contexts, so decoding in between (rather than on a concurrent thread)
+  /// costs one context switch each way per chunk instead of one per frame.
+  /// The incremental decoder keeps every convolution and attention history, so
   /// the samples equal those of one Decode after generation.
   [[nodiscard]] bool GenerateOverlapped(const SynthesisRequest& request,
                                         const NativePrompt& prompt,
@@ -178,69 +181,34 @@ private:
                                         std::string* error) {
     const std::size_t reference_frames =
         prompt.prepend_reference_audio ? prompt.reference_codes.frames : 0;
-    struct Job {
-      std::vector<std::uint32_t> codes;
-      std::size_t frames;
-    };
-    std::mutex mutex;
-    std::condition_variable wake;
-    std::deque<Job> jobs;
-    bool finished = false;
-    std::atomic<bool> failed{false};
+    bool failed = false;
     std::string decode_error;
     std::vector<float> samples;
-    std::thread worker([&] {
-      std::size_t decoded = 0;
-      for (;;) {
-        Job job;
-        {
-          std::unique_lock lock(mutex);
-          wake.wait(lock, [&] { return finished || !jobs.empty(); });
-          if (jobs.empty())
-            return;
-          job = std::move(jobs.front());
-          jobs.pop_front();
-        }
-        if (failed.load())
-          continue;
-        SpeechDecoderOutput audio;
-        const bool first_reference = decoded == 0 && reference_frames != 0;
-        std::string job_error;
-        if (!(first_reference
-                  ? decoder_->DecodeAfterReference(job.codes, job.frames,
-                                                   reference_frames, &audio,
-                                                   &job_error)
-                  : decoder_->DecodeIncremental(job.codes, job.frames, decoded,
-                                                &audio, &job_error))) {
-          std::lock_guard lock(mutex);
-          decode_error = job_error;
-          failed.store(true);
-          continue;
-        }
-        decoded = job.frames;
-        samples.insert(samples.end(), audio.samples.begin(),
-                       audio.samples.end());
-      }
-    });
-    std::size_t emitted = 0;
+    std::size_t decoded = 0, emitted = 0;
     const auto emit = [&](const TalkerGenerationOutput& generated, bool flush) {
       const std::size_t pending = generated.frames - emitted;
-      if (pending != 0 && (flush || pending >= 16)) {
-        Job job;
-        if (reference_frames != 0)
-          job.codes = prompt.reference_codes.codes;
-        job.codes.resize(reference_frames * 16);
-        job.codes.insert(job.codes.end(), generated.codes.begin(),
-                         generated.codes.end());
-        job.frames = reference_frames + generated.frames;
-        {
-          std::lock_guard lock(mutex);
-          jobs.push_back(std::move(job));
-        }
-        wake.notify_one();
-        emitted = generated.frames;
+      if (failed || pending == 0 || (!flush && pending < 16))
+        return !failed;
+      std::vector<std::uint32_t> codes;
+      if (reference_frames != 0)
+        codes = prompt.reference_codes.codes;
+      codes.resize(reference_frames * 16);
+      codes.insert(codes.end(), generated.codes.begin(), generated.codes.end());
+      const std::size_t frames = reference_frames + generated.frames;
+      SpeechDecoderOutput audio;
+      const bool first_reference = decoded == 0 && reference_frames != 0;
+      if (!(first_reference
+                ? decoder_->DecodeAfterReference(
+                      codes, frames, reference_frames, &audio, &decode_error)
+                : decoder_->DecodeIncremental(codes, frames, decoded, &audio,
+                                              &decode_error))) {
+        failed = true;
+        return false;
       }
-      return !failed.load();
+      decoded = frames;
+      emitted = generated.frames;
+      samples.insert(samples.end(), audio.samples.begin(), audio.samples.end());
+      return true;
     };
     TalkerGenerationOutput generated;
     const bool generated_ok =
@@ -249,13 +217,7 @@ private:
             is_cancelled, &generated, error,
             [&](const auto& progress) { return emit(progress, false); }) &&
         emit(generated, true) && generated.frames != 0;
-    {
-      std::lock_guard lock(mutex);
-      finished = true;
-    }
-    wake.notify_one();
-    worker.join();
-    if (!generated_ok || failed.load()) {
+    if (!generated_ok || failed) {
       if (!decode_error.empty())
         SetError(error, decode_error);
       *result = {};
