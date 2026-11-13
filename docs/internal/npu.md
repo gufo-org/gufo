@@ -14,9 +14,18 @@ changing `src/core/npu` or a model's `npu/` runtime.
 | Host operators | `src/core/npu/host_ops.*` | CPU norms, rotary embeddings, attention, activations, bf16 conversion on a persistent thread pool |
 
 Designs are IRON (mlir-aie) programs compiled at build time when
-`GUFO_IRON_PYTHON` names an IRON Python (`cmake/GufoNpuDesigns.cmake`; the
-Nix package passes `.devops/nix/iron`). They install to
-`share/gufo/npu/<name>`; `FindDesign` also honors `GUFO_NPU_DESIGNS`.
+`GUFO_IRON_PYTHON` names an IRON Python (`cmake/GufoNpuDesigns.cmake`, list in
+`cmake/GufoNpuDesignList.cmake`; each reruns when a file in its
+`kernels/<name>` changes). They install to `share/gufo/npu/<name>` (Windows:
+`npu\<name>` beside `gufo.exe`); `FindDesign` also honors `GUFO_NPU_DESIGNS`.
+The Nix package builds them as a derivation of their own
+(`.devops/nix/npu-designs.nix`, from `cmake/npu-designs`) and installs it with
+`GUFO_NPU_PREBUILT_DESIGNS`, so Cachix serves them until a design changes;
+Windows CI keeps the IRON venv and IRON's design cache (`GUFO_NPU_CACHE_HOME`)
+between runs (BUILD-WINDOWS.md). Compiling `qwen3pre` from scratch is slow:
+its runtime sequence is unrolled in Python, and MLIR verification (three passes
+in IRON, more in aiecc) grows faster than linearly with it, so the 1024-row
+program dominates a cold build.
 
 ## BfpGemm
 
