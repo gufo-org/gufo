@@ -3627,6 +3627,8 @@ void TestReasoningTokenCount() {
          "an unclosed model-opened block counts to the end");
   Expect(count({"<a>\n", "x", "</a>"}, State::kText) == 0,
          "text output has no reasoning");
+  Expect(count({"\n", "<a>\n", "x", "</a>"}, State::kTextAfterThought) == 0,
+         "text after reasoning the prompt closed has no reasoning");
   Expect(count({}, State::kThought) == 0, "no output counts nothing");
 }
 

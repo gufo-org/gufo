@@ -160,6 +160,13 @@ public:
   using InitialOutputState = gufo::ext::InitialOutputState;
   using ReasoningMarkup = gufo::ext::ReasoningMarkup;
 
+  /// Output that starts as content, after a reasoning block the prompt closed
+  /// or with no reasoning at all.
+  [[nodiscard]] static constexpr bool IsContent(InitialOutputState initial) {
+    return initial == InitialOutputState::kContent ||
+           initial == InitialOutputState::kContentAfterReasoning;
+  }
+
   struct SamplingDefaults {
     /// Zero means generate until EOS or the remaining context is exhausted.
     std::size_t max_tokens{0};

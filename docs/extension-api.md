@@ -124,7 +124,10 @@ and closes reasoning. The default follows `ReasoningBudgetTags()`; override it
 when the model's text differs from its control tokens. `close` must not be
 empty and `open` must not start with whitespace. With
 `InitialOutputState::kThought` the prompt opened reasoning; with `kAuto` the
-model's output does.
+model's output does. With `kTextAfterThought` the prompt closed it, as a
+template that ends in `<think></think>` does: the output is text, and the
+server drops the separator the model writes before it, as after a `</think>`
+the model wrote: line breaks, or any whitespace with the `qwen` tool format.
 
 ## Tool calls
 

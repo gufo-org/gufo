@@ -2636,6 +2636,22 @@ void TestExternalReasoningDialect() {
                      got.tools == "read;",
                  "reasoning to tool transition keeps reasoning and call");
         }
+
+  // After reasoning the prompt closed, this dialect's separator is line
+  // breaks, before an answer as before a call.
+  check("\r\n\r\nAnswer.", Initial::kContentAfterReasoning, "", "Answer.",
+        "the separator after prompt-closed reasoning is not content");
+  check(" Answer.", Initial::kContentAfterReasoning, "", " Answer.",
+        "other whitespace after prompt-closed reasoning is content");
+  for (const bool responses : {false, true})
+    for (const bool stream : {false, true})
+      for (const auto& pieces : Splits("\n" + call)) {
+        const auto got = RunExternalDialect(
+            pieces, Initial::kContentAfterReasoning, stream, responses, tools);
+        Expect(got.reasoning.empty() && got.content.empty() &&
+                   got.tools == "read;",
+               "a call after prompt-closed reasoning keeps no separator");
+      }
 }
 
 void TestStreamingPromptOpenedReasoning() {
@@ -2727,7 +2743,10 @@ void TestInitialOutputPhases() {
 
 void TestReasoningAnswerSeparator() {
   using gufo::json::Value;
-  for (const bool thinking : {false, true})
+  using Initial = FakeBackend::InitialOutputState;
+  // No reasoning, reasoning the model closed, and reasoning the prompt closed.
+  for (const auto initial : {Initial::kContent, Initial::kReasoning,
+                             Initial::kContentAfterReasoning})
     for (const bool stream : {false, true})
       for (const bool split : {false, true})
         for (const int mode : {0, 1, 2})
@@ -2738,9 +2757,11 @@ void TestReasoningAnswerSeparator() {
                   truncated   ? ""
                   : mode == 2 ? R"({"answer":9,"text":"\n\nliteral"})"
                               : "9\n\nNext paragraph.\n    Indented line.";
+              const bool thinking = initial == Initial::kReasoning;
               const std::string raw =
                   (thinking ? "Check</think>" : "") + separator + answer;
               FakeBackend backend;
+              backend.initial_output_state_override = initial;
               if (truncated)
                 backend.finish_reason = FakeBackend::FinishReason::kLength;
               backend.tool_format =
@@ -2792,9 +2813,10 @@ void TestReasoningAnswerSeparator() {
                               .find("message")
                               ->member_str("content");
               }
-              const auto expected = thinking ? answer : separator + answer;
+              const auto expected =
+                  initial == Initial::kContent ? separator + answer : answer;
               if (content != expected)
-                std::cerr << "separator thinking=" << thinking
+                std::cerr << "separator initial=" << static_cast<int>(initial)
                           << " stream=" << stream << " split=" << split
                           << " mode=" << mode << " truncated=" << truncated
                           << " content=" << Value(content).dump() << "\n";
@@ -2802,6 +2824,77 @@ void TestReasoningAnswerSeparator() {
                      "only the reasoning separator is removed; answer "
                      "whitespace survives");
             }
+}
+
+// A template that ends in "<think></think>" leaves the separator to the model.
+// It is framing before a call as before an answer; returned as content, the
+// replayed turn would no longer render as the generated tokens.
+void TestToolCallAfterPromptClosedReasoning() {
+  using gufo::json::Value;
+  const std::string call =
+      "<tool_call>\n<function=read>\n<parameter=path>\n"
+      "fixture.xml\n</parameter>\n</function>\n"
+      "</tool_call>";
+  for (const std::string separator : {"\n", "\n\n"})
+    for (const bool stream : {false, true})
+      for (const bool split : {false, true}) {
+        auto body = gufo::json::parse(R"({
+        "model":"test-model","reasoning_effort":"none",
+        "messages":[{"role":"user","content":"Read fixture.xml."}],
+        "tool_choice":"auto","tools":[{"type":"function","function":{
+          "name":"read","parameters":{"type":"object",
+          "properties":{"path":{"type":"string"}},"required":["path"]}}}]})");
+        body["stream"] = stream;
+        FakeBackend backend;
+        backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+        backend.initial_output_state_override =
+            FakeBackend::InitialOutputState::kContentAfterReasoning;
+        const auto raw = separator + call;
+        if (split) {
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+        } else {
+          backend.pieces = {raw};
+        }
+        const auto response =
+            gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+        std::string content;
+        std::string arguments;
+        std::size_t calls = 0;
+        bool content_delta = false;
+        const auto collect = [&](const Value& event) {
+          for (const auto& choice : event.find("choices")->items()) {
+            const auto* message = choice.find(stream ? "delta" : "message");
+            const auto* text = message->find("content");
+            if (text != nullptr && text->is_string()) {
+              content += text->str();
+              content_delta = content_delta || !text->str().empty();
+            }
+            if (const auto* found = message->find("tool_calls"))
+              for (const auto& item : found->items()) {
+                calls += !stream || !item.member_str("id").empty();
+                if (const auto* function = item.find("function"))
+                  arguments += function->member_str("arguments");
+              }
+          }
+        };
+        if (stream) {
+          response.streaming_body([&](std::string_view chunk) {
+            const auto payload = chunk.substr(chunk.find("data: ") + 6);
+            if (!payload.starts_with("[DONE]"))
+              collect(gufo::json::parse(payload));
+            return true;
+          });
+        } else {
+          collect(gufo::json::parse(response.body));
+        }
+        Expect(response.status == 200 && calls == 1 && content.empty() &&
+                   !content_delta &&
+                   gufo::json::parse(arguments).member_str("path") ==
+                       "fixture.xml",
+               "the separator before a call after prompt-closed reasoning "
+               "is not content");
+      }
 }
 
 void TestConflictingReasoningControlsAreRejected() {
@@ -7896,6 +7989,7 @@ int main() {
   TestExternalReasoningDialect();
   TestInitialOutputPhases();
   TestReasoningAnswerSeparator();
+  TestToolCallAfterPromptClosedReasoning();
   TestConflictingReasoningControlsAreRejected();
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
