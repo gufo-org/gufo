@@ -52,6 +52,34 @@ void MlaGatherCombine(const float* scores, const __half* cache,
                       std::uint32_t n_sel, std::uint32_t heads, float* latent,
                       hipStream_t stream);
 
+// Token-batched prefill forms of the two gather passes. Query token t
+// (blockIdx.z / blockIdx.y) reads `sel` at t * sel_stride, writes and reads
+// its score region at t * scores_stride on [tiles][heads][tile], takes its
+// absorbed q at q_abs + t * q_stride and its latent at
+// latent + t * latent_stride. Its selection count is derived from the
+// query position pos_first + t exactly like the host:
+// n_sel(t) = kpool * min(top_pools, (pos + 1) / kpool) +
+//            (use_tail ? (pos + 1) % kpool : 0). `n_sel_max` (the largest
+// of these over the token range) sizes the grids and score regions. Every
+// block runs the per-token block arithmetic unchanged, so results are
+// bit-identical to the single-token calls.
+void MlaGatherScoreBatch(const float* q_abs, std::size_t q_stride,
+                         const __half* cache, const std::int32_t* sel,
+                         std::size_t sel_stride, std::uint32_t n_sel_max,
+                         std::uint32_t pos_first, std::uint32_t kpool,
+                         std::uint32_t top_pools, std::uint32_t use_tail,
+                         std::uint32_t tokens, std::uint32_t tile,
+                         std::uint32_t heads, float* scores,
+                         std::size_t scores_stride, hipStream_t stream);
+void MlaGatherCombineBatch(const float* scores, std::size_t scores_stride,
+                           const __half* cache, const std::int32_t* sel,
+                           std::size_t sel_stride, std::uint32_t n_sel_max,
+                           std::uint32_t pos_first, std::uint32_t kpool,
+                           std::uint32_t top_pools, std::uint32_t use_tail,
+                           std::uint32_t tokens, std::uint32_t tile,
+                           std::uint32_t heads, float* latent,
+                           std::size_t latent_stride, hipStream_t stream);
+
 // head_out[h][i] = dot(vb[h][i][:512], latent[h][:512]).
 // `vb` is [heads][256][512] (attn_v_b rows), `latent` is [heads][512];
 // `out` receives [heads][256]. Blocks: one per head, 256 threads.

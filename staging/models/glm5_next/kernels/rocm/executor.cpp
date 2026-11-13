@@ -239,8 +239,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       !f(&e->g1_, inner_n) ||
       !f(&e->beta_, static_cast<std::size_t>(nc) * c.kda_heads) ||
       !f(&e->moe_w_, used_n) ||
-      !f(&e->tile_scores_, static_cast<std::size_t>(tiles) * heads *
-                               kSelTile) ||
+       !f(&e->tile_scores_, static_cast<std::size_t>(nc) * tiles * heads *
+                                kSelTile) ||
       !f(&e->moe_gate_, used_n * c.expert_ff) ||
       !f(&e->moe_up_, used_n * c.expert_ff) ||
       !f(&e->moe_inter_, used_n * c.expert_ff) ||
@@ -306,12 +306,14 @@ std::size_t Executor::SessionBytes(std::uint32_t capacity) const {
                             c.kda_head_dim;
   const std::size_t n_pools =
       static_cast<std::size_t>(capacity) / c.indexer_kpool + 1;
+  const std::size_t np_stride = n_pools + 1;
+  const std::size_t sel_stride =
+      4ULL * c.IndexerTopPools() + c.indexer_kpool;
   return dsa * capacity * (latent + pool) + kda * (conv + state) +
-         (n_pools + 1) * sizeof(float) +
-         static_cast<std::size_t>(c.IndexerTopPools()) *
+         kChunk * np_stride * sizeof(float) +
+         kChunk * static_cast<std::size_t>(c.IndexerTopPools()) *
              sizeof(std::int32_t) +
-         (4ULL * c.IndexerTopPools() + c.indexer_kpool) *
-             sizeof(std::int32_t) +
+         kChunk * sel_stride * sizeof(std::int32_t) +
          (n_pools + 4096) * sizeof(std::uint64_t);
 }
 
@@ -359,10 +361,12 @@ std::unique_ptr<Session> Executor::CreateSession(
   }
   const std::size_t n_pools =
       static_cast<std::size_t>(capacity) / c.indexer_kpool + 1;
-  if (!AllocT(pool, &s->pool_scores, n_pools + 1) ||
-      !AllocT(pool, &s->pool_sel, c.IndexerTopPools()) ||
-      !AllocT(pool, &s->sel,
-              4ULL * c.IndexerTopPools() + c.indexer_kpool) ||
+  s->pool_scores_stride = n_pools + 1;
+  s->pool_sel_stride = c.IndexerTopPools();
+  s->sel_stride = 4ULL * c.IndexerTopPools() + c.indexer_kpool;
+  if (!AllocT(pool, &s->pool_scores, kChunk * s->pool_scores_stride) ||
+      !AllocT(pool, &s->pool_sel, kChunk * s->pool_sel_stride) ||
+      !AllocT(pool, &s->sel, kChunk * s->sel_stride) ||
       !AllocT(pool, &s->topk_scratch, n_pools + 4096)) {
     if (error_msg != nullptr) {
       *error_msg = "session scratch allocation failed";
@@ -550,35 +554,73 @@ void Executor::DsaLayer(const DeviceLayer& l, std::uint32_t slot,
 
   // Per token: pool scores over the complete pools only (the current
   // partial pool joins through the tail); stable top-k; sel expansion;
-  // gather softmax over the selected latent rows (shared selection scratch,
-  // strictly ordered on the stream).
-  for (std::uint32_t r = 0; r < n; ++r) {
-    const std::int32_t pos = static_cast<std::int32_t>(p0) +
-                             static_cast<std::int32_t>(r);
+  // gather softmax over the selected latent rows. One token runs the trio
+  // on the shared selection scratch; a prefill chunk replaces the
+  // per-token launches with one token-batched launch per kernel whose
+  // blocks run the identical arithmetic (_Batch contracts), while the
+  // top-k stays a per-token loop until its own batched form lands.
+  const std::uint32_t top_pools = c.IndexerTopPools();
+  const std::uint32_t use_tail = c.kpool_select_tail ? 1U : 0U;
+  if (n == 1) {
+    const std::int32_t pos = static_cast<std::int32_t>(p0);
     const std::uint32_t tokens = static_cast<std::uint32_t>(pos) + 1;
     const std::uint32_t n_pools = tokens / kpool;
     std::uint32_t k = 0;
     if (n_pools > 0) {
       IdxScore(pool, 2 * key, n_pools * kpool, kpool, key, c.indexer_heads,
-               iq_ + static_cast<std::size_t>(r) * iq_n,
-               l.idx_comp_ape.f32(), iw_ + static_cast<std::size_t>(r) *
-                                           c.indexer_heads,
+               iq_, l.idx_comp_ape.f32(), iw_,
                1.0F / std::sqrt(static_cast<float>(key) * c.indexer_heads),
                s.pool_scores, nullptr);
-      k = std::min(n_pools, c.IndexerTopPools());
+      k = std::min(n_pools, top_pools);
       TopKDesc(s.pool_scores, n_pools, k, s.pool_sel, s.topk_scratch,
                nullptr);
     }
     const std::uint32_t n_tail = c.kpool_select_tail ? tokens % kpool : 0;
     BuildSel(s.pool_sel, k, pos, n_tail, s.sel, nullptr);
     const std::uint32_t n_sel = k * kpool + n_tail;
-    MlaGatherScore(q_abs_ + static_cast<std::size_t>(r) * heads * latent,
-                   cache, s.sel, n_sel, kSelTile, heads, tile_scores_,
+    MlaGatherScore(q_abs_, cache, s.sel, n_sel, kSelTile, heads, tile_scores_,
                    nullptr);
     MlaGatherCombine(tile_scores_, cache, s.sel, kSelTile, n_sel, heads,
-                     dsa_latent_ +
-                         static_cast<std::size_t>(r) * heads * latent,
-                     nullptr);
+                     dsa_latent_, nullptr);
+  } else {
+    IdxScoreBatch(pool, 2 * key, static_cast<std::uint32_t>(p0) + 1U, kpool,
+                  key, c.indexer_heads, iq_, iq_n, l.idx_comp_ape.f32(), iw_,
+                  c.indexer_heads,
+                  1.0F / std::sqrt(static_cast<float>(key) * c.indexer_heads),
+                  n, s.pool_scores, s.pool_scores_stride, nullptr);
+    for (std::uint32_t r = 0; r < n; ++r) {
+      const std::uint32_t n_pools =
+          (static_cast<std::uint32_t>(p0) + r + 1U) / kpool;
+      const std::uint32_t k = std::min(n_pools, top_pools);
+      if (k > 0) {
+        TopKDesc(s.pool_scores +
+                     static_cast<std::size_t>(r) * s.pool_scores_stride,
+                 n_pools, k,
+                 s.pool_sel + static_cast<std::size_t>(r) * s.pool_sel_stride,
+                 s.topk_scratch, nullptr);
+      }
+    }
+    const std::uint32_t sel_capacity = 4U * top_pools + kpool - 1U;
+    BuildSelBatch(s.pool_sel, s.pool_sel_stride,
+                  static_cast<std::uint32_t>(p0), top_pools, kpool, use_tail,
+                  n, sel_capacity, s.sel, s.sel_stride, nullptr);
+    const std::size_t scores_stride =
+        static_cast<std::size_t>((sel_capacity + kSelTile - 1U) / kSelTile) *
+        heads * kSelTile;
+    const std::size_t qa_stride = static_cast<std::size_t>(heads) * latent;
+    const std::uint32_t tokens_last = static_cast<std::uint32_t>(p0) + n;
+    const std::uint32_t n_sel_max =
+        std::min(tokens_last / kpool, top_pools) * kpool +
+        (c.kpool_select_tail ? tokens_last % kpool : 0U);
+    MlaGatherScoreBatch(q_abs_, qa_stride, cache, s.sel, s.sel_stride,
+                        n_sel_max, static_cast<std::uint32_t>(p0), kpool,
+                        top_pools, use_tail, n, kSelTile, heads,
+                        tile_scores_, scores_stride, nullptr);
+    MlaGatherCombineBatch(tile_scores_, scores_stride, cache, s.sel,
+                          s.sel_stride, n_sel_max,
+                          static_cast<std::uint32_t>(p0), kpool, top_pools,
+                          use_tail, n, kSelTile, heads, dsa_latent_,
+                          qa_stride, nullptr);
   }
 
   // Per-head value maps (same head loop shape as the k absorption, same

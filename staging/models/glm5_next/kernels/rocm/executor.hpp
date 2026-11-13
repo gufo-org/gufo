@@ -50,10 +50,15 @@ class Session {
   std::vector<float*> kda_state;      // [heads][d][d] state per KDA layer
   std::size_t conv_bytes{0};          // sizeof an entry of conv_hist
   std::size_t state_bytes{0};         // sizeof an entry of kda_state
-  // Selection scratch sized by the capacity.
+  // Selection scratch sized by the capacity. The batched prefill regions
+  // hold one per-token slice each (executor chunk kChunk) with these
+  // strides; the single-token path reuses slice 0.
   float* pool_scores{nullptr};
+  std::size_t pool_scores_stride{0};
   std::int32_t* pool_sel{nullptr};
+  std::size_t pool_sel_stride{0};
   std::int32_t* sel{nullptr};
+  std::size_t sel_stride{0};
   std::uint64_t* topk_scratch{nullptr};
 };
 

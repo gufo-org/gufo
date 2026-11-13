@@ -430,19 +430,29 @@ __global__ void KdaOutGateKernel(const float* __restrict__ o,
 }
 
 __global__ void IdxScoreKernel(const float* __restrict__ pool,
-                               std::uint32_t pool_stride, std::uint32_t tokens,
+                               std::uint32_t pool_stride, std::uint32_t seen0,
                                unsigned kpool, unsigned key_len, unsigned heads,
                                const float* __restrict__ iq,
+                               std::size_t iq_stride,
                                const float* __restrict__ ape,
-                               const float* __restrict__ w, float q_scale,
-                               float* __restrict__ scores) {
+                               const float* __restrict__ w,
+                               std::size_t w_stride, float q_scale,
+                               float* __restrict__ scores,
+                               std::size_t scores_stride) {
   __shared__ float kp[128];
   __shared__ float total;
   const unsigned P = blockIdx.x;
+  const std::uint32_t t = blockIdx.y;
+  iq += static_cast<std::size_t>(t) * iq_stride;
+  w += static_cast<std::size_t>(t) * w_stride;
+  scores += static_cast<std::size_t>(t) * scores_stride;
   if (threadIdx.x == 0) {
     total = 0.0F;
   }
-  const unsigned seen = tokens - P * kpool;  // >= 1 for launched pools
+  if (P * kpool >= seen0 + t) {
+    return;  // block belongs to a shorter token's pool list
+  }
+  const unsigned seen = seen0 + t - P * kpool;  // >= 1 for launched pools
   const unsigned taps = seen < kpool ? seen : kpool;
   const float* rows = pool + static_cast<std::size_t>(P) * kpool * pool_stride;
   for (unsigned j = threadIdx.x; j < key_len; j += kBlock) {
@@ -761,9 +771,25 @@ __global__ void L2NormHeadsKernel(float* __restrict__ x, std::uint32_t d,
 }
 
 __global__ void BuildSelKernel(const std::int32_t* __restrict__ pool_sel,
-                               std::uint32_t k, std::int32_t pos,
-                               std::uint32_t n_tail,
-                               std::int32_t* __restrict__ sel) {
+                               std::size_t pool_sel_stride, std::int32_t k_fixed,
+                               std::uint32_t pos_first, std::uint32_t kpool,
+                               std::uint32_t top_pools, std::int32_t n_tail_fix,
+                               std::uint32_t use_tail,
+                               std::int32_t* __restrict__ sel,
+                               std::size_t sel_stride) {
+  const std::uint32_t t = blockIdx.y;
+  pool_sel += static_cast<std::size_t>(t) * pool_sel_stride;
+  sel += static_cast<std::size_t>(t) * sel_stride;
+  const std::int32_t pos = static_cast<std::int32_t>(pos_first + t);
+  std::int32_t k = k_fixed;
+  std::int32_t n_tail = n_tail_fix;
+  if (k_fixed < 0) {
+    const std::uint32_t pools = (pos_first + t + 1U) / kpool;
+    k = static_cast<std::int32_t>(pools < top_pools ? pools : top_pools);
+    n_tail = use_tail != 0U
+                 ? static_cast<std::int32_t>((pos_first + t + 1U) % kpool)
+                 : 0;
+  }
   const std::uint32_t total = 4U * k + n_tail;
   for (std::uint32_t i = blockIdx.x * kBlock + threadIdx.x; i < total;
        i += gridDim.x * kBlock) {
@@ -848,20 +874,36 @@ void KdaOutGate(const float* o, const float* w, const float* g2, float* dst,
   KdaOutGateKernel<<<heads, kBlock, 0, stream>>>(o, w, g2, dst, d, eps);
 }
 
-void IdxScore(const float* pool, std::uint32_t pool_stride,
-              std::uint32_t tokens, std::uint32_t kpool, std::uint32_t key_len,
-              std::uint32_t heads, const float* iq, const float* ape,
-              const float* w, float q_scale, float* scores,
-              hipStream_t stream) {
-  // Contract: kpool == 4, key_len <= 128, heads <= 32 (DSa indexer shapes).
-  const std::uint32_t pools = (tokens + kpool - 1) / kpool;
-  if (pools == 0) {
-    return;
-  }
-  IdxScoreKernel<<<pools, kBlock, 0, stream>>>(pool, pool_stride, tokens, kpool,
-                                               key_len, heads, iq, ape, w,
-                                               q_scale, scores);
-}
+ void IdxScore(const float* pool, std::uint32_t pool_stride,
+               std::uint32_t tokens, std::uint32_t kpool, std::uint32_t key_len,
+               std::uint32_t heads, const float* iq, const float* ape,
+               const float* w, float q_scale, float* scores,
+               hipStream_t stream) {
+   // Contract: kpool == 4, key_len <= 128, heads <= 32 (DSa indexer shapes).
+   const std::uint32_t pools = (tokens + kpool - 1) / kpool;
+   if (pools == 0) {
+     return;
+   }
+   IdxScoreKernel<<<dim3(pools, 1U), kBlock, 0, stream>>>(
+       pool, pool_stride, tokens, kpool, key_len, heads, iq, 0U, ape, w, 0U,
+       q_scale, scores, 0U);
+ }
+
+ void IdxScoreBatch(const float* pool, std::uint32_t pool_stride,
+                    std::uint32_t seen0, std::uint32_t kpool,
+                    std::uint32_t key_len, std::uint32_t heads,
+                    const float* iq, std::size_t iq_stride, const float* ape,
+                    const float* w, std::size_t w_stride, float q_scale,
+                    std::uint32_t tokens, float* scores,
+                    std::size_t scores_stride, hipStream_t stream) {
+   const std::uint32_t pools = (seen0 + tokens - 1U + kpool - 1U) / kpool;
+   if (pools == 0U || tokens == 0U) {
+     return;
+   }
+   IdxScoreKernel<<<dim3(pools, tokens), kBlock, 0, stream>>>(
+       pool, pool_stride, seen0, kpool, key_len, heads, iq, iq_stride, ape, w,
+       w_stride, q_scale, scores, scores_stride);
+ }
 
 void TopKDesc(const float* scores, std::uint32_t n, std::uint32_t k,
               std::int32_t* out, std::uint64_t* scratch, hipStream_t stream) {
@@ -1054,8 +1096,23 @@ void BuildSel(const std::int32_t* pool_sel, std::uint32_t k, std::int32_t pos,
   if (total == 0) {
     return;
   }
-  BuildSelKernel<<<Grid1D(total), kBlock, 0, stream>>>(pool_sel, k, pos,
-                                                       n_tail, sel);
+  BuildSelKernel<<<dim3(Grid1D(total), 1U), kBlock, 0, stream>>>(
+      pool_sel, 0U, static_cast<std::int32_t>(k), static_cast<std::uint32_t>(pos),
+      4U, 0U, static_cast<std::int32_t>(n_tail), 0U, sel, 0U);
+}
+
+void BuildSelBatch(const std::int32_t* pool_sel, std::size_t pool_sel_stride,
+                   std::uint32_t pos_first, std::uint32_t top_pools,
+                   std::uint32_t kpool, std::uint32_t use_tail,
+                   std::uint32_t tokens, std::uint32_t max_total,
+                   std::int32_t* sel, std::size_t sel_stride,
+                   hipStream_t stream) {
+  if (tokens == 0U || max_total == 0U) {
+    return;
+  }
+  BuildSelKernel<<<dim3(Grid1D(max_total), tokens), kBlock, 0, stream>>>(
+      pool_sel, pool_sel_stride, -1, pos_first, kpool, top_pools, -1, use_tail,
+      sel, sel_stride);
 }
 
 void SwigluClamp(const float* gate, const float* up, float* dst,

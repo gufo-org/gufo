@@ -70,11 +70,29 @@ __global__ void MlaQabsKernel(const float* __restrict__ q,
 // chunks, unpack their 16 halves into registers, then loop the head slice
 // pairing registers against the float4 q pairs covering the same dims and
 // reduce with shuffles. Head-slice blocks keep small n_sel latency low.
+__device__ unsigned DsaSelCount(std::uint32_t pos_first, std::uint32_t t,
+                                std::uint32_t kpool, std::uint32_t top_pools,
+                                std::uint32_t use_tail) {
+  const std::uint32_t tokens = pos_first + t + 1U;
+  const std::uint32_t pools = tokens / kpool;
+  const std::uint32_t k = pools < top_pools ? pools : top_pools;
+  return k * kpool + (use_tail != 0U ? tokens % kpool : 0U);
+}
+
 __global__ __launch_bounds__(256) void MlaGatherScoreKernel(
-    const float* __restrict__ q_abs, const __half* __restrict__ cache,
-    const std::int32_t* __restrict__ sel, std::uint32_t n_sel,
+    const float* __restrict__ q_abs, std::size_t q_stride,
+    const __half* __restrict__ cache, const std::int32_t* __restrict__ sel,
+    std::size_t sel_stride, std::uint32_t n_sel, std::uint32_t pos_first,
+    std::uint32_t kpool, std::uint32_t top_pools, std::uint32_t use_tail,
     std::uint32_t tile, std::uint32_t heads, std::uint32_t hspan,
-    float* __restrict__ scores) {
+    float* __restrict__ scores, std::size_t scores_stride) {
+  const std::uint32_t t = blockIdx.z;
+  sel += static_cast<std::size_t>(t) * sel_stride;
+  scores += static_cast<std::size_t>(t) * scores_stride;
+  q_abs += static_cast<std::size_t>(t) * q_stride;
+  if (n_sel == 0U) {
+    n_sel = DsaSelCount(pos_first, t, kpool, top_pools, use_tail);
+  }
   const std::uint32_t lane = threadIdx.x & 31U;
   const std::uint32_t key = blockIdx.x * 8U + (threadIdx.x >> 5U);
   if (key >= n_sel) {
@@ -136,12 +154,26 @@ __global__ __launch_bounds__(256) void MlaGatherScoreKernel(
 }
 
 __global__ void MlaGatherCombineKernel(const float* __restrict__ scores,
+                                       std::size_t scores_stride,
                                        const __half* __restrict__ cache,
                                        const std::int32_t* __restrict__ sel,
-                                       std::uint32_t tile, std::uint32_t n_sel,
-                                       std::uint32_t heads,
-                                       float* __restrict__ latent) {
+                                       std::size_t sel_stride,
+                                       std::uint32_t n_sel,
+                                       std::uint32_t pos_first,
+                                       std::uint32_t kpool,
+                                       std::uint32_t top_pools,
+                                       std::uint32_t use_tail,
+                                       std::uint32_t tile, std::uint32_t heads,
+                                       float* __restrict__ latent,
+                                       std::size_t latent_stride) {
   extern __shared__ float smem[];  // [n_sel] exponents + blockDim reducers
+  const std::uint32_t t = blockIdx.y;
+  scores += static_cast<std::size_t>(t) * scores_stride;
+  sel += static_cast<std::size_t>(t) * sel_stride;
+  latent += static_cast<std::size_t>(t) * latent_stride;
+  if (n_sel == 0U) {
+    n_sel = DsaSelCount(pos_first, t, kpool, top_pools, use_tail);
+  }
   float* ex = smem;
   float* red = smem + n_sel;
   const std::uint32_t head = blockIdx.x;
@@ -231,9 +263,25 @@ void MlaGatherScore(const float* q_abs, const __half* cache,
                     std::uint32_t tile, std::uint32_t heads, float* scores,
                     hipStream_t stream) {
   const std::uint32_t hspan = n_sel >= 4096U ? 32U : 16U;
-  const dim3 grid((n_sel + 7U) / 8U, heads / hspan);
-  MlaGatherScoreKernel<<<grid, 256, 0, stream>>>(q_abs, cache, sel, n_sel,
-                                                 tile, heads, hspan, scores);
+  const dim3 grid((n_sel + 7U) / 8U, heads / hspan, 1U);
+  MlaGatherScoreKernel<<<grid, 256, 0, stream>>>(
+      q_abs, 0U, cache, sel, 0U, n_sel, 0U, 1U, 0U, 0U, tile, heads, hspan,
+      scores, 0U);
+}
+
+void MlaGatherScoreBatch(const float* q_abs, std::size_t q_stride,
+                         const __half* cache, const std::int32_t* sel,
+                         std::size_t sel_stride, std::uint32_t n_sel_max,
+                         std::uint32_t pos_first, std::uint32_t kpool,
+                         std::uint32_t top_pools, std::uint32_t use_tail,
+                         std::uint32_t tokens, std::uint32_t tile,
+                         std::uint32_t heads, float* scores,
+                         std::size_t scores_stride, hipStream_t stream) {
+  const std::uint32_t hspan = n_sel_max >= 4096U ? 32U : 16U;
+  const dim3 grid((n_sel_max + 7U) / 8U, heads / hspan, tokens);
+  MlaGatherScoreKernel<<<grid, 256, 0, stream>>>(
+      q_abs, q_stride, cache, sel, sel_stride, 0U, pos_first, kpool, top_pools,
+      use_tail, tile, heads, hspan, scores, scores_stride);
 }
 
 void MlaGatherCombine(const float* scores, const __half* cache,
@@ -241,8 +289,23 @@ void MlaGatherCombine(const float* scores, const __half* cache,
                       std::uint32_t n_sel, std::uint32_t heads, float* latent,
                       hipStream_t stream) {
   const std::size_t smem = (n_sel + 32) * sizeof(float);
-  MlaGatherCombineKernel<<<heads, kMlaKvRank, smem, stream>>>(
-      scores, cache, sel, tile, n_sel, heads, latent);
+  MlaGatherCombineKernel<<<dim3(heads, 1U), kMlaKvRank, smem, stream>>>(
+      scores, 0U, cache, sel, 0U, n_sel, 0U, 1U, 0U, 0U, tile, heads, latent,
+      0U);
+}
+
+void MlaGatherCombineBatch(const float* scores, std::size_t scores_stride,
+                           const __half* cache, const std::int32_t* sel,
+                           std::size_t sel_stride, std::uint32_t n_sel_max,
+                           std::uint32_t pos_first, std::uint32_t kpool,
+                           std::uint32_t top_pools, std::uint32_t use_tail,
+                           std::uint32_t tokens, std::uint32_t tile,
+                           std::uint32_t heads, float* latent,
+                           std::size_t latent_stride, hipStream_t stream) {
+  const std::size_t smem = (n_sel_max + 32) * sizeof(float);
+  MlaGatherCombineKernel<<<dim3(heads, tokens), kMlaKvRank, smem, stream>>>(
+      scores, scores_stride, cache, sel, sel_stride, 0U, pos_first, kpool,
+      top_pools, use_tail, tile, heads, latent, latent_stride);
 }
 
 void MlaApplyVb(const float* latent, const float* vb, std::uint32_t heads,

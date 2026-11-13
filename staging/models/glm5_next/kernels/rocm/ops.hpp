@@ -130,6 +130,20 @@ void IdxScore(const float* pool, std::uint32_t pool_stride,
               std::uint32_t heads, const float* iq, const float* ape,
               const float* w, float q_scale, float* scores, hipStream_t stream);
 
+/// Token-batched prefill form for a contiguous run of query positions.
+/// Query token t (blockIdx.y) scores with `seen0 + t` cached tokens, reads
+/// iq / w at t * iq_stride / t * w_stride and writes its pool scores at
+/// scores + t * scores_stride; the grid covers the longest token's pool
+/// list and shorter tokens' extra blocks exit without writing. Per-block
+/// arithmetic is the single-token kernel unchanged (bit-identical).
+void IdxScoreBatch(const float* pool, std::uint32_t pool_stride,
+                   std::uint32_t seen0, std::uint32_t kpool,
+                   std::uint32_t key_len, std::uint32_t heads,
+                   const float* iq, std::size_t iq_stride, const float* ape,
+                   const float* w, std::size_t w_stride, float q_scale,
+                   std::uint32_t tokens, float* scores,
+                   std::size_t scores_stride, hipStream_t stream);
+
 /// Stable top-k selection: writes the indices of the `k` largest scores,
 /// ordered by score descending and by ascending index on ties (the order a
 /// stable descending ggml_argsort produces). Requires k <= 2048 and reads
@@ -183,6 +197,19 @@ void L2NormHeads(float* x, std::uint32_t heads, std::uint32_t d, float eps,
 /// complete, so no dead slots appear.
 void BuildSel(const std::int32_t* pool_sel, std::uint32_t k, std::int32_t pos,
               std::uint32_t n_tail, std::int32_t* sel, hipStream_t stream);
+
+/// Token-batched form: derives k = min(top_pools, (pos + 1) / kpool) and
+/// the tail count for each of the `tokens` contiguous positions starting
+/// at `pos_first`, reading pool_sel and writing sel from per-token regions
+/// at t * pool_sel_stride / t * sel_stride. `max_total` (= 4*top_pools +
+/// kpool - 1) sizes the grid; per-entry results match the single-token
+/// kernel bit for bit.
+void BuildSelBatch(const std::int32_t* pool_sel, std::size_t pool_sel_stride,
+                   std::uint32_t pos_first, std::uint32_t top_pools,
+                   std::uint32_t kpool, std::uint32_t use_tail,
+                   std::uint32_t tokens, std::uint32_t max_total,
+                   std::int32_t* sel, std::size_t sel_stride,
+                   hipStream_t stream);
 
 /// SwiGLU with the reference clamp pair, elementwise over m * n:
 /// g = min(gate, clamp_gate); out = g * sigmoid(g) * clamp(up, -c, c) with

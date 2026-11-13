@@ -51,6 +51,11 @@ With the Q6_K WMMA dense tier (`ffn_down_shexp` and the other Q6_K
 projections moved from wide GEMV to the tensor-core tier; bit-identical —
 n-gen-1 sha and 9/9, `rocm_dense_wmma` extended with Q6_K shapes):
 pp2048 **179.0 ± 0.3** (`/tmp/opencode/gufo_bench_q6kab.log`).
+With the token-batched DSA indexer/MLA launches (four kernels gain the
+token as a grid dimension over per-token scratch; bit-identical —
+n-gen-1 sha and 9/9): pp2048 **184.5 ± 0.4**, pp16384 **147.0 ± 0.6**
+(`/tmp/opencode/gufo_bench_mla2ab.log`,
+`/tmp/opencode/gufo_bench_mla2gate.log`).
 Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.
