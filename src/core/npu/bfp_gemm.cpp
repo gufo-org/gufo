@@ -45,7 +45,7 @@ constexpr std::size_t kABytes = std::size_t(64) << 20, kCBytes = std::size_t(64)
                                                                  << 20;
 constexpr unsigned kArgA = 3, kArgW = 4, kArgC = 5;
 constexpr std::size_t kLaneWords = std::size_t(1) << 18;
-constexpr int kLanes = 4;
+constexpr int kLanes = 6;
 constexpr std::size_t kMaxArenaBytes = std::size_t(512) << 22;  // bfpgemm.py W
 constexpr int kScratchIds = 1 << 16;  // ids per scratch region
 // Scalars: ng nb kb tiles nb*kc ng*kb b_rep a_base a_row b_base b_col c_base

@@ -35,7 +35,7 @@ constexpr std::size_t kBandRows = 512, kSmallBandRows = 128;
 // rows, each within one band of the 128-row program.
 constexpr std::size_t kSmallSplitRows = 256;
 // Concurrent parts of a batch (BfpGemm has as many staging lanes).
-constexpr std::size_t kParts = 4;
+constexpr std::size_t kParts = 6;
 constexpr std::size_t kGateBlock = 64;  // gate rows per interleaved tile
 
 struct Layer {
@@ -123,7 +123,7 @@ struct Encoder::Impl {
     gemm = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
                                     std::size_t(1400) << 20);
     for (auto& scratch : scratches)
-      scratch = gemm.NewScratch(std::size_t(288) << 20);
+      scratch = gemm.NewScratch(std::size_t(192) << 20);
     embed = reinterpret_cast<const std::uint16_t*>(
         Find("embed_tokens.weight").data);
     ple_model = Upload({"ple.per_layer_model_projection.weight"});
